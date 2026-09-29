@@ -88,7 +88,7 @@ struct Strip {
     freq: Box<[u32; 1024]>,
 }
 
-fn encode_with(
+pub(super) fn encode_with(
     pixels: &[u8],
     width: u32,
     height: u32,

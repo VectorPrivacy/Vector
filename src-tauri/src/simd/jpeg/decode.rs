@@ -29,10 +29,11 @@ const MAX_DIMENSION: usize = 16_384;
 const MAX_ALLOC: usize = 256 * 1024 * 1024;
 
 pub fn decode(data: &[u8]) -> Result<Decoded, DecodeError> {
-    decode_with(data, Backend::detect())
+    decode_with(data, Backend::detect(), None)
 }
 
-fn decode_with(data: &[u8], backend: Backend) -> Result<Decoded, DecodeError> {
+/// `chunks` forces the scan's split (tests); None picks by size and pool.
+fn decode_with(data: &[u8], backend: Backend, chunks: Option<usize>) -> Result<Decoded, DecodeError> {
     let header = parse(data)?;
     let frame = Frame::new(&header)?;
     let entropy = destuff(header.scan);
@@ -49,16 +50,7 @@ fn decode_with(data: &[u8], backend: Backend) -> Result<Decoded, DecodeError> {
             Plane { data: vec![0; stride * frame.mcuy * c.v * 8], stride }
         })
         .collect();
-    // SAFETY: each backend runs only where `Backend::detect` found its features.
-    unsafe {
-        match backend {
-            #[cfg(target_arch = "x86_64")]
-            Backend::Avx2 => scan_avx2(&frame, &entropy, &mut planes)?,
-            #[cfg(target_arch = "aarch64")]
-            Backend::Neon => scan_neon(&frame, &entropy, &mut planes)?,
-            Backend::Scalar => scan_generic::<Scalar>(&frame, &entropy, &mut planes)?,
-        }
-    }
+    scan(&frame, &entropy, &mut planes, backend, chunks)?;
     Ok(to_pixels(&frame, &planes, backend))
 }
 
@@ -236,6 +228,8 @@ struct Frame {
     dc: Vec<Huff>,
     ac: Vec<Huff>,
     restart: usize,
+    /// Per block of an MCU, in coding order: component and its column and row in the MCU.
+    slots: Vec<(usize, usize, usize)>,
 }
 
 impl Frame {
@@ -271,7 +265,8 @@ impl Frame {
             dc.push(h.dc[c.dc].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
             ac.push(h.ac[c.ac].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
         }
-        Ok(Frame { width: h.width, height: h.height, mcux, mcuy, comps, qs, dc, ac, restart: h.restart })
+        let slots = comps.iter().enumerate().flat_map(|(c, k)| (0..k.v).flat_map(move |by| (0..k.h).map(move |bx| (c, bx, by)))).collect();
+        Ok(Frame { width: h.width, height: h.height, mcux, mcuy, comps, qs, dc, ac, restart: h.restart, slots })
     }
 }
 
@@ -379,6 +374,12 @@ impl<'a> Bits<'a> {
 
     fn jump(&mut self, at: usize) {
         (self.pos, self.buf, self.cnt) = (at, 0, 0);
+    }
+
+    fn seek(&mut self, bit: usize) {
+        self.jump(bit / 8);
+        self.refill();
+        self.consume((bit % 8) as u32);
     }
 }
 
@@ -512,63 +513,318 @@ fn decode_block(b: &mut Bits, dc: &Huff, ac: &Huff, pred: &mut i32, blk: &mut [i
     any
 }
 
+/// A block boundary in the scan: where its bits start, its slot in the MCU, its index among
+/// all blocks and the DC predictors in force there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cursor {
+    bit: usize,
+    phase: usize,
+    block: usize,
+    pred: [i32; 3],
+}
+
+/// Below this much entropy data one thread decodes the scan alone.
+const PARALLEL_MIN_BYTES: usize = 64 * 1024;
+
+/// Decode the whole scan into the planes. Restart intervals give exact starting points to
+/// split on; without them, segments come from [`sync_segments`].
+fn scan(f: &Frame, e: &Entropy, planes: &mut [Plane], backend: Backend, chunks: Option<usize>) -> Result<(), DecodeError> {
+    let bpm = f.slots.len();
+    let total = f.mcux * f.mcuy * bpm;
+    let start = Cursor { bit: 0, phase: 0, block: 0, pred: [0; 3] };
+    let n = chunks.unwrap_or_else(|| if e.end < PARALLEL_MIN_BYTES { 1 } else { rayon::current_num_threads() });
+    let segs = if n <= 1 {
+        vec![start]
+    } else if f.restart > 0 {
+        let intervals = (f.mcux * f.mcuy).div_ceil(f.restart);
+        let per = intervals.div_ceil(n);
+        let mut segs = Vec::new();
+        for i in (0..intervals).step_by(per) {
+            let bit = if i == 0 { 0 } else { 8 * *e.restarts.get(i - 1).ok_or(DecodeError::Corrupt("missing restart marker"))? };
+            segs.push(Cursor { bit, phase: 0, block: i * f.restart * bpm, pred: [0; 3] });
+        }
+        segs
+    } else {
+        sync_segments(f, e, n, backend)?
+    };
+    let targets = PlanePtrs(planes.iter_mut().map(|p| (p.data.as_mut_ptr(), p.stride)).collect());
+    let run = |k: usize| -> Result<Cursor, DecodeError> {
+        let end = segs.get(k + 1).map_or(total, |c| c.block);
+        // SAFETY: segments cover disjoint blocks, so their plane writes never overlap; each
+        // backend runs only where `Backend::detect` found its features.
+        unsafe {
+            match backend {
+                #[cfg(target_arch = "x86_64")]
+                Backend::Avx2 => range_avx2(f, e, segs[k], end, &targets),
+                #[cfg(target_arch = "aarch64")]
+                Backend::Neon => range_neon(f, e, segs[k], end, &targets),
+                Backend::Scalar => decode_range::<Scalar>(f, e, segs[k], end, &targets),
+            }
+        }
+    };
+    let ends: Vec<Cursor> = if segs.len() == 1 {
+        vec![run(0)?]
+    } else {
+        (0..segs.len()).into_par_iter().map(run).collect::<Result<_, _>>()?
+    };
+    // Each segment must stop exactly where the next was resolved to begin.
+    if f.restart == 0 && ends.iter().zip(&segs[1..]).any(|(a, b)| a != b) {
+        return Err(DecodeError::Corrupt("segments disagree"));
+    }
+    if ends.last().is_some_and(|c| c.bit > e.end * 8) {
+        return Err(DecodeError::Corrupt("truncated scan"));
+    }
+    Ok(())
+}
+
+struct PlanePtrs(Vec<(*mut u8, usize)>);
+// SAFETY: shared only by segments that write disjoint blocks.
+unsafe impl Sync for PlanePtrs {}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,bmi1,bmi2,lzcnt")]
-unsafe fn scan_avx2(f: &Frame, e: &Entropy, planes: &mut [Plane]) -> Result<(), DecodeError> {
-    scan_generic::<Avx2>(f, e, planes)
+unsafe fn range_avx2(f: &Frame, e: &Entropy, from: Cursor, end: usize, out: &PlanePtrs) -> Result<Cursor, DecodeError> {
+    decode_range::<Avx2>(f, e, from, end, out)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn scan_neon(f: &Frame, e: &Entropy, planes: &mut [Plane]) -> Result<(), DecodeError> {
-    scan_generic::<Neon>(f, e, planes)
+unsafe fn range_neon(f: &Frame, e: &Entropy, from: Cursor, end: usize, out: &PlanePtrs) -> Result<Cursor, DecodeError> {
+    decode_range::<Neon>(f, e, from, end, out)
 }
 
+/// Decode blocks `from.block..end` into the planes; returns the cursor after the last.
 #[inline(always)]
-unsafe fn scan_generic<S: Simd>(f: &Frame, e: &Entropy, planes: &mut [Plane]) -> Result<(), DecodeError> {
+unsafe fn decode_range<S: Simd>(f: &Frame, e: &Entropy, from: Cursor, end: usize, out: &PlanePtrs) -> Result<Cursor, DecodeError> {
+    let bpm = f.slots.len();
     let mut b = Bits::new(e);
-    let mut pred = [0i32; 3];
-    let (mut interval, mut left) = (0, f.restart);
-    for my in 0..f.mcuy {
-        for mx in 0..f.mcux {
-            if f.restart > 0 {
-                if left == 0 {
-                    let at = *e.restarts.get(interval).ok_or(DecodeError::Corrupt("missing restart marker"))?;
-                    if b.consumed_bits() > at * 8 {
-                        return Err(DecodeError::Corrupt("restart interval overrun"));
-                    }
-                    b.jump(at);
-                    pred = [0; 3];
-                    interval += 1;
-                    left = f.restart;
+    b.seek(from.bit);
+    let mut pred = from.pred;
+    let (mut t, mut phase) = (from.block, from.phase);
+    let mcu = t / bpm;
+    let (mut mx, mut my) = (mcu % f.mcux, mcu / f.mcux);
+    let mut left = if f.restart > 0 { f.restart - mcu % f.restart } else { 0 };
+    while t < end {
+        if phase == 0 && f.restart > 0 {
+            if left == 0 {
+                let interval = (my * f.mcux + mx) / f.restart;
+                let at = *e.restarts.get(interval - 1).ok_or(DecodeError::Corrupt("missing restart marker"))?;
+                if b.consumed_bits() > at * 8 {
+                    return Err(DecodeError::Corrupt("restart interval overrun"));
                 }
-                left -= 1;
+                b.jump(at);
+                pred = [0; 3];
+                left = f.restart;
             }
-            for (c, comp) in f.comps.iter().enumerate() {
-                let plane = &mut planes[c];
-                for by in 0..comp.v {
-                    for bx in 0..comp.h {
-                        let mut blk = [0i16; 64];
-                        let any = decode_block(&mut b, &f.dc[c], &f.ac[c], &mut pred[c], &mut blk);
-                        let (x, y) = ((mx * comp.h + bx) * 8, (my * comp.v + by) * 8);
-                        let out = plane.data.as_mut_ptr().add(y * plane.stride + x);
-                        if any {
-                            idct_block::<S>(&blk, &f.qs[c], out, plane.stride);
-                        } else {
-                            dc_block(blk[0], f.qs[c][0], out, plane.stride);
-                        }
-                    }
-                }
+            left -= 1;
+        }
+        let (c, bx, by) = f.slots[phase];
+        let comp = &f.comps[c];
+        let mut blk = [0i16; 64];
+        let any = decode_block(&mut b, &f.dc[c], &f.ac[c], &mut pred[c], &mut blk);
+        let (base, stride) = out.0[c];
+        let dst = base.add(((my * comp.v + by) * 8) * stride + (mx * comp.h + bx) * 8);
+        if any {
+            idct_block::<S>(&blk, &f.qs[c], dst, stride);
+        } else {
+            dc_block(blk[0], f.qs[c][0], dst, stride);
+        }
+        t += 1;
+        phase += 1;
+        if phase == bpm {
+            phase = 0;
+            mx += 1;
+            if mx == f.mcux {
+                (mx, my) = (0, my + 1);
             }
             if b.bad {
                 return Err(DecodeError::Corrupt("invalid entropy data"));
             }
         }
     }
-    if b.consumed_bits() > e.end * 8 {
+    if b.bad {
+        return Err(DecodeError::Corrupt("invalid entropy data"));
+    }
+    Ok(Cursor { bit: b.consumed_bits(), phase, block: t, pred })
+}
+
+/// Parse one block without keeping it; its DC difference, or None where the bits do not form
+/// a block.
+#[inline(always)]
+fn skim_block(b: &mut Bits, dc: &Huff, ac: &Huff) -> Option<i32> {
+    if b.cnt < 32 {
+        b.refill();
+    }
+    let s = u32::from(dc.decode(b));
+    if s > 15 {
+        return None;
+    }
+    let diff = if s > 0 { b.extend(s) } else { 0 };
+    let mut k = 1;
+    while k < 64 {
+        if b.cnt < 32 {
+            b.refill();
+        }
+        let e = ac.lut[b.peek(LUT_BITS) as usize & LUT_MASK];
+        let rs = if e != 0 {
+            let (len, rs) = (u32::from(e >> 8), e as u8);
+            b.consume(len + u32::from(rs & 15));
+            rs
+        } else {
+            let rs = ac.decode_long(b);
+            if rs & 15 != 0 {
+                b.consume(u32::from(rs & 15));
+            }
+            rs
+        };
+        let (run, size) = (usize::from(rs >> 4), rs & 15);
+        if size == 0 {
+            if run != 15 {
+                break;
+            }
+            k += 16;
+            continue;
+        }
+        k += run + 1;
+        if k > 64 {
+            return None;
+        }
+    }
+    (!b.bad).then_some(diff)
+}
+
+/// A block start seen by a speculative pass.
+#[derive(Clone, Copy)]
+struct Mark {
+    bit: u32,
+    dc: i16,
+    phase: u8,
+    /// The pass lost the block structure just before this mark and restarted here.
+    restarted: bool,
+}
+
+struct Skim {
+    marks: Vec<Mark>,
+    /// The first block start at or past the chunk's end.
+    exit: (usize, usize),
+    exit_restarted: bool,
+}
+
+/// Parse blocks from `from` until one starts at or past `stop`. With `exact` the start is
+/// known to be a block boundary and any damage is an error; otherwise the start is a guess,
+/// and where the bits stop forming blocks the pass restarts one bit later.
+fn skim(f: &Frame, e: &Entropy, from: usize, stop: usize, exact: bool) -> Result<Skim, DecodeError> {
+    let bpm = f.slots.len();
+    let mut b = Bits::new(e);
+    b.seek(from);
+    let mut marks = Vec::with_capacity((stop - from) / 16);
+    let (mut phase, mut restarted) = (0, false);
+    loop {
+        let bit = b.consumed_bits();
+        if bit >= stop {
+            return Ok(Skim { marks, exit: (bit, phase), exit_restarted: restarted });
+        }
+        let c = f.slots[phase].0;
+        match skim_block(&mut b, &f.dc[c], &f.ac[c]) {
+            Some(dc) => {
+                marks.push(Mark { bit: bit as u32, dc: dc as i16, phase: phase as u8, restarted });
+                restarted = false;
+                phase = (phase + 1) % bpm;
+            }
+            None if exact => return Err(DecodeError::Corrupt("invalid entropy data")),
+            None => {
+                b.bad = false;
+                b.seek(bit + 1);
+                (phase, restarted) = (0, true);
+            }
+        }
+    }
+}
+
+/// Split a scan without restart markers into segments that decode in parallel.
+///
+/// A Huffman decoder started at an arbitrary bit soon falls into step with the true one: once
+/// both reach the same block boundary with the same MCU slot, they decode identically from
+/// there. Each chunk is parsed speculatively in parallel, then, walking forward from the
+/// start, the true boundary leaving one chunk is matched against the next chunk's marks
+/// (parsing a few blocks on where they have not met yet). Each match is an exact segment start.
+fn sync_segments(f: &Frame, e: &Entropy, n: usize, backend: Backend) -> Result<Vec<Cursor>, DecodeError> {
+    let bpm = f.slots.len();
+    let total = f.mcux * f.mcuy * bpm;
+    let end = e.end * 8;
+    let bounds: Vec<usize> = (0..=n).map(|j| j * end / n).collect();
+    let skim_chunk = |j: usize| {
+        // SAFETY: the x86 build only runs this where `Backend::detect` found BMI2.
+        #[cfg(target_arch = "x86_64")]
+        if backend == Backend::Avx2 {
+            return unsafe { skim_bmi2(f, e, bounds[j], bounds[j + 1], j == 0) };
+        }
+        let _ = backend;
+        skim(f, e, bounds[j], bounds[j + 1], j == 0)
+    };
+    let skims: Vec<Skim> = (0..n).into_par_iter().map(skim_chunk).collect::<Result<_, _>>()?;
+
+    let mut segs = vec![Cursor { bit: 0, phase: 0, block: 0, pred: [0; 3] }];
+    let (mut t, mut pred) = (0, [0i32; 3]);
+    let take = |marks: &[Mark], t: &mut usize, pred: &mut [i32; 3]| -> Result<(), DecodeError> {
+        for (i, m) in marks.iter().enumerate() {
+            if *t == total {
+                break;
+            }
+            if i > 0 && m.restarted {
+                return Err(DecodeError::Corrupt("invalid entropy data"));
+            }
+            let c = f.slots[usize::from(m.phase)].0;
+            pred[c] = pred[c].wrapping_add(i32::from(m.dc));
+            *t += 1;
+        }
+        Ok(())
+    };
+    take(&skims[0].marks, &mut t, &mut pred)?;
+    let mut state = skims[0].exit;
+    let mut overflow: Option<Bits> = None;
+    for sk in &skims[1..] {
+        let mut i = 0;
+        while t < total {
+            while sk.marks.get(i).is_some_and(|m| (m.bit as usize) < state.0) {
+                i += 1;
+            }
+            if sk.marks.get(i).is_some_and(|m| m.bit as usize == state.0 && usize::from(m.phase) == state.1) {
+                segs.push(Cursor { bit: state.0, phase: state.1, block: t, pred });
+                take(&sk.marks[i..], &mut t, &mut pred)?;
+                if t < total && sk.exit_restarted {
+                    return Err(DecodeError::Corrupt("invalid entropy data"));
+                }
+                state = sk.exit;
+                overflow = None;
+                break;
+            }
+            if state.0 >= sk.exit.0 {
+                break;
+            }
+            // Not in step yet: parse one true block ourselves.
+            let b = overflow.get_or_insert_with(|| {
+                let mut b = Bits::new(e);
+                b.seek(state.0);
+                b
+            });
+            let c = f.slots[state.1].0;
+            let dc = skim_block(b, &f.dc[c], &f.ac[c]).ok_or(DecodeError::Corrupt("invalid entropy data"))?;
+            pred[c] = pred[c].wrapping_add(dc);
+            t += 1;
+            state = (b.consumed_bits(), (state.1 + 1) % bpm);
+        }
+    }
+    if t < total {
         return Err(DecodeError::Corrupt("truncated scan"));
     }
-    Ok(())
+    Ok(segs)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1,bmi2,lzcnt")]
+unsafe fn skim_bmi2(f: &Frame, e: &Entropy, from: usize, stop: usize, exact: bool) -> Result<Skim, DecodeError> {
+    skim(f, e, from, stop, exact)
 }
 
 /// Write the block's pixels. `out` must have 8 rows of 8 bytes at `stride`.
@@ -780,9 +1036,30 @@ mod tests {
     fn every_backend_decodes_the_same_pixels() {
         let px = photo(203, 61, 3);
         let jpeg = super::super::encode_rgb(&px, 203, 61, 90).unwrap();
-        let a = decode_with(&jpeg, Backend::Scalar).unwrap().pixels;
-        let b = decode_with(&jpeg, Backend::detect()).unwrap().pixels;
+        let a = decode_with(&jpeg, Backend::Scalar, None).unwrap().pixels;
+        let b = decode_with(&jpeg, Backend::detect(), None).unwrap().pixels;
         assert!(a == b);
+    }
+
+    #[test]
+    fn parallel_segments_decode_exactly_like_one() {
+        let (w, h) = (517u32, 389u32);
+        let px = photo(w as usize, h as usize, 21);
+        // The image crate writes no restart markers, so segments come from resynchronisation;
+        // ours, split into strips, carries them.
+        let mut plain = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut plain, 90).encode(&px, w, h, image::ExtendedColorType::Rgb8).unwrap();
+        let grey: Vec<u8> = px.chunks(3).map(|p| p[1]).collect();
+        let mut plain_grey = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut plain_grey, 90).encode(&grey, w, h, image::ExtendedColorType::L8).unwrap();
+        let strips = super::super::encode::encode_with(&px, w, h, 90, Backend::detect(), Some(3)).unwrap();
+        for jpeg in [&plain, &plain_grey, &strips] {
+            let one = decode_with(jpeg, Backend::detect(), Some(1)).unwrap().pixels;
+            for n in [2, 3, 7, 16] {
+                let many = decode_with(jpeg, Backend::detect(), Some(n)).unwrap().pixels;
+                assert!(one == many, "{n} segments differ from one");
+            }
+        }
     }
 
     #[test]
