@@ -10147,6 +10147,13 @@ select:disabled:hover {
   position: relative;
 }
 
+/* On touch screens a tab answers to the space around it too; nothing drawn changes. */
+body.mobile:not(.ws) .navbar-btn::before {
+  content: '';
+  position: absolute;
+  inset: -16px -30px;
+}
+
 .navbar-btn-inactive {
   opacity: 0.5;
 }
