@@ -9,6 +9,8 @@ use super::Avx2;
 use super::{Backend, Scalar, Simd, AAN, S_OF, ZZ_OF};
 use rayon::prelude::*;
 
+mod progressive;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodeError {
     /// Valid JPEG this decoder does not handle (progressive, arithmetic, CMYK, ...).
@@ -45,6 +47,9 @@ fn decode_with(data: &[u8], backend: Backend, chunks: Option<usize>, min_long_si
     let header = parse(data)?;
     let long = header.width.max(header.height);
     let denom = [8, 4, 2].into_iter().find(|&d| min_long_side > 0 && long.div_ceil(d) >= min_long_side).unwrap_or(1);
+    if header.progressive {
+        return progressive::decode(data, header, denom, backend);
+    }
     let frame = Frame::new(&header, denom)?;
     let entropy = destuff(header.scan);
     match entropy.next_marker {
@@ -73,8 +78,11 @@ struct Header<'a> {
     dc: [Option<Box<Huff>>; 4],
     ac: [Option<Box<Huff>>; 4],
     restart: usize,
-    /// Everything after the SOS header.
+    /// Everything after the SOS header (baseline).
     scan: &'a [u8],
+    progressive: bool,
+    /// Offset of the first SOS marker (progressive): scans and tables continue from there.
+    first_scan: usize,
 }
 
 #[derive(Clone)]
@@ -97,13 +105,25 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
     if !data.starts_with(&[0xFF, 0xD8]) {
         return Err(Corrupt("not a JPEG"));
     }
-    let mut h = Header { width: 0, height: 0, comps: Vec::new(), qt: [None; 4], dc: Default::default(), ac: Default::default(), restart: 0, scan: &[] };
+    let mut h = Header {
+        width: 0,
+        height: 0,
+        comps: Vec::new(),
+        qt: [None; 4],
+        dc: Default::default(),
+        ac: Default::default(),
+        restart: 0,
+        scan: &[],
+        progressive: false,
+        first_scan: 0,
+    };
     let (mut jfif, mut adobe) = (false, None);
     let mut i = 2;
     loop {
         if data.get(i) != Some(&0xFF) {
             return Err(Corrupt("expected a marker"));
         }
+        let marker_at = i;
         while data.get(i) == Some(&0xFF) {
             i += 1;
         }
@@ -118,7 +138,8 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
         let seg = data.get(i + 2..i + len).filter(|_| len >= 2).ok_or(Corrupt("truncated segment"))?;
         i += len;
         match marker {
-            0xC0 | 0xC1 => {
+            0xC0..=0xC2 => {
+                h.progressive = marker == 0xC2;
                 if !h.comps.is_empty() {
                     return Err(Corrupt("second frame header"));
                 }
@@ -149,29 +170,11 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
                     h.comps.push(Component { index: h.comps.len(), id: c[0], h: hs, v: vs, tq, dc: 0, ac: 0 });
                 }
             }
-            0xC2 | 0xC6 | 0xCA | 0xCE => return Err(Unsupported("progressive")),
+            0xC6 | 0xCA | 0xCE => return Err(Unsupported("differential or arithmetic progressive")),
             0xC3 | 0xC5 | 0xC7 | 0xC9 | 0xCB | 0xCC | 0xCD | 0xCF => {
                 return Err(Unsupported("lossless, hierarchical or arithmetic"))
             }
-            0xC4 => {
-                let mut s = seg;
-                while !s.is_empty() {
-                    let (class, id) = (s[0] >> 4, usize::from(s[0] & 15));
-                    let counts = s.get(1..17).ok_or(Corrupt("short Huffman table"))?;
-                    let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
-                    let values = s.get(17..17 + total).ok_or(Corrupt("short Huffman table"))?;
-                    if class > 1 || id > 3 || total > 256 {
-                        return Err(Corrupt("Huffman table parameters"));
-                    }
-                    let table = Huff::new(counts, values)?;
-                    if class == 0 {
-                        h.dc[id] = Some(table);
-                    } else {
-                        h.ac[id] = Some(table);
-                    }
-                    s = &s[17 + total..];
-                }
-            }
+            0xC4 => read_dht(seg, &mut h.dc, &mut h.ac)?,
             0xDB => {
                 let mut s = seg;
                 while !s.is_empty() {
@@ -198,6 +201,10 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
             0xDA => {
                 if h.comps.is_empty() {
                     return Err(Corrupt("scan before frame header"));
+                }
+                if h.progressive {
+                    h.first_scan = marker_at;
+                    break;
                 }
                 let ns = usize::from(*seg.first().ok_or(Corrupt("short scan header"))?);
                 if ns != h.comps.len() {
@@ -226,6 +233,29 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
         return Err(Unsupported("RGB-coded JPEG"));
     }
     Ok(h)
+}
+
+/// Huffman tables from one DHT segment into the DC and AC slots.
+fn read_dht(seg: &[u8], dc: &mut [Option<Box<Huff>>; 4], ac: &mut [Option<Box<Huff>>; 4]) -> Result<(), DecodeError> {
+    use DecodeError::Corrupt;
+    let mut s = seg;
+    while !s.is_empty() {
+        let (class, id) = (s[0] >> 4, usize::from(s[0] & 15));
+        let counts = s.get(1..17).ok_or(Corrupt("short Huffman table"))?;
+        let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
+        let values = s.get(17..17 + total).ok_or(Corrupt("short Huffman table"))?;
+        if class > 1 || id > 3 || total > 256 {
+            return Err(Corrupt("Huffman table parameters"));
+        }
+        let table = Huff::new(counts, values)?;
+        if class == 0 {
+            dc[id] = Some(table);
+        } else {
+            ac[id] = Some(table);
+        }
+        s = &s[17 + total..];
+    }
+    Ok(())
 }
 
 /// Block geometry and the tables the scan needs, resolved and validated.
@@ -301,8 +331,11 @@ impl Frame {
                 let (u, v) = (s / 8, s % 8);
                 (f64::from(q[ZZ_OF[s] as usize]) * AAN[u] * AAN[v] / 8.0) as f32
             }));
-            dc.push(h.dc[c.dc].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
-            ac.push(h.ac[c.ac].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
+            // Progressive scans bring their own tables; the frame holds none.
+            if !h.progressive {
+                dc.push(h.dc[c.dc].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
+                ac.push(h.ac[c.ac].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
+            }
         }
         let slots = comps.iter().enumerate().flat_map(|(c, k)| (0..k.v).flat_map(move |by| (0..k.h).map(move |bx| (c, bx, by)))).collect();
         Ok(Frame {
@@ -338,6 +371,8 @@ struct Entropy {
     restarts: Vec<usize>,
     /// The marker that ended the scan, if the data did not simply run out.
     next_marker: Option<u8>,
+    /// Offset in the input of that marker's 0xFF, or the input's length.
+    stop: usize,
 }
 
 const PAD: usize = 8;
@@ -346,6 +381,7 @@ fn destuff(scan: &[u8]) -> Entropy {
     let mut data = Vec::with_capacity(scan.len() + PAD);
     let mut restarts = Vec::new();
     let mut next_marker = None;
+    let mut stop = scan.len();
     let mut i = 0;
     while i < scan.len() {
         // Runs without 0xFF are copied whole; they are nearly everything.
@@ -365,6 +401,7 @@ fn destuff(scan: &[u8]) -> Entropy {
             Some(0xD0..=0xD7) => restarts.push(data.len()),
             Some(&m) => {
                 next_marker = Some(m);
+                stop = i;
                 break;
             }
         }
@@ -372,7 +409,7 @@ fn destuff(scan: &[u8]) -> Entropy {
     }
     let end = data.len();
     data.resize(end + PAD, 0);
-    Entropy { data, end, restarts, next_marker }
+    Entropy { data, end, restarts, next_marker, stop }
 }
 
 /// MSB-first reader. Bits past `cnt` in `buf` are already the next input, so refills OR in
@@ -420,6 +457,20 @@ impl<'a> Bits<'a> {
         let v = self.peek(s) as i32;
         self.consume(s);
         extend(v, s)
+    }
+
+    /// `n` (0..=16) raw bits.
+    #[inline(always)]
+    fn bits(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        if self.cnt < 16 {
+            self.refill();
+        }
+        let v = self.peek(n);
+        self.consume(n);
+        v
     }
 
     fn consumed_bits(&self) -> usize {
@@ -1228,7 +1279,8 @@ mod tests {
         // Rewrite the frame marker in place: same bytes, declared progressive.
         let sof = progressive.windows(2).position(|m| m == [0xFF, 0xC0]).unwrap();
         progressive[sof + 1] = 0xC2;
-        assert_eq!(decode(&progressive).err(), Some(DecodeError::Unsupported("progressive")));
+        // Baseline scans under a progressive frame header are malformed progressive data.
+        assert!(decode(&progressive).is_err());
         assert!(matches!(decode(b"not a jpeg"), Err(DecodeError::Corrupt(_))));
     }
 
