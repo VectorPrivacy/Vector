@@ -979,29 +979,28 @@ impl ChatState {
     // Message Lookup
     // ========================================================================
 
-    pub fn find_message(&self, message_id: &str) -> Option<(&Chat, Message)> {
+    /// Index of the chat holding `message_id`, decoding the id once rather than per chat.
+    fn chat_index_of_message(&self, message_id: &str) -> Option<usize> {
         if message_id.is_empty() { return None; }
-        for chat in &self.chats {
-            if let Some(compact) = chat.get_compact_message(message_id) {
-                return Some((chat, compact.to_message(&self.interner)));
-            }
-        }
-        None
+        let id = crate::compact::encode_message_id(message_id);
+        self.chats.iter().position(|chat| chat.messages.contains_id(&id))
+    }
+
+    pub fn find_message(&self, message_id: &str) -> Option<(&Chat, Message)> {
+        let chat = &self.chats[self.chat_index_of_message(message_id)?];
+        chat.get_compact_message(message_id).map(|compact| (chat, compact.to_message(&self.interner)))
     }
 
     pub fn find_chat_for_message(&self, message_id: &str) -> Option<(usize, String)> {
-        if message_id.is_empty() { return None; }
-        for (idx, chat) in self.chats.iter().enumerate() {
-            if chat.has_message(message_id) { return Some((idx, chat.id.clone())); }
-        }
-        None
+        let idx = self.chat_index_of_message(message_id)?;
+        Some((idx, self.chats[idx].id.clone()))
     }
 
     pub fn update_message<F>(&mut self, message_id: &str, f: F) -> Option<(String, Message)>
     where F: FnOnce(&mut CompactMessage)
     {
         if message_id.is_empty() { return None; }
-        let chat_idx = self.chats.iter().position(|chat| chat.has_message(message_id))?;
+        let chat_idx = self.chat_index_of_message(message_id)?;
         if let Some(msg) = self.chats[chat_idx].get_compact_message_mut(message_id) { f(msg); }
         let chat_id = self.chats[chat_idx].id.clone();
         self.chats[chat_idx].get_compact_message(message_id).map(|m| (chat_id, m.to_message(&self.interner)))
@@ -1060,7 +1059,7 @@ impl ChatState {
 
     pub fn add_reaction_to_message(&mut self, message_id: &str, reaction: Reaction) -> Option<(String, bool)> {
         if message_id.is_empty() { return None; }
-        let chat_idx = self.chats.iter().position(|chat| chat.has_message(message_id))?;
+        let chat_idx = self.chat_index_of_message(message_id)?;
         let chat_id = self.chats[chat_idx].id.clone();
         let msg = self.chats[chat_idx].get_compact_message_mut(message_id)?;
         let added = msg.add_reaction(reaction, &mut self.interner);
@@ -1087,7 +1086,7 @@ impl ChatState {
     /// for the UI refresh, or `None` if the reaction wasn't present.
     pub fn remove_reaction_from_message(&mut self, message_id: &str, reaction_id: &str) -> Option<(String, Message)> {
         if message_id.is_empty() { return None; }
-        let chat_idx = self.chats.iter().position(|chat| chat.has_message(message_id))?;
+        let chat_idx = self.chat_index_of_message(message_id)?;
         let removed = self.chats[chat_idx]
             .get_compact_message_mut(message_id)
             .map(|m| m.remove_reaction(reaction_id))
@@ -1125,7 +1124,7 @@ impl ChatState {
     }
 
     pub fn message_exists(&self, message_id: &str) -> bool {
-        !message_id.is_empty() && self.chats.iter().any(|chat| chat.has_message(message_id))
+        self.chat_index_of_message(message_id).is_some()
     }
 
     // ========================================================================
