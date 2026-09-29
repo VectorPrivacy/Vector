@@ -237,7 +237,8 @@ fn thumbhash_for_preview(file_path: &str) -> Result<String, String> {
         crate::shared::image::decode_image(bytes, 100)
             .map_err(|e| format!("Failed to decode cached image: {}", e))?
     } else {
-        ::image::open(file_path)
+        let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to open image: {}", e))?;
+        crate::shared::image::decode_image(&bytes, 100)
             .map_err(|e| format!("Failed to open image: {}", e))?
     };
 
