@@ -84,6 +84,11 @@ jobs:
           npm ci
           node scripts/build-frontend.mjs --copy
 
+      # Optimised, and one test at a time, so the printed timings are what users get. LTO off
+      # keeps the build short; it doesn't touch FFmpeg or the encoder.
       - name: test
         working-directory: src-tauri
-        run: cargo test --no-default-features --features video --lib -- --include-ignored --nocapture video
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+        run: cargo test --release --no-default-features --features video --lib -- --include-ignored --nocapture --test-threads=1 video
