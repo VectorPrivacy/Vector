@@ -146,10 +146,36 @@ fn simd_resize(img: &DynamicImage, width: u32, height: u32, alg: fast_image_resi
         DynamicImage::ImageLumaA8(b) => (fr::PixelType::U8x2, b.as_raw()),
         _ => return None,
     };
-    let src = fr::images::ImageRef::new(img.width(), img.height(), raw, pixel).ok()?;
-    let mut dst = fr::images::Image::new(width, height, pixel);
-    fr::Resizer::new().resize(&src, &mut dst, &fr::ResizeOptions::new().resize_alg(alg)).ok()?;
-    let out = dst.into_vec();
+    let (sw, sh) = (img.width(), img.height());
+    let src = fr::images::ImageRef::new(sw, sh, raw, pixel).ok()?;
+    let row_bytes = width as usize * pixel.size();
+    let mut out = vec![0u8; row_bytes * height as usize];
+    // Horizontal bands on rayon, each resized from its own source window. The filter still reads
+    // past the window, so a band matches the whole-image resize (to 1 in rare rounding cases).
+    let bands = if u64::from(sw) * u64::from(sh) < 1 << 20 {
+        1
+    } else {
+        (rayon::current_num_threads() * 2).min(height as usize / 16).max(1)
+    };
+    let band_rows = (height as usize).div_ceil(bands);
+    let scale = f64::from(sh) / f64::from(height);
+    let resize_band = |(i, band): (usize, &mut [u8])| {
+        let rows = (band.len() / row_bytes) as u32;
+        let mut dst = fr::images::Image::from_slice_u8(width, rows, band, pixel).ok()?;
+        let mut opts = fr::ResizeOptions::new().resize_alg(alg);
+        if bands > 1 {
+            let top = (i * band_rows) as f64 * scale;
+            opts = opts.crop(0.0, top, f64::from(sw), (f64::from(rows) * scale).min(f64::from(sh) - top));
+        }
+        fr::Resizer::new().resize(&src, &mut dst, &opts).ok()
+    };
+    let resized: Option<Vec<()>> = if bands > 1 {
+        use rayon::prelude::*;
+        out.par_chunks_mut(band_rows * row_bytes).enumerate().map(resize_band).collect()
+    } else {
+        out.chunks_mut(band_rows * row_bytes).enumerate().map(resize_band).collect()
+    };
+    resized?;
     match pixel {
         fr::PixelType::U8x3 => image::RgbImage::from_raw(width, height, out).map(DynamicImage::ImageRgb8),
         fr::PixelType::U8x4 => image::RgbaImage::from_raw(width, height, out).map(DynamicImage::ImageRgba8),
@@ -1825,6 +1851,20 @@ mod simd_resize_tests {
                 assert_eq!(ours.color(), theirs.color());
                 let p = psnr(ours.as_bytes(), theirs.as_bytes());
                 assert!(p > 45.0, "{:?} {filter:?}: {p:.1} dB", img.color());
+            }
+        }
+    }
+
+    #[test]
+    fn banded_resizes_match_the_image_crate() {
+        let img = DynamicImage::ImageRgb8(photo(1600, 1200));
+        let rgba = DynamicImage::ImageRgba8(img.to_rgba8());
+        for src in [img, rgba] {
+            for (w, h) in [(800, 600), (1000, 750), (1600, 37)] {
+                let ours = resize_exact(&src, w, h, FilterType::Lanczos3);
+                let theirs = src.resize_exact(w, h, FilterType::Lanczos3);
+                let p = psnr(ours.as_bytes(), theirs.as_bytes());
+                assert!(p > 45.0, "{:?} to {w}x{h}: {p:.1} dB", src.color());
             }
         }
     }
