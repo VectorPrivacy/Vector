@@ -8,6 +8,10 @@
 #![cfg(target_arch = "wasm32")]
 
 mod account;
+mod chat_ops;
+mod community_ops;
+mod network_ops;
+mod profile_ops;
 mod attachments;
 mod clock;
 mod commands;
@@ -20,6 +24,13 @@ mod messaging;
 mod sync;
 
 use std::path::PathBuf;
+use std::pin::Pin;
+
+/// A feature module's commands: `None` when the command isn't its own.
+type Module = for<'a> fn(&'a str, &'a commands::Args) -> Pin<Box<dyn std::future::Future<Output = Option<Result<serde_json::Value, String>>> + 'a>>;
+
+/// Consulted in order for commands the core dispatcher doesn't answer.
+const MODULES: &[Module] = &[chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch];
 
 use wasm_bindgen::prelude::*;
 

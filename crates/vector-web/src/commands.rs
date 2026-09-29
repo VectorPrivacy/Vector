@@ -14,27 +14,27 @@ use crate::{account, attachments, files, messaging, sync};
 pub struct Args(pub Value);
 
 impl Args {
-    fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(key).filter(|v| !v.is_null())
     }
 
-    fn str(&self, key: &str) -> Result<String, String> {
+    pub fn str(&self, key: &str) -> Result<String, String> {
         self.opt_str(key).ok_or_else(|| format!("missing argument `{key}`"))
     }
 
-    fn opt_str(&self, key: &str) -> Option<String> {
+    pub fn opt_str(&self, key: &str) -> Option<String> {
         self.get(key).and_then(Value::as_str).map(str::to_string)
     }
 
-    fn usize(&self, key: &str) -> Result<usize, String> {
+    pub fn usize(&self, key: &str) -> Result<usize, String> {
         self.get(key).and_then(Value::as_u64).map(|n| n as usize).ok_or_else(|| format!("missing argument `{key}`"))
     }
 
-    fn bool(&self, key: &str) -> Option<bool> {
+    pub fn bool(&self, key: &str) -> Option<bool> {
         self.get(key).and_then(Value::as_bool)
     }
 
-    fn de<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<T, String> {
+    pub fn de<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<T, String> {
         serde_json::from_value(self.0.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| format!("argument `{key}`: {e}"))
     }
 }
@@ -72,11 +72,11 @@ async fn get_relays() -> Result<Value, String> {
 }
 
 /// A core facade result as a command result.
-fn core<T: serde::Serialize>(r: vector_core::Result<T>) -> Result<Value, String> {
+pub fn core<T: serde::Serialize>(r: vector_core::Result<T>) -> Result<Value, String> {
     r.map_err(|e| e.to_string()).and_then(to_value)
 }
 
-fn to_value<T: serde::Serialize>(v: T) -> Result<Value, String> {
+pub fn to_value<T: serde::Serialize>(v: T) -> Result<Value, String> {
     serde_json::to_value(v).map_err(|e| e.to_string())
 }
 
@@ -406,6 +406,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
 
         _ => {
+            for module in crate::MODULES {
+                if let Some(result) = module(cmd, &a).await {
+                    return result;
+                }
+            }
             vector_core::log_warn!("[Web] unsupported command: {cmd}");
             Err(format!("`{cmd}` is not available on Vector Web yet"))
         }
