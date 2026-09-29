@@ -1150,6 +1150,8 @@ async function initSettings() {
     try {
         const state = await invoke('tor_get_state');
         torApply(state);
+        // A build without Tor has nothing to show or toggle.
+        if (!state.supported) VectorSvelte.setSettingsScreen({ platform: { tor: false } });
         if (state.enabled && !state.running) ensureTorStatePolling();
     } catch (e) {
         console.warn('[Tor] tor_get_state failed:', e);
