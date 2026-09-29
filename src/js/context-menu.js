@@ -195,7 +195,12 @@ function attachLongPressContextMenu(el, fireMenu) {
     document.addEventListener('pointerdown', (e) => {
         _ctxMenuPress = { at: performance.now(), x: e.clientX, y: e.clientY, touch: e.pointerType !== 'mouse' };
     }, true);
+    // The release of the press that opened the menu: no emulated mouse events, no click.
+    document.addEventListener('touchend', (e) => {
+        if (_ctxMenuVisible && _ctxMenuPress.at < _ctxMenuOpenedAt && e.cancelable) e.preventDefault();
+    }, { capture: true, passive: false });
     document.addEventListener('mousedown', () => {
+        if (_ctxMenuPress.at < _ctxMenuOpenedAt) return;
         if (_ctxMenuVisible) _ctxMenuDismissedAt = Date.now();
         hideContextMenu();
     });
