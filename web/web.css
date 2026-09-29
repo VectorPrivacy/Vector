@@ -1,6 +1,10 @@
 /* Vector Web: a browser tab has no window to minimise, maximise or close. */
 .vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
 
+/* WebKit blurs the text of this header along with what's behind it; its background
+   is near-opaque anyway. */
+.account { backdrop-filter: none; -webkit-backdrop-filter: none; }
+
 /* Mini app windows (web/miniapps.js) */
 .xdc-window {
     position: fixed;

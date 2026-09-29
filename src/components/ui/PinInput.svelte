@@ -12,6 +12,7 @@
         if (focusFirst) inputs[0]?.focus();
     }
     export function focusFirst() { inputs[0]?.focus(); }
+    export function focusNext() { (inputs.find((i) => !i.value) || inputs[inputs.length - 1])?.focus(); }
     $effect(() => { resetSeq; untrack(() => clear(focusOnReset)); });
 
     function keydown(e, n) {

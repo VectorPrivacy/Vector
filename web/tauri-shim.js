@@ -128,6 +128,13 @@
     // Commands answered in the page itself (media, clipboard), registered by web/media.js.
     const local = new Map();
 
+    // Only the page knows the device: on a touch screen the app takes its mobile
+    // behaviour (press-and-hold menus, swipe to reply, touch styles), as on Android.
+    local.set('get_platform_features', async () => ({
+        ...(await backend('get_platform_features')),
+        is_mobile: matchMedia('(pointer: coarse)').matches,
+    }));
+
     // Raw-body IPC (Tauri's `invoke(cmd, bytes, { headers })`) keeps the bytes binary.
     function invoke(cmd, args = {}, options = {}) {
         if (local.has(cmd)) {

@@ -59,6 +59,14 @@
             else if (e.passwordShown) passwordEl?.focus();
         });
     });
+    // iOS opens the keyboard only for a focus made inside a tap, so on the PIN and
+    // password steps a tap anywhere reaches the field.
+    function tapToType(ev) {
+        if (l.screen !== 'encrypt' || ev.target.closest('button, input, a, select, textarea')) return;
+        if (e.pinShown) pinRow?.focusNext();
+        else if (e.passwordShown) passwordEl?.focus();
+    }
+
     // A fresh password step starts masked.
     $effect(() => { if (!e.passwordShown) reveal = false; });
     function submitPassword(ev) { ev.preventDefault(); h.encrypt.submitPassword(); }
@@ -97,7 +105,8 @@
         {/if}
     </header>
 
-    <main class="lg-stage">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+    <main class="lg-stage" onclick={tapToType}>
         {#if l.screen === 'start'}
             <div id="login-start" class="lg-block">
                 <div class="lg-buttons">
