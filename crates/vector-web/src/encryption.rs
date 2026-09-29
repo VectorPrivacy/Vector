@@ -5,7 +5,7 @@
 
 use vector_core::db::at_rest::{self, MigrationProgress};
 use vector_core::state;
-use vector_core::{ENCRYPTION_KEY, MY_SECRET_KEY};
+use vector_core::{SignerKind, ENCRYPTION_KEY, MY_SECRET_KEY};
 use zeroize::Zeroize;
 
 use serde_json::Value;
@@ -26,8 +26,21 @@ pub async fn enable(credential: String, security_type: String) -> Result<(), Str
         return Err("Encryption is already enabled".into());
     }
     let mut key = vector_core::crypto::hash_pass(&credential).await;
+    // An account with no sealed key has nothing to reject a wrong PIN; the canary does.
+    let canary = match vector_core::signer_kind() {
+        SignerKind::Nip55 | SignerKind::Nip07 => {
+            match vector_core::crypto::encrypt_with_key(at_rest::NIP55_PIN_CANARY, &key) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    key.zeroize();
+                    return Err(e);
+                }
+            }
+        }
+        _ => None,
+    };
     ENCRYPTION_KEY.set(key, &[&MY_SECRET_KEY]);
-    let result = at_rest::enable(&key, &security_type, None, None, &progress);
+    let result = at_rest::enable(&key, &security_type, None, canary.as_deref(), &progress);
     key.zeroize();
     match result {
         Ok(()) => {

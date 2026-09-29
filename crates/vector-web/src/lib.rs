@@ -13,6 +13,7 @@ mod community_ops;
 mod network_ops;
 mod profile_ops;
 mod selfsync;
+mod signers;
 mod attachments;
 mod clock;
 mod commands;
@@ -33,7 +34,7 @@ use std::pin::Pin;
 type Module = for<'a> fn(&'a str, &'a commands::Args) -> Pin<Box<dyn std::future::Future<Output = Option<Result<serde_json::Value, String>>> + 'a>>;
 
 /// Consulted in order for commands the core dispatcher doesn't answer.
-const MODULES: &[Module] = &[emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch];
+const MODULES: &[Module] = &[signers::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch];
 
 use wasm_bindgen::prelude::*;
 
@@ -63,6 +64,7 @@ pub async fn start(version: String) -> Result<(), JsValue> {
         .await
         .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
 
+    signers::install();
     vector_core::db::set_app_version(version);
     vector_core::db::set_download_dir(PathBuf::from("/downloads"));
     vector_core::VectorCore::init(vector_core::CoreConfig {

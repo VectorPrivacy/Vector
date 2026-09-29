@@ -124,6 +124,9 @@
                 {#if l.nip55Shown}
                     <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
                 {/if}
+                {#if l.nip07Shown}
+                    <button type="button" class="lg-link" disabled={l.nip07Busy} onclick={() => h.nip07()}>Sign in with Browser Extension</button>
+                {/if}
             </div>
         {:else if l.screen === 'invite'}
             <div class="lg-block">

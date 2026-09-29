@@ -4,7 +4,7 @@ use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use vector_core::db;
 use vector_core::state::{self, MNEMONIC_SEED, PENDING_NSEC};
-use vector_core::{Profile, MY_SECRET_KEY, STATE};
+use vector_core::{Profile, SignerKind, MY_SECRET_KEY, STATE};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::emitter;
@@ -36,6 +36,39 @@ fn stamp_fresh_account_profile() {
     });
 }
 
+/// Not account creation: an abandoned creation must not stamp an empty kind-0
+/// over an existing identity's profile.
+pub(crate) fn disarm_fresh_account_stamp() {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+}
+
+/// Hold an account's storage until the security step commits it.
+pub(crate) fn stage_pending(npub: String) {
+    *PENDING_ACCOUNT.lock().unwrap() = Some(npub);
+}
+
+/// Whether an account is staged and not yet committed.
+pub(crate) fn has_pending() -> bool {
+    PENDING_ACCOUNT.lock().unwrap().is_some()
+}
+
+/// Open the staged account's storage and make it the active one.
+pub(crate) fn take_pending_into_current() -> Result<(), String> {
+    if let Some(npub) = PENDING_ACCOUNT.lock().unwrap().take() {
+        db::init_database(&npub)?;
+        db::set_current_account(npub)?;
+    }
+    Ok(())
+}
+
+/// The shared tail of every account commit.
+pub(crate) fn finish_commit() {
+    touch_last_active();
+    vector_core::blossom_servers::refresh_cache();
+    broadcast_pending_invite_if_any();
+    stamp_fresh_account_profile();
+}
+
 /// Forget an account that was started but never committed.
 pub(crate) fn clear_pending() {
     *PENDING_ACCOUNT.lock().unwrap() = None;
@@ -63,12 +96,12 @@ fn broadcast_pending_invite_if_any() {
     });
 }
 
-fn install_client() {
+pub(crate) fn install_client() {
     let client = vector_core::nostr_client_builder().monitor(Monitor::new(1024)).build();
     state::set_nostr_client_if_absent(client);
 }
 
-async fn insert_own_profile(npub: &str) {
+pub(crate) async fn insert_own_profile(npub: &str) {
     let mut profile = Profile::new();
     profile.flags.set_mine(true);
     STATE.lock().await.insert_or_replace_profile(npub, profile);
@@ -217,6 +250,9 @@ async fn commit_pending_account(password: Option<&str>, security_type: Option<&s
     if password.is_some_and(|p| p.trim().is_empty()) {
         return Err("Password must not be empty.".into());
     }
+    if matches!(vector_core::signer_kind(), SignerKind::Nip55 | SignerKind::Nip07) {
+        return crate::signers::commit_keyless(password, security_type).await;
+    }
     let nsec = Zeroizing::new(PENDING_NSEC.lock().unwrap().clone().ok_or("No pending key — call create_account or login first")?);
     let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
 
@@ -235,12 +271,16 @@ async fn commit_pending_account(password: Option<&str>, security_type: Option<&s
         None => None,
     };
 
-    if let Some(npub) = PENDING_ACCOUNT.lock().unwrap().take() {
-        db::init_database(&npub)?;
-        db::set_current_account(npub)?;
-    }
+    take_pending_into_current()?;
 
-    db::settings::commit_account_setup(&stored_key, password.is_some(), security_type, stored_seed.as_deref(), None)?;
+    // A bunker account's key is its client keypair; the pairing rides the same commit.
+    if let Some((url, remote_hex)) = vector_core::pending_bunker_setup().filter(|_| vector_core::is_bunker()) {
+        let stored_url = vector_core::crypto::maybe_encrypt(url).await;
+        db::commit_bunker_account_setup(&stored_key, password.is_some(), security_type, &stored_url, &remote_hex, None)?;
+        vector_core::clear_pending_bunker_setup();
+    } else {
+        db::settings::commit_account_setup(&stored_key, password.is_some(), security_type, stored_seed.as_deref(), None)?;
+    }
 
     for slot in [&PENDING_NSEC, &MNEMONIC_SEED] {
         let mut guard = slot.lock().unwrap();
@@ -251,10 +291,7 @@ async fn commit_pending_account(password: Option<&str>, security_type: Option<&s
     }
 
     state::set_encryption_enabled(password.is_some());
-    touch_last_active();
-    vector_core::blossom_servers::refresh_cache();
-    broadcast_pending_invite_if_any();
-    stamp_fresh_account_profile();
+    finish_commit();
     Ok(())
 }
 
@@ -267,8 +304,8 @@ pub async fn setup_encryption(password: String, security_type: String) -> Result
     commit_pending_account(Some(&password), Some(&security_type)).await
 }
 
-/// Unlock the stored account. Local keys only: bunker and NIP-55 need
-/// transports the browser doesn't have yet.
+/// Unlock the stored account: a local key, a bunker's client keypair, or a
+/// keyless signer's recorded identity.
 pub async fn login_from_stored_key(password: Option<String>) -> Result<String, String> {
     *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
     state::init_encryption_enabled();
@@ -284,23 +321,30 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         return Err("Switching accounts".into());
     }
 
-    let signer_type = db::get_signer_type().unwrap_or_else(|_| "local".into());
-    if signer_type != "local" {
-        return Err(format!("{signer_type} signers are not available on Vector Web yet"));
-    }
-
-    let stored = db::get_pkey()?.ok_or("No private key found")?;
-    let mut nsec = if let Some(pwd) = password {
-        vector_core::crypto::maybe_decrypt_inner(stored, Some(pwd))
-            .await
-            .map_err(|_| "Incorrect password".to_string())?
-    } else {
-        stored
+    let kind = SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
+    let public_key = match kind {
+        SignerKind::Nip07 => crate::signers::unlock_keyless(kind, password).await?,
+        SignerKind::Nip55 => return Err("Offline (Amber) signers are only available on Android.".into()),
+        SignerKind::Local | SignerKind::Bunker => {
+            let stored = db::get_pkey()?.ok_or("No private key found")?;
+            let mut nsec = if let Some(pwd) = password {
+                vector_core::crypto::maybe_decrypt_inner(stored, Some(pwd))
+                    .await
+                    .map_err(|_| "Incorrect password".to_string())?
+            } else {
+                stored
+            };
+            let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
+            nsec.zeroize();
+            MY_SECRET_KEY.store_from_keys(&keys, &[&vector_core::ENCRYPTION_KEY]);
+            if kind == SignerKind::Bunker {
+                crate::signers::unlock_bunker(&keys).await?
+            } else {
+                keys.public_key()
+            }
+        }
     };
-    let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
-    nsec.zeroize();
-    store_identity(&keys);
-    drop(keys);
+    state::set_my_public_key(public_key);
     install_client();
 
     let npub = vector_core::my_public_key().ok_or("no identity")?.to_bech32().map_err(|e| e.to_string())?;

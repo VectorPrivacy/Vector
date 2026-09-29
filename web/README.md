@@ -27,6 +27,9 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   the account, with takeover.
 - **`web/media.js`**: commands the page answers itself: audio playback with spectrum
   waveforms, WAV voice recording, notifications, saving and copying attachments.
+- **`web/signer.js`**: the page half of NIP-07. Extensions inject `window.nostr` into pages
+  only, so core's signer sends each request out as a `nip07_request` event and this answers
+  it through `nip07_reply`.
 - **vector-core on wasm32**: `rt` swaps tokio's spawn and timers for `spawn_local` and
   browser timers, `web_time` supplies the clock, `webfiles` reads and writes OPFS, and
   `db/webfs.rs` keeps the account registry.
@@ -34,6 +37,7 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
 ## Works
 
 Accounts (create, import, PIN/password, unlock, change or disable the PIN, logout, delete, export keys, add-account),
+remote signers (NIP-46 bunkers by link or QR, re-authorize; NIP-07 browser extensions with NIP-44),
 DMs (text, replies, reactions, edits, deletes, retries, self-destruct), attachments (send,
 receive, image compression and metadata stripping, voice messages, audio playback),
 profiles and avatars (edit, upload, blocks, nicknames), Concord v2 communities (create,
@@ -44,6 +48,6 @@ GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animate
 
 ## Not yet
 
-Mini apps, calls, the PIVX wallet, transcription, Tor, bunker and NIP-55 signers, legacy (v1)
+Mini apps, calls, the PIVX wallet, transcription, Tor, NIP-55 (Amber, Android-only), legacy (v1)
 community writes. Avatars and images load through the media proxy; without one, hosts
 that send no CORS headers are shown by URL.

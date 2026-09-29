@@ -53,6 +53,18 @@ async function refreshRemoteSignerCard() {
             });
             return;
         }
+        if (platformFeatures?.os === 'web') {
+            const nip07 = await invoke('get_nip07_status').catch(() => null);
+            if (nip07) {
+                VectorSvelte.setSigner({
+                    label: 'Browser Signer',
+                    hint: 'Your identity key stays in your browser extension. Vector holds nothing on this device.',
+                    npub: nip07.user_npub || '',
+                });
+                applyRemoteSignerDot(await invoke('is_nip07_available').catch(() => false) ? 'online' : 'offline');
+                return;
+            }
+        }
         const nip55 = await invoke('get_nip55_status').catch(() => null);
         if (nip55) {
             VectorSvelte.setSigner({

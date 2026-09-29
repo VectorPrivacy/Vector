@@ -1810,6 +1810,17 @@ async function showSettingsHelp(key) {
 
 /** Re-authorize the external signer: a direct Amber intent for NIP-55, the bunker form otherwise. */
 async function reauthorizeSigner() {
+    const nip07 = platformFeatures?.os === 'web' ? await invoke('get_nip07_status').catch(() => null) : null;
+    if (nip07) {
+        try {
+            await invoke('reauthorize_nip07');
+            showToast('Signer re-authorized.');
+            refreshRemoteSignerCard();
+        } catch (err) {
+            popupConfirm(String(err), '', true, '', 'vector_warning.svg');
+        }
+        return;
+    }
     const nip55 = await invoke('get_nip55_status').catch(() => null);
     if (nip55) {
         try {
