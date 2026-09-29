@@ -212,6 +212,8 @@
                 {/if}
                 {#if !e.typeSelectShown && (e.pinShown || e.passwordShown)}{@render goBack()}{/if}
             </div>
+        {:else if l.screen === 'none'}
+            <div class="lg-booting" role="status" aria-label="Loading"><span></span><span></span><span></span></div>
         {/if}
 
         {#if l.bunker}
