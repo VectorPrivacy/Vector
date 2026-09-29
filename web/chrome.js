@@ -21,17 +21,24 @@
     }
     const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
     const radius = standalone ? cornerRadius() : 0;
-    function setFloor() {
-        // With the keyboard up, the composer sits on the keyboard instead.
+    // ─── Keyboard ───────────────────────────────────────────────────────────
+    // iOS shrinks the window for the keyboard but keeps laying the page out at
+    // full height, then scrolls it up to reveal the input: the header leaves the
+    // screen. The page is sized to what's visible instead and held at the top,
+    // as Android resizes it. The document's own client height stays full-size.
+    function fit() {
         const vv = window.visualViewport;
-        const keyboard = vv && innerHeight - vv.height > 120;
+        const keyboard = !!vv && root.clientHeight - vv.height > 50;
         root.style.setProperty('--floor', `${keyboard ? 0 : radius}px`);
+        root.style.height = keyboard ? `${vv.height}px` : '';
+        if (keyboard) root.style.setProperty('--app-h', `${vv.height}px`); else root.style.removeProperty('--app-h');
+        if (keyboard && (scrollY || vv.offsetTop)) scrollTo(0, 0);
     }
-    setFloor();
-    if (radius) {
-        window.visualViewport?.addEventListener('resize', setFloor);
-        addEventListener('resize', setFloor);
-    }
+    fit();
+    window.visualViewport?.addEventListener('resize', fit);
+    window.visualViewport?.addEventListener('scroll', fit);
+    addEventListener('resize', fit);
+    addEventListener('scroll', fit, { passive: true });
 
     // ─── Top edge ───────────────────────────────────────────────────────────
     // iOS Safari tints its status bar from an opaque fixed box spanning the top

@@ -25,6 +25,8 @@ body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
 body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
 body.mobile .emoji-picker,
 body.mobile .attachment-panel { bottom: calc(65px + var(--floor, 0px)); }
+/* The chat is sized by 100vh, which iOS keeps full-height under the keyboard. */
+body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
 @media (max-width: 640px) {
     .lg-bg-toggle { margin-bottom: max(10px, var(--floor, 0px)); }
 }
