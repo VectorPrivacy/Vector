@@ -47,12 +47,23 @@
         closed[sectionId] = !isClosed(sectionId);
         h.toggleSection(communityId, sectionId);
     }
+
+    // A fresh object per version bump: the chat is mutated in place, so handing the chat
+    // itself on would compare equal and leave the row stale.
+    function rowState(id) {
+        chatVersion(id);
+        const chat = h.chatById(id);
+        return {
+            muted: !!chat?.muted,
+            unread: !!chat && h.computeRowUnreadCount(chat) > 0,
+            // A room set to Nothing is silent everywhere, including its own row.
+            pings: chat && (chat.notify | 0) < 2 ? h.countPingMessages(chat) : 0,
+        };
+    }
 </script>
 
 {#snippet row(channel, canManage)}
-    {@const chat = (chatVersion(channel.id), h.chatById(channel.id))}
-    <!-- A room set to Nothing is silent everywhere, including its own row. -->
-    {@const pings = chat && (chat.notify | 0) < 2 ? h.countPingMessages(chat) : 0}
+    {@const r = rowState(channel.id)}
     <!-- The menu is the only way in: the row itself stays navigation. -->
     {@const menu = (node) => h.attachLongPressContextMenu(node, (x, y) => h.openChannelMenu(communityId, channel, x, y))}
     <!-- Three tiers, loudest first: something to read, nothing to read, and a room you asked
@@ -60,16 +71,16 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="chatlist-channel" id="chatlist-channel-{channel.id}"
          class:active={openChatId() === channel.id}
-         class:is-muted={!!chat?.muted}
-         class:has-unread={!!chat && h.computeRowUnreadCount(chat) > 0}
-         class:is-read={!(chat && h.computeRowUnreadCount(chat) > 0)}
+         class:is-muted={r.muted}
+         class:has-unread={r.unread}
+         class:is-read={!r.unread}
          use:menu
          onclick={() => h.openChannel(communityId, channel)}>
         <span class="chatlist-channel-hash"><span class="icon icon-channel-hash"></span></span>
         <span class="chatlist-channel-name cutoff">{channel.name}</span>
         <!-- A number only for someone calling your name; ordinary unread is the row's own weight. -->
-        {#if pings}
-            <span class="chatlist-channel-badge">{pings > 99 ? '99+' : pings}</span>
+        {#if r.pings}
+            <span class="chatlist-channel-badge">{r.pings > 99 ? '99+' : r.pings}</span>
         {/if}
         <!-- The primary channel anchors the community's row and history; the backend refuses to tombstone it. -->
         {#if canManage && !h.isPrimaryChannelId(channel.id)}
