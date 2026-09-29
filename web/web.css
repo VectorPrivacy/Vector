@@ -32,8 +32,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 36px;
-    padding: 0 6px 0 10px;
+    box-sizing: border-box;
+    height: 37px;
+    padding: 0 4px 0 10px;
     flex-shrink: 0;
     background: #141414;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -48,13 +49,15 @@
 .xdc-icon { width: 20px; height: 20px; border-radius: 5px; object-fit: cover; }
 .xdc-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .xdc-btn {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    flex: 0 0 28px;
     width: 28px;
     height: 28px;
-    border: 0;
     border-radius: 6px;
-    background: transparent;
     color: #bdbdbd;
-    font-size: 14px;
     cursor: pointer;
 }
 .xdc-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }

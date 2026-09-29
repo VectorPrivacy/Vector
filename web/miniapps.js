@@ -36,6 +36,28 @@
         backend('miniapp_closed', { label }).catch(() => {});
     }
 
+    // Both title bar glyphs drawn on one 12px grid, so the buttons match.
+    const SVG = 'http://www.w3.org/2000/svg';
+    function icon(kind) {
+        const svg = document.createElementNS(SVG, 'svg');
+        svg.setAttribute('viewBox', '0 0 12 12');
+        svg.setAttribute('width', '12');
+        svg.setAttribute('height', '12');
+        svg.setAttribute('aria-hidden', 'true');
+        const shape = document.createElementNS(SVG, kind === 'max' ? 'rect' : 'path');
+        if (kind === 'max') {
+            for (const [k, v] of Object.entries({ x: 1.5, y: 1.5, width: 9, height: 9, rx: 1.5 })) shape.setAttribute(k, v);
+        } else {
+            shape.setAttribute('d', 'M2 2L10 10M10 2L2 10');
+        }
+        shape.setAttribute('fill', 'none');
+        shape.setAttribute('stroke', 'currentColor');
+        shape.setAttribute('stroke-width', '1.5');
+        shape.setAttribute('stroke-linecap', 'round');
+        svg.appendChild(shape);
+        return svg;
+    }
+
     function makeWindow(info) {
         const el = document.createElement('div');
         el.className = 'xdc-window';
@@ -56,12 +78,12 @@
         max.type = 'button';
         max.className = 'xdc-btn';
         max.title = 'Maximize';
-        max.textContent = '▢';
+        max.appendChild(icon('max'));
         const x = document.createElement('button');
         x.type = 'button';
         x.className = 'xdc-btn xdc-close';
         x.title = 'Close';
-        x.textContent = '✕';
+        x.appendChild(icon('close'));
         bar.append(max, x);
 
         const frame = document.createElement('iframe');
