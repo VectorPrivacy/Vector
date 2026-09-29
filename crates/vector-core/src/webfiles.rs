@@ -18,10 +18,14 @@ async function dirFor(path, create) {
 }
 export async function opfs_write(path, bytes) {
     const [dir, name] = await dirFor(path, true);
-    const handle = await dir.getFileHandle(name, { create: true });
-    const w = await handle.createWritable();
-    await w.write(bytes);
-    await w.close();
+    const handle = await (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle();
+    try {
+        handle.truncate(0);
+        handle.write(bytes, { at: 0 });
+        handle.flush();
+    } finally {
+        handle.close();
+    }
 }
 export async function opfs_read(path) {
     try {

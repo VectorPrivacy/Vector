@@ -1,5 +1,6 @@
 //! Opening chats, reading history, sending.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -9,15 +10,57 @@ use vector_core::{Message, STATE};
 
 use crate::emitter;
 
-/// Mirrors the desktop callback: optimistic bubble, then its sent/failed update.
+thread_local! {
+    /// Cancel flags for uploads in flight, by pending id.
+    static UPLOAD_CANCEL: std::cell::RefCell<std::collections::HashMap<String, Arc<AtomicBool>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub fn cancel_upload(pending_id: &str) {
+    UPLOAD_CANCEL.with(|m| {
+        if let Some(flag) = m.borrow().get(pending_id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Mirrors the desktop callback: optimistic bubble, upload progress, then its sent/failed update.
+#[derive(Clone, Copy)]
 pub struct WebSendCallback;
 
 impl SendCallback for WebSendCallback {
     fn on_pending(&self, chat_id: &str, msg: &Message) {
+        if !msg.attachments.is_empty() {
+            UPLOAD_CANCEL.with(|m| m.borrow_mut().insert(msg.id.clone(), Arc::new(AtomicBool::new(false))));
+        }
         emitter::emit("message_new", &json!({ "message": msg, "chat_id": chat_id }));
     }
 
+    fn cancel_token(&self, pending_id: &str) -> Option<Arc<AtomicBool>> {
+        UPLOAD_CANCEL.with(|m| m.borrow().get(pending_id).cloned())
+    }
+
+    fn on_upload_progress(&self, pending_id: &str, percentage: u8, bytes_sent: u64) -> Result<(), String> {
+        if self.cancel_token(pending_id).is_some_and(|f| f.load(Ordering::Relaxed)) {
+            return Err("Upload cancelled".into());
+        }
+        emitter::emit("attachment_upload_progress", &json!({ "id": pending_id, "progress": percentage, "bytesSent": bytes_sent }));
+        Ok(())
+    }
+
+    fn on_upload_stage(&self, pending_id: &str, stage: &str, pct: Option<u8>) {
+        emitter::emit("attachment_upload_stage", &json!({ "id": pending_id, "stage": stage, "progress": pct }));
+    }
+
+    fn on_upload_complete(&self, chat_id: &str, pending_id: &str, attachment_id: &str, url: &str) {
+        emitter::emit(
+            "attachment_update",
+            &json!({ "chat_id": chat_id, "message_id": pending_id, "attachment_id": attachment_id, "url": url }),
+        );
+    }
+
     fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        UPLOAD_CANCEL.with(|m| m.borrow_mut().remove(old_id));
         if old_id.starts_with("pending-") && old_id != msg.id {
             let pending_id = old_id.to_string();
             db::spawn_bound(async move {
@@ -28,6 +71,7 @@ impl SendCallback for WebSendCallback {
     }
 
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
+        UPLOAD_CANCEL.with(|m| m.borrow_mut().remove(old_id));
         emitter::emit("message_update", &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id }));
     }
 
@@ -51,6 +95,26 @@ pub async fn message(receiver: String, content: String, replied_to: String) -> R
     let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
     let callback: Arc<dyn SendCallback> = Arc::new(WebSendCallback);
     let result = vector_core::sending::send_dm(&receiver, &content, reply, &config, callback).await?;
+    Ok(json!({ "pending_id": result.pending_id, "event_id": result.event_id }))
+}
+
+pub async fn send_file(
+    receiver: String,
+    replied_to: String,
+    bytes: Arc<Vec<u8>>,
+    name: String,
+    extension: String,
+    img_meta: Option<vector_core::types::ImageMetadata>,
+) -> Result<Value, String> {
+    let config = SendConfig {
+        self_destruct_secs: vector_core::self_destruct::chat_duration_secs(&receiver),
+        ..SendConfig::gui()
+    };
+    let reply = (!replied_to.is_empty()).then_some(replied_to.as_str());
+    let result = vector_core::sending::send_file_dm_with_meta(
+        &receiver, bytes, &name, &extension, img_meta, None, reply, &config, Arc::new(WebSendCallback),
+    )
+    .await?;
     Ok(json!({ "pending_id": result.pending_id, "event_id": result.event_id }))
 }
 

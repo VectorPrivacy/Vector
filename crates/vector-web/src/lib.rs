@@ -13,6 +13,7 @@ mod clock;
 mod commands;
 mod community;
 mod events;
+mod files;
 mod emitter;
 mod messaging;
 mod sync;
@@ -73,5 +74,23 @@ pub async fn invoke(cmd: String, args: String) -> Result<String, JsValue> {
     match commands::dispatch(&cmd, commands::Args(args)).await {
         Ok(v) => Ok(v.to_string()),
         Err(e) => Err(JsValue::from_str(&e)),
+    }
+}
+
+/// A raw-body command: `invoke(cmd, bytes, { headers })` on desktop.
+#[wasm_bindgen]
+pub async fn invoke_bytes(cmd: String, bytes: Vec<u8>, headers: String) -> Result<String, JsValue> {
+    let headers: serde_json::Value = serde_json::from_str(&headers).unwrap_or_default();
+    let header = |k: &str| headers.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    match cmd.as_str() {
+        "cache_file_bytes" => {
+            let name = base64_simd::STANDARD
+                .decode_to_vec(header("file-name"))
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_default();
+            Ok(files::cache_bytes(bytes, name, header("extension")).to_string())
+        }
+        _ => Err(JsValue::from_str(&format!("`{cmd}` does not take a raw body on Vector Web"))),
     }
 }

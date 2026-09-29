@@ -8,7 +8,7 @@ use vector_core::{db, VectorCore, STATE};
 use vector_core::profile::sync::{self as profile_sync, SyncPriority};
 
 use crate::community::{self as cm, ControlOp};
-use crate::{account, attachments, messaging, sync};
+use crate::{account, attachments, files, messaging, sync};
 
 /// Arguments as the frontend sent them (camelCase keys, like Tauri's).
 pub struct Args(pub Value);
@@ -243,6 +243,72 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             messaging::message(a.str("receiver")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo").unwrap_or_default())
                 .await
         }
+        // --- Files ---
+        "cache_android_file" | "get_file_info" => files::file_info(&a.str("filePath").or_else(|_| a.str("path"))?).await,
+        "is_directory" => Ok(json!(false)),
+        "start_image_precompression" => files::start_precompression(a.str("filePath")?).await.map(|_| Value::Null),
+        "get_compression_status" => files::compression_status(&a.str("filePath")?),
+        "clear_compression_cache" => {
+            files::clear_compression(&a.str("filePath")?);
+            Ok(Value::Null)
+        }
+        "start_cached_bytes_compression" => files::start_precompression(String::new()).await.map(|_| Value::Null),
+        "get_cached_bytes_compression_status" => files::compression_status(""),
+        "get_cached_file_info" => Ok(files::cached_info()),
+        "preview_cached_file" => files::preview_cached().await,
+        "clear_cached_file" => {
+            files::clear_cached();
+            Ok(Value::Null)
+        }
+        "read_image_preview" => files::image_preview(&a.str("path")?).await,
+        "allow_video_preview" | "clear_android_file_cache" | "clear_all_android_file_cache" => Ok(Value::Null),
+        "generate_thumbhash_for_preview" => files::thumbhash_preview(&a.opt_str("filePath").unwrap_or_default()).await,
+        "file_has_metadata" => Ok(json!(files::has_metadata(&a.str("filePath")?).await)),
+        "file_message" => {
+            files::file_message(a.str("receiver")?, a.opt_str("repliedTo").unwrap_or_default(), a.str("filePath")?,
+                a.bool("keepMetadata").unwrap_or(false), a.opt_str("nameOverride").unwrap_or_default()).await
+        }
+        "send_cached_compressed_file" => {
+            files::send_compressed(a.str("receiver")?, a.opt_str("repliedTo").unwrap_or_default(), a.str("filePath")?,
+                a.bool("keepMetadata").unwrap_or(false), a.opt_str("nameOverride").unwrap_or_default()).await
+        }
+        "send_cached_file" => {
+            files::send_cached(a.str("receiver")?, a.opt_str("repliedTo").unwrap_or_default(), a.bool("useCompression").unwrap_or(false),
+                a.bool("keepMetadata").unwrap_or(false), a.opt_str("nameOverride").unwrap_or_default()).await
+        }
+        "send_community_files" => {
+            let channel = a.str("channelId")?;
+            let paths: Vec<String> = a.de("filePaths")?;
+            let names: Vec<String> = a.de::<Option<Vec<String>>>("nameOverrides")?.unwrap_or_default();
+            let (compress, keep) = (a.bool("useCompression").unwrap_or(false), a.bool("keepMetadata").unwrap_or(false));
+            let reply = a.opt_str("repliedTo").unwrap_or_default();
+            for (i, path) in paths.iter().enumerate() {
+                let name = names.get(i).cloned().unwrap_or_default();
+                if compress {
+                    files::send_compressed(channel.clone(), reply.clone(), path.clone(), keep, name).await?;
+                } else {
+                    files::file_message(channel.clone(), reply.clone(), path.clone(), keep, name).await?;
+                }
+            }
+            Ok(Value::Null)
+        }
+        "send_community_cached_file" => {
+            files::send_cached(a.str("channelId")?, a.opt_str("repliedTo").unwrap_or_default(), a.bool("useCompression").unwrap_or(false),
+                a.bool("keepMetadata").unwrap_or(false), a.opt_str("nameOverride").unwrap_or_default()).await.map(|_| Value::Null)
+        }
+        "cancel_upload" => {
+            messaging::cancel_upload(&a.str("pendingId").or_else(|_| a.str("messageId"))?);
+            Ok(Value::Null)
+        }
+        "generate_thumbhash_preview" => {
+            let msg_id = a.str("msgId")?;
+            let thumb = VectorCore.get_message(&msg_id).await.and_then(|(_, m)| {
+                m.attachments.iter().find_map(|a| a.img_meta.as_ref().map(|i| i.thumbhash.clone()))
+            });
+            Ok(json!(files::thumbhash_data_url(&thumb.unwrap_or_default())))
+        }
+        "decode_thumbhash" => Ok(json!(files::thumbhash_data_url(&a.str("thumbhash")?))),
+
         // --- Communities ---
         "list_communities" => cm::list_communities(),
         "get_community" => cm::get_community(&a.str("communityId")?),

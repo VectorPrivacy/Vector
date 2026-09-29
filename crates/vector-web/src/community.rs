@@ -445,3 +445,144 @@ pub async fn apply_presence(
         }),
     );
 }
+
+/// One attachment into a channel: local copy, optimistic bubble, seal, upload,
+/// mirror, then the channel message naming it.
+pub async fn send_community_file(
+    channel_id: String,
+    replied_to: String,
+    bytes: std::sync::Arc<Vec<u8>>,
+    name: String,
+    extension: String,
+    img_meta: Option<vector_core::types::ImageMetadata>,
+) -> Result<Value, String> {
+    use vector_core::sending::{FileSource, Sealed};
+    db::scoped(async move {
+        let reply = Some(replied_to).filter(|r| !r.is_empty());
+        let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+        if !is_v2(&community_id) {
+            return Err("Legacy communities are read-only on Vector Web".to_string());
+        }
+        let community = load_v2(&community_id)?;
+        let ch = ChannelId(id32(&channel_id)?);
+        community.channel(&ch).ok_or("Channel not found in Community")?;
+        let author = vector_core::my_public_key().ok_or("Public key not set")?;
+
+        let hash = vector_core::crypto::sha256_hex(&bytes);
+        let local = db::get_download_dir().join(format!("{hash}.{extension}"));
+        vector_core::webfiles::write(&local, &bytes).await?;
+        let params = vector_core::crypto::generate_encryption_params();
+        let mut attachment = vector_core::types::Attachment {
+            id: hash.clone(), key: params.key, nonce: params.nonce,
+            extension: extension.clone(), name, url: String::new(),
+            path: local.to_string_lossy().to_string(), size: bytes.len() as u64 + 16,
+            img_meta, downloading: false, downloaded: true,
+            ..Default::default()
+        };
+
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default();
+        let pending_id = format!("pending-{}", now.as_nanos());
+        let callback = WebSendCallback;
+        let mut pending = Message {
+            id: pending_id.clone(), at: now.as_millis() as u64, pending: true, mine: true,
+            npub: author.to_bech32().ok(), replied_to: reply.clone().unwrap_or_default(),
+            attachments: vec![attachment.clone()], ..Default::default()
+        };
+        let _ = db::events::populate_reply_context(&mut pending).await;
+        STATE.lock().await.add_message_to_chat(&channel_id, &pending);
+        callback.on_pending(&channel_id, &pending);
+
+        let failed = |e: String| async {
+            let row = STATE.lock().await.update_message(&pending_id, |m| {
+                m.set_failed(true);
+                m.set_pending(false);
+            });
+            if let Some((_, msg)) = row {
+                callback.on_failed(&channel_id, &pending_id, &msg);
+            }
+            Err::<Value, String>(e)
+        };
+
+        let signer = match vector_core::signer::active_signer() {
+            Ok(s) => s,
+            Err(e) => return failed(format!("Signer unavailable: {e}")).await,
+        };
+        let servers = vector_core::state::get_blossom_servers();
+        let cancel = callback.cancel_token(&pending_id);
+        let sealed = vector_core::sending::seal_or_reuse(
+            FileSource::Bytes(bytes), &attachment.id, &attachment.key, &attachment.nonce,
+            &pending_id, std::sync::Arc::new(callback), cancel.clone(),
+        )
+        .await;
+        match sealed {
+            Err(e) => return failed(e).await,
+            Ok(Sealed::Reused(r)) => {
+                (attachment.key, attachment.nonce, attachment.url, attachment.size) = (r.key, r.nonce, r.url, r.size);
+            }
+            Ok(Sealed::Body(body, _guard)) => {
+                let pid = pending_id.clone();
+                let progress: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, sent| {
+                    callback.on_upload_progress(&pid, pct.unwrap_or(0), sent.unwrap_or(0))
+                });
+                let mime = vector_core::crypto::mime_from_extension(&extension);
+                let accepted = match vector_core::blossom::upload_body_with_progress_and_failover(
+                    signer.clone(), servers.clone(), body, Some(mime), true, progress,
+                    Some(3), Some(Duration::from_secs(2)), cancel,
+                )
+                .await
+                {
+                    Ok(a) => a,
+                    Err(e) => return failed(format!("Upload failed: {e}")).await,
+                };
+                attachment.url = accepted.url.clone();
+                attachment.fallback_urls = vector_core::blossom::mirror_blob_to_servers(
+                    signer, &accepted.url, servers, 2, Duration::from_secs(5), std::slice::from_ref(&accepted.server),
+                )
+                .await;
+            }
+        }
+        callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &attachment.url);
+
+        let mut tags = vec![vector_core::community::attachments::attachment_to_imeta(&attachment)];
+        if let Some(exp) = vector_core::self_destruct::chat_duration_secs(&channel_id).and_then(vector_core::self_destruct::expiry_after) {
+            tags.push(Tag::expiration(Timestamp::from_secs(exp)));
+        }
+        let reply_owned = match reply.as_deref() {
+            Some(parent) => {
+                let author_hex = STATE
+                    .lock()
+                    .await
+                    .find_message(parent)
+                    .and_then(|(_, m)| m.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()))
+                    .map(|pk| pk.to_hex())
+                    .unwrap_or_default();
+                Some((parent.to_string(), author_hex))
+            }
+            None => None,
+        };
+        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let sent = vector_core::community::v2::service::send_chat_message(&transport, &community, &ch, "", reply_ref, &[], tags).await;
+        let real_id = match sent {
+            Ok(id) => id,
+            Err(e) => return failed(e).await,
+        };
+        let echoed = {
+            let mut state = STATE.lock().await;
+            state.remove_message(&pending_id);
+            let path = attachment.path.clone();
+            state.update_attachment(&channel_id, &real_id, &attachment.id, |a| {
+                a.set_downloaded(true);
+                a.set_downloading(false);
+                a.path = path.clone().into_boxed_str();
+            });
+            state.find_message(&real_id).map(|(_, m)| m)
+        };
+        if let Some(msg) = echoed {
+            callback.on_sent(&channel_id, &pending_id, &msg);
+            callback.on_persist(&channel_id, &msg);
+        }
+        Ok(json!({ "message_id": real_id, "webxdc_topic": null }))
+    })
+    .await
+}

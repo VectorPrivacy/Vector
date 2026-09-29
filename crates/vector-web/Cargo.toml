@@ -25,6 +25,9 @@ web-time = "1"
 bip39 = "2.2.2"
 zeroize = "1.8"
 rusqlite = { version = "0.38", default-features = false }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+fast-thumbhash = "0.2"
+base64-simd = "0.8"
 # The OPFS pool VFS must link against the same SQLite build rusqlite uses.
 sqlite-wasm-rs = "=0.5.5"
 sqlite-wasm-vfs = "=0.2.0"

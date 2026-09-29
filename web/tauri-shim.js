@@ -53,14 +53,69 @@
         p.resolve(value === undefined || value === '' ? undefined : JSON.parse(value));
     }
 
-    function invoke(cmd, args = {}) {
+    function post(msg) {
         return new Promise((resolve, reject) => {
             if (fatal) return reject(fatal);
             const id = nextId++;
             pending.set(id, { resolve, reject });
-            const msg = { t: 'invoke', id, cmd, args: JSON.stringify(args ?? {}) };
+            msg.id = id;
             if (ready) worker.postMessage(msg); else queued.push(msg);
         });
+    }
+
+    // Raw-body IPC (Tauri's `invoke(cmd, bytes, { headers })`) keeps the bytes binary.
+    function invoke(cmd, args = {}, options = {}) {
+        if (args instanceof ArrayBuffer) args = new Uint8Array(args);
+        if (args instanceof Uint8Array) return post({ t: 'invoke-bytes', cmd, bytes: args, headers: options.headers });
+        return post({ t: 'invoke', cmd, args: JSON.stringify(args ?? {}) });
+    }
+
+    const storeFiles = (files) => post({ t: 'store', files: [...files] });
+
+    function pickFiles({ multiple = false, filters } = {}) {
+        return new Promise((resolve) => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = multiple;
+            const exts = (filters || []).flatMap((f) => f.extensions || []).filter((e) => e && e !== '*');
+            if (exts.length) input.accept = exts.map((e) => '.' + e).join(',');
+            input.addEventListener('change', () => resolve([...input.files]));
+            input.addEventListener('cancel', () => resolve([]));
+            input.click();
+        });
+    }
+
+    async function openDialog(opts = {}) {
+        if (opts.directory) return null;
+        const files = await pickFiles(opts);
+        if (!files.length) return null;
+        const paths = await storeFiles(files);
+        return opts.multiple ? paths : paths[0];
+    }
+
+    // File drops, delivered the way Tauri's webview reports them: paths the backend can read.
+    async function onDragDropEvent(cb) {
+        const pos = (e) => new PhysicalPosition(e.clientX * dpr(), e.clientY * dpr());
+        const over = (e) => {
+            if (!e.dataTransfer?.types?.includes('Files')) return;
+            e.preventDefault();
+            cb({ payload: { type: 'over', position: pos(e) } });
+        };
+        const leave = () => cb({ payload: { type: 'leave' } });
+        const drop = async (e) => {
+            if (!e.dataTransfer?.files?.length) return;
+            e.preventDefault();
+            const paths = await storeFiles(e.dataTransfer.files);
+            cb({ payload: { type: 'drop', paths, position: pos(e) } });
+        };
+        addEventListener('dragover', over);
+        addEventListener('dragleave', leave);
+        addEventListener('drop', drop);
+        return () => {
+            removeEventListener('dragover', over);
+            removeEventListener('dragleave', leave);
+            removeEventListener('drop', drop);
+        };
     }
 
     async function listen(name, cb) {
@@ -121,6 +176,8 @@
         close: async () => window.close(),
     });
 
+    const webview = stub({ onDragDropEvent });
+
     const monitor = () => ({
         name: 'browser',
         scaleFactor: dpr(),
@@ -144,7 +201,7 @@
             availableMonitors: async () => [monitor()],
         },
         webviewWindow: { getCurrentWebviewWindow: () => appWindow },
-        webview: { getCurrentWebview: () => appWindow },
+        webview: { getCurrentWebview: () => webview },
         dpi: { PhysicalSize, LogicalSize, PhysicalPosition, LogicalPosition },
         app: {
             getVersion: async () => document.documentElement.dataset.version || 'web',
@@ -156,7 +213,7 @@
             revealItemInDir: async () => {},
         },
         dialog: {
-            open: async () => null,
+            open: openDialog,
             save: async () => null,
             message: async (msg) => { alert(msg); },
             ask: async (msg) => confirm(msg),

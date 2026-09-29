@@ -938,9 +938,22 @@ pub async fn send_file_dm_from(
     let mime_type = crypto::mime_from_extension(extension);
     let download_dir = crate::db::get_download_dir();
 
+    // The web keeps its copy content-addressed in OPFS, and sends from memory only.
+    #[cfg(target_arch = "wasm32")]
+    let (file_hash, local_path_str, img_meta, plain_len) = {
+        let FileSource::Bytes(bytes) = &source else {
+            return Err("Vector Web sends files from memory".into());
+        };
+        let file_hash = crypto::sha256_hex(bytes);
+        let local_path = download_dir.join(format!("{file_hash}.{extension}"));
+        crate::webfiles::write(&local_path, bytes).await?;
+        let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(bytes));
+        (file_hash, local_path.to_string_lossy().to_string(), img_meta, bytes.len() as u64)
+    };
     // Hash, save and (if not given) read the preview metadata off the runtime: each
     // is a full pass over the bytes, and a runtime worker parked on one stalls every
     // task queued behind it.
+    #[cfg(not(target_arch = "wasm32"))]
     let (file_hash, local_path_str, img_meta, plain_len) = {
         let source = match &source {
             FileSource::Bytes(bytes) => FileSource::Bytes(Arc::clone(bytes)),
