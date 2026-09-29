@@ -41,15 +41,18 @@ if (result.error) {
 process.exit(result.status ?? 1);
 
 /**
- * A desktop dev/build turns on video compression when scripts/build-ffmpeg.sh has built FFmpeg
- * for its target (or FFMPEG_DIR names one). VECTOR_VIDEO=0 opts out.
+ * A macOS or Windows dev/build turns on video compression when scripts/build-ffmpeg.sh has built
+ * FFmpeg for its target (or FFMPEG_DIR names one). Bare builds and VECTOR_VIDEO=0 leave it out;
+ * elsewhere there is no system encoder to use.
  */
 function enableVideo(args) {
     if (!['dev', 'build'].includes(args[0]) || process.env.VECTOR_VIDEO === '0') return;
+    if (args.includes('--no-default-features')) return;
     const sep = args.indexOf('--');
     const ours = sep < 0 ? args : args.slice(0, sep);
     const t = ours.findIndex(a => a === '--target' || a === '-t');
     const target = t >= 0 ? ours[t + 1] : hostTarget();
+    if (!/-apple-darwin$|-windows-msvc$/.test(target || '')) return;
     if (!process.env.FFMPEG_DIR) {
         const root = join(dirname(fileURLToPath(import.meta.url)), '..');
         const dir = join(root, 'src-tauri', 'native-deps', 'ffmpeg', target || '');
