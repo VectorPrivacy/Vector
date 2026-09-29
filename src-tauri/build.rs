@@ -257,4 +257,39 @@ fn main() {
         .opt_level(2)
         .warnings(false)
         .compile("speexdsp_calls");
+
+    if std::env::var_os("CARGO_FEATURE_VIDEO").is_some() {
+        link_ffmpeg_system_libs();
+    }
+}
+
+/// ffmpeg-sys-next links FFmpeg's own static libraries but not what they need from the
+/// system (libm, frameworks, the NDK's media library); the build's pkg-config files list those.
+fn link_ffmpeg_system_libs() {
+    println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
+    let dir = std::env::var("FFMPEG_DIR")
+        .expect("the video feature needs FFMPEG_DIR=src-tauri/native-deps/ffmpeg/<target> (scripts/build-ffmpeg.sh)");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let pc_dir = std::path::Path::new(&dir).join("lib/pkgconfig");
+    for entry in std::fs::read_dir(&pc_dir).expect("FFMPEG_DIR has no lib/pkgconfig").flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        for line in text.lines().filter(|l| l.starts_with("Libs:") || l.starts_with("Libs.private:")) {
+            let mut tokens = line.split_whitespace().skip(1);
+            while let Some(t) = tokens.next() {
+                let lib = if t == "-framework" {
+                    tokens.next().map(|f| format!("framework={f}"))
+                } else if let Some(l) = t.strip_prefix("-l") {
+                    (!l.starts_with("av") && !l.starts_with("sw")).then(|| l.to_string())
+                } else if t == "-pthread" && target_os == "linux" {
+                    Some("pthread".into())
+                } else {
+                    None
+                };
+                if let Some(lib) = lib.filter(|l| seen.insert(l.clone())) {
+                    println!("cargo:rustc-link-lib={lib}");
+                }
+            }
+        }
+    }
 }

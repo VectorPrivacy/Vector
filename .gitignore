@@ -50,3 +50,4 @@ memory.sqlite
 memory.sqlite-shm
 memory.sqlite-wal
 stray.toml
+src-tauri/native-deps/

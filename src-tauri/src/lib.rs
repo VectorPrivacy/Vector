@@ -40,6 +40,10 @@ pub struct MediaServerState {
 mod whisper;
 
 mod message;
+
+// Video compression for sending (the `video` feature: a selective static FFmpeg).
+#[cfg(feature = "video")]
+mod video;
 pub use vector_core::{Message, Attachment, Reaction};
 
 mod profile;
