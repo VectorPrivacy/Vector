@@ -9,7 +9,8 @@ const PKG = '/__vector/package';
 const META = '/__vector/meta';
 
 // A policy the app can't loosen: responses carry it, and nothing else serves this origin.
-const CSP = [
+// No frames at all: a child frame is a fresh window with its own WebRTC (see bridge.js).
+const BASE_CSP = [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
     "style-src 'self' 'unsafe-inline' blob:",
@@ -18,11 +19,20 @@ const CSP = [
     "media-src 'self' data: blob:",
     "connect-src 'self' data: blob:",
     "worker-src 'self' blob:",
-    "frame-src 'self' blob: data:",
+    "frame-src 'none'",
+    "fenced-frame-src 'none'",
+    "child-src 'self' blob:",
     "form-action 'none'",
     "base-uri 'self'",
     "object-src 'none'",
-].join('; ');
+    "webrtc 'block'",
+];
+// Documents: HTML strings only through the guard's policy, which is the only one.
+const DOCUMENT_CSP = [...BASE_CSP, "require-trusted-types-for 'script'", 'trusted-types default'].join('; ');
+// Scripts, which may start workers: workers have no DOM and no WebRTC.
+const SCRIPT_CSP = BASE_CSP.join('; ');
+// Anything else opened as a document (an SVG, some XML) runs no script at all.
+const INERT_CSP = "sandbox; default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; media-src 'self' data: blob:";
 
 const TYPES = {
     html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
@@ -122,26 +132,39 @@ async function extract(blob, e) {
 
 // ─── Serving ────────────────────────────────────────────────────────────────
 
+const isDocument = (type) => type.startsWith('text/html');
+const isScript = (type) => type.startsWith('text/javascript') || type.startsWith('application/wasm');
+
 function headers(meta, type) {
     return {
         'Content-Type': type,
-        'Content-Security-Policy': CSP,
+        'Content-Security-Policy': isDocument(type) ? DOCUMENT_CSP : isScript(type) ? SCRIPT_CSP : INERT_CSP,
         'Permissions-Policy': meta.policy,
         'X-Content-Type-Options': 'nosniff',
+        'X-DNS-Prefetch-Control': 'off',
+        'Referrer-Policy': 'no-referrer',
         'Cache-Control': 'no-store',
     };
 }
 
+// Markup the parser would turn into a frame is disarmed before it is served;
+// the guard does the same for markup made at runtime.
+const FRAMES = ['iframe', 'frame', 'frameset', 'object', 'embed', 'fencedframe', 'portal'];
+const FRAME_TAG = new RegExp(`<(/?)([\\w.-]+:)?(${FRAMES.join('|')})(?=[\\s/>]|$)`, 'gi');
+const disarm = (text) => text.replace(FRAME_TAG, '<$1$2vector-blocked-$3');
+
+// The guard must run before anything else in the document, so it goes first,
+// after the doctype if there is one. A later `<script src="webxdc.js">` of the
+// app's own finds the API already there.
 const BRIDGE_TAG = '<script src="/webxdc.js"></script>';
 
 function inject(html) {
-    if (html.includes('webxdc.js')) return html;
-    const head = /<head[^>]*>/i.exec(html);
-    if (head) return html.slice(0, head.index + head[0].length) + BRIDGE_TAG + html.slice(head.index + head[0].length);
-    const root = /<html[^>]*>/i.exec(html);
-    if (root) return html.slice(0, root.index + root[0].length) + BRIDGE_TAG + html.slice(root.index + root[0].length);
-    return BRIDGE_TAG + html;
+    const doctype = /^\uFEFF?\s*<!doctype[^>]*>/i.exec(html);
+    const at = doctype ? doctype[0].length : 0;
+    return html.slice(0, at) + BRIDGE_TAG + html.slice(at);
 }
+
+const MARKUP = /^(text\/html|image\/svg\+xml|application\/xml)/;
 
 async function serve(request, path) {
     let pkg;
@@ -164,7 +187,10 @@ async function serve(request, path) {
     try { body = await extract(blob, entry); } catch (e) { return new Response(String(e), { status: 500 }); }
     const ext = name.split('.').pop().toLowerCase();
     const type = TYPES[ext] || 'application/octet-stream';
-    if (ext === 'html' || ext === 'htm') body = new Blob([inject(await body.text())]);
+    if (MARKUP.test(type)) {
+        const text = disarm(await body.text());
+        body = new Blob([isDocument(type) ? inject(text) : text]);
+    }
 
     const range = request.headers.get('Range');
     const m = range && /bytes=(\d*)-(\d*)/.exec(range);
