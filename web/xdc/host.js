@@ -42,6 +42,6 @@
     });
     window.parent.postMessage({ t: 'xdc-host-ready' }, vector);
 })().catch((e) => {
-    document.body.textContent = `This mini app could not start: ${e?.message || e}`;
+    document.body.textContent = `This mini app could not start: host: ${e?.name || 'Error'}: ${e?.message || e}`;
     document.body.style.cssText = 'color:#ccc;font:14px system-ui;padding:24px';
 });

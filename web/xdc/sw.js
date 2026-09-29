@@ -48,17 +48,22 @@ const TYPES = {
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-// The host page hands the package over; this worker keeps it (in memory, and in
-// its own Cache Storage for when it is restarted) and answers once it's parsed.
+// The host page hands the package over; this worker keeps it as plain bytes (in
+// memory, and in its own Cache Storage for when it is restarted) and answers once
+// it's parsed. No Blobs: WebKit can lose a worker-made Blob's data between reads.
 let current = null;
 
-async function store(bytes, meta) {
-    const blob = new Blob([bytes]);
-    const entries = await readDirectory(blob);
-    const cache = await caches.open(STORE);
-    await cache.put(PKG, new Response(blob));
-    await cache.put(META, new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
-    current = { blob, meta, entries };
+async function store(buffer, meta) {
+    const bytes = new Uint8Array(buffer);
+    current = { bytes, meta, entries: readDirectory(bytes) };
+    // Serving works from memory; the cached copy only matters after a restart.
+    try {
+        const cache = await caches.open(STORE);
+        await cache.put(PKG, new Response(bytes));
+        await cache.put(META, new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
+    } catch (e) {
+        console.warn('[xdc] package not cached:', e);
+    }
 }
 
 self.addEventListener('message', (e) => {
@@ -66,7 +71,7 @@ self.addEventListener('message', (e) => {
     if (e.data?.t !== 'store') return;
     e.waitUntil(store(e.data.bytes, e.data.meta).then(
         () => reply?.postMessage({ ok: true }),
-        (err) => reply?.postMessage({ ok: false, error: String(err?.message || err) }),
+        (err) => reply?.postMessage({ ok: false, error: `worker: ${err?.name || 'Error'}: ${err?.message || err}` }),
     ));
 });
 
@@ -76,8 +81,8 @@ async function load() {
     const [pkg, meta] = await Promise.all([cache.match(PKG), cache.match(META)]);
     if (!pkg) throw new Error('no stored package');
     if (!meta) throw new Error('no stored metadata');
-    const blob = await pkg.blob();
-    current = { blob, meta: await meta.json(), entries: await readDirectory(blob) };
+    const bytes = new Uint8Array(await pkg.arrayBuffer());
+    current = { bytes, meta: await meta.json(), entries: readDirectory(bytes) };
     return current;
 }
 
@@ -86,30 +91,28 @@ async function load() {
 const u16 = (v, o) => v.getUint16(o, true);
 const u32 = (v, o) => v.getUint32(o, true);
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
-async function readDirectory(blob) {
-    const tailLen = Math.min(blob.size, 65557);
-    const tail = new DataView(await blob.slice(blob.size - tailLen).arrayBuffer());
+function readDirectory(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let eocd = -1;
-    for (let i = tailLen - 22; i >= 0; i--) {
-        if (u32(tail, i) === 0x06054b50) { eocd = i; break; }
+    for (let i = bytes.length - 22, stop = Math.max(0, bytes.length - 65557); i >= stop; i--) {
+        if (u32(view, i) === 0x06054b50) { eocd = i; break; }
     }
     if (eocd < 0) throw new Error('not a zip');
-    const count = u16(tail, eocd + 10);
-    const size = u32(tail, eocd + 12);
-    const offset = u32(tail, eocd + 16);
+    const count = u16(view, eocd + 10);
+    const offset = u32(view, eocd + 16);
     if (offset === 0xffffffff || count === 0xffff) throw new Error('zip64 packages are not supported');
-    const dir = new DataView(await blob.slice(offset, offset + size).arrayBuffer());
     const entries = new Map();
-    for (let p = 0, n = 0; n < count && u32(dir, p) === 0x02014b50; n++) {
-        const method = u16(dir, p + 10);
-        const compressed = u32(dir, p + 20);
-        const uncompressed = u32(dir, p + 24);
-        const nameLen = u16(dir, p + 28);
-        const extraLen = u16(dir, p + 30);
-        const commentLen = u16(dir, p + 32);
-        const local = u32(dir, p + 42);
-        const name = decoder.decode(new Uint8Array(dir.buffer, dir.byteOffset + p + 46, nameLen));
+    for (let p = offset, n = 0; n < count && p + 46 <= bytes.length && u32(view, p) === 0x02014b50; n++) {
+        const method = u16(view, p + 10);
+        const compressed = u32(view, p + 20);
+        const uncompressed = u32(view, p + 24);
+        const nameLen = u16(view, p + 28);
+        const extraLen = u16(view, p + 30);
+        const commentLen = u16(view, p + 32);
+        const local = u32(view, p + 42);
+        const name = decoder.decode(bytes.subarray(p + 46, p + 46 + nameLen));
         if (!name.endsWith('/')) entries.set(name, { method, compressed, uncompressed, local });
         p += 46 + nameLen + extraLen + commentLen;
     }
@@ -126,14 +129,14 @@ function find(entries, path) {
 // Decompressed-size ceiling, as desktop: a small entry must not inflate to gigabytes.
 const ENTRY_CAP = 512 * 1024 * 1024;
 
-async function extract(blob, e) {
-    const head = new DataView(await blob.slice(e.local, e.local + 30).arrayBuffer());
-    if (u32(head, 0) !== 0x04034b50) throw new Error('bad entry');
-    const start = e.local + 30 + u16(head, 26) + u16(head, 28);
-    const raw = blob.slice(start, start + e.compressed);
+async function extract(bytes, e) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (e.local + 30 > bytes.length || u32(view, e.local) !== 0x04034b50) throw new Error('bad entry');
+    const start = e.local + 30 + u16(view, e.local + 26) + u16(view, e.local + 28);
+    const raw = bytes.subarray(start, start + e.compressed);
     if (e.method === 0) return raw;
     if (e.method !== 8) throw new Error(`unsupported compression ${e.method}`);
-    const reader = raw.stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+    const reader = new Response(raw).body.pipeThrough(new DecompressionStream('deflate-raw')).getReader();
     const parts = [];
     let total = 0;
     for (;;) {
@@ -143,7 +146,11 @@ async function extract(blob, e) {
         if (total > ENTRY_CAP) { reader.cancel(); throw new Error('entry too large'); }
         parts.push(value);
     }
-    return new Blob(parts);
+    if (parts.length === 1) return parts[0];
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
 }
 
 // ─── Serving ────────────────────────────────────────────────────────────────
@@ -185,7 +192,7 @@ const MARKUP = /^(text\/html|image\/svg\+xml|application\/xml)/;
 async function serve(request, path) {
     let pkg;
     try { pkg = await load(); } catch (e) { return new Response(`Mini app not loaded: ${e?.message || e}`, { status: 503 }); }
-    const { blob, meta, entries } = pkg;
+    const { bytes, meta, entries } = pkg;
     if (path === '/webxdc.js') {
         const src = (await (await fetch('/__vector/bridge.js')).text())
             .replace('__VECTOR_META__', JSON.stringify({ selfAddr: meta.selfAddr, selfName: meta.selfName, parent: meta.parent }));
@@ -200,27 +207,27 @@ async function serve(request, path) {
     }
     if (!entry) return new Response('Not found', { status: 404, headers: headers(meta, 'text/plain') });
     let body;
-    try { body = await extract(blob, entry); } catch (e) { return new Response(String(e), { status: 500 }); }
+    try { body = await extract(bytes, entry); } catch (e) { return new Response(String(e), { status: 500 }); }
     const ext = name.split('.').pop().toLowerCase();
     const type = TYPES[ext] || 'application/octet-stream';
     if (MARKUP.test(type)) {
-        const text = disarm(await body.text());
-        body = new Blob([isDocument(type) ? inject(text) : text]);
+        const text = disarm(decoder.decode(body));
+        body = encoder.encode(isDocument(type) ? inject(text) : text);
     }
 
     const range = request.headers.get('Range');
     const m = range && /bytes=(\d*)-(\d*)/.exec(range);
     if (m) {
-        const size = body.size;
+        const size = body.length;
         const startAt = m[1] === '' ? Math.max(0, size - Number(m[2])) : Number(m[1]);
         const end = m[1] !== '' && m[2] !== '' ? Math.min(Number(m[2]), size - 1) : size - 1;
         if (startAt > end) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
-        return new Response(body.slice(startAt, end + 1), {
+        return new Response(body.subarray(startAt, end + 1), {
             status: 206,
             headers: { ...headers(meta, type), 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${startAt}-${end}/${size}`, 'Content-Length': String(end - startAt + 1) },
         });
     }
-    return new Response(body, { headers: { ...headers(meta, type), 'Accept-Ranges': 'bytes', 'Content-Length': String(body.size) } });
+    return new Response(body, { headers: { ...headers(meta, type), 'Accept-Ranges': 'bytes', 'Content-Length': String(body.length) } });
 }
 
 self.addEventListener('fetch', (e) => {
