@@ -476,6 +476,11 @@ function removeParagraphTags(html) {
     return temp.innerHTML || html;
 }
 
+/** Rendered HTML by source text, most recent last. Rendering is a pure function of the text. */
+const markdownCache = new Map();
+const MARKDOWN_CACHE_ENTRIES = 2000;
+const MARKDOWN_CACHE_MAX_INPUT = 8192;
+
 /**
  * Parse Markdown into HTML
  * This is the main function used throughout the app
@@ -485,7 +490,27 @@ function removeParagraphTags(html) {
  */
 function parseMarkdown(md) {
     const rawInput = typeof md === 'string' ? md : String(md);
+    const hit = markdownCache.get(rawInput);
+    if (hit !== undefined) {
+        markdownCache.delete(rawInput);
+        markdownCache.set(rawInput, hit);
+        return hit;
+    }
+    const html = renderMarkdown(rawInput);
+    // Only sanitised output is kept: before DOMPurify loads the render is raw.
+    if (typeof DOMPurify !== 'undefined' && rawInput.length <= MARKDOWN_CACHE_MAX_INPUT) {
+        markdownCache.set(rawInput, html);
+        if (markdownCache.size > MARKDOWN_CACHE_ENTRIES) markdownCache.delete(markdownCache.keys().next().value);
+    }
+    return html;
+}
 
+/**
+ * Render Markdown to sanitised HTML, uncached.
+ * @param {string} rawInput
+ * @returns {string}
+ */
+function renderMarkdown(rawInput) {
     let rendered;
     try {
         rendered = marked.parse(rawInput);
