@@ -63,6 +63,47 @@
 .xdc-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 .xdc-close:hover { background: #c0392b; }
 .xdc-frame { flex: 1; width: 100%; border: 0; background: #0a0a0a; }
-@media (max-width: 700px) {
-    .xdc-window { inset: 0 !important; width: auto; height: auto; max-width: none; max-height: none; border-radius: 0; resize: none; }
+/* Full screen on touch devices and narrow screens: no frame, a floating exit chip. */
+.xdc-window.xdc-immersive {
+    inset: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none;
+    max-height: none;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    resize: none;
+    background: #000;
 }
+.xdc-immersive .xdc-bar { display: none; }
+.xdc-chip {
+    all: unset;
+    box-sizing: border-box;
+    display: none;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 14px);
+    right: calc(env(safe-area-inset-right, 0px) + 12px);
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 50%;
+    background: rgba(14, 14, 16, 0.8);
+    border: 1.5px solid rgba(89, 252, 179, 0.5);
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
+    opacity: 0.55;
+    transition: opacity 0.25s ease, transform 0.12s ease;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: pointer;
+    z-index: 1;
+}
+.xdc-chip svg { width: 16px; height: 16px; }
+.xdc-immersive .xdc-chip { display: grid; }
+.xdc-chip.xdc-chip-active { opacity: 1; }
+.xdc-chip:active { transform: scale(0.92); }
+.xdc-chip:focus-visible { outline: 2px solid #59fcb3; outline-offset: 2px; }

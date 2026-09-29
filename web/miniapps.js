@@ -93,7 +93,13 @@
         frame.setAttribute('referrerpolicy', 'no-referrer');
         frame.title = info.name || 'Mini App';
 
-        el.append(bar, frame);
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'xdc-chip';
+        chip.setAttribute('aria-label', 'Exit Mini App');
+        chip.appendChild(icon('close'));
+
+        el.append(bar, frame, chip);
         const offset = (cascade++ % 6) * 28;
         el.style.left = `${Math.max(8, (innerWidth - 480) / 2 + offset)}px`;
         el.style.top = `${Math.max(8, (innerHeight - 640) / 2 + offset)}px`;
@@ -103,7 +109,116 @@
         max.onclick = () => el.classList.toggle('xdc-max');
         x.onclick = () => close(info.label);
         drag(el, bar);
+        floatingClose(chip, () => close(info.label));
+        el.classList.toggle('xdc-immersive', immersive());
         return { el, frame };
+    }
+
+    // Touch devices and narrow screens run apps full screen, as the native apps do:
+    // no frame, just a floating exit chip that can be moved out of the game's way.
+    const immersive = () => matchMedia('(pointer: coarse)').matches || innerWidth < 700;
+    addEventListener('resize', () => {
+        const on = immersive();
+        for (const w of windows.values()) w.el.classList.toggle('xdc-immersive', on);
+    });
+
+    // The chip, as in the Android overlay: dim until touched, a tap exits, a drag moves
+    // it, and on release it glides to the nearest of the four edges.
+    function floatingClose(chip, onClose) {
+        const MARGIN = 12;
+        const SLOP = 6;
+        let fade = null;
+        let glide = null;
+        let down = null;
+        let dragging = false;
+
+        // Edges clear of the notch and home indicator.
+        const insets = () => {
+            const s = getComputedStyle(chip.parentElement);
+            return {
+                top: parseFloat(s.paddingTop) || 0, right: parseFloat(s.paddingRight) || 0,
+                bottom: parseFloat(s.paddingBottom) || 0, left: parseFloat(s.paddingLeft) || 0,
+            };
+        };
+        const clamp = (x, y) => {
+            const i = insets();
+            return [
+                Math.max(i.left + MARGIN, Math.min(x, innerWidth - i.right - chip.offsetWidth - MARGIN)),
+                Math.max(i.top + MARGIN, Math.min(y, innerHeight - i.bottom - chip.offsetHeight - MARGIN)),
+            ];
+        };
+        const pos = () => { const r = chip.getBoundingClientRect(); return [r.left, r.top]; };
+        const place = (x, y) => {
+            const [cx, cy] = clamp(x, y);
+            chip.style.left = `${cx}px`;
+            chip.style.top = `${cy}px`;
+            chip.style.right = 'auto';
+        };
+        const wake = () => {
+            chip.classList.add('xdc-chip-active');
+            clearTimeout(fade);
+            fade = setTimeout(() => chip.classList.remove('xdc-chip-active'), 2500);
+        };
+        const nearestEdge = () => {
+            const i = insets();
+            const [x, y] = pos();
+            const w = chip.offsetWidth;
+            const h = chip.offsetHeight;
+            const d = { l: x - i.left, r: innerWidth - i.right - (x + w), t: y - i.top, b: innerHeight - i.bottom - (y + h) };
+            const m = Math.min(d.l, d.r, d.t, d.b);
+            if (m === d.l) return [0, y];
+            if (m === d.r) return [innerWidth, y];
+            if (m === d.t) return [x, 0];
+            return [x, innerHeight];
+        };
+        const glideTo = (tx, ty) => {
+            cancelAnimationFrame(glide);
+            const [sx, sy] = pos();
+            const [ex, ey] = clamp(tx, ty);
+            let start = null;
+            const step = (ts) => {
+                start ??= ts;
+                const t = Math.min(1, (ts - start) / 240);
+                const e = 1 - (1 - t) ** 3;
+                place(sx + (ex - sx) * e, sy + (ey - sy) * e);
+                if (t < 1) glide = requestAnimationFrame(step);
+            };
+            glide = requestAnimationFrame(step);
+        };
+
+        chip.addEventListener('pointerdown', (e) => {
+            cancelAnimationFrame(glide);
+            chip.setPointerCapture(e.pointerId);
+            const [ox, oy] = pos();
+            down = { px: e.clientX, py: e.clientY, ox, oy };
+            dragging = false;
+            wake();
+            e.preventDefault();
+        });
+        chip.addEventListener('pointermove', (e) => {
+            if (!down) return;
+            const dx = e.clientX - down.px;
+            const dy = e.clientY - down.py;
+            if (!dragging && dx * dx + dy * dy > SLOP * SLOP) dragging = true;
+            if (dragging) { place(down.ox + dx, down.oy + dy); wake(); }
+        });
+        chip.addEventListener('pointerup', () => {
+            if (!down) return;
+            const wasDrag = dragging;
+            down = null;
+            dragging = false;
+            if (wasDrag) glideTo(...nearestEdge());
+            else onClose();
+        });
+        chip.addEventListener('pointercancel', () => {
+            if (down && dragging) glideTo(...nearestEdge());
+            down = null;
+            dragging = false;
+        });
+        // Keyboard users get a plain button.
+        chip.addEventListener('click', (e) => { if (e.detail === 0) onClose(); });
+        addEventListener('resize', () => { if (chip.style.left) place(...pos()); });
+        requestAnimationFrame(wake);
     }
 
     // Dragging by the title bar; the frame would swallow the pointer mid-drag.
