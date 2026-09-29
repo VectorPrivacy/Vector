@@ -131,7 +131,11 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
         let fed = scans[i + 1..].iter().zip(&keep[i + 1..]).any(|(t, &kept)| {
             kept && t.spec.ss > 0 && t.spec.comps[0] == c && t.spec.ss <= s.se && s.ss <= t.spec.se
         });
-        keep[i] = fed || (s.ss..=s.se).any(|k| needed(c, k)) || cfg!(test) && KEEP_ALL.with(std::cell::Cell::get);
+        keep[i] = fed || (s.ss..=s.se).any(|k| needed(c, k));
+        #[cfg(test)]
+        if KEEP_ALL.with(std::cell::Cell::get) {
+            keep[i] = true;
+        }
     }
     let scans: Vec<Scan> = scans.into_iter().zip(keep).filter_map(|(s, kept)| kept.then_some(s)).collect();
 
