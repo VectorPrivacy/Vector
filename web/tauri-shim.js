@@ -9,7 +9,7 @@
         navigator.serviceWorker.register('/sw.js').catch((e) => console.error('[web] service worker failed:', e));
     }
 
-    const worker = new Worker('/web/worker.js', { type: 'module' });
+    let worker = null;
     let nextId = 1;
     const pending = new Map();
     const listeners = new Map();
@@ -25,7 +25,7 @@
         }
     }
 
-    worker.onmessage = ({ data }) => {
+    const onWorkerMessage = ({ data }) => {
         switch (data.t) {
             case 'ready':
                 ready = true;
@@ -44,6 +44,58 @@
                 break;
         }
     };
+
+    // One tab per origin owns the storage: OPFS access handles are exclusive.
+    // A second tab offers to take over, and the first steps aside when asked.
+    const channel = new BroadcastChannel('vector-web');
+    let holdLock = null;
+
+    function startWorker() {
+        worker = new Worker('/web/worker.js', { type: 'module' });
+        worker.onmessage = onWorkerMessage;
+    }
+
+    function claim() {
+        navigator.locks.request('vector-web-instance', { ifAvailable: true }, (lock) => {
+            if (!lock) return blocked();
+            startWorker();
+            return new Promise((resolve) => { holdLock = resolve; });
+        }).catch(() => {});
+    }
+
+    channel.onmessage = ({ data }) => {
+        if (data !== 'takeover' || !worker) return;
+        worker.terminate();
+        worker = null;
+        ready = false;
+        holdLock?.();
+        overlay('Vector is open in another tab.', 'Use here', () => { channel.postMessage('takeover'); setTimeout(() => location.reload(), 600); });
+    };
+
+    function blocked() {
+        overlay('Vector is already open in another tab.', 'Use here', () => {
+            channel.postMessage('takeover');
+            setTimeout(() => location.reload(), 600);
+        });
+    }
+
+    function overlay(text, action, onAction) {
+        const show = () => {
+            const el = document.createElement('div');
+            el.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#030303;color:#e5e5e5;font:16px system-ui,sans-serif';
+            const p = document.createElement('p');
+            p.textContent = text;
+            const b = document.createElement('button');
+            b.textContent = action;
+            b.style.cssText = 'padding:10px 22px;border-radius:8px;border:0;background:#59fcb3;color:#030303;font-weight:600;cursor:pointer';
+            b.onclick = onAction;
+            el.append(p, b);
+            document.body.appendChild(el);
+        };
+        if (document.body) show(); else addEventListener('DOMContentLoaded', show);
+    }
+
+    if (navigator.locks) claim(); else startWorker();
 
     function settle(id, ok, value) {
         const p = pending.get(id);
