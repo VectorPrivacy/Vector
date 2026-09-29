@@ -26,11 +26,9 @@ pub fn processed_wrapper_exists(wrapper_id_bytes: &[u8; 32]) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM processed_wrappers WHERE wrapper_id = ?1)",
-        rusqlite::params![&wrapper_id_bytes[..]],
-        |row| row.get(0),
-    ).unwrap_or(false)
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM processed_wrappers WHERE wrapper_id = ?1)")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![&wrapper_id_bytes[..]], |row| row.get(0)))
+        .unwrap_or(false)
 }
 
 /// Backfill a wrapper timestamp onto an EXISTING ledger row (pre-migration-17 rows hold 0).

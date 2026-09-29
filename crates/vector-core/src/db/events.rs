@@ -621,14 +621,11 @@ pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
-    conn.query_row(
-        "SELECT npub FROM events WHERE id = ?1",
-        rusqlite::params![event_id],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .optional()
-    .map(|o| o.flatten())
-    .map_err(|e| format!("Failed to read event author: {}", e))
+    conn.prepare_cached("SELECT npub FROM events WHERE id = ?1")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![event_id], |row| row.get::<_, Option<String>>(0)))
+        .optional()
+        .map(|o| o.flatten())
+        .map_err(|e| format!("Failed to read event author: {}", e))
 }
 
 /// The owning chat identifier, `mine` flag, and stored author (npub) of an event, or
@@ -662,11 +659,9 @@ pub fn message_exists_in_db(message_id: &str) -> Result<bool, String> {
         Ok(c) => c,
         Err(_) => return Ok(false),
     };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)",
-        rusqlite::params![message_id],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to check event existence: {}", e))
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM events WHERE id = ?1)")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![message_id], |row| row.get(0)))
+        .map_err(|e| format!("Failed to check event existence: {}", e))
 }
 
 /// Check if a wrapper (giftwrap) event ID exists. Returns false if DB unavailable.
@@ -675,11 +670,9 @@ pub fn wrapper_event_exists(wrapper_event_id: &str) -> Result<bool, String> {
         Ok(c) => c,
         Err(_) => return Ok(false),
     };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)",
-        rusqlite::params![wrapper_event_id],
-        |row| row.get(0),
-    ).map_err(|e| format!("Failed to check wrapper event existence: {}", e))
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![wrapper_event_id], |row| row.get(0)))
+        .map_err(|e| format!("Failed to check wrapper event existence: {}", e))
 }
 
 /// Update the wrapper event ID for an existing event.

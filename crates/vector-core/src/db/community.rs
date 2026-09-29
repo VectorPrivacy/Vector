@@ -820,11 +820,8 @@ pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, Stri
     }
     let conn = super::get_db_connection_guard_static()?;
     let cid: Option<String> = conn
-        .query_row(
-            "SELECT community_id FROM community_channels WHERE channel_id = ?1",
-            params![channel_id],
-            |r| r.get::<_, String>(0),
-        )
+        .prepare_cached("SELECT community_id FROM community_channels WHERE channel_id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![channel_id], |r| r.get::<_, String>(0)))
         .optional()
         .map_err(|e| format!("community_id_for_channel: {e}"))?;
     if let Some(ref c) = cid {
