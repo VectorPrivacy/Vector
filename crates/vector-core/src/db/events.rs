@@ -1424,6 +1424,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
                 msg.replied_to_npub = ctx.npub.clone();
                 msg.replied_to_has_attachment = Some(ctx.has_attachment);
                 msg.replied_to_attachment_extension = ctx.extension.clone();
+                msg.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
             }
         }
     }
@@ -1739,6 +1740,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 msg.replied_to_npub = ctx.npub.clone();
                 msg.replied_to_has_attachment = Some(ctx.has_attachment);
                 msg.replied_to_attachment_extension = ctx.extension.clone();
+                msg.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
             }
         }
     }

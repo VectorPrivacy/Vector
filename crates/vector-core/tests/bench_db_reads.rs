@@ -129,6 +129,11 @@ async fn bench_page_pipeline() {
             acc[0] += s.elapsed().as_secs_f64();
             let s = Instant::now();
             let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+            let quotes: std::collections::HashMap<String, (Option<String>, Option<String>)> = messages
+                .iter()
+                .filter(|m| m.replied_to_content.is_some())
+                .map(|m| (m.id.clone(), (m.replied_to_content.clone(), m.replied_to_npub.clone())))
+                .collect();
             let mut served = {
                 let mut state = vector_core::STATE.lock().await;
                 state.add_messages_to_chat_batch(npub, messages);
@@ -137,7 +142,14 @@ async fn bench_page_pipeline() {
             };
             acc[1] += s.elapsed().as_secs_f64();
             let s = Instant::now();
-            vector_core::db::events::populate_reply_contexts(served.iter_mut().collect()).await.unwrap();
+            for m in &mut served {
+                if let Some((content, npub)) = quotes.get(&m.id) {
+                    (m.replied_to_content, m.replied_to_npub) = (content.clone(), npub.clone());
+                }
+            }
+            let unresolved: Vec<&mut vector_core::Message> =
+                served.iter_mut().filter(|m| !m.replied_to.is_empty() && m.replied_to_content.is_none()).collect();
+            vector_core::db::events::populate_reply_contexts(unresolved).await.unwrap();
             acc[2] += s.elapsed().as_secs_f64();
             let s = Instant::now();
             let json = serde_json::to_vec(&served).unwrap();
@@ -151,7 +163,7 @@ async fn bench_page_pipeline() {
             }
         }
     }
-    for (name, v) in ["compose from DB", "merge into STATE + read back", "re-attach reply quotes", "serialise JSON"].iter().zip(t) {
+    for (name, v) in ["compose from DB", "merge into STATE + read back", "carry reply quotes across", "serialise JSON"].iter().zip(t) {
         println!("{name:<32} {:>8.1} µs", median(v));
     }
     println!("page of 50: {bytes} bytes of JSON");

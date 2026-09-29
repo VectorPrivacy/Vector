@@ -31,6 +31,24 @@ async fn serve_window_from_state(
         // A mid-load account swap must not write these rows into the new
         // account's STATE (the batch insert even creates the chat if missing);
         let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+        // Reply quotes are view-time decoration the compact form drops; carry the ones the
+        // compose already resolved across rather than querying them again.
+        let quotes: std::collections::HashMap<String, Message> = messages
+            .iter()
+            .filter(|m| m.replied_to_content.is_some())
+            .map(|m| {
+                let quote = Message {
+                    replied_to: m.replied_to.clone(),
+                    replied_to_content: m.replied_to_content.clone(),
+                    replied_to_npub: m.replied_to_npub.clone(),
+                    replied_to_has_attachment: m.replied_to_has_attachment,
+                    replied_to_attachment_extension: m.replied_to_attachment_extension.clone(),
+                    replied_to_emoji_tags: m.replied_to_emoji_tags.clone(),
+                    ..Default::default()
+                };
+                (m.id.clone(), quote)
+            })
+            .collect();
         let mut served = {
             let mut state = STATE.lock().await;
             state.add_messages_to_chat_batch(chat_id, messages);
@@ -45,8 +63,20 @@ async fn serve_window_from_state(
             }
             served
         };
-        // Reply quotes are view-time decoration, not compact identity.
-        let _ = vector_core::db::events::populate_reply_contexts(served.iter_mut().collect()).await;
+        for m in &mut served {
+            if let Some(q) = quotes.get(&m.id).filter(|q| q.replied_to == m.replied_to) {
+                m.replied_to_content = q.replied_to_content.clone();
+                m.replied_to_npub = q.replied_to_npub.clone();
+                m.replied_to_has_attachment = q.replied_to_has_attachment;
+                m.replied_to_attachment_extension = q.replied_to_attachment_extension.clone();
+                m.replied_to_emoji_tags = q.replied_to_emoji_tags.clone();
+            }
+        }
+        let unresolved: Vec<&mut Message> = served
+            .iter_mut()
+            .filter(|m| !m.replied_to.is_empty() && m.replied_to_content.is_none())
+            .collect();
+        let _ = vector_core::db::events::populate_reply_contexts(unresolved).await;
         Ok(served)
     })
     .await
