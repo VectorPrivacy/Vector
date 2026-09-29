@@ -127,13 +127,16 @@ async fn bench_page_pipeline() {
             let s = Instant::now();
             let messages = vector_core::db::events::get_message_views(*id, 50, 0).await.unwrap();
             acc[0] += s.elapsed().as_secs_f64();
+            // Taken before the merge consumes the page, but billed to the quote stage.
             let s = Instant::now();
-            let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
             let quotes: std::collections::HashMap<String, (Option<String>, Option<String>)> = messages
                 .iter()
                 .filter(|m| m.replied_to_content.is_some())
                 .map(|m| (m.id.clone(), (m.replied_to_content.clone(), m.replied_to_npub.clone())))
                 .collect();
+            acc[2] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
             let mut served = {
                 let mut state = vector_core::STATE.lock().await;
                 state.add_messages_to_chat_batch(npub, messages);
