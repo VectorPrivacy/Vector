@@ -301,6 +301,18 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(json!(path))
         }
 
+        // --- Wallpapers ---
+        "preview_wallpaper" => {
+            let p = vector_core::wallpaper::prepare_wallpaper_preview(&a.str("chatId")?, &a.str("filePath")?).await?;
+            Ok(json!({ "path": p.path, "was_animated": p.was_animated, "recommended_dim": p.recommended_dim }))
+        }
+        "publish_wallpaper" => {
+            let (blur, dim) = (a.de::<u8>("blur")?, a.de::<u8>("dim")?);
+            vector_core::wallpaper::publish_wallpaper(&a.str("chatId")?, blur, dim).await.map(|_| Value::Null)
+        }
+        "cancel_wallpaper_preview" => vector_core::wallpaper::cancel_wallpaper_preview(&a.str("chatId")?).await.map(|_| Value::Null),
+        "remove_wallpaper" => vector_core::wallpaper::remove_wallpaper(&a.str("chatId")?).await.map(|_| Value::Null),
+
         // --- Communities ---
         "list_communities" => cm::list_communities(),
         "get_community" => cm::get_community(&a.str("communityId")?),
