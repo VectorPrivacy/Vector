@@ -1,0 +1,27 @@
+# Fuzz targets for Vector's in-house parsers of untrusted input. Standalone so the app build
+# never sees it:  cd src-tauri/fuzz && cargo +nightly fuzz run jpeg_decode -- -max_len=65536
+[package]
+name = "vector-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rayon = "1.11"
+
+[[bin]]
+name = "jpeg_decode"
+path = "fuzz_targets/jpeg_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
