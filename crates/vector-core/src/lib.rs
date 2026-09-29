@@ -4100,10 +4100,7 @@ impl VectorCore {
             // emitter, so these are a no-op there. After the persists so nothing surfaces unsaved.
             for outcome in &outcomes {
                 match outcome {
-                    ChatPersist::New(msg) => crate::traits::emit_event(
-                        "message_new",
-                        &serde_json::json!({ "message": msg, "chat_id": channel_id }),
-                    ),
+                    ChatPersist::New(msg) => crate::traits::emit_message_new(channel_id, msg),
                     ChatPersist::Updated { message, .. }
                     | ChatPersist::ReactionRemoved { message, .. } => {
                         let mut message = message.clone();

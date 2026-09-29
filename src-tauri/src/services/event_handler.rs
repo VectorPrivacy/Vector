@@ -194,7 +194,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         // Realtime community messages are genuinely live: the back-paging fetch is a SEPARATE one-shot
         // batch (process_channel_batch), not this stream, so a suppression flag here only ever hides
         // live messages (saved-but-never-surfaced → permanently stuck unread). Always surface.
-        vector_core::emit_event("message_new", &serde_json::json!({ "message": msg, "chat_id": chat_id }));
+        vector_core::traits::emit_message_new(chat_id, msg);
         let chat_id = chat_id.to_string();
         let msg = msg.clone();
         // Snapshot the session BEFORE the spawn (multi-account rule 1): a swap can land before the
@@ -221,9 +221,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     }
 
     fn on_community_update(&self, chat_id: &str, target_id: &str, msg: &Message) {
-        vector_core::emit_event("message_update", &serde_json::json!({
-            "old_id": target_id, "message": msg, "chat_id": chat_id,
-        }));
+        vector_core::traits::emit_message_replaced(chat_id, target_id, msg);
     }
 
     fn on_community_removed(&self, chat_id: &str, target_id: &str) {

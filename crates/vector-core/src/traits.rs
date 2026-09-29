@@ -12,6 +12,19 @@ use std::sync::OnceLock;
 /// SDK: invokes user-provided callbacks
 pub trait EventEmitter: Send + Sync + 'static {
     fn emit(&self, event: &str, payload: serde_json::Value);
+
+    /// Emit already-serialised JSON. The default parses it for [`EventEmitter::emit`];
+    /// emitters that forward JSON as-is override this and [`EventEmitter::prefers_json`].
+    fn emit_json(&self, event: &str, payload: &serde_json::value::RawValue) {
+        if let Ok(value) = serde_json::from_str(payload.get()) {
+            self.emit(event, value);
+        }
+    }
+
+    /// Whether [`EventEmitter::emit_json`] is cheaper than [`EventEmitter::emit`] here.
+    fn prefers_json(&self) -> bool {
+        false
+    }
 }
 
 /// A no-op emitter for headless/test contexts.
@@ -35,10 +48,33 @@ pub fn emit_event<T: serde::Serialize>(event: &str, payload: &T) {
         return;
     }
     if let Some(emitter) = EVENT_EMITTER.get() {
-        if let Ok(value) = serde_json::to_value(payload) {
+        // One pass straight to JSON where the emitter forwards it; a Value tree otherwise.
+        if emitter.prefers_json() {
+            if let Ok(json) = serde_json::value::to_raw_value(payload) {
+                emitter.emit_json(event, &json);
+            }
+        } else if let Ok(value) = serde_json::to_value(payload) {
             emitter.emit(event, value);
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct MessagePayload<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_id: Option<&'a str>,
+    message: &'a crate::types::Message,
+    chat_id: &'a str,
+}
+
+/// Emit `message_new`: a message joined `chat_id`.
+pub fn emit_message_new(chat_id: &str, message: &crate::types::Message) {
+    emit_event("message_new", &MessagePayload { old_id: None, message, chat_id });
+}
+
+/// Emit `message_update` for a message whose reply context is already resolved.
+pub fn emit_message_replaced(chat_id: &str, old_id: &str, message: &crate::types::Message) {
+    emit_event("message_update", &MessagePayload { old_id: Some(old_id), message, chat_id });
 }
 
 /// Emit a raw JSON value event to the UI layer.
@@ -60,10 +96,7 @@ pub fn emit_event_json(event: &str, payload: serde_json::Value) {
 /// becomes a generic "Attachment") and the renderer never retries.
 pub async fn emit_message_update(chat_id: &str, old_id: &str, message: &mut crate::types::Message) {
     let _ = crate::db::events::populate_reply_context(message).await;
-    emit_event(
-        "message_update",
-        &serde_json::json!({ "old_id": old_id, "message": &*message, "chat_id": chat_id }),
-    );
+    emit_message_replaced(chat_id, old_id, message);
 }
 
 /// Check if an event emitter is registered.

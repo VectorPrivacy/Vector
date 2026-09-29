@@ -14,6 +14,18 @@ impl vector_core::EventEmitter for TauriEventEmitter {
             }
         }
     }
+
+    fn emit_json(&self, event: &str, payload: &serde_json::value::RawValue) {
+        if let Some(handle) = TAURI_APP.get() {
+            if let Err(e) = handle.emit(event, payload) {
+                log_warn!("[EventEmitter] Failed to emit '{}': {}", event, e);
+            }
+        }
+    }
+
+    fn prefers_json(&self) -> bool {
+        true
+    }
 }
 
 pub use vector_core::state::{

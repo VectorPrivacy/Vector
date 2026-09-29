@@ -2229,10 +2229,7 @@ async fn sync_community_channel_inner(
                     // prepends these from its DB re-query (emitting message_new would append them
                     // at the BOTTOM, which is wrong for back-paged history).
                     if !is_older {
-                        vector_core::emit_event(
-                            "message_new",
-                            &serde_json::json!({ "message": msg, "chat_id": channel_id }),
-                        );
+                        vector_core::traits::emit_message_new(channel_id, msg);
                     }
                     new_messages += 1;
                 }
@@ -2244,10 +2241,7 @@ async fn sync_community_channel_inner(
                     // Reactions/edits apply surgically by target id (position-independent), so
                     // emit on BOTH latest and older pages — an older page can carry a reaction to
                     // a still-visible message, which must update live.
-                    vector_core::emit_event(
-                        "message_update",
-                        &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": channel_id }),
-                    );
+                    vector_core::traits::emit_message_replaced(channel_id, target_id, message);
                 }
                 IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
                     // Reaction revoked by its author — drop the kind-7 row (save is additive) and
@@ -2255,10 +2249,7 @@ async fn sync_community_channel_inner(
                     // carries this reaction inside its parent and would re-insert the row.
                     vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
                     let _ = crate::db::delete_event(reaction_id).await;
-                    vector_core::emit_event(
-                        "message_update",
-                        &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": channel_id }),
-                    );
+                    vector_core::traits::emit_message_replaced(channel_id, message_id, message);
                 }
                 IncomingEvent::Removed { target_id } => {
                     // Cooperative tombstone applies surgically by target id (position-independent),
@@ -4034,10 +4025,7 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
                     pending.push(msg);
                     // Emit so the (optimistic, locked) chat row populates + unlocks NOW — the frontend
                     // learns messages via message_new, so without this the promote is invisible to the UI.
-                    vector_core::emit_event(
-                        "message_new",
-                        &serde_json::json!({ "message": msg, "chat_id": &channel_id }),
-                    );
+                    vector_core::traits::emit_message_new(&channel_id, msg);
                     painted += 1;
                 }
                 IncomingEvent::Updated { target_id, message, edit_event } => {
@@ -4045,10 +4033,7 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
                         Some(_) => persist_community_update(&channel_id, message, edit_event.as_deref()).await,
                         None => pending.push(message),
                     }
-                    vector_core::emit_event(
-                        "message_update",
-                        &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
-                    );
+                    vector_core::traits::emit_message_replaced(&channel_id, target_id, message);
                 }
                 IncomingEvent::Removed { target_id } => {
                     vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
@@ -4057,10 +4042,7 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
                 IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
                     vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
                     let _ = crate::db::delete_event(reaction_id).await;
-                    vector_core::emit_event(
-                        "message_update",
-                        &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": &channel_id }),
-                    );
+                    vector_core::traits::emit_message_replaced(&channel_id, message_id, message);
                 }
                 // Presence / membership outcomes are left to the background true-up sync (it re-fetches
                 // the same page and applies them, deduped) — promotion only paints the message content.

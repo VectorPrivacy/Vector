@@ -1072,10 +1072,7 @@ async fn commit_dm_message(
 
     if added && !hidden_author {
         // Emit to frontend
-        crate::traits::emit_event("message_new", &serde_json::json!({
-            "message": &msg,
-            "chat_id": contact
-        }));
+        crate::traits::emit_message_new(contact, &msg);
 
         // Platform callback (notifications, badge, etc.)
         if is_file {
