@@ -505,22 +505,29 @@ fn transcode_animated_opts(
     tolerance: i16,
     frame_step: usize,
 ) -> Result<EncodedImage, String> {
-    use image::codecs::gif::GifDecoder;
     use image::AnimationDecoder;
 
+    type Frames<'a> = Box<dyn Iterator<Item = Result<(image::RgbaImage, image::Delay), String>> + 'a>;
+    fn frames_of<'a>(f: image::Frames<'a>) -> Frames<'a> {
+        Box::new(f.map(|f| {
+            let f = f.map_err(|e| format!("frame decode: {e}"))?;
+            let delay = f.delay();
+            Ok((f.into_buffer(), delay))
+        }))
+    }
     let cursor = Cursor::new(bytes);
-    let frames: image::Frames = if bytes.starts_with(b"GIF8") {
-        let dec = GifDecoder::new(cursor).map_err(|e| format!("gif decode: {e}"))?;
-        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
-        dec.into_frames()
+    let frames: Frames = if bytes.starts_with(b"GIF8") {
+        let canvas = GifCanvas::new(bytes)?;
+        check_animated_dims((canvas.w as u32, canvas.h as u32))?;
+        Box::new(canvas)
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         let dec = image::codecs::webp::WebPDecoder::new(cursor).map_err(|e| format!("webp decode: {e}"))?;
         check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
-        dec.into_frames()
+        frames_of(dec.into_frames())
     } else if bytes.starts_with(b"\x89PNG") {
         let dec = image::codecs::png::PngDecoder::new(cursor).map_err(|e| format!("png decode: {e}"))?;
         check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
-        dec.apng().map_err(|e| format!("apng decode: {e}"))?.into_frames()
+        frames_of(dec.apng().map_err(|e| format!("apng decode: {e}"))?.into_frames())
     } else {
         return Err("not an animated format".into());
     };
@@ -535,8 +542,8 @@ fn transcode_animated_opts(
         // First frame peeled: it fixes the canvas dimensions the encoder
         // needs up front, and seeds the differencing baseline.
         let mut frames = frames;
-        let first = match frames.next() {
-            Some(f) => f.map_err(|e| format!("frame decode: {e}"))?,
+        let (first, first_delay) = match frames.next() {
+            Some(f) => f?,
             None => return Err("no frames decoded".into()),
         };
         let fit = |buf: image::RgbaImage| -> image::RgbaImage {
@@ -547,71 +554,177 @@ fn transcode_animated_opts(
                 buf
             }
         };
-        let write_frame = |enc: &mut gif::Encoder<&mut Vec<u8>>,
-                           mut rgba: Vec<u8>,
-                           (sw, sh): (u32, u32),
-                           (x0, y0): (u32, u32),
-                           delay: image::Delay|
-         -> Result<(), String> {
-            // Speed 10 ≈ good quantization at a fraction of best-quality cost;
-            // frames this small keep the whole pass in the tens of ms.
-            let mut f = gif::Frame::from_rgba_speed(sw as u16, sh as u16, &mut rgba, 10);
-            f.left = x0 as u16;
-            f.top = y0 as u16;
-            let (ms, _) = delay.numer_denom_ms();
-            f.delay = (ms / 10).clamp(2, u32::from(u16::MAX)) as u16;
-            f.dispose = gif::DisposalMethod::Keep;
-            enc.write_frame(&f).map_err(|e| format!("gif encode: {e}"))
-        };
-
-        let first_delay = first.delay();
-        let mut shown = fit(first.into_buffer());
+        let mut shown = fit(first);
         let canvas = shown.dimensions();
-        let mut enc = gif::Encoder::new(&mut out, canvas.0 as u16, canvas.1 as u16, &[])
-            .map_err(|e| format!("gif encode: {e}"))?;
-        enc.set_repeat(gif::Repeat::Infinite).map_err(|e| format!("gif repeat: {e}"))?;
-        write_frame(&mut enc, shown.as_raw().clone(), canvas, (0, 0), first_delay)?;
 
-        // Inter-frame differencing: emit only pixels that changed beyond the
-        // tolerance since what the viewer displays; the rest go transparent
-        // and keep-disposal shows the old pixel through. A naive full-frame
-        // re-encode INFLATES an already optimized GIF several-fold.
-        let mut count = 1usize;
-        // Frame decimation (`frame_step` > 1): skipped frames donate their
-        // delay to the next kept one, so total duration — and perceived speed
-        // — is unchanged, only the motion sampling coarsens.
-        let mut skipped_ms: u32 = 0;
-        for (i, frame) in frames.enumerate() {
-            if count >= max_frames {
-                break;
-            }
-            let frame = frame.map_err(|e| format!("frame decode: {e}"))?;
-            let (ms, _) = frame.delay().numer_denom_ms();
-            if frame_step > 1 && (i + 1) % frame_step != 0 {
-                skipped_ms += ms;
-                continue;
-            }
-            let delay = image::Delay::from_numer_denom_ms(ms + skipped_ms, 1);
-            skipped_ms = 0;
-            let resized = fit(frame.into_buffer());
-            if resized.dimensions() != canvas {
-                return Err("frame dimensions changed mid-animation".into());
-            }
-            // Keyframe flush: tolerance lets slow drift go stale, and over
-            // enough frames the reused patches read as a dirty window. A full
-            // frame at intervals bounds how long any residue can live.
-            if count.is_multiple_of(12) {
-                shown = resized.clone();
-                write_frame(&mut enc, resized.into_raw(), canvas, (0, 0), delay)?;
-            } else {
-                let (sub, x0, y0) = delta_frame(&mut shown, &resized, tolerance);
-                let dims = sub.dimensions();
-                write_frame(&mut enc, sub.into_raw(), dims, (x0, y0), delay)?;
-            }
-            count += 1;
-        }
+        // Quantising and LZW-packing a frame is independent of every other frame; only the
+        // write is ordered. This thread decodes and differences while an encoder thread
+        // quantises batches on the pool; the channel bounds how many frames are in flight.
+        let batch = rayon::current_num_threads() * 2;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<FrameJob>(batch);
+        let out = &mut out;
+        std::thread::scope(|scope| -> Result<(), String> {
+            let encoder = scope.spawn(move || -> Result<(), String> {
+                use rayon::prelude::*;
+                let mut enc = gif::Encoder::new(out, canvas.0 as u16, canvas.1 as u16, &[])
+                    .map_err(|e| format!("gif encode: {e}"))?;
+                enc.set_repeat(gif::Repeat::Infinite).map_err(|e| format!("gif repeat: {e}"))?;
+                let mut pending: Vec<FrameJob> = Vec::with_capacity(batch);
+                let mut jobs = rx.into_iter().peekable();
+                while jobs.peek().is_some() {
+                    pending.extend(jobs.by_ref().take(batch));
+                    let frames: Vec<gif::Frame<'static>> = pending.par_drain(..).map(FrameJob::encode).collect();
+                    for f in &frames {
+                        enc.write_lzw_pre_encoded_frame(f).map_err(|e| format!("gif encode: {e}"))?;
+                    }
+                }
+                Ok(())
+            });
+            let send = |job: FrameJob| tx.send(job).map_err(|_| String::from("gif encoder stopped"));
+
+            let produced = (|| -> Result<(), String> {
+                send(FrameJob { rgba: shown.as_raw().clone(), dims: canvas, at: (0, 0), delay: first_delay })?;
+
+                // Inter-frame differencing: emit only pixels that changed beyond the
+                // tolerance since what the viewer displays; the rest go transparent
+                // and keep-disposal shows the old pixel through. A naive full-frame
+                // re-encode INFLATES an already optimized GIF several-fold.
+                let mut count = 1usize;
+                // Frame decimation (`frame_step` > 1): skipped frames donate their
+                // delay to the next kept one, so total duration — and perceived speed
+                // — is unchanged, only the motion sampling coarsens.
+                let mut skipped_ms: u32 = 0;
+                for (i, frame) in frames.enumerate() {
+                    if count >= max_frames {
+                        break;
+                    }
+                    let (frame, frame_delay) = frame?;
+                    let (ms, _) = frame_delay.numer_denom_ms();
+                    if frame_step > 1 && (i + 1) % frame_step != 0 {
+                        skipped_ms += ms;
+                        continue;
+                    }
+                    let delay = image::Delay::from_numer_denom_ms(ms + skipped_ms, 1);
+                    skipped_ms = 0;
+                    let resized = fit(frame);
+                    if resized.dimensions() != canvas {
+                        return Err("frame dimensions changed mid-animation".into());
+                    }
+                    // Keyframe flush: tolerance lets slow drift go stale, and over
+                    // enough frames the reused patches read as a dirty window. A full
+                    // frame at intervals bounds how long any residue can live.
+                    if count.is_multiple_of(12) {
+                        shown = resized.clone();
+                        send(FrameJob { rgba: resized.into_raw(), dims: canvas, at: (0, 0), delay })?;
+                    } else {
+                        let (sub, x0, y0) = delta_frame(&mut shown, &resized, tolerance);
+                        let dims = sub.dimensions();
+                        send(FrameJob { rgba: sub.into_raw(), dims, at: (x0, y0), delay })?;
+                    }
+                    count += 1;
+                }
+                Ok(())
+            })();
+            drop(tx);
+            encoder.join().map_err(|_| String::from("gif encoder panicked"))??;
+            produced
+        })?;
     }
     Ok(EncodedImage { bytes: out, extension: "gif" })
+}
+
+/// GIF frames composited the way `image`'s GifDecoder does (same disposal, transparency
+/// and clipping), from indexed output through a palette table instead of its per-pixel
+/// RGBA path, which cost several times the LZW decode.
+struct GifCanvas<'a> {
+    dec: gif::Decoder<Cursor<&'a [u8]>>,
+    kept: Vec<u8>,
+    idx: Vec<u8>,
+    w: usize,
+    h: usize,
+}
+
+impl<'a> GifCanvas<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        let mut opts = gif::DecodeOptions::new();
+        opts.set_color_output(gif::ColorOutput::Indexed);
+        let dec = opts.read_info(Cursor::new(bytes)).map_err(|e| format!("gif decode: {e}"))?;
+        let (w, h) = (usize::from(dec.width()), usize::from(dec.height()));
+        Ok(GifCanvas { dec, kept: Vec::new(), idx: Vec::new(), w, h })
+    }
+
+    fn frame(&mut self) -> Result<Option<(image::RgbaImage, image::Delay)>, String> {
+        let (w, h) = (self.w, self.h);
+        if self.kept.is_empty() {
+            self.kept = vec![0; w * h * 4];
+        }
+        let Some(f) = self.dec.next_frame_info().map_err(|e| format!("frame decode: {e}"))? else {
+            return Ok(None);
+        };
+        let (left, top) = (usize::from(f.left), usize::from(f.top));
+        let (fw, fh) = (usize::from(f.width), usize::from(f.height));
+        let (dispose, transparent, local) = (f.dispose, f.transparent, f.palette.clone());
+        let delay = image::Delay::from_numer_denom_ms(u32::from(f.delay) * 10, 1);
+        // Indices past the palette stay [0; 4], as the RGBA path leaves them.
+        let mut lut = [[0u8; 4]; 256];
+        let palette = local.as_deref().or(self.dec.global_palette()).unwrap_or_default();
+        for (i, (rgb, px)) in palette.chunks_exact(3).zip(lut.iter_mut()).enumerate() {
+            let alpha = if transparent == Some(i as u8) { 0 } else { 255 };
+            *px = [rgb[0], rgb[1], rgb[2], alpha];
+        }
+        self.idx.resize(fw * fh, 0);
+        self.dec.read_into_buffer(&mut self.idx).map_err(|e| format!("frame decode: {e}"))?;
+
+        let mut out = self.kept.clone();
+        let x_end = (left + fw).min(w);
+        if left < x_end {
+            for (y, src) in (top..h).zip(self.idx.chunks_exact(fw)) {
+                let span = (y * w + left) * 4..(y * w + x_end) * 4;
+                let px = src.iter().zip(out[span.clone()].chunks_exact_mut(4)).zip(self.kept[span].chunks_exact_mut(4));
+                for ((&i, o), k) in px {
+                    let c = lut[usize::from(i)];
+                    let c = if c[3] == 0 { [k[0], k[1], k[2], k[3]] } else { c };
+                    o.copy_from_slice(&c);
+                    match dispose {
+                        gif::DisposalMethod::Any | gif::DisposalMethod::Keep => k.copy_from_slice(&c),
+                        gif::DisposalMethod::Background => k.fill(0),
+                        gif::DisposalMethod::Previous => {}
+                    }
+                }
+            }
+        }
+        let img = image::RgbaImage::from_raw(w as u32, h as u32, out).expect("canvas-sized");
+        Ok(Some((img, delay)))
+    }
+}
+
+impl Iterator for GifCanvas<'_> {
+    type Item = Result<(image::RgbaImage, image::Delay), String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.frame().transpose()
+    }
+}
+
+struct FrameJob {
+    rgba: Vec<u8>,
+    dims: (u32, u32),
+    at: (u32, u32),
+    delay: image::Delay,
+}
+
+impl FrameJob {
+    fn encode(self) -> gif::Frame<'static> {
+        let FrameJob { mut rgba, dims: (sw, sh), at: (x0, y0), delay } = self;
+        // Speed 10 ≈ good quantization at a fraction of best-quality cost.
+        let mut f = gif::Frame::from_rgba_speed(sw as u16, sh as u16, &mut rgba, 10);
+        f.left = x0 as u16;
+        f.top = y0 as u16;
+        let (ms, _) = delay.numer_denom_ms();
+        f.delay = (ms / 10).clamp(2, u32::from(u16::MAX)) as u16;
+        f.dispose = gif::DisposalMethod::Keep;
+        f.make_lzw_pre_encoded();
+        f
+    }
 }
 
 /// Header-only dimensions of an image, without decoding a pixel.
@@ -639,20 +752,19 @@ const DELTA_TOLERANCE: i16 = 8;
 /// frames forfeit both the crop and the per-pixel reuse.
 fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage, tolerance: i16) -> (image::RgbaImage, u32, u32) {
     let (w, h) = next.dimensions();
-    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
-    let s = shown.as_raw();
-    let n = next.as_raw();
-    // Pass 1: bounding box of pixels that must be re-emitted.
-    for y in 0..h {
-        for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
-            let differs = (0..3).any(|c| (s[i + c] as i16 - n[i + c] as i16).abs() > tolerance);
-            if differs {
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x + 1);
-                y1 = y1.max(y + 1);
-            }
+    let (wu, tol) = (w as usize, tolerance.clamp(0, 255) as u8);
+    // Pass 1: which pixels must be re-emitted, one flag each, then their bounding box.
+    // Byte-wise compare first (a plain lane loop), then fold each pixel's colour flags.
+    let over: Vec<u8> = shown.as_raw().iter().zip(next.as_raw()).map(|(&a, &b)| u8::from(a.abs_diff(b) > tol)).collect();
+    let mask: Vec<u8> = over.chunks_exact(4).map(|p| p[0] | p[1] | p[2]).collect();
+    let (mut x0, mut y0, mut x1, mut y1) = (wu, h as usize, 0usize, 0usize);
+    for (y, row) in mask.chunks_exact(wu).enumerate() {
+        if let Some(first) = row.iter().position(|&m| m != 0) {
+            let last = row.iter().rposition(|&m| m != 0).unwrap_or(first);
+            x0 = x0.min(first);
+            x1 = x1.max(last + 1);
+            y0 = y0.min(y);
+            y1 = y + 1;
         }
     }
     if x0 >= x1 || y0 >= y1 {
@@ -662,19 +774,25 @@ fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage, tolerance:
     // Pass 2: build the sub-frame — reused pixels transparent, changed pixels
     // opaque and mirrored into `shown` so the next comparison sees the truth
     // the viewer sees.
-    let (sw, sh) = (x1 - x0, y1 - y0);
-    let mut sub = image::RgbaImage::new(sw, sh);
+    let sw = x1 - x0;
+    let mut sub = vec![0u8; sw * (y1 - y0) * 4];
+    let n = next.as_raw();
     let shown_raw: &mut [u8] = shown.as_mut();
-    for y in 0..sh {
-        for x in 0..sw {
-            let i = (((y + y0) * w + (x + x0)) * 4) as usize;
-            let differs = (0..3).any(|c| (shown_raw[i + c] as i16 - n[i + c] as i16).abs() > tolerance);
-            if differs {
-                sub.put_pixel(x, y, image::Rgba([n[i], n[i + 1], n[i + 2], 255]));
-                shown_raw[i..i + 4].copy_from_slice(&n[i..i + 4]);
-            }
+    for (y, dst) in (y0..y1).zip(sub.chunks_exact_mut(sw * 4)) {
+        let at = y * wu + x0;
+        // Branch-free over whole pixels as u32 lanes, so it vectorises.
+        let px = mask[at..at + sw].iter().zip(n[at * 4..(at + sw) * 4].chunks_exact(4));
+        let shown_px = shown_raw[at * 4..(at + sw) * 4].chunks_exact_mut(4);
+        for (((&m, nx), sx), d) in px.zip(shown_px).zip(dst.chunks_exact_mut(4)) {
+            let keep = 0u32.wrapping_sub(u32::from(m));
+            let nv = u32::from_le_bytes([nx[0], nx[1], nx[2], nx[3]]);
+            let sv = u32::from_le_bytes([sx[0], sx[1], sx[2], sx[3]]);
+            d.copy_from_slice(&((nv | 0xFF00_0000) & keep).to_le_bytes());
+            sx.copy_from_slice(&((nv & keep) | (sv & !keep)).to_le_bytes());
         }
     }
+    let sub = image::RgbaImage::from_raw(sw as u32, (y1 - y0) as u32, sub).expect("sized to the box");
+    let (x0, y0) = (x0 as u32, y0 as u32);
     (sub, x0, y0)
 }
 
@@ -1488,6 +1606,60 @@ mod animated_tests {
             }
         }
         out
+    }
+
+    /// Every compositing case: offsets, a frame overhanging the canvas, each disposal,
+    /// transparency, a local palette shorter than the indices used, and interlacing.
+    fn tricky_gif() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let global: Vec<u8> = (0..16u8).flat_map(|i| [i * 16, 255 - i * 16, i * 7]).collect();
+            let mut enc = gif::Encoder::new(&mut out, 40, 30, &global).unwrap();
+            // (left, top, width, height, disposal, transparent index, local palette, interlaced)
+            type Case = (u16, u16, u16, u16, gif::DisposalMethod, Option<u8>, bool, bool);
+            let cases: [Case; 8] = [
+                (0, 0, 40, 30, gif::DisposalMethod::Keep, None, false, false),
+                (5, 4, 20, 10, gif::DisposalMethod::Background, Some(3), false, false),
+                (10, 10, 25, 15, gif::DisposalMethod::Previous, Some(0), true, false),
+                (30, 20, 20, 20, gif::DisposalMethod::Keep, Some(5), false, true),
+                (0, 0, 40, 30, gif::DisposalMethod::Any, Some(7), false, false),
+                (2, 2, 7, 9, gif::DisposalMethod::Previous, None, true, true),
+                (39, 29, 1, 1, gif::DisposalMethod::Background, None, false, false),
+                (0, 0, 40, 30, gif::DisposalMethod::Keep, Some(1), true, false),
+            ];
+            for (k, &(left, top, w, h, dispose, transparent, local, interlaced)) in cases.iter().enumerate() {
+                let buffer: Vec<u8> = (0..usize::from(w) * usize::from(h)).map(|i| ((i * 7 + k * 3) % 16) as u8).collect();
+                let mut f = gif::Frame { left, top, width: w, height: h, dispose, transparent, interlaced, ..Default::default() };
+                f.delay = 3 + k as u16;
+                if local {
+                    f.palette = Some((0..10u8).flat_map(|i| [200 - i * 9, i * 20, 99]).collect());
+                }
+                f.buffer = std::borrow::Cow::Owned(buffer);
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn gif_canvas_composites_exactly_like_the_image_crate() {
+        let mut sources = vec![tricky_gif(), synth_gif(64, 48, 4)];
+        if let Ok(dir) = std::env::var("GIF_EQUIV_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                if e.path().extension().is_some_and(|x| x == "gif") {
+                    sources.push(std::fs::read(e.path()).unwrap());
+                }
+            }
+        }
+        for src in &sources {
+            let want = decoded_frames(src);
+            let got: Vec<_> = GifCanvas::new(src).unwrap().collect::<Result<_, _>>().unwrap();
+            assert_eq!(got.len(), want.len());
+            for (i, ((img, delay), w)) in got.iter().zip(&want).enumerate() {
+                assert!(img == w.buffer(), "frame {i} differs");
+                assert_eq!(delay.numer_denom_ms(), w.delay().numer_denom_ms());
+            }
+        }
     }
 
     fn decoded_frames(bytes: &[u8]) -> Vec<Frame> {
