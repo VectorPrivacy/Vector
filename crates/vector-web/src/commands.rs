@@ -39,38 +39,6 @@ impl Args {
     }
 }
 
-fn relay_status(status: nostr_sdk::prelude::RelayStatus) -> &'static str {
-    use nostr_sdk::prelude::RelayStatus::*;
-    match status {
-        Initialized => "initialized",
-        Pending => "pending",
-        Connecting => "connecting",
-        Connected => "connected",
-        Disconnected => "disconnected",
-        Terminated => "terminated",
-        Shutdown => "shutdown",
-        Banned => "banned",
-        Sleeping => "sleeping",
-    }
-}
-
-async fn get_relays() -> Result<Value, String> {
-    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
-    let pool = client.relays().await;
-    let infos: Vec<Value> = vector_core::state::TRUSTED_RELAYS
-        .iter()
-        .map(|url| {
-            let status = pool
-                .iter()
-                .find(|(u, _)| u.as_str().trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
-                .map(|(_, r)| relay_status(r.status()))
-                .unwrap_or("disabled");
-            json!({ "url": url, "status": status, "is_default": true, "is_custom": false, "enabled": true, "mode": "both" })
-        })
-        .collect();
-    Ok(Value::Array(infos))
-}
-
 /// A core facade result as a command result.
 pub fn core<T: serde::Serialize>(r: vector_core::Result<T>) -> Result<Value, String> {
     r.map_err(|e| e.to_string()).and_then(to_value)
@@ -179,6 +147,17 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_dm_contacts" => to_value(db::events::get_dm_contact_npubs()?),
         "get_install_source" => Ok(json!({ "has_store": false, "label": "" })),
         "run_maintenance" | "monitor_relay_connections" => Ok(json!(true)),
+        "pin_chat" | "unpin_chat" => {
+            let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+            let id = a.str("chatId")?;
+            let list = if cmd == "pin_chat" {
+                vector_core::pinned_chats::pin_chat(&client, &id).await?
+            } else {
+                vector_core::pinned_chats::unpin_chat(&client, &id).await?
+            };
+            vector_core::traits::emit_event_json("pinned_chats_updated", json!(list.chats));
+            Ok(json!(list.chats))
+        }
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
         "get_paused_downloads" => Ok(json!({})),
@@ -206,7 +185,6 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             }
             Ok(Value::Null)
         }
-        "get_relays" => get_relays().await,
         "get_blossom_servers_config" => to_value(vector_core::blossom_servers::list_all_servers()),
         "get_media_servers" => to_value(vector_core::state::get_blossom_servers()),
         "get_my_badges" => Ok(json!({

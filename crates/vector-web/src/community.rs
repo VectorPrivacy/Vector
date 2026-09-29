@@ -16,7 +16,7 @@ use vector_core::{db, Message, VectorCore, STATE};
 
 use crate::messaging::WebSendCallback;
 
-fn id32(hex: &str) -> Result<[u8; 32], String> {
+pub(crate) fn id32(hex: &str) -> Result<[u8; 32], String> {
     let bytes = vector_core::simd::hex::hex_to_bytes_32(hex);
     if hex.len() != 64 {
         return Err(format!("invalid id: {hex}"));
@@ -24,17 +24,17 @@ fn id32(hex: &str) -> Result<[u8; 32], String> {
     Ok(bytes)
 }
 
-fn is_v2(community_id: &str) -> bool {
+pub(crate) fn is_v2(community_id: &str) -> bool {
     id32(community_id).is_ok_and(|b| {
         matches!(db::community::community_protocol(&CommunityId(b)).ok().flatten(), Some(ConcordProtocol::V2))
     })
 }
 
-fn load_v2(community_id: &str) -> Result<CommunityV2, String> {
+pub(crate) fn load_v2(community_id: &str) -> Result<CommunityV2, String> {
     db::community::load_community_v2(&CommunityId(id32(community_id)?))?.ok_or_else(|| "Community not found".to_string())
 }
 
-fn summarize_v2(c: &CommunityV2) -> Value {
+pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
     let me = vector_core::my_public_key();
     let owner = c.owner().ok();
     json!({

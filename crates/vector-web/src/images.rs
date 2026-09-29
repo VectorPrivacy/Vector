@@ -95,7 +95,7 @@ fn extension_for(mime: &str) -> Option<&'static str> {
     })
 }
 
-async fn fetch(url: &str, cap: usize) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch(url: &str, cap: usize) -> Result<Vec<u8>, String> {
     use futures_util::StreamExt;
     let client = vector_core::net::shared_http_client();
     let resp = vector_core::net::proxied_request(&client, reqwest::Method::GET, url)
@@ -157,16 +157,37 @@ pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
 async fn fetch_and_store(url: &str, kind: Kind) -> Result<String, String> {
     let cap = if matches!(kind, Kind::Emoji | Kind::EmojiPackIcon) { MAX_EMOJI_BYTES } else { MAX_BYTES };
     let bytes = fetch(url, cap).await?;
-    let ext = extension_for(vector_core::crypto::mime_from_magic_bytes(&bytes)).ok_or("Not an image")?;
+    store(url, kind, &bytes).await
+}
+
+async fn store(url: &str, kind: Kind, bytes: &[u8]) -> Result<String, String> {
+    let ext = extension_for(vector_core::crypto::mime_from_magic_bytes(bytes)).ok_or("Not an image")?;
     let key = &vector_core::crypto::sha256_hex(url.as_bytes())[..16];
     let path = format!("/cache/{}/{key}.{ext}", kind.dir());
-    vector_core::webfiles::write(Path::new(&path), &bytes).await?;
+    vector_core::webfiles::write(Path::new(&path), bytes).await?;
     if kind == Kind::Avatar {
-        let small = if ext == "gif" { None } else { thumb(&bytes) };
+        let small = if ext == "gif" { None } else { thumb(bytes) };
         let thumb_path = format!("/cache/avatars/thumbs/{key}.{ext}");
-        vector_core::webfiles::write(Path::new(&thumb_path), small.as_deref().unwrap_or(&bytes)).await?;
+        vector_core::webfiles::write(Path::new(&thumb_path), small.as_deref().unwrap_or(bytes)).await?;
     }
     Ok(path)
+}
+
+/// Keep bytes we already hold as `url`'s local copy, so it shows without a fetch.
+pub async fn precache(url: &str, kind: Kind, bytes: &[u8]) {
+    match store(url, kind, bytes).await {
+        Ok(path) => remember(url, kind, &path),
+        Err(e) => vector_core::log_debug!("[Images] precache {url}: {e}"),
+    }
+}
+
+/// Drop every local copy and the index pointing at them.
+pub async fn clear_all() {
+    KNOWN.with(|k| k.borrow_mut().clear());
+    if let Some(dir) = app_data() {
+        let _ = db::webfs::remove_tree(&dir, Path::new("/image-index"));
+    }
+    vector_core::webfiles::remove(Path::new("/cache")).await;
 }
 
 /// Cache a profile's pictures and repaint it when either landed.

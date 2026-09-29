@@ -6280,6 +6280,7 @@ dependencies = [
  "image",
  "js-sys",
  "nostr-sdk",
+ "rand 0.8.6",
  "reqwest",
  "rusqlite",
  "serde",

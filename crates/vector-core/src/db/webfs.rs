@@ -48,6 +48,19 @@ pub fn remove(app_data: &Path, path: &Path) -> Result<(), String> {
         .map_err(|e| format!("web file remove: {e}"))
 }
 
+/// Remove `dir` and every path beneath it.
+pub fn remove_tree(app_data: &Path, dir: &Path) -> Result<(), String> {
+    let dir = key(dir);
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    store(app_data)?
+        .execute(
+            "DELETE FROM files WHERE path = ?1 OR substr(path, 1, length(?2)) = ?2",
+            rusqlite::params![dir, prefix],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("web file remove: {e}"))
+}
+
 /// Whether a database exists, without creating it.
 pub fn db_exists(path: &Path) -> bool {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).is_ok()

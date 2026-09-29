@@ -63,7 +63,7 @@ async fn read(path: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Decode with EXIF orientation applied, so re-encoded pixels come out upright.
-fn decode_upright(bytes: &[u8]) -> Result<DynamicImage, String> {
+pub(crate) fn decode_upright(bytes: &[u8]) -> Result<DynamicImage, String> {
     let mut decoder = ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?
@@ -77,7 +77,7 @@ fn decode_upright(bytes: &[u8]) -> Result<DynamicImage, String> {
     Ok(img)
 }
 
-fn encode(img: &DynamicImage, keep_png: bool, quality: u8) -> Result<(Vec<u8>, &'static str), String> {
+pub(crate) fn encode(img: &DynamicImage, keep_png: bool, quality: u8) -> Result<(Vec<u8>, &'static str), String> {
     let mut out = Vec::new();
     let transparent = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] < 255);
     if keep_png || transparent {

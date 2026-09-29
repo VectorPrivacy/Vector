@@ -12,6 +12,7 @@ mod chat_ops;
 mod community_ops;
 mod network_ops;
 mod profile_ops;
+mod selfsync;
 mod attachments;
 mod clock;
 mod commands;

@@ -4,7 +4,7 @@ use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use vector_core::db;
 use vector_core::state::{self, MNEMONIC_SEED, PENDING_NSEC};
-use vector_core::{ClientRelayExt, Profile, MY_SECRET_KEY, STATE};
+use vector_core::{Profile, MY_SECRET_KEY, STATE};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::emitter;
@@ -32,6 +32,33 @@ fn stamp_fresh_account_profile() {
             if let Err(e) = client.send_event(&event).to(relays).await {
                 vector_core::log_warn!("[Account] new-account profile stamp failed: {e}");
             }
+        }
+    });
+}
+
+/// Forget an account that was started but never committed.
+pub(crate) fn clear_pending() {
+    *PENDING_ACCOUNT.lock().unwrap() = None;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+}
+
+/// Publish the invite accepted before setup, once there is a client to send it.
+fn broadcast_pending_invite_if_any() {
+    let Some(invite) = state::pending_invite() else { return };
+    let Some(client) = state::nostr_client() else { return };
+    state::clear_pending_invite();
+    db::spawn_bound(async move {
+        let builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
+            .tag(Tag::custom("l", vec!["vector"]))
+            .tag(Tag::custom("d", vec![invite.invite_code.as_str()]))
+            .tag(Tag::public_key(invite.inviter_pubkey));
+        match vector_core::sign_builder(builder).await {
+            Ok(event) => {
+                if let Err(e) = client.send_event(&event).to(state::active_trusted_relays().await).await {
+                    vector_core::log_warn!("[Account] invite acceptance broadcast failed: {e}");
+                }
+            }
+            Err(e) => vector_core::log_warn!("[Account] invite acceptance signing failed: {e}"),
         }
     });
 }
@@ -226,6 +253,7 @@ async fn commit_pending_account(password: Option<&str>, security_type: Option<&s
     state::set_encryption_enabled(password.is_some());
     touch_last_active();
     vector_core::blossom_servers::refresh_cache();
+    broadcast_pending_invite_if_any();
     stamp_fresh_account_profile();
     Ok(())
 }
@@ -283,30 +311,17 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     Ok(npub)
 }
 
-/// Add the default and discovery relays, then connect. False if already connected.
+/// Add the configured and discovery relays, then connect. False if already connected.
 pub async fn connect() -> bool {
     let Some(client) = state::nostr_client() else { return false };
     if !client.relays().await.is_empty() {
         return false;
     }
-    for url in state::TRUSTED_RELAYS {
-        if let Err(e) = client
-            .add_managed_relay(*url)
-            .capabilities(RelayCapabilities::READ | RelayCapabilities::WRITE)
-            .await
-        {
-            vector_core::log_warn!("[Relay] add {url} failed: {e}");
-        }
-    }
-    for url in state::discovery_relay_iter() {
-        if state::TRUSTED_RELAYS.iter().any(|t| t.trim_end_matches('/') == url.trim_end_matches('/')) {
-            continue;
-        }
-        let _ = client
-            .add_managed_relay(url)
-            .capabilities(vector_core::discovery_relay_capabilities())
-            .await;
-    }
-    client.connect().await;
+    crate::network_ops::add_configured_relays(&client).await;
+    crate::network_ops::start_relay_monitor(&client);
+    db::spawn_bound(async {
+        vector_core::rt::time::sleep(std::time::Duration::from_millis(500)).await;
+        crate::network_ops::reconcile_dm_relay_list().await;
+    });
     true
 }

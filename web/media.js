@@ -224,6 +224,9 @@
     });
     register('read_clipboard_files', () => []);
     register('reveal_attachment', ({ path }) => save(path));
+    // "Show in folder" has no folder here: save the file instead.
+    window.__TAURI__.opener.revealItemInDir = async (path) => save(path);
+    window.__TAURI__.opener.openPath = async (path) => { window.open(convertFileSrc(path), '_blank', 'noopener'); };
 
     // --- Notifications -----------------------------------------------------
     // Permission is asked on the first click: browsers refuse prompts without a gesture.

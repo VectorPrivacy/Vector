@@ -80,6 +80,7 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
 
 /// Start the live DM and community subscription. Runs for the session's life.
 pub fn notifs() {
+    db::spawn_bound(crate::selfsync::start());
     db::spawn_bound(async {
         if let Err(e) = VectorCore.listen(Arc::new(crate::events::WebEventHandler)).await {
             vector_core::log_warn!("[Web] live subscription ended: {e}");
