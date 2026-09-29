@@ -90,8 +90,13 @@ build_ffmpeg() {
     case "$target" in
         *-apple-darwin)
             local arch="${target%%-*}"; [ "$arch" = aarch64 ] && arch=arm64
+            # Xcode's clang and SDK by path: an NDK or Homebrew clang earlier on PATH can't link for macOS.
+            local cc
+            cc=$(xcrun -f clang)
+            SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+            export SDKROOT
             flags+=(--enable-videotoolbox --enable-encoder=h264_videotoolbox
-                --arch="$arch" --cc="clang -arch $arch" --extra-cflags="-mmacosx-version-min=11.0"
+                --arch="$arch" --cc="$cc -arch $arch" --extra-cflags="-mmacosx-version-min=11.0"
                 --extra-ldflags="-mmacosx-version-min=11.0")
             [ "$arch" != "$(uname -m)" ] && flags+=(--enable-cross-compile --target-os=darwin)
             ;;
