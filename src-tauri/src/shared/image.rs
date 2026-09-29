@@ -97,6 +97,30 @@ pub fn encode_jpeg(pixels: &[u8], width: u32, height: u32, quality: u8) -> Resul
     crate::simd::jpeg::encode_rgb(pixels, width, height, quality)
 }
 
+/// Decode an image with EXIF orientation baked in. JPEGs take the in-house decoder, at the
+/// smallest DCT scale whose longer side still reaches `min_long_side` (0: full size); other
+/// formats, and JPEGs it refuses, take `decode_image_bounded`.
+pub fn decode_image(bytes: &[u8], min_long_side: u32) -> Result<DynamicImage, String> {
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        if let Ok(d) = crate::simd::jpeg::decode_at_least(bytes, min_long_side) {
+            let img = if d.channels == 1 {
+                image::GrayImage::from_raw(d.width, d.height, d.pixels).map(DynamicImage::ImageLuma8)
+            } else {
+                image::RgbImage::from_raw(d.width, d.height, d.pixels).map(DynamicImage::ImageRgb8)
+            };
+            if let Some(mut img) = img {
+                let orientation = jpeg_header(bytes)
+                    .and_then(|h| h.orientation)
+                    .and_then(image::metadata::Orientation::from_exif)
+                    .unwrap_or(image::metadata::Orientation::NoTransforms);
+                img.apply_orientation(orientation);
+                return Ok(img);
+            }
+        }
+    }
+    vector_core::crypto::decode_image_bounded(bytes)
+}
+
 /// `DynamicImage::resize` on fast_image_resize: fits within `max_w` x `max_h` keeping the aspect
 /// ratio, with the image crate's rounding.
 pub fn resize_fit(img: &DynamicImage, max_w: u32, max_h: u32, filter: image::imageops::FilterType) -> DynamicImage {
@@ -399,7 +423,7 @@ pub fn prepare_upload_image(bytes: &[u8], kind: UploadImageKind) -> Result<Encod
 
     // decode_image_bounded rejects decode-bombs and bakes EXIF orientation into
     // pixels; the re-encode then drops all remaining metadata.
-    let img = vector_core::crypto::decode_image_bounded(bytes)
+    let img = decode_image(bytes, max_dimension)
         .map_err(|_| "Image couldn't be read (unsupported or corrupt file)".to_string())?;
     compress_image_within_budget(&img, max_dimension, byte_budget, kind.resample_filter())
 }
@@ -1886,6 +1910,27 @@ mod simd_resize_tests {
             let theirs = super::encode_rgba_auto(img.to_rgba8().as_raw(), img.width(), img.height(), 85).unwrap();
             assert_eq!((ours.extension, &ours.bytes), (theirs.extension, &theirs.bytes), "{:?}", img.color());
         }
+    }
+
+    #[test]
+    fn decode_image_matches_the_general_decoder_in_every_orientation() {
+        let src = photo(300, 200);
+        let jpeg = encode_jpeg(src.as_raw(), 300, 200, 92).unwrap();
+        for o in [1u8, 3, 6, 8] {
+            let mut tagged = jpeg.clone();
+            tagged.splice(2..2, super::orientation_app1(o));
+            let ours = super::decode_image(&tagged, 0).unwrap();
+            let theirs = vector_core::crypto::decode_image_bounded(&tagged).unwrap();
+            assert_eq!((ours.width(), ours.height()), (theirs.width(), theirs.height()), "orientation {o}");
+            let p = psnr(ours.to_rgb8().as_raw(), theirs.to_rgb8().as_raw());
+            assert!(p > 40.0, "orientation {o}: {p:.1} dB");
+            let half = super::decode_image(&tagged, 150).unwrap();
+            let want = if o >= 5 { (100, 150) } else { (150, 100) };
+            assert_eq!((half.width(), half.height()), want, "orientation {o} at 1/2");
+        }
+        // Not a JPEG: the general decoder answers.
+        let png = super::encode_png(DynamicImage::ImageRgb8(src).to_rgba8().as_raw(), 300, 200).unwrap();
+        assert_eq!(super::decode_image(&png, 0).unwrap().width(), 300);
     }
 
     #[test]

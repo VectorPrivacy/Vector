@@ -107,7 +107,7 @@ fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::
     let (ext, out): (&str, std::borrow::Cow<[u8]>) = if verbatim_gif {
         ("gif", std::borrow::Cow::Borrowed(bytes))
     } else {
-        let img = vector_core::crypto::decode_image_bounded(bytes)?;
+        let img = crate::shared::image::decode_image(bytes, PREVIEW_MAX_DIM)?;
         let (w, h) = (img.width(), img.height());
         let scale = (PREVIEW_MAX_DIM as f32 / w.max(h) as f32).min(1.0);
         let (nw, nh) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
@@ -234,7 +234,7 @@ fn thumbhash_for_preview(file_path: &str) -> Result<String, String> {
     let img = if file_path.is_empty() {
         let cache = JS_FILE_CACHE.lock().unwrap();
         let (bytes, _, _) = cache.as_ref().ok_or("No cached file and no file path provided")?;
-        vector_core::crypto::decode_image_bounded(bytes)
+        crate::shared::image::decode_image(bytes, 100)
             .map_err(|e| format!("Failed to decode cached image: {}", e))?
     } else {
         ::image::open(file_path)

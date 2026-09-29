@@ -28,14 +28,24 @@ pub struct Decoded {
 const MAX_DIMENSION: usize = 16_384;
 const MAX_ALLOC: usize = 256 * 1024 * 1024;
 
-pub fn decode(data: &[u8]) -> Result<Decoded, DecodeError> {
-    decode_with(data, Backend::detect(), None)
+#[cfg(test)]
+fn decode(data: &[u8]) -> Result<Decoded, DecodeError> {
+    decode_with(data, Backend::detect(), None, 0)
+}
+
+/// Decode at the smallest DCT scale (1/1, 1/2, 1/4 or 1/8) whose longer side is still at least
+/// `min_long_side`, as when the image is headed for a downscale anyway. Scaling inside the IDCT
+/// keeps each block's low frequencies, a proper low-pass, and skips most of the work.
+pub fn decode_at_least(data: &[u8], min_long_side: u32) -> Result<Decoded, DecodeError> {
+    decode_with(data, Backend::detect(), None, min_long_side as usize)
 }
 
 /// `chunks` forces the scan's split (tests); None picks by size and pool.
-fn decode_with(data: &[u8], backend: Backend, chunks: Option<usize>) -> Result<Decoded, DecodeError> {
+fn decode_with(data: &[u8], backend: Backend, chunks: Option<usize>, min_long_side: usize) -> Result<Decoded, DecodeError> {
     let header = parse(data)?;
-    let frame = Frame::new(&header)?;
+    let long = header.width.max(header.height);
+    let denom = [8, 4, 2].into_iter().find(|&d| min_long_side > 0 && long.div_ceil(d) >= min_long_side).unwrap_or(1);
+    let frame = Frame::new(&header, denom)?;
     let entropy = destuff(header.scan);
     match entropy.next_marker {
         None | Some(0xD9) => {}
@@ -46,8 +56,9 @@ fn decode_with(data: &[u8], backend: Backend, chunks: Option<usize>) -> Result<D
         .comps
         .iter()
         .map(|c| {
-            let stride = frame.mcux * c.h * 8;
-            Plane { data: vec![0; stride * frame.mcuy * c.v * 8], stride }
+            let (bw, bh) = frame.block_size[c.index];
+            let stride = (frame.mcux * c.h * bw).next_multiple_of(8);
+            Plane { data: vec![0; stride * frame.mcuy * c.v * bh], stride }
         })
         .collect();
     scan(&frame, &entropy, &mut planes, backend, chunks)?;
@@ -68,6 +79,7 @@ struct Header<'a> {
 
 #[derive(Clone)]
 struct Component {
+    index: usize,
     id: u8,
     h: usize,
     v: usize,
@@ -134,7 +146,7 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
                     if !(1..=4).contains(&hs) || !(1..=4).contains(&vs) || tq > 3 {
                         return Err(Corrupt("component parameters"));
                     }
-                    h.comps.push(Component { id: c[0], h: hs, v: vs, tq, dc: 0, ac: 0 });
+                    h.comps.push(Component { index: h.comps.len(), id: c[0], h: hs, v: vs, tq, dc: 0, ac: 0 });
                 }
             }
             0xC2 | 0xC6 | 0xCA | 0xCE => return Err(Unsupported("progressive")),
@@ -218,8 +230,17 @@ fn parse(data: &[u8]) -> Result<Header<'_>, DecodeError> {
 
 /// Block geometry and the tables the scan needs, resolved and validated.
 struct Frame {
+    /// Output size, after any DCT scaling.
     width: usize,
     height: usize,
+    /// Pixels each component's block decodes to, across and down.
+    block_size: Vec<(usize, usize)>,
+    /// How far chroma still has to be upsampled to meet luma.
+    upsample: (usize, usize),
+    /// Plain dequantisation (kernel order) for the scaled IDCT.
+    qraw: Vec<[f32; 64]>,
+    /// Cosine bases for 1-, 2-, 4- and 8-point outputs: `[n][i * 8 + u]`.
+    basis: [[f32; 64]; 4],
     mcux: usize,
     mcuy: usize,
     comps: Vec<Component>,
@@ -233,7 +254,7 @@ struct Frame {
 }
 
 impl Frame {
-    fn new(h: &Header) -> Result<Self, DecodeError> {
+    fn new(h: &Header, denom: usize) -> Result<Self, DecodeError> {
         use DecodeError::{Corrupt, Unsupported};
         if h.width > MAX_DIMENSION || h.height > MAX_DIMENSION {
             return Err(Unsupported("dimensions"));
@@ -254,10 +275,28 @@ impl Frame {
         if planes + h.width * h.height * comps.len() > MAX_ALLOC {
             return Err(Unsupported("dimensions"));
         }
+        let n = 8 / denom;
+        let (hmax, vmax) = (comps[0].h, comps[0].v);
+        // Chroma decodes at luma's scale where the IDCT can reach it, leaving no upsampling.
+        let block_size: Vec<(usize, usize)> = comps.iter().map(|c| ((n * hmax / c.h).min(8), (n * vmax / c.v).min(8))).collect();
+        let upsample = if comps.len() == 1 { (1, 1) } else { (n * hmax / block_size[1].0, n * vmax / block_size[1].1) };
+        let basis = std::array::from_fn(|k| {
+            let n = 1 << k;
+            std::array::from_fn(|j| {
+                let (i, u) = (j / 8, j % 8);
+                if i >= n || u >= n {
+                    return 0.0;
+                }
+                let c = if u == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+                (c / 2.0 * (((2 * i + 1) * u) as f64 * std::f64::consts::PI / (2 * n) as f64).cos()) as f32
+            })
+        });
         let mut qs = Vec::new();
+        let mut qraw = Vec::new();
         let (mut dc, mut ac) = (Vec::new(), Vec::new());
         for c in &comps {
             let q = h.qt[c.tq].as_ref().ok_or(Corrupt("missing quantisation table"))?;
+            qraw.push(std::array::from_fn(|s| f32::from(q[ZZ_OF[s] as usize])));
             qs.push(std::array::from_fn(|s| {
                 let (u, v) = (s / 8, s % 8);
                 (f64::from(q[ZZ_OF[s] as usize]) * AAN[u] * AAN[v] / 8.0) as f32
@@ -266,7 +305,22 @@ impl Frame {
             ac.push(h.ac[c.ac].as_deref().cloned().ok_or(Corrupt("missing Huffman table"))?);
         }
         let slots = comps.iter().enumerate().flat_map(|(c, k)| (0..k.v).flat_map(move |by| (0..k.h).map(move |bx| (c, bx, by)))).collect();
-        Ok(Frame { width: h.width, height: h.height, mcux, mcuy, comps, qs, dc, ac, restart: h.restart, slots })
+        Ok(Frame {
+            width: h.width.div_ceil(denom),
+            height: h.height.div_ceil(denom),
+            block_size,
+            upsample,
+            qraw,
+            basis,
+            mcux,
+            mcuy,
+            comps,
+            qs,
+            dc,
+            ac,
+            restart: h.restart,
+            slots,
+        })
     }
 }
 
@@ -623,11 +677,20 @@ unsafe fn decode_range<S: Simd>(f: &Frame, e: &Entropy, from: Cursor, end: usize
         let mut blk = [0i16; 64];
         let any = decode_block(&mut b, &f.dc[c], &f.ac[c], &mut pred[c], &mut blk);
         let (base, stride) = out.0[c];
-        let dst = base.add(((my * comp.v + by) * 8) * stride + (mx * comp.h + bx) * 8);
-        if any {
+        let (bw, bh) = f.block_size[c];
+        let dst = base.add((my * comp.v + by) * bh * stride + (mx * comp.h + bx) * bw);
+        if !any {
+            dc_block(blk[0], f.qs[c][0], dst, stride, bw, bh);
+        } else if (bw, bh) == (8, 8) {
             idct_block::<S>(&blk, &f.qs[c], dst, stride);
+        } else if bw == bh {
+            match bw {
+                4 => idct_square::<4>(&blk, &f.qraw[c], dst, stride),
+                2 => idct_square::<2>(&blk, &f.qraw[c], dst, stride),
+                _ => idct_square::<1>(&blk, &f.qraw[c], dst, stride),
+            }
         } else {
-            dc_block(blk[0], f.qs[c][0], dst, stride);
+            idct_scaled(&blk, &f.qraw[c], &f.basis, bw, bh, dst, stride);
         }
         t += 1;
         phase += 1;
@@ -842,10 +905,65 @@ unsafe fn idct_block<S: Simd>(blk: &[i16; 64], qs: &[f32; 64], out: *mut u8, str
 
 /// A DC-only block: the IDCT passes its input through unchanged, so this is bit-identical.
 #[inline(always)]
-unsafe fn dc_block(dc: i16, q0: f32, out: *mut u8, stride: usize) {
+unsafe fn dc_block(dc: i16, q0: f32, out: *mut u8, stride: usize, w: usize, h: usize) {
     let v = ((f32::from(dc) * q0 + 128.0).round_ties_even() as i32).clamp(0, 255) as u8;
-    for y in 0..8 {
-        std::ptr::write_bytes(out.add(y * stride), v, 8);
+    for y in 0..h {
+        std::ptr::write_bytes(out.add(y * stride), v, w);
+    }
+}
+
+/// `N`-point IDCT (N = 1, 2 or 4) of the lowest N frequencies, JPEG-normalised:
+/// `x_i = sum C(u)/2 · F(u) · cos((2i+1)uπ/2N)`.
+#[inline(always)]
+fn idct_n<const N: usize>(f: [f32; N]) -> [f32; N] {
+    // 1/(2√2), cos(π/8)/2, cos(3π/8)/2
+    const A: f32 = 0.35355339;
+    const B: f32 = 0.46193977;
+    const C: f32 = 0.19134172;
+    let mut x = [0f32; N];
+    match N {
+        4 => {
+            let (e0, e1) = ((f[0] + f[2]) * A, (f[0] - f[2]) * A);
+            let (o0, o1) = (f[1] * B + f[3] * C, f[1] * C - f[3] * B);
+            x.copy_from_slice(&[e0 + o0, e1 + o1, e1 - o1, e0 - o0]);
+        }
+        2 => {
+            let (a, b) = (f[0] * A, f[1] * A);
+            x.copy_from_slice(&[a + b, a - b]);
+        }
+        _ => x[0] = f[0] * A,
+    }
+    x
+}
+
+/// Square scaled IDCT, separable, through [`idct_n`].
+#[inline(always)]
+unsafe fn idct_square<const N: usize>(blk: &[i16; 64], q: &[f32; 64], out: *mut u8, stride: usize) {
+    let rows: [[f32; N]; N] = std::array::from_fn(|v| idct_n::<N>(std::array::from_fn(|u| f32::from(blk[u * 8 + v]) * q[u * 8 + v])));
+    (0..N).for_each(|x| {
+        let col = idct_n::<N>(std::array::from_fn(|v| rows[v][x]));
+        for (y, &p) in col.iter().enumerate() {
+            *out.add(y * stride + x) = ((p + 128.0).round_ties_even() as i32).clamp(0, 255) as u8;
+        }
+    });
+}
+
+/// IDCT evaluated at `w` x `h` sample points from the block's lowest `w` x `h` frequencies:
+/// the 8-point reconstruction low-passed and resampled, as libjpeg scales.
+#[inline(always)]
+unsafe fn idct_scaled(blk: &[i16; 64], q: &[f32; 64], basis: &[[f32; 64]; 4], w: usize, h: usize, out: *mut u8, stride: usize) {
+    let (bx, by) = (&basis[w.trailing_zeros() as usize], &basis[h.trailing_zeros() as usize]);
+    let mut rows = [0f32; 64];
+    for v in 0..h {
+        for x in 0..w {
+            rows[v * 8 + x] = (0..w).map(|u| f32::from(blk[u * 8 + v]) * q[u * 8 + v] * bx[x * 8 + u]).sum();
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let v: f32 = (0..h).map(|v| rows[v * 8 + x] * by[y * 8 + v]).sum();
+            *out.add(y * stride + x) = ((v + 128.0).round_ties_even() as i32).clamp(0, 255) as u8;
+        }
     }
 }
 
@@ -931,7 +1049,7 @@ unsafe fn colour_neon(f: &Frame, planes: &[Plane], y0: usize, out: &mut [u8]) {
 #[inline(always)]
 unsafe fn colour_generic<S: Simd>(f: &Frame, planes: &[Plane], y0: usize, out: &mut [u8]) {
     let w = f.width;
-    let (fx, fy) = (f.comps[0].h, f.comps[0].v);
+    let (fx, fy) = f.upsample;
     let (cw, ch) = (w.div_ceil(fx), f.height.div_ceil(fy));
     let stride = planes[1].stride;
     let (near_w, far_w) = (S::splat(0.75), S::splat(0.25));
@@ -1036,8 +1154,8 @@ mod tests {
     fn every_backend_decodes_the_same_pixels() {
         let px = photo(203, 61, 3);
         let jpeg = super::super::encode_rgb(&px, 203, 61, 90).unwrap();
-        let a = decode_with(&jpeg, Backend::Scalar, None).unwrap().pixels;
-        let b = decode_with(&jpeg, Backend::detect(), None).unwrap().pixels;
+        let a = decode_with(&jpeg, Backend::Scalar, None, 0).unwrap().pixels;
+        let b = decode_with(&jpeg, Backend::detect(), None, 0).unwrap().pixels;
         assert!(a == b);
     }
 
@@ -1054,10 +1172,48 @@ mod tests {
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut plain_grey, 90).encode(&grey, w, h, image::ExtendedColorType::L8).unwrap();
         let strips = super::super::encode::encode_with(&px, w, h, 90, Backend::detect(), Some(3)).unwrap();
         for jpeg in [&plain, &plain_grey, &strips] {
-            let one = decode_with(jpeg, Backend::detect(), Some(1)).unwrap().pixels;
-            for n in [2, 3, 7, 16] {
-                let many = decode_with(jpeg, Backend::detect(), Some(n)).unwrap().pixels;
-                assert!(one == many, "{n} segments differ from one");
+            for min_side in [0, 300] {
+                let one = decode_with(jpeg, Backend::detect(), Some(1), min_side).unwrap().pixels;
+                for n in [2, 3, 7, 16] {
+                    let many = decode_with(jpeg, Backend::detect(), Some(n), min_side).unwrap().pixels;
+                    assert!(one == many, "{n} segments differ from one");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_decodes_are_the_image_low_passed() {
+        let (w, h) = (403usize, 301usize);
+        let px = photo(w, h, 13);
+        let mut sub = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut sub, 92).encode(&px, w as u32, h as u32, image::ExtendedColorType::Rgb8).unwrap();
+        let full444 = super::super::encode_rgb(&px, w as u32, h as u32, 92).unwrap();
+        for jpeg in [&sub, &full444] {
+            let full = decode(jpeg).unwrap();
+            for d in [2usize, 4, 8] {
+                let small = decode_at_least(jpeg, w.div_ceil(d) as u32).unwrap();
+                assert_eq!((small.width as usize, small.height as usize), (w.div_ceil(d), h.div_ceil(d)));
+                // Reference: the full decode box-averaged, over whole d x d cells.
+                let (sw, sh) = (w / d, h / d);
+                let mut a = Vec::new();
+                let mut b = Vec::new();
+                for y in 0..sh {
+                    for x in 0..sw {
+                        for c in 0..3 {
+                            let mut sum = 0u32;
+                            for dy in 0..d {
+                                for dx in 0..d {
+                                    sum += u32::from(full.pixels[((y * d + dy) * w + x * d + dx) * 3 + c]);
+                                }
+                            }
+                            a.push((sum as f32 / (d * d) as f32).round() as u8);
+                            b.push(small.pixels[(y * small.width as usize + x) * 3 + c]);
+                        }
+                    }
+                }
+                let p = psnr(&a, &b);
+                assert!(p > 30.0, "1/{d}: {p:.1} dB from the box-filtered full decode");
             }
         }
     }

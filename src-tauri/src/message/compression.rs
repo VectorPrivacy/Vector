@@ -59,7 +59,12 @@ pub(crate) fn prepare_outbound_image(
                 let (width, height) = crate::shared::image::header_dimensions_oriented(b)?;
                 Some(ImageMetadata { thumbhash: t.to_string(), width, height })
             })
-            .or_else(|| vector_core::crypto::decode_image_bounded(b).ok().and_then(|img| meta_from(&img)))
+            .or_else(|| {
+                // The hash reads 100 pixels a side; the dimensions come from the header.
+                let img = crate::shared::image::decode_image(b, 100).ok()?;
+                let (width, height) = crate::shared::image::header_dimensions_oriented(b).unwrap_or((img.width(), img.height()));
+                crate::util::generate_thumbhash_from_image(&img).map(|thumbhash| ImageMetadata { thumbhash, width, height })
+            })
     };
 
     // GIF: never re-encode (would drop animation). Metadata is read off the
@@ -101,8 +106,8 @@ pub(crate) fn prepare_outbound_image(
         }
     }
 
-    // Re-encode paths. decode_image_bounded bakes EXIF orientation into pixels.
-    let img = vector_core::crypto::decode_image_bounded(&bytes)?;
+    // Re-encode paths. Decoding bakes EXIF orientation into pixels.
+    let img = crate::shared::image::decode_image(&bytes, if compress { MAX_DIMENSION } else { 0 })?;
     let (w, h) = (img.width(), img.height());
     let (nw, nh) = if compress {
         calculate_resize_dimensions(w, h, MAX_DIMENSION)
@@ -178,11 +183,11 @@ pub(super) fn compress_bytes_internal(
         });
     }
 
-    // Load and decode the image (EXIF orientation baked into pixels)
-    let img = vector_core::crypto::decode_image_bounded(&bytes)?;
-
     // Determine target dimensions (max 1920px on longest side)
     use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION};
+
+    // Load and decode the image (EXIF orientation baked into pixels)
+    let img = crate::shared::image::decode_image(&bytes, MAX_DIMENSION)?;
     let (width, height) = (img.width(), img.height());
     let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
 
@@ -310,7 +315,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
-        let img = vector_core::crypto::decode_image_bounded(&file_data)?;
+        let img = crate::shared::image::decode_image(&file_data, crate::shared::image::MAX_DIMENSION)?;
 
         // Determine target dimensions (max 1920px on longest side)
         use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
@@ -388,7 +393,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
-        let img = vector_core::crypto::decode_image_bounded(&bytes)?;
+        let img = crate::shared::image::decode_image(&bytes, crate::shared::image::MAX_DIMENSION)?;
 
         // Determine target dimensions (max 1920px on longest side)
         use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};

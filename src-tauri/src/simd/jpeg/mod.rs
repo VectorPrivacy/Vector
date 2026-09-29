@@ -1,9 +1,6 @@
 //! Baseline JPEG codec. The block kernels are written once over [`Simd`] and instantiated for
 //! AVX2, NEON and scalar; no FMA, so every backend produces identical output.
 
-// The decoder is not called from the send path yet.
-#![allow(dead_code, unused_imports)]
-
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 #[cfg(target_arch = "x86_64")]
@@ -14,7 +11,7 @@ use std::arch::x86_64::*;
 mod decode;
 mod encode;
 
-pub use decode::{decode, DecodeError, Decoded};
+pub use decode::decode_at_least;
 pub use encode::encode_rgb;
 
 /// Natural (row-major) index of each zigzag position.
