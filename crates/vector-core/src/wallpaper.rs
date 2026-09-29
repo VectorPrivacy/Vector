@@ -55,10 +55,7 @@ const MAX_WALLPAPER_DIMENSION: u32 = 2560;
 /// chat + at most one preview-staging file per chat.
 fn wallpapers_dir() -> Result<PathBuf, String> {
     let npub = crate::db::get_current_account()?;
-    let dir = crate::db::account_dir(&npub)?.join("wallpapers");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create wallpapers dir: {}", e))?;
-    Ok(dir)
+    Ok(crate::db::account_dir(&npub)?.join("wallpapers"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,12 +76,12 @@ pub struct WallpaperPreview {
 /// mime, extract first frame for animated formats, write to the per-chat
 /// preview slot. The returned path is what the chat background should
 /// switch to while the Confirm/Cancel bar is showing.
-pub fn prepare_wallpaper_preview(
+pub async fn prepare_wallpaper_preview(
     chat_npub: &str,
     file_path: &str,
 ) -> Result<WallpaperPreview, String> {
-    let src = Path::new(file_path);
-    let bytes = std::fs::read(src)
+    let bytes = crate::files::read(Path::new(file_path))
+        .await
         .map_err(|e| format!("Failed to read image: {}", e))?;
 
     if bytes.len() > MAX_WALLPAPER_BYTES {
@@ -101,19 +98,20 @@ pub fn prepare_wallpaper_preview(
     }
 
     // Single decode: normalize (strip + resize + re-encode) and the brightness
-    // estimate share the same decoded pixels — no second decode.
+    // estimate share the same decoded pixels — no second decode. Off the runtime:
+    // a full-size decode would stall every task queued behind it.
     let (final_bytes, final_extension, was_animated, recommended_dim) =
-        normalize_wallpaper_image(&bytes, &mime)?;
+        crate::rt::spawn_blocking(move || normalize_wallpaper_image(&bytes, &mime))
+            .await
+            .map_err(|e| format!("Image processing task failed: {e}"))??;
 
     // Clear any prior preview for this chat (different format or stale).
-    clean_chat_files(chat_npub, FileKind::Preview, None)?;
+    clean_chat_files(chat_npub, FileKind::Preview, None).await?;
 
     let preview = wallpapers_dir()?.join(format!("{}.preview.{}", chat_npub, final_extension));
-    let tmp = preview.with_file_name(format!("{}.preview.{}.tmp", chat_npub, final_extension));
-    std::fs::write(&tmp, &final_bytes)
+    crate::files::write(&preview, &final_bytes)
+        .await
         .map_err(|e| format!("Failed to stage preview file: {}", e))?;
-    std::fs::rename(&tmp, &preview)
-        .map_err(|e| format!("Failed to commit preview file: {}", e))?;
 
     Ok(WallpaperPreview {
         path: preview.to_string_lossy().to_string(),
@@ -164,8 +162,8 @@ fn estimate_brightness_for_white_text(img: &::image::DynamicImage) -> u8 {
 }
 
 /// Delete the preview file (user cancelled before publishing).
-pub fn cancel_wallpaper_preview(chat_npub: &str) -> Result<(), String> {
-    clean_chat_files(chat_npub, FileKind::Preview, None)
+pub async fn cancel_wallpaper_preview(chat_npub: &str) -> Result<(), String> {
+    clean_chat_files(chat_npub, FileKind::Preview, None).await
 }
 
 /// Returns `(bytes, extension, was_animated, recommended_dim)`. Every wallpaper
@@ -231,22 +229,17 @@ enum FileKind {
 /// Remove every wallpaper artifact for `chat_npub` of the given kind. When
 /// `extension_to_skip` is `Some`, files matching that extension are kept
 /// (used to overwrite-in-place during same-format rewrites).
-fn clean_chat_files(
+async fn clean_chat_files(
     chat_npub: &str,
     kind: FileKind,
     extension_to_skip: Option<&str>,
 ) -> Result<(), String> {
     let dir = wallpapers_dir()?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
 
     let preview_prefix = format!("{}.preview.", chat_npub);
     let active_prefix = format!("{}.", chat_npub);
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in crate::files::list(&dir).await {
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
@@ -265,7 +258,7 @@ fn clean_chat_files(
                 continue;
             }
         }
-        let _ = std::fs::remove_file(&path);
+        crate::files::remove(&path).await;
     }
     Ok(())
 }
@@ -292,11 +285,7 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     let dir = wallpapers_dir()?;
     let prefix = format!("{}.preview.", chat_npub);
     let mut preview_path: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(&dir)
-        .map_err(|e| format!("Wallpapers dir: {}", e))?
-        .flatten()
-    {
-        let p = entry.path();
+    for p in crate::files::list(&dir).await {
         let n = p
             .file_name()
             .and_then(|n| n.to_str())
@@ -309,7 +298,8 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     }
     let preview = preview_path
         .ok_or_else(|| "No wallpaper preview to publish. Pick an image first.".to_string())?;
-    let bytes = std::fs::read(&preview)
+    let bytes = crate::files::read(&preview)
+        .await
         .map_err(|e| format!("Failed to read preview file: {}", e))?;
 
     let extension = preview
@@ -445,8 +435,9 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
 
     // Send succeeded — promote the preview file to the active slot.
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
-    clean_chat_files(chat_npub, FileKind::Active, None)?;
-    std::fs::rename(&preview, &active)
+    clean_chat_files(chat_npub, FileKind::Active, None).await?;
+    crate::files::rename(&preview, &active)
+        .await
         .map_err(|e| format!("Failed to promote preview: {}", e))?;
     let active_str = active.to_string_lossy().to_string();
 
@@ -582,7 +573,7 @@ pub async fn apply_received_wallpaper(
     // Removal tombstone — sender cleared their wallpaper. No blob to fetch;
     // wipe the local active file + STATE/DB so the default theme returns.
     if url.is_empty() {
-        clean_chat_files(chat_npub, FileKind::Active, None)?;
+        clean_chat_files(chat_npub, FileKind::Active, None).await?;
         let (slim, prev_url, prev_uploader) = {
             let mut state = crate::state::STATE.lock().await;
             let prev = state.get_chat(chat_npub).map(|c| {
@@ -659,10 +650,8 @@ pub async fn apply_received_wallpaper(
     // chat npub, the DB pool, and the per-account wallpapers dir all belong
 
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
-    clean_chat_files(chat_npub, FileKind::Active, None)?;
-    let tmp = active.with_file_name(format!("{}.{}.tmp", chat_npub, extension));
-    std::fs::write(&tmp, &plaintext).map_err(|e| format!("Write wallpaper: {}", e))?;
-    std::fs::rename(&tmp, &active).map_err(|e| format!("Commit wallpaper: {}", e))?;
+    clean_chat_files(chat_npub, FileKind::Active, None).await?;
+    crate::files::write(&active, &plaintext).await.map_err(|e| format!("Write wallpaper: {}", e))?;
     let active_str = active.to_string_lossy().to_string();
 
     // Capture previous URL + uploader under the same lock — only DELETE
@@ -895,7 +884,7 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
     // Account swapped mid-send — the tombstone already went out, but the
     // local commit below would land in the new account's storage. Skip it.
 
-    clean_chat_files(chat_npub, FileKind::Active, None)?;
+    clean_chat_files(chat_npub, FileKind::Active, None).await?;
     let me_npub = my_pk.to_bech32().unwrap_or_default();
     let (slim, prev_url, prev_uploader) = {
         let mut state = crate::state::STATE.lock().await;

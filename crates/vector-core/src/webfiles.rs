@@ -40,6 +40,15 @@ export async function opfs_size(path) {
         return (await (await dir.getFileHandle(name)).getFile()).size;
     } catch { return -1; }
 }
+export async function opfs_list(path) {
+    try {
+        let dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('files');
+        for (const p of path.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(p);
+        const names = [];
+        for await (const [name, handle] of dir.entries()) if (handle.kind === 'file') names.push(name);
+        return names;
+    } catch { return []; }
+}
 export async function opfs_remove(path) {
     try {
         const [dir, name] = await dirFor(path, false);
@@ -54,6 +63,7 @@ extern "C" {
     async fn opfs_read(path: &str) -> JsValue;
     async fn opfs_size(path: &str) -> JsValue;
     async fn opfs_remove(path: &str) -> JsValue;
+    async fn opfs_list(path: &str) -> JsValue;
 }
 
 fn key(path: &Path) -> String {
@@ -85,4 +95,10 @@ pub async fn exists(path: &Path) -> bool {
 
 pub async fn remove(path: &Path) -> bool {
     opfs_remove(&key(path)).await.as_bool().unwrap_or(false)
+}
+
+/// Names of the files directly inside `dir`.
+pub async fn list(dir: &Path) -> Vec<String> {
+    let v = opfs_list(&key(dir)).await;
+    js_sys::Array::from(&v).iter().filter_map(|n| n.as_string()).collect()
 }

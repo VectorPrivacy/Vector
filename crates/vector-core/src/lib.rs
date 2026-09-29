@@ -30,6 +30,7 @@ mod macros;
 
 // === Foundation ===
 pub mod rt;
+pub mod files;
 #[cfg(target_arch = "wasm32")]
 pub mod webfiles;
 pub mod logging;
