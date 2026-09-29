@@ -362,12 +362,12 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     compressionComplete = false;
     stopCompressionPolling();
 
-    // Keep Metadata shows for any non-GIF image; Compress only above 25KB.
-    // Mini Apps don't get either option.
+    // Compress shows for any image above 25KB, GIFs included; Keep Metadata for any non-GIF
+    // image (GIFs carry none). Mini Apps don't get either option.
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const isGif = ext === 'gif';
     const offerOptions = isImage && !isGif && !isMiniApp;
-    const showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
+    const showCompress = isImage && !isMiniApp && fileSize > MIN_COMPRESS_SIZE;
 
     VectorSvelte.fpOpen({
         stem: getFileStem(displayName) || displayName,
@@ -378,11 +378,9 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     });
     VectorSvelte.fpContent(content);
 
-    if (offerOptions) {
-        // Start pre-compression in background (only when compression is offered)
-        if (showCompress) startPrecompression(filepath);
-        revealMetadataOptionIfPresent(filepath);
-    }
+    // Start pre-compression in background (only when compression is offered)
+    if (showCompress) startPrecompression(filepath);
+    if (offerOptions) revealMetadataOptionIfPresent(filepath);
     // Show/hide publish button for trusted publishers with Mini Apps
     if (isMiniApp) checkAndShowPublishButton();
 }
@@ -552,7 +550,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         // Compress above 25KB; Keep Metadata for any non-GIF image.
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
         offerOptions = ext !== 'gif';
-        showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
+        showCompress = fileSize > MIN_COMPRESS_SIZE;
     } else if (isVideo) {
         if (isAndroid) {
             // Video preview is unreliable on Android; show a film icon.
@@ -576,12 +574,10 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     });
     VectorSvelte.fpContent(content);
 
-    if (offerOptions) {
-        // Start pre-compression in background (only when compression is offered)
-        if (showCompress) startCachedBytesCompression();
-        // Bytes were cached above via cache_file_bytes.
-        revealMetadataOptionIfPresent('');
-    }
+    // Start pre-compression in background (only when compression is offered)
+    if (showCompress) startCachedBytesCompression();
+    // Bytes were cached above via cache_file_bytes.
+    if (offerOptions) revealMetadataOptionIfPresent('');
     if (isMiniApp) checkAndShowPublishButton();
 }
 
@@ -952,7 +948,7 @@ async function sendPreviewedFile() {
     const isImage = usingBytes
         ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
         : isSupportedImage(filePath);
-    const shouldCompress = !!(isImage && fp.compress && fp.compressChecked && ext !== 'gif');
+    const shouldCompress = !!(isImage && fp.compress && fp.compressChecked);
     // Default off = strip EXIF (location, camera, timestamps). When on, metadata
     // is preserved (re-attached onto compressed images, kept as-is otherwise).
     const keepMetadata = !!(isImage && fp.metadata && fp.metadataChecked);

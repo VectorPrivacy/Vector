@@ -436,6 +436,15 @@ pub fn transcode_animated(bytes: &[u8], max_dim: u32, max_frames: usize) -> Resu
     transcode_animated_opts(bytes, max_dim, max_frames, DELTA_TOLERANCE, 1)
 }
 
+/// Longest side an animation is compressed to for sending.
+pub const ANIMATED_SEND_MAX_DIM: u32 = 640;
+
+/// An animation re-encoded for sending: every frame kept, and a tolerance that absorbs
+/// dither noise between frames while keeping every frame near 41 dB.
+pub fn compress_animated_for_send(bytes: &[u8]) -> Result<EncodedImage, String> {
+    transcode_animated_opts(bytes, ANIMATED_SEND_MAX_DIM, usize::MAX, 5, 1)
+}
+
 /// Escalate through quality rungs until the animation fits `byte_budget`:
 /// full quality first, then smaller + lossier, finally half the frames too.
 /// Returns the first rung that fits, or the smallest attempt — video-like
