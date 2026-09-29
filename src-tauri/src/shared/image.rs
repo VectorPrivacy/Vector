@@ -94,20 +94,7 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// # Returns
 /// Encoded JPEG bytes or an error string
 pub fn encode_jpeg(pixels: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, String> {
-    let (w, h) = (
-        u16::try_from(width).map_err(|_| "JPEG width exceeds 65535".to_string())?,
-        u16::try_from(height).map_err(|_| "JPEG height exceeds 65535".to_string())?,
-    );
-    // Pre-allocate: JPEG is typically 5-15% of raw RGB size depending on quality
-    let mut jpeg_data = Vec::with_capacity((pixels.len() / 10).max(1024));
-    let mut encoder = jpeg_encoder::Encoder::new(&mut jpeg_data, quality);
-    // 4:4:4 keeps the image crate's quality at a given setting; optimized tables make it smaller.
-    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
-    encoder.set_optimized_huffman_tables(true);
-    encoder
-        .encode(pixels, w, h, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
-    Ok(jpeg_data)
+    crate::simd::jpeg::encode_rgb(pixels, width, height, quality)
 }
 
 /// `DynamicImage::resize` on fast_image_resize: fits within `max_w` x `max_h` keeping the aspect
