@@ -476,6 +476,13 @@ function removeParagraphTags(html) {
     return temp.innerHTML || html;
 }
 
+/**
+ * Text the pipeline only wraps: no markdown or HTML-significant characters, no line break or
+ * NBSP (serialised as an entity), no list or indent opening, and (checked apart) no `www.`
+ * autolink. Its render is `<span class="markdown-paragraph">` around the text itself.
+ */
+const PLAIN_MARKDOWN = /^(?![\s-]|\d+[.)])[^\n\r\t\u00a0\u2028\u2029<>&"`*_~|#[\]\\/:@=+{}$^]+$/;
+
 /** Rendered HTML by source text, most recent last. Rendering is a pure function of the text. */
 const markdownCache = new Map();
 const MARKDOWN_CACHE_ENTRIES = 2000;
@@ -490,6 +497,9 @@ const MARKDOWN_CACHE_MAX_INPUT = 8192;
  */
 function parseMarkdown(md) {
     const rawInput = typeof md === 'string' ? md : String(md);
+    if (PLAIN_MARKDOWN.test(rawInput) && !/www\./i.test(rawInput)) {
+        return `<span class="markdown-paragraph">${rawInput}</span>`;
+    }
     const hit = markdownCache.get(rawInput);
     if (hit !== undefined) {
         markdownCache.delete(rawInput);
