@@ -13,6 +13,7 @@ pub(crate) mod types;
 pub(crate) mod compression;
 pub(crate) mod sending;
 pub(crate) mod files;
+pub(crate) mod video_compression;
 
 /// Per-session message-content caches that must be cleared on session reset.
 /// Holds plaintext upload buffers, compressed-image cache, pending zip path,
@@ -33,6 +34,7 @@ pub(crate) async fn clear_all_message_caches() {
     // accumulate `Arc<Notify>` allocations across the process lifetime
     // and abandoning them on session reset is the right cleanup point.
     { types::COMPRESSION_NOTIFY.lock().await.clear(); }
+    video_compression::cancel_all();
 }
 
 #[inline]

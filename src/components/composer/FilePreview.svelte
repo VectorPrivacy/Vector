@@ -223,7 +223,7 @@
                     {#if fp.compress}
                         <label class="file-preview-option">
                             <div>
-                                <div class="file-preview-option-label">Compress Image</div>
+                                <div class="file-preview-option-label">{fp.compressLabel}</div>
                                 <div class="file-preview-option-sublabel">{fp.compressInfo}</div>
                             </div>
                             <input type="checkbox" bind:checked={fp.compressChecked} />

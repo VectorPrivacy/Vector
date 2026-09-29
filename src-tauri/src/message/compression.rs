@@ -287,6 +287,10 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             .unwrap_or("")
             .to_lowercase();
 
+        if super::video_compression::is_video_extension(&extension) {
+            return super::video_compression::compress_file(file_path);
+        }
+
         // Read the file into memory
         let file_data = std::fs::read(file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;

@@ -59,6 +59,7 @@ fn main() {
             "clear_all_android_file_cache",
             "start_image_precompression",
             "get_compression_status",
+            "get_compression_progress",
             "clear_compression_cache",
             "send_cached_compressed_file",
             // Image cache commands
