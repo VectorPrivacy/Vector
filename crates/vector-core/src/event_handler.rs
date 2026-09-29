@@ -76,6 +76,19 @@ pub trait InboundEventHandler: Send + Sync {
         _created_at: u64,
     ) {}
 
+    /// A WebXDC realtime peer signal in a DM. `contact` is the DM's npub; `node_addr` =
+    /// `Some` advertises an Iroh node, `None` = peer-left. Clients without Iroh ignore it.
+    #[allow(clippy::too_many_arguments)]
+    fn on_webxdc_signal(
+        &self,
+        _contact: &str,
+        _npub: &str,
+        _topic_id: &str,
+        _node_addr: Option<&str>,
+        _event_id: &str,
+        _created_at: u64,
+    ) {}
+
     /// The local user was removed from a Community (kick / ban / a leave authored on another device).
     /// Local data is torn down (epoch keys retained); the platform surfaces it + refreshes subs.
     fn on_community_self_removed(&self, _community_id: &str) {}
@@ -283,6 +296,17 @@ impl InboundEventHandler for BatchingPersist<'_> {
         created_at: u64,
     ) {
         self.inner.on_community_webxdc(chat_id, npub, topic_id, node_addr, event_id, created_at)
+    }
+    fn on_webxdc_signal(
+        &self,
+        contact: &str,
+        npub: &str,
+        topic_id: &str,
+        node_addr: Option<&str>,
+        event_id: &str,
+        created_at: u64,
+    ) {
+        self.inner.on_webxdc_signal(contact, npub, topic_id, node_addr, event_id, created_at)
     }
     fn on_community_self_removed(&self, community_id: &str) {
         self.inner.on_community_self_removed(community_id)
@@ -804,10 +828,16 @@ pub async fn commit_prepared_event(
                     false
                 }
                 RumorProcessingResult::LeaveRequest { .. } => false,
-                RumorProcessingResult::WebxdcPeerAdvertisement { .. } |
-                RumorProcessingResult::WebxdcPeerLeft { .. } |
+                RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
+                    handler.on_webxdc_signal(&contact, &sender_npub, &topic_id, Some(&node_addr), &event_id, created_at);
+                    false
+                }
+                RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
+                    handler.on_webxdc_signal(&contact, &sender_npub, &topic_id, None, &event_id, created_at);
+                    false
+                }
                 RumorProcessingResult::CallSignal { .. } => {
-                    // WebXDC and calls ride Iroh — handled by src-tauri directly
+                    // Calls ride Iroh — handled by src-tauri directly
                     false
                 }
                 RumorProcessingResult::WallpaperChanged {

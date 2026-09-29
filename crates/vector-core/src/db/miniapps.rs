@@ -49,10 +49,10 @@ pub fn record_miniapp_opened_with_metadata(
     marketplace_id: Option<String>,
     installed_version: Option<String>,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -82,7 +82,7 @@ pub fn record_miniapp_opened_with_metadata(
 pub fn get_miniapps_history(
     limit: Option<i64>,
 ) -> Result<Vec<MiniAppHistoryEntry>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
 
     let limit_val = limit.unwrap_or(50);
 
@@ -121,7 +121,7 @@ pub fn get_miniapps_history(
 pub fn toggle_miniapp_favorite(
     id: i64,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     // Toggle the is_favorite value and return the new state
     conn.execute(
@@ -145,7 +145,7 @@ pub fn set_miniapp_favorite(
     id: i64,
     is_favorite: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     conn.execute(
         "UPDATE miniapps_history SET is_favorite = ?1 WHERE id = ?2",
@@ -160,7 +160,7 @@ pub fn set_miniapp_favorite(
 pub fn remove_miniapp_from_history(
     name: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     conn.execute(
         "DELETE FROM miniapps_history WHERE name = ?1",
@@ -174,8 +174,9 @@ pub fn remove_miniapp_from_history(
 /// Remove history entries whose package file no longer exists on disk (e.g.
 /// after a storage clear deleted the .xdc). A dead ref renders a broken tile
 /// that can only ever open to a file-not-found error.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     let rows: Vec<(i64, Option<String>)> = {
         let mut stmt = conn.prepare(
@@ -209,12 +210,18 @@ pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
     Ok(removed)
 }
 
+/// OPFS can't be probed synchronously, so the web never prunes.
+#[cfg(target_arch = "wasm32")]
+pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
+    Ok(0)
+}
+
 /// Update the installed version for a marketplace app
 pub fn update_miniapp_version(
     marketplace_id: &str,
     version: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     conn.execute(
         "UPDATE miniapps_history SET installed_version = ?1 WHERE marketplace_id = ?2",
@@ -229,7 +236,7 @@ pub fn update_miniapp_version(
 pub fn get_miniapp_installed_version(
     marketplace_id: &str,
 ) -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
 
     let result = conn.query_row(
         "SELECT installed_version FROM miniapps_history WHERE marketplace_id = ?1",
@@ -250,8 +257,8 @@ pub fn get_miniapp_installed_version(
 /// Matches the blossom hash in src_url filenames against the marketplace cache.
 /// Only hash-based matching is used — name matching is intentionally avoided to prevent
 /// phishing when public publishing is enabled.
-pub fn backfill_marketplace_ids(apps: &[super::super::miniapps::marketplace::MarketplaceApp]) -> Result<u32, String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+pub fn backfill_marketplace_ids(apps: &[crate::webxdc::MarketplaceApp]) -> Result<u32, String> {
+    let conn = super::get_write_connection_guard_static()?;
 
     // Get history entries missing marketplace_id
     let mut stmt = conn.prepare(
@@ -298,7 +305,7 @@ pub fn backfill_marketplace_ids(apps: &[super::super::miniapps::marketplace::Mar
 pub fn get_miniapp_granted_permissions(
     file_hash: &str,
 ) -> Result<String, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT permission FROM miniapp_permissions WHERE file_hash = ?1 AND granted = 1"
@@ -320,10 +327,10 @@ pub fn set_miniapp_permission(
     permission: &str,
     granted: bool,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -348,10 +355,10 @@ pub fn set_miniapp_permissions(
     file_hash: &str,
     permissions: &[(&str, bool)],
 ) -> Result<(), String> {
-    let mut conn = crate::account_manager::get_write_connection_guard_static()?;
+    let mut conn = super::get_write_connection_guard_static()?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -382,7 +389,7 @@ pub fn set_miniapp_permissions(
 pub fn has_miniapp_permission_prompt(
     file_hash: &str,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
 
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM miniapp_permissions WHERE file_hash = ?1)",
@@ -398,7 +405,7 @@ pub fn has_miniapp_permission_prompt(
 pub fn revoke_all_miniapp_permissions(
     file_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     conn.execute(
         "DELETE FROM miniapp_permissions WHERE file_hash = ?1",
@@ -415,11 +422,11 @@ pub fn revoke_all_miniapp_permissions(
 
 /// Save marketplace apps to the SQLite cache (full replace).
 /// Upserts all provided apps and deletes any IDs not in the new set.
-pub fn save_marketplace_cache(apps: &[crate::miniapps::marketplace::MarketplaceApp]) -> Result<(), String> {
-    let mut conn = crate::account_manager::get_write_connection_guard_static()?;
+pub fn save_marketplace_cache(apps: &[crate::webxdc::MarketplaceApp]) -> Result<(), String> {
+    let mut conn = super::get_write_connection_guard_static()?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -456,14 +463,14 @@ pub fn save_marketplace_cache(apps: &[crate::miniapps::marketplace::MarketplaceA
 }
 
 /// Load all marketplace apps from the SQLite cache.
-pub fn load_marketplace_cache() -> Result<Vec<crate::miniapps::marketplace::MarketplaceApp>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+pub fn load_marketplace_cache() -> Result<Vec<crate::webxdc::MarketplaceApp>, String> {
+    let conn = super::get_db_connection_guard_static()?;
 
     let mut stmt = conn.prepare(
         "SELECT data FROM marketplace_cache"
     ).map_err(|e| format!("Failed to prepare marketplace cache query: {}", e))?;
 
-    let apps: Vec<crate::miniapps::marketplace::MarketplaceApp> = stmt.query_map([], |row| {
+    let apps: Vec<crate::webxdc::MarketplaceApp> = stmt.query_map([], |row| {
         let json: String = row.get(0)?;
         serde_json::from_str(&json).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -481,7 +488,7 @@ pub fn copy_miniapp_permissions(
     old_hash: &str,
     new_hash: &str,
 ) -> Result<(), String> {
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
+    let conn = super::get_write_connection_guard_static()?;
 
     // Copy all permission records from old hash to new hash
     conn.execute(
@@ -517,7 +524,7 @@ pub fn get_active_peer_advertisements(
     topic_encoded: &str,
     my_npub: &str,
 ) -> Result<Vec<PeerAdvertisementRecord>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
 
     // Latest ad per npub, dropped when a peer-left exists at the SAME OR LATER second —
     // timestamps are second-granular, so an open-then-instant-close lands ad and left in
@@ -586,7 +593,7 @@ pub fn peer_signal_is_current(
     created_at: u64,
     is_advertisement: bool,
 ) -> Result<bool, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
+    let conn = super::get_db_connection_guard_static()?;
     // An AD is superseded by ANY strictly-newer signal or a same-second left;
     // a LEFT only by a strictly-newer ad.
     let sql = if is_advertisement {

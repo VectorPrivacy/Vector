@@ -90,6 +90,7 @@ pub mod emoji_usage;
 pub mod badges;
 pub mod bot_interface;
 pub mod webxdc;
+pub mod webxdc_permissions;
 #[cfg(feature = "tor")]
 pub mod tor;
 

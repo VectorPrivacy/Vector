@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod settings;
 pub mod at_rest;
+pub mod miniapps;
 pub mod schema;
 pub mod profiles;
 pub mod id_cache;
