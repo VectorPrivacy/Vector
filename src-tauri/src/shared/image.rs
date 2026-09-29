@@ -3,9 +3,7 @@
 //! This module consolidates the 16+ duplicate image encoding blocks found throughout
 //! the codebase (primarily in message.rs) into reusable functions.
 
-use image::{DynamicImage, ExtendedColorType};
-use image::codecs::png::{PngEncoder, CompressionType, FilterType};
-use image::ImageEncoder;
+use image::DynamicImage;
 use std::io::Cursor;
 
 /// Maximum dimension for image compression (1920px on longest side)
@@ -57,22 +55,11 @@ pub const SMALL_IMAGE_THRESHOLD: u32 = 200;
 /// # Returns
 /// Encoded PNG bytes or an error string
 pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    // Pre-allocate: PNG with best compression is typically 20-40% of raw RGBA size
-    let estimated_size = pixels.len() / 3;
-    let mut png_data = Vec::with_capacity(estimated_size);
-    let encoder = PngEncoder::new_with_quality(
-        &mut png_data,
-        CompressionType::Best,
-        FilterType::Adaptive,
-    );
-    encoder.write_image(
-        pixels,
-        width,
-        height,
-        ExtendedColorType::Rgba8
-    ).map_err(|e| format!("Failed to encode PNG: {}", e))?;
-    Ok(png_data)
+    crate::simd::png::encode(pixels, width, height, 4, PNG_LEVEL)
 }
+
+/// Deflate level for PNG output: within 2% of maximum compression at a tenth of its time.
+const PNG_LEVEL: u8 = 6;
 
 /// Convert RGBA pixel data to RGB by dropping the alpha channel.
 ///
