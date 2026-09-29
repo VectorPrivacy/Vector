@@ -33,18 +33,17 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
 
 ## Works
 
-Accounts (create, import, PIN/password, unlock, logout, delete, export keys, add-account),
+Accounts (create, import, PIN/password, unlock, change or disable the PIN, logout, delete, export keys, add-account),
 DMs (text, replies, reactions, edits, deletes, retries, self-destruct), attachments (send,
 receive, image compression and metadata stripping, voice messages, audio playback),
 profiles and avatars (edit, upload, blocks, nicknames), Concord v2 communities (create,
 invite, join, channels, history, live messages, reactions, roles, moderation, pins,
 images), relays and Blossom settings, notification levels and mutes, cross-device sync of
 pins, blocks, mutes, nicknames and the community list, browser notifications, emoji and
-GIF pickers.
+GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji.
 
 ## Not yet
 
-Changing local encryption after setup, mini apps, calls, the PIVX wallet, emoji pack
-authoring, wallpapers, transcription, Tor, bunker and NIP-55 signers, legacy (v1)
+Mini apps, calls, the PIVX wallet, transcription, Tor, bunker and NIP-55 signers, legacy (v1)
 community writes. Avatars and images load through the media proxy; without one, hosts
 that send no CORS headers are shown by URL.
