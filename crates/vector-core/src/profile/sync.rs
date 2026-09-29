@@ -72,6 +72,9 @@ impl SyncPriority {
 pub(crate) struct QueueEntry {
     npub: String,
     added_at: Instant,
+    /// Matches `ProfileSyncQueue::queued` while this is the npub's live entry; a re-add
+    /// supersedes it in place rather than sweeping the lanes for it.
+    gen: u64,
 }
 
 // ============================================================================
@@ -84,6 +87,10 @@ pub struct ProfileSyncQueue {
     high_queue: VecDeque<QueueEntry>,
     medium_queue: VecDeque<QueueEntry>,
     low_queue: VecDeque<QueueEntry>,
+    /// Each waiting npub's live entry generation. Superseded entries stay in their lane
+    /// and are dropped when they reach its front.
+    queued: HashMap<String, u64>,
+    next_gen: u64,
     processing: HashSet<String>,
     last_fetched: HashMap<String, Instant>,
     is_processing: bool,
@@ -100,6 +107,8 @@ impl ProfileSyncQueue {
             high_queue: VecDeque::new(),
             medium_queue: VecDeque::new(),
             low_queue: VecDeque::new(),
+            queued: HashMap::new(),
+            next_gen: 0,
             processing: HashSet::new(),
             last_fetched: HashMap::new(),
             is_processing: false,
@@ -121,9 +130,19 @@ impl ProfileSyncQueue {
             }
         }
 
-        self.remove_from_all_queues(&npub);
+        self.next_gen += 1;
+        let gen = self.next_gen;
+        self.queued.insert(npub.clone(), gen);
 
-        let entry = QueueEntry { npub, added_at: Instant::now() };
+        let entry = QueueEntry { npub, added_at: Instant::now(), gen };
+        // Re-adds while the processor is stalled (offline) would otherwise grow the lanes
+        // without bound; one sweep once stale entries outnumber live ones keeps them linear.
+        let len = self.critical_queue.len() + self.high_queue.len() + self.medium_queue.len() + self.low_queue.len();
+        if len > 2 * self.queued.len() + 64 {
+            for lane in [&mut self.critical_queue, &mut self.high_queue, &mut self.medium_queue, &mut self.low_queue] {
+                lane.retain(|e| Self::is_live(&self.queued, e));
+            }
+        }
         match priority {
             SyncPriority::Critical => self.critical_queue.push_back(entry),
             SyncPriority::High => self.high_queue.push_back(entry),
@@ -132,11 +151,18 @@ impl ProfileSyncQueue {
         }
     }
 
-    fn remove_from_all_queues(&mut self, npub: &str) {
-        self.critical_queue.retain(|e| e.npub != npub);
-        self.high_queue.retain(|e| e.npub != npub);
-        self.medium_queue.retain(|e| e.npub != npub);
-        self.low_queue.retain(|e| e.npub != npub);
+    fn is_live(queued: &HashMap<String, u64>, e: &QueueEntry) -> bool {
+        queued.get(&e.npub) == Some(&e.gen)
+    }
+
+    /// Drop superseded entries from the front of every lane, so a non-empty lane has a
+    /// live entry first.
+    fn prune_fronts(&mut self) {
+        for lane in [&mut self.critical_queue, &mut self.high_queue, &mut self.medium_queue, &mut self.low_queue] {
+            while lane.front().is_some_and(|e| !Self::is_live(&self.queued, e)) {
+                lane.pop_front();
+            }
+        }
     }
 
     /// Drop every queued + in-flight entry. Used by `reset_session()` so a
@@ -146,6 +172,7 @@ impl ProfileSyncQueue {
         self.high_queue.clear();
         self.medium_queue.clear();
         self.low_queue.clear();
+        self.queued.clear();
         self.processing.clear();
         self.last_fetched.clear();
     }
@@ -153,6 +180,7 @@ impl ProfileSyncQueue {
     /// Get the next batch of profiles ready to process (highest priority first).
     pub(crate) fn get_next_batch(&mut self) -> Vec<QueueEntry> {
         let mut batch = Vec::new();
+        self.prune_fronts();
 
         let (queue, priority) = if !self.critical_queue.is_empty() {
             (&mut self.critical_queue, SyncPriority::Critical)
@@ -169,15 +197,18 @@ impl ProfileSyncQueue {
         let batch_size = priority.batch_size();
         let processing_delay = priority.processing_delay();
 
-        while batch.len() < batch_size && !queue.is_empty() {
-            if let Some(entry) = queue.front() {
-                if entry.added_at.elapsed() >= processing_delay {
-                    let entry = queue.pop_front().unwrap();
-                    batch.push(entry);
-                } else {
-                    break;
-                }
+        while batch.len() < batch_size {
+            let Some(entry) = queue.front() else { break };
+            if !Self::is_live(&self.queued, entry) {
+                queue.pop_front();
+                continue;
             }
+            if entry.added_at.elapsed() < processing_delay {
+                break;
+            }
+            let entry = queue.pop_front().unwrap();
+            self.queued.remove(&entry.npub);
+            batch.push(entry);
         }
 
         batch
@@ -974,6 +1005,36 @@ mod tests {
         assert_eq!(SyncPriority::Low.batch_size(), 50);
     }
 
+    impl ProfileSyncQueue {
+        fn push_raw(&mut self, priority: SyncPriority, npub: &str, added_at: Instant) {
+            self.next_gen += 1;
+            self.queued.insert(npub.to_string(), self.next_gen);
+            let entry = QueueEntry { npub: npub.to_string(), added_at, gen: self.next_gen };
+            match priority {
+                SyncPriority::Critical => self.critical_queue.push_back(entry),
+                SyncPriority::High => self.high_queue.push_back(entry),
+                SyncPriority::Medium => self.medium_queue.push_back(entry),
+                SyncPriority::Low => self.low_queue.push_back(entry),
+            }
+        }
+
+        fn live(&self, lane: &VecDeque<QueueEntry>) -> Vec<String> {
+            lane.iter().filter(|e| Self::is_live(&self.queued, e)).map(|e| e.npub.clone()).collect()
+        }
+    }
+
+    #[test]
+    fn re_adds_while_stalled_stay_bounded() {
+        let mut queue = ProfileSyncQueue::new();
+        for _ in 0..100 {
+            for i in 0..50 {
+                queue.add(format!("npub1{i}"), SyncPriority::Low, true);
+            }
+        }
+        assert_eq!(queue.live(&queue.low_queue).len(), 50);
+        assert!(queue.low_queue.len() <= 2 * 50 + 64 + 1, "{} entries for 50 profiles", queue.low_queue.len());
+    }
+
     #[test]
     fn queue_add_and_dedup() {
         let mut queue = ProfileSyncQueue::new();
@@ -982,9 +1043,8 @@ mod tests {
         queue.add("npub1alice".to_string(), SyncPriority::High, false);
 
         // Should be in High queue only (deduped from Low)
-        assert!(queue.low_queue.is_empty());
-        assert_eq!(queue.high_queue.len(), 1);
-        assert_eq!(queue.high_queue[0].npub, "npub1alice");
+        assert!(queue.live(&queue.low_queue).is_empty());
+        assert_eq!(queue.live(&queue.high_queue), ["npub1alice"]);
     }
 
     #[test]
@@ -1023,18 +1083,29 @@ mod tests {
     }
 
     #[test]
+    fn re_adding_moves_an_entry_between_lanes() {
+        let mut queue = ProfileSyncQueue::new();
+        queue.add("npub1a".into(), SyncPriority::Low, true);
+        queue.add("npub1b".into(), SyncPriority::Low, true);
+        queue.add("npub1a".into(), SyncPriority::Critical, true);
+        assert_eq!(queue.live(&queue.low_queue), ["npub1b"]);
+        assert_eq!(queue.live(&queue.critical_queue), ["npub1a"]);
+        let batch = queue.get_next_batch();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].npub, "npub1a");
+        // Its superseded Low entry never surfaces, even once the Low lane's delay passes.
+        queue.critical_queue.clear();
+        queue.add("npub1c".into(), SyncPriority::Low, true);
+        assert_eq!(queue.live(&queue.low_queue), ["npub1b", "npub1c"]);
+    }
+
+    #[test]
     fn get_next_batch_priority_order() {
         let mut queue = ProfileSyncQueue::new();
 
         // Add to Low and Critical queues
-        queue.low_queue.push_back(QueueEntry {
-            npub: "npub1low".to_string(),
-            added_at: Instant::now() - Duration::from_secs(600),
-        });
-        queue.critical_queue.push_back(QueueEntry {
-            npub: "npub1critical".to_string(),
-            added_at: Instant::now(),
-        });
+        queue.push_raw(SyncPriority::Low, "npub1low", Instant::now() - Duration::from_secs(600));
+        queue.push_raw(SyncPriority::Critical, "npub1critical", Instant::now());
 
         let batch = queue.get_next_batch();
         assert_eq!(batch.len(), 1);
@@ -1046,10 +1117,7 @@ mod tests {
         let mut queue = ProfileSyncQueue::new();
 
         // Add a High priority entry just now (5s delay required)
-        queue.high_queue.push_back(QueueEntry {
-            npub: "npub1new".to_string(),
-            added_at: Instant::now(),
-        });
+        queue.push_raw(SyncPriority::High, "npub1new", Instant::now());
 
         let batch = queue.get_next_batch();
         assert!(batch.is_empty(), "should not process before delay elapses");
