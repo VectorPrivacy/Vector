@@ -44,6 +44,8 @@ async fn setup() {
                         at: 1_700_000_000_000 + (n as u64) * 60_000,
                         mine: n % 3 == 0,
                         npub: Some(chat.clone()),
+                        // Every fifth message quotes one a little earlier, as real threads do.
+                        replied_to: if n % 5 == 4 { format!("{:016x}{:048x}", c, n - 3) } else { String::new() },
                         ..Default::default()
                     }
                 })
@@ -106,4 +108,51 @@ async fn bench_db_read_paths() {
     for (name, t) in rows {
         println!("{name:<36} {:>10.1} µs", median(t));
     }
+}
+
+/// One page as the app serves it: compose from the DB, merge into STATE and read back compact,
+/// re-attach reply quotes, serialise for IPC.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark, not an assertion"]
+async fn bench_page_pipeline() {
+    setup().await;
+    let chats: Vec<(String, i64)> = (0..CHATS)
+        .map(|c| (chat_npub(c), vector_core::db::id_cache::get_chat_id_by_identifier(&chat_npub(c)).expect("id")))
+        .collect();
+    let mut t = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut bytes = 0;
+    for round in 0..ROUNDS + 2 {
+        let mut acc = [0f64; 4];
+        for (npub, id) in &chats {
+            let s = Instant::now();
+            let messages = vector_core::db::events::get_message_views(*id, 50, 0).await.unwrap();
+            acc[0] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+            let mut served = {
+                let mut state = vector_core::STATE.lock().await;
+                state.add_messages_to_chat_batch(npub, messages);
+                let chat = state.get_chat(npub).unwrap();
+                ids.iter().filter_map(|id| chat.get_compact_message(id)).map(|c| c.to_message(&state.interner)).collect::<Vec<_>>()
+            };
+            acc[1] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            vector_core::db::events::populate_reply_contexts(served.iter_mut().collect()).await.unwrap();
+            acc[2] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            let json = serde_json::to_vec(&served).unwrap();
+            acc[3] += s.elapsed().as_secs_f64();
+            bytes = json.len();
+            black_box(json);
+        }
+        if round >= 2 {
+            for (v, a) in t.iter_mut().zip(acc) {
+                v.push(a * 1e6 / CHATS as f64);
+            }
+        }
+    }
+    for (name, v) in ["compose from DB", "merge into STATE + read back", "re-attach reply quotes", "serialise JSON"].iter().zip(t) {
+        println!("{name:<32} {:>8.1} µs", median(v));
+    }
+    println!("page of 50: {bytes} bytes of JSON");
 }
