@@ -92,13 +92,11 @@ pub fn get_attachments_for_events(event_ids: &[String]) -> Result<HashMap<String
         return Ok(out);
     }
     let conn = super::get_db_connection_guard_static()?;
-    let placeholders = event_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT {SELECT_COLS} FROM attachments WHERE event_id IN ({placeholders}) ORDER BY event_id, att_index"
+        "SELECT {SELECT_COLS} FROM attachments WHERE event_id IN (SELECT value FROM json_each(?1)) ORDER BY event_id, att_index"
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare get_attachments: {e}"))?;
-    let params = rusqlite::params_from_iter(event_ids.iter());
-    let rows = stmt.query_map(params, row_to_attachment)
+    let mut stmt = conn.prepare_cached(&sql).map_err(|e| format!("prepare get_attachments: {e}"))?;
+    let rows = stmt.query_map([super::events::id_list_param(event_ids)], row_to_attachment)
         .map_err(|e| format!("query get_attachments: {e}"))?;
     for r in rows.flatten() {
         out.entry(r.0).or_default().push(r.1);

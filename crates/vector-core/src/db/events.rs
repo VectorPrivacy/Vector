@@ -851,13 +851,19 @@ fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
 /// seeks `community_bans`' primary key instead of walking chats -> channels for
 /// every candidate event.
 fn community_of_chat(conn: &rusqlite::Connection, chat_id: i64) -> Option<String> {
-    conn.query_row(
+    conn.prepare_cached(
         "SELECT cc.community_id FROM community_channels cc \
          JOIN chats c ON c.chat_identifier = cc.channel_id WHERE c.id = ?1",
-        rusqlite::params![chat_id],
-        |r| r.get::<_, String>(0),
     )
+    .ok()?
+    .query_row(rusqlite::params![chat_id], |r| r.get::<_, String>(0))
     .ok()
+}
+
+/// An id list as one JSON array parameter, read in SQL through `json_each(?)`: one statement
+/// for any list length, so it prepares once per connection and stays cached.
+pub(super) fn id_list_param(ids: &[String]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
 }
 
 /// Excludes a banned author's events BEFORE `LIMIT`.
@@ -906,7 +912,7 @@ pub async fn get_events(
                 kind_placeholders, ban_filter_sql(community_param), limit_param, offset_param
             );
 
-            let mut stmt = conn.prepare(&sql)
+            let mut stmt = conn.prepare_cached(&sql)
                 .map_err(|e| format!("Failed to prepare events query: {}", e))?;
 
             match k.len() {
@@ -934,7 +940,7 @@ pub async fn get_events(
                 _ => return Err("Unsupported number of kinds".to_string()),
             }
         } else {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 &format!("SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
                  created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
                  FROM events WHERE chat_id = ?1{} \
@@ -971,24 +977,15 @@ pub async fn get_related_events(
     }
 
     let conn = super::get_db_connection_guard_static()?;
-
-    let placeholders: String = reference_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
          created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
-         FROM events WHERE reference_id IN ({}) \
+         FROM events WHERE reference_id IN (SELECT value FROM json_each(?1)) \
          ORDER BY created_at ASC, received_at ASC",
-        placeholders
-    );
+    )
+    .map_err(|e| format!("Failed to prepare related events query: {}", e))?;
 
-    let mut stmt = conn.prepare(&sql)
-        .map_err(|e| format!("Failed to prepare related events query: {}", e))?;
-
-    let params: Vec<&dyn rusqlite::ToSql> = reference_ids.iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
-        .collect();
-
-    let events: Vec<StoredEvent> = stmt.query_map(params.as_slice(), parse_event_row)
+    let events: Vec<StoredEvent> = stmt.query_map([id_list_param(reference_ids)], parse_event_row)
         .map_err(|e| format!("Failed to query related events: {}", e))?
         .filter_map(|r| r.ok())
         .collect();
@@ -1021,24 +1018,14 @@ pub async fn get_reply_contexts(
 
     let (events, edits) = {
         let conn = super::get_db_connection_guard_static()?;
-
-        let placeholders: String = (0..message_ids.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
+        let ids = id_list_param(message_ids);
 
         // Query original messages (tags carry the file-type/name for attachment quotes)
-        let sql = format!(
-            "SELECT id, kind, content, npub, tags FROM events WHERE id IN ({})",
-            placeholders
-        );
-        let mut stmt = conn.prepare(&sql)
+        let mut stmt = conn
+            .prepare_cached("SELECT id, kind, content, npub, tags FROM events WHERE id IN (SELECT value FROM json_each(?1))")
             .map_err(|e| format!("Failed to prepare reply context query: {}", e))?;
 
-        let params: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
-        let params_dyn: Vec<&dyn rusqlite::ToSql> = params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-
-        let rows = stmt.query_map(params_dyn.as_slice(), |row| {
+        let rows = stmt.query_map([&ids], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?,
                 row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?))
@@ -1047,15 +1034,14 @@ pub async fn get_reply_contexts(
         drop(stmt);
 
         // Query latest edits
-        let edit_sql = format!(
-            "SELECT reference_id, content, tags FROM events \
-             WHERE kind = {} AND reference_id IN ({}) \
-             ORDER BY created_at DESC, received_at DESC",
-            event_kind::MESSAGE_EDIT, placeholders
-        );
-        let mut edit_stmt = conn.prepare(&edit_sql)
+        let mut edit_stmt = conn
+            .prepare_cached(
+                "SELECT reference_id, content, tags FROM events \
+                 WHERE kind = ?2 AND reference_id IN (SELECT value FROM json_each(?1)) \
+                 ORDER BY created_at DESC, received_at DESC",
+            )
             .map_err(|e| format!("Failed to prepare edit query: {}", e))?;
-        let edit_rows = edit_stmt.query_map(params_dyn.as_slice(), |row| {
+        let edit_rows = edit_stmt.query_map(rusqlite::params![&ids, event_kind::MESSAGE_EDIT as i32], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?))
         }).map_err(|e| format!("Failed to query edits: {}", e))?;

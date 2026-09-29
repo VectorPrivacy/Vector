@@ -168,3 +168,42 @@ async fn bench_page_pipeline() {
     }
     println!("page of 50: {bytes} bytes of JSON");
 }
+
+/// Where a page's compose time goes: each query it makes, timed on its own.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark, not an assertion"]
+async fn bench_compose_parts() {
+    setup().await;
+    use vector_core::db::events;
+    let ids: Vec<i64> = (0..CHATS).map(|c| vector_core::db::id_cache::get_chat_id_by_identifier(&chat_npub(c)).unwrap()).collect();
+    let kinds = [vector_core::stored_event::event_kind::CHAT_MESSAGE, vector_core::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE, vector_core::stored_event::event_kind::FILE_ATTACHMENT];
+    let mut t = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for round in 0..ROUNDS + 2 {
+        let mut acc = [0f64; 5];
+        for id in &ids {
+            let s = Instant::now();
+            let evs = events::get_events(*id, Some(&kinds), 50, 0).await.unwrap();
+            acc[0] += s.elapsed().as_secs_f64();
+            let msg_ids: Vec<String> = evs.iter().map(|e| e.id.clone()).collect();
+            let s = Instant::now();
+            black_box(events::get_related_events(&msg_ids).await.unwrap());
+            acc[1] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            black_box(vector_core::db::attachments::get_attachments_for_events(&msg_ids).unwrap());
+            acc[2] += s.elapsed().as_secs_f64();
+            let replies: Vec<String> = evs.iter().filter_map(|e| e.get_reply_reference().map(str::to_string)).collect();
+            let s = Instant::now();
+            black_box(events::get_reply_contexts(&replies).await.unwrap());
+            acc[3] += s.elapsed().as_secs_f64();
+            let s = Instant::now();
+            black_box(events::get_message_views(*id, 50, 0).await.unwrap());
+            acc[4] += s.elapsed().as_secs_f64();
+        }
+        if round >= 2 {
+            for (v, a) in t.iter_mut().zip(acc) { v.push(a * 1e6 / CHATS as f64); }
+        }
+    }
+    for (name, v) in ["get_events (query + decrypt)", "related events", "attachments", "reply contexts", "whole compose"].iter().zip(t) {
+        println!("{name:<32} {:>8.1} µs", median(v));
+    }
+}
