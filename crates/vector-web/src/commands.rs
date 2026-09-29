@@ -296,6 +296,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             files::send_cached(a.str("channelId")?, a.opt_str("repliedTo").unwrap_or_default(), a.bool("useCompression").unwrap_or(false),
                 a.bool("keepMetadata").unwrap_or(false), a.opt_str("nameOverride").unwrap_or_default()).await.map(|_| Value::Null)
         }
+        "web_send_voice" => files::send_voice(a.str("receiver")?, a.opt_str("repliedTo").unwrap_or_default(), a.str("filePath")?).await,
         "cancel_upload" => {
             messaging::cancel_upload(&a.str("pendingId").or_else(|_| a.str("messageId"))?);
             Ok(Value::Null)

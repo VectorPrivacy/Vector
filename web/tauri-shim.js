@@ -63,8 +63,18 @@
         });
     }
 
+    // Commands answered in the page itself (media, clipboard), registered by web/media.js.
+    const local = new Map();
+
     // Raw-body IPC (Tauri's `invoke(cmd, bytes, { headers })`) keeps the bytes binary.
     function invoke(cmd, args = {}, options = {}) {
+        if (local.has(cmd)) {
+            try { return Promise.resolve(local.get(cmd)(args ?? {}, options)); } catch (e) { return Promise.reject(String(e?.message ?? e)); }
+        }
+        return backend(cmd, args, options);
+    }
+
+    function backend(cmd, args = {}, options = {}) {
         if (args instanceof ArrayBuffer) args = new Uint8Array(args);
         if (args instanceof Uint8Array) return post({ t: 'invoke-bytes', cmd, bytes: args, headers: options.headers });
         return post({ t: 'invoke', cmd, args: JSON.stringify(args ?? {}) });
@@ -221,6 +231,15 @@
         },
         process: { exit: async () => location.reload(), relaunch: async () => location.reload() },
         updater: { check: async () => null },
+    };
+
+    const convertFileSrc = window.__TAURI__.core.convertFileSrc;
+    window.__vectorWeb = {
+        register: (cmd, fn) => local.set(cmd, fn),
+        emit: dispatchEvent,
+        backend,
+        storeFiles,
+        convertFileSrc,
     };
 
     // The desktop reloads its webview on `session_reload`; here a reload also

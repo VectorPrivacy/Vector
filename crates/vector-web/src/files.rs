@@ -283,3 +283,10 @@ pub async fn image_preview(path: &str) -> Result<Value, String> {
     }
     Ok(json!(path))
 }
+
+/// A recorded voice message: a nameless WAV, which receivers render as a voice player.
+pub async fn send_voice(receiver: String, replied_to: String, path: String) -> Result<Value, String> {
+    let bytes = std::sync::Arc::new(read(&path).await?);
+    let _ = vector_core::webfiles::remove(Path::new(&path)).await;
+    send(receiver, replied_to, bytes, String::new(), "wav".into(), None).await
+}
