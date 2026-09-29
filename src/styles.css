@@ -2547,6 +2547,24 @@ body.mobile #chat-new-scan-btn { display: block; }
   -webkit-user-drag: none;
   -webkit-touch-callout: none;
 }
+/* The whole app on touch, as a native app: a long-press is Vector's menu, never the
+   OS selecting text or offering an image, and copying goes through that menu. Only
+   what takes typing stays selectable. */
+body.mobile,
+body.mobile * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+body.mobile input,
+body.mobile textarea,
+body.mobile [contenteditable],
+body.mobile [contenteditable] * {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
 
 .profile-more-dropdown {
   position: absolute;
