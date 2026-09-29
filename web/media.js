@@ -224,4 +224,21 @@
     });
     register('read_clipboard_files', () => []);
     register('reveal_attachment', ({ path }) => save(path));
+
+    // --- Notifications -----------------------------------------------------
+    // Permission is asked on the first click: browsers refuse prompts without a gesture.
+    addEventListener('pointerdown', () => {
+        if (window.Notification?.permission === 'default') Notification.requestPermission();
+    }, { once: true });
+
+    window.__TAURI__.event.listen('web_notify', ({ payload }) => {
+        if (window.Notification?.permission !== 'granted') return;
+        if (document.visibilityState === 'visible' && document.hasFocus()) return;
+        const n = new Notification(payload.title, {
+            body: payload.body,
+            icon: payload.icon ? convertFileSrc(payload.icon) : '/icons/vector-mark.svg',
+            tag: payload.chat_id,
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+    });
 })();
