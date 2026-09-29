@@ -550,11 +550,12 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
         std::fs::create_dir_all(dir).map_err(|e| format!("thumb dir: {e}"))?;
     }
     let mut out: Option<Vec<u8>> = None;
-    if crate::shared::image::animated_format(bytes).is_none() {
-        if let Ok(img) = image::load_from_memory(bytes) {
-            if img.width() > AVATAR_THUMB_DIM || img.height() > AVATAR_THUMB_DIM {
-                out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
-            }
+    // Size from the header: a JPEG decodes DCT-scaled to just above the thumb, so the
+    // decoded size no longer says whether the original needed shrinking.
+    let big = crate::shared::image::animated_dims(bytes).is_some_and(|(w, h)| w.max(h) > AVATAR_THUMB_DIM);
+    if big && crate::shared::image::animated_format(bytes).is_none() {
+        if let Ok(img) = crate::shared::image::decode_image(bytes, AVATAR_THUMB_DIM) {
+            out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
         }
     }
     let tmp = dest.with_extension("tmp");
@@ -1156,5 +1157,34 @@ mod backfill_probe {
                 Err(e) => println!("{name}: transcode failed: {e}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod avatar_thumb_tests {
+    use super::*;
+
+    fn jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 7 * 30) as u8]));
+        crate::shared::image::encode_jpeg(img.as_raw(), w, h, 90).unwrap()
+    }
+
+    #[test]
+    fn large_avatars_shrink_to_the_thumb_and_small_ones_copy_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        // 1280 decodes DCT-scaled to exactly the thumb size, which must still re-encode.
+        for (w, h) in [(1280, 960), (4000, 300), (300, 170)] {
+            let path = dir.path().join(format!("{w}x{h}.jpg"));
+            let bytes = jpeg(w, h);
+            write_avatar_thumb(&path, &bytes).unwrap();
+            let thumb = std::fs::read(avatar_thumb_path(&path).unwrap()).unwrap();
+            let img = image::load_from_memory(&thumb).unwrap();
+            assert_eq!(img.width().max(img.height()), AVATAR_THUMB_DIM, "{w}x{h}");
+            assert!(thumb.len() < bytes.len(), "{w}x{h}");
+        }
+        let path = dir.path().join("small.jpg");
+        let bytes = jpeg(120, 90);
+        write_avatar_thumb(&path, &bytes).unwrap();
+        assert_eq!(std::fs::read(avatar_thumb_path(&path).unwrap()).unwrap(), bytes);
     }
 }
