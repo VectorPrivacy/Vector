@@ -232,10 +232,23 @@
     window.__TAURI__.opener.openPath = async (path) => { openOrSave(path); };
 
     // --- Notifications -----------------------------------------------------
-    // Permission is asked on the first click: browsers refuse prompts without a gesture.
-    addEventListener('pointerdown', () => {
-        if (window.Notification?.permission === 'default') Notification.requestPermission();
-    }, { once: true });
+    // Asked in-app once signed in, and from Settings; the browser's own prompt only
+    // follows a tap on Allow, since it refuses prompts without a gesture.
+    const permission = () => window.Notification?.permission || 'unsupported';
+    register('web_notifications', () => permission());
+    register('request_web_notifications', async () => {
+        if (permission() === 'default') await Notification.requestPermission();
+        return permission();
+    });
+    register('offer_web_notifications', async () => {
+        if (permission() !== 'default') return;
+        const invoke = window.__TAURI__.core.invoke;
+        if (await invoke('get_sql_setting', { key: 'web_notif_prompted' }).catch(() => null)) return;
+        await invoke('set_sql_setting', { key: 'web_notif_prompted', value: 'true' });
+        const allow = await popupConfirm('Notifications', 'Vector can let you know when messages arrive while it is in the background.<br><br>You can change this later in Settings.', false, '', 'vector_warning.svg', '', 'Allow');
+        if (allow) await Notification.requestPermission();
+        initNotificationSettings();
+    });
 
     window.__TAURI__.event.listen('web_notify', ({ payload }) => {
         if (window.Notification?.permission !== 'granted') return;

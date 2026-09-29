@@ -35,6 +35,8 @@ await buildSvelte({ dev: !release });
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
 for (const f of ['tauri-shim.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+// Icons and the link-preview card, at the root where browsers and crawlers look.
+cpSync(join(ROOT, 'web', 'meta'), OUT, { recursive: true });
 // The app's own version, for Settings and the database's downgrade record.
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 const workerPath = join(OUT, 'web', 'worker.js');
@@ -64,11 +66,39 @@ export const CSP = [
 ].join('; ');
 
 // The shim must define window.__TAURI__ before any app script runs.
+const SITE = 'https://web.vectorapp.io';
+const TITLE = 'Vector Web - Private Messaging';
+const DESCRIPTION = 'Vector, the private and end-to-end encrypted messenger, right in your browser. No install, no phone number: your keys stay on your device.';
+const META = [
+    `<meta name="description" content="${DESCRIPTION}">`,
+    `<link rel="canonical" href="${SITE}/">`,
+    '<link rel="icon" href="/favicon.ico" sizes="32x32">',
+    '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">',
+    '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">',
+    '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">',
+    '<meta name="apple-mobile-web-app-title" content="Vector">',
+    '<meta property="og:type" content="website">',
+    '<meta property="og:site_name" content="Vector">',
+    `<meta property="og:url" content="${SITE}/">`,
+    `<meta property="og:title" content="${TITLE}">`,
+    `<meta property="og:description" content="${DESCRIPTION}">`,
+    `<meta property="og:image" content="${SITE}/og.png">`,
+    '<meta property="og:image:type" content="image/png">',
+    '<meta property="og:image:width" content="1200">',
+    '<meta property="og:image:height" content="630">',
+    '<meta property="og:image:alt" content="Vector: private messaging, right in your browser.">',
+    '<meta name="twitter:card" content="summary_large_image">',
+    `<meta name="twitter:title" content="${TITLE}">`,
+    `<meta name="twitter:description" content="${DESCRIPTION}">`,
+    `<meta name="twitter:image" content="${SITE}/og.png">`,
+].map((m) => `    ${m}\n`).join('');
+
 const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
     .replace('<html', `<html data-version="${VERSION}"`)
     .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
-    .replace('</head>', '    <link rel="stylesheet" href="/web/web.css" />\n  </head>'));
+    .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
+    .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true"></div>\n  '));
 
 console.log(`[build-web] → ${OUT}`);

@@ -308,7 +308,9 @@ async function login(skipAnimations = false) {
 
                 // Prompt for background service / battery optimization (mobile only, once)
                 // Deferred so login animations finish first
-                if (platformFeatures.is_mobile) {
+                if (platformFeatures.os === 'web') {
+                    setTimeout(() => invoke('offer_web_notifications').catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
+                } else if (platformFeatures.is_mobile) {
                     setTimeout(async () => {
                         try {
                             const prompted = await invoke('get_background_service_prompted');

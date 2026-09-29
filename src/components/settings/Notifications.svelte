@@ -4,7 +4,7 @@
     // desktop (settings blob) and mobile (per-key) persistence stay in the app.
     import { notifState } from '../lib/settings.svelte.js';
     import Select from '../ui/Select.svelte';
-    let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind)
+    let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind), allowBrowser
 
     const n = notifState();
     // The dropdown shows Custom while a file is still being picked, so it is local.
@@ -58,6 +58,13 @@
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(kind); };
     }
 </script>
+
+{#if n.ask}
+    <div class="form-group notif-allow">
+        <span class="notif-privacy-label">Alerts for new messages</span>
+        <button class="btn accept-btn btn-bounce" onclick={() => h.allowBrowser()}>Allow</button>
+    </div>
+{/if}
 
 {#if n.sounds}
     <div class="form-group">

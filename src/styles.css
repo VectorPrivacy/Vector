@@ -9174,6 +9174,17 @@ select {
   margin-left: 5px;
 }
 
+.notif-allow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+.notif-allow .accept-btn {
+  width: auto;
+  padding: 8px 22px;
+}
 #notif-privacy-group {
   display: flex;
   align-items: center;

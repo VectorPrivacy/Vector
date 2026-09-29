@@ -1046,6 +1046,7 @@ const NOTIF_HANDLERS = {
     },
     preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
     explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
+    allowBrowser: () => invoke('request_web_notifications').then(initNotificationSettings),
 };
 
 async function initNotificationSettings() {
@@ -1067,8 +1068,11 @@ async function initNotificationSettings() {
         const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
         if (val === 'hide_content' || val === 'hide_all') privacy = val;
     } catch (_) { /* default full */ }
+    // A browser build asks the browser itself, which answers once per site.
+    const ask = platformFeatures.os === 'web' && (await invoke('web_notifications').catch(() => null)) === 'default';
     VectorSvelte.setNotifSettings({
         sounds,
+        ask,
         globalMute: blob.global_mute,
         muteEveryone: blob.mute_everyone,
         sound: { type: blob.sound?.type || 'Default', path: blob.sound?.path || null },
