@@ -1756,7 +1756,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
     // Anchor: newest own message, or the chat's `last_read` event of any kind. A max per kind reads
     // the end of idx_events_unread rather than the whole chat; MATERIALIZED runs each CTE once.
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "WITH anchors AS MATERIALIZED ( \
                 SELECT c.id AS chat_id, c.chat_identifier AS chat_identifier, MAX( \
                     COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?1), 0), \
@@ -1807,7 +1807,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
 pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String> {
     let conn = super::get_db_connection_guard_static()?;
     let count: i64 = conn
-        .query_row(
+        .prepare_cached(
             "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
              WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
                AND (e.npub IS NULL OR e.npub NOT IN ( \
@@ -1822,14 +1822,18 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
                        AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR e2.id = c.last_read)), 0)",
-            rusqlite::params![
-                event_kind::CHAT_MESSAGE as i32,
-                event_kind::PRIVATE_DIRECT_MESSAGE as i32,
-                event_kind::FILE_ATTACHMENT as i32,
-                chat_identifier
-            ],
-            |row| row.get(0),
         )
+        .and_then(|mut stmt| {
+            stmt.query_row(
+                rusqlite::params![
+                    event_kind::CHAT_MESSAGE as i32,
+                    event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+                    event_kind::FILE_ATTACHMENT as i32,
+                    chat_identifier
+                ],
+                |row| row.get(0),
+            )
+        })
         .map_err(|e| format!("query unread_count_for_chat: {e}"))?;
     Ok(count as u32)
 }
