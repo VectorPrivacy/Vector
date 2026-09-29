@@ -103,8 +103,17 @@ writeFileSync(indexPath, html
     // Link previews (Discord's embed stripe) take the first theme-color; media="print"
     // keeps it off the browser chrome, which falls through to the page's dark one.
     .replace('<meta name="theme-color"', '<meta name="theme-color" content="#59fcb3" media="print">\n    <meta name="theme-color"')
-    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
+    .replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
     .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n  '));
+
+// Every injection hangs off a marker in index.html; a missed one must not ship a page without its policy.
+const built = readFileSync(indexPath, 'utf8');
+for (const needed of ['Content-Security-Policy', '/web/tauri-shim.js', '/web/web.css', 'og:image', 'edge-cap']) {
+    if (!built.includes(needed)) {
+        console.error(`[build-web] index.html is missing ${needed}: an injection marker moved`);
+        process.exit(1);
+    }
+}
 
 console.log(`[build-web] → ${OUT}`);
