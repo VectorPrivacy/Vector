@@ -8,7 +8,7 @@ use super::super::Neon;
 use super::super::Avx2;
 use super::super::{Backend, Scalar, Simd, S_OF};
 use super::{
-    be16, dc_block, destuff, idct_block, idct_scaled, idct_square, read_dht, to_pixels, Bits, DecodeError,
+    be16, dc_block, dc_only, destuff, idct_block, idct_scaled, idct_square, read_dht, to_pixels, Bits, DecodeError,
     Decoded, Entropy, Frame, Header, Huff, Plane,
 };
 use rayon::prelude::*;
@@ -26,6 +26,12 @@ struct Coefs {
     /// Blocks a non-interleaved scan visits: the component's own extent.
     vis_w: usize,
     vis_h: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Decode every scan, as the reference the skipping is checked against.
+    static KEEP_ALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A scan with the tables and restart interval in force where it appeared.
@@ -108,6 +114,26 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
         }
     }
     frame.restart = restart;
+
+    // Scaled, the IDCT reads only each block's lowest `bw` x `bh` frequencies. An AC scan
+    // covering none of them is dropped, unless a kept refinement scan still reads its bits.
+    let needed = |c: usize, k: usize| {
+        let ((bw, bh), s) = (frame.block_size[c], usize::from(S_OF[k]));
+        s / 8 < bw && s % 8 < bh
+    };
+    let mut keep = vec![true; scans.len()];
+    for i in (0..scans.len()).rev() {
+        let s = &scans[i].spec;
+        if s.ss == 0 {
+            continue;
+        }
+        let c = s.comps[0];
+        let fed = scans[i + 1..].iter().zip(&keep[i + 1..]).any(|(t, &kept)| {
+            kept && t.spec.ss > 0 && t.spec.comps[0] == c && t.spec.ss <= s.se && s.ss <= t.spec.se
+        });
+        keep[i] = fed || (s.ss..=s.se).any(|k| needed(c, k)) || cfg!(test) && KEEP_ALL.with(std::cell::Cell::get);
+    }
+    let scans: Vec<Scan> = scans.into_iter().zip(keep).filter_map(|(s, kept)| kept.then_some(s)).collect();
 
     // DC scans touch only coefficient 0 of every component, AC scans only their one
     // component's 1..63: each group decodes in order, the groups in parallel.
@@ -435,7 +461,7 @@ unsafe fn idct_row<S: Simd>(row: &[i16], dc: &[i16], q8: &[f32; 64], qraw: &[f32
         blk[0] = dc;
         let blk = &blk;
         let dst = out.as_mut_ptr().add(bx * bw);
-        if blk[1..].iter().all(|&c| c == 0) {
+        if dc_only(blk, bw, bh) {
             dc_block(blk[0], q8[0], dst, stride, bw, bh);
         } else if (bw, bh) == (8, 8) {
             idct_block::<S>(blk, q8, dst, stride);
@@ -486,6 +512,26 @@ mod tests {
             assert!(decode_with(jpeg, Backend::Scalar, None, 0).unwrap().pixels == ours.pixels, "{name}: backends differ");
             let half = decode_with(jpeg, Backend::detect(), None, 30).unwrap();
             assert_eq!((half.width, half.height), (ours.width.div_ceil(2), ours.height.div_ceil(2)), "{name} at 1/2");
+        }
+    }
+
+    #[test]
+    fn skipped_scans_never_change_a_scaled_decode() {
+        use super::super::decode_at_least;
+        let mut files: Vec<Vec<u8>> = FIXTURES.iter().map(|f| f.1.to_vec()).collect();
+        if let Ok(dir) = std::env::var("PROGRESSIVE_DIR") {
+            files.extend(std::fs::read_dir(dir).unwrap().flatten().map(|e| std::fs::read(e.path()).unwrap()));
+        }
+        for (n, jpeg) in files.iter().enumerate() {
+            let long = image::load_from_memory(jpeg).map(|i| i.width().max(i.height())).unwrap_or(64);
+            for min in [long / 8, long / 4, long / 2, long] {
+                let skipped = decode_at_least(jpeg, min).unwrap();
+                super::KEEP_ALL.with(|k| k.set(true));
+                let all = decode_at_least(jpeg, min).unwrap();
+                super::KEEP_ALL.with(|k| k.set(false));
+                assert_eq!((skipped.width, skipped.height), (all.width, all.height));
+                assert!(skipped.pixels == all.pixels, "file {n} at >= {min} px");
+            }
         }
     }
 

@@ -730,7 +730,7 @@ unsafe fn decode_range<S: Simd>(f: &Frame, e: &Entropy, from: Cursor, end: usize
         let (base, stride) = out.0[c];
         let (bw, bh) = f.block_size[c];
         let dst = base.add((my * comp.v + by) * bh * stride + (mx * comp.h + bx) * bw);
-        if !any {
+        if !any || (bw, bh) != (8, 8) && dc_only(&blk, bw, bh) {
             dc_block(blk[0], f.qs[c][0], dst, stride, bw, bh);
         } else if (bw, bh) == (8, 8) {
             idct_block::<S>(&blk, &f.qs[c], dst, stride);
@@ -961,6 +961,13 @@ unsafe fn dc_block(dc: i16, q0: f32, out: *mut u8, stride: usize, w: usize, h: u
     for y in 0..h {
         std::ptr::write_bytes(out.add(y * stride), v, w);
     }
+}
+
+/// Whether the coefficients a `w` x `h` scaled kernel reads are DC alone. Such a block takes
+/// [`dc_block`], which is exact; the scaled IDCTs round `1/8` through two factors of `1/(2√2)`.
+#[inline(always)]
+fn dc_only(blk: &[i16; 64], w: usize, h: usize) -> bool {
+    (0..w).all(|u| blk[u * 8..u * 8 + h].iter().enumerate().all(|(v, &c)| c == 0 || u + v == 0))
 }
 
 /// `N`-point IDCT (N = 1, 2 or 4) of the lowest N frequencies, JPEG-normalised:
