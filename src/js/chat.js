@@ -301,8 +301,16 @@ function _updateChatWindow(chat, sortedMessages, single) {
     initMessageToolbar();   // the toolbar host lives inside the container
     const msgs = _dmsgListHelpers.messages(chat.id);
     let lo = Infinity, hi = -1;
+    // A batch indexes the list once (first index per id, as findIndex finds); per-message
+    // scans were quadratic in page loads.
+    let indexOf = m => msgs.findIndex(x => x === m || x.id === m.id);
+    if (sortedMessages.length > 1) {
+        const at = new Map();
+        for (let i = 0; i < msgs.length; i++) if (!at.has(msgs[i].id)) at.set(msgs[i].id, i);
+        indexOf = m => at.get(m.id) ?? -1;
+    }
     for (const m of sortedMessages) {
-        const i = msgs.findIndex(x => x === m || x.id === m.id);
+        const i = indexOf(m);
         if (i === -1) continue;
         if (i < lo) lo = i;
         if (i > hi) hi = i;
