@@ -178,7 +178,6 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "is_scanning" => Ok(json!(STATE.lock().await.is_syncing)),
         "get_dm_contacts" => to_value(db::events::get_dm_contact_npubs()?),
         "get_install_source" => Ok(json!({ "has_store": false, "label": "" })),
-        "get_message_delete_meta_bulk" => Ok(json!({})),
         "run_maintenance" | "monitor_relay_connections" => Ok(json!(true)),
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
@@ -394,7 +393,8 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             core(VectorCore.set_member_roles(&a.str("communityId")?, &a.str("npub")?, a.de("roleIds")?).await)
         }
         "get_chat_commands" => to_value(VectorCore.get_chat_commands(&a.str("chatId")?).await),
-        "cache_community_image" | "cache_invite_logo" => Ok(Value::Null),
+        "cache_community_image" => crate::community_ops::cache_community_image(&a).await,
+        "cache_invite_logo" => crate::community_ops::cache_invite_logo(&a).await,
 
         "start_typing" => {
             let receiver = a.str("receiver")?;
