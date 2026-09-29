@@ -744,10 +744,12 @@ impl FrameJob {
     }
 }
 
-/// `gif::Frame::from_rgba_speed(.., 10)` to the byte: an exact palette when a frame has at
-/// most 256 colours, else NeuQuant (speed 10 ≈ good quantization at a fraction of
-/// best-quality cost), through the in-house port with its memoised lookup.
+/// `gif::Frame::from_rgba_speed(.., 10)`: an exact palette when a frame has at most 256
+/// colours, else NeuQuant (speed 10 ≈ good quantization at a fraction of best-quality cost)
+/// through the in-house port with its memoised lookup. Unlike it, a clear pixel never
+/// shares a palette entry with an opaque colour.
 fn quantise_frame(width: u16, height: u16, pixels: &mut [u8]) -> gif::Frame<'static> {
+    const REFINE_PASSES: usize = 3;
     use crate::simd::neuquant::{IndexCache, NeuQuant};
     let px = |p: &[u8]| [p[0], p[1], p[2], p[3]];
     let mut transparent: Option<[u8; 4]> = None;
@@ -776,11 +778,40 @@ fn quantise_frame(width: u16, height: u16, pixels: &mut [u8]) -> gif::Frame<'sta
         let buffer = pixels.chunks_exact(4).map(|p| index_of(px(p))).collect();
         let palette = sorted.iter().flat_map(|c| { let [r, g, b, _] = c.to_be_bytes(); [r, g, b] }).collect();
         (buffer, palette, transparent.map(index_of))
-    } else {
-        let nq = NeuQuant::new(10, pixels);
+    } else if transparent.is_none() {
+        let mut nq = NeuQuant::new(10, pixels);
+        nq.refine(pixels, REFINE_PASSES);
         let mut memo = IndexCache::new(&nq);
         let buffer = pixels.chunks_exact(4).map(|p| memo.index_of(px(p))).collect();
-        (buffer, nq.color_map_rgb(), transparent.map(|t| nq.index_of(t)))
+        (buffer, nq.color_map_rgb(), None)
+    } else {
+        // Opaque pixels alone train the palette, and its least-used entry becomes the clear
+        // slot, those pixels moving to their next-nearest colour. An entry shared with a dark
+        // colour would punch that colour through to the frame below.
+        let opaque: Vec<u8> = pixels.chunks_exact(4).filter(|p| p[3] != 0).flatten().copied().collect();
+        let mut nq = NeuQuant::new(10, &opaque);
+        nq.refine(&opaque, REFINE_PASSES);
+        let mut memo = IndexCache::new(&nq);
+        let mut buffer: Vec<u8> = pixels.chunks_exact(4).map(|p| if p[3] == 0 { 0 } else { memo.index_of(px(p)) }).collect();
+        let mut uses = [0usize; 256];
+        for (&i, p) in buffer.iter().zip(pixels.chunks_exact(4)) {
+            uses[usize::from(i)] += usize::from(p[3] != 0);
+        }
+        let slot = (0..256).min_by_key(|&i| uses[i]).unwrap_or(0);
+        let mut palette = nq.color_map_rgb();
+        let nearest_other = |p: &[u8]| -> u8 {
+            let d = |i: usize| (0..3).map(|c| (i32::from(palette[i * 3 + c]) - i32::from(p[c])).pow(2)).sum::<i32>();
+            (0..256).filter(|&i| i != slot).min_by_key(|&i| d(i)).unwrap_or(0) as u8
+        };
+        for (b, p) in buffer.iter_mut().zip(pixels.chunks_exact(4)) {
+            if p[3] == 0 {
+                *b = slot as u8;
+            } else if usize::from(*b) == slot {
+                *b = nearest_other(p);
+            }
+        }
+        palette[slot * 3..slot * 3 + 3].fill(0);
+        (buffer, palette, Some(slot as u8))
     };
     gif::Frame {
         width,
