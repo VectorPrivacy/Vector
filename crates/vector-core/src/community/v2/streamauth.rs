@@ -133,14 +133,14 @@ fn remembered_challenge(relay: &RelayUrl) -> Option<String> {
 
 /// Last responder-driven resubscribe per relay, bounding the challenge→auth→
 /// resubscribe reaction to one per [`RESUB_COOLDOWN`] window per relay.
-static RESUB_AT: LazyLock<Mutex<HashMap<RelayUrl, std::time::Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static RESUB_AT: LazyLock<Mutex<HashMap<RelayUrl, web_time::Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 const RESUB_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// True (and stamps now) if this relay hasn't been resubscribed within the
 /// cooldown window; false while one is still fresh.
 fn resub_cooldown_elapsed(relay: &RelayUrl) -> bool {
     let mut map = RESUB_AT.lock().unwrap_or_else(|e| e.into_inner());
-    let now = std::time::Instant::now();
+    let now = web_time::Instant::now();
     match map.get(relay) {
         Some(at) if now.duration_since(*at) < RESUB_COOLDOWN => false,
         _ => {
@@ -288,7 +288,7 @@ pub async fn prime_auth(client: &Client, relays: &[String]) {
         .authors(authors)
         .limit(1);
     // Bounded so a dead relay can't stall the subscription refresh behind it.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), client
+    let _ = crate::rt::time::timeout(std::time::Duration::from_secs(8), client
         .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
             urls.into_iter().map(|u| (u, vec![filter.clone()])),
         ))

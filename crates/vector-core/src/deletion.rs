@@ -563,7 +563,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                         err_str,
                         RATELIMIT_BACKOFF.as_secs()
                     );
-                    tokio::time::sleep(RATELIMIT_BACKOFF).await;
+                    crate::rt::time::sleep(RATELIMIT_BACKOFF).await;
                     continue;
                 }
                 if retryable {
@@ -612,7 +612,7 @@ fn extract_target_event_id(deletion: &Event) -> Option<EventId> {
 /// is actually gone. Logs a clear "GONE" or "STILL PRESENT" so we can
 /// identify non-compliant relays without bisecting via external tools.
 async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &EventId) {
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    crate::rt::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let pool = client;
     let relays = pool.relays().await;
@@ -666,8 +666,8 @@ async fn publish_cooperative_hide(
     original_kind: u16,
 ) -> Result<(), String> {
     let my_pk = my_public_key().ok_or("Public key not set")?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
     let expiration_ts = now + COOPERATIVE_HIDE_EXPIRY_SECS;

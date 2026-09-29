@@ -39,10 +39,10 @@ bitcoin_hashes = { version = "1.2", default-features = false, features = ["std",
 bip39 = { version = "2.2.2", features = ["rand"] }
 
 # Database
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "fallible_uint"] }
 
-# Async
-tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util", "rt-multi-thread", "macros"] }
+# Async (tokio's full feature set is native-only; see the wasm32 target table)
+tokio = { version = "1.49.0", features = ["sync", "time", "io-util", "macros", "rt"] }
 futures-util = "0.3.31"
 bytes = "1.9"
 # Boxed, Send futures for the Community Transport trait so impls work in spawned tasks.
@@ -73,19 +73,18 @@ chacha20 = "0.9"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # HTTP
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "socks", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 url = "2.5.7"
 
 # Image metadata
 fast-thumbhash = "0.2"
 
 # Utils
+# std::time on native; the browser clock on wasm32, where std's panics.
+web-time = "1"
 rand = "0.8"
 base64-simd = "0.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-
-# TLS
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Tor (Arti) — stock crates.io. Now that Vector is on rusqlite 0.37+ we share
 # libsqlite3-sys with Arti's tor-dirmgr directly, so the rusqlite-0.32 fork is gone.
@@ -100,8 +99,22 @@ tor-guardmgr = { version = "0.45", default-features = false, features = ["bridge
 # we can splice Arti's DataStream into a tokio TcpStream for the SOCKS5 bridge.
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.49.0", features = ["net", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "socks", "http2"] }
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 # Platform
 libc = "0.2"
+
+# Vector Web: the browser supplies the clock, entropy, timers and the executor.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+wasmtimer = "0.4"
 
 [features]
 default = []

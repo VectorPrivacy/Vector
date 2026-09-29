@@ -257,7 +257,7 @@ pub async fn refresh_subscription(client: &Client) {
             if any_live {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            crate::rt::time::sleep(Duration::from_millis(250)).await;
         }
     }
 
@@ -483,7 +483,7 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
                 .unwrap_or(true);
             if caught { break; }
             if attempt + 1 < CHANNEL_FOLLOW_MAX_ATTEMPTS {
-                tokio::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
+                crate::rt::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
             }
         }
         let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);

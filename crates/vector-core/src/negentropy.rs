@@ -27,8 +27,8 @@ fn cap_key(relay_url: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -72,17 +72,17 @@ fn parse_cap_entry(raw: &str) -> Option<(bool, u64)> {
 /// relay must cost the allowance, not a full negentropy initial_timeout. The
 /// Monitor-driven reconnect catch-up covers it the moment it truly connects.
 pub async fn wait_connected(relay: &Relay, allowance: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + allowance;
+    let deadline = crate::rt::time::Instant::now() + allowance;
     loop {
         match relay.status() {
             RelayStatus::Connected => return true,
             RelayStatus::Terminated | RelayStatus::Banned => return false,
             _ => {}
         }
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::time::Instant::now() >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        crate::rt::time::sleep(Duration::from_millis(150)).await;
     }
 }
 
@@ -203,7 +203,7 @@ pub async fn reconcile_missing(
                 if !wait_connected(&relay, connect_allowance).await {
                     return (url, None, false);
                 }
-                let r = tokio::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
+                let r = crate::rt::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
                 let connected = relay.status() == RelayStatus::Connected;
                 (url, Some(r), connected)
             });

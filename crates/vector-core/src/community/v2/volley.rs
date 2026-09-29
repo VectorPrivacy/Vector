@@ -67,7 +67,7 @@ async fn connected_targets(
     relays: &[String],
     allowance: std::time::Duration,
 ) -> Vec<String> {
-    let deadline = tokio::time::Instant::now() + allowance;
+    let deadline = crate::rt::time::Instant::now() + allowance;
     loop {
         let pool = client.relays().await;
         let up: Vec<String> = relays
@@ -80,10 +80,10 @@ async fn connected_targets(
             })
             .cloned()
             .collect();
-        if !up.is_empty() || tokio::time::Instant::now() >= deadline {
+        if !up.is_empty() || crate::rt::time::Instant::now() >= deadline {
             return up;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 }
 
@@ -205,7 +205,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         for (i, j) in jobs.iter().enumerate() {
             by_set.entry(j.relay_set).or_default().push(i);
         }
-        let batch_start = std::time::Instant::now();
+        let batch_start = web_time::Instant::now();
         // Register every job's plane key BEFORE any relay contact: gating relays
         // serve a multi-author REQ only when EVERY author is authed on the
         // connection (proven live: all-authed → EOSE; partial → CLOSED), and the
@@ -354,7 +354,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             }
         }
         stats.batch_ms = batch_start.elapsed().as_millis();
-        let fallback_start = std::time::Instant::now();
+        let fallback_start = web_time::Instant::now();
 
         // Second barrel: jobs the batch couldn't see. When the only LIVE relay in
         // a set is auth-gating (Ditto serves plane reads solely to a connection
@@ -397,8 +397,8 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 // so recently-active channels still confirm against a live gating
                 // relay. Dormant ones trust the batch.
                 const RECENT_SECS: u64 = 7 * 24 * 3600;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 j.since.is_some_and(|s| now.saturating_sub(s) < RECENT_SECS)

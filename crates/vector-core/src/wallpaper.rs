@@ -367,8 +367,8 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // This flow never mirrors, so only the descriptor matters.
     .url;
 
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let created_at = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let rumor = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
@@ -633,11 +633,11 @@ pub async fn apply_received_wallpaper(
             return Err("Wallpaper too large".to_string());
         }
     }
-    let mut resp = resp;
     let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut body)
         .await
+        .transpose()
         .map_err(|e| format!("Read body: {}", e))?
     {
         bytes.extend_from_slice(&chunk);
@@ -862,8 +862,8 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
     let recipient_pk = PublicKey::from_bech32(chat_npub)
         .map_err(|e| format!("Invalid chat npub: {}", e))?;
 
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let created_at = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     // Tombstone: same d-tag + recipient p-tag as a set, but no url/key/nonce.

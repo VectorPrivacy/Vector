@@ -51,8 +51,8 @@ pub const REALTIME_FRESH_WINDOW_MS: u64 = 300_000;
 /// the "new" surfaces (`is_new`, bot events, pings); folding and persistence
 /// are NEVER gated on freshness.
 pub fn is_realtime_fresh(at_ms: u64) -> bool {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     at_ms.saturating_add(REALTIME_FRESH_WINDOW_MS) >= now_ms
@@ -364,8 +364,8 @@ mod freshness_tests {
     // (hours to months old) and far-future junk are not "new" surfaces.
     #[test]
     fn realtime_freshness_window() {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
         assert!(is_realtime_fresh(now_ms), "just-sent is fresh");
         assert!(is_realtime_fresh(now_ms - REALTIME_FRESH_WINDOW_MS / 2), "modest delay is fresh");
         assert!(!is_realtime_fresh(now_ms - 3_600_000), "an hour-old replay is not");

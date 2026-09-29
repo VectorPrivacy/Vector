@@ -263,7 +263,7 @@ pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String>
     if candidates.is_empty() {
         return None;
     }
-    tokio::task::spawn_blocking(move || {
+    crate::rt::spawn_blocking(move || {
         candidates.into_iter().find_map(|p| {
             let bytes = std::fs::read(&p).ok()?;
             (crate::crypto::sha256_hex(&bytes) == expected)

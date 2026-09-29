@@ -31,8 +31,8 @@ const FETCH_TIMEOUT_SECS: u64 = 20;
 
 /// Milliseconds since the epoch — the clock the merge tiebreaks on (`added_at`/`removed_at`).
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
@@ -548,7 +548,7 @@ pub fn republish_community_list_debounced() {
     stamp_published_now();
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     crate::db::spawn_bound(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
         let client = match crate::state::nostr_client() {
             Some(c) => c,
@@ -556,7 +556,7 @@ pub fn republish_community_list_debounced() {
         };
         if let Err(e) = publish_community_list(&client).await {
             crate::log_warn!("[CommunityList] Republish failed: {} (retrying in 5s)", e);
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
             if let Err(e) = publish_community_list(&client).await {
                 crate::log_warn!("[CommunityList] Republish retry failed: {}", e);

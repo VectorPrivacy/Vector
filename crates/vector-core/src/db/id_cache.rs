@@ -82,8 +82,8 @@ pub fn get_or_create_chat_id(chat_identifier: &str) -> Result<i64, String> {
         // 0 = DirectMessage (npub), 2 = Community (non-npub). Value 1 was the
         // retired MlsGroup variant and is dropped by the get_all_chats load filter,
         // so a non-npub stub MUST be 2 or the chat vanishes on reload.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap()
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap()
             .as_secs() as i64;
         let chat_type: i32 = if chat_identifier.starts_with("npub1") { 0 } else { 2 };
 

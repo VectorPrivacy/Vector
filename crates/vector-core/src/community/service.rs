@@ -92,8 +92,8 @@ pub async fn create_community<T: Transport + ?Sized>(
         // active signer — local vault OR a NIP-46 bunker.
         let signer = crate::signer::active_signer()?;
         let cid = community.id.to_hex();
-        let created = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
@@ -215,8 +215,8 @@ pub async fn build_presence(
     attribution: Option<(String, Option<String>)>,
 ) -> Result<nostr_sdk::prelude::Event, String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let content = match (joined, attribution) {
@@ -267,8 +267,8 @@ pub async fn publish_webxdc_signal<T: Transport + ?Sized>(
     node_addr: Option<&str>,
 ) -> Result<(), String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let content = crate::webxdc::peer_signal_content(topic_id, node_addr);
@@ -292,8 +292,8 @@ pub async fn publish_typing_signal<T: Transport + ?Sized>(
     channel: &Channel,
 ) -> Result<(), String> {
     let author_pk = crate::state::my_public_key().ok_or("not logged in")?;
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let unsigned = super::envelope::build_inner_typed(
@@ -324,8 +324,8 @@ pub async fn persist_webxdc_signal(
     }
     // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
     // can't outrank every later genuine peer-left in the latest-per-npub read.
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let created_at = created_at.min(now_secs + 300);
@@ -346,8 +346,8 @@ pub async fn persist_webxdc_signal(
         tags,
         reference_id: Some(topic_id.to_string()),
         created_at,
-        received_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        received_at: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64,
         mine: false,
@@ -425,8 +425,8 @@ pub async fn publish_kick<T: Transport + ?Sized>(
             return Err("you can't kick a member who outranks you (or the owner)".to_string());
         }
     }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     // pinned authority: a non-owner kicker cites the grant that authorizes them (owner cites nothing).
@@ -502,8 +502,8 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
             Some((v, h)) => (v + 1, Some(h)),
             None => (1, None),
         };
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // pinned authority: a non-owner banner cites the grant edition that authorizes them, so peers
@@ -855,8 +855,8 @@ pub async fn set_member_grant<T: Transport + ?Sized>(
             Some((v, h)) => (v + 1, Some(h)),
             None => (1, None),
         };
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
@@ -1258,8 +1258,8 @@ pub async fn publish_owner_hide<T: Transport + ?Sized>(
             return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
         }
     }
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     // Keyless moderation-hide: a 3305 delete signed by MY REAL npub. The inner signature IS the
@@ -1386,7 +1386,7 @@ pub async fn preload_community(invite: &super::invite::CommunityInvite) {
     let prune_relays = community.relays.clone();
     let prune_id = community.id;
     crate::db::spawn_bound(async move {
-        tokio::time::sleep(crate::community::cache::PRELOAD_TTL).await;
+        crate::rt::time::sleep(crate::community::cache::PRELOAD_TTL).await;
         // Joined within the window? Its relays are legitimate now (and its preload entry was already
         // taken on accept) — leave them.
         if matches!(crate::db::community::load_community(&prune_id), Ok(Some(_))) {
@@ -1428,8 +1428,8 @@ pub async fn republish_community_metadata<T: Transport + ?Sized>(
             Some((v, h)) => (v + 1, Some(h)),
             None => (1, None),
         };
-        let created = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let meta = super::metadata::CommunityMetadata::of(community);
@@ -1484,8 +1484,8 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
             Some((v, h)) => (v + 1, Some(h)),
             None => (1, None),
         };
-        let created = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let meta = super::metadata::ChannelMetadata { name: new_name.to_string() };
@@ -1586,8 +1586,8 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
             community_id: community.id.to_hex(),
             url: url.clone(),
             label: label.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             expires_at,
@@ -1706,7 +1706,7 @@ pub async fn revoke_public_invite<T: Transport + ?Sized>(
     crate::db::scoped(async move {
         let cid = community.id.to_hex();
         let token_hex = crate::simd::hex::bytes_to_hex_32(token);
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         // Idempotent no-op if we don't hold the token: either it's already retired (re-revoke) or it's not
         // ours — creator-only, the token is held only by its creator. Nothing to do, never a double-rotate.
         if !crate::db::community::list_public_invites(&cid)?.iter().any(|r| r.token == token_hex) {
@@ -1816,8 +1816,8 @@ pub async fn publish_migration_carrier<T: Transport + ?Sized>(
         }
         let signer = crate::signer::active_signer()?;
         let actor_pk = crate::state::my_public_key().ok_or("no local identity to sign the migration")?;
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let created_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let unsigned = super::roster::build_group_dissolved_edition_unsigned_with_content(actor_pk, &community.id, created_at, payload_content);
         let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("sign migration carrier: {e}"))?;
         // Size gate on the ACTUAL sealed outer before publishing — the wizard aborts cleanly
@@ -1850,8 +1850,8 @@ pub async fn dissolve_community<T: Transport + ?Sized>(
         // (b) Tombstone FIRST, must-succeed. The marker is the whole mechanism; build it chain-free (vsk=10,
         // fixed v1, no prev-hash) and seal under the CURRENT server root for the wire (re-anchoring keeps the
         // plane reachable there). A durable publish that fails returns Err so we never half-apply.
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let unsigned = super::roster::build_group_dissolved_edition_unsigned(actor_pk, &community.id, created_at);
@@ -1915,8 +1915,8 @@ pub async fn publish_my_invite_links<T: Transport + ?Sized>(
             Some((v, h)) => (v + 1, Some(h)),
             None => (1, None),
         };
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let created_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // pinned authority: a non-owner creator cites the grant that authorizes them (owner cites nothing).
@@ -2168,8 +2168,8 @@ async fn republish_my_invite_links<T: Transport + ?Sized>(
     community: &Community,
 ) -> Result<Vec<String>, String> {
     let cid = community.id.to_hex();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let locators: Vec<String> = crate::db::community::list_public_invites(&cid)?

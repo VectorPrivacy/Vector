@@ -646,8 +646,8 @@ fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
 /// NIP-40: true when the tag's expiry already lies in the past at receipt.
 fn already_expired(expiration: Option<u64>) -> bool {
     match expiration {
-        Some(exp) => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        Some(exp) => web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| exp <= d.as_secs())
             .unwrap_or(false),
         None => false,
@@ -793,8 +793,8 @@ fn process_app_specific(
             .parse()
             .map_err(|_| "Invalid expiration timestamp")?;
 
-        let current_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let current_timestamp = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_err(|e| format!("System time error: {}", e))?
             .as_secs();
 
@@ -1072,8 +1072,8 @@ pub fn resolve_message_timestamp(created_at_secs: u64, ms_tag: Option<&str>) -> 
         Some(offset) if offset <= 999 => base.saturating_add(offset),
         _ => base,
     };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(u64::MAX);
     if at > now_ms.saturating_add(FUTURE_GRACE_MS) { now_ms } else { at }
@@ -1145,8 +1145,8 @@ mod tests {
         assert_eq!(resolve_message_timestamp(1500, Some("4242")), 1_500_000);
         assert_eq!(resolve_message_timestamp(1500, Some("nope")), 1_500_000);
         // Far-future created_at (year ~9999) is clamped back to ~now — can't dominate ordering.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         let clamped = resolve_message_timestamp(253_402_300_800, Some("5"));
         assert!(clamped <= (now + 3600) * 1000, "implausible-future ms must clamp to ~now");
     }
@@ -1442,8 +1442,8 @@ mod tests {
     #[test]
     fn test_typing_indicator_valid() {
         let keys = test_keypair();
-        let future_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap()
+        let future_ts = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap()
             .as_secs() + 10;
         let t = tags(vec![
             Tag::identifier("vector"),
@@ -1549,8 +1549,8 @@ mod tests {
     #[test]
     fn test_future_expiration_still_processes() {
         let keys = test_keypair();
-        let future_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap()
+        let future_ts = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap()
             .as_secs() + 600;
         let t = tags(vec![Tag::expiration(Timestamp::from_secs(future_ts))]);
         let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "still alive", t);

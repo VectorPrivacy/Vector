@@ -10,7 +10,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use nostr_sdk::prelude::*;
 
@@ -396,8 +397,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 
                         // Update timestamp
                         profile.last_updated = secs_to_compact(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
+                            web_time::SystemTime::now()
+                                .duration_since(web_time::UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs()
                         );
@@ -427,8 +428,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 let mut state = STATE.lock().await;
                 if let Some(profile) = state.get_profile_mut(&npub) {
                     profile.last_updated = secs_to_compact(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
+                        web_time::SystemTime::now()
+                            .duration_since(web_time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs()
                     );
@@ -821,7 +822,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
         };
 
         if should_wait {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            crate::rt::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 
@@ -831,7 +832,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
                 let mut queue = owner.lock().unwrap();
                 queue.is_processing = false;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            crate::rt::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 
@@ -848,7 +849,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
                 queue.mark_done(&entry.npub);
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            crate::rt::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Release processing lock
@@ -858,7 +859,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
             queue.is_processing = false;
         }
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        crate::rt::time::sleep(Duration::from_millis(500)).await;
     }
 }
 

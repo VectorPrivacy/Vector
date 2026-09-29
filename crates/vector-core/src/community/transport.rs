@@ -306,7 +306,7 @@ where
             break;
         }
         if !backoff.is_zero() {
-            tokio::time::sleep(backoff).await;
+            crate::rt::time::sleep(backoff).await;
         }
     }
     if pending.len() < total {
@@ -369,7 +369,7 @@ pub fn forget_warmed_relay(url: &str) {
 #[derive(Default)]
 struct BreakerEntry {
     consecutive_failures: u8,
-    tripped_until: Option<std::time::Instant>,
+    tripped_until: Option<web_time::Instant>,
 }
 
 static RELAY_BREAKER: std::sync::LazyLock<
@@ -434,7 +434,7 @@ fn breaker_tripped_at(generation: u64, url: &str) -> bool {
     with_breaker_at(generation, |map| {
         map.get(url)
             .and_then(|e| e.tripped_until)
-            .is_some_and(|t| std::time::Instant::now() < t)
+            .is_some_and(|t| web_time::Instant::now() < t)
     })
 }
 
@@ -456,7 +456,7 @@ fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: boo
         let e = map.entry(url.to_string()).or_default();
         e.consecutive_failures = e.consecutive_failures.saturating_add(1);
         if e.consecutive_failures >= BREAKER_TRIP_THRESHOLD {
-            e.tripped_until = Some(std::time::Instant::now() + BREAKER_COOLDOWN);
+            e.tripped_until = Some(web_time::Instant::now() + BREAKER_COOLDOWN);
         }
     })
 }
@@ -479,7 +479,7 @@ fn effective_evidence(query: &Query) -> Evidence {
 
 struct PooledPlane {
     client: Client,
-    last_used: std::time::Instant,
+    last_used: web_time::Instant,
 }
 
 static PLANE_POOL: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashMap<String, PooledPlane>)>> =
@@ -547,7 +547,7 @@ fn plane_pool_take(generation: u64, key: &str) -> (Option<Client>, Vec<Client>) 
         g.0 = generation;
     }
     // Sweep idle-expired entries.
-    let now = std::time::Instant::now();
+    let now = web_time::Instant::now();
     let expired: Vec<String> = g.1.iter()
         .filter(|(_, p)| now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
         .map(|(k, _)| k.clone())
@@ -585,7 +585,7 @@ fn plane_pool_insert(generation: u64, key: String, client: Client) -> Vec<Client
             }
         }
     }
-    g.1.insert(key, PooledPlane { client, last_used: std::time::Instant::now() });
+    g.1.insert(key, PooledPlane { client, last_used: web_time::Instant::now() });
     evicted
 }
 
@@ -721,7 +721,7 @@ pub async fn fetch_relay_eose_filters(
             let relay = self.0.clone();
             let id = self.1.clone();
             // spawn-detached: sends a relay CLOSE, touches no account state.
-            tokio::spawn(async move {
+            crate::rt::spawn(async move {
                 let _ = relay
                     .send_msg(nostr_sdk::prelude::ClientMessage::Close(std::borrow::Cow::Owned(id)))
                     .await;
@@ -736,14 +736,14 @@ pub async fn fetch_relay_eose_filters(
         })
         .await
         .map_err(|_| EoseFail::Gone)?;
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = crate::rt::time::Instant::now() + timeout;
     let mut events: Vec<Event> = Vec::new();
     let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
     loop {
         // 0.45 hands back a Stream, so there's no broadcast-lag case to drain:
         // the stream ending is the closed case, and the deadline is still a
         // failure rather than a false EOSE.
-        let notification = match tokio::time::timeout_at(deadline, notifications.next()).await {
+        let notification = match crate::rt::time::timeout_at(deadline, notifications.next()).await {
             Ok(Some(n)) => n,
             Ok(None) => return Err(EoseFail::Gone),
             Err(_) => return Err(EoseFail::Deadline), // timeout is NOT EOSE
@@ -845,12 +845,12 @@ async fn wait_until_tor_ready<F: Fn() -> bool>(
     if !is_blocked() {
         return Ok(());
     }
-    let deadline = std::time::Instant::now() + max_wait;
+    let deadline = web_time::Instant::now() + max_wait;
     while is_blocked() {
-        if std::time::Instant::now() >= deadline {
+        if web_time::Instant::now() >= deadline {
             return Err("Tor is still connecting. Wait a moment and try again.".to_string());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     Ok(())
 }
@@ -1088,7 +1088,7 @@ impl LiveTransport {
                 };
                 let full_budget = timeout >= base_timeout;
                 // spawn-detached: relay I/O only — no account storage is touched.
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     let out = fetch_relay_eose(&client, &r, filter, timeout).await;
                     (r, full_budget, out)
                 })
@@ -1103,11 +1103,11 @@ impl LiveTransport {
         // wait is TIME-BOUNDED from the first success so a dead relay can't
         // gate a degraded set (a 2-relay community with one relay down must not
         // ride that relay's timeout on every fetch).
-        let mut quorum_deadline: Option<tokio::time::Instant> = None;
+        let mut quorum_deadline: Option<crate::rt::time::Instant> = None;
         let mut quorum_window_closed = false;
         while !plan.satisfied() && !plan.exhausted() {
             let next = match quorum_deadline {
-                Some(deadline) => match tokio::time::timeout_at(deadline, fetches.next()).await {
+                Some(deadline) => match crate::rt::time::timeout_at(deadline, fetches.next()).await {
                     Ok(n) => n,
                     Err(_) => {
                         quorum_window_closed = true;
@@ -1124,7 +1124,7 @@ impl LiveTransport {
                     plan.record(true);
                     if evidence == Evidence::Quorum && quorum_deadline.is_none() {
                         quorum_deadline = Some(
-                            tokio::time::Instant::now()
+                            crate::rt::time::Instant::now()
                                 + std::time::Duration::from_millis(QUORUM_GRACE_MS),
                         );
                     }
@@ -1148,7 +1148,7 @@ impl LiveTransport {
         // requirement still merge synchronously. Skipped when the quorum window
         // already expired (that wait subsumes this one).
         if !fetches.is_empty() && !quorum_window_closed {
-            let grace = tokio::time::sleep(std::time::Duration::from_millis(RESIDUAL_GRACE_MS));
+            let grace = crate::rt::time::sleep(std::time::Duration::from_millis(RESIDUAL_GRACE_MS));
             tokio::pin!(grace);
             loop {
                 tokio::select! {
@@ -1221,9 +1221,9 @@ impl Transport for LiveTransport {
                 let client = client.clone();
                 let event = event.clone();
                 // spawn-detached: relay I/O only — no account storage is touched.
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     matches!(
-                        tokio::time::timeout(timeout, client.send_event(&event).to(vec![r.clone()])).await,
+                        crate::rt::time::timeout(timeout, client.send_event(&event).to(vec![r.clone()])).await,
                         Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false)
                     )
                 })
@@ -1372,7 +1372,7 @@ impl Transport for LiveTransport {
         // latency), so we fan out one send per relay and take the first winner; the losers are cancelled and
         // re-sent in the background. Retry rounds within CONFIRM_WINDOW; zero ACKs in the window = failure.
         let mut acked_any = false;
-        let _ = tokio::time::timeout(CONFIRM_WINDOW, async {
+        let _ = crate::rt::time::timeout(CONFIRM_WINDOW, async {
             loop {
                 // Per ROUND, not from `pending`: a dead socket stays pending (the
                 // reconcile loop may revive it before the stragglers give up) but a
@@ -1382,7 +1382,7 @@ impl Transport for LiveTransport {
                     let client = &client;
                     let event = &event;
                     Box::pin(async move {
-                        match tokio::time::timeout(timeout, client.send_event(event).to(vec![r.clone()])).await {
+                        match crate::rt::time::timeout(timeout, client.send_event(event).to(vec![r.clone()])).await {
                             Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false) => Ok(r),
                             _ => Err(()),
                         }
@@ -1393,7 +1393,7 @@ impl Transport for LiveTransport {
                     pending.retain(|r| r != &winner);
                     break;
                 }
-                tokio::time::sleep(backoff).await;
+                crate::rt::time::sleep(backoff).await;
             }
         })
         .await;
@@ -1410,12 +1410,12 @@ impl Transport for LiveTransport {
         // confirmed ACK; 's fetch-union heals anything that never lands. The client is shared — not torn
         // down — so the spawned task just drops its handle when finished.
         // spawn-detached: relay I/O only — no account storage is touched.
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let client_ref = &client;
             let event_ref = &event;
             let _ = durable_broadcast(&pending, MAX_PUBLISH_ATTEMPTS, backoff, move |round| {
                 Box::pin(async move {
-                    match tokio::time::timeout(timeout, client_ref.send_event(event_ref).to(round.clone())).await {
+                    match crate::rt::time::timeout(timeout, client_ref.send_event(event_ref).to(round.clone())).await {
                         Ok(Ok(output)) => round.into_iter().filter(|p| RelayUrl::parse(p).map(|u| output.success.contains_key(&u)).unwrap_or(false)).collect(),
                         _ => Vec::new(),
                     }
@@ -1803,7 +1803,7 @@ mod tests {
 
     #[tokio::test]
     async fn tor_gate_passes_immediately_when_not_blocked() {
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let res = wait_until_tor_ready(|| false, std::time::Duration::from_secs(30)).await;
         assert!(res.is_ok());
         assert!(start.elapsed() < std::time::Duration::from_secs(1), "must not wait when Tor is ready");

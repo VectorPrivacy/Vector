@@ -23,7 +23,8 @@
 //! anyone chose; the setting's own help text says so.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub const SETTING_KEY: &str = "privacy_proxy_media";
 pub const UNFURL_EXT: &str = "magnitude-unfurl";
@@ -69,7 +70,7 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
         if !servers.is_empty() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        crate::rt::time::sleep(Duration::from_millis(200)).await;
         servers = crate::state::get_blossom_servers();
     }
     let mut found = None;

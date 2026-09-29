@@ -20,12 +20,24 @@ macro_rules! __log_keep_used {
     }};
 }
 
+/// stderr natively; the browser console on wasm32, where stderr is a sink.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __log_line {
+    ($($arg:tt)*) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        eprintln!($($arg)*);
+        #[cfg(target_arch = "wasm32")]
+        $crate::logging::console_line(&format!($($arg)*));
+    }};
+}
+
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {{
         #[cfg(debug_assertions)]
         if $crate::logging::level_enabled($crate::logging::LEVEL_INFO) {
-            eprintln!("[INFO] {}", format_args!($($arg)*));
+            $crate::__log_line!("[INFO] {}", format_args!($($arg)*));
         }
         $crate::__log_keep_used!($($arg)*);
     }};
@@ -36,7 +48,7 @@ macro_rules! log_debug {
     ($($arg:tt)*) => {{
         #[cfg(debug_assertions)]
         if $crate::logging::level_enabled($crate::logging::LEVEL_DEBUG) {
-            eprintln!("[DEBUG] {}", format_args!($($arg)*));
+            $crate::__log_line!("[DEBUG] {}", format_args!($($arg)*));
         }
         $crate::__log_keep_used!($($arg)*);
     }};
@@ -47,7 +59,7 @@ macro_rules! log_trace {
     ($($arg:tt)*) => {{
         #[cfg(debug_assertions)]
         if $crate::logging::level_enabled($crate::logging::LEVEL_TRACE) {
-            eprintln!("[TRACE] {}", format_args!($($arg)*));
+            $crate::__log_line!("[TRACE] {}", format_args!($($arg)*));
         }
         $crate::__log_keep_used!($($arg)*);
     }};
@@ -57,11 +69,11 @@ macro_rules! log_trace {
 macro_rules! log_warn {
     ($($arg:tt)*) => {{
         if $crate::logging::level_enabled($crate::logging::LEVEL_WARN) {
-            let _secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let _secs = $crate::rt::time_std::SystemTime::now()
+                .duration_since($crate::rt::time_std::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            eprintln!("[WARN {:02}:{:02}:{:02}Z] {}", (_secs / 3600) % 24, (_secs / 60) % 60, _secs % 60, format_args!($($arg)*));
+            $crate::__log_line!("[WARN {:02}:{:02}:{:02}Z] {}", (_secs / 3600) % 24, (_secs / 60) % 60, _secs % 60, format_args!($($arg)*));
         }
     }};
 }
@@ -77,7 +89,7 @@ macro_rules! log_net_fail {
         // Console print matches log_warn! exactly (level-gated); persistence
         // is unconditional — the log file exists for after-the-fact diagnosis.
         if $crate::logging::level_enabled($crate::logging::LEVEL_WARN) {
-            eprintln!("[WARN] {}", &msg);
+            $crate::__log_line!("[WARN] {}", &msg);
         }
         $crate::logging::persist(&format!(
             "[{} WARN] {}",
@@ -97,7 +109,7 @@ macro_rules! log_net_info {
         let msg = format!($($arg)*);
         #[cfg(debug_assertions)]
         if $crate::logging::level_enabled($crate::logging::LEVEL_INFO) {
-            eprintln!("[INFO] {}", &msg);
+            $crate::__log_line!("[INFO] {}", &msg);
         }
         $crate::logging::persist(&format!(
             "[{} INFO] {}",

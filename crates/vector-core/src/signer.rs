@@ -873,7 +873,7 @@ pub async fn attempt_bunker_login(
             if let Some(old) = take_bunker_signer() {
                 // spawn-detached: drains the replaced signer's relay pool; it holds no
                 // account state and must finish even if the account swaps meanwhile.
-                tokio::spawn(async move { let _ = old.shutdown().await; });
+                crate::rt::spawn(async move { let _ = old.shutdown().await; });
             }
             set_bunker_signer(nc);
             set_bunker_state(BunkerConnectionState::Online);

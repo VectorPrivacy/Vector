@@ -288,8 +288,8 @@ fn apply_presence(opened: &OpenedMessage, channel: &Channel, my_pubkey: &PublicK
 /// sort key — a forged far-future stamp would otherwise pin the event at the
 /// timeline edge forever (mirrors the webxdc handlers' clamp).
 fn clamp_inner_secs(secs: u64) -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     secs.min(now + 300)
@@ -325,8 +325,8 @@ fn apply_typing(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<Incomin
     if opened.content != "typing" {
         return None;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     // A typing signal is live for 30s from ITS OWN send time, never the wall
@@ -1170,7 +1170,7 @@ mod tests {
     /// A kick inner timestamp safely AFTER `db_roster_channel`'s community save, so the join-time
     /// guard honors it. `build_inner_full` derives `created_at = ms / 1000`, so we add a 5s margin.
     fn post_join_ms() -> u64 {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         (now + 5) * 1000
     }
 
@@ -1332,7 +1332,7 @@ mod tests {
                 .finalize(&alice).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
         };
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
 
         // A FRESH "typing" signal from another member surfaces, attributed to the inner
         // author, expiring ~30s after ITS OWN send time (never the receiver's clock —
@@ -1667,8 +1667,8 @@ mod tests {
     fn replayed_old_typing_signals_are_dropped() {
         let author = Keys::generate();
         let me = Keys::generate();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
         let fresh = opened_from(&author, "typing", now_ms);
         match apply_typing(&fresh, &me.public_key()) {

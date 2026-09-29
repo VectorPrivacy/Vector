@@ -960,7 +960,7 @@ pub fn run_side_by_side(
     let bytes = serde_json::to_vec(&policy).map_err(|e| e.to_string())?;
     let lp = LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None };
 
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let rows = crate::db::community::community_policy_messages(community_id_hex, caps::WINDOW_MAX_MESSAGES)?;
     let corpus = rows.len();
     let messages: Vec<MessageSignal> = rows
@@ -1019,7 +1019,7 @@ pub fn run_side_by_side(
     };
 
     let signals_ms = t0.elapsed().as_millis() as u64;
-    let t1 = std::time::Instant::now();
+    let t1 = web_time::Instant::now();
     let report = evaluate(&signals, &[lp], &[], now_ms);
     let evaluate_ms = t1.elapsed().as_millis() as u64;
     let pr = report.policies.first().ok_or("no policy report")?;

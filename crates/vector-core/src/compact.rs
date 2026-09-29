@@ -1832,7 +1832,7 @@ mod tests {
     /// Comprehensive benchmark test for memory reduction and performance
     #[test]
     fn benchmark_compact_vs_message() {
-        use std::time::Instant;
+        use web_time::Instant;
 
         const NUM_MESSAGES: usize = 10_000;
         const NUM_UNIQUE_USERS: usize = 50; // Realistic chat scenario
@@ -2069,7 +2069,7 @@ mod tests {
     /// 3. Direct u16 handle binary search (current -- O(log n) x 2-byte int cmp, Profile.id is u16)
     #[test]
     fn benchmark_profile_lookup() {
-        use std::time::Instant;
+        use web_time::Instant;
         use std::hint::black_box;
 
         const NUM_PROFILES: usize = 60;

@@ -366,7 +366,7 @@ pub async fn prepare_event(
     if let Some(skip) = dedup_skip(&event).await {
         return skip;
     }
-    let unwrap_start = std::time::Instant::now();
+    let unwrap_start = web_time::Instant::now();
     let unwrapped = crate::signer::unwrap_gift_wrap(&event).await;
     finish_prepare(&event, unwrapped, unwrap_start.elapsed().as_nanos() as u64, my_public_key)
 }
@@ -384,7 +384,7 @@ pub async fn prepare_events(events: &[Event], my_public_key: PublicKey) -> Vec<P
     }
     let todo: Vec<&Event> = events.iter().zip(&out).filter(|(_, o)| o.is_none()).map(|(e, _)| e).collect();
     if !todo.is_empty() {
-        let unwrap_start = std::time::Instant::now();
+        let unwrap_start = web_time::Instant::now();
         let unwrapped = crate::signer::unwrap_gift_wraps(&todo).await;
         let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64 / todo.len() as u64;
         let mut unwrapped = unwrapped.into_iter();
@@ -518,7 +518,7 @@ fn finish_prepare(
         conversation_type: ConversationType::DirectMessage,
     };
 
-    let parse_start = std::time::Instant::now();
+    let parse_start = web_time::Instant::now();
     let download_dir = crate::db::get_download_dir();
     match process_rumor(rumor_event, rumor_context, &download_dir) {
         Ok(result) => {
@@ -745,7 +745,7 @@ pub async fn commit_prepared_event(
                             if att.size == 0
                                 && (att.url.starts_with("https://") || att.url.starts_with("http://"))
                             {
-                                if let Ok(Some(size)) = tokio::time::timeout(
+                                if let Ok(Some(size)) = crate::rt::time::timeout(
                                     std::time::Duration::from_secs(3),
                                     crate::net::get_remote_file_size(&att.url),
                                 ).await {
@@ -909,7 +909,7 @@ pub async fn commit_prepared_event(
                     // Join re-validates freshness. std::sync::Arc<crate::db::Session>'d so a mid-flight swap is a no-op.
                     let invite_warm = invite.clone();
                     let bg = crate::db::current_session();
-                    tokio::spawn(async move {
+                    crate::rt::spawn(async move {
                         if !bg.is_live() {
                             return;
                         }

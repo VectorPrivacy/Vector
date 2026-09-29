@@ -519,6 +519,7 @@ impl Backend {
 
     /// Every backend this CPU can run, by name: the tests cover each, and the bench
     /// forces each to find crossovers.
+    #[cfg_attr(not(target_pointer_width = "64"), allow(dead_code))]
     pub(super) fn available() -> Vec<(&'static str, Backend)> {
         #[allow(unused_mut)]
         let mut v = vec![("portable", Backend::Portable)];

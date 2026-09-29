@@ -29,6 +29,7 @@
 mod macros;
 
 // === Foundation ===
+pub mod rt;
 pub mod logging;
 pub mod error;
 pub mod traits;
@@ -500,6 +501,7 @@ impl VectorCore {
         }
 
         // Install rustls ring provider
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         net::raise_fd_limit();
@@ -1451,8 +1453,8 @@ impl VectorCore {
         let bundle = service::fetch_public_invite(&transport, &relays, &token)
             .await
             .map_err(VectorError::Other)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp)
@@ -1551,8 +1553,8 @@ impl VectorCore {
             // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp) or it
             // is refused — before finalize persists anything. The migrated fence inside
             // finalize_member_join still wins for held communities.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             crate::community::migration::gate_fresh_v1_join(&transport, &community, now)
@@ -2096,8 +2098,8 @@ impl VectorCore {
             let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
             let mut extra_tags = Vec::new();
             if let Some(secs) = expires_in_secs.filter(|s| *s > 0) {
-                let at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let at = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
                     .saturating_add(secs);
@@ -2116,8 +2118,8 @@ impl VectorCore {
         Self::ensure_v1_writable(&community)?;
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let reply = replied_to.filter(|r| !r.is_empty());
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let unsigned = envelope::build_inner_typed(
@@ -2257,8 +2259,8 @@ impl VectorCore {
                     .map_err(VectorError::Other);
             }
             let (community, channel) = v1_target.expect("v1 target resolved when no v2 community matched");
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let ms = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let unsigned = envelope::build_inner_full(
@@ -2549,8 +2551,8 @@ impl VectorCore {
         let (community, channel) = self.resolve_channel(channel_id)?;
         Self::ensure_v1_writable(&community)?;
         let author_pk = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let unsigned = envelope::build_inner_typed(
@@ -3115,8 +3117,8 @@ impl VectorCore {
             .iter()
             .any(|rid| roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0));
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let findings = crate::community::policy::harness::screen_message(
@@ -3162,8 +3164,8 @@ impl VectorCore {
         use nostr_sdk::prelude::PublicKey;
         use std::collections::{HashMap, HashSet};
 
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_secs = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         {
@@ -3360,8 +3362,8 @@ impl VectorCore {
                 })
                 .collect();
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let assembled =
@@ -3426,8 +3428,8 @@ impl VectorCore {
 
         let hash = crate::community::policy::harness::hash_policy_bytes(bytes.as_bytes());
         let hash_hex = crate::simd::hex::bytes_to_hex_32(&hash.0);
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_secs = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::db::community::set_community_policy(&cid_hex, policy_id, bytes, &hash_hex, enabled, now_secs)
@@ -3463,8 +3465,8 @@ impl VectorCore {
     /// across six runs.
     fn policy_console_report(cid_hex: &str, community: &crate::community::v2::community::CommunityV2) -> Result<std::sync::Arc<serde_json::Value>> {
         use crate::community::v2::guestbook::GuestbookEntry;
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_secs = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         {
@@ -3612,8 +3614,8 @@ impl VectorCore {
             })
             .unwrap_or_default();
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let diff = crate::community::policy::harness::run_side_by_side(
@@ -5101,7 +5103,7 @@ impl VectorCore {
                     }
                     // Outer slack over the initial_timeout so the SDK's error
                     // (which distinguishes refusal from silence) surfaces first.
-                    let result = tokio::time::timeout(
+                    let result = crate::rt::time::timeout(
                         neg_outer,
                         relay.sync(f).items(i).opts(o),
                     ).await;
@@ -5431,7 +5433,7 @@ impl VectorCore {
             db::spawn_bound(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
                 // whole pool — so coalesce Connected transitions within a short window into one resync.
-                let mut last_resync: Option<std::time::Instant> = None;
+                let mut last_resync: Option<web_time::Instant> = None;
                 while let Ok(notification) = rx.recv().await {
                     let MonitorNotification::StatusChanged { status, .. } = notification;
                     if status == RelayStatus::Connected {
@@ -5444,7 +5446,7 @@ impl VectorCore {
                             community::realtime::refresh_subscription(&c).await;
                             community::v2::realtime::refresh_subscription(&c).await;
                         }
-                        last_resync = Some(std::time::Instant::now());
+                        last_resync = Some(web_time::Instant::now());
                     }
                 }
             });
@@ -5456,12 +5458,12 @@ impl VectorCore {
         {
             let client_health = client.clone();
             db::spawn_bound(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
+                crate::rt::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
                 loop {
                     for (url, relay) in client_health.relays().await {
                         match relay.status() {
                             RelayStatus::Connected => {
-                                let probe = tokio::time::timeout(
+                                let probe = crate::rt::time::timeout(
                                     std::time::Duration::from_secs(10),
                                     client_health
                                         .fetch_events(nostr_sdk::prelude::ReqTarget::single(
@@ -5473,7 +5475,7 @@ impl VectorCore {
                                 .await;
                                 if !matches!(probe, Ok(Ok(_))) {
                                     relay.disconnect();
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    crate::rt::time::sleep(std::time::Duration::from_millis(500)).await;
                                     let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                                 }
                             }
@@ -5483,7 +5485,7 @@ impl VectorCore {
                             _ => {}
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    crate::rt::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });
         }

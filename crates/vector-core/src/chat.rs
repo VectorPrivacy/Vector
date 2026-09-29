@@ -57,8 +57,8 @@ impl Chat {
             participants,
             messages: CompactMessageVec::new(),
             last_read: [0u8; 32],
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            created_at: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
             metadata: ChatMetadata::new(),
@@ -269,8 +269,8 @@ impl Chat {
     }
 
     pub fn get_active_typers(&self, interner: &NpubInterner) -> Vec<String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         self.typing_participants.iter()
             .filter(|(_, exp)| *exp > now)
             .filter_map(|(h, _)| interner.resolve(*h).map(|s| s.to_string()))
@@ -283,8 +283,8 @@ impl Chat {
         } else {
             self.typing_participants.push((handle, expires_at));
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         self.typing_participants.retain(|(_, exp)| *exp > now);
     }
 
@@ -513,8 +513,8 @@ mod tests {
         let chat = Chat::new_dm("npub1peer".to_string(), &mut interner);
 
         // created_at should be recent (within last 5 seconds)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
         assert!(
             chat.created_at >= now - 5 && chat.created_at <= now + 1,
             "created_at ({}) should be close to now ({})",
@@ -831,8 +831,8 @@ mod tests {
         let mut interner = NpubInterner::new();
         let mut chat = Chat::new_dm("npub1peer".to_string(), &mut interner);
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
 
         // One active, one expired
         let active_handle = interner.intern("npub1active");
@@ -851,8 +851,8 @@ mod tests {
         let mut interner = NpubInterner::new();
         let mut chat = Chat::new_dm("npub1peer".to_string(), &mut interner);
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
 
         let handle = interner.intern("npub1typer");
         chat.update_typing_participant(handle, now + 100);

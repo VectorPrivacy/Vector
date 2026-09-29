@@ -196,7 +196,7 @@ struct WrapConfirm {
     loop_exited: AtomicBool,
     notify: tokio::sync::Notify,
     session: std::sync::Arc<crate::db::Session>,
-    registered_at: std::time::Instant,
+    registered_at: web_time::Instant,
 }
 
 /// Entries carry this account's chat and message ids, so a late OK must only
@@ -375,7 +375,7 @@ async fn retry_send_gift_wrap(
                     );
                     last_error = Some(e);
                     if attempt + 1 < max_attempts {
-                        tokio::time::sleep(config.retry_delay).await;
+                        crate::rt::time::sleep(config.retry_delay).await;
                     }
                     continue;
                 }
@@ -397,7 +397,7 @@ async fn retry_send_gift_wrap(
                 loop_exited: AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
                 session: crate::db::current_session(),
-                registered_at: std::time::Instant::now(),
+                registered_at: web_time::Instant::now(),
             });
             register_wrap_confirm(entry.clone());
             confirm = Some(entry);
@@ -487,7 +487,7 @@ async fn retry_send_gift_wrap(
             // Sleep out the retry delay, waking instantly on a late OK
             // (notify_one stores a permit, so an OK landing before this
             // line still wakes us).
-            let _ = tokio::time::timeout(
+            let _ = crate::rt::time::timeout(
                 config.retry_delay,
                 confirm_ref.notify.notified(),
             ).await;
@@ -604,8 +604,8 @@ pub async fn send_dm(
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap();
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH).unwrap();
     let pending_id = format!("pending-{}", now.as_nanos());
 
     let receiver = PublicKey::from_bech32(receiver_npub)
@@ -860,7 +860,7 @@ pub async fn seal_or_reuse(
     callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_)).then_some(0));
     let sealed = match plain {
         FileSource::Bytes(bytes) => {
-            let sealed = tokio::task::spawn_blocking(move || {
+            let sealed = crate::rt::spawn_blocking(move || {
                 crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
             })
             .await
@@ -873,7 +873,7 @@ pub async fn seal_or_reuse(
             let guard = TempFile(out.clone());
             let target = out.clone();
             let (stage_cb, pid) = (callback.clone(), pending_id.to_string());
-            let (sealed_hash, len) = tokio::task::spawn_blocking(move || {
+            let (sealed_hash, len) = crate::rt::spawn_blocking(move || {
                 crypto::stream::encrypt_file_with_progress(&path, &target, &key, &nonce, &mut |pct| {
                     stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
                     // A cancel lands here, not after the whole file is sealed.
@@ -927,8 +927,8 @@ pub async fn send_file_dm_from(
     let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap();
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH).unwrap();
     let pending_id = format!("pending-{}", now.as_nanos());
     let milliseconds = now.as_millis() % 1000;
 
@@ -948,7 +948,7 @@ pub async fn send_file_dm_from(
         };
         let (filename, extension) = (filename.to_string(), extension.to_string());
         let tmp_tag = pending_id.clone();
-        tokio::task::spawn_blocking(move || -> Result<_, String> {
+        crate::rt::spawn_blocking(move || -> Result<_, String> {
             let (file_hash, plain_len) = match &source {
                 FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
                 FileSource::Path(path) => crypto::stream::hash_file(path)?,
