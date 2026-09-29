@@ -26,12 +26,22 @@
     // full height, then scrolls it up to reveal the input: the header leaves the
     // screen. The page is sized to what's visible instead and held at the top,
     // as Android resizes it. The document's own client height stays full-size.
+    // The messages keep their distance from the bottom across a resize, so the
+    // latest stay in view above the keyboard rather than sliding behind it.
+    let applied = null;
     function fit() {
         const vv = window.visualViewport;
         const keyboard = !!vv && root.clientHeight - vv.height > 50;
-        root.style.setProperty('--floor', `${keyboard ? 0 : radius}px`);
-        root.style.height = keyboard ? `${vv.height}px` : '';
-        if (keyboard) root.style.setProperty('--app-h', `${vv.height}px`); else root.style.removeProperty('--app-h');
+        const height = keyboard ? `${vv.height}px` : '';
+        if (height !== applied) {
+            applied = height;
+            const list = document.getElementById('chat-messages');
+            const fromBottom = list ? list.scrollHeight - list.scrollTop - list.clientHeight : 0;
+            root.style.setProperty('--floor', `${keyboard ? 0 : radius}px`);
+            root.style.height = height;
+            if (keyboard) root.style.setProperty('--app-h', height); else root.style.removeProperty('--app-h');
+            if (list?.clientHeight) list.scrollTop = list.scrollHeight - list.clientHeight - fromBottom;
+        }
         if (keyboard && (scrollY || vv.offsetTop)) scrollTo(0, 0);
     }
     fit();
