@@ -505,6 +505,8 @@ async function setupRustListeners() {
 
     // Listen for profile updates
     _on('profile_update', (evt) => {
+        // Name-derived text (mention chips, system-event lines, previews) re-renders only on a rename.
+        const renamed = getName(evt.payload.id) !== getName(evt.payload);
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
         let avatarCacheChanged = false;
@@ -541,10 +543,9 @@ async function setupRustListeners() {
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
         // and member-list retro-resolve).
-        {
+        if (renamed) {
             const id = evt.payload.id;
             const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
-            const newAvatarSrc = getProfileAvatarSrc(evt.payload);
             // Rows and reply quotes derive from the profile signal; mention chips are
             // built by the text pipeline and patched here.
             document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(el => {
@@ -567,7 +568,7 @@ async function setupRustListeners() {
         // Retro-resolve system events (join/leave lines) that rendered with this
         // npub's stub before the profile loaded — both the cached content and any
         // already-painted DOM line, plus buffered (not-yet-revealed) events.
-        for (const chat of arrChats) {
+        if (renamed) for (const chat of arrChats) {
             for (const m of chat.messages || []) {
                 if (m.system_event?.member_npub === evt.payload.id) {
                     m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
@@ -576,7 +577,7 @@ async function setupRustListeners() {
                 }
             }
         }
-        for (const buffer of _systemEventBuffer.values()) {
+        if (renamed) for (const buffer of _systemEventBuffer.values()) {
             for (const m of buffer) {
                 if (m.system_event?.member_npub === evt.payload.id) {
                     m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
@@ -596,7 +597,7 @@ async function setupRustListeners() {
         // Upgrade any message-less community whose preview shows THIS npub's join from the npub stub
         // to the resolved name. The group row's state hash doesn't track the join actor , so the list
         // alone wouldn't repaint it — patch the row directly.
-        for (const chat of arrChats) {
+        if (renamed) for (const chat of arrChats) {
             const se = latestPreviewSystemEvent(chat);
             if (se && se.member_npub === evt.payload.id) touchChatRow(chat);
         }
