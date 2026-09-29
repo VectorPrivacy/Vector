@@ -601,10 +601,10 @@ async function setupRustListeners() {
             if (se && se.member_npub === evt.payload.id) touchChatRow(chat);
         }
 
-        // This profile's DM row re-derives (name, avatar, bot mark); the list re-diffs
-        // in case a block flag changed its membership. No other row is touched.
+        // This profile's DM row re-derives (name, avatar, bot mark); the list re-diffs, once
+        // per burst of fetched profiles, in case a block flag changed its membership.
         VectorSvelte.touchProfile(evt.payload.id);
-        reorderChatlist();
+        scheduleChatlistReorder();
     });
 
     _on('chat_muted', (evt) => {
