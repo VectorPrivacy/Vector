@@ -197,7 +197,7 @@ webp = "0.3"
 # libwebp's streaming animation decoder and encoder (shared/animated_webp.rs), which the
 # `webp` crate only offers holding every frame in memory.
 libwebp-sys = "0.9"
-ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling", "static"], optional = true }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-resampling", "static"], optional = true }
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
 cpal = "0.16.0"

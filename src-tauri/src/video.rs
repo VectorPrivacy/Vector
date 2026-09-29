@@ -1,9 +1,11 @@
 //! Video compression for sending: any common phone or web video in, H.264 + AAC MP4 out,
 //! at most 720p, through the platform's hardware H.264 encoder. FFmpeg is a selective static
-//! build (scripts/build-ffmpeg.sh); rare containers and codecs are not compiled in.
+//! build (scripts/build-ffmpeg.sh); rare containers and codecs are not compiled in, and frames
+//! scale through the photo path's SIMD resizer rather than swscale.
 
 use ffmpeg_next as ffmpeg;
-use ffmpeg::{codec, encoder, format, frame, media, software, Dictionary, Packet, Rational};
+use ffmpeg::{codec, encoder, format, frame, media, software, Dictionary, Packet, Rational, Rescale};
+use format::Pixel;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -77,7 +79,12 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
     let vin_index = vin.index();
     let vin_tb = vin.time_base();
     let fps = [vin.avg_frame_rate(), vin.rate()].into_iter().find(|r| r.numerator() > 0 && r.denominator() > 0).unwrap_or(Rational(30, 1));
-    let mut decoder = codec::context::Context::from_parameters(vin.parameters()).map_err(err("video decoder"))?.decoder().video().map_err(err("video decoder"))?;
+    let mut decoder = {
+        let mut ctx = codec::context::Context::from_parameters(vin.parameters()).map_err(err("video decoder"))?;
+        // Frame threads on every core; the count follows the machine.
+        ctx.set_threading(codec::threading::Config { kind: codec::threading::Type::Frame, ..Default::default() });
+        ctx.decoder().video().map_err(err("video decoder"))?
+    };
     let display_matrix = display_matrix(&vin);
     let ain = ictx.streams().best(media::Type::Audio).map(|s| (s.index(), s.time_base(), s.parameters()));
     let total_us = ictx.duration().max(1) as f64;
@@ -92,15 +99,23 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         .video()
         .ok()
         .and_then(|v| v.formats())
-        .and_then(|mut f| f.find(|p| matches!(p, format::Pixel::YUV420P | format::Pixel::NV12)))
-        .unwrap_or(format::Pixel::YUV420P);
+        .and_then(|mut f| f.find(|p| matches!(p, Pixel::YUV420P | Pixel::NV12)))
+        .unwrap_or(Pixel::YUV420P);
     let mut venc = codec::context::Context::new_with_codec(vcodec).encoder().video().map_err(err("video encoder"))?;
     venc.set_width(w);
     venc.set_height(h);
     venc.set_format(pix);
-    venc.set_time_base(vin_tb);
+    // One tick a frame: encoders' rate control budgets per tick. Variable-rate sources land
+    // on the nearest tick.
+    let enc_tb = fps.invert();
+    venc.set_time_base(enc_tb);
     venc.set_frame_rate(Some(fps));
     venc.set_aspect_ratio(decoder.aspect_ratio());
+    // Scaling keeps the samples' meaning, so the output carries the source's colour tags.
+    venc.set_color_range(decoder.color_range());
+    venc.set_colorspace(decoder.color_space());
+    venc.set_color_primaries(decoder.color_primaries());
+    venc.set_color_transfer_characteristic(decoder.color_transfer_characteristic());
     let fps_f = f64::from(fps.numerator()) / f64::from(fps.denominator());
     venc.set_bit_rate((f64::from(w * h) * fps_f.min(60.0) * BITS_PER_PIXEL) as usize);
     venc.set_gop((fps_f * 2.0).round().max(1.0) as u32);
@@ -116,7 +131,6 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         }
         ost.index()
     };
-    let mut scaler: Option<software::scaling::Context> = None;
 
     // Audio: AAC is copied as it is, anything else re-encoded to AAC.
     let mut audio = match ain {
@@ -139,7 +153,7 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
 
     let mut last_progress = 0.0f32;
     let mut decoded = frame::Video::empty();
-    let mut scaled = frame::Video::empty();
+    let mut last_pts: Option<i64> = None;
     for (stream, mut packet) in ictx.packets() {
         if cancel.load(Ordering::Relaxed) {
             return Err("video compression cancelled".into());
@@ -147,7 +161,7 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         let si = stream.index();
         if si == vin_index {
             decoder.send_packet(&packet).map_err(err("decode video"))?;
-            drain_video(&mut decoder, &mut venc, &mut scaler, &mut decoded, &mut scaled, (w, h, pix), vin_tb, vout_index, vout_tb, &mut octx)?;
+            drain_video(&mut decoder, &mut venc, &mut decoded, (w, h, pix), (vin_tb, enc_tb), &mut last_pts, vout_index, vout_tb, &mut octx)?;
             if let Some(ts) = packet.pts() {
                 let done = (ts as f64 * f64::from(vin_tb) * 1e6 / total_us).clamp(0.0, 1.0) as f32;
                 if done - last_progress >= 0.01 {
@@ -169,9 +183,9 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         }
     }
     decoder.send_eof().map_err(err("decode video"))?;
-    drain_video(&mut decoder, &mut venc, &mut scaler, &mut decoded, &mut scaled, (w, h, pix), vin_tb, vout_index, vout_tb, &mut octx)?;
+    drain_video(&mut decoder, &mut venc, &mut decoded, (w, h, pix), (vin_tb, enc_tb), &mut last_pts, vout_index, vout_tb, &mut octx)?;
     venc.send_eof().map_err(err("encode video"))?;
-    write_encoded(&mut venc, vin_tb, vout_index, vout_tb, &mut octx)?;
+    write_encoded(&mut venc, enc_tb, vout_index, vout_tb, &mut octx)?;
     if let Some(Audio::Encode(t)) = audio.as_mut() {
         t.finish(&mut octx)?;
     }
@@ -184,36 +198,88 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
 fn drain_video(
     decoder: &mut ffmpeg::decoder::Video,
     venc: &mut encoder::Video,
-    scaler: &mut Option<software::scaling::Context>,
     decoded: &mut frame::Video,
-    scaled: &mut frame::Video,
     (w, h, pix): (u32, u32, format::Pixel),
-    in_tb: Rational,
+    (in_tb, enc_tb): (Rational, Rational),
+    last_pts: &mut Option<i64>,
     out_index: usize,
     out_tb: Rational,
     octx: &mut format::context::Output,
 ) -> Result<(), String> {
     while decoder.receive_frame(decoded).is_ok() {
-        // The scaler follows the stream: some files change size or format mid-stream.
-        let fits = scaler.as_ref().is_some_and(|s| {
-            let i = s.input();
-            (i.format, i.width, i.height) == (decoded.format(), decoded.width(), decoded.height())
-        });
-        if !fits {
-            *scaler = Some(
-                software::scaling::Context::get(decoded.format(), decoded.width(), decoded.height(), pix, w, h, software::scaling::Flags::BICUBIC)
-                    .map_err(err("scaler"))?,
-            );
-        }
-        if let Some(s) = scaler.as_mut() {
-            s.run(decoded, scaled).map_err(err("scale"))?;
-        }
-        scaled.set_pts(decoded.timestamp());
+        // A fresh frame each time: the encoder keeps references to frames it still holds.
+        let mut scaled = scale_frame(decoded, w, h, pix)?;
+        // Timestamps must rise strictly; two source frames can round onto one tick.
+        let pts = decoded.timestamp().map(|t| t.rescale(in_tb, enc_tb)).unwrap_or(last_pts.map_or(0, |p| p + 1));
+        let pts = last_pts.map_or(pts, |p| pts.max(p + 1));
+        *last_pts = Some(pts);
+        scaled.set_pts(Some(pts));
         scaled.set_kind(ffmpeg::picture::Type::None);
-        venc.send_frame(scaled).map_err(err("encode video"))?;
-        write_encoded(venc, in_tb, out_index, out_tb, octx)?;
+        scaled.set_color_range(decoded.color_range());
+        scaled.set_color_space(decoded.color_space());
+        scaled.set_color_primaries(decoded.color_primaries());
+        scaled.set_color_transfer_characteristic(decoded.color_transfer_characteristic());
+        venc.send_frame(&scaled).map_err(err("encode video"))?;
+        write_encoded(venc, enc_tb, out_index, out_tb, octx)?;
     }
     Ok(())
+}
+
+/// Planar YUV the decoders here produce: 8- or 10-bit, 4:2:0, 4:2:2 or 4:4:4.
+fn deep(format: Pixel) -> Option<bool> {
+    match format {
+        Pixel::YUV420P | Pixel::YUV422P | Pixel::YUV444P | Pixel::YUVJ420P | Pixel::YUVJ422P | Pixel::YUVJ444P => Some(false),
+        Pixel::YUV420P10LE | Pixel::YUV422P10LE | Pixel::YUV444P10LE => Some(true),
+        _ => None,
+    }
+}
+
+/// `src` as 8-bit 4:2:0 at `w` x `h`, each plane resized on its own through the SIMD resizer
+/// the photo path uses, which also brings 4:2:2 and 4:4:4 chroma to 4:2:0. `NV12` output
+/// interleaves the chroma planes.
+fn scale_frame(src: &frame::Video, w: u32, h: u32, out_format: Pixel) -> Result<frame::Video, String> {
+    let deep = deep(src.format()).ok_or_else(|| format!("unsupported pixel format {:?}", src.format()))?;
+    let mut out = frame::Video::new(out_format, w, h);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let mut chroma: Vec<image::GrayImage> = Vec::with_capacity(2);
+    for plane in 0..3 {
+        let (pw, ph) = (src.plane_width(plane), src.plane_height(plane));
+        let (stride, data) = (src.stride(plane), src.data(plane));
+        let mut packed = Vec::with_capacity(pw as usize * ph as usize);
+        for row in data.chunks(stride).take(ph as usize) {
+            if deep {
+                // 10-bit samples round to 8 bits: the output is 8-bit H.264.
+                packed.extend(row[..pw as usize * 2].chunks_exact(2).map(|s| ((u16::from_le_bytes([s[0], s[1]]) + 2) >> 2).min(255) as u8));
+            } else {
+                packed.extend_from_slice(&row[..pw as usize]);
+            }
+        }
+        let img = image::GrayImage::from_raw(pw, ph, packed).ok_or("frame plane size")?;
+        let (dw, dh) = if plane == 0 { (w, h) } else { (cw, ch) };
+        let img = if (pw, ph) == (dw, dh) {
+            img
+        } else {
+            crate::shared::image::resize_exact(&image::DynamicImage::ImageLuma8(img), dw, dh, image::imageops::FilterType::CatmullRom).into_luma8()
+        };
+        if plane == 0 || out_format == Pixel::YUV420P {
+            let stride = out.stride(plane);
+            for (dst, src) in out.data_mut(plane).chunks_mut(stride).zip(img.chunks(dw as usize)) {
+                dst[..dw as usize].copy_from_slice(src);
+            }
+        } else {
+            chroma.push(img);
+        }
+    }
+    if let [u, v] = &chroma[..] {
+        let stride = out.stride(1);
+        for ((dst, u), v) in out.data_mut(1).chunks_mut(stride).zip(u.chunks(cw as usize)).zip(v.chunks(cw as usize)) {
+            for (x, (&a, &b)) in u.iter().zip(v).enumerate() {
+                dst[2 * x] = a;
+                dst[2 * x + 1] = b;
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn write_encoded(venc: &mut encoder::Video, in_tb: Rational, out_index: usize, out_tb: Rational, octx: &mut format::context::Output) -> Result<(), String> {

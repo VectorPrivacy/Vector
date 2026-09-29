@@ -43,6 +43,7 @@ mod message;
 
 // Video compression for sending (the `video` feature: a selective static FFmpeg).
 #[cfg(feature = "video")]
+#[allow(dead_code)] // Not yet on the send path.
 mod video;
 pub use vector_core::{Message, Attachment, Reaction};
 

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds a selective, static, LGPL FFmpeg for video compression: common phone and web
-# formats in, H.264 + AAC MP4 out through the platform's hardware encoder.
+# Builds a selective, static, LGPL FFmpeg for video compression: the formats Vector users
+# actually send in, H.264 + AAC MP4 out through the platform's hardware encoder. Frames are
+# scaled in Rust (fast_image_resize), so swscale is not built.
 # Outputs to src-tauri/native-deps/ffmpeg/<rust-target>/{include,lib}
 #
 # Usage: scripts/build-ffmpeg.sh [rust-target ...]   (default: the host)
@@ -8,7 +9,8 @@
 #   aarch64-linux-android | armv7-linux-androideabi | x86_64-linux-android  (NDK, MediaCodec)
 #   x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu (no hardware encoder yet)
 # Env: ANDROID_NDK_HOME/NDK_HOME for Android; FFMPEG_TEST_ENCODER=1 adds FFmpeg's own MPEG-4
-# Part 2 encoder so the pipeline can be tested where no hardware encoder exists.
+# Part 2 encoder (and its decoder, to read the output back) so the pipeline can be tested where
+# no hardware encoder exists.
 #
 # Prerequisites: a C toolchain, make, pkg-config; nasm on x86 hosts (else x86 SIMD is off).
 
@@ -36,23 +38,24 @@ else
     echo "$FFMPEG_SHA256  $FFMPEG_TAR" | shasum -a 256 -c -
 fi
 
-# Everything off, then only what phones and the web commonly produce. Rare containers and
-# codecs are left out on purpose: each decoder is attack surface and binary weight.
+# Everything off, then only what a survey of 12k received attachments showed in use: H.264
+# (~92% of videos), HEVC and VP9 video; AAC and Opus audio; MP4/MOV and WebM containers.
+# Anything rarer is left out on purpose: each decoder is attack surface and binary weight.
 COMMON_FLAGS=(
     --disable-everything --disable-autodetect --disable-programs --disable-doc
     --disable-network --disable-avdevice --disable-avfilter --disable-debug
     --enable-static --disable-shared --enable-pic
     --enable-protocol=file
-    --enable-demuxer=mov,matroska,avi
+    --enable-demuxer=mov,matroska
     --enable-muxer=mp4
-    --enable-parser=h264,hevc,vp8,vp9,mpeg4video,aac,opus,mpegaudio,vorbis
-    --enable-decoder=h264,hevc,vp8,vp9,mpeg4,aac,opus,mp3,vorbis,pcm_s16le,pcm_s16be,pcm_f32le
+    --enable-parser=h264,hevc,vp9,aac,opus
+    --enable-decoder=h264,hevc,vp9,aac,opus
     --enable-encoder=aac
-    --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb
-    --enable-swscale --enable-swresample
+    --enable-bsf=aac_adtstoasc
+    --disable-swscale --enable-swresample
 )
 if [ "$FFMPEG_TEST_ENCODER" = "1" ]; then
-    COMMON_FLAGS+=(--enable-encoder=mpeg4)
+    COMMON_FLAGS+=(--enable-encoder=mpeg4 --enable-decoder=mpeg4 --enable-parser=mpeg4video)
 fi
 
 host_target() {
