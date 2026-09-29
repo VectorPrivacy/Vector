@@ -112,11 +112,30 @@ fn store_identity(keys: &Keys) {
     state::set_my_public_key(keys.public_key());
 }
 
+/// An account on disk is real once its setup committed: a stored key, or a
+/// keyless signer's identity. One abandoned before that holds neither.
+pub(crate) fn is_committed(npub: &str) -> bool {
+    if !db::get_accounts().unwrap_or_default().iter().any(|n| n == npub) {
+        return false;
+    }
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else { return false };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    conn.query_row("SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1", [], |_| Ok(()))
+        .is_ok()
+}
+
 pub fn get_encryption_and_key() -> Result<Value, String> {
     let has_account = if db::get_current_account().is_ok() {
         true
     } else if let Some(npub) = db::read_active_account_file().ok().flatten() {
-        db::set_current_account(npub.clone()).is_ok() && db::init_database(&npub).is_ok()
+        if is_committed(&npub) {
+            db::set_current_account(npub.clone()).is_ok() && db::init_database(&npub).is_ok()
+        } else {
+            let _ = db::clear_active_account_file();
+            false
+        }
     } else {
         false
     };
@@ -174,7 +193,12 @@ fn account_metadata(npub: &str) -> Value {
 }
 
 pub fn list_accounts_with_metadata() -> Value {
-    let mut accounts: Vec<Value> = db::get_accounts().unwrap_or_default().iter().map(|n| account_metadata(n)).collect();
+    let mut accounts: Vec<Value> = db::get_accounts()
+        .unwrap_or_default()
+        .iter()
+        .filter(|n| is_committed(n))
+        .map(|n| account_metadata(n))
+        .collect();
     accounts.sort_by_key(|m| std::cmp::Reverse(m["last_active"].as_i64().unwrap_or(0)));
     Value::Array(accounts)
 }
@@ -209,7 +233,7 @@ pub async fn login(mut import_key: String) -> Result<Value, String> {
     };
 
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
-    if db::get_accounts().unwrap_or_default().iter().any(|n| n == &npub) {
+    if is_committed(&npub) {
         let _ = db::write_active_account_file(&npub);
         emitter::emit("session_reload", &());
         return Ok(json!({ "public": npub, "existing": true }));
@@ -220,10 +244,7 @@ pub async fn login(mut import_key: String) -> Result<Value, String> {
     drop(keys);
     install_client();
     insert_own_profile(&npub).await;
-
-    if let Err(e) = db::init_database(&npub).and_then(|_| db::set_current_account(npub.clone())) {
-        emitter::emit("loading_error", &e);
-    }
+    stage_pending(npub.clone());
     Ok(json!({ "public": npub, "existing": false }))
 }
 

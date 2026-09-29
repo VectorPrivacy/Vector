@@ -60,7 +60,7 @@ fn nip07_reply(a: &Args) -> Result<Value, String> {
 
 /// An imported identity already on this device reopens instead of re-adding.
 fn switch_if_known(npub: &str) -> bool {
-    if db::get_accounts().unwrap_or_default().iter().any(|n| n == npub) {
+    if crate::account::is_committed(npub) {
         let _ = db::write_active_account_file(npub);
         emitter::emit("session_reload", &());
         return true;
