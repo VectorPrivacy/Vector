@@ -39,11 +39,26 @@ cpSync(join(ROOT, 'web', 'pkg'), join(OUT, 'web', 'pkg'), { recursive: true });
 // Root scope, so it can answer `/vfs/…` for the whole page.
 cpSync(join(ROOT, 'web', 'sw.js'), join(OUT, 'sw.js'));
 
+// Desktop's policy, minus Tauri's schemes. Remote images are allowed because
+// without a media proxy the page loads them directly, as desktop does.
+export const CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "img-src 'self' data: blob: https:",
+    "media-src 'self' blob: https://gifverse.net",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self' https://gifverse.net",
+    "worker-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "form-action 'none'",
+].join('; ');
+
 // The shim must define window.__TAURI__ before any app script runs.
 const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
-    .replace('<head>', '<head>\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>')
+    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>`)
     .replace('</head>', '    <link rel="stylesheet" href="/web/web.css" />\n  </head>'));
 
 console.log(`[build-web] → ${OUT}`);

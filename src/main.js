@@ -2252,7 +2252,11 @@ function anchorShowsItsDestination(anchor) {
  * links are always cross-origin. Same-origin therefore means "our own UI".
  */
 function isAppChromeAnchor(anchor) {
-    try { return new URL(anchor.href).origin === location.origin; }
+    try {
+        const url = new URL(anchor.href);
+        // Vector Web serves received files same-origin under /vfs: those are content, not UI.
+        return url.origin === location.origin && !url.pathname.startsWith('/vfs/');
+    }
     catch { return true; }
 }
 

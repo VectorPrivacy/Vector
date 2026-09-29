@@ -108,12 +108,12 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
 }
 
 /// Whether a cached image path still points at a file. The web keeps its cache
-/// in OPFS, which only answers asynchronously, so the record is trusted there.
+/// in OPFS, which only answers asynchronously, so a local path is trusted there.
 fn cached_file_present(path: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = path;
-        true
+        // A remote URL stands in when no proxy could fetch it; don't keep it past this session.
+        path.starts_with('/')
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

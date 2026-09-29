@@ -203,7 +203,10 @@
         a.remove();
     }
 
-    register('open_attachment', ({ path }) => { window.open(convertFileSrc(path), '_blank', 'noopener'); });
+    // Only media opens in a tab; anything else is saved, never navigated to.
+    const VIEWABLE = /\.(png|jpe?g|gif|webp|avif|bmp|mp4|webm|mov|mp3|m4a|aac|ogg|opus|wav|flac)$/i;
+    const openOrSave = (path) => (VIEWABLE.test(path) ? window.open(convertFileSrc(path), '_blank', 'noopener') : save(path));
+    register('open_attachment', ({ path }) => { openOrSave(path); });
     register('share_attachment', async ({ path }) => {
         const blob = await (await fetch(convertFileSrc(path))).blob();
         const file = new File([blob], fileName(path), { type: blob.type });
@@ -226,7 +229,7 @@
     register('reveal_attachment', ({ path }) => save(path));
     // "Show in folder" has no folder here: save the file instead.
     window.__TAURI__.opener.revealItemInDir = async (path) => save(path);
-    window.__TAURI__.opener.openPath = async (path) => { window.open(convertFileSrc(path), '_blank', 'noopener'); };
+    window.__TAURI__.opener.openPath = async (path) => { openOrSave(path); };
 
     // --- Notifications -----------------------------------------------------
     // Permission is asked on the first click: browsers refuse prompts without a gesture.

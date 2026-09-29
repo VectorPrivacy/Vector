@@ -16,6 +16,7 @@ use vector_core::{db, SlimProfile, STATE};
 const MAX_BYTES: usize = 10 * 1024 * 1024;
 const MAX_EMOJI_BYTES: usize = 1024 * 1024;
 const AVATAR_THUMB: u32 = 160;
+const FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -131,22 +132,32 @@ fn thumb(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A displayable src for `url`: the local copy's path, or the URL itself.
+/// A displayable src for `url`: the local copy's path, or the URL itself when no
+/// media proxy is in use (the page then loads it directly, as desktop fetches it).
+/// With a proxy in play a failure stays a failure: falling back would leak the IP.
 pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     vector_core::net::validate_url_not_private(url).map_err(str::to_string)?;
     if let Some(path) = remembered(url, kind) {
         return Ok(path);
     }
-    if !IN_FLIGHT.with(|f| f.borrow_mut().insert(url.to_string())) {
-        return Ok(url.to_string());
+    while IN_FLIGHT.with(|f| f.borrow().contains(url)) {
+        vector_core::rt::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let result = fetch_and_store(url, kind).await;
+    if let Some(path) = remembered(url, kind) {
+        return Ok(path);
+    }
+    IN_FLIGHT.with(|f| f.borrow_mut().insert(url.to_string()));
+    let proxied = vector_core::proxy::proxied(url).await.is_some();
+    let result = vector_core::rt::time::timeout(FETCH_BUDGET, fetch_and_store(url, kind))
+        .await
+        .unwrap_or_else(|_| Err("timed out".into()));
     IN_FLIGHT.with(|f| f.borrow_mut().remove(url));
     match result {
         Ok(path) => {
             remember(url, kind, &path);
             Ok(path)
         }
+        Err(e) if proxied => Err(e),
         Err(e) => {
             vector_core::log_debug!("[Images] {url}: {e}; the page loads it directly");
             Ok(url.to_string())

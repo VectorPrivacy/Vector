@@ -441,6 +441,26 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
     if attachments.is_empty() {
         return;
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let dir = crate::db::get_download_dir();
+        let paths: Vec<std::path::PathBuf> = attachments
+            .iter()
+            .map(|a| std::path::PathBuf::from(&*a.path))
+            .filter(|p| p.starts_with(&dir) && !p.components().any(|c| c == std::path::Component::ParentDir))
+            .collect();
+        crate::db::spawn_bound(async move {
+            for p in paths {
+                crate::webfiles::remove(&p).await;
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    delete_cached_attachment_files_native(attachments);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn delete_cached_attachment_files_native(attachments: &[crate::types::Attachment]) {
     let download_dir = match crate::db::get_download_dir().canonicalize() {
         Ok(d) => d,
         Err(_) => return,

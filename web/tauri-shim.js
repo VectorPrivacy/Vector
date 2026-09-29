@@ -33,8 +33,10 @@
                 break;
             case 'fatal':
                 fatal = data.error;
-                console.error('[web] backend failed to start:', fatal);
+                console.error('[web] backend stopped:', fatal);
                 for (const msg of queued.splice(0)) settle(msg.id, false, fatal);
+                for (const id of [...pending.keys()]) settle(id, false, fatal);
+                overlay('Vector hit an error and needs to restart.', 'Reload', () => location.reload());
                 break;
             case 'result':
                 settle(data.id, data.ok, data.ok ? data.value : data.error);
@@ -69,13 +71,18 @@
         worker = null;
         ready = false;
         holdLock?.();
-        overlay('Vector is open in another tab.', 'Use here', () => { channel.postMessage('takeover'); setTimeout(() => location.reload(), 600); });
+        overlay('Vector is open in another tab.', 'Use here', () => { takeOver(); });
     };
+
+    // Ask the owner to step aside, then reload once its lock is actually free.
+    function takeOver() {
+        channel.postMessage('takeover');
+        navigator.locks.request('vector-web-instance', () => location.reload());
+    }
 
     function blocked() {
         overlay('Vector is already open in another tab.', 'Use here', () => {
-            channel.postMessage('takeover');
-            setTimeout(() => location.reload(), 600);
+            takeOver();
         });
     }
 
@@ -252,7 +259,7 @@
         core: {
             invoke,
             // Backend files are served from OPFS by the service worker (web/sw.js).
-            convertFileSrc: (path) => (!path || /^[a-z]+:/i.test(path) ? path : '/vfs' + encodeURI(path.startsWith('/') ? path : '/' + path)),
+            convertFileSrc: (path) => (!path || /^[a-z]+:/i.test(path) ? path : '/vfs' + ('/' + path.replace(/^\/+/, '')).split('/').map(encodeURIComponent).join('/')),
             Channel: class { constructor() { this.onmessage = null; } },
         },
         event: { listen, once, emit: async (name, payload) => dispatchEvent(name, payload) },

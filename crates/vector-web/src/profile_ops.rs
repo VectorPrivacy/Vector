@@ -307,7 +307,11 @@ async fn logout() -> Result<(), String> {
 }
 
 async fn delete_account(a: &Args) -> Result<Value, String> {
-    remove_account(a.str("npub")?).await.map(|was_active| json!(was_active))
+    let was_active = remove_account(a.str("npub")?).await?;
+    if was_active {
+        crate::emitter::emit("session_reload", &());
+    }
+    Ok(json!(was_active))
 }
 
 /// Remove `npub`'s databases (main file, journal, WAL) from the OPFS pool.
@@ -339,13 +343,17 @@ async fn remove_account(npub: String) -> Result<bool, String> {
 
     let app_data = db::get_app_data_dir()?.clone();
     let dir = db::account_dir(&npub)?;
-    db::webfs::remove_tree(&app_data, &dir)?;
+    // Databases first: a registry row outliving its database is harmless, the reverse orphans a pool slot.
     // A connection the old session still holds errors on its next I/O; the page reloads after this.
     delete_account_databases(&npub).await?;
+    db::webfs::remove_tree(&app_data, &dir)?;
     vector_core::webfiles::remove(&dir).await;
+    // Originals the user picked still carry their metadata.
+    vector_core::webfiles::remove(std::path::Path::new("/picked")).await;
 
     if db::list_account_npubs().is_ok_and(|v| v.is_empty()) {
         vector_core::webfiles::remove(&db::get_download_dir()).await;
+        crate::images::clear_all().await;
     }
     Ok(was_active)
 }

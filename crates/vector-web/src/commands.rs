@@ -96,8 +96,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             db::write_active_account_file(&a.str("npub")?)?;
             Ok(Value::Null)
         }
-        // A reload restarts the worker, which boots the marked account.
-        "swap_session" => Ok(Value::Null),
+        // A reload restarts the worker, which boots the marked account and ends every task of this one.
+        "swap_session" => {
+            crate::emitter::emit("session_reload", &());
+            Ok(Value::Null)
+        }
         "tor_get_state" => Ok(json!({
             "enabled": false, "running": false, "supported": false,
             "status": "", "bootstrap_progress": 0, "socks_proxy": null,

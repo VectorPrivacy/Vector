@@ -233,7 +233,13 @@ async fn send_upload(
     };
     let mut request_future = Box::pin(request.body(request_body).send());
 
-    let mut watch = StallWatch::new(total_size, stall_limit, RESPONSE_WAIT);
+    // fetch reports no upload progress, so the whole transfer happens inside the
+    // response wait: give it room for the body at a slow 64 KB/s.
+    #[cfg(target_arch = "wasm32")]
+    let response_wait = RESPONSE_WAIT + std::time::Duration::from_secs(total_size / (64 * 1024));
+    #[cfg(not(target_arch = "wasm32"))]
+    let response_wait = RESPONSE_WAIT;
+    let mut watch = StallWatch::new(total_size, stall_limit, response_wait);
     let mut last_percentage = 0;
     let mut poll_interval = crate::rt::time::interval(crate::rt::time::Duration::from_millis(100));
 

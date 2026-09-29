@@ -176,10 +176,14 @@ pub async fn file_message(receiver: String, replied_to: String, path: String, ke
     clear_compression(&path);
     let name = sanitized_name(&name_override, name);
     if !is_image(&ext) {
-        return send(receiver, replied_to, bytes, name, ext, None).await;
+        let sent = send(receiver, replied_to, bytes, name, ext, None).await?;
+        forget_picked(&path).await;
+        return Ok(sent);
     }
     let p = prepare_image(bytes, &ext, false, keep_metadata)?;
-    send(receiver, replied_to, p.bytes, name, p.extension, p.img_meta).await
+    let sent = send(receiver, replied_to, p.bytes, name, p.extension, p.img_meta).await?;
+    forget_picked(&path).await;
+    Ok(sent)
 }
 
 /// Compressed send of a picked image: the preview's pre-compression when it matches.
@@ -190,7 +194,9 @@ pub async fn send_compressed(receiver: String, replied_to: String, path: String,
         Some(p) => p,
         None => prepare_image(Arc::new(read(&path).await?), &ext, true, keep_metadata)?,
     };
-    send(receiver, replied_to, p.bytes, name, p.extension, p.img_meta).await
+    let sent = send(receiver, replied_to, p.bytes, name, p.extension, p.img_meta).await?;
+    forget_picked(&path).await;
+    Ok(sent)
 }
 
 pub fn cache_bytes(bytes: Vec<u8>, name: String, extension: String) -> Value {
@@ -287,6 +293,14 @@ pub async fn image_preview(path: &str) -> Result<Value, String> {
 /// A recorded voice message: a nameless WAV, which receivers render as a voice player.
 pub async fn send_voice(receiver: String, replied_to: String, path: String) -> Result<Value, String> {
     let bytes = std::sync::Arc::new(read(&path).await?);
-    let _ = vector_core::webfiles::remove(Path::new(&path)).await;
-    send(receiver, replied_to, bytes, String::new(), "wav".into(), None).await
+    let sent = send(receiver, replied_to, bytes, String::new(), "wav".into(), None).await?;
+    forget_picked(&path).await;
+    Ok(sent)
+}
+
+/// The page's copy of a picked file, once sent: the attachment lives on under its hash.
+async fn forget_picked(path: &str) {
+    if path.starts_with("/picked/") {
+        vector_core::webfiles::remove(Path::new(path)).await;
+    }
 }

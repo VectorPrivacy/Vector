@@ -38,6 +38,7 @@ use wasm_bindgen::prelude::*;
 
 /// Root of every account's files inside the OPFS pool.
 const APP_DATA: &str = "/vector";
+const POOL_SLOTS: u32 = 48;
 
 #[wasm_bindgen]
 pub fn set_event_sink(sink: js_sys::Function) {
@@ -53,7 +54,11 @@ pub async fn start(version: String) -> Result<(), JsValue> {
     let cfg = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new()
         .directory("vector-web")
         .build();
-    sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, true)
+    let pool = sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, true)
+        .await
+        .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
+    // One slot per database file and per journal; the default six run out by the fifth account.
+    pool.reserve_minimum_capacity(POOL_SLOTS)
         .await
         .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
 

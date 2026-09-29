@@ -274,9 +274,14 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     state::init_encryption_enabled();
 
     if state::nostr_client().is_some() {
-        return vector_core::my_public_key()
-            .and_then(|pk| pk.to_bech32().ok())
-            .ok_or_else(|| "Public key not initialized".to_string());
+        let in_memory = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
+        let marked = db::read_active_account_file().ok().flatten();
+        // A key left from an abandoned add-account must not sign for the marked account.
+        if in_memory.is_some() && in_memory == marked {
+            return in_memory.ok_or_else(|| "Public key not initialized".into());
+        }
+        emitter::emit("session_reload", &());
+        return Err("Switching accounts".into());
     }
 
     let signer_type = db::get_signer_type().unwrap_or_else(|_| "local".into());

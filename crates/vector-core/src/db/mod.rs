@@ -1098,7 +1098,11 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
             Ok(conn) => return Ok(conn),
             Err(e) if e.contains("locked") || e.contains("busy") => {
                 last_err = e;
+                // One thread on the web: nothing else can release the lock while we wait.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(std::time::Duration::from_millis(50 * u64::from(attempt + 1)));
+                #[cfg(target_arch = "wasm32")]
+                let _ = attempt;
             }
             Err(e) => return Err(e),
         }

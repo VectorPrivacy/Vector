@@ -54,7 +54,7 @@ async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_la
             })
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "New Message".into());
-        (rings, name, profile.map(|p| p.avatar_cached.to_string()).filter(|a| !a.is_empty()))
+        (rings, name, profile.map(|p| p.avatar_cached.to_string()).filter(|a| a.starts_with('/')))
     };
     if !rings {
         return;

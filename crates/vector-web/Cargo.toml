@@ -20,13 +20,13 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 # nostr reads time through universal-time, which on wasm needs the binary to supply a clock.
-universal-time = "0.3"
+universal-time = "=0.3.0"
 web-time = "1"
 bip39 = "2.2.2"
 zeroize = "1.8"
 rand = "0.8"
 rusqlite = { version = "0.38", default-features = false }
-image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico", "bmp"] }
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
