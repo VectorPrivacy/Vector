@@ -256,23 +256,41 @@ pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String>
         candidates.push(crate::db::get_download_dir().join(&att.name));
     }
     let size = att.size;
-    candidates.retain(|p| match std::fs::metadata(p) {
-        Ok(m) => size == 0 || m.len() == size || m.len() + 16 == size,
-        Err(_) => false,
-    });
-    if candidates.is_empty() {
-        return None;
+    #[cfg(target_arch = "wasm32")]
+    {
+        for p in candidates {
+            let Some(len) = crate::webfiles::size(&p).await else { continue };
+            if size != 0 && len != size && len + 16 != size {
+                continue;
+            }
+            if let Ok(bytes) = crate::webfiles::read(&p).await {
+                if crate::crypto::sha256_hex(&bytes) == expected {
+                    return Some(p.to_string_lossy().to_string());
+                }
+            }
+        }
+        None
     }
-    crate::rt::spawn_blocking(move || {
-        candidates.into_iter().find_map(|p| {
-            let bytes = std::fs::read(&p).ok()?;
-            (crate::crypto::sha256_hex(&bytes) == expected)
-                .then(|| p.to_string_lossy().to_string())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        candidates.retain(|p| match std::fs::metadata(p) {
+            Ok(m) => size == 0 || m.len() == size || m.len() + 16 == size,
+            Err(_) => false,
+        });
+        if candidates.is_empty() {
+            return None;
+        }
+        crate::rt::spawn_blocking(move || {
+            candidates.into_iter().find_map(|p| {
+                let bytes = std::fs::read(&p).ok()?;
+                (crate::crypto::sha256_hex(&bytes) == expected)
+                    .then(|| p.to_string_lossy().to_string())
+            })
         })
-    })
-    .await
-    .ok()
-    .flatten()
+        .await
+        .ok()
+        .flatten()
+    }
 }
 
 /// Run [`verify_local_copy`] over a message's undownloaded attachments,

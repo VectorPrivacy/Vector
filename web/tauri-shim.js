@@ -5,6 +5,10 @@
 (() => {
     'use strict';
 
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch((e) => console.error('[web] service worker failed:', e));
+    }
+
     const worker = new Worker('/web/worker.js', { type: 'module' });
     let nextId = 1;
     const pending = new Map();
@@ -128,7 +132,8 @@
     window.__TAURI__ = {
         core: {
             invoke,
-            convertFileSrc: (path) => path,
+            // Backend files are served from OPFS by the service worker (web/sw.js).
+            convertFileSrc: (path) => (!path || /^[a-z]+:/i.test(path) ? path : '/vfs' + encodeURI(path.startsWith('/') ? path : '/' + path)),
             Channel: class { constructor() { this.onmessage = null; } },
         },
         event: { listen, once, emit: async (name, payload) => dispatchEvent(name, payload) },

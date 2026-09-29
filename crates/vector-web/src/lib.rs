@@ -8,8 +8,11 @@
 #![cfg(target_arch = "wasm32")]
 
 mod account;
+mod attachments;
 mod clock;
 mod commands;
+mod community;
+mod events;
 mod emitter;
 mod messaging;
 mod sync;
@@ -40,6 +43,7 @@ pub async fn start(version: String) -> Result<(), JsValue> {
         .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
 
     vector_core::db::set_app_version(version);
+    vector_core::db::set_download_dir(PathBuf::from("/downloads"));
     vector_core::VectorCore::init(vector_core::CoreConfig {
         data_dir: PathBuf::from(APP_DATA),
         event_emitter: Some(Box::new(emitter::WebEmitter)),

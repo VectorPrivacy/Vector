@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use vector_core::db;
-use vector_core::{NoOpEventHandler, SlimProfile, VectorCore, STATE};
+use vector_core::{SlimProfile, VectorCore, STATE};
 
 use crate::emitter;
 
@@ -64,16 +64,21 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
     if init {
         hydrate_and_announce().await;
     }
-    emitter::emit("sync_progress", &serde_json::json!({ "mode": "Syncing" }));
-    let result = VectorCore.sync_dms(None, &NoOpEventHandler).await;
-    emitter::emit("sync_finished", &());
-    result.map(|_| ()).map_err(|e| e.to_string())
+    // History arrives behind the painted list; `sync_finished` repaints what it added.
+    db::spawn_bound(async {
+        emitter::emit("sync_progress", &serde_json::json!({ "mode": "Syncing" }));
+        if let Err(e) = VectorCore.sync_dms(None, &crate::events::WebEventHandler).await {
+            vector_core::log_warn!("[Web] DM sync failed: {e}");
+        }
+        emitter::emit("sync_finished", &());
+    });
+    Ok(())
 }
 
 /// Start the live DM and community subscription. Runs for the session's life.
 pub fn notifs() {
     db::spawn_bound(async {
-        if let Err(e) = VectorCore.listen(Arc::new(NoOpEventHandler)).await {
+        if let Err(e) = VectorCore.listen(Arc::new(crate::events::WebEventHandler)).await {
             vector_core::log_warn!("[Web] live subscription ended: {e}");
         }
     });

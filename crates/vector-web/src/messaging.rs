@@ -10,7 +10,7 @@ use vector_core::{Message, STATE};
 use crate::emitter;
 
 /// Mirrors the desktop callback: optimistic bubble, then its sent/failed update.
-struct WebSendCallback;
+pub struct WebSendCallback;
 
 impl SendCallback for WebSendCallback {
     fn on_pending(&self, chat_id: &str, msg: &Message) {
@@ -76,7 +76,7 @@ pub fn get_system_events(conversation_id: &str) -> Result<Value, String> {
                     "event_type": tag("event-type").and_then(|v| v.parse::<u8>().ok()).unwrap_or(255),
                     "content": event.content,
                     "member_npub": tag("member").unwrap_or_default(),
-                    "at": event.created_at,
+                    "at": event.created_at * 1000,
                 })
             })
             .collect(),

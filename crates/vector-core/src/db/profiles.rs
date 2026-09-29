@@ -40,11 +40,11 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
             bot: row.get::<_, i32>(13)? != 0,
             avatar_cached: {
                 let p: String = row.get(14)?;
-                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+                if !p.is_empty() && !cached_file_present(&p) { String::new() } else { p }
             },
             banner_cached: {
                 let p: String = row.get(15)?;
-                if !p.is_empty() && !std::path::Path::new(&p).exists() { String::new() } else { p }
+                if !p.is_empty() && !cached_file_present(&p) { String::new() } else { p }
             },
             is_blocked: row.get::<_, i32>(16).unwrap_or(0) != 0,
         })
@@ -105,4 +105,18 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
     Ok(())
+}
+
+/// Whether a cached image path still points at a file. The web keeps its cache
+/// in OPFS, which only answers asynchronously, so the record is trusted there.
+fn cached_file_present(path: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        true
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::path::Path::new(path).exists()
+    }
 }

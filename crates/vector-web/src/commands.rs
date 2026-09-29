@@ -4,10 +4,11 @@
 //! frontend already treats as a failed call.
 
 use serde_json::{json, Value};
-use vector_core::db;
+use vector_core::{db, VectorCore, STATE};
 use vector_core::profile::sync::{self as profile_sync, SyncPriority};
 
-use crate::{account, messaging, sync};
+use crate::community::{self as cm, ControlOp};
+use crate::{account, attachments, messaging, sync};
 
 /// Arguments as the frontend sent them (camelCase keys, like Tauri's).
 pub struct Args(pub Value);
@@ -32,6 +33,47 @@ impl Args {
     fn bool(&self, key: &str) -> Option<bool> {
         self.get(key).and_then(Value::as_bool)
     }
+
+    fn de<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<T, String> {
+        serde_json::from_value(self.0.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| format!("argument `{key}`: {e}"))
+    }
+}
+
+fn relay_status(status: nostr_sdk::prelude::RelayStatus) -> &'static str {
+    use nostr_sdk::prelude::RelayStatus::*;
+    match status {
+        Initialized => "initialized",
+        Pending => "pending",
+        Connecting => "connecting",
+        Connected => "connected",
+        Disconnected => "disconnected",
+        Terminated => "terminated",
+        Shutdown => "shutdown",
+        Banned => "banned",
+        Sleeping => "sleeping",
+    }
+}
+
+async fn get_relays() -> Result<Value, String> {
+    let client = vector_core::state::nostr_client().ok_or("Nostr client not initialized")?;
+    let pool = client.relays().await;
+    let infos: Vec<Value> = vector_core::state::TRUSTED_RELAYS
+        .iter()
+        .map(|url| {
+            let status = pool
+                .iter()
+                .find(|(u, _)| u.as_str().trim_end_matches('/').eq_ignore_ascii_case(url.trim_end_matches('/')))
+                .map(|(_, r)| relay_status(r.status()))
+                .unwrap_or("disabled");
+            json!({ "url": url, "status": status, "is_default": true, "is_custom": false, "enabled": true, "mode": "both" })
+        })
+        .collect();
+    Ok(Value::Array(infos))
+}
+
+/// A core facade result as a command result.
+fn core<T: serde::Serialize>(r: vector_core::Result<T>) -> Result<Value, String> {
+    r.map_err(|e| e.to_string()).and_then(to_value)
 }
 
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, String> {
@@ -125,16 +167,49 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             let ok = profile_sync::load_profile(a.str("npub")?, &sync::WebProfileSyncHandler).await;
             Ok(json!(ok))
         }
+        "queue_chat_profiles_sync" => {
+            profile_sync::queue_chat_profiles(a.str("chatId")?, a.bool("isOpening").unwrap_or(false)).await;
+            Ok(Value::Null)
+        }
+        "refresh_profile_now" => {
+            profile_sync::refresh_profile_now(a.str("npub")?);
+            Ok(Value::Null)
+        }
+        "is_scanning" => Ok(json!(STATE.lock().await.is_syncing)),
+        "get_dm_contacts" => to_value(db::events::get_dm_contact_npubs()?),
+        "get_install_source" => Ok(json!({ "has_store": false, "label": "" })),
+        "get_message_delete_meta_bulk" => Ok(json!({})),
         "run_maintenance" | "monitor_relay_connections" => Ok(json!(true)),
-        "list_community_invites" => Ok(json!([])),
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
         "get_paused_downloads" => Ok(json!({})),
         "get_unread_counts" => to_value(db::events::unread_counts().await?),
         "update_unread_counter" => Ok(json!(messaging::unread_total().await)),
-        "list_emoji_packs" | "get_emoji_usage" => Ok(json!([])),
-        "get_theme_slot_anchor" => Ok(Value::Null),
-        "bump_emoji_usage_batch" => Ok(Value::Null),
+        "list_emoji_packs" => to_value(vector_core::emoji_packs::load_all_packs()?),
+        "get_pack_share_naddr" => to_value(vector_core::emoji_packs::share_naddr(&a.str("naddr")?).await?),
+        "get_theme_emoji_pack" => to_value(vector_core::emoji_packs::get_or_fetch_theme_pack(&a.str("naddr")?).await?),
+        "subscribe_emoji_pack" => to_value(vector_core::emoji_packs::subscribe_pack(&a.str("naddr")?).await?),
+        "get_theme_slot_anchor" => to_value(vector_core::emoji_packs::get_theme_slot_anchor()?),
+        "set_theme_emoji_pack" => {
+            let emojis: Vec<vector_core::emoji_packs::PackEmoji> = a.de("emojis")?;
+            vector_core::emoji_packs::set_theme_emoji_tags(emojis.into_iter().map(|e| (e.shortcode, e.url)).collect());
+            Ok(Value::Null)
+        }
+        "get_emoji_usage" => {
+            if db::get_current_account().is_err() {
+                return Ok(json!([]));
+            }
+            to_value(vector_core::emoji_usage::ranked(a.de::<Option<usize>>("limit")?))
+        }
+        "bump_emoji_usage_batch" => {
+            if db::get_current_account().is_ok() {
+                vector_core::emoji_usage::bump_batch(&a.de::<Vec<vector_core::emoji_usage::EmojiUse>>("entries")?)?;
+            }
+            Ok(Value::Null)
+        }
+        "get_relays" => get_relays().await,
+        "get_blossom_servers_config" => to_value(vector_core::blossom_servers::list_all_servers()),
+        "get_media_servers" => to_value(vector_core::state::get_blossom_servers()),
         "get_my_badges" => Ok(json!({
             "vector": vector_core::badges::has_vector_badge(),
             "tier": vector_core::badges::effective_tier(),
@@ -153,15 +228,103 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_message_views" => to_value(
             messaging::get_message_views(&a.str("chatId")?, a.usize("limit")?, a.usize("offset")?).await?,
         ),
+        "get_messages_around" => {
+            let chat = db::id_cache::get_chat_id_by_identifier(&a.str("chatId")?)?;
+            let (before, after) = (a.usize("before")?.min(512), a.usize("after")?.min(512));
+            to_value(db::events::get_messages_around(chat, &a.str("anchorId")?, before, after).await?)
+        }
         "get_system_events" => messaging::get_system_events(&a.str("conversationId")?),
         "pivx_get_chat_payments" => Ok(json!([])),
+        "download_attachment" => {
+            Ok(json!(attachments::download_attachment(a.str("npub")?, a.str("msgId")?, a.str("attachmentId")?).await))
+        }
         "evict_chat_messages" => Ok(Value::Null),
         "message" => {
             messaging::message(a.str("receiver")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo").unwrap_or_default())
                 .await
         }
+        // --- Communities ---
+        "list_communities" => cm::list_communities(),
+        "get_community" => cm::get_community(&a.str("communityId")?),
+        "get_community_admins" => cm::get_community_admins(&a.str("communityId")?),
+        "get_community_members" => Ok(cm::get_community_members(&a.str("communityId")?).await),
+        "get_community_banlist" => Ok(cm::get_community_banlist(&a.str("communityId")?)),
+        "get_community_invite_summary" => cm::get_community_invite_summary(&a.str("communityId")?),
+        "get_community_capabilities" => core(VectorCore.community_capabilities(&a.str("communityId")?)),
+        "get_community_roles_view" => core(VectorCore.community_roles_view(&a.str("communityId")?)),
+        "get_community_role_graph" => core(VectorCore.community_role_graph(&a.str("communityId")?)),
+        "check_community_raid" => core(VectorCore.check_community_raid(&a.str("communityId")?)),
+        "list_community_invites" => to_value(db::community::list_pending_invites()?),
+        "list_public_invites" => to_value(db::community::list_public_invites(&a.str("communityId")?)?),
+        "sync_community_channel" => {
+            cm::sync_community_channel(&a.str("channelId")?, a.de("beforeMs")?, a.bool("resetCursor").unwrap_or(false)).await
+        }
+        "send_community_message" => cm::send_community_message(a.str("channelId")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo"), a.opt_str("bot"))
+            .await
+            .map(|_| Value::Null),
+        "react_to_community_message" => {
+            let (emoji, url) = (a.str("emoji")?, a.opt_str("emojiUrl"));
+            cm::community_control(&a.str("channelId")?, &a.str("messageId")?, ControlOp::React { emoji: &emoji, url: url.as_deref() })
+                .await
+                .map(|_| Value::Null)
+        }
+        "edit_community_message" => {
+            let content = a.str("newContent")?;
+            cm::community_control(&a.str("channelId")?, &a.str("messageId")?, ControlOp::Edit(&content)).await.map(|_| Value::Null)
+        }
+        "delete_community_message" => {
+            let message_id = a.str("messageId")?;
+            let channel = STATE.lock().await.find_message(&message_id).map(|(c, _)| c.id.clone()).ok_or("message not found (already deleted?)")?;
+            cm::community_control(&channel, &message_id, ControlOp::Delete).await.map(|_| Value::Null)
+        }
+        "create_community" => cm::create_community(a.str("name")?, a.opt_str("channelName"), a.de("relays")?).await,
+        "create_community_channel" => {
+            cm::create_community_channel(a.str("communityId")?, a.str("name")?, a.bool("private").unwrap_or(false)).await
+        }
+        "update_community_metadata" => {
+            let id = a.str("communityId")?;
+            let (name, description) = (a.opt_str("name"), a.opt_str("description"));
+            VectorCore.edit_community_metadata(&id, name.as_deref(), description.as_deref()).await.map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "preview_public_invite" => cm::preview_public_invite(&a.str("url")?).await,
+        "accept_public_invite" => cm::accept_public_invite(a.str("url")?).await,
+        "accept_community_invite" => cm::accept_community_invite(&a.str("communityId")?).await,
+        "decline_community_invite" => {
+            db::community::delete_pending_invite(&a.str("communityId")?)?;
+            Ok(Value::Null)
+        }
+        "create_public_invite" => {
+            let expires_at_ms = a.de::<Option<u64>>("expiresInSecs")?.map(|secs| {
+                let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                now.saturating_add(secs).saturating_mul(1000)
+            });
+            core(VectorCore.create_public_invite(&a.str("communityId")?, expires_at_ms, a.opt_str("label")).await)
+        }
+        "revoke_public_invite" => core(VectorCore.revoke_public_invite(&a.str("communityId")?, &a.str("token")?).await),
+        "invite_to_community" => core(VectorCore.invite_to_community(&a.str("communityId")?, &a.str("inviteeNpub")?).await),
+        "leave_community" => core(VectorCore.leave_community(&a.str("communityId")?).await),
+        "get_channel_pins" => core(VectorCore.get_channel_pins(&a.str("communityId")?, &a.str("channelId")?)),
+        "pin_community_message" => {
+            core(VectorCore.pin_community_message(&a.str("communityId")?, &a.str("channelId")?, &a.str("messageId")?).await)
+        }
+        "unpin_community_message" => {
+            core(VectorCore.unpin_community_message(&a.str("communityId")?, &a.str("channelId")?, &a.str("messageId")?).await)
+        }
+        "reorder_community_roles" => core(VectorCore.reorder_roles(&a.str("communityId")?, &a.de::<Vec<String>>("ordered")?).await),
+        "set_community_member_roles" => {
+            core(VectorCore.set_member_roles(&a.str("communityId")?, &a.str("npub")?, a.de("roleIds")?).await)
+        }
+        "get_chat_commands" => to_value(VectorCore.get_chat_commands(&a.str("chatId")?).await),
+        "cache_community_image" | "cache_invite_logo" => Ok(Value::Null),
+
         "start_typing" => {
-            let _ = vector_core::VectorCore.send_typing(&a.str("receiver")?).await;
+            let receiver = a.str("receiver")?;
+            if receiver.starts_with("npub1") {
+                let _ = VectorCore.send_typing(&receiver).await;
+            } else {
+                let _ = VectorCore.send_community_typing(&receiver).await;
+            }
             Ok(Value::Null)
         }
 

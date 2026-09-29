@@ -36,6 +36,8 @@ rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
 for (const f of ['tauri-shim.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
 cpSync(join(ROOT, 'web', 'pkg'), join(OUT, 'web', 'pkg'), { recursive: true });
+// Root scope, so it can answer `/vfs/…` for the whole page.
+cpSync(join(ROOT, 'web', 'sw.js'), join(OUT, 'sw.js'));
 
 // The shim must define window.__TAURI__ before any app script runs.
 const indexPath = join(OUT, 'index.html');
