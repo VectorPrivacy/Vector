@@ -65,6 +65,9 @@ pub mod signer;
 // === NIP-55 offline signer (on-device Amber over Android IPC) ===
 pub mod nip55;
 
+// === NIP-07 browser signer (a `window.nostr` extension, web builds) ===
+pub mod nip07;
+
 // === Database ===
 pub mod db;
 /// The "every task carries its account" check, run by this crate's suite and
@@ -431,6 +434,7 @@ pub use nip55::{
     nip55_is_installed, nip55_pair, nip55_perms_json,
     VECTOR_NIP55_SIGN_KINDS, VECTOR_NIP55_ENCRYPT_TYPES,
 };
+pub use nip07::{Nip07Backend, Nip07Signer, set_nip07_backend, nip07_backend, nip07_get_public_key};
 pub use error::{VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};

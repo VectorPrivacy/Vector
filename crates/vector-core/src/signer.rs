@@ -1,4 +1,5 @@
-//! Polymorphic signer — local key vault vs. NIP-46 remote bunker.
+//! Polymorphic signer — local key vault, NIP-46 remote bunker, or an
+//! external signer (NIP-55 app, NIP-07 browser extension).
 //!
 //! Vector supports two signer modes per account:
 //!
@@ -136,6 +137,8 @@ pub enum ActiveSigner {
     Bunker(WatchedBunkerSigner),
     /// On-device NIP-55 signer app reached over Android IPC.
     Nip55(crate::nip55::Nip55Signer),
+    /// NIP-07 browser extension in the page hosting a web build.
+    Nip07(crate::nip07::Nip07Signer),
     /// Raw keys — headless/CLI consumers and tests, which have a vault key but
     /// no notion of signer modes.
     Keys(Keys),
@@ -147,6 +150,7 @@ macro_rules! dispatch {
             ActiveSigner::Local(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
             ActiveSigner::Bunker(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
             ActiveSigner::Nip55(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
+            ActiveSigner::Nip07(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
             ActiveSigner::Keys(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
         }
     };
@@ -280,6 +284,10 @@ pub fn active_signer() -> Result<ActiveSigner, String> {
             let pk = crate::state::my_public_key().ok_or("no active identity")?;
             Ok(ActiveSigner::Nip55(crate::nip55::Nip55Signer::new(pk)))
         }
+        SignerKind::Nip07 => {
+            let pk = crate::state::my_public_key().ok_or("no active identity")?;
+            Ok(ActiveSigner::Nip07(crate::nip07::Nip07Signer::new(pk)))
+        }
         SignerKind::Local => {
             let keys = crate::state::MY_SECRET_KEY
                 .to_keys()
@@ -313,6 +321,9 @@ pub enum SignerKind {
     /// over local Android IPC. Nothing secret is stored on this device at all
     /// (not even a client keypair). Android-only.
     Nip55 = 2,
+    /// The user's nsec lives in a NIP-07 browser extension. Web-only; keyless
+    /// like NIP-55.
+    Nip07 = 3,
 }
 
 impl SignerKind {
@@ -323,6 +334,7 @@ impl SignerKind {
             SignerKind::Local => "local",
             SignerKind::Bunker => "bunker",
             SignerKind::Nip55 => "nip55",
+            SignerKind::Nip07 => "nip07",
         }
     }
 
@@ -334,6 +346,7 @@ impl SignerKind {
         match s {
             "bunker" => SignerKind::Bunker,
             "nip55" => SignerKind::Nip55,
+            "nip07" => SignerKind::Nip07,
             _ => SignerKind::Local,
         }
     }
@@ -347,6 +360,7 @@ pub fn signer_kind() -> SignerKind {
     match SIGNER_KIND.load(Ordering::Acquire) {
         1 => SignerKind::Bunker,
         2 => SignerKind::Nip55,
+        3 => SignerKind::Nip07,
         _ => SignerKind::Local,
     }
 }
@@ -918,6 +932,8 @@ mod tests {
         assert_eq!(SignerKind::from_setting_str("local"), SignerKind::Local);
         assert_eq!(SignerKind::from_setting_str("bunker"), SignerKind::Bunker);
         assert_eq!(SignerKind::from_setting_str("nip55"), SignerKind::Nip55);
+        assert_eq!(SignerKind::from_setting_str("nip07"), SignerKind::Nip07);
+        assert_eq!(SignerKind::Nip07.as_setting_str(), "nip07");
         assert_eq!(SignerKind::Local.as_setting_str(), "local");
         assert_eq!(SignerKind::Bunker.as_setting_str(), "bunker");
         assert_eq!(SignerKind::Nip55.as_setting_str(), "nip55");

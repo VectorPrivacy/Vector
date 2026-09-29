@@ -39,7 +39,7 @@ pub use settings::{
     commit_bunker_account_setup,
     get_nip55_user_pubkey, set_nip55_user_pubkey,
     get_nip55_signer_package, set_nip55_signer_package,
-    commit_nip55_account_setup,
+    commit_nip55_account_setup, commit_external_signer_setup,
 };
 
 // ============================================================================
