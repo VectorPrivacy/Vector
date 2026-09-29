@@ -1229,6 +1229,7 @@ async function init(skipAccountCheck = false) {
 
     // Display pending Community invites.
     await loadCommunityInvites();
+    invitesChanged();
 
     // Preload each community's admin roster so admin tags + @everyone render from the first paint,
     // not only after the Group Info panel has been opened (which used to be the sole roster loader).
