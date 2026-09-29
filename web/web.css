@@ -14,9 +14,11 @@
 }
 body.mobile { --chrome-h: 12px; }
 body.mobile > main.container { margin-top: var(--chrome-h); }
-/* Opaque, so the strip above in their colour reads as part of them. */
+/* Opaque, so the strip above in their colour reads as part of them. The chat
+   header states its top: WebKit pins a fixed box with top:auto to the viewport. */
 body.mobile .chat-header,
 body.mobile .profile-header { background-color: rgb(22, 22, 22); }
+body.mobile .chat-header { top: var(--chrome-h); }
 .edge-cap[hidden] { display: none; }
 
 /* The floor: a Home Screen app runs under the home indicator (web/chrome.js). */
@@ -30,6 +32,16 @@ body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
 body.mobile #chat-list,
 body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
 body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
+/* The floor below the composer is solid, like the header, not the chat's wallpaper. */
+body.mobile #chat-box::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: calc(max(5px, var(--floor, 0px)) - 5px);
+    background: rgb(22, 22, 22);
+}
 body.mobile .emoji-picker,
 body.mobile .attachment-panel { bottom: calc(65px + var(--floor, 0px)); }
 /* The chat is sized by 100vh, which iOS keeps full-height under the keyboard. */
