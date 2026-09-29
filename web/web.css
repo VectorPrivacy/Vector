@@ -1,22 +1,33 @@
 /* Vector Web: a browser tab has no window to minimise, maximise or close. */
 .vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
 
-/* iOS Safari blurs its status bar unless a fixed, coloured box spans the top edge.
-   Screens with a fixed header already have one; this stands in on the two without,
-   matching what it covers. Only there: an isolated pane's header can't rise above it. */
-.edge-cap { display: none; }
-body.mobile:has(#chat[style*="none"]):has(#chats:not([style*="none"]) > .account) .edge-cap,
-body.mobile:has(#chat[style*="none"]):has(#settings:not([style*="none"])) .edge-cap {
-    display: block;
+/* The status-bar cap (web/chrome.js paints it); under the pane headers it matches. */
+.edge-cap {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
     height: 12px;
     z-index: 99;
-    background-color: #030303;
 }
-body.mobile:has(#chat[style*="none"]):has(#chats:not([style*="none"]) > .account) .edge-cap { background-color: #131313; }
+.edge-cap[hidden] { display: none; }
+
+/* The floor: a Home Screen app runs under the home indicator (web/chrome.js). */
+/* The tab bar takes half of it: its own height already clears most of the curve. */
+body.mobile .navbar {
+    box-sizing: border-box;
+    height: calc(65px + var(--floor, 0px) / 2);
+    padding-bottom: calc(var(--floor, 0px) / 2);
+}
+body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
+body.mobile #chat-list,
+body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
+body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
+body.mobile .emoji-picker,
+body.mobile .attachment-panel { bottom: calc(65px + var(--floor, 0px)); }
+@media (max-width: 640px) {
+    .lg-bg-toggle { margin-bottom: max(10px, var(--floor, 0px)); }
+}
 
 /* Mini app windows (web/miniapps.js) */
 .xdc-window {

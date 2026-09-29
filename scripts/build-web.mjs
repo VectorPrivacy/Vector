@@ -34,7 +34,7 @@ await buildSvelte({ dev: !release });
 
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
-for (const f of ['tauri-shim.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
 // Icons and the link-preview card, at the root where browsers and crawlers look.
 cpSync(join(ROOT, 'web', 'meta'), OUT, { recursive: true });
 // The app's own version, for Settings and the database's downgrade record.
@@ -99,8 +99,8 @@ const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
     .replace('<html', `<html data-version="${VERSION}"`)
-    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
+    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
-    .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true"></div>\n  '));
+    .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n  '));
 
 console.log(`[build-web] → ${OUT}`);
