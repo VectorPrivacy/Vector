@@ -374,8 +374,8 @@ function _dmsgTextLeaf(msg, ctx) {
     // Graphemes, not UTF-16 units: a fully-qualified ZWJ sequence is one visual emoji.
     let graphemeCount = customEmojiCount;
     if (strEmojiCleaned) {
-        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-        for (const _ of seg.segment(strEmojiCleaned)) {
+        _graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        for (const _ of _graphemeSegmenter.segment(strEmojiCleaned)) {
             if (++graphemeCount > 6) break;
         }
     }
@@ -387,6 +387,9 @@ function _dmsgTextLeaf(msg, ctx) {
     twemojify(textSpan);
     return textSpan;
 }
+
+/** Shared across rows: constructing a Segmenter costs more than the count it does. */
+let _graphemeSegmenter = null;
 
 // ----------------------------------------------------------------------------
 // Sub-builders
