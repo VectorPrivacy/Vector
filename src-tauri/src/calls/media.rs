@@ -16,6 +16,8 @@ use super::settings;
 use super::transport::{pack, unpack};
 use super::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};
 pub use super::stats::MediaStats;
+pub use vector_core::calls::share::ShareInput;
+use vector_core::calls::platform::CallAudio;
 use crate::audio_engine::{AudioEngine, LiveLink};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use iroh::endpoint::Connection;
@@ -34,34 +36,6 @@ fn now_ms() -> u64 {
 const FLAG_MUTED: u16 = 1;
 /// Datagram flag: a frame of the shared screen's sound, stereo, its own sequence.
 const FLAG_SHARE: u16 = 2;
-
-/// A shared screen's sound as the webview captures it: interleaved samples at the
-/// capture's own rate, waiting for the share thread. Lives on the call, not the
-/// engine, so a device change does not lose what was in flight.
-pub struct ShareInput {
-    ring: SpscRing,
-    rate: std::sync::atomic::AtomicU32,
-    channels: std::sync::atomic::AtomicU32,
-    pub active: AtomicBool,
-}
-
-impl ShareInput {
-    pub fn new() -> Self {
-        Self {
-            // Two seconds of stereo at 48 kHz.
-            ring: SpscRing::new(192_000),
-            rate: std::sync::atomic::AtomicU32::new(48_000),
-            channels: std::sync::atomic::AtomicU32::new(2),
-            active: AtomicBool::new(false),
-        }
-    }
-
-    pub fn push(&self, rate: u32, channels: u8, samples: &[f32]) {
-        self.rate.store(rate, Ordering::Relaxed);
-        self.channels.store(channels as u32, Ordering::Relaxed);
-        self.ring.push(samples);
-    }
-}
 
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
@@ -218,6 +192,21 @@ impl MediaEngine {
         }
 
         Ok(Self { stop, muted, stats, link, on_mixer, threads, rx_task: Some(rx_task) })
+    }
+}
+
+impl CallAudio for MediaEngine {
+    fn stats(&self) -> Arc<MediaStats> {
+        Arc::clone(&self.stats)
+    }
+    fn set_muted(&self, on: bool) {
+        self.muted.store(on, Ordering::Relaxed);
+    }
+    fn set_volume(&self, volume: f32) {
+        self.link.set_gain(volume);
+    }
+    fn set_share_volume(&self, volume: f32) {
+        self.link.set_share_gain(volume);
     }
 }
 
@@ -609,7 +598,7 @@ fn share_thread(
         let active = share.active.load(Ordering::Relaxed);
         if !active {
             // Nothing to send: keep both rings from filling, and resync when it starts.
-            share.ring.skip(share.ring.len());
+            share.ring().skip(share.ring().len());
             link.share_tap.skip(link.share_tap.len());
             was_active = false;
             std::thread::sleep(Duration::from_millis(20));
@@ -619,7 +608,7 @@ fn share_thread(
             was_active = true;
             // Both rings start together: whatever lead the reference then takes is
             // the capture's round trip, which the pairing carries from here on.
-            share.ring.skip(share.ring.len());
+            share.ring().skip(share.ring().len());
             link.share_tap.skip(link.share_tap.len());
             left.clear();
             right.clear();
@@ -628,14 +617,14 @@ fn share_thread(
             probe_next = Instant::now() + Duration::from_secs(2);
             far_wait = 0;
         }
-        let rate = share.rate.load(Ordering::Relaxed);
+        let rate = share.rate();
         if rate != src_rate {
             src_rate = rate;
             rs_l = Resampler::new(rate, ENGINE_RATE);
             rs_r = Resampler::new(rate, ENGINE_RATE);
         }
-        let channels = share.channels.load(Ordering::Relaxed).clamp(1, 2) as usize;
-        let n = share.ring.pop(&mut scratch);
+        let channels = share.channels().clamp(1, 2) as usize;
+        let n = share.ring().pop(&mut scratch);
         if n > 0 {
             in_l.clear();
             in_r.clear();

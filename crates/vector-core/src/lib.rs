@@ -396,8 +396,8 @@ pub mod self_destruct;
 // === SIMD Operations ===
 pub mod simd;
 
-/// Calls: session rules, wire format, jitter buffer and rate control. See `vector-calls`.
-pub use vector_calls as calls;
+/// Calls: the platform-free half from `vector-calls`, and with `calls` the session itself.
+pub mod calls;
 
 // === Community protocol (GROUP_PROTOCOL.md) ===
 pub mod community;

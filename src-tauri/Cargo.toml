@@ -141,7 +141,7 @@ cc = "1"
 
 [dependencies]
 # Vector Core — the single source of truth for all Vector logic
-vector-core = { path = "../crates/vector-core", default-features = false }
+vector-core = { path = "../crates/vector-core", default-features = false, features = ["calls"] }
 
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.
@@ -150,6 +150,7 @@ nostr-blossom = "=0.45.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
+async-trait = "0.1"
 tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

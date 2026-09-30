@@ -7966,6 +7966,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "image",
+ "iroh",
  "js-sys",
  "libc",
  "nostr",

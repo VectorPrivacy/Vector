@@ -47,6 +47,8 @@ futures-util = "0.3.31"
 bytes = "1.9"
 # Boxed, Send futures for the Community Transport trait so impls work in spawned tasks.
 async-trait = "0.1"
+# Calls ride Iroh; only the clients that place them (the app, the web) enable `calls`.
+iroh = { version = "1.0", default-features = false, features = ["tls-ring"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -119,6 +121,8 @@ wasmtimer = "0.4"
 
 [features]
 default = []
+# The call session and its video track, over Iroh. See `calls::platform`.
+calls = ["dep:iroh"]
 # Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
 # bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
 # `tor::proxy_url()` returning `Some(socks5h://127.0.0.1:<port>)` when active.
