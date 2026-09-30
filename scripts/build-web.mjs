@@ -9,7 +9,7 @@
  * Output: dist-web/, served by `node web/serve.mjs`.
  */
 
-import { cpSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { cpSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
@@ -46,6 +46,24 @@ cpSync(join(ROOT, 'web', 'pkg'), join(OUT, 'web', 'pkg'), { recursive: true });
 cpSync(join(ROOT, 'web', 'sw.js'), join(OUT, 'sw.js'));
 // Mini app origins are served from here; see serve.mjs.
 cpSync(join(ROOT, 'web', 'xdc'), join(OUT, '__vector'), { recursive: true });
+
+// What the page warms once signed in, so a screen opened for the first time has
+// its icons already: the UI's own images and fonts. The login art is on screen
+// before this list is read.
+const warm = [];
+const collect = (dir, url) => {
+    for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) {
+            if (name !== 'login') collect(path, `${url}${name}/`);
+        } else if (/\.(svg|png|gif|webp|woff2)$/i.test(name)) {
+            warm.push(url + encodeURIComponent(name));
+        }
+    }
+};
+collect(join(OUT, 'icons'), '/icons/');
+collect(join(OUT, 'fonts'), '/fonts/');
+writeFileSync(join(OUT, 'web', 'warm.json'), JSON.stringify(warm));
 
 // Desktop's policy, minus Tauri's schemes. Remote images are allowed because
 // without a media proxy the page loads them directly, as desktop does.

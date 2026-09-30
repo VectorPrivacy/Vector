@@ -551,6 +551,23 @@
         }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['src', 'poster', 'style'] });
     }
 
+    // Once signed in and idle, fetch the UI's icons and fonts into the HTTP cache,
+    // so a screen opened for the first time paints with them. Four at a time and
+    // low priority: the app's own requests go first.
+    listen('init_finished', () => {
+        const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
+        idle(async () => {
+            let queue;
+            try { queue = await (await fetch('/web/warm.json')).json(); } catch { return; }
+            const lane = async () => {
+                for (let url; (url = queue.shift());) {
+                    try { await (await fetch(url, { priority: 'low' })).arrayBuffer(); } catch {}
+                }
+            };
+            await Promise.all([lane(), lane(), lane(), lane()]);
+        }, { timeout: 5000 });
+    });
+
     // Nothing is kept here: leaving signs out, so say so first. The app's own
     // reloads (an account switch, logging out) are the user's choice already.
     let signedIn = false;
