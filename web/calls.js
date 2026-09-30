@@ -16,6 +16,7 @@
     let preparing = null;
     let graph = null;
     let test = null;
+    let chimeBuf = null;
 
     function constraints(s) {
         return {
@@ -101,6 +102,21 @@
         }
     }
 
+    /** The call-ended chime, through the call's own context: it outlives the call by a moment. */
+    async function chime() {
+        const c = ctx;
+        if (!c) return;
+        try {
+            await c.resume();
+            chimeBuf ??= await c.decodeAudioData(await (await fetch('/web/ended.wav')).arrayBuffer());
+            const src = c.createBufferSource();
+            src.buffer = chimeBuf;
+            src.connect(c.destination);
+            src.onended = () => { if (!graph && !test) c.suspend().catch(() => {}); };
+            src.start();
+        } catch (_) {}
+    }
+
     web.onCall = (msg) => {
         switch (msg.op) {
             case 'start':
@@ -113,7 +129,7 @@
                 mic?.getAudioTracks()[0]?.applyConstraints(constraints(msg.settings).audio).catch(() => {});
                 break;
             case 'ended':
-                new Audio('/web/ended.wav').play().catch(() => {});
+                chime();
                 break;
         }
     };
