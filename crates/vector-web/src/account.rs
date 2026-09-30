@@ -235,7 +235,7 @@ pub async fn login(mut import_key: String) -> Result<Value, String> {
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
     if is_committed(&npub) {
         let _ = db::write_active_account_file(&npub);
-        emitter::emit("session_reload", &());
+        crate::storage::reload().await;
         return Ok(json!({ "public": npub, "existing": true }));
     }
 
@@ -338,7 +338,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         if in_memory.is_some() && in_memory == marked {
             return in_memory.ok_or_else(|| "Public key not initialized".into());
         }
-        emitter::emit("session_reload", &());
+        crate::storage::reload().await;
         return Err("Switching accounts".into());
     }
 

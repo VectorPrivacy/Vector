@@ -301,30 +301,16 @@ async fn reset_session() {
 async fn logout() -> Result<(), String> {
     let npub = db::get_current_account().map_err(|_| "Not logged in".to_string())?;
     let result = remove_account(npub).await;
-    crate::emitter::emit("session_reload", &());
+    crate::storage::reload().await;
     result.map(|_| ())
 }
 
 async fn delete_account(a: &Args) -> Result<Value, String> {
     let was_active = remove_account(a.str("npub")?).await?;
     if was_active {
-        crate::emitter::emit("session_reload", &());
+        crate::storage::reload().await;
     }
     Ok(json!(was_active))
-}
-
-/// Remove `npub`'s databases (main file, journal, WAL) from the OPFS pool.
-async fn delete_account_databases(npub: &str) -> Result<(), String> {
-    // Installing again only hands back the pool `start` registered.
-    let cfg = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new().directory("vector-web").build();
-    let pool = sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, true)
-        .await
-        .map_err(|e| format!("OPFS storage unavailable: {e:?}"))?;
-    let marker = format!("/{npub}/");
-    for name in pool.list().into_iter().filter(|n| n.contains(&marker)) {
-        pool.delete_db(&name).map_err(|e| format!("Failed to remove {name}: {e:?}"))?;
-    }
-    Ok(())
 }
 
 /// Permanently delete an account. True when it was the active one.
@@ -344,7 +330,7 @@ async fn remove_account(npub: String) -> Result<bool, String> {
     let dir = db::account_dir(&npub)?;
     // Databases first: a registry row outliving its database is harmless, the reverse orphans a pool slot.
     // A connection the old session still holds errors on its next I/O; the page reloads after this.
-    delete_account_databases(&npub).await?;
+    crate::storage::delete_databases(&npub).await?;
     db::webfs::remove_tree(&app_data, &dir)?;
     vector_core::webfiles::remove(&dir).await;
     // Originals the user picked still carry their metadata.

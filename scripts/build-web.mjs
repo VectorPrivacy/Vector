@@ -34,7 +34,7 @@ await buildSvelte({ dev: !release });
 
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
-for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'storage.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
 // Icons and the link-preview card, at the root where browsers and crawlers look.
 cpSync(join(ROOT, 'web', 'meta'), OUT, { recursive: true });
 // The app's own version, for Settings and the database's downgrade record.

@@ -56,6 +56,9 @@
                 for (const id of [...pending.keys()]) settle(id, false, fatal);
                 overlay('Vector hit an error and needs to restart.', 'Reload', () => location.reload());
                 break;
+            case 'file-changed':
+                forget(data.path);
+                break;
             case 'result':
                 settle(data.id, data.ok, data.ok ? data.value : data.error);
                 break;
@@ -304,10 +307,12 @@
     const vfsUrl = (path) => '/vfs' + ('/' + path.replace(/^\/+/, '')).split('/').map(encodeURIComponent).join('/');
     const blobMode = () => storage !== null && (storage !== 'persistent' || !hasServiceWorker());
 
-    // Only passive types render, as web/sw.js serves them; anything else is bytes to save.
+    // Only passive types render, as web/sw.js serves them; anything else is bytes to
+    // save. No SVG: a blob is a document on this origin, with no sandbox header to
+    // disarm one opened on its own.
     const TYPES = {
         png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
-        avif: 'image/avif', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+        avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
         mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
         mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', opus: 'audio/ogg',
         wav: 'audio/wav', flac: 'audio/flac', weba: 'audio/webm',
@@ -315,21 +320,46 @@
     };
     const typeOf = (path) => TYPES[path.split('.').pop().toLowerCase()] || 'application/octet-stream';
 
-    // Least recently used first; past the budget the oldest URLs are released.
+    // Least recently used first; past the budget the oldest URLs nothing shows are released.
     const BLOB_BUDGET = 256 * 1024 * 1024;
     const blobs = new Map();
     let blobBytes = 0;
     const loading = new Map();
+    // A file found missing is asked for again only after a moment.
+    const missing = new Map();
+    const MISSING_FOR = 5000;
+    // URLs minted here: the app releases blob URLs it made itself, never these.
+    const owned = new Set();
+    const revoke = URL.revokeObjectURL.bind(URL);
+
+    const inUse = (url) => !!document.querySelector(`[src="${url}"],[poster="${url}"],[style*="${url}"]`);
+
+    function release(path) {
+        const b = blobs.get(path);
+        if (!b) return;
+        blobs.delete(path);
+        blobBytes -= b.size;
+        if (!inUse(b.url)) {
+            owned.delete(b.url);
+            revoke(b.url);
+        }
+    }
 
     function remember(path, url, size) {
+        owned.add(url);
         blobs.set(path, { url, size });
         blobBytes += size;
         for (const [p, b] of blobs) {
-            if (blobBytes <= BLOB_BUDGET || p === path) break;
-            URL.revokeObjectURL(b.url);
-            blobs.delete(p);
-            blobBytes -= b.size;
+            if (blobBytes <= BLOB_BUDGET) break;
+            if (p !== path && !inUse(b.url)) release(p);
         }
+    }
+
+    // A file rewritten or removed in place: its old bytes must not be served again.
+    function forget(path) {
+        const prefix = path.replace(/\/+$/, '') + '/';
+        for (const p of [...blobs.keys()]) if (p === path || p.startsWith(prefix)) release(p);
+        for (const p of [...missing.keys()]) if (p === path || p.startsWith(prefix)) missing.delete(p);
     }
 
     /** The URL a stored file can be loaded from now; null when it doesn't exist. */
@@ -341,10 +371,14 @@
             blobs.set(path, hit);
             return Promise.resolve(hit.url);
         }
+        if (Date.now() - (missing.get(path) || 0) < MISSING_FOR) return Promise.resolve(null);
         if (!loading.has(path)) {
             loading.set(path, post({ t: 'file', path })
                 .then((bytes) => {
-                    if (!bytes) return null;
+                    if (!bytes) {
+                        missing.set(path, Date.now());
+                        return null;
+                    }
                     const url = URL.createObjectURL(new Blob([bytes], { type: typeOf(path) }));
                     remember(path, url, bytes.byteLength);
                     return url;
@@ -355,25 +389,24 @@
         return loading.get(path);
     }
 
-    // A transparent pixel, so an image shows nothing rather than a broken icon meanwhile.
+    // A transparent pixel with an unguessable name, so an image shows nothing rather
+    // than a broken icon meanwhile, and no message can name someone else's file.
     const PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
     // A placeholder, plus whatever a caller appended to it (a cache-busting query).
-    const TOKEN = /data:image\/gif;base64,[A-Za-z0-9+/=]+#vfs-\d+(?:[?&][^"')\s]*)?/g;
+    const TOKEN = /data:image\/gif;base64,[A-Za-z0-9+/=]+#vfs-[0-9a-f-]{36}(?:[?&][^"')\s]*)?/g;
     const tokens = new Map();
+    const tokenOf = new Map();
     const tokenIn = (value) => {
-        const base = typeof value === 'string' && value.startsWith(PLACEHOLDER) ? /^[^#]+#vfs-\d+/.exec(value)?.[0] : null;
+        const base = typeof value === 'string' && value.startsWith(PLACEHOLDER) ? /^[^#]+#vfs-[0-9a-f-]{36}/.exec(value)?.[0] : null;
         return base && tokens.has(base) ? base : null;
     };
-    const tokenOf = new Map();
-    // What each element was last given, so a late file can't overwrite a newer value.
-    const latest = new WeakMap();
 
     function convertFileSrc(path) {
         if (!path || /^[a-z]+:/i.test(path)) return path;
         if (!blobMode()) return vfsUrl(path);
         let token = tokenOf.get(path);
         if (!token) {
-            token = `${PLACEHOLDER}#vfs-${tokens.size + 1}`;
+            token = `${PLACEHOLDER}#vfs-${crypto.randomUUID()}`;
             tokenOf.set(path, token);
             tokens.set(token, path);
             installBinding();
@@ -382,20 +415,58 @@
         return token;
     }
 
-    // `needle` is the text that was handed out: the placeholder and any suffix.
-    function bind(el, attr, token, needle = token) {
-        if (!latest.has(el)) latest.set(el, new Map());
-        latest.get(el).set(attr, needle);
-        fileUrl(tokens.get(token)).then((url) => {
-            if (!url || latest.get(el)?.get(attr) !== needle) return;
-            latest.get(el).delete(attr);
-            if (attr === 'style') {
-                const style = el.getAttribute('style');
-                if (style?.includes(needle)) el.setAttribute('style', style.split(needle).join(url));
-            } else {
-                el.setAttribute(attr, url);
+    /** The stored path behind a URL `convertFileSrc` handed out, if it is one. */
+    const pathOf = (url) => tokens.get(tokenIn(url)) ?? null;
+
+    // What each element was last given and hasn't got yet: a file arriving late must
+    // not overwrite a newer value, or a cleared one.
+    const awaiting = new WeakMap();
+    const decodeWait = new WeakMap();
+    let setNative = null;
+    let removeNative = null;
+
+    const isMedia = (el) => el instanceof HTMLMediaElement || el instanceof HTMLSourceElement;
+
+    function wanted(el, attr, needle) {
+        if (attr === 'style') return !!el.getAttribute('style')?.includes(needle);
+        return awaiting.get(el)?.get(attr) === needle;
+    }
+
+    function apply(el, attr, needle, url) {
+        if (attr === 'style') {
+            const style = el.getAttribute('style');
+            if (style?.includes(needle)) setNative(el, 'style', style.split(needle).join(url));
+        } else {
+            awaiting.get(el)?.delete(attr);
+            setNative(el, attr, url);
+        }
+    }
+
+    // `needle` is the text handed out: the placeholder and any suffix.
+    function bind(el, attr, token, needle) {
+        const path = tokens.get(token);
+        const hit = blobs.get(path);
+        if (hit) return apply(el, attr, needle, hit.url);
+        if (attr !== 'style') {
+            if (!awaiting.has(el)) awaiting.set(el, new Map());
+            awaiting.get(el).set(attr, needle);
+            // A GIF is no media: never let a player try it and fail. An image on
+            // screen shows the pixel at once rather than the file it showed before.
+            if (isMedia(el)) removeNative(el, attr);
+            else if (el.isConnected && el.getAttribute(attr) !== needle) setNative(el, attr, needle);
+        }
+        const done = fileUrl(path).then((url) => {
+            if (!wanted(el, attr, needle)) return;
+            if (url) apply(el, attr, needle, url);
+            else if (attr !== 'style') {
+                awaiting.get(el)?.delete(attr);
+                el.dispatchEvent(new Event('error'));
             }
         });
+        if (attr === 'src' && el instanceof HTMLImageElement) {
+            decodeWait.set(el, done);
+            done.then(() => { if (decodeWait.get(el) === done) decodeWait.delete(el); });
+        }
     }
 
     function check(el, attr) {
@@ -405,41 +476,55 @@
             for (const m of value.match(TOKEN) || []) { const t = tokenIn(m); if (t) bind(el, 'style', t, m); }
             return;
         }
+        if (awaiting.get(el)?.get(attr) === value) return;
         const token = tokenIn(value);
-        if (!token) return;
-        // A GIF is no media: never let a player try it and fail.
-        if (el instanceof HTMLMediaElement || el instanceof HTMLSourceElement) el.removeAttribute(attr);
-        bind(el, attr, token, value);
+        if (token) bind(el, attr, token, value);
     }
 
     let bound = false;
     function installBinding() {
         if (bound) return;
         bound = true;
+        URL.revokeObjectURL = (url) => { if (!owned.has(url)) revoke(url); };
+
+        const setAttribute = Element.prototype.setAttribute;
+        const removeAttribute = Element.prototype.removeAttribute;
+        const natives = new Map();
         const targets = [
             [HTMLImageElement.prototype, 'src'], [HTMLMediaElement.prototype, 'src'],
             [HTMLSourceElement.prototype, 'src'], [HTMLVideoElement.prototype, 'poster'],
         ];
         for (const [proto, attr] of targets) {
             const d = Object.getOwnPropertyDescriptor(proto, attr);
+            natives.set(proto, d);
             Object.defineProperty(proto, attr, {
                 ...d,
                 set(v) {
                     const token = tokenIn(v);
                     if (token) return bind(this, attr, token, v);
-                    latest.get(this)?.delete(attr);
+                    awaiting.get(this)?.delete(attr);
                     d.set.call(this, v);
                 },
             });
         }
-        const setAttribute = Element.prototype.setAttribute;
+        setNative = (el, attr, value) => setAttribute.call(el, attr, value);
+        removeNative = (el, attr) => removeAttribute.call(el, attr);
         Element.prototype.setAttribute = function (name, value) {
-            if ((name === 'src' || name === 'poster') && typeof value === 'string') {
+            if (name === 'src' || name === 'poster') {
                 const token = tokenIn(value);
                 if (token) return bind(this, name, token, value);
-                latest.get(this)?.delete(name);
+                awaiting.get(this)?.delete(name);
             }
             return setAttribute.call(this, name, value);
+        };
+        Element.prototype.removeAttribute = function (name) {
+            if (name === 'src' || name === 'poster') awaiting.get(this)?.delete(name);
+            return removeAttribute.call(this, name);
+        };
+        const decode = HTMLImageElement.prototype.decode;
+        HTMLImageElement.prototype.decode = function () {
+            const wait = decodeWait.get(this);
+            return wait ? wait.then(() => decode.call(this)) : decode.call(this);
         };
         const fetch0 = window.fetch;
         window.fetch = function (input, init) {
@@ -464,11 +549,14 @@
         }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['src', 'poster', 'style'] });
     }
 
-    // Nothing is kept here: leaving signs out, so say so first.
+    // Nothing is kept here: leaving signs out, so say so first. The app's own
+    // reloads (an account switch, logging out) are the user's choice already.
     let signedIn = false;
+    let leaving = false;
     listen('init_finished', () => { signedIn = true; });
+    listen('session_reload', () => { leaving = true; });
     addEventListener('beforeunload', (e) => {
-        if (storage !== 'memory' || !signedIn || fatal) return;
+        if (storage !== 'memory' || !signedIn || leaving || fatal) return;
         e.preventDefault();
         e.returnValue = '';
     });
@@ -505,7 +593,7 @@
             ask: async (msg) => confirm(msg),
             confirm: async (msg) => confirm(msg),
         },
-        process: { exit: async () => location.reload(), relaunch: async () => location.reload() },
+        process: { exit: async () => { leaving = true; location.reload(); }, relaunch: async () => { leaving = true; location.reload(); } },
         updater: { check: async () => null },
     };
 
@@ -516,6 +604,7 @@
         storeFiles,
         convertFileSrc,
         fileUrl,
+        pathOf,
         storage: () => storage,
         hasServiceWorker,
     };

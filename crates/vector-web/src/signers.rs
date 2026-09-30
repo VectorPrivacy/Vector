@@ -59,10 +59,10 @@ fn nip07_reply(a: &Args) -> Result<Value, String> {
 }
 
 /// An imported identity already on this device reopens instead of re-adding.
-fn switch_if_known(npub: &str) -> bool {
+async fn switch_if_known(npub: &str) -> bool {
     if crate::account::is_committed(npub) {
         let _ = db::write_active_account_file(npub);
-        emitter::emit("session_reload", &());
+        crate::storage::reload().await;
         return true;
     }
     false
@@ -89,7 +89,7 @@ async fn login_with_nip07() -> Result<Value, String> {
         }
         return Err("Already logged in. Logout first to add another account.".into());
     }
-    if switch_if_known(&npub) {
+    if switch_if_known(&npub).await {
         return Ok(json!({ "public": npub, "existing": true }));
     }
     let npub = stage_keyless(pk, SignerKind::Nip07, NIP07_SIGNER_NAME).await?;
@@ -236,7 +236,7 @@ async fn connect_bunker(bunker_url: String) -> Result<Value, String> {
     let client_keys = Keys::generate();
     let remote_pk = vector_core::attempt_bunker_login(&bunker_url, client_keys.clone(), web_time::Duration::from_secs(60)).await?;
     let npub = remote_pk.to_bech32().map_err(|e| e.to_string())?;
-    if switch_if_known(&npub) {
+    if switch_if_known(&npub).await {
         drop_bunker().await;
         return Ok(json!({ "public": npub, "existing": true }));
     }
@@ -288,7 +288,7 @@ async fn start_nostrconnect_session() -> Result<Value, String> {
         }
         vector_core::set_bunker_signer(nc);
         let Ok(npub) = remote_pk.to_bech32();
-        if switch_if_known(&npub) {
+        if switch_if_known(&npub).await {
             drop_bunker().await;
             return;
         }
@@ -361,7 +361,7 @@ async fn reauthorize_bunker() -> Result<Value, String> {
             // Unlock never finished: boot again with the signer answering.
             let _ = nc.shutdown().await;
             vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
-            emitter::emit("session_reload", &());
+            crate::storage::reload().await;
             return;
         }
         vector_core::set_bunker_signer(nc);

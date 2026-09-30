@@ -11,7 +11,8 @@
     let input = $state(null);
     // A bare filename resolves under ./icons/; a full URL (asset/blob/data/http, e.g. a
     // decrypted community logo) is used verbatim.
-    const iconSrc = $derived(/:\/\/|^data:|^blob:/.test(p.icon) ? p.icon : './icons/' + p.icon);
+    // No icon, no src: a hidden image still loads, and './icons/' alone is a 404.
+    const iconSrc = $derived(!p.icon ? null : /:\/\/|^data:|^blob:/.test(p.icon) ? p.icon : './icons/' + p.icon);
     $effect(() => { if (p.open && p.placeholder && input) input.focus(); });
 </script>
 

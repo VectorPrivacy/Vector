@@ -68,7 +68,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             "debug_mode": false,
             "media_url": null,
             "self_update": false,
-            "storage": crate::Storage::current().name(),
+            "storage": crate::storage::Storage::current().name(),
         })),
         "check_account_downgrade" => Ok(Value::Null),
         "get_theme" => {
@@ -99,7 +99,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         // A reload restarts the worker, which boots the marked account and ends every task of this one.
         "swap_session" => {
-            crate::emitter::emit("session_reload", &());
+            crate::storage::reload().await;
             Ok(Value::Null)
         }
         "tor_get_state" => Ok(json!({

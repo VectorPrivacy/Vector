@@ -14,6 +14,7 @@ mod network_ops;
 mod profile_ops;
 mod selfsync;
 mod signers;
+mod storage;
 mod attachments;
 mod catchup;
 mod clock;
@@ -42,38 +43,10 @@ use wasm_bindgen::prelude::*;
 
 /// Root of every account's files inside the OPFS pool.
 const APP_DATA: &str = "/vector";
-const POOL_SLOTS: u32 = 48;
 
 #[wasm_bindgen]
 pub fn set_event_sink(sink: js_sys::Function) {
     emitter::set_sink(sink);
-}
-
-/// How long this browser keeps what Vector stores, as `web/worker.js` found it.
-static STORAGE: std::sync::OnceLock<Storage> = std::sync::OnceLock::new();
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Storage {
-    /// OPFS: kept until the user clears it.
-    Persistent,
-    /// IndexedDB in a private window: kept until the browser closes.
-    Session,
-    /// Nothing: a reload starts over.
-    Memory,
-}
-
-impl Storage {
-    pub(crate) fn current() -> Self {
-        STORAGE.get().copied().unwrap_or(Storage::Persistent)
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Storage::Persistent => "persistent",
-            Storage::Session => "session",
-            Storage::Memory => "memory",
-        }
-    }
 }
 
 /// Mount storage and initialise core. Must run in a dedicated worker: the OPFS
@@ -82,37 +55,7 @@ impl Storage {
 pub async fn start(version: String, level: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
 
-    let storage = match level.as_str() {
-        "session" => Storage::Session,
-        "memory" => Storage::Memory,
-        _ => Storage::Persistent,
-    };
-    match storage {
-        Storage::Persistent => {
-            let cfg = sqlite_wasm_vfs::sahpool::OpfsSAHPoolCfgBuilder::new()
-                .directory("vector-web")
-                .build();
-            let pool = sqlite_wasm_vfs::sahpool::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, true)
-                .await
-                .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
-            // One slot per database file and per journal; the default six run out by the fifth account.
-            pool.reserve_minimum_capacity(POOL_SLOTS)
-                .await
-                .map_err(|e| JsValue::from_str(&format!("OPFS storage unavailable: {e:?}")))?;
-        }
-        Storage::Session => {
-            sqlite_wasm_vfs::relaxed_idb::install::<sqlite_wasm_rs::WasmOsCallback>(
-                &sqlite_wasm_vfs::relaxed_idb::RelaxedIdbCfg::default(),
-                true,
-            )
-            .await
-            .map_err(|e| JsValue::from_str(&format!("Browser storage unavailable: {e}")))?;
-            vector_core::db::set_relaxed_durability(true);
-        }
-        // SQLite's own default on the web keeps databases in memory.
-        Storage::Memory => {}
-    }
-    let _ = STORAGE.set(storage);
+    storage::install(&level).await?;
 
     signers::install();
     vector_core::db::set_app_version(version);
