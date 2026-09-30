@@ -3,9 +3,24 @@
 //! permissions, and carries realtime channels over Iroh.
 
 mod marketplace;
-pub use marketplace::preload as preload_marketplace;
 mod package;
 mod realtime;
+
+/// Whether this browser can run mini apps at all (each needs a service worker),
+/// as the page reports at boot.
+static AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_available(on: bool) {
+    AVAILABLE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Warm the marketplace after login, where apps can run: its listings and their
+/// icons are downloads nobody could use otherwise.
+pub async fn preload_marketplace() {
+    if AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        marketplace::preload().await;
+    }
+}
 
 use std::collections::HashMap;
 use std::path::Path;

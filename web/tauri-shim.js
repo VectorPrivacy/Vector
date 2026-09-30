@@ -47,6 +47,8 @@
                 ready = true;
                 storage = data.level || 'persistent';
                 applyCapabilities();
+                // Ahead of the queue: the backend decides what to warm up by it.
+                post({ t: 'invoke', cmd: 'web_capabilities', args: JSON.stringify({ miniApps: hasServiceWorker() }) }).catch(() => {});
                 for (const msg of queued.splice(0)) worker.postMessage(msg);
                 break;
             case 'fatal':

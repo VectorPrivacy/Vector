@@ -126,6 +126,10 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             sync::notifs();
             Ok(json!(true))
         }
+        "web_capabilities" => {
+            crate::miniapps::set_available(a.bool("miniApps").unwrap_or(true));
+            Ok(Value::Null)
+        }
         "web_resume" => {
             let hidden_ms = a.get("hiddenMs").and_then(Value::as_u64).unwrap_or(0);
             db::spawn_bound(crate::catchup::resume(hidden_ms));
