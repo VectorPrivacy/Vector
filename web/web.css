@@ -169,3 +169,8 @@ body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
 .no-miniapps .attachment-panel-miniapps {
     display: none !important;
 }
+
+/* Browsers without WebCodecs audio or AudioWorklets cannot place a call. */
+.no-calls .call-header-btn {
+    display: none !important;
+}

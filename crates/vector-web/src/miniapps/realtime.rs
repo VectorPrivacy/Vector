@@ -129,7 +129,7 @@ impl Iroh {
 
         let endpoint = Endpoint::builder(RelayOnly)
             .secret_key(secret_key)
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![GOSSIP_ALPN.to_vec(), vector_core::calls::wire::CALL_ALPN.to_vec()])
             .transport_config(transport)
             .bind()
             .await?;
@@ -159,6 +159,9 @@ impl Iroh {
                                 vector_core::log_warn!("[WEBXDC] gossip connection failed: {e}");
                             }
                         }
+                        Ok(conn) if conn.alpn() == vector_core::calls::wire::CALL_ALPN => {
+                            vector_core::calls::session::on_incoming(conn).await;
+                        }
                         Ok(_) => {}
                         Err(e) => vector_core::log_warn!("[WEBXDC] accept failed: {e}"),
                     }
@@ -171,6 +174,10 @@ impl Iroh {
 
     pub fn node_addr(&self) -> EndpointAddr {
         relay_only(self.endpoint.addr())
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 
     pub async fn has_channel(&self, topic: &TopicId) -> bool {

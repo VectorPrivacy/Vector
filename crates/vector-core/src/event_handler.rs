@@ -836,10 +836,16 @@ pub async fn commit_prepared_event(
                     handler.on_webxdc_signal(&contact, &sender_npub, &topic_id, None, &event_id, created_at);
                     false
                 }
-                RumorProcessingResult::CallSignal { .. } => {
-                    // Calls ride Iroh — handled by src-tauri directly
+                #[cfg(feature = "calls")]
+                RumorProcessingResult::CallSignal { call_id, signal, node_addr, sender_npub, created_at, video, media, .. } => {
+                    // Only the DM's other party may signal; a group member cannot ring us through a channel.
+                    if contact == sender_npub {
+                        crate::calls::session::on_signal(&sender_npub, &call_id, &signal, node_addr.as_deref(), created_at, video.as_deref(), media.as_deref()).await;
+                    }
                     false
                 }
+                #[cfg(not(feature = "calls"))]
+                RumorProcessingResult::CallSignal { .. } => false,
                 RumorProcessingResult::WallpaperChanged {
                     sender_npub, created_at, url, decryption_key, decryption_nonce,
                     plaintext_hash, mime, blur, dim, event_id,

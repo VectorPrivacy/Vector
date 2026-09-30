@@ -87,9 +87,11 @@ async function callVideoOnState(s) {
     if (videoLinkCallId === s.id || !videoCaps.decode.length) return;
     videoLinkCallId = s.id;
     decodeErrorShown = false;
-    invoke('call_video_link').then((url) => {
+    invoke('call_video_link').then((link) => {
         if (videoLinkCallId !== s.id) return;
-        ensureVideoWorker().postMessage({ t: 'open', url, caps: videoCaps });
+        // A loopback socket's URL, or a MessagePort where the backend is itself a worker.
+        if (typeof link === 'string') ensureVideoWorker().postMessage({ t: 'open', url: link, caps: videoCaps });
+        else ensureVideoWorker().postMessage({ t: 'open', port: link.port, caps: videoCaps }, [link.port]);
     }).catch(() => { videoLinkCallId = null; });
 }
 
@@ -132,7 +134,7 @@ function requestSource(kind) {
     // offers the choice where it can. Our own playback is excluded where the
     // platform knows how; the backend cancels it against the mixer's output anyway.
     return waitForSource(kind === 'screen'
-        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
+        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: platformFeatures?.share_audio === false ? false : { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
         : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
 }
 
@@ -275,7 +277,7 @@ function attachSource(kind, stream) {
     const track = stream.getVideoTracks()[0];
     // The OS's own "stop sharing" control ends the track from outside.
     track.onended = () => { if (selfTracks[kind] === stream) stopVideo(kind, true); };
-    if (previewEls[kind]) previewEls[kind].srcObject = stream;
+    if (previewEls[kind]) showPreview(previewEls[kind], stream);
     pumpFrames(kind, stream);
 }
 
@@ -350,7 +352,13 @@ function attachPeerCanvas(kind, el, gone = false) {
 /** The preview element for one of our pictures; null when it unmounts. */
 function attachSelfPreview(kind, el) {
     previewEls[kind] = el;
-    if (el) el.srcObject = selfTracks[kind];
+    if (el) showPreview(el, selfTracks[kind]);
+}
+
+/** Chromium leaves a preview attached mid-transition paused despite `autoplay`. */
+function showPreview(el, stream) {
+    el.srcObject = stream ?? null;
+    if (stream) el.play().catch(() => {});
 }
 
 // Hidden means backgrounded on a phone, where the camera must stop, but only covered

@@ -1,7 +1,8 @@
 // Vector Web backend: vector-core as WebAssembly, one dedicated worker per tab.
 // OPFS's synchronous access handles, which the SQLite VFS needs, exist only here.
-import init, { start, invoke, invoke_bytes, set_event_sink } from './pkg/vector_web.js';
+import init, { start, invoke, invoke_bytes, set_event_sink, set_call_sink } from './pkg/vector_web.js';
 import { probeStorage, filesFor } from './storage.js';
+import { onSink, onPageMessage } from './calls-media.js';
 
 const VERSION = 'web';
 
@@ -10,6 +11,7 @@ const booted = (async () => {
     globalThis.vectorFiles = filesFor(level, (path) => postMessage({ t: 'file-changed', path }));
     await init();
     set_event_sink((name, json, bytes) => postMessage({ t: 'event', name, json, bytes }, bytes ? [bytes.buffer] : []));
+    set_call_sink(onSink);
     // A tab that just stepped aside may still be closing its storage handles.
     for (let attempt = 0; ; attempt++) {
         try {
@@ -52,6 +54,12 @@ addEventListener('error', (e) => { if (trapped(e.error ?? e.message)) die(e.erro
 addEventListener('unhandledrejection', (e) => { if (trapped(e.reason)) die(e.reason); });
 
 onmessage = async ({ data }) => {
+    // The page's half of a call: worklet ports and failures, never answered.
+    if (data.t?.startsWith('call-')) {
+        await booted.catch(() => {});
+        onPageMessage(data);
+        return;
+    }
     try {
         await booted;
         const value = await run(data);

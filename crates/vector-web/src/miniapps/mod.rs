@@ -4,7 +4,7 @@
 
 mod marketplace;
 mod package;
-mod realtime;
+pub(crate) mod realtime;
 mod url;
 
 /// Whether this browser can run mini apps at all (each needs a service worker),

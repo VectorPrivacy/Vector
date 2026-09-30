@@ -23,6 +23,7 @@
         const root = document.documentElement.classList;
         if (storage) root.add(`storage-${storage}`);
         root.toggle('no-miniapps', !hasServiceWorker());
+        root.toggle('no-calls', !(typeof AudioEncoder === 'function' && typeof AudioWorkletNode === 'function' && navigator.mediaDevices?.getUserMedia));
     }
 
     let worker = null;
@@ -60,6 +61,9 @@
                 break;
             case 'file-changed':
                 forget(data.path);
+                break;
+            case 'call':
+                window.__vectorWeb.onCall?.(data);
                 break;
             case 'result':
                 settle(data.id, data.ok, data.ok ? data.value : data.error);
@@ -626,6 +630,9 @@
         pathOf,
         storage: () => storage,
         hasServiceWorker,
+        /** Call media plumbing (web/calls.js): straight to the worker, ports and all. */
+        callPost: (msg, transfer = []) => { if (ready && worker) worker.postMessage(msg, transfer); },
+        onCall: null,
     };
 
     // Back in the foreground: the OS froze the worker's sockets while away.

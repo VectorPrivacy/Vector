@@ -9,4 +9,6 @@ pub mod platform;
 #[cfg(feature = "calls")]
 pub mod session;
 #[cfg(feature = "calls")]
+pub mod settings;
+#[cfg(feature = "calls")]
 pub mod video;

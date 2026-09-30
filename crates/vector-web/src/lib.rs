@@ -8,6 +8,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod account;
+mod calls;
 mod chat_ops;
 mod community_ops;
 mod network_ops;
@@ -38,7 +39,7 @@ use std::pin::Pin;
 type Module = for<'a> fn(&'a str, &'a commands::Args) -> Pin<Box<dyn std::future::Future<Output = Option<Result<serde_json::Value, String>>> + 'a>>;
 
 /// Consulted in order for commands the core dispatcher doesn't answer.
-const MODULES: &[Module] = &[signers::dispatch, miniapps::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch, rail::dispatch];
+const MODULES: &[Module] = &[signers::dispatch, miniapps::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch, rail::dispatch, calls::dispatch];
 
 use wasm_bindgen::prelude::*;
 
@@ -59,6 +60,7 @@ pub async fn start(version: String, level: String) -> Result<(), JsValue> {
     storage::install(&level).await?;
 
     signers::install();
+    calls::install();
     vector_core::db::set_app_version(version);
     vector_core::db::set_download_dir(PathBuf::from("/downloads"));
     vector_core::VectorCore::init(vector_core::CoreConfig {
