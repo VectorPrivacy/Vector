@@ -125,6 +125,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             sync::notifs();
             Ok(json!(true))
         }
+        "web_resume" => {
+            let hidden_ms = a.get("hiddenMs").and_then(Value::as_u64).unwrap_or(0);
+            db::spawn_bound(crate::catchup::resume(hidden_ms));
+            Ok(Value::Null)
+        }
         "sync_all_profiles" => {
             profile_sync::sync_all_profiles().await;
             Ok(Value::Null)

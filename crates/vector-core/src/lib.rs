@@ -485,6 +485,17 @@ pub struct CoreConfig {
 #[derive(Clone, Copy)]
 pub struct VectorCore;
 
+/// Who fetches what was published while a `listen` client was offline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatchUp {
+    /// `listen` folds state, back-fills every channel and syncs DMs before going
+    /// live, and again on each reconnect: a bot starts from a complete picture.
+    Inline,
+    /// `listen` goes live at once and leaves the gap to the caller, which pages
+    /// it behind the live subscriptions (a UI that paints as history lands).
+    External,
+}
+
 /// What one catch-up page cost and what it yielded.
 ///
 /// `fetched` is the relay's answer — zero means there is genuinely nothing
@@ -5390,6 +5401,11 @@ impl VectorCore {
     /// # }
     /// ```
     pub async fn listen(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
+        self.listen_with(handler, CatchUp::Inline).await
+    }
+
+    /// `listen`, choosing who fetches what was published while offline.
+    pub async fn listen_with(&self, handler: Arc<dyn InboundEventHandler>, catch_up: CatchUp) -> Result<()> {
         use nostr_sdk::prelude::*;
 
         let client = state::nostr_client()
@@ -5414,8 +5430,10 @@ impl VectorCore {
         // Spawn the single per-community follow worker for this session; the v2
         // follow queue (fed by dispatch, catch-up, and sync) drains through it.
         community::v2::realtime::spawn_follow_worker(handler.clone());
-        let _ = self.sync_communities().await;
-        let _ = self.sync_dms(None, &NoOpEventHandler).await;
+        if catch_up == CatchUp::Inline {
+            let _ = self.sync_communities().await;
+            let _ = self.sync_dms(None, &NoOpEventHandler).await;
+        }
 
         // Subscribe to DMs (GiftWraps) AND Community channel events — one loop dispatches both
         // through the same handler, so `on_dm_received`/`on_community_message` share a sink.
@@ -5436,7 +5454,7 @@ impl VectorCore {
         // while we were down, so a relay (re)connecting is exactly when we must catch up. On each
         // Connected transition we refold consensus + reconcile DMs (NIP-77 negentropy → only the
         // diff) and re-track the realtime sub at the current epochs. Idle when healthy. Stops on swap.
-        if let Some(monitor) = client.monitor() {
+        if let Some(monitor) = client.monitor().filter(|_| catch_up == CatchUp::Inline) {
             let mut rx = monitor.subscribe();
             db::spawn_bound(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the

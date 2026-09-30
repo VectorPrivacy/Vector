@@ -15,6 +15,7 @@ mod profile_ops;
 mod selfsync;
 mod signers;
 mod attachments;
+mod catchup;
 mod clock;
 mod commands;
 mod community;

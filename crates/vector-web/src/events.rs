@@ -69,6 +69,10 @@ async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_la
 }
 
 impl InboundEventHandler for WebEventHandler {
+    fn on_subscription_ready(&self, _communities: usize) {
+        crate::catchup::request();
+    }
+
     fn on_dm_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
         if !is_new {
             return;

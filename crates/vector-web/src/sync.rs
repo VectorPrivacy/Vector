@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use vector_core::db;
-use vector_core::{SlimProfile, VectorCore, STATE};
+use vector_core::{CatchUp, SlimProfile, VectorCore, STATE};
 
 use crate::emitter;
 
@@ -79,11 +79,12 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Start the live DM and community subscription. Runs for the session's life.
+/// Start the live DM and community subscription. Runs for the session's life;
+/// `catchup` fetches what it missed, behind it.
 pub fn notifs() {
     db::spawn_bound(crate::selfsync::start());
     db::spawn_bound(async {
-        if let Err(e) = VectorCore.listen(Arc::new(crate::events::WebEventHandler)).await {
+        if let Err(e) = VectorCore.listen_with(Arc::new(crate::events::WebEventHandler), CatchUp::External).await {
             vector_core::log_warn!("[Web] live subscription ended: {e}");
         }
     });

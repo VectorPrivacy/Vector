@@ -686,6 +686,7 @@ pub fn start_relay_monitor(client: &Client) {
                     if let Some(c) = state::nostr_client() {
                         vector_core::resubscribe_relay_after_reconnect(&c, &relay_url).await;
                     }
+                    crate::catchup::after_reconnect();
                 }
             }
         });

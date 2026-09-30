@@ -311,6 +311,16 @@
         convertFileSrc,
     };
 
+    // Back in the foreground: the OS froze the worker's sockets while away.
+    let hiddenAt = 0;
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+        const away = hiddenAt ? Date.now() - hiddenAt : 0;
+        hiddenAt = 0;
+        if (ready && away >= 2000) backend('web_resume', { hiddenMs: away }).catch(() => {});
+    });
+    addEventListener('online', () => { if (ready) backend('web_resume', { hiddenMs: 0 }).catch(() => {}); });
+
     // The desktop reloads its webview on `session_reload`; here a reload also
     // restarts the worker, which boots whichever account is marked active.
     document.documentElement.classList.add('vector-web');

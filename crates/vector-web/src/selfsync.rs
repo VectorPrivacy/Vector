@@ -182,7 +182,7 @@ async fn handle(event: Event) {
 }
 
 /// Another device joined or left a community: follow it here.
-async fn ingest_v2_community_list() {
+pub(crate) async fn ingest_v2_community_list() {
     use vector_core::community::v2::service as v2;
     let Some(client) = vector_core::state::nostr_client() else { return };
     let bootstrap: Vec<String> = client.relays().await.keys().map(|r| r.to_string()).collect();
