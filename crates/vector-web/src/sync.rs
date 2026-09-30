@@ -69,14 +69,56 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
         db::spawn_bound(crate::miniapps::preload_marketplace());
     }
     // History arrives behind the painted list; `sync_finished` repaints what it added.
-    db::spawn_bound(async {
+    db::spawn_bound(async move {
         emitter::emit("sync_progress", &serde_json::json!({ "mode": "Syncing" }));
         if let Err(e) = VectorCore.sync_dms(None, &crate::events::WebEventHandler).await {
             vector_core::log_warn!("[Web] DM sync failed: {e}");
         }
         emitter::emit("sync_finished", &());
+        if init {
+            db::spawn_bound(merge_media_servers());
+            db::spawn_bound(refresh_badges());
+        }
     });
     Ok(())
+}
+
+/// The account's published media servers (kind 10063), merged in after the first
+/// sync, then each one's capabilities learned so uploads route correctly.
+async fn merge_media_servers() {
+    use vector_core::{blossom, blossom_info, blossom_servers, state};
+    let (Some(client), Some(me)) = (state::nostr_client(), vector_core::my_public_key()) else { return };
+    match blossom_servers::fetch_and_merge_own_list(&client, me).await {
+        Ok(0) => {}
+        Ok(n) => vector_core::log_info!("[BlossomServers] merged {n} server(s) from the account's list"),
+        Err(e) => vector_core::log_warn!("[BlossomServers] list fetch failed: {e}"),
+    }
+    let Ok(signer) = vector_core::signer::active_signer() else { return };
+    let servers = state::get_blossom_servers();
+    if blossom_info::refresh_all(signer.clone(), servers.clone(), std::time::Duration::from_secs(60)).await > 0 {
+        vector_core::emit_event("blossom_info_updated", &());
+    }
+    match blossom::probe_servers_for_octet_stream(signer, servers).await {
+        Ok(0) => {}
+        Ok(_) => vector_core::emit_event("blossom_capabilities_updated", &()),
+        Err(e) => vector_core::log_warn!("[Blossom Probe] probe pass failed: {e}"),
+    }
+}
+
+/// The account's badges, which gate its perks (emoji and pin limits). Once the
+/// sync has settled: the relay holding a claim is often the one it just saturated.
+async fn refresh_badges() {
+    vector_core::rt::time::sleep(std::time::Duration::from_secs(30)).await;
+    vector_core::badges::refresh_own_badges().await;
+    vector_core::badges::refresh_own_bug_hunter().await;
+    vector_core::emit_event(
+        "badges_updated",
+        &serde_json::json!({
+            "vector": vector_core::badges::has_vector_badge(),
+            "tier": vector_core::badges::effective_tier(),
+            "bug_hunter": vector_core::badges::bug_hunter_tier(),
+        }),
+    );
 }
 
 /// Start the live DM and community subscription. Runs for the session's life;

@@ -173,14 +173,25 @@ fn account_metadata(npub: &str) -> Value {
     let Ok(conn) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return meta;
     };
-    if let Ok((nickname, display, name, avatar)) = conn.query_row(
-        "SELECT nickname, display_name, name, avatar FROM profiles WHERE npub = ?1",
+    if let Ok((nickname, display, name, avatar, avatar_cached)) = conn.query_row(
+        "SELECT nickname, display_name, name, avatar, avatar_cached FROM profiles WHERE npub = ?1",
         [npub],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        },
     ) {
         meta["display_name"] = json!([nickname, display, name].into_iter().find(|s| !s.is_empty()));
         if !avatar.is_empty() {
             meta["avatar_url"] = json!(avatar);
+        }
+        if !avatar_cached.is_empty() {
+            meta["avatar_cached"] = json!(avatar_cached);
         }
     }
     let setting = |key: &str| {
