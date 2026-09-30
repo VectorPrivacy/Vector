@@ -5,6 +5,7 @@
 mod marketplace;
 mod package;
 mod realtime;
+mod url;
 
 /// Whether this browser can run mini apps at all (each needs a service worker),
 /// as the page reports at boot.
@@ -463,6 +464,10 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> std::pin::Pin<Box<dyn std::fut
             "miniapp_prepare" => prepare(a).await,
             "miniapp_rt_join" => match a.str("label") {
                 Ok(l) => rt_join(l).await,
+                Err(e) => Err(e),
+            },
+            "miniapp_resolve_url_xdc" => match a.str("url") {
+                Ok(u) => url::resolve(u, a.opt_str("msgId").unwrap_or_default(), a.bool("download").unwrap_or(false)).await,
                 Err(e) => Err(e),
             },
             "miniapp_closed" => match a.str("label") {
