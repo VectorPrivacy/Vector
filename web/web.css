@@ -13,6 +13,9 @@
     z-index: 99;
 }
 body.mobile { --chrome-h: 12px; }
+/* The body keeps the strip's margin inside it (its own formatting context):
+   collapsed through it, the margin would push the page a strip taller than the screen. */
+body.mobile { display: flow-root; }
 body.mobile > main.container { margin-top: var(--chrome-h); }
 /* Opaque, so the strip above in their colour reads as part of them. The chat
    header states its top: WebKit pins a fixed box with top:auto to the viewport. */
