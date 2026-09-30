@@ -177,6 +177,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_unread_counts" => to_value(db::events::unread_counts().await?),
         "update_unread_counter" => Ok(json!(messaging::unread_total().await)),
         "list_emoji_packs" => to_value(vector_core::emoji_packs::load_all_packs()?),
+        "refresh_emoji_packs" => to_value(vector_core::emoji_packs::refresh_subscribed_packs().await?),
         "get_pack_share_naddr" => to_value(vector_core::emoji_packs::share_naddr(&a.str("naddr")?).await?),
         "get_theme_emoji_pack" => to_value(vector_core::emoji_packs::get_or_fetch_theme_pack(&a.str("naddr")?).await?),
         "subscribe_emoji_pack" => to_value(vector_core::emoji_packs::subscribe_pack(&a.str("naddr")?).await?),
