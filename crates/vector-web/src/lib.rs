@@ -67,7 +67,9 @@ pub async fn start(version: String, level: String) -> Result<(), JsValue> {
     })
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    vector_core::db::spawn_bound(vector_core::profile::sync::start_profile_sync_processor(
+    // spawn-detached: the processor serves whichever account is live, as on desktop.
+    // Bound here it would keep the pre-login session, whose queue nothing fills.
+    vector_core::rt::spawn(vector_core::profile::sync::start_profile_sync_processor(
         std::sync::Arc::new(sync::WebProfileSyncHandler),
     ));
 
