@@ -113,6 +113,7 @@
                     <button type="button" class="lg-btn primary" onclick={() => h.createAccount()}>Create Account</button>
                     <button type="button" class="lg-btn accent" onclick={() => h.openImport()}>Login</button>
                 </div>
+                {#if l.privateNote}<p class="lg-private-note">{l.privateNote}</p>{/if}
                 {@render goBack()}
             </div>
         {:else if l.screen === 'import'}

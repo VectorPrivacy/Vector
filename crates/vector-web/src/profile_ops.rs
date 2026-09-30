@@ -13,7 +13,6 @@ use vector_core::profile::sync as profile_sync;
 use vector_core::synced_prefs::{self, IdList, NicknameMap, Pref};
 use vector_core::tags::TagsExt;
 use vector_core::{db, state, VectorCore, STATE};
-use wasm_bindgen::prelude::*;
 
 use crate::commands::{to_value, Args};
 use crate::images::{self, Kind as ImageKind};
@@ -528,34 +527,9 @@ async fn get_bug_hunter_tier(a: &Args) -> Result<Value, String> {
 // Storage
 // ---------------------------------------------------------------------------
 
-#[wasm_bindgen(inline_js = r#"
-async function dirAt(path) {
-    let dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('files');
-    for (const p of path.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(p);
-    return dir;
-}
-export async function opfs_list(path, recursive) {
-    const out = [];
-    let root;
-    try { root = await dirAt(path); } catch { return '[]'; }
-    const walk = async (dir, prefix) => {
-        for await (const [name, handle] of dir.entries()) {
-            if (handle.kind === 'file') out.push([prefix + name, (await handle.getFile()).size]);
-            else if (recursive) await walk(handle, prefix + name + '/');
-        }
-    };
-    try { await walk(root, ''); } catch {}
-    return JSON.stringify(out);
-}
-"#)]
-extern "C" {
-    async fn opfs_list(path: &str, recursive: bool) -> JsValue;
-}
-
-/// `(relative name, size)` of the files under an OPFS directory.
+/// `(relative name, size)` of the files under a storage directory.
 async fn list_files(dir: &Path, recursive: bool) -> Vec<(String, u64)> {
-    let json = opfs_list(&dir.to_string_lossy(), recursive).await.as_string().unwrap_or_default();
-    serde_json::from_str(&json).unwrap_or_default()
+    vector_core::webfiles::tree(dir, recursive).await
 }
 
 /// The extension the storage chart buckets by; dotfiles are markers, never content.

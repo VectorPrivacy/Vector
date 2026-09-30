@@ -1,7 +1,28 @@
 // The colour an album card's controls wear, measured from its art.
 
+// Whether a canvas reads back what was drawn. Anti-fingerprinting browsers (Tor,
+// Mullvad) garble it, and noise would name a random hue; Brave's small noise stays
+// within the tolerance.
+let readsTrue = null;
+export function canvasReadsTrue() {
+    if (readsTrue !== null) return readsTrue;
+    try {
+        const c = document.createElement('canvas');
+        c.width = c.height = 1;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.fillStyle = '#2a7fd4';
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        readsTrue = Math.abs(r - 42) <= 3 && Math.abs(g - 127) <= 3 && Math.abs(b - 212) <= 3;
+    } catch {
+        readsTrue = false;
+    }
+    return readsTrue;
+}
+
 // The art's most prominent colourful hue, lifted to a brightness the controls read at.
 export function artAccent(src) {
+    if (!canvasReadsTrue()) return Promise.resolve(null);
     return new Promise((resolve) => {
         const img = new Image();
         img.onerror = () => resolve(null);

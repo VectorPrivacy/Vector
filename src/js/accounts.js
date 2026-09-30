@@ -150,7 +150,9 @@ const profileSwitcher = {
         // Soft cap: disable the Add button at the tier's account ceiling. Existing
         // accounts (even above the cap) stay listed + usable; only adding more is gated.
         const atCap = accounts.length >= maxAccountsForTier();
-        VectorSvelte.setSwitcherAdd(atCap, atCap ? 'Maximum Accounts' : 'Add Profile');
+        // A browser that keeps nothing loses the current profile on a switch.
+        const single = platformFeatures?.multi_account === false;
+        VectorSvelte.setSwitcherAdd(atCap || single, single ? 'One Profile in Private Mode' : atCap ? 'Maximum Accounts' : 'Add Profile');
     },
 
     toggleEditMode() {

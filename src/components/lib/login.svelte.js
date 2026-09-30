@@ -16,6 +16,8 @@ const l = $state({
     importKey: '', inviteCode: '',
     nip55Shown: false, nip55Busy: false,
     nip07Shown: false, nip07Busy: false,
+    // Set where the browser keeps nothing past closing: what signing in means there.
+    privateNote: '',
     // The illustration behind the screens; a per-device preference, so it lives in the browser.
     bgHidden: readBgHidden(),
 });

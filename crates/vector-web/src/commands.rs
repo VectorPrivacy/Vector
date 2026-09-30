@@ -68,6 +68,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             "debug_mode": false,
             "media_url": null,
             "self_update": false,
+            "storage": crate::Storage::current().name(),
         })),
         "check_account_downgrade" => Ok(Value::Null),
         "get_theme" => {

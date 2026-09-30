@@ -210,3 +210,4 @@ flushSync();
 export { reactionEls } from './lib/reactionpopups.svelte.js';
 export { miniProfileEls, setMiniProfileRoles, setMiniProfileRoleBusy } from './lib/miniprofile.svelte.js';
 export { railEls, setRailLayout } from './lib/rail.svelte.js';
+export { canvasReadsTrue } from './lib/artcolor.js';

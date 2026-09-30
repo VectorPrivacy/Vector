@@ -20277,6 +20277,14 @@ body.profile-switcher-editing .profile-switcher-add {
   gap: 16px;
 }
 #login-start .lg-buttons { gap: 13px; }
+.lg-private-note {
+  max-width: 280px;
+  margin: 22px auto 0;
+  color: #b2b2b2;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
 .lg-btn {
   width: 250px;
   max-width: calc(100vw - 48px);

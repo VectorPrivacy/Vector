@@ -1111,6 +1111,24 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     Err(last_err)
 }
 
+/// Set by a web build whose storage acknowledges writes before they reach disk
+/// (IndexedDB mirroring): SQLite must not ask it to sync, which it refuses.
+#[cfg(target_arch = "wasm32")]
+static RELAXED_DURABILITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_relaxed_durability(on: bool) {
+    RELAXED_DURABILITY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn synchronous_pragma() -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    if RELAXED_DURABILITY.load(std::sync::atomic::Ordering::Relaxed) {
+        return "OFF";
+    }
+    "NORMAL"
+}
+
 fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(path)
         .map_err(|e| format!("Failed to open database: {}", e))?;
@@ -1125,7 +1143,10 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     // WAL for concurrent reads. cache_size negative = KiB (16 MiB page cache) to keep hot
     // pages resident on a large DB; temp_store=MEMORY keeps GROUP BY / sort scratch in
     // memory instead of spilling to disk.
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;")
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous={}; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;",
+        synchronous_pragma()
+    ))
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
     // Room for every hot statement: page loads, unread counts and the persist path together
     // outgrow rusqlite's default of 16, and an evicted statement re-prepares on its next use.

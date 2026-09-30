@@ -1,7 +1,9 @@
-//! Files on the web: OPFS, under `files/<path>`, where the page's service worker
-//! serves them back as `/vfs/<path>` (Vector Web's `convertFileSrc`).
+//! Files on the web, under `<path>` in whichever store the browser keeps: OPFS,
+//! IndexedDB for a private window, or memory. The worker (`web/worker.js`) picks
+//! the store and exposes it as `globalThis.vectorFiles`; the page is served the
+//! files as `/vfs/<path>` by its service worker, or as blob URLs where it has none.
 //!
-//! Async where std::fs is sync: OPFS hands out file handles only through promises.
+//! Async where std::fs is sync: every browser store answers through promises.
 
 use std::path::Path;
 
@@ -9,61 +11,21 @@ use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-async function dirFor(path, create) {
-    let dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('files', { create });
-    const parts = path.split('/').filter(Boolean);
-    const name = parts.pop();
-    for (const p of parts) dir = await dir.getDirectoryHandle(p, { create });
-    return [dir, name];
-}
-export async function opfs_write(path, bytes) {
-    const [dir, name] = await dirFor(path, true);
-    const handle = await (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle();
-    try {
-        handle.truncate(0);
-        handle.write(bytes, { at: 0 });
-        handle.flush();
-    } finally {
-        handle.close();
-    }
-}
-export async function opfs_read(path) {
-    try {
-        const [dir, name] = await dirFor(path, false);
-        const file = await (await dir.getFileHandle(name)).getFile();
-        return new Uint8Array(await file.arrayBuffer());
-    } catch { return null; }
-}
-export async function opfs_size(path) {
-    try {
-        const [dir, name] = await dirFor(path, false);
-        return (await (await dir.getFileHandle(name)).getFile()).size;
-    } catch { return -1; }
-}
-export async function opfs_list(path) {
-    try {
-        let dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('files');
-        for (const p of path.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(p);
-        const names = [];
-        for await (const [name, handle] of dir.entries()) if (handle.kind === 'file') names.push(name);
-        return names;
-    } catch { return []; }
-}
-export async function opfs_remove(path) {
-    try {
-        const [dir, name] = await dirFor(path, false);
-        await dir.removeEntry(name, { recursive: true });
-        return true;
-    } catch { return false; }
-}
+export async function store_write(path, bytes) { await globalThis.vectorFiles.write(path, bytes); }
+export async function store_read(path) { return globalThis.vectorFiles.read(path); }
+export async function store_size(path) { return globalThis.vectorFiles.size(path); }
+export async function store_remove(path) { return globalThis.vectorFiles.remove(path); }
+export async function store_list(path) { return (await globalThis.vectorFiles.list(path, false)).map(([name]) => name); }
+export async function store_tree(path, recursive) { return JSON.stringify(await globalThis.vectorFiles.list(path, recursive)); }
 "#)]
 extern "C" {
     #[wasm_bindgen(catch)]
-    async fn opfs_write(path: &str, bytes: Uint8Array) -> Result<(), JsValue>;
-    async fn opfs_read(path: &str) -> JsValue;
-    async fn opfs_size(path: &str) -> JsValue;
-    async fn opfs_remove(path: &str) -> JsValue;
-    async fn opfs_list(path: &str) -> JsValue;
+    async fn store_write(path: &str, bytes: Uint8Array) -> Result<(), JsValue>;
+    async fn store_read(path: &str) -> JsValue;
+    async fn store_size(path: &str) -> JsValue;
+    async fn store_remove(path: &str) -> JsValue;
+    async fn store_list(path: &str) -> JsValue;
+    async fn store_tree(path: &str, recursive: bool) -> JsValue;
 }
 
 fn key(path: &Path) -> String {
@@ -71,13 +33,13 @@ fn key(path: &Path) -> String {
 }
 
 pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    opfs_write(&key(path), Uint8Array::from(bytes))
+    store_write(&key(path), Uint8Array::from(bytes))
         .await
-        .map_err(|e| format!("OPFS write {}: {e:?}", path.display()))
+        .map_err(|e| format!("File write {}: {e:?}", path.display()))
 }
 
 pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
-    let v = opfs_read(&key(path)).await;
+    let v = store_read(&key(path)).await;
     if v.is_null() {
         return Err(format!("{} not found", path.display()));
     }
@@ -86,7 +48,7 @@ pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
 
 /// Size in bytes, `None` if absent.
 pub async fn size(path: &Path) -> Option<u64> {
-    opfs_size(&key(path)).await.as_f64().filter(|n| *n >= 0.0).map(|n| n as u64)
+    store_size(&key(path)).await.as_f64().filter(|n| *n >= 0.0).map(|n| n as u64)
 }
 
 pub async fn exists(path: &Path) -> bool {
@@ -94,11 +56,18 @@ pub async fn exists(path: &Path) -> bool {
 }
 
 pub async fn remove(path: &Path) -> bool {
-    opfs_remove(&key(path)).await.as_bool().unwrap_or(false)
+    store_remove(&key(path)).await.as_bool().unwrap_or(false)
 }
 
 /// Names of the files directly inside `dir`.
 pub async fn list(dir: &Path) -> Vec<String> {
-    let v = opfs_list(&key(dir)).await;
+    let v = store_list(&key(dir)).await;
     js_sys::Array::from(&v).iter().filter_map(|n| n.as_string()).collect()
+}
+
+/// `(relative name, size)` of the files under `dir`; with `recursive`, names are
+/// paths relative to it.
+pub async fn tree(dir: &Path, recursive: bool) -> Vec<(String, u64)> {
+    let json = store_tree(&key(dir), recursive).await.as_string().unwrap_or_default();
+    serde_json::from_str(&json).unwrap_or_default()
 }

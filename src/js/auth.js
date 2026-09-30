@@ -437,6 +437,12 @@ function showWelcomeScreen() {
 /** The open encrypt screen's handlers; the component's controls route here. */
 let encryptFlow = null;
 
+/** Set by Create Account: a key made here exists nowhere else yet. */
+let keysAreNew = false;
+
+/** The browser keeps this session only until it closes, or not at all. */
+const storageIsEphemeral = () => !!platformFeatures?.storage && platformFeatures.storage !== 'persistent';
+
 /**
  * Display the Encryption/Decryption flow.
  * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting a new one.
@@ -587,8 +593,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 
     /** Show the security type selection phase */
     function showSecurityTypeSelector() {
+        // Where the browser deletes everything on close, a PIN would guard nothing.
+        const skipChoice = storageIsEphemeral();
         // The type selector uses the login logo above instead of the lock header.
-        VectorSvelte.patchEncrypt({ headerShown: false, pinShown: false, passwordShown: false, typeSelectShown: true });
+        if (!skipChoice) VectorSvelte.patchEncrypt({ headerShown: false, pinShown: false, passwordShown: false, typeSelectShown: true });
 
         // Biometric-only mode (Android 11+ with capable hardware): a generated
         // 256-bit credential nobody ever knows, unlocked solely by the OS.
@@ -633,6 +641,8 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             setTitle('Setting up your account...', { typeSelectShown: false, headerShown: true, lockShown: false, gradient: true });
             try {
                 await invoke('skip_encryption');
+                if (keysAreNew && storageIsEphemeral()) await exportAccount({ saving: true });
+                keysAreNew = false;
                 login();
             } catch (e) {
                 // Backend rejected (disk full, DB locked by AV, migration
@@ -644,6 +654,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 VectorSvelte.patchEncrypt({ typeSelectShown: true });
             }
         };
+        if (skipChoice) flow.choose('skip');
     }
 
     /** Start the credential entry phase for the chosen type */
@@ -925,6 +936,7 @@ async function createAccount() {
 
         const { public: pubKey } = await invoke("create_account");
         strPubkey = pubKey;
+        keysAreNew = true;
 
         // Connect to Nostr network
         await invoke("connect");

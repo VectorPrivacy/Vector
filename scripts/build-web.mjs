@@ -55,7 +55,7 @@ export const CSP = [
     "img-src 'self' data: blob: https:",
     "media-src 'self' blob: https://gifverse.net",
     "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' https://gifverse.net",
+    "connect-src 'self' blob: https://gifverse.net",
     "worker-src 'self'",
     // Mini apps run on subdomains of whatever host serves Vector; the server narrows
     // this to its own `*.xdc.<host>` with a header, and both policies apply.

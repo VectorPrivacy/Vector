@@ -5,8 +5,24 @@
 (() => {
     'use strict';
 
-    if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js').catch((e) => console.error('[web] service worker failed:', e));
+    // The service worker serves stored files where storage is OPFS. Private browsers
+    // refuse one, which also rules out mini apps: each runs behind its own.
+    let serviceWorker = 'serviceWorker' in navigator ? 'pending' : 'none';
+    if (serviceWorker === 'pending') {
+        navigator.serviceWorker.register('/sw.js').then(
+            () => { serviceWorker = 'ok'; },
+            (e) => { serviceWorker = 'none'; applyCapabilities(); console.warn('[web] no service worker:', e); },
+        );
+    }
+    const hasServiceWorker = () => serviceWorker !== 'none';
+
+    // How long the browser keeps what Vector stores ('persistent' | 'session' |
+    // 'memory'), as the worker found it; null until it has booted.
+    let storage = null;
+    function applyCapabilities() {
+        const root = document.documentElement.classList;
+        if (storage) root.add(`storage-${storage}`);
+        root.toggle('no-miniapps', !hasServiceWorker());
     }
 
     let worker = null;
@@ -29,6 +45,8 @@
         switch (data.t) {
             case 'ready':
                 ready = true;
+                storage = data.level || 'persistent';
+                applyCapabilities();
                 for (const msg of queued.splice(0)) worker.postMessage(msg);
                 break;
             case 'fatal':
@@ -105,14 +123,19 @@
         if (document.body) show(); else addEventListener('DOMContentLoaded', show);
     }
 
-    if (navigator.locks) claim(); else startWorker();
+    // Tor Browser's Safer and Safest levels turn WebAssembly off, and Vector's core is WebAssembly.
+    if (typeof WebAssembly !== 'object') {
+        fatal = 'WebAssembly is turned off';
+        overlay('Vector needs WebAssembly, which this browser has turned off. In Tor Browser, open the shield menu, set the security level to Standard, then reload.', 'Reload', () => location.reload());
+    } else if (navigator.locks) claim(); else startWorker();
 
     function settle(id, ok, value) {
         const p = pending.get(id);
         if (!p) return;
         pending.delete(id);
         if (!ok) return p.reject(value);
-        p.resolve(value === undefined || value === '' ? undefined : JSON.parse(value));
+        if (typeof value !== 'string') return p.resolve(value);
+        p.resolve(value === '' ? undefined : JSON.parse(value));
     }
 
     function post(msg) {
@@ -130,10 +153,17 @@
 
     // Only the page knows the device: on a touch screen the app takes its mobile
     // behaviour (press-and-hold menus, swipe to reply, touch styles), as on Android.
-    local.set('get_platform_features', async () => ({
-        ...(await backend('get_platform_features')),
-        is_mobile: matchMedia('(pointer: coarse)').matches,
-    }));
+    // What the browser allows decides the rest: another account only where switching
+    // (a reload) keeps the one before, mini apps only behind a service worker.
+    local.set('get_platform_features', async () => {
+        const features = await backend('get_platform_features');
+        return {
+            ...features,
+            is_mobile: matchMedia('(pointer: coarse)').matches,
+            multi_account: features.storage !== 'memory',
+            mini_apps: hasServiceWorker(),
+        };
+    });
 
     // Raw-body IPC (Tauri's `invoke(cmd, bytes, { headers })`) keeps the bytes binary.
     function invoke(cmd, args = {}, options = {}) {
@@ -265,11 +295,188 @@
         workArea: { size: new PhysicalSize(screen.availWidth * dpr(), screen.availHeight * dpr()), position: new PhysicalPosition(0, 0) },
     });
 
+    // ─── Stored files ───────────────────────────────────────────────────────
+    // With OPFS and a service worker, a stored file is `/vfs<path>`, served by
+    // web/sw.js. Anywhere else the page holds it as a blob: URL of the worker's
+    // bytes. `convertFileSrc` must answer at once, so there it hands out a stable
+    // placeholder per file, and whatever is given one (an element's src or poster,
+    // a style, a fetch) is pointed at the file's current URL once its bytes are here.
+    const vfsUrl = (path) => '/vfs' + ('/' + path.replace(/^\/+/, '')).split('/').map(encodeURIComponent).join('/');
+    const blobMode = () => storage !== null && (storage !== 'persistent' || !hasServiceWorker());
+
+    // Only passive types render, as web/sw.js serves them; anything else is bytes to save.
+    const TYPES = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+        avif: 'image/avif', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+        mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska',
+        mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', opus: 'audio/ogg',
+        wav: 'audio/wav', flac: 'audio/flac', weba: 'audio/webm',
+        txt: 'text/plain; charset=utf-8',
+    };
+    const typeOf = (path) => TYPES[path.split('.').pop().toLowerCase()] || 'application/octet-stream';
+
+    // Least recently used first; past the budget the oldest URLs are released.
+    const BLOB_BUDGET = 256 * 1024 * 1024;
+    const blobs = new Map();
+    let blobBytes = 0;
+    const loading = new Map();
+
+    function remember(path, url, size) {
+        blobs.set(path, { url, size });
+        blobBytes += size;
+        for (const [p, b] of blobs) {
+            if (blobBytes <= BLOB_BUDGET || p === path) break;
+            URL.revokeObjectURL(b.url);
+            blobs.delete(p);
+            blobBytes -= b.size;
+        }
+    }
+
+    /** The URL a stored file can be loaded from now; null when it doesn't exist. */
+    function fileUrl(path) {
+        if (!blobMode()) return Promise.resolve(vfsUrl(path));
+        const hit = blobs.get(path);
+        if (hit) {
+            blobs.delete(path);
+            blobs.set(path, hit);
+            return Promise.resolve(hit.url);
+        }
+        if (!loading.has(path)) {
+            loading.set(path, post({ t: 'file', path })
+                .then((bytes) => {
+                    if (!bytes) return null;
+                    const url = URL.createObjectURL(new Blob([bytes], { type: typeOf(path) }));
+                    remember(path, url, bytes.byteLength);
+                    return url;
+                })
+                .catch(() => null)
+                .finally(() => loading.delete(path)));
+        }
+        return loading.get(path);
+    }
+
+    // A transparent pixel, so an image shows nothing rather than a broken icon meanwhile.
+    const PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    // A placeholder, plus whatever a caller appended to it (a cache-busting query).
+    const TOKEN = /data:image\/gif;base64,[A-Za-z0-9+/=]+#vfs-\d+(?:[?&][^"')\s]*)?/g;
+    const tokens = new Map();
+    const tokenIn = (value) => {
+        const base = typeof value === 'string' && value.startsWith(PLACEHOLDER) ? /^[^#]+#vfs-\d+/.exec(value)?.[0] : null;
+        return base && tokens.has(base) ? base : null;
+    };
+    const tokenOf = new Map();
+    // What each element was last given, so a late file can't overwrite a newer value.
+    const latest = new WeakMap();
+
+    function convertFileSrc(path) {
+        if (!path || /^[a-z]+:/i.test(path)) return path;
+        if (!blobMode()) return vfsUrl(path);
+        let token = tokenOf.get(path);
+        if (!token) {
+            token = `${PLACEHOLDER}#vfs-${tokens.size + 1}`;
+            tokenOf.set(path, token);
+            tokens.set(token, path);
+            installBinding();
+            fileUrl(path);
+        }
+        return token;
+    }
+
+    // `needle` is the text that was handed out: the placeholder and any suffix.
+    function bind(el, attr, token, needle = token) {
+        if (!latest.has(el)) latest.set(el, new Map());
+        latest.get(el).set(attr, needle);
+        fileUrl(tokens.get(token)).then((url) => {
+            if (!url || latest.get(el)?.get(attr) !== needle) return;
+            latest.get(el).delete(attr);
+            if (attr === 'style') {
+                const style = el.getAttribute('style');
+                if (style?.includes(needle)) el.setAttribute('style', style.split(needle).join(url));
+            } else {
+                el.setAttribute(attr, url);
+            }
+        });
+    }
+
+    function check(el, attr) {
+        const value = el.getAttribute(attr);
+        if (!value || !value.includes('#vfs-')) return;
+        if (attr === 'style') {
+            for (const m of value.match(TOKEN) || []) { const t = tokenIn(m); if (t) bind(el, 'style', t, m); }
+            return;
+        }
+        const token = tokenIn(value);
+        if (!token) return;
+        // A GIF is no media: never let a player try it and fail.
+        if (el instanceof HTMLMediaElement || el instanceof HTMLSourceElement) el.removeAttribute(attr);
+        bind(el, attr, token, value);
+    }
+
+    let bound = false;
+    function installBinding() {
+        if (bound) return;
+        bound = true;
+        const targets = [
+            [HTMLImageElement.prototype, 'src'], [HTMLMediaElement.prototype, 'src'],
+            [HTMLSourceElement.prototype, 'src'], [HTMLVideoElement.prototype, 'poster'],
+        ];
+        for (const [proto, attr] of targets) {
+            const d = Object.getOwnPropertyDescriptor(proto, attr);
+            Object.defineProperty(proto, attr, {
+                ...d,
+                set(v) {
+                    const token = tokenIn(v);
+                    if (token) return bind(this, attr, token, v);
+                    latest.get(this)?.delete(attr);
+                    d.set.call(this, v);
+                },
+            });
+        }
+        const setAttribute = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+            if ((name === 'src' || name === 'poster') && typeof value === 'string') {
+                const token = tokenIn(value);
+                if (token) return bind(this, name, token, value);
+                latest.get(this)?.delete(name);
+            }
+            return setAttribute.call(this, name, value);
+        };
+        const fetch0 = window.fetch;
+        window.fetch = function (input, init) {
+            const u = typeof input === 'string' ? input : input instanceof URL ? input.href : null;
+            const token = tokenIn(u);
+            if (token) {
+                return fileUrl(tokens.get(token)).then((url) => (url ? fetch0(url, init) : Promise.reject(new TypeError('File not found'))));
+            }
+            return fetch0.call(this, input, init);
+        };
+        // Markup built as a string never goes through the setters above.
+        const visit = (el) => { for (const a of ['src', 'poster', 'style']) if (el.hasAttribute(a)) check(el, a); };
+        new MutationObserver((records) => {
+            for (const r of records) {
+                if (r.type === 'attributes') { check(r.target, r.attributeName); continue; }
+                for (const n of r.addedNodes) {
+                    if (n.nodeType !== 1) continue;
+                    visit(n);
+                    for (const el of n.querySelectorAll('[src*="#vfs-"],[poster*="#vfs-"],[style*="#vfs-"]')) visit(el);
+                }
+            }
+        }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['src', 'poster', 'style'] });
+    }
+
+    // Nothing is kept here: leaving signs out, so say so first.
+    let signedIn = false;
+    listen('init_finished', () => { signedIn = true; });
+    addEventListener('beforeunload', (e) => {
+        if (storage !== 'memory' || !signedIn || fatal) return;
+        e.preventDefault();
+        e.returnValue = '';
+    });
+
     window.__TAURI__ = {
         core: {
             invoke,
-            // Backend files are served from OPFS by the service worker (web/sw.js).
-            convertFileSrc: (path) => (!path || /^[a-z]+:/i.test(path) ? path : '/vfs' + ('/' + path.replace(/^\/+/, '')).split('/').map(encodeURIComponent).join('/')),
+            convertFileSrc,
             Channel: class { constructor() { this.onmessage = null; } },
         },
         event: { listen, once, emit: async (name, payload) => dispatchEvent(name, payload) },
@@ -302,13 +509,15 @@
         updater: { check: async () => null },
     };
 
-    const convertFileSrc = window.__TAURI__.core.convertFileSrc;
     window.__vectorWeb = {
         register: (cmd, fn) => local.set(cmd, fn),
         emit: dispatchEvent,
         backend,
         storeFiles,
         convertFileSrc,
+        fileUrl,
+        storage: () => storage,
+        hasServiceWorker,
     };
 
     // Back in the foreground: the OS froze the worker's sockets while away.

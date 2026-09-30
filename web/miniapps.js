@@ -246,6 +246,9 @@
     }
 
     async function open({ filePath, chatId = '', messageId = '', href = null, topicId = null }) {
+        if (!window.__vectorWeb.hasServiceWorker()) {
+            throw new Error('Mini Apps need a service worker, which this private browser does not allow.');
+        }
         requireHostName();
         const info = await backend('miniapp_prepare', { filePath, chatId, messageId, topicId });
         const existing = windows.get(info.label);

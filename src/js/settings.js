@@ -287,6 +287,13 @@ async function fetchPlatformFeatures() {
     // Touch surfaces key off `.mobile` for gesture-driven affordances
     // (long-press menus, swipe-to-reply, bigger hit targets).
     document.body.classList.toggle('mobile', !!platformFeatures.is_mobile);
+    if (platformFeatures.storage === 'session' || platformFeatures.storage === 'memory') {
+        VectorSvelte.patchLogin({
+            privateNote: platformFeatures.storage === 'session'
+                ? 'Private browser: Vector keeps this session until the browser closes. You sign in again next time.'
+                : 'Private browser: Vector keeps nothing here, so a reload or closing the tab signs you out.',
+        });
+    }
 }
 
 /**
@@ -737,8 +744,11 @@ async function logoutAccount() {
     }
 }
 
-/** Show the account's keys in a popup with copy buttons. */
-async function exportAccount() {
+/**
+ * Show the account's keys in a popup with copy buttons. `saving` is the prompt for
+ * a new account in a browser that keeps nothing: the keys are the only way back in.
+ */
+async function exportAccount({ saving = false } = {}) {
     try {
         // Call the backend to export keys
         const keys = await invoke('export_keys');
@@ -751,7 +761,9 @@ async function exportAccount() {
         let exportContent = `
         <div style="text-align: center; padding: 0 8px;">
             <p style="color: var(--danger-pink); font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">
-            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
+            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">${saving
+                ? 'This browser keeps nothing once it closes. These keys are how you sign in again, and there is no other way back in. Never share them.'
+                : 'These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.'}</p>
         `;
 
         // Both the seed phrase and the nsec are long single-line strings.
@@ -782,7 +794,7 @@ async function exportAccount() {
         </div>
         `;
 
-        await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg', '', null, false, {
+        await popupConfirm(saving ? 'Save Your Keys' : 'Export Account', exportContent, true, '', 'vector_warning.svg', '', saving ? "I've Saved Them" : null, false, {
             'copy-seed': () => navigator.clipboard.writeText(keys.seed_phrase),
             'copy-nsec': () => navigator.clipboard.writeText(keys.nsec),
         });

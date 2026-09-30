@@ -156,3 +156,9 @@ body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
 .xdc-chip.xdc-chip-active { opacity: 1; }
 .xdc-chip:active { transform: scale(0.92); }
 .xdc-chip:focus-visible { outline: 2px solid #59fcb3; outline-offset: 2px; }
+
+/* A browser that refuses service workers can't run mini apps: no way in. */
+.no-miniapps #miniapps-btn,
+.no-miniapps .attachment-panel-miniapps {
+    display: none !important;
+}

@@ -3,7 +3,7 @@
 // WAV, and saving/copying attachments.
 (() => {
     'use strict';
-    const { register, emit, backend, storeFiles, convertFileSrc } = window.__vectorWeb;
+    const { register, emit, backend, storeFiles, fileUrl } = window.__vectorWeb;
 
     // --- Audio engine ------------------------------------------------------
     const FPS = 30;
@@ -98,8 +98,14 @@
         return el;
     };
 
+    const urlOf = async (path) => {
+        const url = await fileUrl(path);
+        if (!url) throw new Error(`${path} not found`);
+        return url;
+    };
+
     async function load({ path }) {
-        const url = convertFileSrc(path);
+        const url = await urlOf(path);
         const el = await metadataOf(url);
         el.preload = 'auto';
         const id = nextId++;
@@ -110,7 +116,7 @@
     }
 
     register('audio_probe', async ({ path }) => {
-        const el = await metadataOf(convertFileSrc(path));
+        const el = await metadataOf(await urlOf(path));
         return Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : 0;
     });
     register('audio_load', load);
@@ -194,9 +200,9 @@
     // --- Attachment actions ------------------------------------------------
     const fileName = (path) => path.split('/').pop() || 'file';
 
-    function save(path) {
+    async function save(path) {
         const a = document.createElement('a');
-        a.href = convertFileSrc(path);
+        a.href = await urlOf(path);
         a.download = fileName(path);
         document.body.appendChild(a);
         a.click();
@@ -205,16 +211,16 @@
 
     // Only media opens in a tab; anything else is saved, never navigated to.
     const VIEWABLE = /\.(png|jpe?g|gif|webp|avif|bmp|mp4|webm|mov|mp3|m4a|aac|ogg|opus|wav|flac)$/i;
-    const openOrSave = (path) => (VIEWABLE.test(path) ? window.open(convertFileSrc(path), '_blank', 'noopener') : save(path));
+    const openOrSave = async (path) => (VIEWABLE.test(path) ? window.open(await urlOf(path), '_blank', 'noopener') : save(path));
     register('open_attachment', ({ path }) => { openOrSave(path); });
     register('share_attachment', async ({ path }) => {
-        const blob = await (await fetch(convertFileSrc(path))).blob();
+        const blob = await (await fetch(await urlOf(path))).blob();
         const file = new File([blob], fileName(path), { type: blob.type });
         if (navigator.canShare?.({ files: [file] })) return navigator.share({ files: [file] });
         save(path);
     });
     register('write_clipboard_files', async ({ paths }) => {
-        const blob = await (await fetch(convertFileSrc(paths[0]))).blob();
+        const blob = await (await fetch(await urlOf(paths[0]))).blob();
         const type = blob.type.startsWith('image/') ? 'image/png' : blob.type;
         const png = type === blob.type ? blob : await new Promise((resolve) => {
             createImageBitmap(blob).then((bmp) => {
@@ -234,7 +240,12 @@
     // --- Notifications -----------------------------------------------------
     // Asked in-app once signed in, and from Settings; the browser's own prompt only
     // follows a tap on Allow, since it refuses prompts without a gesture.
-    const permission = () => window.Notification?.permission || 'unsupported';
+    // Private browsers keep no permission past the session and deny the prompt anyway.
+    const permission = () => {
+        const kept = window.__vectorWeb.storage();
+        if (kept === 'session' || kept === 'memory') return 'unsupported';
+        return window.Notification?.permission || 'unsupported';
+    };
     register('web_notifications', () => permission());
     register('request_web_notifications', async () => {
         if (permission() === 'default') await Notification.requestPermission();
@@ -250,12 +261,13 @@
         initNotificationSettings();
     });
 
-    window.__TAURI__.event.listen('web_notify', ({ payload }) => {
+    window.__TAURI__.event.listen('web_notify', async ({ payload }) => {
         if (window.Notification?.permission !== 'granted') return;
         if (document.visibilityState === 'visible' && document.hasFocus()) return;
+        const icon = payload.icon ? await fileUrl(payload.icon) : null;
         const n = new Notification(payload.title, {
             body: payload.body,
-            icon: payload.icon ? convertFileSrc(payload.icon) : '/icons/vector-mark.svg',
+            icon: icon || '/icons/vector-mark.svg',
             tag: payload.chat_id,
         });
         n.onclick = () => { window.focus(); n.close(); };
