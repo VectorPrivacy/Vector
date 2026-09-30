@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use iroh::endpoint::VarInt;
-use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr};
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender, JoinOptions};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 pub use iroh_gossip::proto::TopicId;
@@ -122,7 +122,7 @@ impl Iroh {
         impl iroh::endpoint::presets::Preset for RelayOnly {
             fn apply(self, builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
                 builder
-                    .relay_mode(RelayMode::Default)
+                    .relay_mode(RelayMode::Custom(browser_relays()))
                     .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
             }
         }
@@ -407,7 +407,30 @@ pub fn decode_node_addr(s: &str) -> Result<EndpointAddr, String> {
 }
 
 pub fn relay_only(addr: EndpointAddr) -> EndpointAddr {
-    EndpointAddr { id: addr.id, addrs: addr.addrs.into_iter().filter(|a| matches!(a, TransportAddr::Relay(_))).collect() }
+    let addrs = addr
+        .addrs
+        .into_iter()
+        .filter_map(|a| match a {
+            TransportAddr::Relay(url) => Some(TransportAddr::Relay(browser_relay(&url))),
+            _ => None,
+        })
+        .collect();
+    EndpointAddr { id: addr.id, addrs }
+}
+
+/// WebKit refuses a WebSocket to a fully-qualified host, and iroh spells its relays
+/// with the trailing dot; it is the same server without it.
+fn browser_relay(url: &RelayUrl) -> RelayUrl {
+    let mut u = (**url).clone();
+    if let Some(host) = u.host_str().and_then(|h| h.strip_suffix('.')).map(str::to_string) {
+        let _ = u.set_host(Some(&host));
+    }
+    RelayUrl::from(u)
+}
+
+/// The default relays, as a browser can dial them.
+fn browser_relays() -> RelayMap {
+    iroh::defaults::prod::default_relay_map().urls::<Vec<RelayUrl>>().iter().map(browser_relay).collect()
 }
 
 fn short_id(id: &PublicKey) -> String {
