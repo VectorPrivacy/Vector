@@ -35,8 +35,12 @@ body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
 body.mobile #chat-list,
 body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
 body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
-/* The floor below the composer is solid, like the header, not the chat's wallpaper. */
-body.mobile #chat-box::after {
+body.mobile #chat-new-box { bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
+body.mobile #chat-new .chat-new-center-content { bottom: calc(50px + max(5px, var(--floor, 0px))); }
+body.mobile .create-group-footer { padding-bottom: max(15px, var(--floor, 0px)); }
+/* The floor below an input bar is solid, like the header, not the chat's wallpaper. */
+body.mobile #chat-box::after,
+body.mobile #chat-new-box::after {
     content: '';
     position: absolute;
     left: 0;
