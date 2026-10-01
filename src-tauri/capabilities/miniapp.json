@@ -11,8 +11,6 @@
     ]
   },
   "permissions": [
-    "core:event:allow-listen",
-    "core:event:allow-emit",
     "allow-miniapp-get-updates",
     "allow-miniapp-send-update",
     "allow-miniapp-join-realtime-channel",

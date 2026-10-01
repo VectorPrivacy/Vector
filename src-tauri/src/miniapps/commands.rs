@@ -624,9 +624,9 @@ fn grant_isolated_ipc(app: &AppHandle, window_label: &str, port: u16) -> Result<
         .local(false)
         .remote(super::isolated::origin(port))
         .window(window_label);
+    // No core:event permissions: Vector broadcasts app events (decrypted messages
+    // among them) to every webview, and the bridge needs none of them.
     for permission in [
-        "core:event:allow-listen",
-        "core:event:allow-emit",
         "allow-miniapp-get-updates",
         "allow-miniapp-send-update",
         "allow-miniapp-join-realtime-channel",

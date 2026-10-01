@@ -1,12 +1,16 @@
 {
   "$schema": "../../gen/schemas/desktop-schema.json",
   "identifier": "mcp-bridge-dev",
-  "description": "The MCP debug bridge's page-side commands, in every window (mini apps included). Debug builds only: build.rs leaves this directory out of release.",
+  "description": "The MCP debug bridge's page-side commands, in every window (mini apps included); it returns execute_js results through an emitted event. Debug builds only: build.rs leaves this directory out of release.",
   "windows": [
     "*"
   ],
+  "remote": {
+    "urls": ["http://localhost:*"]
+  },
   "permissions": [
-    "mcp-bridge:default"
+    "mcp-bridge:default",
+    "core:event:allow-emit"
   ],
   "platforms": ["linux", "windows", "macOS"]
 }
