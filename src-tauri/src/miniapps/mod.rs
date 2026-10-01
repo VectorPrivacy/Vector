@@ -15,6 +15,8 @@ pub(crate) mod commands;
 pub(crate) mod network_isolation;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod isolated;
+#[cfg(target_os = "macos")]
+pub(crate) mod pointer_lock;
 pub(crate) mod realtime;
 pub(crate) mod rt_ws;
 pub(crate) mod marketplace;

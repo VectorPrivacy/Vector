@@ -1162,6 +1162,9 @@ pub async fn miniapp_open(
             "__VECTOR_DEBUG_BRIDGE__",
             if cfg!(debug_assertions) { "true" } else { "false" },
         );
+        #[cfg(target_os = "macos")]
+        super::pointer_lock::install(&app).await;
+
         let mut window_builder = WebviewWindowBuilder::new(
             &app,
             &window_label,
