@@ -318,6 +318,7 @@ pub fn run() {
         // captures it at webview creation, so page-load is the first moment
         // get_current() is reliably populated. The frontend consumes through the
         // pending slot, so a URL that ALSO fired on_open_url executes only once.
+        // The plugin never clears get_current(), so a reload must skip a URL already handled.
         .on_page_load(|_webview, _payload| {
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
             if matches!(_payload.event(), tauri::webview::PageLoadEvent::Finished) {
@@ -330,7 +331,7 @@ pub fn run() {
                     if let Ok(Some(urls)) = app.deep_link().get_current() {
                         if !urls.is_empty() {
                             let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
-                            deep_link::handle_deep_link(&app, urls);
+                            deep_link::handle_current_deep_link(&app, urls);
                         }
                     }
                 });

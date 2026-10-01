@@ -14,6 +14,9 @@ use tauri::{AppHandle, Emitter, Runtime};
 /// Global storage for pending deep link action (received before frontend is ready)
 static PENDING_DEEP_LINK: Mutex<Option<DeepLinkAction>> = Mutex::new(None);
 
+/// The URLs last handed to `handle_deep_link`, from any source.
+static LAST_URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Represents a parsed deep link action to be sent to the frontend
 #[derive(Debug, Clone, Serialize)]
 pub struct DeepLinkAction {
@@ -174,6 +177,9 @@ fn strip_html_suffix(s: &str) -> &str {
 /// * `handle` - The Tauri app handle
 /// * `urls` - A vector of URL strings to process
 pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
+    if let Ok(mut last) = LAST_URLS.lock() {
+        last.clone_from(&urls);
+    }
     for url in urls {
         println!("[DeepLink] Received URL: {}", url);
         
@@ -194,6 +200,17 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
             println!("[DeepLink] Failed to parse URL: {}", url);
         }
     }
+}
+
+/// Handle the plugin's `get_current()` URLs on a page load.
+///
+/// The plugin keeps the last URL for the life of the process, so every reload (an account swap)
+/// would replay it; only a URL not already handled is new.
+pub fn handle_current_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
+    if LAST_URLS.lock().is_ok_and(|last| *last == urls) {
+        return;
+    }
+    handle_deep_link(handle, urls);
 }
 
 /// Store a pending notification tap action (called from Android JNI when user taps a notification)
