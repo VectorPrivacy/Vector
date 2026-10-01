@@ -326,6 +326,7 @@ const PERMISSIONS_POLICY_DENY_ALL: &str = concat!(
     "otp-credentials=(), ",
     "payment=(), ",
     "picture-in-picture=(), ",
+    "publickey-credentials-create=(), ",
     "publickey-credentials-get=(), ",
     "screen-wake-lock=(), ",
     "serial=(), ",

@@ -11,19 +11,41 @@ use tauri::{
 };
 
 use nostr_sdk::prelude::ToBech32;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use super::state::MiniAppsState;
 use crate::STATE;
 
 /// Content Security Policy for Mini Apps - very restrictive for security
 /// Based on DeltaChat's implementation
-static CSP: LazyLock<String> = LazyLock::new(|| build_csp(false));
-/// The same policy for apps on the loopback host (`isolated.rs`).
-static ISOLATED_CSP: LazyLock<String> = LazyLock::new(|| build_csp(true));
+fn csp() -> Cow<'static, str> {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    cached_csp(&CACHED, false)
+}
 
-pub(super) fn isolated_csp() -> &'static str {
-    &ISOLATED_CSP
+/// The same policy for apps on the loopback host (`isolated.rs`).
+pub(super) fn isolated_csp() -> Cow<'static, str> {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    cached_csp(&CACHED, true)
+}
+
+/// The realtime WebSocket's port, so the policy can name it instead of every
+/// local port (any local WebSocket service, a debug build's MCP bridge included).
+static RT_WS_PORT: OnceLock<u16> = OnceLock::new();
+
+pub(crate) fn set_rt_ws_port(port: u16) {
+    let _ = RT_WS_PORT.set(port);
+}
+
+fn cached_csp(cache: &'static OnceLock<String>, isolated: bool) -> Cow<'static, str> {
+    if let Some(policy) = cache.get() {
+        return Cow::Borrowed(policy);
+    }
+    // Before the realtime server exists there is no port to allow; don't cache that.
+    if RT_WS_PORT.get().is_none() {
+        return Cow::Owned(build_csp(isolated));
+    }
+    Cow::Borrowed(cache.get_or_init(|| build_csp(isolated)))
 }
 
 fn build_csp(isolated: bool) -> String {
@@ -70,18 +92,21 @@ fn build_csp(isolated: bool) -> String {
         ]),
     );
     
-    // Restrict connections to self, IPC, data/blob URLs, and localhost WebSocket
-    // (the realtime WS server uses a random token for auth, so wildcard port is safe)
+    // Restrict connections to self, IPC, data/blob URLs, and the realtime WebSocket
     let mut connect = vec![
         "'self'".to_owned(),
         "ipc:".to_owned(),
         "data:".to_owned(),
         "blob:".to_owned(),
-        "ws://127.0.0.1:*".to_owned(),
     ];
+    if let Some(port) = RT_WS_PORT.get() {
+        connect.push(format!("ws://127.0.0.1:{port}"));
+    }
     if isolated {
         // WebView2's IPC endpoint; without it Tauri falls back to postMessage.
-        connect.push("http://ipc.localhost".to_owned());
+        if cfg!(windows) {
+            connect.push("http://ipc.localhost".to_owned());
+        }
         m.insert(
             "frame-ancestors".to_string(),
             CspDirectiveSources::List(vec!["'self'".to_owned()]),
@@ -506,7 +531,7 @@ fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions:
     http::Response::builder()
         .status(http::StatusCode::OK)
         .header(http::header::CONTENT_TYPE, content_type)
-        .header(http::header::CONTENT_SECURITY_POLICY, &*CSP)
+        .header(http::header::CONTENT_SECURITY_POLICY, csp().into_owned())
         // Ensure that the browser doesn't try to interpret the file incorrectly
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // Dynamic permissions policy based on user grants
@@ -532,7 +557,7 @@ fn make_error_response(status: http::StatusCode, message: &str, granted_permissi
     http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "text/plain")
-        .header(http::header::CONTENT_SECURITY_POLICY, &*CSP)
+        .header(http::header::CONTENT_SECURITY_POLICY, csp().into_owned())
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header("Permissions-Policy", permissions_policy)
         // Cross-origin isolation headers for SharedArrayBuffer (WASM threads)

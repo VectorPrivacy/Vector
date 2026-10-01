@@ -1026,6 +1026,7 @@ impl RealtimeManager {
         log_info!("[WEBXDC] Realtime WS server listening on 127.0.0.1:{port}");
 
         let _ = self.ws_info.set(super::rt_ws::WsInfo { port, token: token.clone() });
+        super::scheme::set_rt_ws_port(port);
 
         // Spawn accept loop on the MAIN Tauri runtime (survives JNI temp runtime)
         let send_handles = self.send_handles.clone();

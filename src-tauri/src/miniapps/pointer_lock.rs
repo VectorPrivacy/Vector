@@ -26,6 +26,8 @@ pub(crate) async fn install(app: &tauri::AppHandle) {
         return;
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
+    // SAFETY: with_webview runs this on the main thread with wry's live WKWebView;
+    // `UIDelegate` is a plain getter that returns an object or nil.
     let queued = main.with_webview(move |wv| unsafe {
         let view = wv.inner() as *mut AnyObject;
         let delegate: *mut AnyObject = msg_send![view, UIDelegate];
@@ -41,20 +43,27 @@ pub(crate) async fn install(app: &tauri::AppHandle) {
 }
 
 /// Returns true when the class now carries the grant (added now or before).
+///
+/// # Safety
+/// `class` is null or a registered Objective-C class.
 unsafe fn add_grant(class: *const AnyClass) -> bool {
     if class.is_null() {
         return false;
     }
     let selector = sel!(_webViewDidRequestPointerLock:completionHandler:);
+    // SAFETY: an IMP is called with the receiver and selector first, then the
+    // method's arguments; "v@:@@?" (void; self, _cmd, WKWebView, block) matches
+    // this signature, which is WebKit's for this selector.
     let imp = std::mem::transmute::<
-        unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut Block<dyn Fn(Bool)>),
+        unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut Block<dyn Fn(Bool)>),
         Imp,
     >(did_request_pointer_lock);
     let added = objc2::ffi::class_addMethod(class as *mut AnyClass, selector, imp, c"v@:@@?".as_ptr());
     added.as_bool() || (*class).responds_to(selector)
 }
 
-unsafe extern "C-unwind" fn did_request_pointer_lock(
+/// Not unwinding: a panic here must abort rather than unwind into WebKit.
+unsafe extern "C" fn did_request_pointer_lock(
     _this: *mut AnyObject,
     _cmd: Sel,
     web_view: *mut AnyObject,
@@ -62,11 +71,14 @@ unsafe extern "C-unwind" fn did_request_pointer_lock(
 ) {
     // Only the window the user is in may take the pointer.
     let allow = !web_view.is_null() && in_key_window(web_view) && is_miniapp_url(&current_url(web_view));
+    // SAFETY: WebKit passes a live completion block and expects exactly one call.
     if let Some(handler) = handler.as_ref() {
         handler.call((Bool::new(allow),));
     }
 }
 
+/// # Safety
+/// `web_view` is a live WKWebView.
 unsafe fn in_key_window(web_view: *mut AnyObject) -> bool {
     let window: *mut AnyObject = msg_send![web_view, window];
     if window.is_null() {
@@ -76,6 +88,8 @@ unsafe fn in_key_window(web_view: *mut AnyObject) -> bool {
     key.as_bool()
 }
 
+/// # Safety
+/// `web_view` is a live WKWebView; NSURL/NSString results are checked for nil.
 unsafe fn current_url(web_view: *mut AnyObject) -> String {
     let url: *mut AnyObject = msg_send![web_view, URL];
     if url.is_null() {

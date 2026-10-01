@@ -176,6 +176,21 @@ try {
     webkitRTCPeerConnection = () => {};
 } catch (e) {}
 
+// Secure-context APIs a Mini App has no use for (a loopback-hosted app is a
+// secure context): local file pickers, WebAuthn and the engine's own
+// notification prompt. Best effort; the Permissions-Policy denies WebAuthn too.
+try {
+    ['showOpenFilePicker', 'showSaveFilePicker', 'showDirectoryPicker'].forEach(function (name) {
+        try { Object.defineProperty(window, name, { value: undefined, configurable: false }); } catch (e) {}
+    });
+    if ('credentials' in navigator) {
+        Object.defineProperty(Navigator.prototype, 'credentials', { get: function () { return undefined; }, configurable: false });
+    }
+    if (window.Notification) {
+        Object.defineProperty(Notification, 'requestPermission', { value: function () { return Promise.resolve('denied'); }, configurable: false });
+    }
+} catch (e) {}
+
 // ============================================================================
 // Media API Permission Guards
 // WebKit/WKWebView ignores Permissions-Policy headers, so we must enforce
@@ -618,26 +633,64 @@ async fn miniapp_storage_partition(file_hash: &str) -> String {
 /// so it needs its own capability: this window, this exact origin, and the
 /// same commands as `capabilities/miniapp.json`.
 #[cfg(not(target_os = "android"))]
+const ISOLATED_IPC_PERMISSIONS: [&str; 7] = [
+    // No core:event permissions: Vector broadcasts app events (decrypted messages
+    // among them) to every webview, and the bridge needs none of them.
+    "allow-miniapp-get-updates",
+    "allow-miniapp-send-update",
+    "allow-miniapp-join-realtime-channel",
+    "allow-miniapp-leave-realtime-channel",
+    "allow-miniapp-send-realtime-data",
+    "allow-miniapp-get-granted-permissions-for-window",
+    "notification:allow-is-permission-granted",
+];
+
+#[cfg(not(target_os = "android"))]
 fn grant_isolated_ipc(app: &AppHandle, window_label: &str, port: u16) -> Result<(), Error> {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
     use tauri::ipc::CapabilityBuilder;
-    let mut capability = CapabilityBuilder::new(format!("miniapp-isolated-{port}"))
+    // Grants can't be revoked, so each (window, port) is added once.
+    static GRANTED: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(Default::default);
+    // Tauri resolves capabilities with an unwrap under a lock every IPC call
+    // takes: a label it can't parse would take all IPC down with it.
+    if window_label.is_empty()
+        || !window_label.chars().all(|c| c.is_ascii_alphanumeric() || "-/:_".contains(c))
+    {
+        return Err(Error::Anyhow(anyhow::anyhow!("invalid Mini App window label")));
+    }
+    let key = (window_label.to_string(), port);
+    let mut granted = GRANTED.lock().map_err(|_| Error::Anyhow(anyhow::anyhow!("capability registry poisoned")))?;
+    if granted.contains(&key) {
+        return Ok(());
+    }
+    let mut capability = CapabilityBuilder::new(format!("miniapp-isolated-{port}-{}", granted.len()))
         .local(false)
         .remote(super::isolated::origin(port))
         .window(window_label);
-    // No core:event permissions: Vector broadcasts app events (decrypted messages
-    // among them) to every webview, and the bridge needs none of them.
-    for permission in [
-        "allow-miniapp-get-updates",
-        "allow-miniapp-send-update",
-        "allow-miniapp-join-realtime-channel",
-        "allow-miniapp-leave-realtime-channel",
-        "allow-miniapp-send-realtime-data",
-        "allow-miniapp-get-granted-permissions-for-window",
-        "notification:allow-is-permission-granted",
-    ] {
+    for permission in ISOLATED_IPC_PERMISSIONS {
         capability = capability.permission(permission);
     }
-    app.add_capability(capability).map_err(Error::Tauri)
+    app.add_capability(capability).map_err(Error::Tauri)?;
+    granted.insert(key);
+    Ok(())
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod isolated_ipc_tests {
+    /// An unknown permission id panics inside Tauri; stay a copy of the static capability.
+    #[test]
+    fn the_isolated_grant_matches_the_miniapp_capability() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../capabilities/miniapp.json")).unwrap();
+        let listed: Vec<&str> = file["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+        let mut ours: Vec<&str> = super::ISOLATED_IPC_PERMISSIONS.to_vec();
+        let mut theirs = listed.clone();
+        ours.sort();
+        theirs.sort();
+        assert_eq!(ours, theirs);
+        assert!(!listed.iter().any(|p| p.starts_with("core:event")));
+    }
 }
 
 /// Get the base URL for Mini Apps based on platform
@@ -889,7 +942,20 @@ pub async fn miniapp_open(
             Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
         })??;
         log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
-    
+
+        // One window per isolated app: two would share (and fight over) one data store.
+        #[cfg(not(target_os = "android"))]
+        if package.manifest.cross_origin_isolated {
+            let partition = miniapp_storage_partition(&package.file_hash).await;
+            if let Some(other) = super::isolated::window_for_partition(&partition, &window_label) {
+                if let Some(window) = app.get_webview_window(&other) {
+                    window.show()?;
+                    window.set_focus()?;
+                    return Ok(());
+                }
+            }
+        }
+
         // Parse the topic ID if provided (from the message's webxdc-topic tag)
         let realtime_topic = if let Some(ref topic_str) = topic_id {
             match super::realtime::decode_topic_id(topic_str) {
@@ -1119,14 +1185,27 @@ pub async fn miniapp_open(
 
         // Apps that opt into cross-origin isolation are served from a loopback
         // origin of their own (isolated.rs); everything else keeps the custom scheme.
-        let (initial_url, first_url, isolated_boot) = if isolated {
-            let (port, boot_url) = super::isolated::start(&app, &window_label, &partition, href.as_deref())
-                .await
-                .map_err(|e| Error::Anyhow(anyhow::anyhow!("Mini App loopback host: {e}")))?;
-            if let Err(e) = grant_isolated_ipc(&app, &window_label, port) {
-                super::isolated::stop(&window_label);
-                return Err(e);
-            }
+        let (initial_url, first_url, isolated_boot, isolated_host) = if isolated {
+            let started = match super::isolated::start(&app, &window_label, &partition, href.as_deref()).await {
+                Ok(started) => started,
+                Err(super::isolated::StartError::AlreadyOpen(other)) => {
+                    state.remove_instance_if(&window_label, instance.instance_id).await;
+                    if let Some(window) = app.get_webview_window(&other) {
+                        window.show()?;
+                        window.set_focus()?;
+                    }
+                    return Ok(());
+                }
+                Err(super::isolated::StartError::Failed(e)) => {
+                    state.remove_instance_if(&window_label, instance.instance_id).await;
+                    return Err(Error::Anyhow(anyhow::anyhow!("Mini App loopback host: {e}")));
+                }
+            };
+            // Stops the host on any early return below; disarmed once the window exists.
+            let guard = super::isolated::HostGuard::new(&window_label, started.id);
+            let port = started.port;
+            let boot_url = started.boot_url;
+            grant_isolated_ipc(&app, &window_label, port)?;
             let origin: tauri::Url = format!("{}/", super::isolated::origin(port))
                 .parse()
                 .map_err(|e: url::ParseError| Error::Anyhow(e.into()))?;
@@ -1136,7 +1215,7 @@ pub async fn miniapp_open(
             let first = WebviewUrl::External("about:blank".parse().map_err(|e: url::ParseError| Error::Anyhow(e.into()))?);
             #[cfg(not(target_os = "linux"))]
             let first = WebviewUrl::External(boot_url.clone());
-            (origin, first, Some(boot_url))
+            (origin, first, Some((port, boot_url)), Some((guard, started.id)))
         } else {
             let mut url = get_miniapp_base_url(&partition)?;
             if let Some(ref href_value) = href {
@@ -1146,7 +1225,7 @@ pub async fn miniapp_open(
                 log_trace!("Mini App will open at: {}", url);
             }
             let first = WebviewUrl::CustomProtocol(url.clone());
-            (url, first, None)
+            (url, first, None, None)
         };
         let initial_url_clone = initial_url.clone();
     
@@ -1164,6 +1243,8 @@ pub async fn miniapp_open(
         );
         #[cfg(target_os = "macos")]
         super::pointer_lock::install(&app).await;
+        // Its port goes into every Mini App page's CSP, so it must exist first.
+        state.realtime.ensure_ws_started();
 
         let mut window_builder = WebviewWindowBuilder::new(
             &app,
@@ -1239,36 +1320,42 @@ pub async fn miniapp_open(
             }
         }
 
-        let window = match window_builder.build() {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                #[cfg(not(target_os = "android"))]
-                super::isolated::stop(&window_label);
-                return Err(e.into());
-            }
-        };
+        let window = Arc::new(window_builder.build()?);
 
         #[cfg(target_os = "linux")]
-        if let Some(boot_url) = isolated_boot.clone() {
-            let port = super::isolated::port_for(&window_label).unwrap_or_default();
+        if let Some((port, boot_url)) = isolated_boot.clone() {
             let blackhole = dummy_proxy_url.to_string();
-            let exempt = window.with_webview(move |wv| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let queued = window.with_webview(move |wv| {
                 use webkit2gtk::{NetworkProxyMode, NetworkProxySettings, WebContextExt, WebViewExt, WebsiteDataManagerExt};
                 let view = wv.inner();
-                if let Some(manager) = view.context().and_then(|c| c.website_data_manager()) {
-                    let hosts = [format!("localhost:{port}"), format!("127.0.0.1:{port}"), format!("[::1]:{port}")];
-                    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-                    let mut settings = NetworkProxySettings::new(Some(blackhole.as_str()), &hosts);
-                    manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
-                }
+                super::isolated::enable_web_storage(&view);
+                let applied = match view.context().and_then(|c| c.website_data_manager()) {
+                    Some(manager) => {
+                        let hosts = [format!("localhost:{port}")];
+                        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+                        let mut settings = NetworkProxySettings::new(Some(blackhole.as_str()), &hosts);
+                        manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
+                        true
+                    }
+                    None => false,
+                };
+                let _ = tx.send(applied);
             });
-            if let Err(e) = exempt.and_then(|_| window.navigate(boot_url)) {
-                super::isolated::stop(&window_label);
+            // Fail closed: without the blackhole the app would have the network.
+            let applied = queued.is_ok()
+                && matches!(tokio::time::timeout(std::time::Duration::from_secs(5), rx).await, Ok(Ok(true)));
+            if !applied || window.navigate(boot_url).is_err() {
                 let _ = window.destroy();
-                return Err(e.into());
+                return Err(Error::Anyhow(anyhow::anyhow!("could not isolate the Mini App's network")));
             }
         }
-        let _ = &isolated_boot;
+        #[cfg(not(target_os = "linux"))]
+        let _ = isolated_boot;
+        let isolated_id = isolated_host.map(|(guard, id)| {
+            guard.disarm();
+            id
+        });
 
         // A covered game must keep its socket: WebKit throttles a page whose window is
         // occluded (timers at 1 Hz, no animation frames, a suppressed process), and a
@@ -1302,7 +1389,9 @@ pub async fn miniapp_open(
             match event {
                 tauri::WindowEvent::Destroyed => {
                     log_info!("Mini App window destroyed: {}", window_label_for_handler);
-                    super::isolated::stop(&window_label_for_handler);
+                    if let Some(id) = isolated_id {
+                        super::isolated::stop_if(&window_label_for_handler, id);
+                    }
                     let app_handle = app_handle_for_handler.clone();
                     let label = window_label_for_handler.clone();
                     tauri::async_runtime::spawn(async move {
