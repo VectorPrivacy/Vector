@@ -62,7 +62,17 @@ class Mic extends AudioWorkletProcessor {
     }
 }
 
-/** Keeps a little decoded audio queued and asks the worker for the next frame as it drains. */
+/** Frames of decoded audio the speaker keeps ahead: the least, and the most it grows to. */
+const MIN_AHEAD = 2;
+const MAX_AHEAD = 12;
+/** Seconds without running dry before the speaker gives a frame of that margin back. */
+const CALM_SECS = 15;
+
+/** Keeps decoded audio queued and asks the worker for the next frame as it drains.
+ *  Engines render in bursts of several quanta (WebKit on a phone especially), so
+ *  the margin starts at two frames, grows a frame each time it runs dry, and
+ *  shrinks back once playout has been calm for a while. After running dry it
+ *  refills before it plays again, so one late answer cannot become a stutter. */
 class Speaker extends AudioWorkletProcessor {
     constructor() {
         super();
@@ -74,15 +84,21 @@ class Speaker extends AudioWorkletProcessor {
         this.rs = null;
         this.idleUntil = 0;
         this.done = false;
-        // Two frames ahead: the jitter buffer upstream holds the network's margin.
-        this.target = Math.round((FRAME * 2 * sampleRate) / RATE);
+        this.playing = false;
         this.per = Math.round((FRAME * sampleRate) / RATE);
+        this.ahead = MIN_AHEAD;
+        this.calmSince = currentTime;
+        // Silence played while the call was running, in samples, reported once a second.
+        this.starved = 0;
+        this.reportAt = currentTime + 1;
         this.port.onmessage = ({ data }) => {
             if (data.port) {
                 this.src = data.port;
                 this.src.onmessage = ({ data }) => this.take(data);
             }
-            if (data.rate && data.rate !== RATE) this.rs = new Resampler(RATE, data.rate);
+            if (data.rate && data.rate !== RATE) {
+                this.rs = new Resampler(RATE, data.rate);
+            }
             if (data.stop) this.done = true;
         };
     }
@@ -107,23 +123,45 @@ class Speaker extends AudioWorkletProcessor {
     process(_, outputs) {
         if (this.done) return false;
         const out = outputs[0][0];
+        const target = this.ahead * this.per;
+        if (!this.playing && this.buffered >= target) this.playing = true;
         let i = 0;
-        while (i < out.length && this.queue.length) {
-            const q = this.queue[0];
-            const n = Math.min(out.length - i, q.length - this.head);
-            out.set(q.subarray(this.head, this.head + n), i);
-            i += n;
-            this.head += n;
-            this.buffered -= n;
-            if (this.head >= q.length) {
-                this.queue.shift();
-                this.head = 0;
+        if (this.playing) {
+            while (i < out.length && this.queue.length) {
+                const q = this.queue[0];
+                const n = Math.min(out.length - i, q.length - this.head);
+                out.set(q.subarray(this.head, this.head + n), i);
+                i += n;
+                this.head += n;
+                this.buffered -= n;
+                if (this.head >= q.length) {
+                    this.queue.shift();
+                    this.head = 0;
+                }
+            }
+            if (i < out.length) {
+                this.starved += out.length - i;
+                this.playing = false;
+                this.ahead = Math.min(MAX_AHEAD, this.ahead + 1);
+                this.calmSince = currentTime;
+            } else if (this.ahead > MIN_AHEAD && currentTime - this.calmSince > CALM_SECS) {
+                this.ahead--;
+                this.calmSince = currentTime;
             }
         }
-        if (this.src && currentTime >= this.idleUntil) {
-            while (this.buffered + this.asked * this.per < this.target) {
-                this.src.postMessage({ ahead: Math.round((this.buffered * 1000) / sampleRate) });
-                this.asked++;
+        if (this.src) {
+            if (currentTime >= this.idleUntil) {
+                while (this.buffered + this.asked * this.per < this.ahead * this.per) {
+                    this.src.postMessage({ ahead: Math.round((this.buffered * 1000) / sampleRate) });
+                    this.asked++;
+                }
+            }
+            if (currentTime >= this.reportAt) {
+                this.reportAt = currentTime + 1;
+                if (this.starved) {
+                    this.src.postMessage({ starved: Math.ceil(this.starved / this.per) });
+                    this.starved = 0;
+                }
             }
         }
         return true;

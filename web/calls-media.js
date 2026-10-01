@@ -1,13 +1,11 @@
 // Vector Web calls, the worker's half: Opus through WebCodecs, between the page's
 // audio worklets and the engine in Rust (crates/vector-web/src/calls.rs), which
 // owns the datagrams, the jitter buffer and the rate ladder.
-import { call_audio_frame, call_audio_level, call_audio_pull, call_audio_ready, call_link_close, call_link_open, call_link_send } from './pkg/vector_web.js';
+import { call_audio_frame, call_audio_level, call_audio_pull, call_audio_ready, call_audio_starved, call_link_close, call_link_open, call_link_send } from './pkg/vector_web.js';
 
 const RATE = 48000;
 const FRAME = 960;
 const FRAME_US = 20000;
-/** Rust's `MAX_PLC_RUN`: a gap longer than this fades to silence. */
-const MAX_PLC_RUN = 3;
 /** A slot the speaker asked for that has nothing yet. */
 const NONE = new Float32Array(0);
 
@@ -141,7 +139,10 @@ export function onPageMessage(data) {
     call.mic = data.mic;
     call.spk = data.spk;
     call.mic.onmessage = ({ data }) => onMic(data);
-    call.spk.onmessage = ({ data }) => pull(data.ahead ?? 0);
+    call.spk.onmessage = ({ data }) => {
+        if (data.starved) call_audio_starved(data.starved);
+        else pull(data.ahead ?? 0);
+    };
     call_audio_ready(undefined);
 }
 
@@ -270,13 +271,13 @@ function pull(ahead) {
     flush();
 }
 
-/** The last frame again, fading, so a run of losses ends in silence rather than a held vowel. */
+/** WebCodecs offers no packet loss concealment. Looping the last frame buzzes, so the
+ *  first missing frame is the last one fading to nothing, and any after it are silence. */
 function conceal(run) {
     const last = call.last;
     const out = new Float32Array(last?.length ?? FRAME);
-    if (!last) return out;
-    const gain = Math.max(0, 1 - run / (MAX_PLC_RUN + 1));
-    for (let i = 0; i < out.length; i++) out[i] = last[i] * gain;
+    if (!last || run > 1) return out;
+    for (let i = 0; i < out.length; i++) out[i] = last[i] * (1 - i / out.length);
     return out;
 }
 

@@ -17,6 +17,8 @@
     let graph = null;
     let test = null;
     let chimeBuf = null;
+    /** WebKit's call output: a media element playing the speaker's stream. */
+    let out = null;
 
     function constraints(s) {
         return {
@@ -45,9 +47,24 @@
         return ctx;
     }
 
+    /** While the microphone is open, WebKit ducks and distorts Web Audio's own output,
+     *  but plays a MediaStream through the same voice-processing unit as the capture, as
+     *  it does a WebRTC call: undistorted, and heard by the echo canceller. The element
+     *  starts here, inside the tap, since WebKit lets no media start outside one. */
+    function output(c) {
+        if (out || !('audioSession' in navigator)) return;
+        const dest = c.createMediaStreamDestination();
+        const player = new Audio();
+        player.srcObject = dest.stream;
+        out = { dest, player, playing: false };
+        const o = out;
+        player.play().then(() => { o.playing = true; }, () => {});
+    }
+
     function prepare() {
         if (!supported()) return Promise.reject(new Error("Calls aren't supported in this browser"));
         const c = context();
+        output(c);
         worklets ??= c.audioWorklet.addModule('/web/calls-worklet.js');
         preparing ??= (async () => {
             const settings = await backend('call_audio_settings_get').catch(() => null);
@@ -71,6 +88,11 @@
     /** Everything off: the microphone light goes out with the call. */
     function release() {
         stopGraph();
+        if (out) {
+            out.player.pause();
+            out.player.srcObject = null;
+            out = null;
+        }
         mic?.getTracks().forEach((t) => t.stop());
         mic = null;
         preparing = null;
@@ -90,7 +112,8 @@
             micNode.connect(sink);
             sink.connect(ctx.destination);
             const spk = new AudioWorkletNode(ctx, 'vector-speaker', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
-            spk.connect(ctx.destination);
+            // A media element that failed to start leaves the context's own output, which still plays.
+            spk.connect(out?.playing ? out.dest : ctx.destination);
             const toMic = new MessageChannel();
             const toSpk = new MessageChannel();
             micNode.port.postMessage({ port: toMic.port1, rate: ctx.sampleRate }, [toMic.port1]);

@@ -248,6 +248,15 @@ pub fn call_audio_frame(packet: &[u8], ok: bool) {
     }
 }
 
+/// The speaker ran dry for `frames` frames' worth: gaps the listener heard,
+/// counted with the concealed frames the call's quality readout is built on.
+#[wasm_bindgen]
+pub fn call_audio_starved(frames: u32) {
+    if let Some(e) = engine() {
+        e.stats.concealed.fetch_add(frames as u64, Ordering::Relaxed);
+    }
+}
+
 /// Loudness for the meters, 0 to 1: `peer` false is the microphone.
 #[wasm_bindgen]
 pub fn call_audio_level(peer: bool, level: f32) {
