@@ -1332,7 +1332,12 @@ pub async fn miniapp_open(
                 super::isolated::enable_web_storage(&view);
                 let applied = match view.context().and_then(|c| c.website_data_manager()) {
                     Some(manager) => {
-                        let hosts = [format!("localhost:{port}")];
+                        // Its own origin, and the realtime WebSocket (token-gated, the
+                        // only local port its CSP allows) so sends skip IPC.
+                        let mut hosts = vec![format!("localhost:{port}")];
+                        if let Some(rt) = super::scheme::rt_ws_port() {
+                            hosts.push(format!("127.0.0.1:{rt}"));
+                        }
                         let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
                         let mut settings = NetworkProxySettings::new(Some(blackhole.as_str()), &hosts);
                         manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));

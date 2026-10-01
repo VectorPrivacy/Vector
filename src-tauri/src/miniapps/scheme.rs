@@ -37,6 +37,11 @@ pub(crate) fn set_rt_ws_port(port: u16) {
     let _ = RT_WS_PORT.set(port);
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn rt_ws_port() -> Option<u16> {
+    RT_WS_PORT.get().copied()
+}
+
 fn cached_csp(cache: &'static OnceLock<String>, isolated: bool) -> Cow<'static, str> {
     if let Some(policy) = cache.get() {
         return Cow::Borrowed(policy);
