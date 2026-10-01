@@ -644,7 +644,7 @@ fn extract_nip40_expiration(rumor: &RumorEvent) -> Option<u64> {
 }
 
 /// NIP-40: true when the tag's expiry already lies in the past at receipt.
-fn already_expired(expiration: Option<u64>) -> bool {
+pub(crate) fn already_expired(expiration: Option<u64>) -> bool {
     match expiration {
         Some(exp) => web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)

@@ -136,6 +136,10 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
     match event {
         ChatEvent::Message { opened, reply_to, emoji } => {
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
+            // CORD-08 §3: readers enforce the rumor's own expiry; the wrap's copy is relay hygiene.
+            if crate::rumor::already_expired(msg.expiration) {
+                return None;
+            }
             // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
             // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
             if crate::db::events::event_exists(&msg.id).unwrap_or(false) {
@@ -638,6 +642,51 @@ mod tests {
             persist_chat_event(&dup, &channel_id, &me.public_key()).await.is_none(),
             "a re-wrapped duplicate yields no outcome (nothing re-fires)"
         );
+    }
+
+    #[tokio::test]
+    async fn an_already_expired_message_is_refused_at_ingest() {
+        use nostr_sdk::prelude::{Tag, Timestamp};
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Exp", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let member = Keys::generate();
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rec = Recorder::default();
+
+        // Only the rumor carries the past expiry: a keyholder re-wrapped the seal
+        // without the outer tag, so no relay-side NIP-40 filter drops it first.
+        let expired = vec![Tag::expiration(Timestamp::from_secs(1_000_000_000))];
+        let rumor = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "gone", None, &[], expired, 5_000);
+        let seal = stream::build_seal(&rumor, stream::SealForm::Encrypted, &group, &member).unwrap();
+        let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, Timestamp::from_secs(5)).unwrap();
+        assert!(
+            !wrap.tags.iter().any(|t| t.as_slice().first().map(|k| k == "expiration").unwrap_or(false)),
+            "the outer wrap carries no expiration"
+        );
+        let DispatchedV2::Chat { channel_id, event } = dispatch_wrap(&wrap, &community, &me.public_key(), &rec) else {
+            panic!("a chat wrap dispatches as Chat");
+        };
+        let id = event.opened().rumor_id.to_hex();
+        assert!(
+            persist_chat_event(&event, &channel_id, &me.public_key()).await.is_none(),
+            "an expired message yields no outcome"
+        );
+        assert!(!crate::db::events::event_exists(&id).unwrap(), "never stored");
+        assert!(crate::state::STATE.lock().await.find_message(&id).is_none(), "never resident");
+
+        // A live timer still delivers: only an expiry already in the past is refused.
+        let later = vec![Tag::expiration(Timestamp::from_secs(4_000_000_000))];
+        let rumor = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "kept", None, &[], later, 6_000);
+        let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(6), false).unwrap();
+        let DispatchedV2::Chat { channel_id, event } = dispatch_wrap(&wrap, &community, &me.public_key(), &rec) else {
+            panic!("a chat wrap dispatches as Chat");
+        };
+        let Some(ChatPersist::New(msg)) = persist_chat_event(&event, &channel_id, &me.public_key()).await else {
+            panic!("an unexpired message persists as New");
+        };
+        assert_eq!(msg.expiration, Some(4_000_000_000));
     }
 
     #[tokio::test]
