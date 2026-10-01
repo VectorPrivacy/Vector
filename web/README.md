@@ -18,8 +18,11 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   frontend calls with the same argument and return shapes; feature modules
   (`chat_ops`, `profile_ops`, `network_ops`, `community_ops`) take what it doesn't.
   Anything unlisted rejects with "not available on Vector Web yet".
-- **`web/worker.js`**: runs the module in a dedicated worker. SQLite lives in OPFS through
-  the `opfs-sahpool` VFS; attachments and cached images are plain OPFS files.
+- **`web/worker.js`** + **`web/storage.js`**: run the module in a dedicated worker and pick
+  where it keeps things. OPFS where the browser allows it (SQLite through the `opfs-sahpool`
+  VFS, files as plain OPFS files); IndexedDB in a private window, kept until the browser
+  closes; memory where neither works (Tor Browser), gone on reload. Private storage skips
+  the PIN, and memory allows one account, since switching reloads the page.
 - **`web/sw.js`**: serves those files at `/vfs/<path>` (with Range), which is what
   `convertFileSrc` returns.
 - **`web/tauri-shim.js`**: defines `window.__TAURI__` before any app script. `invoke` and
@@ -33,6 +36,13 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   origin's service worker (`xdc/sw.js`) serves the app out of its `.xdc` under an offline
   CSP and the desktop Permissions-Policy; `xdc/bridge.js` is `window.webxdc`. Realtime
   channels run on Iroh in the worker, relay-only and wire-compatible with desktop.
+- **`web/calls.js`**, **`web/calls-media.js`**, **`web/calls-worklet.js`**: voice and video
+  calls on core's call session (`crates/vector-web/src/calls.rs` is the platform under it).
+  The page opens the microphone inside the tap that places or answers a call, AudioWorklets
+  carry audio straight to the worker, and WebCodecs does Opus there; the datagrams, jitter
+  buffer and rate ladder are the shared Rust. Video is the desktop's video worker over a
+  MessagePort. On WebKit the call plays through a media element, since Safari distorts Web
+  Audio's own output while the microphone is open.
 - **`web/signer.js`**: the page half of NIP-07. Extensions inject `window.nostr` into pages
   only, so core's signer sends each request out as a `nip07_request` event and this answers
   it through `nip07_reply`.
@@ -51,14 +61,19 @@ invite, join, channels, history, live messages, reactions, roles, moderation, pi
 images), relays and Blossom settings, notification levels and mutes, cross-device sync of
 pins, blocks, mutes, nicknames and the community list, browser notifications, emoji and
 GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji,
-mini apps (from chats, history and the Nexus marketplace; per-app storage; permissions;
-realtime multiplayer over Iroh).
+mini apps (from chats, history, `.xdc` links and the Nexus marketplace; per-app storage;
+permissions; realtime multiplayer over Iroh), voice and video calls with screen sharing
+(web to web and web to desktop), private windows and Tor Browser.
 
 ## Not yet
 
-Calls, the PIVX wallet, transcription, Tor, NIP-55 (Amber, Android-only), legacy (v1)
-community writes. Avatars and images load through the media proxy; without one, hosts
-that send no CORS headers are shown by URL.
+Notifications while the page is closed (no push), notification sounds, sending folders,
+screen-share audio in calls, voice transcription, video compression. A call ends when a
+phone locks or backgrounds the page.
+
+Not planned: the PIVX wallet, Nexus publishing, in-app Tor (use Tor Browser), NIP-55
+(Amber, Android-only), legacy (v1) community writes. Avatars and images load through the
+media proxy; without one, hosts that send no CORS headers are shown by URL.
 
 ## Hosting
 
@@ -67,3 +82,6 @@ the same server: `serve.mjs` answers those with only the mini app host page, its
 worker and the bridge template. On localhost that works as is (`*.localhost` resolves to
 the machine); a deployment needs wildcard DNS and a wildcard certificate for
 `*.xdc.<host>`, and should send the page `frame-src <scheme>://*.xdc.<host>` as serve.mjs does.
+
+The media proxy (Magnitude) admits a browser by its `Origin`, since a page cannot set the
+`Vector/…` User-Agent desktop sends: a new Vector Web origin must be added to its `origins`.

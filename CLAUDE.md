@@ -31,6 +31,8 @@ npm run build:bare       # Release without default features (no whisper, tor or 
 npm run android:dev      # Android dev (./scripts/android-dev.sh)
 npm run android:build    # Android release (tauri android build)
 scripts/fdroid-build.sh  # F-Droid flavour: source-only, unsigned, no in-app updater (docs/fdroid/)
+npm run web:build        # Vector Web: wasm core + frontend → dist-web/ (`-- --release` for production)
+npm run web:serve        # Serve dist-web at http://localhost:8790
 ```
 
 Video compression (`video` feature): `scripts/build-ffmpeg.sh [rust-target]` builds a selective
@@ -67,6 +69,8 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`net.rs`** — SSRF protection, build_http_client
 - **`stats.rs`** — CacheStats, DeepSize trait for memory benchmarking (debug builds)
 - **`traits.rs`** — EventEmitter trait (abstracts UI notification), ProgressReporter
+- **`rt.rs`** — spawn and timers: tokio natively, the browser event loop on wasm32
+- **`calls/`** — the `vector-calls` crate (wire format, jitter buffer, rate ladder) re-exported; with the `calls` feature, the call session, video track and audio settings, over a `CallPlatform` trait each client implements (endpoint, audio engine, video link)
 
 `src-tauri` consumes vector-core via `path = "../crates/vector-core"`. Types and globals are re-exported — same instances, shared memory.
 
@@ -80,8 +84,19 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`message/`** — Re-exports vector-core types + TauriSendCallback + file dedup logic
 - **`services/`** — Event handler, subscription handler, notifications
 - **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
+- **`calls/`** — the desktop's `CallPlatform`: cpal + Opus + SpeexDSP media engine, the webview's video socket, native screen audio
 - **`android/`** — JNI bindings, localhost media server, background sync
 - **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
+
+### Vector Web (`crates/vector-web/`, `web/`)
+
+The same frontend in a browser, over vector-core compiled to wasm32 in a dedicated worker
+(`web/README.md`). `crates/vector-web` answers the Tauri command names with the same argument
+and return shapes; `web/tauri-shim.js` defines `window.__TAURI__` and answers the page-only
+commands. Calls use the shared session: the page captures and plays on AudioWorklets,
+WebCodecs does Opus in the worker. A long-lived loop that serves whichever account is live
+must be unbound (`rt::spawn` + `// spawn-detached:`): `init_database` rebinds the session, so a
+task bound before login keeps the old one.
 
 ### Frontend (`src/`)
 
@@ -206,6 +221,9 @@ Every new `#[tauri::command]` requires THREE things:
 3. Registration in the `invoke_handler` macro in `lib.rs`
 
 Missing any = `invoke()` silently rejects with "Command X not allowed by ACL".
+
+Vector Web answers commands by name in `crates/vector-web` (`commands.rs` or a feature module's
+`dispatch`); a command it lacks rejects with "not available on Vector Web yet".
 
 **If the command mutates per-account state**, see the multi-account section above: commands are unbound, so a multi-step publish still needs a `SessionGuard` at entry and an abort before the persist.
 
