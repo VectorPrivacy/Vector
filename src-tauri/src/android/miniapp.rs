@@ -53,6 +53,11 @@ fn load_class_from_activity<'a>(
 /// single self-contained page, serve it through a proper asset origin instead.
 const OVERLAY_HTML: &str = include_str!("../../../src/overlay.html");
 
+/// Threaded Mini Apps (`cross_origin_isolated`) in the overlay: verified to work on WebView
+/// 153+, but WebView runs every page in one renderer process, so the app's SharedArrayBuffer
+/// timer would share it with the chat UI. Off until that is the owner's call.
+pub const THREADED_MINIAPPS: bool = false;
+
 /// Open a Mini App in a full-screen overlay WebView.
 ///
 /// This calls MiniAppManager.openMiniApp() on the Kotlin side.
@@ -63,6 +68,7 @@ pub fn open_miniapp_overlay(
     message_id: &str,
     href: Option<&str>,
     partition: &str,
+    isolated: bool,
 ) -> Result<(), String> {
     log_info!(
         "Opening Mini App overlay: {} (chat: {}, message: {})",
@@ -110,12 +116,12 @@ pub fn open_miniapp_overlay(
             .new_string(partition)
             .map_err(|e| format!("Failed to create partition string: {:?}", e))?;
 
-        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href, overlayHtml, partition)
+        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href, overlayHtml, partition, isolated)
         // Note: We need to run on UI thread, so we call via the activity
         env.call_static_method(
             manager_class,
             "openMiniApp",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V",
             &[
                 JValue::Object(&j_miniapp_id),
                 JValue::Object(&j_package_path),
@@ -124,6 +130,7 @@ pub fn open_miniapp_overlay(
                 JValue::Object(&j_href),
                 JValue::Object(&j_overlay_html),
                 JValue::Object(&j_partition),
+                JValue::Bool(isolated as u8),
             ],
         )
         .map_err(|e| format!("Failed to call MiniAppManager.openMiniApp: {:?}", e))?;

@@ -146,7 +146,11 @@ rust {
 }
 
 dependencies {
-    implementation("androidx.webkit:webkit:1.6.1")
+    // 1.18: Profile.setCrossOriginIsolatedAllowlist, threaded Mini Apps (MiniAppIsolation.kt).
+    // Pure Java; its kotlin-stdlib 2.1 has metadata this Kotlin 1.9 compiler can't read.
+    implementation("androidx.webkit:webkit:1.18.0-alpha01") {
+        exclude(group = "org.jetbrains.kotlin", module = "kotlin-stdlib")
+    }
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.8.0")
     implementation("androidx.core:core-ktx:1.12.0")

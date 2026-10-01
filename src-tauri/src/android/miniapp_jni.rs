@@ -26,7 +26,36 @@ use crate::TAURI_APP;
 /// cross-contaminate between apps; the CSP names it explicitly beside 'self'.
 fn csp_header(host: &str) -> String {
     let o = format!("http://{}", host);
-    format!("default-src 'self' {o}; style-src 'self' {o} 'unsafe-inline' blob:; font-src 'self' {o} data: blob:; script-src 'self' {o} 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' {o} ws://127.0.0.1:* ipc: data: blob:; img-src 'self' {o} data: blob:; media-src 'self' {o} data: blob:; webrtc 'block'")
+    // The realtime WebSocket's own port, not every local port (any local service).
+    let ws = crate::miniapps::scheme::rt_ws_port()
+        .map(|port| format!(" ws://127.0.0.1:{port}"))
+        .unwrap_or_default();
+    // 'wasm-unsafe-eval': Chromium 145+ no longer compiles WASM under 'unsafe-eval' alone.
+    format!("default-src 'self' {o}; style-src 'self' {o} 'unsafe-inline' blob:; font-src 'self' {o} data: blob:; script-src 'self' {o} 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' {o}{ws} ipc: data: blob:; img-src 'self' {o} data: blob:; media-src 'self' {o} data: blob:; webrtc 'block'")
+}
+
+/// Whether the package opts into cross-origin isolation, read once per package.
+fn package_is_isolated(package_path: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    static CACHE: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
+    if let Some(known) = CACHE.lock().ok().and_then(|c| c.get(package_path).copied()) {
+        return known;
+    }
+    let isolated = std::fs::File::open(package_path)
+        .ok()
+        .and_then(|f| zip::ZipArchive::new(f).ok())
+        .and_then(|mut archive| {
+            let mut entry = archive.by_name("manifest.toml").ok()?;
+            let mut text = String::new();
+            std::io::Read::take(&mut entry, 1024 * 1024).read_to_string(&mut text).ok()?;
+            toml::from_str::<crate::miniapps::state::MiniAppManifest>(&text).ok()
+        })
+        .is_some_and(|m| m.cross_origin_isolated);
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(package_path.to_string(), isolated);
+    }
+    isolated
 }
 
 /// Permissions Policy for Mini Apps (Android document responses).
@@ -921,12 +950,9 @@ fn serve_file_from_package(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {}", e))?;
 
-    // Normalize path
-    let file_path = if path.is_empty() || path == "/" {
-        "index.html"
-    } else {
-        path.strip_prefix("/").unwrap_or(path)
-    };
+    // Normalize path; empty segments collapse ("maps//ui.map"), as on desktop
+    let normalized = path.split('/').filter(|seg| !seg.is_empty()).collect::<Vec<_>>().join("/");
+    let file_path = if normalized.is_empty() { "index.html" } else { normalized.as_str() };
 
     // Security: Block path traversal attempts
     // A malicious .xdc could try paths like "../../../etc/passwd" or "foo/../../../sensitive"
@@ -984,7 +1010,7 @@ fn serve_file_from_package(
     }
 
     // Create WebResourceResponse with security headers
-    create_web_resource_response(env, &mime_type, &contents, &csp_header(host))
+    create_web_resource_response(env, &mime_type, &contents, &csp_header(host), package_is_isolated(package_path))
 }
 
 /// Case-insensitive byte search for ASCII HTML tags.
@@ -1031,6 +1057,7 @@ fn create_web_resource_response(
     mime_type: &str,
     data: &[u8],
     csp: &str,
+    isolated: bool,
 ) -> Result<jobject, String> {
     // Create headers map
     let map_class = env
@@ -1096,6 +1123,27 @@ fn create_web_resource_response(
             ],
         )
         .map_err(|e| format!("Failed to put Permissions-Policy header: {:?}", e))?;
+    }
+
+    // Threaded apps: WebView isolates an allowlisted origin (MiniAppIsolation.kt)
+    // that sends Document-Isolation-Policy; COOP/COEP do nothing in a WebView.
+    if isolated {
+        for (key, value) in [
+            ("Document-Isolation-Policy", "isolate-and-require-corp"),
+            ("Cross-Origin-Resource-Policy", "same-origin"),
+        ] {
+            let k = env.new_string(key).map_err(|e| format!("{:?}", e))?;
+            let v = env.new_string(value).map_err(|e| format!("{:?}", e))?;
+            unsafe {
+                env.call_method_unchecked(
+                    &headers,
+                    put_method,
+                    jni::signature::ReturnType::Object,
+                    &[jni::sys::jvalue { l: k.into_raw() }, jni::sys::jvalue { l: v.into_raw() }],
+                )
+                .map_err(|e| format!("Failed to put {key} header: {:?}", e))?;
+            }
+        }
     }
 
     // Cache-Control: prevent WebView from caching stale content

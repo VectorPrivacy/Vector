@@ -9,6 +9,7 @@ import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.webkit.JavascriptInterface
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -72,7 +73,8 @@ object MiniAppManager {
         messageId: String,
         href: String?,
         overlayHtml: String,
-        partition: String
+        partition: String,
+        isolated: Boolean
     ) {
         val act = activity ?: run {
             Logger.error(TAG, "Cannot open Mini App: Activity not initialized", null)
@@ -95,6 +97,9 @@ object MiniAppManager {
 
             // Create the Mini App WebView
             val webView = MiniAppWebView(act, miniappId, packagePath, host)
+            if (isolated && !MiniAppIsolation.allow(webView, "http://$host")) {
+                Toast.makeText(act, "This Mini App needs Android System WebView 153 or newer.", Toast.LENGTH_LONG).show()
+            }
 
             // Add to root view with slide-in animation
             rootView?.let { root ->

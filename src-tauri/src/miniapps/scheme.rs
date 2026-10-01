@@ -24,6 +24,7 @@ fn csp() -> Cow<'static, str> {
 }
 
 /// The same policy for apps on the loopback host (`isolated.rs`).
+#[cfg(not(target_os = "android"))]
 pub(super) fn isolated_csp() -> Cow<'static, str> {
     static CACHED: OnceLock<String> = OnceLock::new();
     cached_csp(&CACHED, true)
@@ -37,7 +38,7 @@ pub(crate) fn set_rt_ws_port(port: u16) {
     let _ = RT_WS_PORT.set(port);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn rt_ws_port() -> Option<u16> {
     RT_WS_PORT.get().copied()
 }

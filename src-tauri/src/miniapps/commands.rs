@@ -943,6 +943,13 @@ pub async fn miniapp_open(
         })??;
         log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
 
+        #[cfg(target_os = "android")]
+        if package.manifest.cross_origin_isolated && !crate::android::miniapp::THREADED_MINIAPPS {
+            let msg = format!("{} needs the Vector app on a computer for now", package.manifest.name);
+            vector_core::traits::emit_event("show_toast", &msg);
+            return Err(Error::Anyhow(anyhow::anyhow!(msg)));
+        }
+
         // One window per isolated app: two would share (and fight over) one data store.
         #[cfg(not(target_os = "android"))]
         if package.manifest.cross_origin_isolated {
@@ -1152,6 +1159,9 @@ pub async fn miniapp_open(
         {
             log_info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
 
+            // Its port goes into the app's CSP, so it must exist before the page loads.
+            state.realtime.ensure_ws_started();
+
             // Open the native overlay WebView
             crate::android::miniapp::open_miniapp_overlay(
                 &window_label,
@@ -1160,6 +1170,7 @@ pub async fn miniapp_open(
                 &message_id,
                 href.as_deref(),
                 &miniapp_storage_partition(&package.file_hash).await,
+                package.manifest.cross_origin_isolated,
             ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
 
             // Record to Mini Apps history
