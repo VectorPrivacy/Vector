@@ -245,16 +245,20 @@
         });
     }
 
+    // SharedArrayBuffer is a precise timer, so a threaded app may run only where its frame
+    // gets a process apart from this page and the worker holding the keys: desktop
+    // Chromium, which origin-keys the Origin-Agent-Cluster frames. Firefox and mobile
+    // browsers keep same-site frames in this page's process.
+    const isolatesFrames = () => navigator.userAgentData?.mobile === false;
+
     async function open({ filePath, chatId = '', messageId = '', href = null, topicId = null }) {
         if (!window.__vectorWeb.hasServiceWorker()) {
             throw new Error('Mini Apps need a service worker, which this private browser does not allow.');
         }
         requireHostName();
         const info = await backend('miniapp_prepare', { filePath, chatId, messageId, topicId });
-        // Threaded apps need this page isolated (COOP + COEP credentialless), which
-        // Safari and Firefox for Android don't support yet.
-        if (info.isolated && !self.crossOriginIsolated) {
-            throw new Error(`${info.name || 'This app'} needs a browser with cross-origin isolation (Chrome, Edge or Firefox on desktop), or the Vector app.`);
+        if (info.isolated && !(self.crossOriginIsolated && isolatesFrames())) {
+            throw new Error(`${info.name || 'This app'} needs Chrome, Edge or another Chromium browser on a computer, or the Vector app.`);
         }
         const existing = windows.get(info.label);
         if (existing) {

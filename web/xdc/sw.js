@@ -162,10 +162,12 @@ const isScript = (type) => type.startsWith('text/javascript') || type.startsWith
 // isolated page embeds only frames that opt in to COEP themselves. CORP is
 // cross-origin because Vector embeds this origin (same-site only in deployment,
 // not on localhost); the worker answers this origin's own pages and nothing else.
+// Origin-Agent-Cluster: a process apart from Vector's page, which is same-site.
 function headers(meta, type) {
     return {
         'Cross-Origin-Embedder-Policy': 'require-corp',
         'Cross-Origin-Resource-Policy': 'cross-origin',
+        'Origin-Agent-Cluster': '?1',
         'Content-Type': type,
         'Content-Security-Policy': isDocument(type) ? DOCUMENT_CSP : isScript(type) ? SCRIPT_CSP : INERT_CSP,
         'Permissions-Policy': meta.policy,

@@ -43,6 +43,7 @@ function serveMiniAppOrigin(req, res, vectorHost) {
             // Embeddable by Vector's isolated page; see headers() in xdc/sw.js.
             'Cross-Origin-Embedder-Policy': 'require-corp',
             'Cross-Origin-Resource-Policy': 'cross-origin',
+            'Origin-Agent-Cluster': '?1',
             'Cache-Control': 'no-cache',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; frame-ancestors ${vector}`,

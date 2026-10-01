@@ -88,9 +88,14 @@ Threaded mini apps (`cross_origin_isolated = true` in the manifest) need the pag
 isolated: send every response of Vector's own origin `Cross-Origin-Opener-Policy: same-origin`
 and `Cross-Origin-Embedder-Policy: credentialless`, and the `*.xdc.<host>` files
 `Cross-Origin-Embedder-Policy: require-corp` with `Cross-Origin-Resource-Policy: cross-origin`
-(their service worker adds the same to everything it serves). `credentialless` keeps
-cross-origin images loading without CORP headers; Safari and Firefox for Android don't
-support it yet, ignore it, and open threaded apps with a message instead.
+and `Origin-Agent-Cluster: ?1` (their service worker adds the same to everything it serves).
+`credentialless` keeps cross-origin images loading without CORP headers.
+
+An app frame is same-site with Vector's page, and SharedArrayBuffer makes a precise timer
+for Spectre, so a threaded app opens only where the frame gets a process of its own:
+desktop Chromium, which gives each `Origin-Agent-Cluster` origin one. Firefox keys its
+processes by site and mobile browsers share them, so those open threaded apps with a
+message; serving apps from a separate registrable domain would let Firefox in.
 
 The media proxy (Magnitude) admits a browser by its `Origin`, since a page cannot set the
 `Vector/…` User-Agent desktop sends: a new Vector Web origin must be added to its `origins`.
