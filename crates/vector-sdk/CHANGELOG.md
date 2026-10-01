@@ -3,6 +3,35 @@
 All notable changes to `vector-sdk` are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## 0.11.0
+
+Requires `vector-core` 0.10.0.
+
+### Added
+
+- **Mini Apps, behind the `xdc` feature.** Bots join the realtime sessions of Mini Apps
+  (`.xdc` files) shared in DMs and Communities, and speak the app's own messages.
+  `bot.xdc("app-id").run(..)` runs a handler for each copy of an app someone opens (`"*"`
+  for every app, `.join_when(JoinWhen::Shared)` to join on share), `msg.xdc()?.join()`
+  joins one by hand, and `channel.send_xdc(path)` hands an app out. A session sends to
+  everyone in it (`send_json`, `send_text`, `send`, or a `sender()` from another task) and
+  yields `XdcEvent`s; `XdcFrame::verified_sender()` names a sender you can act on.
+  Handler sessions end after 3 minutes with nobody connected or 15 without a message
+  (`idle_timeout`, `quiet_timeout`). The builder's `xdc_download_limit` (default 32 MiB)
+  caps the download used to read an app's manifest.
+- **`BotEvent::XdcPresence`**: someone opened or closed a Mini App in a chat the bot is in.
+- Guides: [Add a bot to your Mini App](guides/bot-for-your-mini-app.md) and
+  [Write a bot for any Mini App](guides/bot-for-any-mini-app.md).
+- Examples: `xdc_counter_bot` and `xdc_tictactoe_2d_bot` (each ships its own app),
+  `xdc_oracle_bot`, `xdc_tictactoe_bot`, `xdc_spy` and `xdc_probe`.
+
+### Changed
+
+- The SDK's log lines (slash commands, the interface manifest) go to stderr through
+  `VECTOR_LOG`, like vector-core's, instead of stdout.
+- `listen()` subscribes to live DMs before its startup catch-up, so a message sent while
+  the bot starts arrives live instead of at the next resync.
+
 ## 0.8.0
 
 Requires `vector-core` 0.7.0. Closes the two gaps in [#83](https://github.com/VectorPrivacy/Vector/issues/83):

@@ -7945,7 +7945,7 @@ dependencies = [
 
 [[package]]
 name = "vector-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm 0.11.1",
@@ -8041,7 +8041,7 @@ dependencies = [
 
 [[package]]
 name = "vector_sdk"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "nostr-sdk",
  "serde",

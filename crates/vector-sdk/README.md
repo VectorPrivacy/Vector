@@ -9,7 +9,7 @@ or encryption underneath.
 
 ```toml
 [dependencies]
-vector_sdk = "0.10"
+vector_sdk = "0.11"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -190,7 +190,7 @@ together. With the `xdc` feature your bot joins in too, as an opponent, a refere
 behind an app that needs more than a phone (an LLM, a database, a game's master copy).
 
 ```toml
-vector_sdk = { version = "0.10", features = ["xdc"] }  # `xdc` needs the first release after 0.10.0
+vector_sdk = { version = "0.11", features = ["xdc"] }
 ```
 
 ```rust

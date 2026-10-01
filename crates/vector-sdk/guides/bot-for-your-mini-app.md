@@ -68,7 +68,7 @@ Turn on the `xdc` feature:
 
 ```toml
 [dependencies]
-vector_sdk = { version = "0.10", features = ["xdc"] }  # `xdc` needs the first release after 0.10.0
+vector_sdk = { version = "0.11", features = ["xdc"] }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
