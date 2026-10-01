@@ -226,12 +226,20 @@ async fn prepare(a: &Args) -> Result<Value, String> {
             allow.push(name);
         }
     }
+    let isolated = pkg.manifest.cross_origin_isolated;
+    let policy = if isolated {
+        // Chromium only isolates a cross-origin frame the embedder delegates it to.
+        allow.push("cross-origin-isolated".to_string());
+        vector_core::webxdc_permissions::build_isolated_permissions_policy(&granted)
+    } else {
+        vector_core::webxdc_permissions::build_permissions_policy(&granted)
+    };
     Ok(json!({
         "label": label, "partition": partition, "name": pkg.manifest.name,
         "icon_data": icon_data_url(&pkg.icon), "file_hash": pkg.file_hash,
         "self_addr": me, "self_name": self_name(&me),
-        "policy": vector_core::webxdc_permissions::build_permissions_policy(&granted), "allow": allow.join("; "),
-        "realtime": topic.is_some(),
+        "policy": policy, "allow": allow.join("; "),
+        "realtime": topic.is_some(), "isolated": isolated,
     }))
 }
 

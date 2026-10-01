@@ -158,8 +158,14 @@ async function extract(bytes, e) {
 const isDocument = (type) => type.startsWith('text/html');
 const isScript = (type) => type.startsWith('text/javascript') || type.startsWith('application/wasm');
 
+// Vector's page is cross-origin isolated where the browser allows, and an
+// isolated page embeds only frames that opt in to COEP themselves. CORP is
+// cross-origin because Vector embeds this origin (same-site only in deployment,
+// not on localhost); the worker answers this origin's own pages and nothing else.
 function headers(meta, type) {
     return {
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
         'Content-Type': type,
         'Content-Security-Policy': isDocument(type) ? DOCUMENT_CSP : isScript(type) ? SCRIPT_CSP : INERT_CSP,
         'Permissions-Policy': meta.policy,
@@ -198,7 +204,8 @@ async function serve(request, path) {
             .replace('__VECTOR_META__', JSON.stringify({ selfAddr: meta.selfAddr, selfName: meta.selfName, parent: meta.parent }));
         return new Response(src, { headers: headers(meta, TYPES.js) });
     }
-    let name = path.replace(/^\/+/, '') || 'index.html';
+    // Empty segments collapse ("maps//ui.map"), as on any static server.
+    let name = path.split('/').filter(Boolean).join('/') || 'index.html';
     if (name.split('/').includes('..')) return new Response('Bad path', { status: 400 });
     let entry = null;
     for (const candidate of [name, `${name}.html`, `${name.replace(/\/$/, '')}/index.html`]) {

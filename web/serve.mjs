@@ -40,6 +40,9 @@ function serveMiniAppOrigin(req, res, vectorHost) {
         const vector = `http://${vectorHost}`;
         res.writeHead(200, {
             'Content-Type': TYPES[extname(name)],
+            // Embeddable by Vector's isolated page; see headers() in xdc/sw.js.
+            'Cross-Origin-Embedder-Policy': 'require-corp',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
             'Cache-Control': 'no-cache',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; frame-ancestors ${vector}`,
@@ -57,7 +60,16 @@ createServer(async (req, res) => {
         let file = join(ROOT, path);
         if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
         const body = await readFile(file);
-        const headers = { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' };
+        const headers = {
+            'Content-Type': TYPES[extname(file)] || 'application/octet-stream',
+            'Cache-Control': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            // Cross-origin isolation for threaded Mini Apps. `credentialless` keeps
+            // arbitrary cross-origin images loading; browsers without it (Safari)
+            // read it as unsafe-none and stay as they were.
+            'Cross-Origin-Opener-Policy': 'same-origin',
+            'Cross-Origin-Embedder-Policy': 'credentialless',
+        };
         // Clickjacking guard for the app page; meta CSP can't carry frame-ancestors.
         if (extname(file) === '.html') {
             headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host}`;

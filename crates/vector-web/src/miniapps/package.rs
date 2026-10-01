@@ -19,6 +19,9 @@ pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub source_code_url: Option<String>,
+    /// Threaded WebAssembly: the app's frame is cross-origin isolated.
+    #[serde(default)]
+    pub cross_origin_isolated: bool,
 }
 
 pub struct Package {

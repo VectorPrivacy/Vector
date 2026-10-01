@@ -34,7 +34,8 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   own origin, `<partition>.xdc.<vector host>`, so its localStorage and IndexedDB are its own
   and persist; marketplace apps keep one partition across versions, as on desktop. That
   origin's service worker (`xdc/sw.js`) serves the app out of its `.xdc` under an offline
-  CSP and the desktop Permissions-Policy; `xdc/bridge.js` is `window.webxdc`. Realtime
+  CSP and the desktop Permissions-Policy; `xdc/bridge.js` is `window.webxdc`. An app that
+  sets `cross_origin_isolated` gets `allow="cross-origin-isolated"` on its frame. Realtime
   channels run on Iroh in the worker, relay-only and wire-compatible with desktop.
 - **`web/calls.js`**, **`web/calls-media.js`**, **`web/calls-worklet.js`**: voice and video
   calls on core's call session (`crates/vector-web/src/calls.rs` is the platform under it).
@@ -82,6 +83,14 @@ the same server: `serve.mjs` answers those with only the mini app host page, its
 worker and the bridge template. On localhost that works as is (`*.localhost` resolves to
 the machine); a deployment needs wildcard DNS and a wildcard certificate for
 `*.xdc.<host>`, and should send the page `frame-src <scheme>://*.xdc.<host>` as serve.mjs does.
+
+Threaded mini apps (`cross_origin_isolated = true` in the manifest) need the page cross-origin
+isolated: send every response of Vector's own origin `Cross-Origin-Opener-Policy: same-origin`
+and `Cross-Origin-Embedder-Policy: credentialless`, and the `*.xdc.<host>` files
+`Cross-Origin-Embedder-Policy: require-corp` with `Cross-Origin-Resource-Policy: cross-origin`
+(their service worker adds the same to everything it serves). `credentialless` keeps
+cross-origin images loading without CORP headers; Safari and Firefox for Android don't
+support it yet, ignore it, and open threaded apps with a message instead.
 
 The media proxy (Magnitude) admits a browser by its `Origin`, since a page cannot set the
 `Vector/…` User-Agent desktop sends: a new Vector Web origin must be added to its `origins`.

@@ -251,6 +251,11 @@
         }
         requireHostName();
         const info = await backend('miniapp_prepare', { filePath, chatId, messageId, topicId });
+        // Threaded apps need this page isolated (COOP + COEP credentialless), which
+        // Safari and Firefox for Android don't support yet.
+        if (info.isolated && !self.crossOriginIsolated) {
+            throw new Error(`${info.name || 'This app'} needs a browser with cross-origin isolation (Chrome, Edge or Firefox on desktop), or the Vector app.`);
+        }
         const existing = windows.get(info.label);
         if (existing) {
             focus(existing);
