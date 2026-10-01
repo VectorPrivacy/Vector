@@ -29,6 +29,10 @@ pub struct MiniAppManifest {
     /// Optional source code URL (e.g., GitHub repository)
     #[serde(default)]
     pub source_code_url: Option<String>,
+    /// Opt-in to cross-origin isolation (SharedArrayBuffer, threaded WebAssembly).
+    /// Desktop then serves the app over loopback HTTP in its own data store.
+    #[serde(default)]
+    pub cross_origin_isolated: bool,
 }
 
 /// Represents a Mini App package (a .xdc file which is a ZIP archive)
@@ -207,8 +211,9 @@ impl MiniAppPackage {
         let file = std::fs::File::open(&self.path)?;
         let mut archive = zip::ZipArchive::new(file)?;
 
-        // Normalize path (remove leading slash) and prevent path traversal
-        let normalized_path = path.trim_start_matches('/');
+        // Normalize path (drop empty segments, e.g. "maps//ui.map") and prevent path traversal
+        let normalized = path.split('/').filter(|seg| !seg.is_empty()).collect::<Vec<_>>().join("/");
+        let normalized_path = normalized.as_str();
 
         // Reject paths containing directory traversal sequences
         if normalized_path.contains("..") || normalized_path.contains("\\..") {

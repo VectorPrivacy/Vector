@@ -13,6 +13,8 @@ pub(crate) mod scheme;
 pub(crate) mod state;
 pub(crate) mod commands;
 pub(crate) mod network_isolation;
+#[cfg(not(target_os = "android"))]
+pub(crate) mod isolated;
 pub(crate) mod realtime;
 pub(crate) mod rt_ws;
 pub(crate) mod marketplace;

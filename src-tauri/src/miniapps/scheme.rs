@@ -18,7 +18,15 @@ use crate::STATE;
 
 /// Content Security Policy for Mini Apps - very restrictive for security
 /// Based on DeltaChat's implementation
-static CSP: LazyLock<String> = LazyLock::new(|| {
+static CSP: LazyLock<String> = LazyLock::new(|| build_csp(false));
+/// The same policy for apps on the loopback host (`isolated.rs`).
+static ISOLATED_CSP: LazyLock<String> = LazyLock::new(|| build_csp(true));
+
+pub(super) fn isolated_csp() -> &'static str {
+    &ISOLATED_CSP
+}
+
+fn build_csp(isolated: bool) -> String {
     let mut m: HashMap<String, CspDirectiveSources> = HashMap::new();
     
     // Only allow resources from self (the webxdc:// origin)
@@ -64,16 +72,22 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
     
     // Restrict connections to self, IPC, data/blob URLs, and localhost WebSocket
     // (the realtime WS server uses a random token for auth, so wildcard port is safe)
-    m.insert(
-        "connect-src".to_string(),
-        CspDirectiveSources::List(vec![
-            "'self'".to_owned(),
-            "ipc:".to_owned(),
-            "data:".to_owned(),
-            "blob:".to_owned(),
-            "ws://127.0.0.1:*".to_owned(),
-        ]),
-    );
+    let mut connect = vec![
+        "'self'".to_owned(),
+        "ipc:".to_owned(),
+        "data:".to_owned(),
+        "blob:".to_owned(),
+        "ws://127.0.0.1:*".to_owned(),
+    ];
+    if isolated {
+        // WebView2's IPC endpoint; without it Tauri falls back to postMessage.
+        connect.push("http://ipc.localhost".to_owned());
+        m.insert(
+            "frame-ancestors".to_string(),
+            CspDirectiveSources::List(vec!["'self'".to_owned()]),
+        );
+    }
+    m.insert("connect-src".to_string(), CspDirectiveSources::List(connect));
     
     // Allow data URLs and blob URLs for images
     m.insert(
@@ -108,7 +122,7 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
     // origin, and naming a fixed host here would let an app iframe another
     // origin's storage (including the legacy shared one).
     csp.to_string()
-});
+}
 
 use vector_core::webxdc_permissions::build_permissions_policy;
 
@@ -216,7 +230,7 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
 /// Get the current user's npub and display name
 /// Note: This function avoids locking STATE to prevent potential deadlocks
 /// when called from the protocol handler
-async fn get_user_info() -> (String, String) {
+pub(super) async fn get_user_info() -> (String, String) {
     // Get user's npub from Nostr client
     let user_npub = if let Some(pk) = crate::my_public_key() {
         pk.to_bech32().unwrap_or_else(|_| "unknown".to_string())
@@ -268,7 +282,7 @@ fn serve_webxdc_js(
 /// Inject the webxdc.js script inline into HTML content
 /// This ensures window.webxdc is available before any other scripts run
 /// If the HTML already includes webxdc.js, we skip injection to avoid duplicates
-fn inject_webxdc_script(html_data: &[u8], user_npub: &str, user_display_name: &str) -> Vec<u8> {
+pub(super) fn inject_webxdc_script(html_data: &[u8], user_npub: &str, user_display_name: &str) -> Vec<u8> {
     let html_str = String::from_utf8_lossy(html_data);
     
     // Check if the HTML already includes webxdc.js - if so, don't inject
@@ -315,7 +329,7 @@ fn inject_webxdc_script(html_data: &[u8], user_npub: &str, user_display_name: &s
 
 /// Generate the canonical webxdc.js bridge script (used by both serve and inline injection).
 /// All console.log/warn calls stripped from hot paths — only console.error for actual failures.
-fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String {
+pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str) -> String {
     format!(r#"
 (function() {{
     'use strict';
@@ -497,11 +511,10 @@ fn make_success_response(body: Vec<u8>, content_type: &str, granted_permissions:
         .header(http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // Dynamic permissions policy based on user grants
         .header("Permissions-Policy", permissions_policy)
-        // Cross-origin isolation: enables SharedArrayBuffer and high-resolution timers.
-        // WASM-threaded games (Unity, Godot, etc.) need SharedArrayBuffer for multi-threaded
-        // rendering; without these headers on Chromium/WebView2 they fall back to single-
-        // threaded mode and run extremely slowly.  WKWebView (macOS) and WebKitGTK (Linux)
-        // provide SharedArrayBuffer without these headers, so this mainly fixes Windows.
+        // No custom-scheme page is ever cross-origin isolated (WebKit enforces COOP
+        // only on network loads; WebView2 maps the scheme to a non-secure host), so
+        // these do not grant SharedArrayBuffer here. Apps that need it opt in to the
+        // loopback host in `isolated.rs`.
         .header("Cross-Origin-Opener-Policy", "same-origin")
         .header("Cross-Origin-Embedder-Policy", "require-corp")
         .body(Cow::Owned(body))
@@ -529,7 +542,7 @@ fn make_error_response(status: http::StatusCode, message: &str, granted_permissi
         .unwrap()
 }
 
-fn get_mime_type(path: &str) -> String {
+pub(super) fn get_mime_type(path: &str) -> String {
     let extension = path.rsplit('.').next().unwrap_or("");
     match extension.to_lowercase().as_str() {
         "html" | "htm" => "text/html",

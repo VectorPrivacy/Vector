@@ -429,9 +429,30 @@ pub fn build_permissions_policy(granted_permissions: &str) -> String {
     policy
 }
 
+/// Permissions-Policy for an app served cross-origin isolated: the user's
+/// grants plus `cross-origin-isolated=(self)`. Chromium honours `()` and
+/// would switch isolation (and with it SharedArrayBuffer) back off.
+pub fn build_isolated_permissions_policy(granted_permissions: &str) -> String {
+    let policy = build_permissions_policy(granted_permissions);
+    debug_assert!(policy.contains("cross-origin-isolated=()"));
+    policy.replacen("cross-origin-isolated=()", "cross-origin-isolated=(self)", 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_policy_allows_only_cross_origin_isolation_for_self() {
+        let base = build_permissions_policy("camera");
+        let isolated = build_isolated_permissions_policy("camera");
+        assert!(base.contains("cross-origin-isolated=()"));
+        assert!(isolated.contains("cross-origin-isolated=(self)"));
+        assert!(!isolated.contains("cross-origin-isolated=()"));
+        assert_eq!(base.replace("cross-origin-isolated=()", "cross-origin-isolated=(self)"), isolated);
+        assert!(isolated.contains("camera=(self)") && isolated.contains("microphone=()"));
+        assert!(build_isolated_permissions_policy("").contains("cross-origin-isolated=(self)"));
+    }
 
     #[test]
     fn test_parse_permissions() {

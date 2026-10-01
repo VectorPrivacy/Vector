@@ -290,6 +290,11 @@ pub fn run() {
         // WebKitGTK can be quite funky cross-platform: as a result, we'll fallback to a more compatible renderer
         // In theory, this will make Vector run more consistently across a wider range of Linux Desktop distros.
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        // WebKitGTK through 2.54 keeps SharedArrayBuffer off even in a cross-origin
+        // isolated page (miniapps/isolated.rs) unless JSC enables it before the first
+        // web process. It applies to every page; the only untrusted ones are Mini Apps,
+        // each in its own process under a CSP that loads nothing cross-origin.
+        std::env::set_var("JSC_useSharedArrayBuffer", "1");
     }
 
     #[cfg(target_os = "windows")]

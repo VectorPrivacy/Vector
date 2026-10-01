@@ -614,6 +614,32 @@ async fn miniapp_storage_partition(file_hash: &str) -> String {
     }
 }
 
+/// IPC for a window on the loopback host. Tauri treats that origin as remote,
+/// so it needs its own capability: this window, this exact origin, and the
+/// same commands as `capabilities/miniapp.json`.
+#[cfg(not(target_os = "android"))]
+fn grant_isolated_ipc(app: &AppHandle, window_label: &str, port: u16) -> Result<(), Error> {
+    use tauri::ipc::CapabilityBuilder;
+    let mut capability = CapabilityBuilder::new(format!("miniapp-isolated-{port}"))
+        .local(false)
+        .remote(super::isolated::origin(port))
+        .window(window_label);
+    for permission in [
+        "core:event:allow-listen",
+        "core:event:allow-emit",
+        "allow-miniapp-get-updates",
+        "allow-miniapp-send-update",
+        "allow-miniapp-join-realtime-channel",
+        "allow-miniapp-leave-realtime-channel",
+        "allow-miniapp-send-realtime-data",
+        "allow-miniapp-get-granted-permissions-for-window",
+        "notification:allow-is-permission-granted",
+    ] {
+        capability = capability.permission(permission);
+    }
+    app.add_capability(capability).map_err(Error::Tauri)
+}
+
 /// Get the base URL for Mini Apps based on platform
 #[allow(dead_code)] // Used on desktop only
 fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
@@ -1088,15 +1114,40 @@ pub async fn miniapp_open(
         // ========================================
         #[cfg(not(target_os = "android"))]
         {
-        // Build the initial URL - append href if provided
-        let mut initial_url =
-            get_miniapp_base_url(&miniapp_storage_partition(&package.file_hash).await)?;
-        if let Some(ref href_value) = href {
-            // Append href to the base URL (href should start with / or be a relative path)
-            let href_path = href_value.trim_start_matches('/');
-            initial_url.set_path(&format!("/{}", href_path));
-            log_trace!("Mini App will open at: {}", initial_url);
-        }
+        let partition = miniapp_storage_partition(&package.file_hash).await;
+        let isolated = package.manifest.cross_origin_isolated;
+
+        // Apps that opt into cross-origin isolation are served from a loopback
+        // origin of their own (isolated.rs); everything else keeps the custom scheme.
+        let (initial_url, first_url, isolated_boot) = if isolated {
+            let (port, boot_url) = super::isolated::start(&app, &window_label, &partition, href.as_deref())
+                .await
+                .map_err(|e| Error::Anyhow(anyhow::anyhow!("Mini App loopback host: {e}")))?;
+            if let Err(e) = grant_isolated_ipc(&app, &window_label, port) {
+                super::isolated::stop(&window_label);
+                return Err(e);
+            }
+            let origin: tauri::Url = format!("{}/", super::isolated::origin(port))
+                .parse()
+                .map_err(|e: url::ParseError| Error::Anyhow(e.into()))?;
+            // Linux opens blank first: the proxy that keeps the app off the network
+            // must be in place (with this origin exempt) before the app's code runs.
+            #[cfg(target_os = "linux")]
+            let first = WebviewUrl::External("about:blank".parse().map_err(|e: url::ParseError| Error::Anyhow(e.into()))?);
+            #[cfg(not(target_os = "linux"))]
+            let first = WebviewUrl::External(boot_url.clone());
+            (origin, first, Some(boot_url))
+        } else {
+            let mut url = get_miniapp_base_url(&partition)?;
+            if let Some(ref href_value) = href {
+                // Append href to the base URL (href should start with / or be a relative path)
+                let href_path = href_value.trim_start_matches('/');
+                url.set_path(&format!("/{}", href_path));
+                log_trace!("Mini App will open at: {}", url);
+            }
+            let first = WebviewUrl::CustomProtocol(url.clone());
+            (url, first, None)
+        };
         let initial_url_clone = initial_url.clone();
     
         // Get the dummy proxy URL for network isolation (Linux only)
@@ -1114,7 +1165,7 @@ pub async fn miniapp_open(
         let mut window_builder = WebviewWindowBuilder::new(
             &app,
             &window_label,
-            WebviewUrl::CustomProtocol(initial_url.clone()),
+            first_url,
         )
         .title(&package.manifest.name)
         .inner_size(480.0, 640.0)
@@ -1132,9 +1183,13 @@ pub async fn miniapp_open(
             // storage.
             let own_scheme = initial_url.scheme().to_string();
             let own_host = initial_url.host_str().map(str::to_string);
+            let own_port = initial_url.port_or_known_default();
+            let blank_ok = cfg!(target_os = "linux") && isolated;
             move |url| {
-                let allowed =
-                    url.scheme() == own_scheme && url.host_str().map(str::to_string) == own_host;
+                let allowed = (url.scheme() == own_scheme
+                    && url.host_str().map(str::to_string) == own_host
+                    && url.port_or_known_default() == own_port)
+                    || (blank_ok && url.as_str() == "about:blank");
                 if !allowed {
                     log_warn!("Blocked navigation to: {}", url);
                 }
@@ -1155,11 +1210,62 @@ pub async fn miniapp_open(
         // Note: On Windows, both proxy_url and additional_browser_args cause WebView2 to freeze
         //       We rely on CSP for security on Windows instead
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-        {
+        if !isolated {
             window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
         }
-    
-        let window = Arc::new(window_builder.build()?);
+
+        // An isolated app gets a data store of its own: cookies, storage and cache
+        // never meet another app's (or the main window's), whatever its origin.
+        if isolated {
+            #[cfg(target_os = "macos")]
+            {
+                window_builder = match super::isolated::store_identifier(&partition) {
+                    Some(id) => window_builder.data_store_identifier(id),
+                    None => window_builder.incognito(true),
+                };
+            }
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                let dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(Error::Tauri)?
+                    .join("miniapp-isolated")
+                    .join(&partition);
+                window_builder = window_builder.data_directory(dir);
+            }
+        }
+
+        let window = match window_builder.build() {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                #[cfg(not(target_os = "android"))]
+                super::isolated::stop(&window_label);
+                return Err(e.into());
+            }
+        };
+
+        #[cfg(target_os = "linux")]
+        if let Some(boot_url) = isolated_boot.clone() {
+            let port = super::isolated::port_for(&window_label).unwrap_or_default();
+            let blackhole = dummy_proxy_url.to_string();
+            let exempt = window.with_webview(move |wv| {
+                use webkit2gtk::{NetworkProxyMode, NetworkProxySettings, WebContextExt, WebViewExt, WebsiteDataManagerExt};
+                let view = wv.inner();
+                if let Some(manager) = view.context().and_then(|c| c.website_data_manager()) {
+                    let hosts = [format!("localhost:{port}"), format!("127.0.0.1:{port}"), format!("[::1]:{port}")];
+                    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+                    let mut settings = NetworkProxySettings::new(Some(blackhole.as_str()), &hosts);
+                    manager.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut settings));
+                }
+            });
+            if let Err(e) = exempt.and_then(|_| window.navigate(boot_url)) {
+                super::isolated::stop(&window_label);
+                let _ = window.destroy();
+                return Err(e.into());
+            }
+        }
+        let _ = &isolated_boot;
 
         // A covered game must keep its socket: WebKit throttles a page whose window is
         // occluded (timers at 1 Hz, no animation frames, a suppressed process), and a
@@ -1193,6 +1299,7 @@ pub async fn miniapp_open(
             match event {
                 tauri::WindowEvent::Destroyed => {
                     log_info!("Mini App window destroyed: {}", window_label_for_handler);
+                    super::isolated::stop(&window_label_for_handler);
                     let app_handle = app_handle_for_handler.clone();
                     let label = window_label_for_handler.clone();
                     tauri::async_runtime::spawn(async move {
