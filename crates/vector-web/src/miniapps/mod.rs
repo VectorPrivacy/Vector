@@ -1,10 +1,10 @@
 //! Mini apps (WebXDC). The page runs each app in a sandboxed iframe on its own
 //! origin (`web/miniapps.js`); this side reads packages, keeps history and
-//! permissions, and carries realtime channels over Iroh.
+//! permissions, and carries realtime channels (vector-core's `xdc`).
 
 mod marketplace;
 mod package;
-pub(crate) mod realtime;
+mod realtime;
 mod url;
 
 /// Whether this browser can run mini apps at all (each needs a service worker),
@@ -25,32 +25,32 @@ pub async fn preload_marketplace() {
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use vector_core::db;
-use vector_core::event_ext::FinalizeUnsignedWithId;
-use vector_core::stored_event::{event_kind, StoredEvent};
-use vector_core::{state, STATE};
+use vector_core::xdc::wire;
+use vector_core::STATE;
 
 use crate::commands::Args;
 use crate::emitter;
-use realtime::TopicId;
 
 /// An open app window, keyed by its label (`miniapp:<chat>:<message>`, as desktop).
 struct Instance {
+    /// Tells a reopen of the label from the window it replaced.
+    id: u64,
     chat_id: String,
-    topic: Option<TopicId>,
+    /// Canonical base32, for an app that uses realtime.
+    topic: Option<String>,
 }
 
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+/// The worker serves one account (a swap reloads it), so these are its.
 static OPEN: Mutex<Option<HashMap<String, Instance>>> = Mutex::new(None);
 /// Who is playing on each topic, as far as their signals say.
-static SESSION_PEERS: Mutex<Option<HashMap<TopicId, Vec<String>>>> = Mutex::new(None);
-/// Addresses advertised before we joined; dialled when we do.
-static CACHED_ADDRS: Mutex<Option<HashMap<TopicId, Vec<EndpointAddr>>>> = Mutex::new(None);
-
-use iroh::EndpointAddr;
+static SESSION_PEERS: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
 
 fn with<K, V, R>(m: &Mutex<Option<HashMap<K, V>>>, f: impl FnOnce(&mut HashMap<K, V>) -> R) -> R {
     f(m.lock().unwrap().get_or_insert_with(HashMap::new))
@@ -60,20 +60,20 @@ fn my_npub() -> Option<String> {
     vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok())
 }
 
-fn session_peers(topic: &TopicId) -> Vec<String> {
+fn session_peers(topic: &str) -> Vec<String> {
     with(&SESSION_PEERS, |m| m.get(topic).cloned().unwrap_or_default())
 }
 
-fn add_session_peer(topic: TopicId, npub: String) {
+fn add_session_peer(topic: &str, npub: String) {
     with(&SESSION_PEERS, |m| {
-        let v = m.entry(topic).or_default();
+        let v = m.entry(topic.to_string()).or_default();
         if !v.contains(&npub) {
             v.push(npub);
         }
     });
 }
 
-fn remove_session_peer(topic: &TopicId, npub: &str) {
+fn remove_session_peer(topic: &str, npub: &str) {
     with(&SESSION_PEERS, |m| {
         if let Some(v) = m.get_mut(topic) {
             v.retain(|n| n != npub);
@@ -81,43 +81,30 @@ fn remove_session_peer(topic: &TopicId, npub: &str) {
     });
 }
 
-/// The chat a topic is played in, for advertising; solo play has none.
-fn chat_for_topic(topic: &TopicId) -> Option<String> {
-    with(&OPEN, |m| {
-        m.values()
-            .find(|i| i.topic.as_ref() == Some(topic) && !i.chat_id.is_empty() && i.chat_id != "solo")
-            .map(|i| i.chat_id.clone())
-    })
+fn topic_is_open(topic: &str) -> bool {
+    with(&OPEN, |m| m.values().any(|i| i.topic.as_deref() == Some(topic)))
 }
 
-fn topic_is_open(topic: &TopicId) -> bool {
-    with(&OPEN, |m| m.values().any(|i| i.topic.as_ref() == Some(topic)))
+fn is_solo(chat_id: &str) -> bool {
+    chat_id.is_empty() || chat_id == "solo"
 }
 
 /// The lobby state for a topic, for the chat's app card.
-pub(crate) fn emit_status(topic_encoded: &str, _peer_count: usize, is_active: bool) {
-    let Ok(topic) = realtime::decode_topic_id(topic_encoded) else { return };
-    let peers = session_peers(&topic);
+pub(crate) fn emit_status(topic: &str, is_active: bool) {
+    let peers = session_peers(topic);
     emitter::emit(
         "miniapp_realtime_status",
         &json!({
-            "topic": topic_encoded, "peer_count": peers.len(), "peers": peers,
+            "topic": topic, "peer_count": peers.len(), "peers": peers,
             "is_active": is_active, "has_pending_peers": !peers.is_empty(),
         }),
     );
 }
 
-/// A peer dropped out of the mesh: tell the chat again where we are, so it can find us.
-pub(crate) fn readvertise_later(topic_encoded: String) {
-    db::spawn_bound(async move {
-        vector_core::rt::time::sleep(std::time::Duration::from_secs(2)).await;
-        let Ok(topic) = realtime::decode_topic_id(&topic_encoded) else { return };
-        let Some(chat_id) = chat_for_topic(&topic) else { return };
-        let Some(iroh) = realtime::try_iroh().await else { return };
-        if let Ok(addr) = realtime::encode_node_addr(&iroh.node_addr()) {
-            send_signal(&chat_id, &topic_encoded, Some(&addr)).await;
-        }
-    });
+/// End every realtime session as the account that joined them, while it can
+/// still announce the departures: before a reload swaps the account.
+pub(crate) async fn end_sessions() {
+    vector_core::xdc::session::leave_all(std::time::Duration::from_secs(4)).await;
 }
 
 // ─── Package info ───────────────────────────────────────────────────────────
@@ -203,18 +190,24 @@ async fn prepare(a: &Args) -> Result<Value, String> {
     );
 
     // Solo play still gets a channel (apps expect one); it just isn't advertised.
-    let solo = label.starts_with("miniapp:solo:");
-    let topic = if pkg.uses_realtime {
-        Some(match a.opt_str("topicId").and_then(|t| realtime::decode_topic_id(&t).ok()) {
-            Some(t) => t,
-            None => realtime::derive_topic_id(&pkg.manifest.name, &chat_id, &message_id),
-        })
-    } else {
-        None
-    };
-    with(&OPEN, |m| m.insert(label.clone(), Instance { chat_id: chat_id.clone(), topic }));
-    if let Some(topic) = topic {
-        preconnect(topic, (!solo).then(|| chat_id.clone()), me.clone());
+    let topic = pkg.uses_realtime.then(|| {
+        let bytes = a
+            .opt_str("topicId")
+            .and_then(|t| wire::decode_topic(&t).ok())
+            .unwrap_or_else(|| wire::fallback_topic(&pkg.manifest.name, &chat_id, &message_id));
+        wire::encode_topic(&bytes)
+    });
+    // The page prepares an open window again only to focus it; its session stays.
+    let id = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
+    let fresh = with(&OPEN, |m| match m.entry(label.clone()) {
+        std::collections::hash_map::Entry::Occupied(_) => false,
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(Instance { id, chat_id: chat_id.clone(), topic: topic.clone() });
+            true
+        }
+    });
+    if let (true, Some(topic)) = (fresh, topic.clone()) {
+        preconnect(label.clone(), id, chat_id.clone(), topic, me.clone());
     }
 
     let granted = db::miniapps::get_miniapp_granted_permissions(&pkg.file_hash).unwrap_or_default();
@@ -243,209 +236,88 @@ async fn prepare(a: &Args) -> Result<Value, String> {
     }))
 }
 
-/// Join the topic with no window attached (events buffer), advertise ourselves,
-/// and dial everyone already known to be playing.
-fn preconnect(topic: TopicId, chat_id: Option<String>, me: String) {
+/// Join the window's session before the app asks (events buffer until it
+/// does), and put us in the topic's lobby.
+fn preconnect(label: String, id: u64, chat_id: String, topic: String, me: String) {
     db::spawn_bound(async move {
-        let topic_encoded = realtime::encode_topic_id(&topic);
-        let iroh = match realtime::iroh().await {
-            Ok(i) => i,
-            Err(e) => return vector_core::log_warn!("[WEBXDC] {e}"),
-        };
-        let mut peers: Vec<EndpointAddr> = with(&CACHED_ADDRS, |m| m.remove(&topic).unwrap_or_default());
-        for ad in db::miniapps::get_active_peer_advertisements(&topic_encoded, &me).unwrap_or_default() {
-            if let Ok(addr) = realtime::decode_node_addr(&ad.node_addr_encoded) {
-                add_session_peer(topic, ad.npub);
-                if !peers.iter().any(|p| p.id == addr.id) {
-                    peers.push(addr);
-                }
+        let w = realtime::Window { label: &label, id, chat_id: &chat_id, topic: &topic, advertise: !is_solo(&chat_id) };
+        if let Err(e) = realtime::open(w, false).await {
+            return vector_core::log_warn!("[WEBXDC] realtime join failed: {e}");
+        }
+        if !is_solo(&chat_id) {
+            for ad in db::miniapps::get_active_peer_advertisements_in(&topic, &chat_id, &me, 32).unwrap_or_default() {
+                add_session_peer(&topic, ad.npub);
             }
         }
-        if let Err(e) = iroh.join(topic, peers, None, topic_encoded.clone()).await {
-            return vector_core::log_warn!("[WEBXDC] join failed: {e}");
-        }
-        if let (Some(chat_id), Ok(addr)) = (chat_id, realtime::encode_node_addr(&iroh.node_addr())) {
-            send_signal(&chat_id, &topic_encoded, Some(&addr)).await;
-        }
-        add_session_peer(topic, me);
-        emit_status(&topic_encoded, 0, true);
+        add_session_peer(&topic, me);
+        emit_status(&topic, true);
     });
 }
 
-fn instance_topic(label: &str) -> Option<TopicId> {
-    with(&OPEN, |m| m.get(label).and_then(|i| i.topic))
+fn instance(label: &str) -> Option<(u64, String, String)> {
+    with(&OPEN, |m| m.get(label).and_then(|i| Some((i.id, i.chat_id.clone(), i.topic.clone()?))))
 }
 
 async fn rt_join(label: String) -> Result<Value, String> {
-    let topic = instance_topic(&label).ok_or("This mini app has no realtime channel")?;
-    let iroh = realtime::iroh().await?;
-    // Normally warm already; this attaches the window and flushes what buffered.
-    for _ in 0..100 {
-        if iroh.has_channel(&topic).await {
-            break;
-        }
-        vector_core::rt::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    let encoded = realtime::encode_topic_id(&topic);
-    iroh.join(topic, Vec::new(), Some(label), encoded.clone()).await.map_err(|e| e.to_string())?;
-    Ok(json!({ "topic": encoded }))
+    let (id, chat_id, topic) = instance(&label).ok_or("This mini app has no realtime channel")?;
+    // Normally joined already by the open; this attaches the app and flushes what buffered.
+    let w = realtime::Window { label: &label, id, chat_id: &chat_id, topic: &topic, advertise: !is_solo(&chat_id) };
+    realtime::open(w, true).await?;
+    Ok(json!({ "topic": topic }))
 }
 
 pub async fn rt_send(label: &str, bytes: Vec<u8>) -> Result<Value, String> {
     if bytes.len() > 128_000 {
         return Err("Realtime message too large".into());
     }
-    let topic = instance_topic(label).ok_or("No realtime channel")?;
-    let iroh = realtime::try_iroh().await.ok_or("No realtime channel")?;
-    iroh.send(&topic, bytes).await.map_err(|e| e.to_string())?;
+    realtime::send(label, bytes).await?;
     Ok(Value::Null)
 }
 
-/// The window is gone: leave the topic and tell the chat we stopped playing.
+/// The window is gone: end its session (announcing the departure) and leave the lobby.
 async fn closed(label: String) -> Result<Value, String> {
     let Some(inst) = with(&OPEN, |m| m.remove(&label)) else { return Ok(Value::Null) };
     let Some(topic) = inst.topic else { return Ok(Value::Null) };
+    realtime::close(&label, inst.id).await;
     if topic_is_open(&topic) {
         return Ok(Value::Null);
     }
-    if let Some(iroh) = realtime::try_iroh().await {
-        iroh.leave(&topic).await;
-    }
-    let encoded = realtime::encode_topic_id(&topic);
     if let Some(me) = my_npub() {
         remove_session_peer(&topic, &me);
     }
-    emit_status(&encoded, 0, false);
-    if !label.starts_with("miniapp:solo:") {
-        db::spawn_bound(async move { send_signal(&inst.chat_id, &encoded, None).await; });
-    }
+    emit_status(&topic, false);
     Ok(Value::Null)
 }
 
 async fn realtime_status(topic_encoded: &str) -> Result<Value, String> {
-    let topic = realtime::decode_topic_id(topic_encoded)?;
-    let active = match realtime::try_iroh().await {
-        Some(i) => i.has_channel(&topic).await,
-        None => false,
-    };
+    let topic = wire::encode_topic(&wire::decode_topic(topic_encoded)?);
     let peers = session_peers(&topic);
-    Ok(json!({ "active": active, "peer_count": peers.len(), "pending_peer_count": 0, "topic_id": topic_encoded, "peers": peers }))
+    Ok(json!({
+        "active": realtime::is_active(&topic), "peer_count": peers.len(), "pending_peer_count": 0,
+        "topic_id": topic_encoded, "peers": peers,
+    }))
 }
 
 // ─── Peer signals over Nostr ────────────────────────────────────────────────
 
-/// Advertise our node on a topic (`Some(addr)`) or announce we left (`None`),
-/// to a DM peer by gift wrap or into a community channel.
-async fn send_signal(chat_id: &str, topic: &str, node_addr: Option<&str>) -> bool {
-    let (Some(client), Some(me)) = (state::nostr_client(), vector_core::my_public_key()) else { return false };
-    match PublicKey::from_bech32(chat_id) {
-        Ok(pk) => {
-            let mut b = EventBuilder::new(Kind::ApplicationSpecificData, if node_addr.is_some() { "peer-advertisement" } else { "peer-left" })
-                .tag(Tag::public_key(pk))
-                .tag(Tag::custom("d", vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom("webxdc-topic", vec![topic.to_string()]));
-            if let Some(addr) = node_addr {
-                b = b.tag(Tag::custom("webxdc-node-addr", vec![addr.to_string()]));
-            }
-            let rumor = b.finalize_unsigned_with_id(me);
-            let relays = state::active_trusted_relays().await;
-            vector_core::send_gift_wrap(&client, relays, &pk, rumor, []).await.is_ok()
-        }
-        Err(_) => match send_community_signal(chat_id, topic, node_addr).await {
-            Ok(()) => true,
-            Err(e) => {
-                vector_core::log_warn!("[WEBXDC] community peer signal failed: {e}");
-                false
-            }
-        },
-    }
-}
-
-/// A peer signal sealed into a (v2) community channel as kind 3310.
-async fn send_community_signal(channel_id: &str, topic: &str, node_addr: Option<&str>) -> Result<(), String> {
-    use vector_core::community::{v2, ChannelId, CommunityId, ConcordProtocol};
-    use vector_core::simd::hex::hex_to_bytes_32;
-    let cid = db::community::community_id_for_channel(channel_id)?.ok_or("Not a community channel")?;
-    let community_id = CommunityId(hex_to_bytes_32(&cid));
-    if db::community::community_protocol(&community_id)? != Some(ConcordProtocol::V2) {
-        return Err("Legacy communities are not available on Vector Web".into());
-    }
-    let community = db::community::load_community_v2(&community_id)?.ok_or("Community not found")?;
-    let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-    v2::service::send_webxdc_signal(&transport, &community, &ChannelId(hex_to_bytes_32(channel_id)), topic, node_addr)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// A peer's signal, from a DM or a community channel. Persisted for later joins,
-/// then applied live only if it is still that peer's latest word on the topic.
+/// A peer's signal, from a DM or a community channel: vector-core persists it
+/// and dials the peer into a session on its topic; the lobby here shows who is playing.
 pub fn on_signal(contact: String, npub: String, topic_id: String, node_addr: Option<String>, event_id: String, created_at: u64) {
     db::spawn_bound(async move {
-        let Ok(topic) = realtime::decode_topic_id(&topic_id) else { return };
-        let addr = match node_addr.as_deref().map(realtime::decode_node_addr) {
-            Some(Ok(a)) => Some(a),
-            Some(Err(_)) => return,
-            None => None,
+        let Some(sig) = vector_core::xdc::on_signal(&contact, &npub, &topic_id, node_addr.as_deref(), &event_id, created_at).await else {
+            return;
         };
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        // A forged far-future signal must not outrank every later genuine one.
-        let created_at = created_at.min(now + 300);
-        persist_signal(&event_id, &topic_id, node_addr.as_deref(), &npub, created_at, &contact).await;
-        if !db::miniapps::peer_signal_is_current(&topic_id, &npub, created_at, addr.is_some()).unwrap_or(false) {
+        // History stays persisted; the lobby follows the present.
+        if !sig.current {
             return;
         }
-        let live = match realtime::try_iroh().await {
-            Some(i) if i.has_channel(&topic).await => Some(i),
-            _ => None,
-        };
-        match addr {
-            Some(addr) => {
-                add_session_peer(topic, npub);
-                match &live {
-                    Some(iroh) => {
-                        if let Err(e) = iroh.add_peer(topic, addr).await {
-                            vector_core::log_warn!("[WEBXDC] could not reach advertised peer: {e}");
-                        }
-                    }
-                    None => with(&CACHED_ADDRS, |m| m.entry(topic).or_default().push(addr)),
-                }
-            }
-            None => remove_session_peer(&topic, &npub),
+        if sig.node_addr.is_some() {
+            add_session_peer(&sig.topic, sig.npub);
+        } else {
+            remove_session_peer(&sig.topic, &sig.npub);
         }
-        emit_status(&topic_id, 0, live.is_some());
+        emit_status(&sig.topic, realtime::is_active(&sig.topic));
     });
-}
-
-async fn persist_signal(event_id: &str, topic_id: &str, node_addr: Option<&str>, npub: &str, created_at: u64, contact: &str) {
-    if db::events::event_exists(event_id).unwrap_or(true) {
-        return;
-    }
-    let Ok(chat_id) = db::id_cache::get_or_create_chat_id(contact) else { return };
-    let mut tags = vec![vec!["webxdc-topic".to_string(), topic_id.to_string()]];
-    if let Some(addr) = node_addr {
-        tags.push(vec!["webxdc-node-addr".to_string(), addr.to_string()]);
-    }
-    tags.push(vec!["d".to_string(), "vector-webxdc-peer".to_string()]);
-    let event = StoredEvent {
-        id: event_id.to_string(),
-        kind: event_kind::APPLICATION_SPECIFIC,
-        chat_id,
-        user_id: None,
-        content: if node_addr.is_some() { "peer-advertisement" } else { "peer-left" }.to_string(),
-        tags,
-        reference_id: Some(topic_id.to_string()),
-        created_at,
-        received_at: web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
-        mine: false,
-        pending: false,
-        failed: false,
-        wrapper_event_id: None,
-        npub: Some(npub.to_string()),
-        preview_metadata: None,
-    };
-    if let Err(e) = db::events::save_event(&event).await {
-        vector_core::log_warn!("[WEBXDC] could not persist peer signal: {e}");
-    }
 }
 
 // ─── History and permissions ────────────────────────────────────────────────
@@ -474,6 +346,10 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> std::pin::Pin<Box<dyn std::fut
                 Ok(l) => rt_join(l).await,
                 Err(e) => Err(e),
             },
+            "miniapp_rt_leave" => a.str("label").map(|l| {
+                realtime::detach(&l);
+                Value::Null
+            }),
             "miniapp_resolve_url_xdc" => match a.str("url") {
                 Ok(u) => url::resolve(u, a.opt_str("msgId").unwrap_or_default(), a.bool("download").unwrap_or(false)).await,
                 Err(e) => Err(e),
@@ -487,10 +363,6 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> std::pin::Pin<Box<dyn std::fut
                 Err(e) => Err(e),
             },
             "miniapp_list_open" => Ok(json!([])),
-            "send_webxdc_peer_advertisement" => match (a.str("receiver"), a.str("topicId"), a.str("nodeAddr")) {
-                (Ok(r), Ok(t), Ok(n)) => Ok(json!(send_signal(&r, &t, Some(&n)).await)),
-                _ => Err("missing arguments".into()),
-            },
             "miniapp_record_opened" => (|| {
                 db::miniapps::record_miniapp_opened(a.str("name")?, a.str("srcUrl")?, a.opt_str("attachmentRef").unwrap_or_default())
             })()

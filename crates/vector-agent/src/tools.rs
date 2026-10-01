@@ -39,7 +39,7 @@ pub struct GetMessagesRequest {
     #[schemars(description = "Maximum number of messages to return")]
     #[serde(default = "default_limit")]
     pub limit: usize,
-    #[schemars(description = "Offset from most recent")]
+    #[schemars(description = "How many of the most recent messages to skip, to page back through history")]
     #[serde(default)]
     pub offset: usize,
 }
@@ -195,6 +195,88 @@ pub struct SyncCommunityChannelRequest {
 
 fn default_page() -> usize { 20 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct XdcAppsRequest {
+    #[schemars(description = "Chat to look in: an npub for a DM, a channel id for a Community channel")]
+    pub chat_id: String,
+    #[schemars(description = "How many recent messages to scan (default 200)")]
+    #[serde(default = "default_scan")]
+    pub scan: usize,
+}
+
+fn default_scan() -> usize { 200 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct XdcJoinRequest {
+    #[schemars(description = "Id of the message carrying the Mini App (from xdc_apps)")]
+    pub message_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct XdcSendRequest {
+    #[schemars(description = "The session's topic (from xdc_join)")]
+    pub topic: String,
+    #[schemars(description = "The frame to broadcast, as text. Most apps speak JSON: send the JSON string.")]
+    pub text: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct XdcReadRequest {
+    #[schemars(description = "The session's topic (from xdc_join)")]
+    pub topic: String,
+    #[schemars(description = "If nothing is buffered, wait up to this many milliseconds for something to arrive (max 30000)")]
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct XdcTopicRequest {
+    #[schemars(description = "The session's topic (from xdc_join)")]
+    pub topic: String,
+}
+
+/// A Mini App session the agent joined: a sender, and the events a pump task buffers.
+struct AgentXdc {
+    sender: vector_core::xdc::XdcSender,
+    events: Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>,
+    touched: Arc<std::sync::Mutex<tokio::time::Instant>>,
+    leave: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Which join this entry is, so an ending session only removes its own.
+    generation: u64,
+}
+
+static XDC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+const XDC_BUFFER: usize = 500;
+/// Events returned by one `xdc_read`; the rest wait for the next.
+const XDC_READ_BATCH: usize = 100;
+/// Frame text kept per event: a tool result is read by a model, not stored.
+const XDC_TEXT_CAP: usize = 8 * 1024;
+/// A session nobody has read from or sent on for this long is left.
+const XDC_UNTOUCHED: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn xdc_event_json(ev: vector_core::xdc::XdcEvent) -> serde_json::Value {
+    use vector_core::xdc::XdcEvent;
+    match ev {
+        XdcEvent::Data(f) => {
+            let text = f.text().map(|t| match t.char_indices().nth(XDC_TEXT_CAP) {
+                Some((cut, _)) => format!("{}…[{} more bytes]", &t[..cut], t.len() - cut),
+                None => t.to_string(),
+            });
+            serde_json::json!({
+                "type": "data",
+                "from": f.from.npub,
+                "verified": f.verified_sender().is_some(),
+                "bytes": if text.is_none() { Some(f.payload.len()) } else { None },
+                "text": text,
+            })
+        }
+        XdcEvent::PeerJoined(p) => serde_json::json!({ "type": "joined", "npub": p.npub }),
+        XdcEvent::PeerLeft(p) => serde_json::json!({ "type": "left", "npub": p.npub }),
+        XdcEvent::Lagged => serde_json::json!({ "type": "lagged" }),
+    }
+}
+
 // ============================================================================
 // VectorAgent — MCP server with all tools
 // ============================================================================
@@ -203,8 +285,18 @@ fn default_page() -> usize { 20 }
 pub struct VectorAgent {
     core: VectorCore,
     message_buffer: Arc<Mutex<Vec<BufferedMessage>>>,
+    xdc: Arc<Mutex<std::collections::HashMap<String, AgentXdc>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+impl VectorAgent {
+    /// The `limit` messages before the newest `skip`, oldest first.
+    async fn recent_messages(&self, chat_id: &str, limit: usize, skip: usize) -> Vec<vector_core::Message> {
+        let all = self.core.get_messages(chat_id, usize::MAX, 0).await;
+        let end = all.len().saturating_sub(skip);
+        all[end.saturating_sub(limit)..end].to_vec()
+    }
 }
 
 #[tool_router]
@@ -213,6 +305,7 @@ impl VectorAgent {
         Self {
             core,
             message_buffer,
+            xdc: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -342,9 +435,9 @@ impl VectorAgent {
         }
     }
 
-    #[tool(description = "Get message history for a chat. Returns messages in chronological order.")]
+    #[tool(description = "Get message history for a chat: the most recent `limit` messages (skipping the newest `offset`), in chronological order.")]
     async fn get_messages(&self, Parameters(req): Parameters<GetMessagesRequest>) -> Result<CallToolResult, McpError> {
-        let msgs = self.core.get_messages(&req.chat_id, req.limit, req.offset).await;
+        let msgs = self.recent_messages(&req.chat_id, req.limit, req.offset).await;
         let json = serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".into());
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -371,7 +464,8 @@ impl VectorAgent {
 
     #[tool(description = "Sync DM history from relays using NIP-77 negentropy reconciliation. Fetches missed messages and populates chat history. Use since_days to limit scope (e.g. 7 for last week) or omit for full sync.")]
     async fn sync_dms(&self, Parameters(req): Parameters<SyncDmsRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.sync_dms(req.since_days, &vector_core::NoOpEventHandler).await {
+        // Signals the sync opens still reach joined Mini App sessions; messages are history.
+        match self.core.sync_dms(req.since_days, &vector_core::LiveOnly::signals(&crate::handler::XdcSignalSink)).await {
             Ok((events, new)) => Ok(CallToolResult::success(vec![Content::text(
                 format!("DM sync complete: {} events processed, {} new messages", events, new)
             )])),
@@ -732,6 +826,130 @@ impl VectorAgent {
         match self.core.edit_community_metadata(&req.community_id, req.name.as_deref(), req.description.as_deref()).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text("Community metadata updated.")])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+    // === Mini Apps (WebXDC) ===
+
+    #[tool(description = "List the Mini Apps (.xdc games and tools) shared in a chat, newest first: message id, app file, its realtime topic, and who is playing now. Join one with xdc_join.")]
+    async fn xdc_apps(&self, Parameters(req): Parameters<XdcAppsRequest>) -> Result<CallToolResult, McpError> {
+        let me = self.core.my_npub().unwrap_or_default();
+        let msgs = self.recent_messages(&req.chat_id, req.scan, 0).await;
+        let mut out = Vec::new();
+        for m in msgs.iter().rev() {
+            for a in m.attachments.iter().filter(|a| vector_core::xdc::is_app(a)) {
+                let playing: Vec<String> = a.webxdc_topic.as_deref()
+                    .and_then(|t| vector_core::db::miniapps::get_active_peer_advertisements_in(t, &req.chat_id, &me, 64).ok())
+                    .unwrap_or_default()
+                    .into_iter().map(|r| r.npub).collect();
+                out.push(serde_json::json!({
+                    "message_id": m.id, "file": a.name, "topic": a.webxdc_topic, "from_me": m.mine,
+                    "joined": a.webxdc_topic.as_deref().is_some_and(vector_core::xdc::is_joined),
+                    "playing": playing,
+                }));
+            }
+        }
+        Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&out).unwrap_or_default())]))
+    }
+
+    #[tool(description = "Join a Mini App's realtime session, as if you opened it: everyone in it can now exchange frames with you. Your selfAddr is your npub. Frames are the app's own protocol (usually JSON); read the app's source or watch with xdc_read to learn it. Returns the session topic.")]
+    async fn xdc_join(&self, Parameters(req): Parameters<XdcJoinRequest>) -> Result<CallToolResult, McpError> {
+        let Some((chat_id, msg)) = self.core.get_message(&req.message_id).await else {
+            return Ok(CallToolResult::error(vec![Content::text("No such message")]));
+        };
+        let Some(topic) = msg.attachments.iter().find(|a| vector_core::xdc::is_app(a)).and_then(|a| a.webxdc_topic.clone()) else {
+            return Ok(CallToolResult::error(vec![Content::text("That message carries no Mini App with a realtime topic")]));
+        };
+        let mut session = match vector_core::xdc::join(&chat_id, &topic).await {
+            Ok(s) => s,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let topic = session.topic().to_string();
+        let events: Arc<Mutex<std::collections::VecDeque<serde_json::Value>>> = Arc::default();
+        let touched = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let (leave_tx, mut leave_rx) = tokio::sync::oneshot::channel::<()>();
+        // Registered before the pump starts, so a session that ends at once still cleans up after itself.
+        let generation = XDC_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.xdc.lock().await.insert(topic.clone(), AgentXdc { sender: session.sender(), events: events.clone(), touched: touched.clone(), leave: Some(leave_tx), generation });
+        let (xdc, t) = (self.xdc.clone(), topic.clone());
+        vector_core::db::spawn_bound(async move {
+            let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    ev = session.recv() => match ev {
+                        Some(ev) => {
+                            let mut b = events.lock().await;
+                            if b.len() >= XDC_BUFFER {
+                                b.pop_front();
+                            }
+                            b.push_back(xdc_event_json(ev));
+                        }
+                        None => break,
+                    },
+                    _ = &mut leave_rx => break,
+                    // An agent that stops calling the tools has walked away from the game.
+                    _ = idle_check.tick() => {
+                        if touched.lock().unwrap().elapsed() > XDC_UNTOUCHED {
+                            break;
+                        }
+                    }
+                }
+            }
+            session.leave().await;
+            let mut map = xdc.lock().await;
+            if map.get(&t).is_some_and(|e| e.generation == generation) {
+                map.remove(&t);
+            }
+        });
+        Ok(CallToolResult::success(vec![Content::text(serde_json::json!({ "topic": topic, "chat_id": chat_id, "self_addr": self.core.my_npub() }).to_string())]))
+    }
+
+    #[tool(description = "Broadcast one frame to everyone in a joined Mini App session (at most 128000 bytes). Delivery is best-effort and only reaches players online now.")]
+    async fn xdc_send(&self, Parameters(req): Parameters<XdcSendRequest>) -> Result<CallToolResult, McpError> {
+        let sender = self.xdc.lock().await.get(&req.topic).map(|s| {
+            *s.touched.lock().unwrap() = tokio::time::Instant::now();
+            s.sender.clone()
+        });
+        let Some(sender) = sender else {
+            return Ok(CallToolResult::error(vec![Content::text("Not in that session; xdc_join first")]));
+        };
+        match sender.send(req.text.into_bytes()).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("sent")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(description = "Read and clear (up to 100 at a time) what arrived in a joined Mini App session since the last read: frames (with the sender's npub, and verified=true when it could not have been forged in transit), players joining and leaving. Set wait_ms to wait for the next event. A session untouched for 15 minutes is left.")]
+    async fn xdc_read(&self, Parameters(req): Parameters<XdcReadRequest>) -> Result<CallToolResult, McpError> {
+        let events = self.xdc.lock().await.get(&req.topic).map(|s| {
+            *s.touched.lock().unwrap() = tokio::time::Instant::now();
+            s.events.clone()
+        });
+        let Some(events) = events else {
+            return Ok(CallToolResult::error(vec![Content::text("Not in that session; xdc_join first")]));
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(req.wait_ms.min(30_000));
+        loop {
+            let drained: Vec<serde_json::Value> = {
+                let mut b = events.lock().await;
+                let n = b.len().min(XDC_READ_BATCH);
+                b.drain(..n).collect()
+            };
+            if !drained.is_empty() || tokio::time::Instant::now() >= deadline {
+                return Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&drained).unwrap_or_default())]));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tool(description = "Leave a Mini App session and tell the chat.")]
+    async fn xdc_leave(&self, Parameters(req): Parameters<XdcTopicRequest>) -> Result<CallToolResult, McpError> {
+        let leave = self.xdc.lock().await.get_mut(&req.topic).and_then(|s| s.leave.take());
+        match leave {
+            Some(tx) => {
+                let _ = tx.send(());
+                Ok(CallToolResult::success(vec![Content::text("left")]))
+            }
+            None => Ok(CallToolResult::error(vec![Content::text("Not in that session")])),
         }
     }
 }

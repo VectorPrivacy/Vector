@@ -4868,26 +4868,6 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Decode a 64-char hex Community id to 32 bytes (rejects malformed input).
-/// Resolve a channel id (hex) to its owning Community + Channel — the shared front half of
-/// every channel-addressed send.
-pub(crate) fn resolve_community_channel(
-    channel_id: &str,
-) -> Result<(vector_core::community::Community, vector_core::community::Channel), String> {
-    let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
-    Ok((community, channel))
-}
-
 /// Decode a deterministic 64-char hex id (DB-stored community/channel id, our own encrypted
 /// self-list, or a frontend-supplied command param — never a raw inbound-event field, which is
 /// validated at the network boundary in event_handler's invite parse) into 32 bytes via the SIMD

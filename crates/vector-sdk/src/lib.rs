@@ -63,6 +63,7 @@
 //! | Manage a community | [`IncomingMessage::community`] / [`VectorBot::community`] → [`Community`] |
 //! | Be invitable safely | [`builder().public()`](VectorBotBuilder::public) / [`whitelist(..)`](VectorBotBuilder::whitelist) |
 //! | Manage profiles | [`fetch_profile`](VectorBot::fetch_profile) · [`update_profile`](VectorBot::update_profile) · [`block`](VectorBot::block) … |
+//! | Join the Mini Apps (WebXDC games and tools) people share, on their realtime channel | `bot.xdc(..).run(..)`, `msg.xdc()` (feature `xdc`; see the `xdc` module) |
 //! | Anything else | [`bot.core()`](VectorBot::core) → the full [`VectorCore`] facade |
 //!
 //! ## Receiving: `on_message` vs `on_event`
@@ -209,6 +210,7 @@
 //! - **`moderation_bot`** — welcomes joiners and auto-bans on a word filter.
 //! - **`whitelist_bot`** — a private bot that only joins communities it trusts.
 //! - **`file_bot`** / **`save_files_bot`** — send a file / receive and decrypt one.
+//! - **`xdc_tictactoe_bot`** / **`xdc_oracle_bot`** — play a shared Mini App live / be the server behind one (feature `xdc`).
 //!
 //! ```sh
 //! VECTOR_NSEC=nsec1... cargo run -p vector-sdk --example echo_bot
@@ -245,6 +247,11 @@ mod commands;
 pub use commands::{CommandBuilder, CommandCtx, DISCOVERY_RELAYS};
 
 pub mod policy;
+
+#[cfg(feature = "xdc")]
+pub mod xdc;
+#[cfg(feature = "xdc")]
+pub use xdc::{JoinWhen, Manifest, Xdc, XdcAppBuilder, XdcEvent, XdcFrame, XdcMatch, XdcPeer, XdcSender, XdcSession};
 
 // ============================================================================
 // VectorBot
@@ -288,9 +295,24 @@ pub struct VectorBot {
     npub: String,
     invite_policy: Arc<InvitePolicy>,
     commands: Arc<commands::CommandRegistry>,
+    #[cfg(feature = "xdc")]
+    xdc: Arc<xdc::XdcRouter>,
 }
 
 impl VectorBot {
+    /// A bot that was never logged in, for tests of local bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        VectorBot {
+            core: VectorCore,
+            npub: String::new(),
+            invite_policy: Arc::new(InvitePolicy::Manual),
+            commands: Arc::new(Default::default()),
+            #[cfg(feature = "xdc")]
+            xdc: Arc::new(Default::default()),
+        }
+    }
+
     /// Start building a bot. Provide a key with [`VectorBotBuilder::nsec`] (or
     /// [`mnemonic`](VectorBotBuilder::mnemonic)), then call
     /// [`build`](VectorBotBuilder::build).
@@ -495,11 +517,11 @@ impl VectorBot {
         F: Fn(VectorBot, IncomingMessage) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.prepare_listen().await;
         let adapter = ClosureHandler {
             bot: self.clone(),
             handler: Arc::new(handler),
         };
+        self.prepare_listen(&adapter).await;
         self.core.listen(Arc::new(adapter)).await
     }
 
@@ -527,11 +549,11 @@ impl VectorBot {
         F: Fn(VectorBot, BotEvent) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.prepare_listen().await;
         let adapter = EventClosureHandler {
             bot: self.clone(),
             handler: Arc::new(handler),
         };
+        self.prepare_listen(&adapter).await;
         self.core.listen(Arc::new(adapter)).await
     }
 
@@ -539,14 +561,20 @@ impl VectorBot {
     /// THEN apply the invite policy to everything parked (so a restarted private bot still auto-joins
     /// communities it was invited to). Live invites are handled by the event adapters. Registered
     /// slash commands publish their interface manifest here so pickers can discover them.
-    async fn prepare_listen(&self) {
-        let _ = self.core.sync_dms(None, &NoOpEventHandler).await;
+    async fn prepare_listen(&self, handler: &dyn InboundEventHandler) {
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let _ = self.core.sync_dms(None, &vector_core::LiveOnly::from(handler, started)).await;
+        #[cfg(feature = "xdc")]
+        self.xdc_router().rescan_parked(self.clone()).await;
         self.process_pending_invites().await;
         self.publish_interface_manifest().await;
     }
 
     /// Escape hatch: drive the receive loop with a custom
-    /// [`InboundEventHandler`] for full control over every event kind.
+    /// [`InboundEventHandler`] for full control over every event kind. With the
+    /// `xdc` feature, forward `on_webxdc_signal` / `on_community_webxdc` to
+    /// [`vector_core::xdc::on_signal`], or Mini App sessions can't tell who
+    /// their players are.
     pub async fn listen_with(&self, handler: Arc<dyn InboundEventHandler>) -> Result<()> {
         self.core.listen(handler).await
     }
@@ -555,7 +583,7 @@ impl VectorBot {
     /// Returns `(events_processed, new_messages)`. Pass `Some(days)` to limit
     /// the window, or `None` for a full sync.
     pub async fn sync_dms(&self, since_days: Option<u64>) -> Result<(u32, u32)> {
-        self.core.sync_dms(since_days, &NoOpEventHandler).await
+        self.core.sync_dms(since_days, &XdcSignals(self)).await
     }
 
     /// Catch up every Community this bot is in — refold consensus (re-foundings / rekeys / banlist /
@@ -670,6 +698,8 @@ pub struct VectorBotBuilder {
     data_dir: Option<PathBuf>,
     event_emitter: Option<Box<dyn EventEmitter>>,
     invite_policy: Option<InvitePolicy>,
+    #[cfg(feature = "xdc")]
+    xdc_download_limit: Option<usize>,
     #[cfg(feature = "tor")]
     tor: bool,
     #[cfg(feature = "tor")]
@@ -711,6 +741,15 @@ impl VectorBotBuilder {
     /// Shorthand for [`invite_policy(InvitePolicy::Public)`](Self::invite_policy).
     pub fn public(self) -> Self {
         self.invite_policy(InvitePolicy::Public)
+    }
+
+    /// The largest Mini App (`.xdc`, in bytes) the bot downloads to read its
+    /// manifest, for matching handlers by app id or hash. Defaults to
+    /// [`xdc::DEFAULT_DOWNLOAD_LIMIT`] (32 MiB); see [`xdc::set_download_limit`].
+    #[cfg(feature = "xdc")]
+    pub fn xdc_download_limit(mut self, bytes: usize) -> Self {
+        self.xdc_download_limit = Some(bytes);
+        self
     }
 
     /// Make this a **private** bot — auto-accept invites *only* from these pubkeys, ignoring all
@@ -833,11 +872,18 @@ impl VectorBotBuilder {
             );
         }
 
+        #[cfg(feature = "xdc")]
+        if let Some(bytes) = self.xdc_download_limit {
+            xdc::set_download_limit(bytes);
+        }
+
         Ok(VectorBot {
             core,
             npub: result.npub,
             invite_policy: Arc::new(self.invite_policy.unwrap_or(InvitePolicy::Manual)),
             commands: Arc::new(Default::default()),
+            #[cfg(feature = "xdc")]
+            xdc: Arc::new(Default::default()),
         })
     }
 }
@@ -1810,6 +1856,8 @@ where
         if bot.try_command(&incoming) {
             return;
         }
+        #[cfg(feature = "xdc")]
+        bot.xdc_shared(chat_id, msg);
         tokio::spawn(async move {
             handler(bot, incoming).await;
         });
@@ -1849,6 +1897,34 @@ where
             bot.apply_invite_policy(&community_id).await;
         });
     }
+
+    #[cfg(feature = "xdc")]
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.bot.xdc_signal(contact, npub, topic, node_addr, event_id, created_at);
+    }
+
+    #[cfg(feature = "xdc")]
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.bot.xdc_signal(chat_id, npub, topic, node_addr, event_id, created_at);
+    }
+}
+
+/// For a manual DM sync: the Mini App signals it opens still reach the bot's
+/// Mini App handlers (the live subscription won't deliver them again); the rest
+/// is history.
+#[cfg_attr(not(feature = "xdc"), allow(dead_code))]
+struct XdcSignals<'a>(&'a VectorBot);
+
+impl InboundEventHandler for XdcSignals<'_> {
+    #[cfg(feature = "xdc")]
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.0.xdc_signal(contact, npub, topic, node_addr, event_id, created_at);
+    }
+
+    #[cfg(feature = "xdc")]
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.0.xdc_signal(chat_id, npub, topic, node_addr, event_id, created_at);
+    }
 }
 
 // ============================================================================
@@ -1867,8 +1943,9 @@ pub enum BotEvent {
     /// joins the stream the moment its own auth completes, gating nobody else.
     /// No longer gated on the slowest relay in the set. Fires even
     /// with `communities: 0`, so "subscribed to nothing" and "still connecting"
-    /// are different observable states. Messages sent BEFORE this are not
-    /// delivered live; recover them with a sync + [`Channel::history`].
+    /// are different observable states. Community messages sent BEFORE this are
+    /// not delivered live; recover them with a sync + [`Channel::history`]. DMs
+    /// sent since the bot began listening are delivered either way.
     Ready { communities: usize },
     /// A new message (DM or Community channel).
     Message(IncomingMessage),
@@ -1906,6 +1983,12 @@ pub enum BotEvent {
     /// # }
     /// ```
     ChannelKeyed { community_id: String, channel_id: String, backfilled: usize },
+    /// Someone opened (`online`) or closed a Mini App: their client announced its
+    /// realtime node on the app's `topic`. Join it with
+    /// [`IncomingMessage::xdc`] / the `xdc` feature's handlers. `at` is when they
+    /// said so (unix seconds): a catch-up can deliver a player's signals out of
+    /// order, so the latest `at` per player is their state.
+    XdcPresence { chat_id: String, topic: String, npub: String, online: bool, at: u64 },
 }
 
 /// Adapts a user `on_event` closure into an [`InboundEventHandler`], mapping every hook to a [`BotEvent`].
@@ -1939,7 +2022,25 @@ where
         if self.bot.try_command(&incoming) {
             return;
         }
+        #[cfg(feature = "xdc")]
+        self.bot.xdc_shared(chat_id, msg);
         self.emit(BotEvent::Message(incoming));
+    }
+
+    #[cfg_attr(not(feature = "xdc"), allow(unused_variables))]
+    fn xdc_presence(&self, chat_id: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        #[cfg(feature = "xdc")]
+        self.bot.xdc_signal(chat_id, npub, topic, node_addr, event_id, created_at);
+        // Same freshness rule as presence: a synced backlog of signals is history.
+        if vector_core::community::is_realtime_fresh(created_at.saturating_mul(1000)) {
+            self.emit(BotEvent::XdcPresence {
+                chat_id: chat_id.to_string(),
+                topic: topic.to_string(),
+                npub: npub.to_string(),
+                online: node_addr.is_some(),
+                at: created_at,
+            });
+        }
     }
 }
 
@@ -2022,6 +2123,12 @@ where
     }
     fn on_subscription_ready(&self, communities: usize) {
         self.emit(BotEvent::Ready { communities });
+    }
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.xdc_presence(contact, npub, topic, node_addr, event_id, created_at);
+    }
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.xdc_presence(chat_id, npub, topic, node_addr, event_id, created_at);
     }
 }
 

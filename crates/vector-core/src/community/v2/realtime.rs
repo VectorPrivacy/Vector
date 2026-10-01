@@ -322,7 +322,7 @@ pub fn invalidate_held_v2_cache() {
 /// So the post-sweep re-assert forgets the ids first: the next refresh cannot take
 /// the fast path and genuinely re-subscribes.
 pub async fn force_refresh_subscription(client: &Client) {
-    println!("[v2-sub] force re-assert begin");
+    crate::log_info!("[v2-sub] force re-assert begin");
     {
         let mut sub_guard = V2_SUB_ID.lock().await;
         if let Some(old) = sub_guard.take() {
@@ -370,7 +370,7 @@ pub async fn refresh_subscription(client: &Client) {
                 let up: Vec<String> = wanted.iter()
                     .filter(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false))
                     .map(|u| u.to_string()).collect();
-                println!("[v2-sub] connect-wait {:?}: {}/{} wanted relays up: {:?}", wait_t.elapsed(), up.len(), wanted.len(), up);
+                crate::log_info!("[v2-sub] connect-wait {:?}: {}/{} wanted relays up: {:?}", wait_t.elapsed(), up.len(), wanted.len(), up);
             }
             // Register every held plane's key BEFORE subscribing, so the responder
             // can answer any NIP-42 challenge our REQs trigger. Cheap + local.
@@ -439,7 +439,7 @@ pub async fn refresh_subscription(client: &Client) {
         }
         match client.subscribe(filter.clone()).await {
             Ok(out) => {
-                println!(
+                crate::log_info!(
                     "[v2-sub] poolwide {}: ok {:?} failed {:?}",
                     *out,
                     out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
@@ -447,7 +447,7 @@ pub async fn refresh_subscription(client: &Client) {
                 );
                 *pw = Some(out.value);
             }
-            Err(e) => println!("[v2-sub] poolwide subscribe FAILED: {e}"),
+            Err(e) => crate::log_warn!("[v2-sub] poolwide subscribe FAILED: {e}"),
         }
     }
     match client
@@ -457,7 +457,7 @@ pub async fn refresh_subscription(client: &Client) {
         .await
     {
         Ok(out) => {
-            println!(
+            crate::log_info!(
                 "[v2-sub] targeted {}: ok {:?} failed {:?}",
                 *out,
                 out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
@@ -465,7 +465,7 @@ pub async fn refresh_subscription(client: &Client) {
             );
             *sub_guard = Some(out.value);
         }
-        Err(e) => println!("[v2-sub] targeted subscribe FAILED: {e}"),
+        Err(e) => crate::log_warn!("[v2-sub] targeted subscribe FAILED: {e}"),
     }
     mark_subscription_ready();
     drop(set_guard);

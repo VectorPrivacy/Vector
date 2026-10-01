@@ -216,7 +216,7 @@ where
         return Ok(());
     }
 
-    println!("[DB] Migration {}: {}...", id, name);
+    crate::log_info!("[DB] Migration {}: {}...", id, name);
 
     // Start transaction - this is the atomicity boundary
     let tx = conn.transaction()
@@ -232,7 +232,7 @@ where
             tx.commit()
                 .map_err(|e| format!("[DB] Migration {}: Failed to commit: {}", id, e))?;
 
-            println!("[DB] Migration {} complete", id);
+            crate::log_info!("[DB] Migration {} complete", id);
             Ok(())
         }
         Err(e) => {
@@ -260,7 +260,7 @@ fn ensure_column_exists(
     ).map(|c| c > 0).unwrap_or(false);
 
     if !exists {
-        println!("[DB] Safety net: adding missing column {}.{}", table, column);
+        crate::log_warn!("[DB] Safety net: adding missing column {}.{}", table, column);
         conn.execute(
             &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type),
             [],

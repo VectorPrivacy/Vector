@@ -706,7 +706,6 @@ pub fn run() {
             // Realtime signaling commands (commands/realtime.rs)
             commands::realtime::notifs,
             commands::realtime::start_typing,
-            commands::realtime::send_webxdc_peer_advertisement,
             calls::commands::call_start,
             calls::commands::call_accept,
             calls::commands::call_reject,
@@ -789,8 +788,6 @@ pub fn run() {
             miniapps::commands::miniapp_join_realtime_channel,
             miniapps::commands::miniapp_leave_realtime_channel,
             miniapps::commands::miniapp_send_realtime_data,
-            miniapps::commands::miniapp_add_realtime_peer,
-            miniapps::commands::miniapp_get_realtime_node_addr,
             miniapps::commands::miniapp_get_realtime_status,
             // Mini Apps history commands
             miniapps::commands::miniapp_record_opened,

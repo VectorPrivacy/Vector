@@ -150,7 +150,7 @@ cc = "1"
 
 [dependencies]
 # Vector Core — the single source of truth for all Vector logic
-vector-core = { path = "../crates/vector-core", default-features = false, features = ["calls"] }
+vector-core = { path = "../crates/vector-core", default-features = false, features = ["calls", "xdc"] }
 
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.

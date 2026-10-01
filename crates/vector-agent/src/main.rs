@@ -3,14 +3,39 @@ mod tools;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::ServiceExt;
+#[cfg(not(unix))]
+use rmcp::transport::stdio;
 use vector_core::{VectorCore, CoreConfig};
 
 use handler::AgentEventHandler;
 use tools::VectorAgent;
 
+/// The MCP stream owns stdout: a stray `println!` anywhere in the process
+/// (a dependency's included) would corrupt it. File descriptor 1 is pointed at
+/// stderr, and the protocol gets the original stdout to itself.
+#[cfg(unix)]
+fn claim_stdout() -> std::io::Result<tokio::fs::File> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: plain descriptor calls on fds 1 and 2, before any other thread
+    // writes to them; the duplicate is owned by the returned File alone.
+    unsafe {
+        let mcp = libc::dup(libc::STDOUT_FILENO);
+        if mcp < 0 || libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(tokio::fs::File::from_std(std::fs::File::from_raw_fd(mcp)))
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    #[cfg(unix)]
+    let mcp_out = claim_stdout().unwrap_or_else(|e| {
+        eprintln!("Failed to take stdout for MCP: {}", e);
+        std::process::exit(1);
+    });
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -68,7 +93,11 @@ async fn main() {
     eprintln!("[vector-agent] MCP server ready (stdio)");
 
     let agent = VectorAgent::new(core, message_buffer);
-    let service = agent.serve(stdio()).await.unwrap_or_else(|e| {
+    #[cfg(unix)]
+    let transport = (tokio::io::stdin(), mcp_out);
+    #[cfg(not(unix))]
+    let transport = stdio();
+    let service = agent.serve(transport).await.unwrap_or_else(|e| {
         eprintln!("Failed to start MCP server: {}", e);
         std::process::exit(1);
     });

@@ -101,7 +101,7 @@ pub fn disable(
                 }
                 Err(_) => {
                     // Content looks encrypted (hex) but isn't — skip it
-                    println!("[Encryption] Skipping event {} - looks encrypted but isn't", id);
+                    crate::log_info!("[Encryption] Skipping event {} - looks encrypted but isn't", id);
                     skipped += 1;
                 }
             }
@@ -176,9 +176,9 @@ pub fn disable(
     set_encryption_enabled(false);
 
     if skipped > 0 {
-        println!("[Encryption] Skipped {} false-positive hex events", skipped);
+        crate::log_info!("[Encryption] Skipped {} false-positive hex events", skipped);
     }
-    println!("[Encryption] Disable complete: decrypted {} events", total - skipped);
+    crate::log_info!("[Encryption] Disable complete: decrypted {} events", total - skipped);
 
     Ok(())
 }
@@ -331,7 +331,7 @@ pub fn enable(
     // Update cached flag now that transaction committed successfully
     set_encryption_enabled(true);
 
-    println!("[Encryption] Enable complete: encrypted {} events", total);
+    crate::log_info!("[Encryption] Enable complete: encrypted {} events", total);
 
     Ok(())
 }
@@ -907,7 +907,7 @@ pub fn backfill_community_at_rest() -> Result<(), String> {
     )
     .map_err(|e| format!("backfill flag: {e}"))?;
     tx.commit().map_err(|e| format!("backfill commit: {e}"))?;
-    println!("[Encryption] Community at-rest backfill complete");
+    crate::log_info!("[Encryption] Community at-rest backfill complete");
     Ok(())
 }
 
@@ -967,7 +967,7 @@ fn verify_plaintext_state_in_tx(tx: &rusqlite::Transaction) -> Result<(), String
         ));
     }
 
-    println!("[Encryption] Verification passed: all data confirmed plaintext");
+    crate::log_info!("[Encryption] Verification passed: all data confirmed plaintext");
     Ok(())
 }
 
@@ -1034,7 +1034,7 @@ fn verify_encrypted_state_in_tx(
         }
     }
 
-    println!("[Encryption] Verification passed: all data confirmed encrypted and round-trips correctly");
+    crate::log_info!("[Encryption] Verification passed: all data confirmed encrypted and round-trips correctly");
     Ok(())
 }
 
@@ -1138,7 +1138,7 @@ pub fn rekey(
                 }
                 Err(_) => {
                     // Content looks encrypted but can't be decrypted — skip
-                    println!("[Rekey] Skipping event {} - decrypt failed", id);
+                    crate::log_warn!("[Rekey] Skipping event {} - decrypt failed", id);
                 }
             }
         }

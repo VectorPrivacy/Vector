@@ -91,6 +91,8 @@ pub mod badges;
 pub mod bot_interface;
 pub mod webxdc;
 pub mod webxdc_permissions;
+#[cfg(feature = "xdc")]
+pub mod xdc;
 #[cfg(feature = "tor")]
 pub mod tor;
 
@@ -436,7 +438,7 @@ pub use nip55::{
     VECTOR_NIP55_SIGN_KINDS, VECTOR_NIP55_ENCRYPT_TYPES,
 };
 pub use nip07::{Nip07Backend, Nip07Signer, set_nip07_backend, nip07_backend, nip07_get_public_key};
-pub use error::{VectorError, Result};
+pub use error::{DownloadError, VectorError, Result};
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
@@ -444,7 +446,7 @@ pub use deletion::{delete_own_dm, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
-pub use event_handler::{InboundEventHandler, NoOpEventHandler, PreparedEvent, process_event};
+pub use event_handler::{InboundEventHandler, LiveOnly, NoOpEventHandler, PreparedEvent, process_event};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -485,11 +487,20 @@ pub struct CoreConfig {
 #[derive(Clone, Copy)]
 pub struct VectorCore;
 
+/// Which live subscription an event came in on.
+enum LiveRoute {
+    Dm,
+    CommunityV1,
+    CommunityV2,
+}
+
 /// Who fetches what was published while a `listen` client was offline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatchUp {
-    /// `listen` folds state, back-fills every channel and syncs DMs before going
-    /// live, and again on each reconnect: a bot starts from a complete picture.
+    /// `listen` folds state, back-fills every channel and syncs DMs before its
+    /// Community subscriptions go live (DMs go live first, so nothing sent during
+    /// the sync is missed), and again on each reconnect: a bot starts from a
+    /// complete picture.
     Inline,
     /// `listen` goes live at once and leaves the gap to the caller, which pages
     /// it behind the live subscriptions (a UI that paints as history lands).
@@ -657,10 +668,24 @@ impl VectorCore {
         attachment: &Attachment,
         author_npub: Option<&str>,
     ) -> Result<Vec<u8>> {
+        self.download_attachment_within(attachment, author_npub, 256 * 1024 * 1024)
+            .await
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// [`download_attachment_from`](Self::download_attachment_from), refusing more
+    /// than `max_bytes` of ciphertext: the size an attachment declares is the
+    /// sender's word, so the cap holds on the bytes actually received.
+    pub async fn download_attachment_within(
+        &self,
+        attachment: &Attachment,
+        author_npub: Option<&str>,
+        max_bytes: usize,
+    ) -> std::result::Result<Vec<u8>, DownloadError> {
         use futures_util::StreamExt;
-        const MAX_DOWNLOAD: usize = 256 * 1024 * 1024;
+        let max_download = max_bytes;
         if attachment.url.is_empty() {
-            return Err(VectorError::Other("attachment has no URL".into()));
+            return Err(DownloadError::Unusable("attachment has no URL".into()));
         }
         // Bounded by progress, not by a deadline: any rate finishes, a stall fails over.
         let client = crate::net::build_http_client_with_options(
@@ -668,8 +693,10 @@ impl VectorCore {
             Some(crate::net::TRANSFER_STALL),
             true,
         )
-        .map_err(VectorError::Other)?;
+        .map_err(DownloadError::Unreachable)?;
         let mut last_err = String::from("download failed");
+        // Whether every source answered: only then is a failure the message's own.
+        let mut all_answered = true;
         let mut candidates: Vec<String> = vec![attachment.url.clone()];
         candidates.extend(attachment.fallback_urls.iter().cloned());
         let mut hash_swap_tried = false;
@@ -709,17 +736,20 @@ impl VectorCore {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = format!("download: {e}");
+                    all_answered = false;
                     next_source!();
                 }
             };
             if !resp.status().is_success() {
                 last_err = format!("download failed: HTTP {}", resp.status());
+                all_answered = false;
                 next_source!();
             }
             // Stream with a cap so a hostile/oversized blob can't OOM the process. The cap is
             // permanent — every mirror serves the same blob, so don't bother trying the next.
             let mut encrypted: Vec<u8> = Vec::with_capacity(
-                resp.content_length().map(|l| (l as usize).min(MAX_DOWNLOAD)).unwrap_or(64 * 1024),
+                // The declared length is the server's word: reserve no more than a few MiB on it.
+                resp.content_length().map(|l| usize::try_from(l).unwrap_or(usize::MAX).min(max_download).min(4 * 1024 * 1024)).unwrap_or(64 * 1024),
             );
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -727,11 +757,12 @@ impl VectorCore {
                     Ok(c) => c,
                     Err(e) => {
                         last_err = format!("read body: {e}");
+                        all_answered = false;
                         next_source!();
                     }
                 };
-                if encrypted.len() + chunk.len() > MAX_DOWNLOAD {
-                    return Err(VectorError::Other("attachment exceeds 256 MiB cap".into()));
+                if encrypted.len() + chunk.len() > max_download {
+                    return Err(DownloadError::TooLarge(max_download));
                 }
                 encrypted.extend_from_slice(&chunk);
             }
@@ -762,7 +793,7 @@ impl VectorCore {
             }
         }
         log_net_fail!("[Download] all {} source(s) failed for {}: {}", candidates.len(), attachment.url, last_err);
-        Err(VectorError::Other(last_err))
+        Err(if all_answered { DownloadError::Unusable(last_err) } else { DownloadError::Unreachable(last_err) })
     }
 
     /// Send a NIP-17 gift-wrapped file attachment DM.
@@ -2265,6 +2296,10 @@ impl VectorCore {
                 img_meta,
                 downloading: false,
                 downloaded: true,
+                // Mini Apps: one topic minted at send, so every member joins the same session.
+                webxdc_topic: extension
+                    .eq_ignore_ascii_case("xdc")
+                    .then(|| crate::webxdc::mint_topic_id(&file_hash, &author_pk.to_hex())),
                 ..Default::default()
             };
             let imeta = vec![attachments::attachment_to_imeta(&attachment)];
@@ -5421,23 +5456,68 @@ impl VectorCore {
         // won't re-challenge an authed connection; the v2 sub dies silently).
         community::v2::streamauth::ensure_responder(&client);
 
-        // Outage resilience — catch up on connect, then re-sync periodically.
-        //
-        // Catch up BEFORE going realtime so a bot that was offline folds any missed re-foundings /
-        // metadata / banlist changes (and recent messages) into local state, and subscribes at the
-        // CURRENT epoch pseudonyms. This is state-only: historical messages are not replayed to the
-        // handler (matches the gateway model) — query them via `get_messages`.
         // Spawn the single per-community follow worker for this session; the v2
         // follow queue (fed by dispatch, catch-up, and sync) drains through it.
         community::v2::realtime::spawn_follow_worker(handler.clone());
+
+        // DMs go live BEFORE the catch-up: the subscription only carries what is
+        // published after it starts, so a wrap sent mid-catch-up reaches us by one
+        // or the other. Wrapper dedup absorbs any it gets from both. The stream is
+        // read from here on, catch-up included, keeping only live subscriptions'
+        // events: the catch-up's own traffic shares the notification ring and
+        // would otherwise push them out of it.
+        let listening_since = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let notifications = client.notifications();
+        let dm_sub_id = self.subscribe_dms().await?;
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<(LiveRoute, Box<nostr_sdk::prelude::Event>)>(4096);
+        let dm_sid = dm_sub_id.clone();
+        db::spawn_bound(async move {
+            let mut notifications = notifications;
+            while let Some(notification) = notifications.next().await {
+                // Relay OKs feed the send pipeline: an OK that outlives the
+                // per-attempt wait still confirms delivery, and can rescue a
+                // message already marked Failed.
+                if let nostr_sdk::prelude::ClientNotification::Message { message, .. } = &notification {
+                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = &**message {
+                        sending::note_relay_ok(event_id, *status);
+                    }
+                }
+                let nostr_sdk::prelude::ClientNotification::Event { event, subscription_id, .. } = notification else { continue };
+                let route = if subscription_id == dm_sid {
+                    LiveRoute::Dm
+                } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
+                    || community::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
+                {
+                    // The pool-wide sub is the path that streams on Android.
+                    LiveRoute::CommunityV1
+                } else if community::v2::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
+                    || community::v2::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
+                {
+                    LiveRoute::CommunityV2
+                } else {
+                    continue;
+                };
+                if live_tx.send((route, event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Outage resilience — catch up on connect, then re-sync periodically.
+        //
+        // Communities catch up BEFORE their subscriptions so a bot that was offline folds any
+        // missed re-foundings / metadata / banlist changes (and recent messages) into local state,
+        // and subscribes at the CURRENT epoch pseudonyms. This is state-only: historical messages
+        // are not replayed to the handler (matches the gateway model) — query them via
+        // `get_messages`. Peer signals and messages sent since listening began are
+        // the exception (see `LiveOnly`).
         if catch_up == CatchUp::Inline {
             let _ = self.sync_communities().await;
-            let _ = self.sync_dms(None, &NoOpEventHandler).await;
+            let _ = self.sync_dms(None, &event_handler::LiveOnly::from(&*handler, listening_since)).await;
         }
 
-        // Subscribe to DMs (GiftWraps) AND Community channel events — one loop dispatches both
-        // through the same handler, so `on_dm_received`/`on_community_message` share a sink.
-        let dm_sub_id = self.subscribe_dms().await?;
+        // Community channel events share the DM loop below, so `on_dm_received` /
+        // `on_community_message` share a sink.
         community::realtime::refresh_subscription(&client).await;
         community::v2::realtime::refresh_subscription(&client).await;
 
@@ -5456,6 +5536,7 @@ impl VectorCore {
         // diff) and re-track the realtime sub at the current epochs. Idle when healthy. Stops on swap.
         if let Some(monitor) = client.monitor().filter(|_| catch_up == CatchUp::Inline) {
             let mut rx = monitor.subscribe();
+            let handler = handler.clone();
             db::spawn_bound(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
                 // whole pool — so coalesce Connected transitions within a short window into one resync.
@@ -5467,7 +5548,8 @@ impl VectorCore {
                             continue;
                         }
                         let _ = VectorCore.sync_communities().await;
-                        let _ = VectorCore.sync_dms(None, &NoOpEventHandler).await;
+                        let resync_from = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                        let _ = VectorCore.sync_dms(None, &event_handler::LiveOnly::from(&*handler, resync_from)).await;
                         if let Some(c) = state::nostr_client() {
                             community::realtime::refresh_subscription(&c).await;
                             community::v2::realtime::refresh_subscription(&c).await;
@@ -5518,41 +5600,19 @@ impl VectorCore {
 
         let client_for_closure = client.clone();
 
-        // 0.45 removed `handle_notifications`; drive the stream directly. It ends when
-        // the client shuts down, which is what stops this loop on `swap_session`.
-        let mut notifications = client.notifications();
-        while let Some(notification) = notifications.next().await {
-            let handler = handler.clone();
-            let c = client_for_closure.clone();
-            let dm_sid = dm_sub_id.clone();
-            {
-                // Relay OKs feed the send pipeline: an OK that outlives the
-                // per-attempt wait still confirms delivery, and can rescue a
-                // message already marked Failed.
-                if let nostr_sdk::prelude::ClientNotification::Message { message, .. } = &notification {
-                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = &**message {
-                        sending::note_relay_ok(event_id, *status);
-                    }
+        // The intake above ends when the client shuts down, which is what stops
+        // this loop on `swap_session`.
+        while let Some((route, event)) = live_rx.recv().await {
+            match route {
+                // DMs, files, reactions
+                LiveRoute::Dm => {
+                    let prepared = event_handler::prepare_event(*event, &client_for_closure, my_pk).await;
+                    event_handler::commit_prepared_event(prepared, true, &*handler).await;
                 }
-                if let nostr_sdk::prelude::ClientNotification::Event { event, subscription_id, .. } = notification {
-                    if subscription_id == dm_sid {
-                        // DMs, files, reactions
-                        let prepared = event_handler::prepare_event(*event, &c, my_pk).await;
-                        event_handler::commit_prepared_event(prepared, true, &*handler).await;
-                    } else if community::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
-                        || community::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
-                    {
-                        // Community (v1) channel messages / reactions / edits / control editions.
-                        // OR the pool-wide sub (the path that streams on Android) — else v1 events
-                        // arriving under it match no branch and are silently dropped.
-                        community::realtime::dispatch_event(*event, handler.clone()).await;
-                    } else if community::v2::realtime::subscription_id().await.as_ref() == Some(&subscription_id)
-                        || community::v2::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
-                    {
-                        // Concord v2 plane events (authors-addressed kind-1059/21059).
-                        community::v2::realtime::dispatch_event(*event, handler.clone()).await;
-                    }
-                }
+                // Community (v1) channel messages / reactions / edits / control editions.
+                LiveRoute::CommunityV1 => community::realtime::dispatch_event(*event, handler.clone()).await,
+                // Concord v2 plane events (authors-addressed kind-1059/21059).
+                LiveRoute::CommunityV2 => community::v2::realtime::dispatch_event(*event, handler.clone()).await,
             }
         }
 
@@ -5577,6 +5637,11 @@ impl VectorCore {
     pub async fn swap_session(&self) {
         // FIRST — invalidate every captured guard before any teardown begins.
         state::clear_message_tombstones();
+
+        // Mini App sessions end as the account that joined them, while its client
+        // and key still exist to announce the departure.
+        #[cfg(feature = "xdc")]
+        crate::xdc::session::leave_all(std::time::Duration::from_secs(4)).await;
 
         // Shut the client down before anything else: this detaches relay subscriptions and ends the
         // prior `listen()` loop, so it stops firing the old account's events into the new session.

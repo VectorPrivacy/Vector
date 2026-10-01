@@ -53,7 +53,7 @@ impl CacheStats {
 
     /// Print current stats
     pub fn log(&self) {
-        println!(
+        crate::log_info!(
             "[CacheStats] chats={} messages={} memory={} last_insert={:?} avg_insert={}ns inserts={}",
             self.chat_count,
             self.message_count,

@@ -57,6 +57,27 @@ pub fn derive_url_topic_id(url: &str, msg_id: &str) -> String {
     base32_nopad_encode(&hasher.finalize())
 }
 
+/// BASE32 no-pad decoding (RFC 4648), the inverse of [`base32_nopad_encode`].
+pub fn base32_nopad_decode(encoded: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(encoded.len() * 5 / 8);
+    let (mut buf, mut bits) = (0u64, 0u32);
+    for &c in encoded {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a',
+            b'2'..=b'7' => c - b'2' + 26,
+            _ => return Err(format!("invalid base32 character {:?}", c as char)),
+        };
+        buf = (buf << 5) | v as u64;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 /// BASE32 no-pad encoding (RFC 4648). Mirrors the miniapp realtime layer's
 /// codec exactly — the two must agree for topic tags to decode.
 pub fn base32_nopad_encode(bytes: &[u8]) -> String {

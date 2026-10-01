@@ -28,7 +28,6 @@ use wasm_bindgen::prelude::*;
 use web_time::Instant;
 
 use crate::commands::{to_value, Args};
-use crate::miniapps::realtime;
 
 /// Datagram flags, as desktop's engine sets them.
 const FLAG_MUTED: u16 = 1;
@@ -41,15 +40,15 @@ pub struct WebCalls;
 #[async_trait::async_trait(?Send)]
 impl CallPlatform for WebCalls {
     async fn endpoint(&self) -> Result<Endpoint, String> {
-        Ok(realtime::iroh().await?.endpoint().clone())
+        Ok(vector_core::xdc::mesh::mesh().await?.endpoint().clone())
     }
 
     async fn local_addr(&self) -> Result<String, String> {
-        realtime::encode_node_addr(&realtime::iroh().await?.node_addr())
+        vector_core::xdc::wire::encode_node_addr(&vector_core::xdc::mesh::mesh().await?.node_addr())
     }
 
     fn decode_addr(&self, addr: &str) -> Option<EndpointAddr> {
-        realtime::decode_node_addr(addr).ok()
+        vector_core::xdc::wire::decode_node_addr(addr).ok().map(vector_core::xdc::wire::dialable)
     }
 
     async fn start_audio(&self, conn: Connection, start: AudioStart) -> Result<Box<dyn CallAudio>, String> {

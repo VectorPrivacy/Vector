@@ -110,6 +110,26 @@ pub fn get_attachments_for_event(event_id: &str) -> Result<Vec<Attachment>, Stri
     Ok(map.into_values().next().unwrap_or_default())
 }
 
+/// The Mini App message carrying `topic` in one chat: `(event id, attachment)`.
+/// Scoped to the chat because a topic is only a session id there; anyone can
+/// paste the same topic onto an app sent from elsewhere.
+pub fn find_by_webxdc_topic_in(chat_identifier: &str, topic: &str) -> Result<Option<(String, Attachment)>, String> {
+    let Ok(chat) = super::id_cache::get_chat_id_by_identifier(chat_identifier) else { return Ok(None) };
+    let conn = super::get_db_connection_guard_static()?;
+    let cols = SELECT_COLS.split(", ").map(|c| format!("a.{}", c.trim())).collect::<Vec<_>>().join(", ");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {cols} FROM attachments a JOIN events e ON e.id = a.event_id \
+             WHERE a.webxdc_topic = ?1 AND e.chat_id = ?2 ORDER BY e.created_at ASC LIMIT 1"
+        ))
+        .map_err(|e| format!("prepare topic lookup: {e}"))?;
+    let mut rows = stmt.query(rusqlite::params![topic, chat]).map_err(|e| format!("topic lookup: {e}"))?;
+    match rows.next().map_err(|e| format!("topic lookup: {e}"))? {
+        Some(row) => row_to_attachment(row).map(Some).map_err(|e| format!("topic row: {e}")),
+        None => Ok(None),
+    }
+}
+
 /// The message carrying an attachment with this content hash, newest first.
 ///
 /// One blob can ride many messages (a forward, a re-post, forty accounts in a
@@ -463,6 +483,31 @@ mod tests {
             ..Default::default()
         };
         crate::db::events::save_message(chat, &msg).await.unwrap();
+    }
+
+    /// A realtime topic resolves to the one Mini App message that carries it,
+    /// and to the chat it was shared in: a session is only that chat's.
+    #[tokio::test]
+    async fn a_topic_resolves_to_its_app_message_only_within_its_chat() {
+        let (_tmp, _guard) = init_test_db();
+        let mut game = att("HG", "https://b.example/g", true, true);
+        game.extension = "xdc".into();
+        game.webxdc_topic = Some("TOPICA".into());
+        save("npub1chatq", "evt_game", false, game).await;
+        save("npub1chatq", "evt_photo", false, att("HP", "https://b.example/p", true, true)).await;
+
+        let (event_id, found) = find_by_webxdc_topic_in("npub1chatq", "TOPICA").unwrap().expect("the topic's message");
+        assert_eq!(event_id, "evt_game");
+        assert_eq!(found.id, "HG");
+        assert!(find_by_webxdc_topic_in("npub1chatq", "TOPICB").unwrap().is_none());
+        // The same topic pasted onto an app in another chat is not this session.
+        let mut copy = att("HG", "https://b.example/g2", true, true);
+        copy.extension = "xdc".into();
+        copy.webxdc_topic = Some("TOPICA".into());
+        save("npub1stranger", "evt_copy", false, copy).await;
+        assert_eq!(find_by_webxdc_topic_in("npub1chatq", "TOPICA").unwrap().unwrap().0, "evt_game");
+        assert_eq!(find_by_webxdc_topic_in("npub1stranger", "TOPICA").unwrap().unwrap().0, "evt_copy");
+        assert!(find_by_webxdc_topic_in("npub1nobody", "TOPICA").unwrap().is_none());
     }
 
     /// The smart-forward ledger: a verified prior send/download of the same

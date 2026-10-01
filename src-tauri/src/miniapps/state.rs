@@ -311,6 +311,9 @@ pub struct RealtimeChannelState {
     pub topic: TopicId,
     /// Whether the channel is active
     pub active: bool,
+    /// The window instance it belongs to: a teardown racing a reopen of the
+    /// same label must not remove its successor's channel.
+    pub instance_id: u64,
 }
 
 /// Global state for managing Mini App instances
@@ -321,13 +324,10 @@ pub struct MiniAppsState {
     awake: std::sync::Mutex<Option<crate::awake::Hold>>,
     /// Cache of loaded packages (id -> package)
     packages: RwLock<HashMap<String, Arc<MiniAppPackage>>>,
-    /// Realtime channel manager (Iroh P2P)
+    /// Mini App windows' realtime sessions (vector-core's, over Iroh)
     pub realtime: RealtimeManager,
     /// Map of window_label -> realtime channel state
     pub realtime_channels: RwLock<HashMap<String, RealtimeChannelState>>,
-    /// Cached peer addresses for QUIC connection on join (topic -> addrs).
-    /// Populated from peer advertisements, consumed on join.
-    peer_addrs: RwLock<HashMap<TopicId, Vec<iroh::EndpointAddr>>>,
     /// Known session participants (topic -> list of npubs).
     /// Single source of truth for lobby state and avatar display.
     session_peers: RwLock<HashMap<TopicId, Vec<String>>>,
@@ -358,22 +358,23 @@ impl MiniAppsState {
             instances: RwLock::new(HashMap::new()),
             awake: std::sync::Mutex::new(None),
             packages: RwLock::new(HashMap::new()),
-            realtime: RealtimeManager::new(None),
+            realtime: RealtimeManager::new(),
             realtime_channels: RwLock::new(HashMap::new()),
-            peer_addrs: RwLock::new(HashMap::new()),
             session_peers: RwLock::new(HashMap::new()),
             opening: Arc::new(std::sync::Mutex::new(HashSet::new())),
             preconnect_signals: RwLock::new(HashMap::new()),
         }
     }
     
-    /// Drop the account-scoped realtime lobby state (session npubs + cached peer addrs).
-    /// Called from the session-swap teardown — the maps are keyed by game topic and hold
-    /// the OLD account's players/addresses. Instances/channels are left to their own
-    /// window lifecycle; their send paths resolve the account they were opened under.
+    /// Drop the account-scoped realtime lobby state (session npubs, keyed by game
+    /// topic). Called from the session-swap teardown, after the windows close.
     pub async fn clear_account_scoped(&self) {
         self.session_peers.write().await.clear();
-        self.peer_addrs.write().await.clear();
+    }
+
+    /// Every open Mini App window's label and instance.
+    pub async fn open_instances(&self) -> Vec<(String, u64)> {
+        self.instances.read().await.iter().map(|(label, i)| (label.clone(), i.instance_id)).collect()
     }
 
     /// Get or set the realtime channel for an instance
@@ -382,41 +383,21 @@ impl MiniAppsState {
         channels.insert(window_label.to_string(), state);
     }
     
-    /// Get the realtime channel state for an instance
-    pub async fn get_realtime_channel(&self, window_label: &str) -> Option<TopicId> {
-        let channels = self.realtime_channels.read().await;
-        channels.get(window_label).map(|s| s.topic)
-    }
-    
-    /// Remove the realtime channel for an instance
-    pub async fn remove_realtime_channel(&self, window_label: &str) -> Option<RealtimeChannelState> {
+    /// Remove the realtime channel only if it still belongs to `instance_id`.
+    pub async fn remove_realtime_channel_if(&self, window_label: &str, instance_id: u64) -> Option<RealtimeChannelState> {
         let mut channels = self.realtime_channels.write().await;
-        channels.remove(window_label)
+        match channels.get(window_label) {
+            Some(c) if c.instance_id == instance_id => channels.remove(window_label),
+            _ => None,
+        }
     }
     
-    /// Check if an instance has an active realtime channel
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    pub async fn has_realtime_channel(&self, window_label: &str) -> bool {
-        let channels = self.realtime_channels.read().await;
-        channels.get(window_label).map(|s| s.active).unwrap_or(false)
-    }
-
     /// Check if ANY instance has an active realtime channel for a given topic
     pub async fn has_realtime_channel_for_topic(&self, topic: &TopicId) -> bool {
         let channels = self.realtime_channels.read().await;
         channels.values().any(|s| s.active && &s.topic == topic)
     }
 
-    /// Get the chat_id for an instance that has a realtime channel with the given topic
-    pub async fn get_chat_id_for_topic(&self, topic: &TopicId) -> Option<String> {
-        let channels = self.realtime_channels.read().await;
-        let label = channels.iter()
-            .find(|(_, s)| s.active && &s.topic == topic)
-            .map(|(label, _)| label.clone())?;
-        drop(channels);
-        self.get_instance(&label).await.map(|i| i.chat_id.clone())
-    }
-    
     // ─── Preconnect signals ───────────────────────────────────────────────
 
     /// Store a preconnect completion signal for a window label
@@ -427,23 +408,6 @@ impl MiniAppsState {
     /// Take the preconnect signal for a window label (consumed by joinRealtimeChannel)
     pub async fn take_preconnect_signal(&self, label: &str) -> Option<tokio::sync::watch::Receiver<bool>> {
         self.preconnect_signals.write().await.remove(label)
-    }
-
-    // ─── Peer address cache (for QUIC connection on join) ──────────────────
-
-    /// Cache a peer's address for a topic (from a peer advertisement)
-    pub async fn cache_peer_addr(&self, topic: TopicId, addr: iroh::EndpointAddr) {
-        let mut addrs = self.peer_addrs.write().await;
-        let list = addrs.entry(topic).or_default();
-        if !list.iter().any(|a| a.id == addr.id) {
-            list.push(addr);
-        }
-    }
-
-    /// Take all cached peer addresses for a topic (consumed on join)
-    pub async fn take_peer_addrs(&self, topic: &TopicId) -> Vec<iroh::EndpointAddr> {
-        let mut addrs = self.peer_addrs.write().await;
-        addrs.remove(topic).unwrap_or_default()
     }
 
     // ─── Session peers (persistent participant tracking) ───────────────────
@@ -503,18 +467,6 @@ impl MiniAppsState {
         } else {
             None
         };
-        if instances.is_empty() {
-            self.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
-        }
-        removed
-    }
-
-    pub async fn remove_instance(&self, window_label: &str) -> Option<MiniAppInstance> {
-        // Clean up realtime channel state first
-        self.remove_realtime_channel(window_label).await;
-
-        let mut instances = self.instances.write().await;
-        let removed = instances.remove(window_label);
         if instances.is_empty() {
             self.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
         }

@@ -1,0 +1,5 @@
+name = "Oracle"
+id = "vector-oracle"
+description = "Ask the bot that sent this. Everyone in the chat sees the answers stream in."
+version = "1.0.0"
+icon = "icon.svg"

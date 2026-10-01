@@ -9,7 +9,6 @@ use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
 use std::io::Read;
 use tauri::{Emitter, Manager};
-use nostr_sdk::prelude::ToBech32;
 use crate::util::bytes_to_hex_string;
 use crate::TAURI_APP;
 
@@ -128,84 +127,14 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
 
         log_info!("Mini App closed (JNI callback): {}", miniapp_id);
 
-        // Full teardown: destroy Iroh entirely so next session gets a fresh start.
-        // The old approach (leave_channel) left stale gossip state that broke session 2.
         if let Some(app) = TAURI_APP.get() {
             let app = app.clone();
-            let miniapp_id_owned = miniapp_id.clone();
-            // chat_id belongs to the account current NOW — bail in the task if it swaps.
-            let session = vector_core::db::current_session();
+            // Read now: a reopen of the same label registers a new instance, and only this one ends.
+            let state = app.state::<crate::miniapps::state::MiniAppsState>();
+            let Some(instance) = tauri::async_runtime::block_on(state.get_instance(&miniapp_id)) else { return };
             tauri::async_runtime::spawn(async move {
-                let state = app.state::<crate::miniapps::state::MiniAppsState>();
-
-                // Snapshot what THIS teardown owns, FIRST: a rapid reopen of the same
-                // label re-registers a NEW instance and may create a NEW Iroh while
-                // this task is still mid-shutdown (it can sit 5s in shutdown alone).
-                // Every destructive step below is gated on these snapshots so a stale
-                // teardown can't delete the successor session out from under itself.
-                let closing_instance = state.get_instance(&miniapp_id_owned).await;
-                let iroh_at_close = state.realtime.try_get().await;
-
-                // Grab channel info before teardown (for peer-left signal + status update)
-                let channel_state = state.remove_realtime_channel(&miniapp_id_owned).await;
-
-                if let Some(channel) = channel_state {
-                    let topic_encoded = crate::miniapps::realtime::encode_topic_id(&channel.topic);
-
-                    // Remove ourselves from session peers
-                    if let Some(my_pk) = crate::my_public_key() {
-                        let my_npub = my_pk.to_bech32().unwrap();
-                        state.remove_session_peer(&channel.topic, &my_npub).await;
-                    }
-
-                    // Emit status update
-                    let session_peers = state.get_session_peers(&channel.topic).await;
-                    let session_count = session_peers.len();
-                    if let Some(main_window) = app.get_webview_window("main") {
-                        let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                            "topic": topic_encoded,
-                            "peer_count": session_count,
-                            "peers": session_peers,
-                            "is_active": false,
-                            "has_pending_peers": session_count > 0,
-                        }));
-                    }
-
-                    // Send peer-left signal (from the CLOSING instance's chat — the live
-                    // lookup could return a reopened successor's instance instead)
-                    if let Some(ref instance) = closing_instance {
-                        let chat_id = instance.chat_id.clone();
-                        let topic_for_left = topic_encoded.clone();
-                        if session.is_live() {
-                            vector_core::db::spawn_bound(async move {
-                                if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
-                                    log_warn!("[WEBXDC] Failed to send peer-left signal");
-                                }
-                            });
-                        }
-                    }
-                }
-
-                // Shut down the Iroh instance THIS close owns (closes QUIC connections,
-                // leaves gossip topics, stops the actor) — but never a successor's
-                // freshly-created one. Next miniapp_open creates a fresh instance.
-                if let Some(expected) = iroh_at_close {
-                    match tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        state.realtime.shutdown_iroh_if_current(&expected),
-                    ).await {
-                        Ok(true) => log_info!("[WEBXDC] Iroh fully shut down on Mini App close"),
-                        Ok(false) => log_info!("[WEBXDC] Iroh already replaced by a newer session — leaving it running"),
-                        Err(_) => log_warn!("[WEBXDC] Iroh shutdown timed out (5s) — forcing drop"),
-                    }
-                }
-
-                // Remove the instance — ONLY if it's still the one this close was for.
-                if let Some(instance) = closing_instance {
-                    state.remove_instance_if(&miniapp_id_owned, instance.instance_id).await;
-                }
-
-                log_info!("[WEBXDC] Mini App cleanup complete: {}", miniapp_id_owned);
+                crate::miniapps::commands::teardown_window(&app, &miniapp_id, instance.instance_id).await;
+                log_info!("[WEBXDC] Mini App cleanup complete: {}", miniapp_id);
             });
         }
 })
@@ -399,222 +328,39 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
             }
         };
 
-        // JNI runs on Android main thread, outside tokio. Use a lightweight
-        // single-threaded runtime for synchronous state reads.
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                log_error!("[{}] Failed to create tokio runtime: {:?}", miniapp_id, e);
-                return std::ptr::null_mut();
-            }
-        };
-
         let state = app.state::<crate::miniapps::state::MiniAppsState>();
-
-        // Read instance, derive topic, set channel state, and eagerly init Iroh + WS server
-        // synchronously. Setting channel state before async join prevents races.
-        // Iroh init here ensures the WS URL is available for the return value.
-        let setup = rt.block_on(async {
-            let instance = state.get_instance(&miniapp_id).await
-                .ok_or("Instance not found")?;
-
-            let topic = if let Some(t) = instance.realtime_topic {
-                t
-            } else {
-                crate::miniapps::realtime::derive_topic_id(
-                    &instance.package.manifest.name,
-                    &instance.chat_id,
-                    &instance.message_id,
-                )
-            };
-
-            let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
-
-            // NOTE: even when the channel is already active (preconnect won the race and
-            // created it with NO event target — inbound data is buffering), we MUST proceed:
-            // iroh's join_channel rejoin branch attaches this call's event target + flushes
-            // the buffered backlog, and the delivery loop below pumps it to the WebView.
-            // The old "already active → return early" shortcut left the target unset, so
-            // Android SENT fine but NEVER RECEIVED whenever preconnect finished first —
-            // the long-standing "twitchy on Android" coin flip.
-            if state.has_realtime_channel(&miniapp_id).await {
-                log_info!("[WEBXDC] Android: Realtime channel already active for {} — attaching event target", miniapp_id);
-            }
-
-            // Set channel state immediately (idempotent re-set on the already-active path)
-            state.set_realtime_channel(&miniapp_id, crate::miniapps::state::RealtimeChannelState {
-                topic,
-                active: true,
-            }).await;
-
-            // NOTE: Do NOT call get_or_init() here! This block runs on a temporary
-            // single-threaded tokio runtime (rt) that is dropped after block_on().
-            // Any tasks spawned by Endpoint::bind() would be killed when rt is dropped.
-            // Iroh init happens in the tauri::async_runtime::spawn block below instead.
-            //
-            // BUT: start the WS server eagerly (sync bind + spawn on main runtime).
-            // This ensures ws_url is available BEFORE returning to JS.
-            state.realtime.ensure_ws_started();
-            let ws_url = state.realtime.ws_url_for(&miniapp_id);
-
-            Ok::<_, String>((Some(instance), topic, topic_encoded, ws_url))
-        });
-        drop(rt);
-
-        let (instance_opt, topic, topic_encoded, ws_url) = match setup {
-            Ok(r) => r,
-            Err(e) => {
-                log_error!("[{}] joinRealtimeChannel setup failed: {}", miniapp_id, e);
+        let instance = match tauri::async_runtime::block_on(state.get_instance(&miniapp_id)) {
+            Some(i) => i,
+            None => {
+                log_error!("[{}] joinRealtimeChannel: instance not found", miniapp_id);
                 return std::ptr::null_mut();
             }
         };
+        let topic = instance.realtime_topic.unwrap_or_else(|| {
+            crate::miniapps::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
+        });
+        let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
 
-        // If already active, return existing result without spawning new tasks
-        let instance = match instance_opt {
-            Some(inst) => inst,
-            None => {
-                let result = serde_json::json!({ "topic": topic_encoded, "ws_url": ws_url, "label": miniapp_id });
-                return match env.new_string(&result.to_string()) {
-                    Ok(s) => s.into_raw(),
-                    Err(_) => std::ptr::null_mut(),
-                };
-            }
-        };
+        // The socket binds synchronously so its URL can go back with this call.
+        state.realtime.ensure_ws_started();
+        let ws_url = state.realtime.ws_url_for(&miniapp_id);
 
-        log_info!("[{}] Joining realtime channel with topic: {}", miniapp_id, topic_encoded);
-
-        // Create bounded mpsc channel for event delivery to Android WebView
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::miniapps::realtime::RealtimeEvent>(256);
-
-        // Spawn the async join work on the Tauri runtime
         let app_for_join = app.clone();
-        let miniapp_id_for_join = miniapp_id.clone();
-        let topic_encoded_for_join = topic_encoded.clone();
+        let label = miniapp_id.clone();
+        // The node's tasks must live on the app runtime: JNI threads have none of their own.
         tauri::async_runtime::spawn(async move {
             let state = app_for_join.state::<crate::miniapps::state::MiniAppsState>();
-
-            // Wait for preconnect to finish (if it ran for this Mini App)
-            if let Some(mut rx) = state.take_preconnect_signal(&miniapp_id_for_join).await {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    rx.wait_for(|ready| *ready),
-                ).await;
+            if let Some(mut ready) = state.take_preconnect_signal(&label).await {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ready.wait_for(|r| *r)).await;
             }
-
-            // The user can close the overlay while this join is still in flight; the
-            // close teardown removes the channel state. A dead game must not proceed —
-            // get_or_init below would RESURRECT Iroh and advertise a ghost player.
-            if !state.has_realtime_channel(&miniapp_id_for_join).await {
-                log_info!("[WEBXDC] Android: game closed before join completed — aborting join for {}", miniapp_id_for_join);
-                return;
-            }
-
-            // Initialize Iroh (instant if preconnect already ran)
-            let iroh = match state.realtime.get_or_init().await {
-                Ok(iroh) => iroh,
-                Err(e) => {
-                    log_error!("[WEBXDC] Android: Failed to initialize Iroh: {}", e);
-                    // Clean up the channel state we set synchronously
-                    state.remove_realtime_channel(&miniapp_id_for_join).await;
-                    return;
-                }
-            };
-
-            // Join the channel with mpsc event target
-            let event_target = crate::miniapps::realtime::EventTarget::MpscSender(tx);
-            let ws_targets = Some(state.realtime.ws_senders.clone());
-            let is_rejoin = match iroh.join_channel(topic, vec![], Some(event_target), Some(app_for_join.clone()), miniapp_id_for_join.clone(), ws_targets).await {
-                Ok((rejoin, _)) => {
-                    if rejoin {
-                        log_info!("[WEBXDC] Android: Re-joined existing channel for topic: {}", topic_encoded_for_join);
-                    } else {
-                        log_info!("[WEBXDC] Android: Joined new channel for topic: {}", topic_encoded_for_join);
-                    }
-                    rejoin
-                }
-                Err(e) => {
-                    log_error!("[WEBXDC] Android: Failed to join channel: {}", e);
-                    state.remove_realtime_channel(&miniapp_id_for_join).await;
-                    return;
-                }
-            };
-
-            // Only connect peers + send advertisement if preconnect didn't
-            if !is_rejoin {
-                let cached_addrs = state.take_peer_addrs(&topic).await;
-                if !cached_addrs.is_empty() {
-                    log_info!("[WEBXDC] Android: Connecting to {} cached peers", cached_addrs.len());
-                    for addr in cached_addrs {
-                        let peer_id = addr.id;
-                        if let Err(e) = iroh.add_peer(topic, addr).await {
-                            log_warn!("[WEBXDC] Android: Failed to connect to cached peer {}: {}", peer_id, e);
-                        }
-                    }
-                }
-            }
-
-            // Get node address and send peer advertisements
-            if !is_rejoin {
-                let node_addr = iroh.get_node_addr();
-                match crate::miniapps::realtime::encode_node_addr(&node_addr) {
-                    Ok(node_addr_encoded) => {
-                        let chat_id = instance.chat_id.clone();
-                        let topic_for_ad = topic_encoded_for_join.clone();
-                        let addr_for_ad = node_addr_encoded.clone();
-
-                        // Send initial advertisement
-                        let chat_id_1 = chat_id.clone();
-                        let topic_1 = topic_for_ad.clone();
-                        let addr_1 = addr_for_ad.clone();
-                        vector_core::db::spawn_bound(async move {
-                            crate::commands::realtime::send_webxdc_peer_advertisement(
-                                chat_id_1, topic_1, addr_1,
-                            ).await;
-                        });
-
-                        // Send delayed advertisement
-                        let chat_id_2 = chat_id;
-                        let topic_2 = topic_for_ad;
-                        let addr_2 = addr_for_ad;
-                        vector_core::db::spawn_bound(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                            crate::commands::realtime::send_webxdc_peer_advertisement(
-                                chat_id_2, topic_2, addr_2,
-                            ).await;
-                        });
-                    }
-                    Err(e) => {
-                        log_warn!("[WEBXDC] Android: Failed to encode node addr: {}", e);
-                    }
-                }
-            } // if !is_rejoin (advertisement)
-
-            // Add ourselves to session peers
-            if let Some(my_pk) = crate::my_public_key() {
-                let my_npub = my_pk.to_bech32().unwrap();
-                state.add_session_peer(topic, my_npub).await;
-            }
-
-            // Emit status event — session_peers is the single source of truth
-            if let Some(main_window) = app_for_join.get_webview_window("main") {
-                let session_peers = state.get_session_peers(&topic).await;
-                let peer_count = session_peers.len();
-                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                    "topic": topic_encoded_for_join,
-                    "peer_count": peer_count,
-                    "peers": session_peers,
-                    "is_active": true,
-                }));
+            let target = crate::miniapps::realtime::EventTarget::MpscSender(tx);
+            if let Err(e) = crate::miniapps::commands::start_realtime(&app_for_join, &instance, Some(target)).await {
+                log_warn!("[WEBXDC] Android: realtime join for {} failed: {}", label, e);
             }
         });
-
-        // Spawn the delivery task that forwards events to Android WebView via JNI
         tauri::async_runtime::spawn(android_realtime_delivery_loop(rx));
 
-        // Return JSON with topic + WS URL + label to Kotlin/JS
         let result = serde_json::json!({ "topic": topic_encoded, "ws_url": ws_url, "label": miniapp_id });
         match env.new_string(&result.to_string()) {
             Ok(s) => s.into_raw(),
@@ -649,22 +395,9 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_leaveRealtimeChannelNativ
             }
         };
 
-        let miniapp_id_owned = miniapp_id;
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
-
-            // Remove and leave the realtime channel. try_get, NOT get_or_init: this
-            // races the overlay-close full shutdown, and the loser must not resurrect
-            // a fresh endpoint just to leave a topic it doesn't hold.
-            if let Some(channel_state) = state.remove_realtime_channel(&miniapp_id_owned).await {
-                if let Some(iroh) = state.realtime.try_get().await {
-                    if let Err(e) = iroh.leave_channel(channel_state.topic, &miniapp_id_owned).await {
-                        log_warn!("[WEBXDC] Android leaveRealtimeChannel: {} (already gone — ignoring)", e);
-                    } else {
-                        log_info!("[WEBXDC] Android: Left realtime channel for {}", miniapp_id_owned);
-                    }
-                }
-            }
+            state.realtime.detach(&miniapp_id).await;
         });
 })
 }
@@ -716,28 +449,10 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_sendRealtimeDataNative(
             }
         };
 
-        let data = bytes;
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
-
-            let topic = match state.get_realtime_channel(&miniapp_id).await {
-                Some(t) => t,
-                None => {
-                    log_warn!("[WEBXDC] Android sendRealtimeData: no active channel for {}", miniapp_id);
-                    return;
-                }
-            };
-
-            let iroh = match state.realtime.get_or_init().await {
-                Ok(iroh) => iroh,
-                Err(e) => {
-                    log_error!("[WEBXDC] Android sendRealtimeData: failed to get Iroh: {}", e);
-                    return;
-                }
-            };
-
-            if let Err(e) = iroh.send_data(topic, data).await {
-                log_error!("[WEBXDC] Android sendRealtimeData: failed to send: {}", e);
+            if let Err(e) = state.realtime.send(&miniapp_id, bytes).await {
+                log_warn!("[WEBXDC] Android sendRealtimeData for {}: {}", miniapp_id, e);
             }
         });
 })
@@ -1208,8 +923,8 @@ fn create_web_resource_response(
 
 /// Background task that reads RealtimeEvents from the bounded mpsc channel
 /// and delivers Data events to the Android WebView via JNI.
-/// Status events (Connected, PeerJoined, PeerLeft) are already handled
-/// by emit_realtime_status() in the subscribe loop.
+/// Status events (Connected, PeerJoined, PeerLeft) stay in Rust: the main
+/// window's lobby shows presence.
 ///
 /// Resilience: JNI panics are caught so a single bad delivery can't kill the
 /// loop. Consecutive failures trigger exponential backoff (100ms → 200ms → …
@@ -1251,7 +966,7 @@ async fn android_realtime_delivery_loop(
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
         }
-        // Connected, PeerJoined, PeerLeft are handled by emit_realtime_status
+        // Connected, PeerJoined, PeerLeft: the main window's lobby shows presence
     }
     log_info!("[WEBXDC] Android realtime delivery loop ended (channel closed)");
 }

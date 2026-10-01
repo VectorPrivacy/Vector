@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tic-Tac-Toe</title>
+<style>
+  :root { --bg: #12141c; --cell: #1d2130; --ink: #eef0f8; --dim: #8b91aa; --x: #59fcb3; --o: #ff8fa3; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+  #board { display: grid; grid-template-columns: repeat(3, 84px); gap: 8px; }
+  #board button { width: 84px; height: 84px; border: 0; border-radius: 12px; background: var(--cell);
+    font-size: 44px; font-weight: 700; cursor: pointer; }
+  #board button.X { color: var(--x); }
+  #board button.O { color: var(--o); }
+  #status { color: var(--dim); min-height: 1.4em; }
+  #again { border: 0; border-radius: 10px; padding: 10px 18px; background: var(--cell); color: var(--ink);
+    font: inherit; cursor: pointer; visibility: hidden; }
+</style>
+</head>
+<body>
+<main>
+  <div id="board"></div>
+  <p id="status">Waiting for the bot…</p>
+  <button id="again">New game</button>
+</main>
+<script>
+// The bot is the referee and plays O. The first person to move plays X; everyone
+// else in the chat watches. This page draws what the bot says and sends moves.
+const me = window.webxdc.selfAddr;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const channel = window.webxdc.joinRealtimeChannel();
+const send = (msg) => channel.send(enc.encode(JSON.stringify(msg)));
+
+const cells = [];
+for (let i = 0; i < 9; i++) {
+  const cell = document.createElement('button');
+  cell.onclick = () => send({ t: 'move', cell: i });
+  document.getElementById('board').append(cell);
+  cells.push(cell);
+}
+document.getElementById('again').onclick = () => send({ t: 'new' });
+
+// state: { board: "X.O......", turn: "X" | "O", winner: null | "X" | "O" | "draw", x: npub | null }
+function show(state) {
+  state.board.split('').forEach((mark, i) => {
+    cells[i].textContent = mark === '.' ? '' : mark;
+    cells[i].className = mark;
+  });
+  const mine = state.x === null || state.x === me;
+  let text;
+  if (state.winner === 'draw') text = 'A draw';
+  else if (state.winner === 'X') text = mine ? 'You win!' : 'X wins';
+  else if (state.winner === 'O') text = 'The bot wins';
+  else if (state.turn === 'O') text = 'The bot is thinking…';
+  else text = mine ? 'Your move' : 'Watching someone play';
+  document.getElementById('status').textContent = text;
+  document.getElementById('again').style.visibility = state.winner ? 'visible' : 'hidden';
+}
+
+channel.setListener((bytes) => {
+  const msg = JSON.parse(dec.decode(bytes));
+  if (msg.t === 'state') show(msg);
+});
+
+send({ t: 'hello' });
+</script>
+</body>
+</html>

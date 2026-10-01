@@ -15,6 +15,20 @@ pub mod time {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 
+/// Whether work can be spawned from here: natively only inside a tokio
+/// runtime (a drop off-runtime, or during shutdown, has none); always in the
+/// browser, whose event loop is the runtime.
+pub fn can_spawn() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::runtime::Handle::try_current().is_ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use futures_util::future::{AbortHandle, Abortable};

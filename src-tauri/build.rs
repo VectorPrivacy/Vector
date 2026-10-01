@@ -100,7 +100,6 @@ fn main() {
             "get_media_servers",
             "monitor_relay_connections",
             "start_typing",
-            "send_webxdc_peer_advertisement",
             "connect",
             "encrypt",
             "decrypt",
@@ -186,8 +185,6 @@ fn main() {
             "miniapp_join_realtime_channel",
             "miniapp_send_realtime_data",
             "miniapp_leave_realtime_channel",
-            "miniapp_add_realtime_peer",
-            "miniapp_get_realtime_node_addr",
             "miniapp_get_realtime_status",
             // Marketplace commands
             "marketplace_fetch_apps",

@@ -770,7 +770,7 @@ pub async fn resolve_gift_wrap_targets(
     }
 
     if !inbox_strs.is_empty() {
-        println!(
+        crate::log_info!(
             "[InboxRelays] Routing gift-wrap to {} inbox relays for {}",
             resolved.len(),
             recipient
@@ -1329,7 +1329,7 @@ pub async fn publish_inbox_relays_synced(
         note_list_seen(event.created_at.as_secs().max(remote_ts));
     }
 
-    println!(
+    crate::log_info!(
         "[InboxRelays] Published kind 10050 with {} relay(s) ({} foreign preserved)",
         plan.list.len(),
         plan.list.len().saturating_sub(plan.contributed.len())

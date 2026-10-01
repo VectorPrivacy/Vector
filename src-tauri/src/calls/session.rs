@@ -1,42 +1,33 @@
 //! The call session is vector-core's (`vector_core::calls::session`); this is the
-//! desktop's side of it: the Mini Apps' Iroh endpoint, the cpal media engine, the
+//! desktop's side of it: the Iroh node it shares with Mini Apps, the cpal media engine, the
 //! webview's video socket, keeping the machine awake, and the ended chime.
 
 pub use vector_core::calls::session::*;
 
 use super::media::{MediaEngine, ShareInput};
-use crate::miniapps::realtime::{decode_node_addr, encode_node_addr, IrohState};
-use crate::miniapps::state::MiniAppsState;
-use crate::TAURI_APP;
+use crate::miniapps::realtime::{decode_node_addr, encode_node_addr};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::Manager;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use vector_core::calls::platform::{AudioStart, AwakeLevel, CallAudio, CallPlatform, LinkConn};
 
 struct Desktop;
 
-async fn iroh() -> Result<Arc<IrohState>, String> {
-    let app = TAURI_APP.get().ok_or("App not ready")?;
-    let state = app.state::<MiniAppsState>();
-    state.realtime.get_or_init().await.map_err(|e| format!("Iroh unavailable: {e}"))
-}
-
 #[async_trait::async_trait]
 impl CallPlatform for Desktop {
     async fn endpoint(&self) -> Result<Endpoint, String> {
-        Ok(iroh().await?.endpoint.clone())
+        Ok(crate::miniapps::realtime::mesh().await?.endpoint().clone())
     }
 
     async fn local_addr(&self) -> Result<String, String> {
-        encode_node_addr(&iroh().await?.get_node_addr()).map_err(|e| e.to_string())
+        encode_node_addr(&crate::miniapps::realtime::mesh().await?.node_addr()).map_err(|e| e.to_string())
     }
 
     fn decode_addr(&self, addr: &str) -> Option<EndpointAddr> {
-        decode_node_addr(addr).ok()
+        decode_node_addr(addr).ok().map(vector_core::xdc::wire::dialable)
     }
 
     async fn start_audio(&self, conn: Connection, start: AudioStart) -> Result<Box<dyn CallAudio>, String> {

@@ -29,11 +29,10 @@ pub use vector_core::db::miniapps::{
     get_miniapp_granted_permissions, set_miniapp_permission, set_miniapp_permissions,
     has_miniapp_permission_prompt, revoke_all_miniapp_permissions, copy_miniapp_permissions,
     save_marketplace_cache, load_marketplace_cache,
-    get_active_peer_advertisements, peer_signal_is_current,
 };
 // ID cache — delegates to vector-core
 pub use vector_core::db::id_cache::{
-    get_chat_id_by_identifier, get_or_create_chat_id,
+    get_chat_id_by_identifier,
 };
 pub async fn preload_id_caches() -> Result<(), String> {
     vector_core::db::id_cache::preload_id_caches()
@@ -69,7 +68,7 @@ pub use attachments::{
 // Event database functions
 pub use events::{
     save_event, save_pivx_payment_event,
-    event_exists, delete_event,
+    delete_event,
     get_message_views, get_all_chats_last_messages,
     unread_counts,
 };

@@ -219,12 +219,12 @@ impl VectorBot {
         tokio::spawn(async move {
             match bot_interface::typed_args(&spec, &parsed) {
                 Ok(args) => {
-                    println!("[CMD] /{} {:?}", parsed.name, parsed.args);
+                    vector_core::log_info!("[CMD] /{} {:?}", parsed.name, parsed.args);
                     let ctx = CommandCtx { bot, msg: incoming, args };
                     handler(ctx).await;
                 }
                 Err(e) => {
-                    println!("[CMD] /{} REJECTED ({e}) raw={:?}", parsed.name, parsed.args);
+                    vector_core::log_info!("[CMD] /{} REJECTED ({e}) raw={:?}", parsed.name, parsed.args);
                     let usage = usage_line(&spec);
                     // Canonical two-line error: `{arg}: {reason}` then `usage: {line}`.
                     // ASCII-only and split-on-first-newline parsable, so every
@@ -265,7 +265,7 @@ impl VectorBot {
         relays.sort();
         relays.dedup();
         match bot_interface::publish_manifest(&manifest, &keys, &relays).await {
-            Ok(n) => println!("[vector-sdk] interface manifest ({} command(s)) stored on {n} relay(s)", manifest.commands.len()),
+            Ok(n) => vector_core::log_info!("[vector-sdk] interface manifest ({} command(s)) stored on {n} relay(s)", manifest.commands.len()),
             Err(e) => eprintln!("[vector-sdk] manifest publish failed: {e}"),
         }
     }
@@ -343,16 +343,10 @@ mod tests {
     #[tokio::test]
     async fn recipient_tag_routes_commands() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use vector_core::VectorCore;
 
         let ran = Arc::new(AtomicBool::new(false));
         let me = "npub1me000000000000000000000000000000000000000000000000000000".to_string();
-        let bot = VectorBot {
-            core: VectorCore,
-            npub: me.clone(),
-            invite_policy: Arc::new(crate::InvitePolicy::Manual),
-            commands: Arc::new(Default::default()),
-        };
+        let bot = VectorBot { npub: me.clone(), ..VectorBot::test_stub() };
         let flag = ran.clone();
         bot.command("ping", "test").run(move |_ctx| {
             let flag = flag.clone();

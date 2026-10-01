@@ -37,6 +37,28 @@ impl fmt::Display for VectorError {
 
 impl std::error::Error for VectorError {}
 
+/// Why an attachment download failed, for callers that remember failures.
+#[derive(Debug)]
+pub enum DownloadError {
+    /// More ciphertext than the caller's cap (in bytes). Every mirror serves the same blob.
+    TooLarge(usize),
+    /// Every source answered, and none served bytes that decrypt or match their hash.
+    Unusable(String),
+    /// A source didn't answer; a later attempt may reach it.
+    Unreachable(String),
+}
+
+impl fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DownloadError::TooLarge(cap) => write!(f, "attachment exceeds the {} cap", crate::crypto::format_bytes(*cap as u64)),
+            DownloadError::Unusable(msg) | DownloadError::Unreachable(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for DownloadError {}
+
 impl From<String> for VectorError {
     fn from(s: String) -> Self {
         VectorError::Other(s)

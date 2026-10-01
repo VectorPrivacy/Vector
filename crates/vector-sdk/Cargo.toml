@@ -24,10 +24,16 @@ tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[dev-dependencies]
+# The examples that ship their own Mini App package it at startup.
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+
 [features]
 default = []
 # Pass-through: build vector-core with embedded Tor (Arti). Off by default.
 tor = ["vector-core/tor"]
+# Mini Apps (WebXDC): join the realtime sessions of shared apps. Pulls in Iroh.
+xdc = ["vector-core/xdc"]
 
 [[example]]
 name = "echo_bot"
@@ -49,3 +55,27 @@ name = "whitelist_bot"
 
 [[example]]
 name = "save_files_bot"
+
+[[example]]
+name = "xdc_counter_bot"
+required-features = ["xdc"]
+
+[[example]]
+name = "xdc_tictactoe_2d_bot"
+required-features = ["xdc"]
+
+[[example]]
+name = "xdc_tictactoe_bot"
+required-features = ["xdc"]
+
+[[example]]
+name = "xdc_probe"
+required-features = ["xdc"]
+
+[[example]]
+name = "xdc_oracle_bot"
+required-features = ["xdc"]
+
+[[example]]
+name = "xdc_spy"
+required-features = ["xdc"]

@@ -1,4 +1,4 @@
 name = "Vector Clicker"
-description = "A fun multiplayer clicker game! Compete with friends to see who can click the most."
-version = "1.0.0"
+description = "A multiplayer clicker: everyone with it open sees a live scoreboard."
+version = "1.1.0"
 icon = "icon.svg"

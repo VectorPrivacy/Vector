@@ -490,7 +490,8 @@ pub(crate) async fn tauri_commit_prepared_event_with(
 // WebXDC peer management — Tauri + Iroh specific
 // ============================================================================
 
-/// Handle a WebXDC peer advertisement - persist to SQLite and add the peer to our realtime channel
+/// A WebXDC peer advertisement: vector-core persists it and dials the peer into
+/// any session we have on the topic; the lobby here shows who is playing.
 pub(crate) async fn handle_webxdc_peer_advertisement(
     event_id: &str,
     topic_id: &str,
@@ -499,161 +500,10 @@ pub(crate) async fn handle_webxdc_peer_advertisement(
     created_at: u64,
     conversation_id: &str,
 ) -> bool {
-    use crate::miniapps::realtime::{decode_topic_id, decode_node_addr};
-
-    log_info!("[WEBXDC] Received peer advertisement for topic {}", topic_id);
-
-    // Validate BEFORE persisting — both fields are sender-controlled, and a garbage
-    // row would otherwise sit in the events table forever.
-    let topic = match decode_topic_id(topic_id) {
-        Ok(t) => t,
-        Err(e) => {
-            log_warn!("Failed to decode topic ID in peer advertisement: {}", e);
-            return false;
-        }
-    };
-    let node_addr = match decode_node_addr(node_addr_encoded) {
-        Ok(addr) => addr,
-        Err(e) => {
-            log_warn!("Failed to decode node address in peer advertisement: {}", e);
-            return false;
-        }
-    };
-    // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
-    // can't outrank every later genuine peer-left forever.
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let created_at = created_at.min(now_secs + 300);
-
-    // Persist to SQLite for offline->online peer discovery
-    if !db::event_exists(event_id).unwrap_or(true) {
-        if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
-            let tags = vec![
-                vec!["webxdc-topic".to_string(), topic_id.to_string()],
-                vec!["webxdc-node-addr".to_string(), node_addr_encoded.to_string()],
-                vec!["d".to_string(), "vector-webxdc-peer".to_string()],
-            ];
-            let event = crate::stored_event::StoredEvent {
-                id: event_id.to_string(),
-                kind: crate::stored_event::event_kind::APPLICATION_SPECIFIC,
-                chat_id,
-                user_id: None,
-                content: "peer-advertisement".to_string(),
-                tags,
-                reference_id: Some(topic_id.to_string()),
-                created_at,
-                received_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                mine: false,
-                pending: false,
-                failed: false,
-                wrapper_event_id: None,
-                npub: Some(sender_npub.to_string()),
-                preview_metadata: None,
-            };
-            if let Err(e) = db::save_event(&event).await {
-                log_warn!("[WEBXDC] Failed to persist peer advertisement: {}", e);
-            }
-        }
-    }
-
-    // Recency gate for everything LIVE below (session peers, Iroh feed, lobby emit):
-    // a replayed or historically-synced ad that's no longer this sender's latest word
-    // (a newer signal exists, or a same-second left — tombstone wins ties) must not
-    // resurrect a departed player. History stays persisted; the lobby follows the present.
-    if !db::peer_signal_is_current(topic_id, sender_npub, created_at, true).unwrap_or(false) {
-        log_info!("[WEBXDC] Stale peer advertisement for topic {} from {} — persisted, not surfaced", topic_id, sender_npub);
-        return true;
-    }
-
-    // Get the MiniApps state and add the peer
-    if let Some(handle) = TAURI_APP.get() {
-        let state = handle.state::<miniapps::state::MiniAppsState>();
-
-        // Check if we have an active realtime channel for this topic
-        let has_channel = {
-            let channels = state.realtime_channels.read().await;
-            log_info!("[WEBXDC] Checking {} active channels for topic match", channels.len());
-            for (label, ch) in channels.iter() {
-                log_info!("[WEBXDC]   Channel '{}': topic={}, active={}",
-                    label,
-                    crate::miniapps::realtime::encode_topic_id(&ch.topic),
-                    ch.active);
-            }
-            channels.values().any(|ch| ch.topic == topic && ch.active)
-        };
-
-        log_info!("[WEBXDC] has_channel for topic {}: {}", topic_id, has_channel);
-
-        if has_channel {
-            log_info!("[WEBXDC] Found active channel for topic {}, adding peer", topic_id);
-            state.add_session_peer(topic, sender_npub.to_string()).await;
-            // Get the realtime manager and add the peer
-            match state.realtime.get_or_init().await {
-                Ok(iroh) => {
-                    match iroh.add_peer(topic, node_addr.clone()).await {
-                        Ok(_) => {
-                            log_info!("[WEBXDC] Successfully added peer {} to realtime channel topic {}",
-                                node_addr.id, topic_id);
-                        }
-                        Err(e) => {
-                            log_error!("[WEBXDC] Failed to add peer to realtime channel: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log_error!("[WEBXDC] Failed to get realtime manager: {}", e);
-                }
-            }
-
-            // Emit status update so the frontend shows the new peer's avatar
-            let peer_npubs = state.get_session_peers(&topic).await;
-            let peer_count = peer_npubs.len();
-            if let Some(main_window) = handle.get_webview_window("main") {
-                use tauri::Emitter;
-                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                    "topic": topic_id,
-                    "peer_count": peer_count,
-                    "peers": peer_npubs,
-                    "is_active": true,
-                    "has_pending_peers": true,
-                }));
-                log_info!("[WEBXDC] Emitted miniapp_realtime_status: topic={}, peer_count={}", topic_id, peer_count);
-            }
-            return true;
-        } else {
-            // Cache addr for QUIC connection when we join, track npub for lobby UI
-            log_info!("[WEBXDC] Caching peer addr for topic {} (no active channel yet)", topic_id);
-            state.cache_peer_addr(topic, node_addr).await;
-            state.add_session_peer(topic, sender_npub.to_string()).await;
-
-            // Emit event to frontend so it can update the UI (show "Click to Join" and player avatars)
-            let peer_npubs = state.get_session_peers(&topic).await;
-            let peer_count = peer_npubs.len();
-            if let Some(main_window) = handle.get_webview_window("main") {
-                use tauri::Emitter;
-                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                    "topic": topic_id,
-                    "peer_count": peer_count,
-                    "peers": peer_npubs,
-                    "is_active": false,
-                    "has_pending_peers": peer_count > 0,
-                }));
-                log_info!("[WEBXDC] Emitted miniapp_realtime_status event: topic={}, peer_count={}", topic_id, peer_count);
-            }
-
-            return true;
-        }
-    }
-
-    false
+    on_peer_signal(event_id, topic_id, Some(node_addr_encoded), sender_npub, created_at, conversation_id).await
 }
 
-/// Handle a WebXDC peer-left signal — a peer closed their Mini App.
+/// A WebXDC peer-left signal: a peer closed their Mini App.
 pub(crate) async fn handle_webxdc_peer_left(
     event_id: &str,
     topic_id: &str,
@@ -661,94 +511,36 @@ pub(crate) async fn handle_webxdc_peer_left(
     created_at: u64,
     conversation_id: &str,
 ) -> bool {
-    use crate::miniapps::realtime::decode_topic_id;
+    on_peer_signal(event_id, topic_id, None, sender_npub, created_at, conversation_id).await
+}
 
-    log_info!("[WEBXDC] Received peer-left from {} for topic {}", sender_npub, topic_id);
-
-    // Validate BEFORE persisting (sender-controlled field).
-    let topic = match decode_topic_id(topic_id) {
-        Ok(t) => t,
-        Err(e) => {
-            log_warn!("Failed to decode topic ID in peer-left: {}", e);
-            return false;
-        }
+async fn on_peer_signal(
+    event_id: &str,
+    topic_id: &str,
+    node_addr: Option<&str>,
+    sender_npub: &str,
+    created_at: u64,
+    conversation_id: &str,
+) -> bool {
+    let Some(sig) = vector_core::xdc::on_signal(conversation_id, sender_npub, topic_id, node_addr, event_id, created_at).await else {
+        log_warn!("[WEBXDC] Dropped a malformed peer signal for topic {}", topic_id);
+        return false;
     };
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let created_at = created_at.min(now_secs + 300);
-
-    // Persist to SQLite
-    if !db::event_exists(event_id).unwrap_or(true) {
-        if let Ok(chat_id) = db::get_or_create_chat_id(conversation_id) {
-            let tags = vec![
-                vec!["webxdc-topic".to_string(), topic_id.to_string()],
-                vec!["d".to_string(), "vector-webxdc-peer".to_string()],
-            ];
-            let event = crate::stored_event::StoredEvent {
-                id: event_id.to_string(),
-                kind: crate::stored_event::event_kind::APPLICATION_SPECIFIC,
-                chat_id,
-                user_id: None,
-                content: "peer-left".to_string(),
-                tags,
-                reference_id: Some(topic_id.to_string()),
-                created_at,
-                received_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                mine: false,
-                pending: false,
-                failed: false,
-                wrapper_event_id: None,
-                npub: Some(sender_npub.to_string()),
-                preview_metadata: None,
-            };
-            if let Err(e) = db::save_event(&event).await {
-                log_warn!("[WEBXDC] Failed to persist peer-left: {}", e);
-            }
-        }
-    }
-
-    // Recency gate (mirror of the advertisement side): a STALE left — one already
-    // superseded by a newer ad — must not evict an actively-playing peer from the
-    // lobby. Out-of-order page syncs deliver exactly this shape.
-    if !db::peer_signal_is_current(topic_id, sender_npub, created_at, false).unwrap_or(false) {
-        log_info!("[WEBXDC] Stale peer-left for topic {} from {} — persisted, not surfaced", topic_id, sender_npub);
+    // History stays persisted; the lobby follows the present. A replayed or
+    // out-of-order signal must not resurrect a departed player or evict an active one.
+    if !sig.current {
         return true;
     }
-
-    if let Some(handle) = TAURI_APP.get() {
-        let state = handle.state::<miniapps::state::MiniAppsState>();
-
-        // Remove from session peers
+    let Ok(topic) = crate::miniapps::realtime::decode_topic_id(topic_id) else { return false };
+    let Some(handle) = TAURI_APP.get() else { return false };
+    let state = handle.state::<miniapps::state::MiniAppsState>();
+    if node_addr.is_some() {
+        state.add_session_peer(topic, sender_npub.to_string()).await;
+    } else {
         state.remove_session_peer(&topic, sender_npub).await;
-
-        // Check if we're actively playing
-        let we_are_playing = {
-            let channels = state.realtime_channels.read().await;
-            channels.values().any(|ch| ch.topic == topic && ch.active)
-        };
-
-        // Emit updated status
-        let peer_npubs = state.get_session_peers(&topic).await;
-        let peer_count = peer_npubs.len();
-        if let Some(main_window) = handle.get_webview_window("main") {
-            use tauri::Emitter;
-            let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                "topic": topic_id,
-                "peer_count": peer_count,
-                "peers": peer_npubs,
-                "is_active": we_are_playing,
-                "has_pending_peers": peer_count > 0,
-            }));
-            log_info!("[WEBXDC] Peer-left status update: topic={}, remaining={}", topic_id, peer_count);
-        }
-
-        return true;
     }
-
-    false
+    let we_are_playing = state.has_realtime_channel_for_topic(&topic).await;
+    let peers = state.get_session_peers(&topic).await;
+    crate::miniapps::commands::emit_lobby(&sig.topic, peers, we_are_playing);
+    true
 }

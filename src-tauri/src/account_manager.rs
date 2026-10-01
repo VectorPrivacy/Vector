@@ -585,6 +585,8 @@ static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Tear down every per-session global so the backend looks like a freshly
 /// launched process. Order matters:
+///   0. End the call and the Mini App sessions first: they announce their end
+///      through the client, and leave as the account that joined them.
 ///   1. Take and shut down the Nostr client BEFORE clearing other state, so
 ///      relay subscriptions detach cleanly and concurrent readers see None.
 ///   2. Stop Tor BEFORE closing the DB pool — Tor's last write may target the
@@ -611,6 +613,13 @@ pub async fn reset_session() {
     // Tasks that wake up mid-reset see an invalid guard and exit instead of
     // writing partially-cleared state.
     vector_core::state::clear_message_tombstones();
+
+    // A call and the Mini App sessions share the account's node, which the
+    // sessions' end retires; both end while the client exists to say so.
+    crate::calls::session::end_all("account_changed");
+    if let Some(handle) = crate::TAURI_APP.get() {
+        crate::miniapps::commands::end_for_account_swap(handle).await;
+    }
 
     if let Some(client) = vector_core::take_nostr_client() {
         let _ = client.shutdown().await;
@@ -678,9 +687,8 @@ pub async fn reset_session() {
     // Pooled plane connections are authed as account A's plane secret keys — close them on swap.
     vector_core::community::transport::clear_plane_pool();
 
-    // Mini App realtime lobby state is account-scoped (session npubs + cached peer addrs
-    // keyed by game topic). Carried across a swap it would show account A's players in
-    // account B's lobby and bootstrap-connect B into A's sessions.
+    // Mini App lobbies are account-scoped: carried across a swap they would show
+    // account A's players in account B's lobby.
     if let Some(handle) = crate::TAURI_APP.get() {
         use tauri::Manager;
         handle.state::<crate::miniapps::state::MiniAppsState>()
@@ -698,7 +706,6 @@ pub async fn reset_session() {
     // Mid-flight voice recording — drop the buffer AND any stashed
     // "pending" recording so a voice note prepared for account A doesn't
     // surface in account B's compose box.
-    crate::calls::session::end_all("account_changed");
     if let Some(rec) = crate::voice::RECORDER.get() {
         rec.cancel();
     }

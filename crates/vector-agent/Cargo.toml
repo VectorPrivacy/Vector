@@ -3,12 +3,17 @@ name = "vector-agent"
 version = "0.1.0"
 edition = "2021"
 description = "MCP server giving AI agents full Vector/Nostr capabilities via vector-core."
+readme = "README.md"
 
 [dependencies]
-vector-core = { path = "../vector-core" }
+# `xdc`: join the Mini App sessions shared in chats (the xdc_* tools).
+vector-core = { path = "../vector-core", features = ["xdc"] }
 rmcp = { version = "1.5", features = ["server", "transport-io"] }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

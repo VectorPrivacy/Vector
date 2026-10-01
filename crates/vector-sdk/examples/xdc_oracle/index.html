@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oracle</title>
+<style>
+  :root { --bg: #14111f; --panel: #1d1830; --ink: #ece8ff; --dim: #9a92c0; --accent: #8f72ff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #2a2342; }
+  header .orb { width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at 40% 35%, #d8ccff, #5b3cc4); }
+  header .status { margin-left: auto; font-size: 12px; color: var(--dim); }
+  header .status.on { color: #7ee2a8; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .q { align-self: flex-end; background: var(--accent); color: #fff; padding: 8px 12px; border-radius: 14px 14px 4px 14px; max-width: 80%; }
+  .q small { display: block; opacity: .75; font-size: 11px; }
+  .a { align-self: flex-start; background: var(--panel); padding: 10px 12px; border-radius: 14px 14px 14px 4px; max-width: 88%; white-space: pre-wrap; }
+  .a.pending::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+  .hint { color: var(--dim); text-align: center; margin: auto; max-width: 280px; }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #2a2342; }
+  input { flex: 1; background: var(--panel); border: 1px solid #2a2342; color: var(--ink); border-radius: 10px; padding: 10px 12px; font: inherit; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 0 16px; font: inherit; font-weight: 600; }
+  button:disabled { opacity: .4; }
+</style>
+</head>
+<body>
+<header><div class="orb"></div><strong>Oracle</strong><span id="status" class="status">Waiting for the oracle…</span></header>
+<div id="log"><p class="hint" id="hint">Ask anything. Everyone in this chat sees the questions and answers.</p></div>
+<form id="ask"><input id="text" autocomplete="off" placeholder="Ask the oracle…"><button id="go" disabled>Ask</button></form>
+<script>
+(function () {
+  const wx = window.webxdc;
+  const me = wx ? wx.selfAddr : 'local';
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const log = document.getElementById('log');
+  const status = document.getElementById('status');
+  const go = document.getElementById('go');
+  const answers = new Map(); // id -> element
+  let oracle = null;          // the bot's npub, once it says hello
+  let ch = null;
+
+  function send(m) { m.by = me; try { ch.send(enc.encode(JSON.stringify(m))); } catch (e) {} }
+
+  function question(id, text, by, name) {
+    if (answers.has(id)) return answers.get(id);
+    document.getElementById('hint')?.remove();
+    const q = document.createElement('div');
+    q.className = 'q';
+    q.innerHTML = '<small></small>';
+    q.firstChild.textContent = by === me ? 'You' : (name || by.slice(0, 12));
+    q.appendChild(document.createTextNode(text));
+    const a = document.createElement('div');
+    a.className = 'a pending';
+    log.append(q, a);
+    answers.set(id, a);
+    log.scrollTop = log.scrollHeight;
+    return a;
+  }
+
+  function onMsg(bytes) {
+    let m; try { m = JSON.parse(dec.decode(bytes)); } catch (e) { return; }
+    if (!m || m.by === me) return;
+    if (m.t === 'ready') {
+      oracle = m.by;
+      status.textContent = 'Connected · ' + (m.model || 'oracle');
+      status.className = 'status on';
+      go.disabled = false;
+      // Catch up on what was asked before we opened.
+      (m.transcript || []).forEach(it => { const a = question(it.id, it.q, it.asker, it.name); a.textContent = it.a; a.classList.remove('pending'); });
+    } else if (m.t === 'ask') {
+      question(m.id, m.text, m.by, m.name);
+    } else if (m.t === 'chunk' && m.by === oracle) {
+      const a = answers.get(m.id); if (a) { a.textContent += m.text; log.scrollTop = log.scrollHeight; }
+    } else if (m.t === 'done' && m.by === oracle) {
+      // The full text reconciles any chunk the channel dropped.
+      const a = answers.get(m.id); if (a) { a.textContent = m.text; a.classList.remove('pending'); }
+    }
+  }
+
+  document.getElementById('ask').addEventListener('submit', e => {
+    e.preventDefault();
+    const input = document.getElementById('text');
+    const text = input.value.trim();
+    if (!text || !ch) return;
+    input.value = '';
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    question(id, text, me);
+    send({ t: 'ask', id, text, name: wx ? wx.selfName : 'You' });
+  });
+
+  if (!wx || !wx.joinRealtimeChannel) { status.textContent = 'Open inside Vector'; return; }
+  ch = wx.joinRealtimeChannel();
+  ch.setListener(onMsg);
+  // Say hello until the oracle answers; the channel joins asynchronously.
+  const hello = () => { if (!oracle) { send({ t: 'hello' }); setTimeout(hello, 2000); } };
+  setTimeout(hello, 800);
+})();
+</script>
+</body>
+</html>

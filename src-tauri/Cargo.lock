@@ -11710,8 +11710,10 @@ dependencies = [
  "hmac",
  "image",
  "iroh",
+ "iroh-gossip",
  "js-sys",
  "libc",
+ "noq-proto",
  "nostr",
  "nostr-blossom",
  "nostr-connect",
@@ -11726,6 +11728,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tor-circmgr",
  "tor-dirmgr",
  "tor-guardmgr",
@@ -11739,6 +11742,7 @@ dependencies = [
  "wasmtimer",
  "web-time",
  "zeroize",
+ "zip 2.4.2",
 ]
 
 [[package]]

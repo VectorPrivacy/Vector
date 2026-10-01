@@ -14,7 +14,6 @@ pub enum Error {
     BlackholeProxyUnavailable,
     Anyhow(anyhow::Error),
     RealtimeChannelAlreadyActive,
-    RealtimeChannelNotActive,
     Realtime(String),
     Database(String),
 }
@@ -39,7 +38,6 @@ impl std::fmt::Display for Error {
             Error::BlackholeProxyUnavailable => write!(f, "Blackhole proxy unavailable for network isolation"),
             Error::Anyhow(e) => write!(f, "{}", e),
             Error::RealtimeChannelAlreadyActive => write!(f, "Realtime channel already active - call leave() first"),
-            Error::RealtimeChannelNotActive => write!(f, "Realtime channel not active - call joinRealtimeChannel() first"),
             Error::Realtime(s) => write!(f, "Realtime channel error: {}", s),
             Error::Database(s) => write!(f, "Database error: {}", s),
         }

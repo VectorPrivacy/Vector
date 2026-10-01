@@ -7913,6 +7913,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 name = "vector-agent"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rmcp",
  "schemars 1.2.1",
  "serde",
@@ -7967,8 +7968,10 @@ dependencies = [
  "hmac",
  "image",
  "iroh",
+ "iroh-gossip",
  "js-sys",
  "libc",
+ "noq-proto",
  "nostr",
  "nostr-blossom",
  "nostr-connect",
@@ -7985,6 +7988,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tor-circmgr",
  "tor-dirmgr",
  "tor-guardmgr",
@@ -7998,13 +8002,13 @@ dependencies = [
  "wasmtimer",
  "web-time",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
 name = "vector-web"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64-simd",
  "bip39",
@@ -8014,14 +8018,11 @@ dependencies = [
  "futures-util",
  "image",
  "iroh",
- "iroh-gossip",
  "js-sys",
- "noq-proto",
  "nostr-sdk",
  "rand 0.8.6",
  "reqwest 0.13.5",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8047,6 +8048,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "vector-core",
+ "zip",
 ]
 
 [[package]]

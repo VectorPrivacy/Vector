@@ -49,6 +49,12 @@ bytes = "1.9"
 async-trait = "0.1"
 # Calls ride Iroh; only the clients that place them (the app, the web) enable `calls`.
 iroh = { version = "1.0", default-features = false, features = ["tls-ring"], optional = true }
+# Mini App realtime sessions (`xdc`): the gossip mesh, its congestion controller, and the
+# package reader. Wire-compatible with the app's own realtime layer.
+iroh-gossip = { version = "0.101", default-features = false, features = ["net"], optional = true }
+noq-proto = { version = "1.1", optional = true }
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+toml = { version = "0.8", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -118,11 +124,16 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 wasmtimer = "0.4"
+# The crypto provider a Mini App node's QUIC endpoint is built with, as natively.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [features]
 default = []
 # The call session and its video track, over Iroh. See `calls::platform`.
 calls = ["dep:iroh"]
+# Mini App (WebXDC) realtime sessions, for every client: join a game's Iroh gossip
+# topic, find its players over Nostr, read `.xdc` manifests. See `xdc`.
+xdc = ["dep:iroh", "dep:iroh-gossip", "dep:noq-proto", "dep:zip", "dep:toml"]
 # Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
 # bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
 # `tor::proxy_url()` returning `Some(socks5h://127.0.0.1:<port>)` when active.

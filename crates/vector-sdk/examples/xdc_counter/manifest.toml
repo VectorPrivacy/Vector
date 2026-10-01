@@ -1,0 +1,4 @@
+name = "Counter"
+id = "vector-counter"
+description = "A number everyone in the chat shares. The bot that sent it keeps count."
+version = "1.0.0"

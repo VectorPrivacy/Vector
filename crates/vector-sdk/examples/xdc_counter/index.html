@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Counter</title>
+<style>
+  :root { --bg: #10161d; --panel: #1a2430; --ink: #e8f0f7; --dim: #8aa0b3; --accent: #59fcb3; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; }
+  output { font-size: 72px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2ch; text-align: center; }
+  .row { display: flex; align-items: center; gap: 28px; }
+  button { width: 64px; height: 64px; border-radius: 50%; border: 0; background: var(--panel); color: var(--accent);
+    font-size: 32px; cursor: pointer; }
+  button:disabled { opacity: .35; cursor: default; }
+  p { color: var(--dim); margin: 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row">
+    <button id="minus" disabled>−</button>
+    <output id="count">·</output>
+    <button id="plus" disabled>+</button>
+  </div>
+  <p id="status">Waiting for the counter bot…</p>
+</main>
+<script>
+// The bot keeps the count. This page only asks it to change and shows what it says.
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const channel = window.webxdc.joinRealtimeChannel();
+const send = (msg) => channel.send(enc.encode(JSON.stringify(msg)));
+
+channel.setListener((bytes) => {
+  const msg = JSON.parse(dec.decode(bytes));
+  if (msg.t !== 'count') return;
+  document.getElementById('count').value = msg.value;
+  document.getElementById('status').textContent = 'Everyone in this chat sees the same number';
+  document.getElementById('plus').disabled = false;
+  document.getElementById('minus').disabled = false;
+});
+
+document.getElementById('plus').onclick = () => send({ t: 'add', by: 1 });
+document.getElementById('minus').onclick = () => send({ t: 'add', by: -1 });
+
+// Ask for the current count. The bot also sends it to everyone who arrives.
+send({ t: 'hello' });
+</script>
+</body>
+</html>

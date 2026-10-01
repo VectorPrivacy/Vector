@@ -129,32 +129,6 @@ async function onMiniAppUpdate(callback) {
 // ============================================================================
 
 /**
- * Get our Iroh node address for sharing with peers via Nostr
- * This should be called when joining a realtime channel to advertise our presence
- * @returns {Promise<string>} Encoded node address
- */
-async function getRealtimeNodeAddr() {
-    const { invoke } = window.__TAURI__.core;
-    return await invoke('miniapp_get_realtime_node_addr');
-}
-
-/**
- * Add a peer to a Mini App's realtime channel
- * Called when receiving a peer advertisement via Nostr
- * @param {string} chatId - The chat ID
- * @param {string} messageId - The message ID
- * @param {string} peerAddr - Encoded peer node address
- * @returns {Promise<void>}
- */
-async function addRealtimePeer(chatId, messageId, peerAddr) {
-    const { invoke } = window.__TAURI__.core;
-    // Note: This needs to be called from the Mini App window context
-    // For now, we'll need to emit an event to the Mini App window
-    // TODO: Implement cross-window peer addition
-    console.log('addRealtimePeer called:', chatId, messageId, peerAddr);
-}
-
-/**
  * Listen for realtime channel events from Mini Apps
  * Used to coordinate peer discovery via Nostr
  * @param {function} callback - Called when a Mini App joins/leaves realtime channel

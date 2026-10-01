@@ -119,6 +119,7 @@ pub(crate) async fn flush() {
 
 /// Reload the page onto whichever account is marked active, once storage has it.
 pub(crate) async fn reload() {
+    crate::miniapps::end_sessions().await;
     flush().await;
     crate::emitter::emit("session_reload", &());
 }

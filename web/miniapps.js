@@ -258,6 +258,8 @@
         requireHostName();
         const info = await backend('miniapp_prepare', { filePath, chatId, messageId, topicId });
         if (info.isolated && !(self.crossOriginIsolated && isolatesFrames())) {
+            // Prepare started its realtime session; no window will end it.
+            if (!windows.has(info.label)) backend('miniapp_closed', { label: info.label }).catch(() => {});
             throw new Error(`${info.name || 'This app'} needs Chrome, Edge or another Chromium browser on a computer, or the Vector app.`);
         }
         const existing = windows.get(info.label);
@@ -303,6 +305,7 @@
                     }
                     break;
                 case 'rt-leave':
+                    backend('miniapp_rt_leave', { label: w.info.label }).catch(() => {});
                     break;
             }
         };

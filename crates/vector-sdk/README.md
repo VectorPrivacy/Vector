@@ -9,7 +9,7 @@ or encryption underneath.
 
 ```toml
 [dependencies]
-vector_sdk = "0.3"
+vector_sdk = "0.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -156,7 +156,8 @@ that arrive while the bot is running; to read older history, use `bot.core().get
 ## Examples
 
 Runnable, self-contained bots live in [`examples/`](examples) — each shows off one thing.
-Every one needs `VECTOR_NSEC` (the bot's key); a few take extra env vars.
+Most take `VECTOR_NSEC` (the bot's key); the Mini App ones create a key on first run and keep it
+in their data folder.
 
 | Example | What it shows |
 | --- | --- |
@@ -167,6 +168,12 @@ Every one needs `VECTOR_NSEC` (the bot's key); a few take extra env vars.
 | [`whitelist_bot`](examples/whitelist_bot.rs) | A private bot that only joins communities it trusts. |
 | [`file_bot`](examples/file_bot.rs) | Sends one file, then exits. |
 | [`save_files_bot`](examples/save_files_bot.rs) | Saves every received file to disk. |
+| [`xdc_counter_bot`](examples/xdc_counter_bot.rs) | The smallest bot-backed Mini App: a number a whole chat shares (`xdc` feature). |
+| [`xdc_tictactoe_2d_bot`](examples/xdc_tictactoe_2d_bot.rs) | Ships tic-tac-toe, referees it and plays O (`xdc` feature). |
+| [`xdc_oracle_bot`](examples/xdc_oracle_bot.rs) | Ships its own Mini App and streams LLM answers into it (`xdc` feature). |
+| [`xdc_tictactoe_bot`](examples/xdc_tictactoe_bot.rs) | Plays 3D Tic-Tac-Toe, an app it didn't write, against whoever opens it (`xdc` feature). |
+| [`xdc_spy`](examples/xdc_spy.rs) | Prints every message of any app opened with it: learn an app's protocol (`xdc` feature). |
+| [`xdc_probe`](examples/xdc_probe.rs) | Tests a game bot without a phone: shares the app and plays the human's side (`xdc` feature). |
 
 ```sh
 # Echo bot — replies to every message
@@ -175,6 +182,49 @@ VECTOR_NSEC=nsec1... cargo run --example echo_bot
 # AI bot — wire any OpenAI-compatible endpoint to your chats
 OPENAI_API_KEY=sk-... VECTOR_NSEC=nsec1... cargo run --example ai_bot
 ```
+
+## Mini Apps (WebXDC)
+
+A Mini App is an `.xdc` file shared in a chat: a game or tool that everyone who opens it uses
+together. With the `xdc` feature your bot joins in too, as an opponent, a referee, or the server
+behind an app that needs more than a phone (an LLM, a database, a game's master copy).
+
+```toml
+vector_sdk = { version = "0.10", features = ["xdc"] }  # `xdc` needs the first release after 0.10.0
+```
+
+```rust
+// Runs whenever someone opens an app whose manifest says id = "vector-counter",
+// for as long as they have it open.
+bot.xdc("vector-counter").run(|_bot, mut session| async move {
+    while let Some(event) = session.next().await {
+        if let XdcEvent::Data(frame) = event {
+            let msg: serde_json::Value = frame.json().unwrap_or_default();
+            if msg["t"] == "hello" {
+                session.send_json(&serde_json::json!({ "t": "count", "value": 0 })).await.ok();
+            }
+        }
+    }
+});
+```
+
+Two guides walk through it end to end:
+
+- [Add a bot to your Mini App](guides/bot-for-your-mini-app.md): you wrote the app, now give it a bot.
+- [Write a bot for any Mini App](guides/bot-for-any-mini-app.md): learn an app's messages from its source and its traffic, then join in.
+
+| You want to… | …you call |
+| --- | --- |
+| React to an app being opened | `bot.xdc("app-id").run(…)`, or `"*"` for every app |
+| Join one copy yourself | `msg.xdc()?.join().await` |
+| Hand out your app | `channel.send_xdc("app.xdc").await` |
+| Talk to everyone in it | `session.send_json(&v)` / `send_text` / `send`, then `session.next()` |
+| Know who sent a message | `frame.from.npub`, or `frame.verified_sender()` when it matters |
+| Read the app's manifest | `xdc.manifest().await` |
+
+It works the same in DMs and in Communities. Players in a session can see each other's IP
+address, and the bot's; a bot with Tor on stays out of sessions unless you call
+`vector_sdk::xdc::allow_outside_tor(true)`.
 
 ## Accounts & keys
 

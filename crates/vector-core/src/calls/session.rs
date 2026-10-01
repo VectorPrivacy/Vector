@@ -321,9 +321,11 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
     if PublicKey::from_bech32(&peer).is_err() {
         return Err("Not a valid npub".into());
     }
-    let addr = platform::get()?.local_addr().await?;
+    let platform = platform::get()?;
     let id = format!("{:032x}", rand::random::<u128>());
 
+    // In the slot before the node is read: a client that closes an idle node
+    // must see this call, or the offer could name a node already gone.
     let state = {
         let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
@@ -358,6 +360,16 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
         let state = call.state(None);
         *guard = Some(call);
         state
+    };
+    let addr = match platform.local_addr().await {
+        Ok(a) => a,
+        Err(e) => {
+            let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
+            if guard.as_ref().is_some_and(|c| c.id == id) {
+                *guard = None;
+            }
+            return Err(e);
+        }
     };
     emit_state(&state);
 

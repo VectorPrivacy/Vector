@@ -1,0 +1,4 @@
+name = "Tic-Tac-Toe"
+id = "vector-tictactoe-2d"
+description = "Play tic-tac-toe against the bot that sent this. Everyone else in the chat watches."
+version = "1.0.0"

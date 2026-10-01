@@ -582,6 +582,56 @@ pub fn get_active_peer_advertisements(
     Ok(records.filter_map(|r| r.ok()).filter(|r| !r.node_addr_encoded.is_empty()).collect())
 }
 
+/// [`get_active_peer_advertisements`] limited to one chat, newest first, at most
+/// `limit`. A topic is one chat's session; an advertisement for it that arrived
+/// through any other chat (a stranger's DM, a channel whose ban dropped the live
+/// signal) names nobody who is playing here.
+pub fn get_active_peer_advertisements_in(
+    topic_encoded: &str,
+    chat_identifier: &str,
+    my_npub: &str,
+    limit: usize,
+) -> Result<Vec<PeerAdvertisementRecord>, String> {
+    let Ok(chat) = super::id_cache::get_chat_id_by_identifier(chat_identifier) else {
+        return Ok(Vec::new());
+    };
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT e.npub, e.tags
+        FROM events e
+        INNER JOIN (
+            SELECT npub, MAX(created_at) as max_ts
+            FROM events
+            WHERE kind = 30078 AND reference_id = ?1 AND chat_id = ?3
+              AND content = 'peer-advertisement' AND npub IS NOT NULL AND npub != ?2
+            GROUP BY npub
+        ) latest ON e.npub = latest.npub AND e.created_at = latest.max_ts
+        WHERE e.kind = 30078 AND e.reference_id = ?1 AND e.chat_id = ?3
+          AND e.content = 'peer-advertisement'
+          AND NOT EXISTS (
+              SELECT 1 FROM events l
+              WHERE l.kind = 30078 AND l.reference_id = ?1 AND l.chat_id = ?3
+                AND l.npub = e.npub AND l.content = 'peer-left' AND l.created_at >= e.created_at
+          )
+        ORDER BY e.created_at DESC
+        LIMIT ?4
+        "#,
+    ).map_err(|e| format!("Failed to prepare peer advertisement query: {}", e))?;
+    let records = stmt.query_map(rusqlite::params![topic_encoded, my_npub, chat, limit as i64], |row| {
+        let npub: String = row.get(0)?;
+        let tags: Vec<Vec<String>> = serde_json::from_str(&row.get::<_, String>(1)?).unwrap_or_default();
+        let node_addr_encoded = tags
+            .iter()
+            .find(|t| t.first().map(|s| s.as_str()) == Some("webxdc-node-addr"))
+            .and_then(|t| t.get(1))
+            .cloned()
+            .unwrap_or_default();
+        Ok(PeerAdvertisementRecord { npub, node_addr_encoded })
+    }).map_err(|e| format!("Failed to query peer advertisements: {}", e))?;
+    Ok(records.filter_map(|r| r.ok()).filter(|r| !r.node_addr_encoded.is_empty()).collect())
+}
+
 /// Is this peer signal still the CURRENT word on `npub`'s participation in `topic`?
 /// Gates the LIVE side of signal handling (session-peer add/remove, Iroh feed, lobby
 /// emit) so a replayed or out-of-order historical event can't resurrect a departed

@@ -95,6 +95,21 @@
             }
         }
         
+        .board {
+            margin-top: 24px;
+            min-width: 220px;
+            list-style: none;
+            font-size: 0.95rem;
+        }
+
+        .board li {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+        }
+
         .stats {
             margin-top: 30px;
             font-size: 0.9rem;
@@ -112,6 +127,8 @@
         👆
     </button>
     
+    <ol class="board" id="board"></ol>
+
     <div class="stats" id="stats">
         Clicks per second: <span id="cps">0</span>
     </div>
@@ -122,65 +139,85 @@
         let clickTimes = [];
         let myAddr = 'unknown';
         let myName = 'Player';
-        
+        let channel = null;
+        // Everyone playing this copy of the app, by address: { name, score }
+        const players = {};
+
+        const enc = new TextEncoder();
+        const dec = new TextDecoder();
+        function send(msg) {
+            if (channel) channel.send(enc.encode(JSON.stringify(msg)));
+        }
+        function myEntry() {
+            return { t: 'score', addr: myAddr, name: myName, score: myScore };
+        }
+
         // Initialize the game
         function init() {
-            // Get player info from webxdc
             if (window.webxdc) {
                 myAddr = window.webxdc.selfAddr || 'unknown';
                 myName = window.webxdc.selfName || 'Player';
-                
-                document.getElementById('playerInfo').textContent = 
-                    `Playing as: ${myName}`;
-                
-                // Set up update listener
-                window.webxdc.setUpdateListener(function(update) {
-                    handleUpdate(update);
-                }, 0);
+                document.getElementById('playerInfo').textContent = `Playing as: ${myName}`;
+
+                // Your score survives closing the app: storage is kept per app.
+                myScore = Number(localStorage.getItem('score')) || 0;
+                updateScoreDisplay();
+
+                // Everyone with this app open in the chat shares this channel.
+                channel = window.webxdc.joinRealtimeChannel();
+                channel.setListener((bytes) => handleMessage(JSON.parse(dec.decode(bytes))));
+
+                // Say hello: everyone already playing answers with their score.
+                send({ t: 'hello' });
+                send(myEntry());
             } else {
-                document.getElementById('playerInfo').textContent = 
-                    'Demo mode (webxdc not available)';
+                document.getElementById('playerInfo').textContent = 'Demo mode (webxdc not available)';
             }
-            
+            players[myAddr] = { name: myName, score: myScore };
+            renderBoard();
+
             // Update CPS every second
             setInterval(updateCPS, 1000);
         }
-        
+
         // Handle click on the button
         function handleClick(event) {
             myScore++;
+            localStorage.setItem('score', myScore);
+            players[myAddr] = { name: myName, score: myScore };
             updateScoreDisplay();
+            renderBoard();
             createClickEffect(event);
-            
-            // Track click time for CPS calculation
             clickTimes.push(Date.now());
-            
-            // Send update to other players
-            if (window.webxdc) {
-                window.webxdc.sendUpdate({
-                    payload: {
-                        type: 'score',
-                        addr: myAddr,
-                        name: myName,
-                        score: myScore
-                    }
-                }, `${myName} clicked! Score: ${myScore}`);
+            send(myEntry());
+        }
+
+        // Handle messages from other players
+        function handleMessage(msg) {
+            if (msg.t === 'hello') {
+                // A newcomer missed everything so far: tell them where we stand.
+                send(myEntry());
+            } else if (msg.t === 'score' && msg.addr !== myAddr) {
+                players[msg.addr] = { name: msg.name, score: msg.score };
+                renderBoard();
             }
         }
-        
-        // Handle updates from other players
-        function handleUpdate(update) {
-            if (update.payload && update.payload.type === 'score') {
-                const { addr, name, score } = update.payload;
-                
-                // If it's our own update coming back, sync the score
-                if (addr === myAddr && score > myScore) {
-                    myScore = score;
-                    updateScoreDisplay();
-                }
+
+        // Show everyone's score, highest first
+        function renderBoard() {
+            const rows = Object.values(players).sort((a, b) => b.score - a.score);
+            document.getElementById('board').innerHTML = '';
+            for (const p of rows) {
+                const li = document.createElement('li');
+                const name = document.createElement('span');
+                const score = document.createElement('span');
+                name.textContent = p.name;
+                score.textContent = p.score.toLocaleString();
+                li.append(name, score);
+                document.getElementById('board').append(li);
             }
         }
-        
+
         // Update the score display
         function updateScoreDisplay() {
             document.getElementById('score').textContent = myScore.toLocaleString();

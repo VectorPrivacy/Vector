@@ -111,8 +111,9 @@ pub trait InboundEventHandler: Send + Sync {
     /// stream auth completes in the background). Fires once per
     /// [`listen`](crate::VectorCore::listen), after the startup refresh commits —
     /// even when `communities` is 0, so "subscribed to nothing" and "still
-    /// connecting" are distinguishable. Before this, messages are only
-    /// recoverable by a later sync, not live.
+    /// connecting" are distinguishable. Community messages sent before this are
+    /// only recoverable by a later sync; DMs sent since `listen` began still
+    /// reach the handler.
     fn on_subscription_ready(&self, _communities: usize) {}
 
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
@@ -135,6 +136,54 @@ pub trait InboundEventHandler: Send + Sync {
 /// No-op handler for CLI/tests.
 pub struct NoOpEventHandler;
 impl InboundEventHandler for NoOpEventHandler {}
+
+/// For catch-up syncs: forwards to `inner` only what is live rather than
+/// history. Mini App peer signals always: a signal is live state, and a sync
+/// that opens one ledgers its wrapper, so the live subscription will never
+/// deliver it again. With [`from`](Self::from), also DMs and files sent since
+/// that moment: sent while the sync ran, they can reach us through it alone.
+pub struct LiveOnly<'a> {
+    inner: &'a dyn InboundEventHandler,
+    live_from_ms: Option<u64>,
+}
+
+impl<'a> LiveOnly<'a> {
+    /// Signals only.
+    pub fn signals(inner: &'a dyn InboundEventHandler) -> Self {
+        LiveOnly { inner, live_from_ms: None }
+    }
+
+    /// Signals, and messages sent at or after `ms` (unix milliseconds).
+    pub fn from(inner: &'a dyn InboundEventHandler, ms: u64) -> Self {
+        LiveOnly { inner, live_from_ms: Some(ms) }
+    }
+
+    fn is_live(&self, msg: &Message) -> bool {
+        self.live_from_ms.is_some_and(|from| msg.at >= from)
+    }
+}
+
+impl InboundEventHandler for LiveOnly<'_> {
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.inner.on_community_webxdc(chat_id, npub, topic_id, node_addr, event_id, created_at)
+    }
+
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        self.inner.on_webxdc_signal(contact, npub, topic_id, node_addr, event_id, created_at)
+    }
+
+    fn on_dm_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        if self.is_live(msg) {
+            self.inner.on_dm_received(chat_id, msg, is_new)
+        }
+    }
+
+    fn on_file_received(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        if self.is_live(msg) {
+            self.inner.on_file_received(chat_id, msg, is_new)
+        }
+    }
+}
 
 /// One deferred DM persist: the message, its chat, and its gift-wrap ledger entry — the
 /// ledger row commits in the same flush transaction as the message row (see
@@ -1404,4 +1453,53 @@ pub async fn process_event(
         .ok_or_else(|| "Public key not initialized".to_string())?;
     let prepared = prepare_event(event, &client, my_pk).await;
     Ok(commit_prepared_event(prepared, is_new, handler).await)
+}
+
+#[cfg(test)]
+mod signals_only_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counts {
+        signals: AtomicUsize,
+        messages: AtomicUsize,
+    }
+
+    impl InboundEventHandler for Counts {
+        fn on_webxdc_signal(&self, _: &str, _: &str, _: &str, _: Option<&str>, _: &str, _: u64) {
+            self.signals.fetch_add(1, Ordering::Relaxed);
+        }
+        fn on_community_webxdc(&self, _: &str, _: &str, _: &str, _: Option<&str>, _: &str, _: u64) {
+            self.signals.fetch_add(1, Ordering::Relaxed);
+        }
+        fn on_dm_received(&self, _: &str, _: &Message, _: bool) {
+            self.messages.fetch_add(1, Ordering::Relaxed);
+        }
+        fn on_file_received(&self, _: &str, _: &Message, _: bool) {
+            self.messages.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_catch_up_sync_passes_on_signals_and_nothing_else() {
+        let inner = Counts::default();
+        let sync = LiveOnly::signals(&inner);
+        sync.on_webxdc_signal("npub1a", "npub1a", "T", Some("addr"), "e1", 1);
+        sync.on_community_webxdc("chan", "npub1a", "T", None, "e2", 1);
+        sync.on_dm_received("npub1a", &Message { at: u64::MAX, ..Default::default() }, true);
+        assert_eq!(inner.signals.load(Ordering::Relaxed), 2);
+        assert_eq!(inner.messages.load(Ordering::Relaxed), 0, "messages from a sync are history");
+    }
+
+    #[test]
+    fn a_startup_sync_passes_on_messages_sent_since_listening_began() {
+        let inner = Counts::default();
+        let sync = LiveOnly::from(&inner, 5_000);
+        sync.on_dm_received("npub1a", &Message { at: 4_999, ..Default::default() }, true);
+        assert_eq!(inner.messages.load(Ordering::Relaxed), 0, "before: history");
+        sync.on_dm_received("npub1a", &Message { at: 5_000, ..Default::default() }, true);
+        sync.on_file_received("npub1a", &Message { at: 6_000, ..Default::default() }, true);
+        assert_eq!(inner.messages.load(Ordering::Relaxed), 2, "since: live");
+    }
 }

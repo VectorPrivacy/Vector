@@ -6,14 +6,13 @@
 //! limits `fetch()` to ~100 req/s.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::realtime::SendHandle;
+use super::realtime::SendHandles;
 
 /// Info returned after starting the WS server.
 pub(crate) struct WsInfo {
@@ -27,9 +26,9 @@ pub(crate) type WsTickets = Arc<std::sync::RwLock<HashMap<String, String>>>;
 /// Shared state passed to each WS connection handler.
 struct WsState {
     tickets: WsTickets,
-    send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
-    /// Map of window label → WS sender. WS handler registers here on connect.
-    /// join_channel looks up the sender and wires it into the event target.
+    send_handles: SendHandles,
+    /// Map of window label → WS sender, registered on connect. A window's
+    /// session takes it up when the app joins (`RealtimeManager::open`).
     ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
@@ -40,7 +39,7 @@ struct WsState {
 pub(crate) async fn run_accept_loop(
     listener: TcpListener,
     tickets: WsTickets,
-    send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
+    send_handles: SendHandles,
     ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 ) {
     let state = Arc::new(WsState {
@@ -71,7 +70,7 @@ pub(crate) async fn run_accept_loop(
 /// Handle a single WebSocket connection.
 ///
 /// The URL path is `/{ticket}`; anything after it is ignored.
-/// After the upgrade handshake, binary frames are forwarded to `fast_send()`.
+/// After the upgrade handshake, binary frames are broadcast on the window's session.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     state: &WsState,
@@ -119,9 +118,8 @@ async fn handle_connection(
     // Create a channel for incoming gossip data → WS write
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
-    // Store WS sender in a shared map so join_channel can find it later.
-    // The WS connects before join_channel runs, so we can't look up the event
-    // target here. Instead, join_channel looks up our sender and wires it in.
+    // The window's session takes this sender up when the app joins; the socket
+    // opens after the join, so until a rejoin its frames arrive by the target.
     {
         let mut senders = state.ws_senders.write().unwrap_or_else(|e| e.into_inner());
         senders.insert(label.clone(), ws_tx.clone());
@@ -146,11 +144,11 @@ async fn handle_connection(
                         let len = data.len();
                         if len <= 128_000 {
                             let t0 = std::time::Instant::now();
-                            fast_send_inline(
-                                &state.send_handles,
-                                &label,
-                                data.into(),
-                            );
+                            // Awaited, so the app's frames go out in the order it sent them.
+                            let sender = state.send_handles.read().unwrap_or_else(|e| e.into_inner()).get(&label).cloned();
+                            if let Some(sender) = sender {
+                                let _ = sender.send(data.to_vec()).await;
+                            }
                             let elapsed = t0.elapsed().as_nanos() as u64;
                             msg_count += 1;
                             total_nanos += elapsed;
@@ -199,32 +197,6 @@ async fn handle_connection(
 
     log_info!("[WEBXDC] RT WS disconnected: {label}");
     Ok(())
-}
-
-/// Inline fast_send — adds gossip trailer and broadcasts via gossip protocol.
-#[inline]
-fn fast_send_inline(
-    send_handles: &std::sync::RwLock<HashMap<String, SendHandle>>,
-    label: &str,
-    data: Vec<u8>,
-) {
-    let handles = send_handles.read().unwrap_or_else(|e| e.into_inner());
-    let Some(handle) = handles.get(label) else {
-        return;
-    };
-
-    // Add trailer: seq(4) + pubkey(32)
-    let mut msg = data;
-    msg.reserve(36);
-    let seq_num = handle.seq.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    msg.extend_from_slice(&seq_num.to_le_bytes());
-    msg.extend_from_slice(&handle.public_key_bytes);
-
-    // Fire-and-forget broadcast (gossip is async, spawn a task)
-    let sender = handle.sender.clone();
-    vector_core::db::spawn_bound(async move {
-        let _ = sender.broadcast(msg.into()).await;
-    });
 }
 
 fn label_for_ticket(tickets: &WsTickets, ticket: &str) -> Option<String> {
