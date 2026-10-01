@@ -76,6 +76,19 @@ pub trait InboundEventHandler: Send + Sync {
         _created_at: u64,
     ) {}
 
+    /// A WebXDC realtime peer signal in a DM. `contact` is the DM's npub; `node_addr` =
+    /// `Some` advertises an Iroh node, `None` = peer-left. Clients without Iroh ignore it.
+    #[allow(clippy::too_many_arguments)]
+    fn on_webxdc_signal(
+        &self,
+        _contact: &str,
+        _npub: &str,
+        _topic_id: &str,
+        _node_addr: Option<&str>,
+        _event_id: &str,
+        _created_at: u64,
+    ) {}
+
     /// The local user was removed from a Community (kick / ban / a leave authored on another device).
     /// Local data is torn down (epoch keys retained); the platform surfaces it + refreshes subs.
     fn on_community_self_removed(&self, _community_id: &str) {}
@@ -284,6 +297,17 @@ impl InboundEventHandler for BatchingPersist<'_> {
     ) {
         self.inner.on_community_webxdc(chat_id, npub, topic_id, node_addr, event_id, created_at)
     }
+    fn on_webxdc_signal(
+        &self,
+        contact: &str,
+        npub: &str,
+        topic_id: &str,
+        node_addr: Option<&str>,
+        event_id: &str,
+        created_at: u64,
+    ) {
+        self.inner.on_webxdc_signal(contact, npub, topic_id, node_addr, event_id, created_at)
+    }
     fn on_community_self_removed(&self, community_id: &str) {
         self.inner.on_community_self_removed(community_id)
     }
@@ -366,7 +390,7 @@ pub async fn prepare_event(
     if let Some(skip) = dedup_skip(&event).await {
         return skip;
     }
-    let unwrap_start = std::time::Instant::now();
+    let unwrap_start = web_time::Instant::now();
     let unwrapped = crate::signer::unwrap_gift_wrap(&event).await;
     finish_prepare(&event, unwrapped, unwrap_start.elapsed().as_nanos() as u64, my_public_key)
 }
@@ -384,7 +408,7 @@ pub async fn prepare_events(events: &[Event], my_public_key: PublicKey) -> Vec<P
     }
     let todo: Vec<&Event> = events.iter().zip(&out).filter(|(_, o)| o.is_none()).map(|(e, _)| e).collect();
     if !todo.is_empty() {
-        let unwrap_start = std::time::Instant::now();
+        let unwrap_start = web_time::Instant::now();
         let unwrapped = crate::signer::unwrap_gift_wraps(&todo).await;
         let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64 / todo.len() as u64;
         let mut unwrapped = unwrapped.into_iter();
@@ -518,7 +542,7 @@ fn finish_prepare(
         conversation_type: ConversationType::DirectMessage,
     };
 
-    let parse_start = std::time::Instant::now();
+    let parse_start = web_time::Instant::now();
     let download_dir = crate::db::get_download_dir();
     match process_rumor(rumor_event, rumor_context, &download_dir) {
         Ok(result) => {
@@ -745,7 +769,7 @@ pub async fn commit_prepared_event(
                             if att.size == 0
                                 && (att.url.starts_with("https://") || att.url.starts_with("http://"))
                             {
-                                if let Ok(Some(size)) = tokio::time::timeout(
+                                if let Ok(Some(size)) = crate::rt::time::timeout(
                                     std::time::Duration::from_secs(3),
                                     crate::net::get_remote_file_size(&att.url),
                                 ).await {
@@ -804,12 +828,24 @@ pub async fn commit_prepared_event(
                     false
                 }
                 RumorProcessingResult::LeaveRequest { .. } => false,
-                RumorProcessingResult::WebxdcPeerAdvertisement { .. } |
-                RumorProcessingResult::WebxdcPeerLeft { .. } |
-                RumorProcessingResult::CallSignal { .. } => {
-                    // WebXDC and calls ride Iroh — handled by src-tauri directly
+                RumorProcessingResult::WebxdcPeerAdvertisement { event_id, topic_id, node_addr, sender_npub, created_at } => {
+                    handler.on_webxdc_signal(&contact, &sender_npub, &topic_id, Some(&node_addr), &event_id, created_at);
                     false
                 }
+                RumorProcessingResult::WebxdcPeerLeft { event_id, topic_id, sender_npub, created_at } => {
+                    handler.on_webxdc_signal(&contact, &sender_npub, &topic_id, None, &event_id, created_at);
+                    false
+                }
+                #[cfg(feature = "calls")]
+                RumorProcessingResult::CallSignal { call_id, signal, node_addr, sender_npub, created_at, video, media, .. } => {
+                    // Only the DM's other party may signal; a group member cannot ring us through a channel.
+                    if contact == sender_npub {
+                        crate::calls::session::on_signal(&sender_npub, &call_id, &signal, node_addr.as_deref(), created_at, video.as_deref(), media.as_deref()).await;
+                    }
+                    false
+                }
+                #[cfg(not(feature = "calls"))]
+                RumorProcessingResult::CallSignal { .. } => false,
                 RumorProcessingResult::WallpaperChanged {
                     sender_npub, created_at, url, decryption_key, decryption_nonce,
                     plaintext_hash, mime, blur, dim, event_id,
@@ -909,7 +945,7 @@ pub async fn commit_prepared_event(
                     // Join re-validates freshness. std::sync::Arc<crate::db::Session>'d so a mid-flight swap is a no-op.
                     let invite_warm = invite.clone();
                     let bg = crate::db::current_session();
-                    tokio::spawn(async move {
+                    crate::rt::spawn(async move {
                         if !bg.is_live() {
                             return;
                         }

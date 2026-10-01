@@ -23,7 +23,8 @@
 //! anyone chose; the setting's own help text says so.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 pub const SETTING_KEY: &str = "privacy_proxy_media";
 pub const UNFURL_EXT: &str = "magnitude-unfurl";
@@ -69,7 +70,7 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
         if !servers.is_empty() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        crate::rt::time::sleep(Duration::from_millis(200)).await;
         servers = crate::state::get_blossom_servers();
     }
     let mut found = None;
@@ -105,20 +106,21 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
         None if every_answer_known => crate::log_warn!("[Proxy] no configured Blossom server offers {}; falling back", extension),
         None => crate::log_warn!("[Proxy] could not learn which server offers {}; asking again next time", extension),
     }
-    // A found server is remembered; a settled "none" (every server asked,
-    // none offers it) only briefly, so a server that starts offering it is
-    // seen soon; a failure to learn is not remembered at all.
+    // A found server is remembered; "none", settled or not, only briefly, so a
+    // server that starts offering it (or answers again) is seen soon. An
+    // unsettled answer loads pictures directly either way; remembering it only
+    // spares every picture meanwhile a round of document fetches (a browser
+    // can't read a server whose error pages refuse cross-origin reads).
     if let Ok(mut picks) = PICKS.lock() {
         picks.retain(|p| p.extension != extension);
-        match (&found, every_answer_known) {
-            (Some(_), _) => picks.push(Pick { extension, server: found.clone(), at: Instant::now() }),
+        match &found {
+            Some(_) => picks.push(Pick { extension, server: found.clone(), at: Instant::now() }),
             // Dated back so it ages out after the short window, not the long.
-            (None, true) => {
+            None => {
                 if let Some(at) = Instant::now().checked_sub(PICK_TTL - NEGATIVE_PICK_TTL) {
                     picks.push(Pick { extension, server: None, at });
                 }
             }
-            (None, false) => {}
         }
     }
     found

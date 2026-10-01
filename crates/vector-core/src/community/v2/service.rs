@@ -39,8 +39,8 @@ fn me_pk() -> Result<PublicKey, String> {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
@@ -2001,7 +2001,7 @@ pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str
 /// handshake takes under boot contention.
 async fn wait_for_bootstrap_relay(relays: &[String]) {
     let Some(client) = crate::state::nostr_client() else { return };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let deadline = crate::rt::time::Instant::now() + std::time::Duration::from_secs(8);
     loop {
         for url in relays {
             if let Ok(Some(relay)) = client.relay(url).await {
@@ -2010,10 +2010,10 @@ async fn wait_for_bootstrap_relay(relays: &[String]) {
                 }
             }
         }
-        if tokio::time::Instant::now() >= deadline {
+        if crate::rt::time::Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(400)).await;
     }
 }
 
@@ -2024,7 +2024,7 @@ async fn wait_for_bootstrap_relay(relays: &[String]) {
 /// untouched, so the revocation gate always runs live.
 struct VerifiedPreview {
     session: std::sync::Arc<crate::db::Session>,
-    at: std::time::Instant,
+    at: web_time::Instant,
     community_id: [u8; 32],
     community_root: [u8; 32],
     folded: CommunityV2,
@@ -2064,7 +2064,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
             let folded = vj.community;
             *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
                 session: crate::db::current_session(),
-                at: std::time::Instant::now(),
+                at: web_time::Instant::now(),
                 community_id: folded.id().0,
                 community_root: folded.community_root,
                 folded: folded.clone(),
@@ -2790,8 +2790,8 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
                     let mut ev = ev;
                     if ev.observed_at.is_none() {
                         ev.observed_at = Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
+                            web_time::SystemTime::now()
+                                .duration_since(web_time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0),
                         );
@@ -2875,8 +2875,8 @@ fn mark_guestbook_observed_since(cid_hex: &str) {
     if crate::db::settings::get_sql_setting(key.clone()).ok().flatten().is_some() {
         return; // never moves forward — a later stamp would erase our own coverage
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let _ = crate::db::settings::set_sql_setting(key, now.to_string());
@@ -4234,7 +4234,7 @@ pub fn republish_community_list_durable(just_joined: Option<crate::community::Co
                 Ok(false) => {} // skipped (remote fetch failed) — already logged; retry
                 Err(e) => crate::log_warn!("[CommunityList] republish attempt #{} failed: {}", attempt, e),
             }
-            tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(*wait)).await;
         }
         crate::log_warn!(
             "[CommunityList] gave up recording membership after {} attempts — it will re-record on the next join/leave",
@@ -4289,7 +4289,7 @@ pub fn tombstone_community_list_durable(community_id: crate::community::Communit
     }
     crate::db::spawn_bound(async move {
         for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
-            tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(*wait)).await;
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             match tombstone_community_list(&transport, &community_id, &relays, removed_at).await {
                 Ok(()) => {
@@ -5769,7 +5769,7 @@ pub async fn contain_raid<T: Transport + ?Sized>(
                 break;
             }
             if attempt < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
+                crate::rt::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
             }
         }
         match refound {
@@ -9405,7 +9405,7 @@ async fn run_pin_duty<T: Transport + ?Sized>(
         for b in me_hex.bytes().chain(target.bytes()) {
             h = h.wrapping_mul(31).wrapping_add(u32::from(b));
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5 + u64::from(h % 21))).await;
+        crate::rt::time::sleep(std::time::Duration::from_secs(5 + u64::from(h % 21))).await;
     }
 
     // Re-read after the stagger: another curator's edition may have landed.
@@ -10174,13 +10174,13 @@ mod tests {
         crate::db::community::set_migration_pointer(&v1_cid, &migration::build_migration_content(&signpost, None).unwrap()).unwrap();
 
         let held = crate::community::v2::realtime::follow_lock(&v2_id).lock_owned().await;
-        let drive = tokio::spawn({
+        let drive = crate::rt::spawn({
             let relay = relay.clone();
             let m_v1 = m_v1.clone();
             async move { migration::drive_migration(&*relay, &m_v1).await }
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!drive.is_finished(), "the flip must wait for the in-flight follow pass");
         assert!(crate::db::community::get_migrated_to(&v1_cid).unwrap().is_none(), "no fence while the lock is held");
         assert_eq!(
@@ -10353,14 +10353,14 @@ mod tests {
         // A follow pass is in flight: it holds the lock across its network stage.
         let held = crate::community::v2::realtime::follow_lock(&v2_id).lock_owned().await;
 
-        let wizard = tokio::spawn({
+        let wizard = crate::rt::spawn({
             let relay = relay.clone();
             let v1 = v1.clone();
             async move { migration::migrate_community_to_v2(&*relay, &v1, unlocked).await }
         });
 
         // The wizard runs its network phases but must BLOCK at the flip.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!wizard.is_finished(), "the flip must wait for the in-flight follow pass");
         assert!(
             crate::db::community::get_migrated_to(&v1_cid).unwrap().is_none(),
@@ -11083,7 +11083,7 @@ mod tests {
         let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
         let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
         // Let the leave land strictly after the join.
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(2)).await;
         leave_community(&bed.relay, &joined).await.unwrap();
 
         bed.swap_to(&owner);
@@ -13768,7 +13768,7 @@ mod tests {
         let new_root = [0xD6; 32];
         publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
 
-        let followed = tokio::time::timeout(
+        let followed = crate::rt::time::timeout(
             std::time::Duration::from_secs(20),
             follow_rekeys(&bed.relay, &joined, &crate::db::current_session()),
         )
@@ -15511,7 +15511,7 @@ mod tests {
             crate::state::MY_SECRET_KEY.store_from_keys(k, &[]);
             crate::state::set_my_public_key(k.public_key());
         };
-        let settle = || tokio::time::sleep(std::time::Duration::from_secs(2));
+        let settle = || crate::rt::time::sleep(std::time::Duration::from_secs(2));
 
         // A: create + a channel + grant B admin + mint link.
         become_acct(&a);
@@ -18667,7 +18667,7 @@ mod tests {
         println!("[smoke] sent message {sent_id}");
 
         // Give the relay a moment to store + be ready to serve it.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        crate::rt::time::sleep(std::time::Duration::from_secs(3)).await;
 
         let page = fetch_channel(&transport, &community, &general, 50).await.expect("fetch");
         let texts: Vec<String> = page
@@ -19177,19 +19177,19 @@ mod tests {
     #[async_trait::async_trait]
     impl Transport for YieldyRelay<'_> {
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.publish(event, relays).await
         }
         async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.fetch(query, relays).await
         }
         async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
         async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.publish_durable(event, relays).await
         }
     }
@@ -19373,19 +19373,19 @@ mod tests {
     #[async_trait::async_trait]
     impl Transport for BrokenPublish<'_> {
         async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             Err("relay refused".to_string())
         }
         async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.fetch(query, relays).await
         }
         async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
         async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             Err("relay refused".to_string())
         }
     }
@@ -19403,7 +19403,7 @@ mod tests {
 
         let broken = BrokenPublish(&bed.relay);
         let (wa, wb) = ([a], [b]);
-        let (ra, rb) = tokio::time::timeout(
+        let (ra, rb) = crate::rt::time::timeout(
             std::time::Duration::from_secs(30),
             async {
                 tokio::join!(

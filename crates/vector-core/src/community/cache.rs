@@ -8,7 +8,8 @@
 use nostr_sdk::prelude::Event;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 #[derive(Default)]
 struct CommunityCache {
@@ -225,7 +226,7 @@ pub async fn take_or_await_preload(community_id: &str) -> Option<Vec<Event>> {
         if Instant::now() >= deadline {
             return None;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        crate::rt::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

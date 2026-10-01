@@ -84,12 +84,14 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 - **Metadata Stripped by Default:** EXIF and location data removed from every photo before it leaves your device.
 - **Self-Destructing Messages:** Set a per-chat timer and watch messages disappear on your own schedule.
 - **Local Encryption:** Protect your account with a PIN, password, or biometrics.
+- **In Your Browser:** Vector Web runs the full app in any modern browser, Tor Browser included, with nothing to install.
 
 ### 👥 Communities & Chat
 - **Encrypted Communities:** Discord-style spaces with channels, roles, and admins, fully end-to-end encrypted.
 - **Bans That Actually Work:** Removing a member re-keys the room, cryptographically locking them out of everything that follows.
 - **Rich Message Composer:** Markdown, mentions, and custom emojis render live as you type.
 - **Voice Messages:** Record and send audio, with optional on-device AI transcription.
+- **Voice & Video Calls:** Encrypted one-to-one calls with camera and screen sharing, peer to peer.
 - **Multiple Accounts:** Run several identities on one install with an in-app switcher.
 
 ### 🎨 Style & Customization
@@ -116,7 +118,7 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 
 # Install
 
-Download the latest release for your platform. No account, no phone number, no email required.
+Download the latest release for your platform, or open Vector Web in your browser. No account, no phone number, no email required.
 
 | Platform | Download |
 |----------|----------|
@@ -124,6 +126,7 @@ Download the latest release for your platform. No account, no phone number, no e
 | macOS | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
 | Linux | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
 | Android | [Latest Release](https://github.com/VectorPrivacy/Vector/releases/latest) |
+| Web | [web.vectorapp.io](https://web.vectorapp.io) |
 
 > [!NOTE]
 > The Android build is a standard APK and runs on de-Googled and privacy-focused Android variants, including [GrapheneOS](https://grapheneos.org) and UP Phone.
@@ -144,6 +147,15 @@ Prefer to build from source? See [Compiling](#compiling) below.
 | Ubuntu / Debian | [docs/build/ubuntu.md](docs/build/ubuntu.md) |
 | macOS → Android | [docs/build/macos-android.md](docs/build/macos-android.md) |
 | Your OS missing? | [Contribute a guide!](docs/build/) |
+
+### Vector Web
+
+```bash
+npm run web:build              # wasm core + frontend → dist-web/ (add `-- --release` for production)
+npm run web:serve              # http://localhost:8790
+```
+
+Needs `wasm-pack` and the `wasm32-unknown-unknown` target; see [web/README.md](web/README.md) for how it fits together and how to host it.
 
 ---
 

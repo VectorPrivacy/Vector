@@ -209,8 +209,9 @@ function cancelReactionLongPress() {
 
 // Hover summary (desktop only). Uses a 500ms delay so brief cursor flyovers
 // don't fire the tip. mousein/mouseout via mouseover/mouseout (capture-style)
-// because mouseenter/mouseleave don't bubble.
-document.addEventListener('mouseover', (e) => {
+// because mouseenter/mouseleave don't bubble. Registered after the deferred
+// scripts, which declare `platformFeatures`.
+document.addEventListener('DOMContentLoaded', () => document.addEventListener('mouseover', (e) => {
     if (platformFeatures?.is_mobile) return;
     const reactionEl = e.target.closest('.reaction');
     if (!reactionEl) return;
@@ -229,7 +230,7 @@ document.addEventListener('mouseover', (e) => {
             showReactionHoverTip(reactionEl);
         }
     }, REACTION_HOVER_DELAY_MS);
-});
+}), { once: true });
 
 document.addEventListener('mouseout', (e) => {
     const reactionEl = e.target.closest('.reaction');

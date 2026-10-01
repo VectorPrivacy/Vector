@@ -51,3 +51,7 @@ memory.sqlite-shm
 memory.sqlite-wal
 stray.toml
 src-tauri/native-deps/
+
+# Vector Web build output
+dist-web
+web/pkg

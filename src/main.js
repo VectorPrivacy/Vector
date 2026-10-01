@@ -1229,6 +1229,7 @@ async function init(skipAccountCheck = false) {
 
     // Display pending Community invites.
     await loadCommunityInvites();
+    invitesChanged();
 
     // Preload each community's admin roster so admin tags + @everyone render from the first paint,
     // not only after the Group Info panel has been opened (which used to be the sole roster loader).
@@ -2251,7 +2252,11 @@ function anchorShowsItsDestination(anchor) {
  * links are always cross-origin. Same-origin therefore means "our own UI".
  */
 function isAppChromeAnchor(anchor) {
-    try { return new URL(anchor.href).origin === location.origin; }
+    try {
+        const url = new URL(anchor.href);
+        // Vector Web serves received files same-origin under /vfs: those are content, not UI.
+        return url.origin === location.origin && !url.pathname.startsWith('/vfs/');
+    }
     catch { return true; }
 }
 

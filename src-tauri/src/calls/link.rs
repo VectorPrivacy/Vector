@@ -9,11 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-/// One socket, split: what goes to the webview and what comes from it.
-pub struct LinkConn {
-    pub to_web: mpsc::Sender<Bytes>,
-    pub from_web: mpsc::Receiver<Bytes>,
-}
+pub use vector_core::calls::platform::LinkConn;
 
 struct Server {
     port: u16,

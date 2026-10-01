@@ -656,8 +656,8 @@ mod tests {
         // 1. Publish two messages, retaining each ephemeral key for later deletion.
         // Use a real epoch-ms so the split-out created_at is "now" (relays reject
         // events dated absurdly far in the past/future).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         let mut published: Vec<(Keys, Event)> = Vec::new();

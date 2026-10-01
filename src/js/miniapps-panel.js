@@ -132,7 +132,8 @@ async function loadMiniAppsHistory() {
         const history = await invoke('miniapp_get_history', { limit: null });
 
         const preInstallDone = localStorage.getItem('miniapps_preinstall_done') === 'true';
-        if (history.length === 0 && !preInstallDone) {
+        // A browser that can't run mini apps gets no packages it could never open.
+        if (history.length === 0 && !preInstallDone && platformFeatures?.mini_apps !== false) {
             localStorage.setItem('miniapps_preinstall_done', 'true');
             preinstallDefaultMiniApps();
         }

@@ -814,8 +814,8 @@ pub fn save_subscriptions(addrs: &[String]) -> Result<(), String> {
     tx.execute("DELETE FROM emoji_pack_subscriptions", [])
         .map_err(|e| format!("Failed to clear subscriptions: {}", e))?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() as i64;
     // `position` (the slice index) is the authoritative display order — the
     // DELETE-all-reinsert stamps every row with the same `now`, so ordering
     // by `subscribed_at` alone would be unstable.
@@ -990,7 +990,7 @@ const NIP65_FETCH_TIMEOUT_SECS: u64 = 10;
 #[derive(Clone)]
 struct CachedRelayList {
     relays: Vec<RelayUrl>,
-    fetched_at: std::time::Instant,
+    fetched_at: web_time::Instant,
     /// Empty fetches use the shorter TTL so transient outages recover fast.
     empty: bool,
     /// True when the entry came from a SUCCESSFUL kind-10002 fetch. An
@@ -1045,7 +1045,7 @@ fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>, verified: bool) 
         let empty = relays.is_empty();
         cache.insert(pubkey, CachedRelayList {
             relays,
-            fetched_at: std::time::Instant::now(),
+            fetched_at: web_time::Instant::now(),
             empty,
             verified,
         });
@@ -1533,13 +1533,13 @@ async fn sweep_via_isolated_client(
     // least one handshake to complete (bounded) before sampling connectivity —
     // an instant sample reads empty on every run, which would make before ∩
     // after a tautological zero and outbox absences permanently unjudgeable.
-    let connect_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let connect_deadline = web_time::Instant::now() + std::time::Duration::from_secs(8);
     let before = loop {
         let connected = connected_read_relays(&scratch, false).await;
-        if !connected.is_empty() || std::time::Instant::now() >= connect_deadline {
+        if !connected.is_empty() || web_time::Instant::now() >= connect_deadline {
             break connected;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(200)).await;
     };
     let result = scratch.fetch_events(pack_filter).timeout(timeout).await;
     let dels = match &result {
@@ -1659,8 +1659,8 @@ pub async fn fetch_subscribed_packs(
         // deleting an own pack removes its rows locally, so there's nothing to
         // grieve, and a self-authored pack must never grey out over relay state.
         let me_hex = my_pubkey.to_hex();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let mut health_changed = false;
@@ -1905,7 +1905,7 @@ pub fn republish_emoji_list_debounced() {
     );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     crate::db::spawn_bound(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
         let client = match nostr_client() {
             Some(c) => c,
@@ -1913,7 +1913,7 @@ pub fn republish_emoji_list_debounced() {
         };
         if let Err(e) = publish_emoji_list(&client).await {
             crate::log_warn!("[EmojiPacks] Republish failed: {} (retrying in 5s)", e);
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
             if let Err(e2) = publish_emoji_list(&client).await {
                 crate::log_warn!("[EmojiPacks] Republish retry failed: {}", e2);
@@ -2031,8 +2031,8 @@ pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
         to_save.is_own = true;
         let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
         to_save.id = naddr_from_addr(&raw_addr)?;
-        to_save.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        to_save.updated_at = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs();
 
         // Equipped-pack cap. Replacing an existing own pack is fine — only
         // a *new* identifier would push us over the limit.

@@ -331,7 +331,9 @@ async function handleComposerKeydown(evt) {
         if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
         if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
         if (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()) return;
-        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey) {
+        // A phone browser's Return key is a newline; its Send button sends.
+        const returnIsNewline = platformFeatures.os === 'web' && platformFeatures.is_mobile;
+        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey && !returnIsNewline) {
             evt.preventDefault();
             await sendMessage(domChatMessageInput.value);
         }

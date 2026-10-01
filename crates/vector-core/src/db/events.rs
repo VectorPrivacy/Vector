@@ -127,11 +127,11 @@ fn reaction_to_stored_event(
         content: reaction.emoji.clone(),
         tags,
         reference_id: Some(reaction.reference_id.clone()),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        created_at: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs()).unwrap_or(0),
-        received_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        received_at: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0),
         mine,
         pending: false,
@@ -410,8 +410,8 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         tags,
         reference_id: None,
         created_at: message.at / 1000,
-        received_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        received_at: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         mine: message.mine,
@@ -441,8 +441,8 @@ pub async fn save_system_event_by_id(
     member_npub: &str,
     member_name: Option<&str>,
 ) -> Result<bool, String> {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
     save_system_event_at(event_id, conversation_id, event_type, member_npub, member_name, now_secs, None, None).await
 }
@@ -476,8 +476,8 @@ pub async fn save_system_event_at(
     }
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
     // Author-set timestamp: clamp forward so a future-dated event can't jump ahead of real activity.
     let created_at = created_at_secs.min(now_secs);
@@ -527,8 +527,8 @@ pub async fn save_edit_event(
     user_id: Option<i64>,
     npub: &str,
 ) -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap();
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH).unwrap();
 
     // Carry NIP-30 emoji tags so a reload renders the edit's custom emoji image
     // (the reload fold reads the latest edit's tags, not the original message's).
@@ -591,8 +591,8 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
 /// re-serves across restarts (NIP-09 is best-effort — relays ignore it freely).
 pub fn add_message_tombstone(event_id: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     conn.execute(
@@ -1963,7 +1963,7 @@ mod tests {
     }
 
     fn now_secs() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs()
     }
 
     /// A page of synced replies must come out of the batch resolver carrying their quotes.

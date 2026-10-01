@@ -278,7 +278,7 @@ async fn stamp_dissolved_chats(id: &CommunityId) {
 /// write, and the TTL only backstops a missed writer; it adds nothing to
 /// rotation propagation, which already waits on the follow worker's write.
 struct HeldV2Cache;
-type HeldV2Slot = std::sync::Mutex<Option<(std::time::Instant, Arc<Vec<CommunityV2>>)>>;
+type HeldV2Slot = std::sync::Mutex<Option<(web_time::Instant, Arc<Vec<CommunityV2>>)>>;
 fn held_v2_cache() -> Arc<HeldV2Slot> {
     crate::db::current_session().scoped::<HeldV2Cache, HeldV2Slot>()
 }
@@ -296,7 +296,7 @@ pub fn load_held_v2_cached() -> Arc<Vec<CommunityV2>> {
     }
     let fresh = Arc::new(load_held_v2());
     *cache.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((std::time::Instant::now(), Arc::clone(&fresh)));
+        Some((web_time::Instant::now(), Arc::clone(&fresh)));
     fresh
 }
 
@@ -357,13 +357,13 @@ pub async fn refresh_subscription(client: &Client) {
             // against a still-connecting relay silently fails to register — same
             // trap as v1).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
-            let wait_t = std::time::Instant::now();
+            let wait_t = web_time::Instant::now();
             for _ in 0..24 {
                 let pool = client.relays().all().await;
                 if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                crate::rt::time::sleep(std::time::Duration::from_millis(250)).await;
             }
             {
                 let pool = client.relays().all().await;

@@ -58,6 +58,7 @@ pub fn has_unbound_spawn(src: &str) -> bool {
 /// function early in a file would otherwise hide every line after it.
 // Assembled at compile time so this file never contains the text it searches for.
 const NEEDLE: &str = concat!("tokio::", "spawn(");
+const RT_NEEDLE: &str = concat!("rt::", "spawn(");
 
 fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
     let all: Vec<&str> = src.lines().collect();
@@ -73,7 +74,7 @@ fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
         .iter()
         .enumerate()
         .filter(|(i, line)| {
-            line.contains(NEEDLE)
+            (line.contains(NEEDLE) || line.contains(RT_NEEDLE))
                 && !line.trim_start().starts_with("//")
                 && !line.contains("spawn-detached:")
                 && !lines[..*i].iter().rev().take(4).any(|p| p.contains("spawn-detached:"))

@@ -100,8 +100,8 @@ pub fn persist(line: &str) {
 /// in the tree). A bare clock time can't tell a support-log reader whether an
 /// error predates a fix — the date is the whole point of a persistent log.
 pub fn timestamp_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format_unix_utc(secs)
@@ -146,4 +146,17 @@ mod ts_tests {
         assert_eq!(format_unix_utc(1_735_689_599), "2024-12-31 23:59:59Z");
         assert_eq!(format_unix_utc(1_767_225_600), "2026-01-01 00:00:00Z");
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(s: &str);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub fn console_line(line: &str) {
+    console_log(line);
 }

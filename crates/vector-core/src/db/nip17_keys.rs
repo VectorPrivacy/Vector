@@ -61,8 +61,8 @@ pub fn store_wrap_key(
     relay_urls: &[String],
 ) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
     let relays_json = serde_json::to_string(relay_urls)
@@ -297,8 +297,8 @@ pub fn clear_resend_payload(rumor_id: &EventId) -> Result<(), String> {
 /// Returns how many bodies were reaped.
 pub fn prune_stale_resend_payloads(max_age_secs: i64) -> Result<usize, String> {
     let conn = super::get_write_connection_guard_static()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
     let cutoff = now - max_age_secs;

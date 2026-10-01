@@ -470,11 +470,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
 static PENDING_REAUTH_RESULT: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
-/// Known plaintext for the NIP-55 PIN verification canary. Encrypted under the
-/// derived key at setup (and when Local Encryption is toggled on) and
-/// re-decrypted at boot to reject a wrong PIN (a keyless account has no pkey
-/// whose failed decrypt would otherwise do this).
-pub(crate) const NIP55_PIN_CANARY: &str = "vector-nip55-pin-ok";
+pub(crate) use vector_core::db::at_rest::NIP55_PIN_CANARY;
 
 #[tauri::command]
 pub fn get_pending_reauth_result() -> Option<String> {
@@ -1114,6 +1110,14 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             }
         };
 
+        // Clones don't share the pairing, so the slot takes the paired instance,
+        // unless the attempt was abandoned meanwhile.
+        if vector_core::bunker_signer().is_none() {
+            let _ = signer.shutdown().await;
+            return;
+        }
+        vector_core::set_bunker_signer(signer);
+
         // Same staging block as connect_bunker — extract any further if
         // a third entry point ever appears. Wraps the side-effects so a
         // failure here can roll back cleanly.
@@ -1634,7 +1638,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // One-time wrap of pre-existing plaintext community rows on an already-
     // encrypted account. Runs for every signer kind (a no-op when the account
     // isn't encrypted); ENCRYPTION_KEY is installed by every branch above.
-    if let Err(e) = crate::commands::encryption::backfill_community_at_rest() {
+    if let Err(e) = vector_core::db::at_rest::backfill_community_at_rest() {
         eprintln!("[Login] community at-rest backfill deferred: {e}");
     }
 

@@ -48,8 +48,8 @@ pub fn resolve_send_expiry(chat_id: &str) -> Option<u64> {
 /// after its upload, so the clock starts at publish, not at the moment the send was asked
 /// for.
 pub fn expiry_after(duration_secs: u64) -> Option<u64> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .ok()?
         .as_secs();
     Some(now + duration_secs)
@@ -78,7 +78,7 @@ pub async fn sweep_expired() -> Option<u64> {
     }
     let _guard = SweepGuard;
 
-    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    let now = match web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(_) => return None,
     };
@@ -170,7 +170,7 @@ pub(crate) async fn purge_one(id: &str, db_fallback: Option<(Vec<crate::types::A
 /// closed (or while their chat was out of STATE) must NEVER render — not
 /// even for the frame between hydration and the next sweep tick.
 pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
-    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    let now = match web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(_) => return,
     };
@@ -196,8 +196,8 @@ pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
 /// (down to a 1s floor) so the final stretch purges in real time, but never
 /// longer than SWEEP_MAX_SECS so a newly-arrived message is noticed promptly.
 fn next_sweep_delay(soonest: Option<u64>) -> std::time::Duration {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let secs = match soonest {
@@ -214,7 +214,7 @@ fn next_sweep_delay(soonest: Option<u64>) -> std::time::Duration {
 pub async fn run_sweeper_loop() {
     loop {
         let soonest = sweep_expired().await;
-        tokio::time::sleep(next_sweep_delay(soonest)).await;
+        crate::rt::time::sleep(next_sweep_delay(soonest)).await;
     }
 }
 
@@ -229,5 +229,5 @@ pub fn start_sweeper() {
     // whichever account is live. Binding would pin it to whoever logged in
     // first, and every later account would silently stop expiring messages.
     // spawn-detached: the sweeper must expire messages for whichever account is live; see above.
-    tokio::spawn(run_sweeper_loop());
+    crate::rt::spawn(run_sweeper_loop());
 }

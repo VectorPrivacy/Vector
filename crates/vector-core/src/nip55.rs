@@ -380,7 +380,7 @@ impl Nip55Signer {
                 SignerError::backend(Nip55Error::Ipc("nip55 semaphore closed".to_string()))
             })?;
             let (d, cp, cu) = (data.clone(), counterparty.clone(), current_user.clone());
-            match tokio::task::spawn_blocking(move || backend.resolver_op(method, &d, &cp, &cu)).await {
+            match crate::rt::spawn_blocking(move || backend.resolver_op(method, &d, &cp, &cu)).await {
                 Ok(o) => o,
                 Err(e) => {
                     return Err(SignerError::backend(Nip55Error::Ipc(format!(
@@ -412,7 +412,7 @@ impl Nip55Signer {
                 let _intent_permit = NIP55_INTENT_SEMAPHORE.acquire().await.map_err(|_| {
                     SignerError::backend(Nip55Error::Ipc("nip55 intent semaphore closed".to_string()))
                 })?;
-                let res = match tokio::task::spawn_blocking(move || {
+                let res = match crate::rt::spawn_blocking(move || {
                     backend.intent_op(intent_type, &data, &counterparty, &current_user)
                 })
                 .await
@@ -578,7 +578,7 @@ pub async fn nip55_pair() -> Result<(PublicKey, String), String> {
     let perms = nip55_perms_json();
     let backend = nip55_backend().ok_or("no external signer available on this platform")?;
     let (pk_str, package) =
-        tokio::task::spawn_blocking(move || backend.get_public_key_pairing(&perms))
+        crate::rt::spawn_blocking(move || backend.get_public_key_pairing(&perms))
             .await
             .map_err(|e| format!("pairing worker join error: {e}"))?
             .map_err(|e| e.to_string())?;

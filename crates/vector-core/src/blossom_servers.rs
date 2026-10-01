@@ -216,7 +216,7 @@ static REPUBLISH_GEN: AtomicU64 = AtomicU64::new(0);
 pub fn republish_blossom_servers_debounced() {
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     crate::db::spawn_bound(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
         let client = match nostr_client() {
             Some(c) => c,
@@ -224,7 +224,7 @@ pub fn republish_blossom_servers_debounced() {
         };
         if let Err(e) = publish_blossom_servers(&client).await {
             crate::log_warn!("[BlossomServers] Republish failed: {} (retrying in 5s)", e);
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
             if let Err(e2) = publish_blossom_servers(&client).await {
                 crate::log_warn!("[BlossomServers] Republish retry failed: {}", e2);
@@ -350,7 +350,7 @@ pub async fn fetch_and_merge_own_list(
 /// author hex → (servers, fetched_at). Public network data keyed by FOREIGN
 /// pubkey, so it's account-agnostic and survives swaps safely. Empty lists
 /// cache too — a sender with no 10063 mustn't be re-queried per broken blob.
-type UserServerLists = std::collections::HashMap<String, (Vec<String>, std::time::Instant)>;
+type UserServerLists = std::collections::HashMap<String, (Vec<String>, web_time::Instant)>;
 
 static USER_SERVER_LIST_CACHE: std::sync::LazyLock<std::sync::Mutex<UserServerLists>> =
     std::sync::LazyLock::new(Default::default);
@@ -429,7 +429,7 @@ pub async fn fetch_user_server_list(client: &Client, author: PublicKey) -> Vec<S
         if cache.len() > 512 {
             cache.clear();
         }
-        cache.insert(key, (servers.clone(), std::time::Instant::now()));
+        cache.insert(key, (servers.clone(), web_time::Instant::now()));
     }
     servers
 }

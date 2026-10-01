@@ -1,0 +1,176 @@
+/* Vector Web: a browser tab has no window to minimise, maximise or close. */
+.vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
+
+/* The status-bar cap (web/chrome.js paints it). iOS colours the status bar from
+   an opaque fixed box at the very top edge, and only a simple one, so the cap is
+   always that box, in a strip the title-bar inset reserves so it hides nothing. */
+.edge-cap {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 12px;
+    z-index: 99;
+}
+body.mobile { --chrome-h: 12px; }
+/* The body keeps the strip's margin inside it (its own formatting context):
+   collapsed through it, the margin would push the page a strip taller than the screen. */
+body.mobile { display: flow-root; }
+body.mobile > main.container { margin-top: var(--chrome-h); }
+/* Opaque, so the strip above in their colour reads as part of them. The chat
+   header states its top: WebKit pins a fixed box with top:auto to the viewport. */
+body.mobile .chat-header,
+body.mobile .profile-header { background-color: rgb(22, 22, 22); }
+body.mobile .chat-header { top: var(--chrome-h); }
+.edge-cap[hidden] { display: none; }
+
+/* The floor: a Home Screen app runs under the home indicator (web/chrome.js). */
+/* The tab bar takes half of it: its own height already clears most of the curve. */
+body.mobile .navbar {
+    box-sizing: border-box;
+    height: calc(65px + var(--floor, 0px) / 2);
+    padding-bottom: calc(var(--floor, 0px) / 2);
+}
+body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
+body.mobile #chat-list,
+body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
+body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
+body.mobile #chat-new-box { bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
+body.mobile #chat-new .chat-new-center-content { bottom: calc(50px + max(5px, var(--floor, 0px))); }
+body.mobile .create-group-footer { padding-bottom: max(15px, var(--floor, 0px)); }
+/* The floor below an input bar is solid, like the header, not the chat's wallpaper. */
+body.mobile #chat-box::after,
+body.mobile #chat-new-box::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: calc(max(5px, var(--floor, 0px)) - 5px);
+    background: rgb(22, 22, 22);
+}
+body.mobile .emoji-picker,
+body.mobile .attachment-panel { bottom: calc(65px + var(--floor, 0px)); }
+/* The chat is sized by 100vh, which iOS keeps full-height under the keyboard. */
+body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
+@media (max-width: 640px) {
+    .lg-bg-toggle { margin-bottom: max(10px, var(--floor, 0px)); }
+}
+
+/* Mini app windows (web/miniapps.js) */
+.xdc-window {
+    position: fixed;
+    width: 480px;
+    height: 640px;
+    min-width: 320px;
+    min-height: 360px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    display: flex;
+    flex-direction: column;
+    background: #0a0a0a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    resize: both;
+}
+.xdc-window.xdc-max {
+    inset: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    resize: none;
+}
+.xdc-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-sizing: border-box;
+    height: 37px;
+    padding: 0 4px 0 10px;
+    flex-shrink: 0;
+    background: #141414;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    color: #e5e5e5;
+    font: 600 13px system-ui, sans-serif;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+}
+.xdc-dragging .xdc-bar { cursor: grabbing; }
+.xdc-dragging .xdc-frame { pointer-events: none; }
+.xdc-icon { width: 20px; height: 20px; border-radius: 5px; object-fit: cover; }
+.xdc-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xdc-btn {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    color: #bdbdbd;
+    cursor: pointer;
+}
+.xdc-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.xdc-close:hover { background: #c0392b; }
+.xdc-frame { flex: 1; width: 100%; border: 0; background: #0a0a0a; }
+/* Full screen on touch devices and narrow screens: no frame, a floating exit chip. */
+.xdc-window.xdc-immersive {
+    inset: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none;
+    max-height: none;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    resize: none;
+    background: #000;
+}
+.xdc-immersive .xdc-bar { display: none; }
+.xdc-chip {
+    all: unset;
+    box-sizing: border-box;
+    display: none;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 14px);
+    right: calc(env(safe-area-inset-right, 0px) + 12px);
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 50%;
+    background: rgba(14, 14, 16, 0.8);
+    border: 1.5px solid rgba(89, 252, 179, 0.5);
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
+    opacity: 0.55;
+    transition: opacity 0.25s ease, transform 0.12s ease;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: pointer;
+    z-index: 1;
+}
+.xdc-chip svg { width: 16px; height: 16px; }
+.xdc-immersive .xdc-chip { display: grid; }
+.xdc-chip.xdc-chip-active { opacity: 1; }
+.xdc-chip:active { transform: scale(0.92); }
+.xdc-chip:focus-visible { outline: 2px solid #59fcb3; outline-offset: 2px; }
+
+/* A browser that refuses service workers can't run mini apps: no way in. */
+.no-miniapps #miniapps-btn,
+.no-miniapps .attachment-panel-miniapps {
+    display: none !important;
+}
+
+/* Browsers without WebCodecs audio or AudioWorklets cannot place a call. */
+.no-calls .call-header-btn {
+    display: none !important;
+}

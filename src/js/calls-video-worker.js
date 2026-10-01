@@ -87,9 +87,29 @@ function control(obj) {
     send(msg);
 }
 
-function open(url, caps) {
+/** The same link over a MessagePort, for a backend that is itself a worker (Vector Web).
+ *  Sends copy, as a socket's do: the encoders' buffers cycle at once. */
+function portLink(port) {
+    const w = { readyState: WebSocket.OPEN, binaryType: 'arraybuffer', onopen: null, onmessage: null, onclose: null, onerror: null };
+    const shut = () => {
+        if (w.readyState === WebSocket.CLOSED) return;
+        w.readyState = WebSocket.CLOSED;
+        port.close();
+        w.onclose?.();
+    };
+    w.send = (bytes) => port.postMessage(bytes);
+    w.close = () => {
+        if (w.readyState !== WebSocket.CLOSED) port.postMessage('close');
+        shut();
+    };
+    port.onmessage = (e) => { if (e.data === 'close') shut(); else w.onmessage?.({ data: e.data }); };
+    queueMicrotask(() => w.onopen?.());
+    return w;
+}
+
+function open(url, caps, port) {
     close();
-    const w = new WebSocket(url);
+    const w = port ? portLink(port) : new WebSocket(url);
     ws = w;
     w.binaryType = 'arraybuffer';
     w.onopen = () => {
@@ -379,7 +399,7 @@ self.onmessage = (e) => {
     const m = e.data;
     const t = tracks[m.kind];
     switch (m.t) {
-        case 'open': open(m.url, m.caps); break;
+        case 'open': open(m.url, m.caps, m.port); break;
         case 'close': close(); break;
         case 'canvas':
             if (!t) break;

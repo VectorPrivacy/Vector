@@ -434,7 +434,7 @@ pub fn save_rail_debounced(layout: &crate::rail_layout::RailLayout) -> Result<()
 fn schedule_rail_publish() {
     let generation = rail_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     crate::db::spawn_bound(async move {
-        tokio::time::sleep(RAIL_PUBLISH_IDLE).await;
+        crate::rt::time::sleep(RAIL_PUBLISH_IDLE).await;
         if rail_gen().load(std::sync::atomic::Ordering::Relaxed) != generation {
             return;
         }

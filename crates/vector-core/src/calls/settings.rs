@@ -76,12 +76,12 @@ pub fn speaker_gain() -> f32 {
 pub fn set(s: AudioSettings) -> Result<(), String> {
     s.store();
     let json = serde_json::to_string(&current()).map_err(|e| e.to_string())?;
-    vector_core::db::set_sql_setting(KEY.to_string(), json)
+    crate::db::set_sql_setting(KEY.to_string(), json)
 }
 
 /// Loads the account's saved settings into the live values; defaults when unset.
 pub fn load() -> AudioSettings {
-    let s = vector_core::db::get_sql_setting(KEY.to_string())
+    let s = crate::db::get_sql_setting(KEY.to_string())
         .ok()
         .flatten()
         .and_then(|j| serde_json::from_str::<AudioSettings>(&j).ok())

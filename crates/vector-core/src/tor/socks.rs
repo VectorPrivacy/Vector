@@ -61,7 +61,7 @@ pub(super) async fn run(
                 }
                 Err(e) => {
                     log_warn!("[Tor SOCKS] accept error: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    crate::rt::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
         }

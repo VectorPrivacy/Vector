@@ -58,7 +58,7 @@
                 <span class="attachment-panel-label">Commands</span>
             </button>
         {/if}
-        <button class="attachment-panel-item" onclick={h.miniapps}>
+        <button class="attachment-panel-item attachment-panel-miniapps" onclick={h.miniapps}>
             <div class="attachment-panel-btn"><span class="icon icon-gamepad"></span></div>
             <span class="attachment-panel-label">Mini Apps</span>
         </button>

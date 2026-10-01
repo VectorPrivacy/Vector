@@ -101,8 +101,8 @@ pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
         Err(_) => return Ok(Vec::new()),
     };
 
-    let cutoff_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap()
+    let cutoff_secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH).unwrap()
         .as_secs()
         .saturating_sub(days * 24 * 60 * 60);
 

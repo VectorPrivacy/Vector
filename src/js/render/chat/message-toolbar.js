@@ -563,7 +563,12 @@ function _dmsgCopyText(text) {
 }
 
 
+// The chip sits in the message list at the swiped row's offset; left in place, even
+// transparent, it stretches the list's scroll area, into the next chat opened too.
+let _dmsgSwipeHideTimer = null;
+
 function _dmsgBeginSwipeVisual(rowEl) {
+    clearTimeout(_dmsgSwipeHideTimer);
     rowEl.style.transition = 'none';
     // Transform and opacity are driven per frame, so they stay instant by not being in
     // the transition; the glow and border ease through the stylesheet's own rule.
@@ -593,6 +598,8 @@ function _dmsgResetSwipe(animate, rowEl, spring) {
         rowEl.style.transform = '';
     }
     VectorSvelte.setToolbarSwipe({ transition: animate ? 'opacity 0.2s ease, transform 0.2s ease' : 'none', opacity: '0', transform: 'scale(0.4)', past: false });
+    clearTimeout(_dmsgSwipeHideTimer);
+    _dmsgSwipeHideTimer = setTimeout(() => VectorSvelte.setToolbarSwipe({ visible: false }), animate ? 220 : 0);
 }
 
 function _dmsgInitGestures() {

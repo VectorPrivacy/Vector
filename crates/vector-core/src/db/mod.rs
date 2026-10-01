@@ -14,6 +14,8 @@ use std::ops::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 
 pub mod settings;
+pub mod at_rest;
+pub mod miniapps;
 pub mod schema;
 pub mod profiles;
 pub mod id_cache;
@@ -25,6 +27,10 @@ pub mod nip17_keys;
 pub mod community;
 pub mod bots;
 pub mod notify;
+#[cfg(target_arch = "wasm32")]
+pub mod webfs;
+#[cfg(target_arch = "wasm32")]
+use webfs::{clear_active_account_file_in, list_account_npubs_in, read_active_account_file_in, write_active_account_file_in};
 
 pub use settings::{
     get_sql_setting, set_sql_setting, advance_u64_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
@@ -34,7 +40,7 @@ pub use settings::{
     commit_bunker_account_setup,
     get_nip55_user_pubkey, set_nip55_user_pubkey,
     get_nip55_signer_package, set_nip55_signer_package,
-    commit_nip55_account_setup,
+    commit_nip55_account_setup, commit_external_signer_setup,
 };
 
 // ============================================================================
@@ -205,8 +211,10 @@ pub fn list_account_npubs() -> Result<Vec<String>, String> {
 /// is 63 bytes (canonical npub) plus optional trailing newline. The
 /// marker lives in a user-writable dir, so accidental / malicious
 /// multi-gigabyte writes are a realistic OOM vector if read unbounded.
+#[cfg(not(target_arch = "wasm32"))]
 const MARKER_MAX_BYTES: u64 = 256;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_active_account_file_in(app_data: &std::path::Path) -> Result<Option<String>, String> {
     use std::io::Read;
 
@@ -249,6 +257,7 @@ fn read_active_account_file_in(app_data: &std::path::Path) -> Result<Option<Stri
     Ok(Some(npub))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_active_account_file_in(app_data: &std::path::Path, npub: &str) -> Result<(), String> {
     if !is_valid_npub(npub) {
         return Err(format!("Invalid npub format: {}", npub));
@@ -303,6 +312,7 @@ fn write_active_account_file_in(app_data: &std::path::Path, npub: &str) -> Resul
     ))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn clear_active_account_file_in(app_data: &std::path::Path) -> Result<(), String> {
     let path = app_data.join(ACTIVE_ACCOUNT_FILE);
     if path.exists() {
@@ -312,6 +322,7 @@ fn clear_active_account_file_in(app_data: &std::path::Path) -> Result<(), String
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn list_account_npubs_in(app_data: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(app_data) {
@@ -908,14 +919,14 @@ pub fn with_session<F: std::future::Future>(
 /// runs, so an account switch mid-flight can no longer redirect its writes. Use
 /// this for any task that touches per-account state; a bare `tokio::spawn`
 /// leaves the task reading whoever is live at the moment it asks.
-pub fn spawn_bound<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+pub fn spawn_bound<F>(fut: F) -> crate::rt::JoinHandle<F::Output>
 where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send + 'static,
+    F: std::future::Future + crate::rt::MaybeSend + 'static,
+    F::Output: crate::rt::MaybeSend + 'static,
 {
     let session = current_session();
     // spawn-detached: this IS the binding — it installs the session it just read.
-    tokio::spawn(TASK_SESSION.scope(session, fut))
+    crate::rt::spawn(TASK_SESSION.scope(session, fut))
 }
 
 impl std::fmt::Debug for Session {
@@ -1088,12 +1099,35 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
             Ok(conn) => return Ok(conn),
             Err(e) if e.contains("locked") || e.contains("busy") => {
                 last_err = e;
+                // One thread on the web: nothing else can release the lock while we wait.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(std::time::Duration::from_millis(50 * u64::from(attempt + 1)));
+                #[cfg(target_arch = "wasm32")]
+                let _ = attempt;
             }
             Err(e) => return Err(e),
         }
     }
     Err(last_err)
+}
+
+/// Set by a web build whose storage never syncs to disk itself (IndexedDB
+/// mirroring, memory): SQLite must not ask it to, which IndexedDB refuses, and
+/// with no shared memory there is no WAL, only a journal best kept in memory.
+#[cfg(target_arch = "wasm32")]
+static RELAXED_DURABILITY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_relaxed_durability(on: bool) {
+    RELAXED_DURABILITY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn durability_pragmas() -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    if RELAXED_DURABILITY.load(std::sync::atomic::Ordering::Relaxed) {
+        return "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
+    }
+    "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
 }
 
 fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
@@ -1110,7 +1144,10 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     // WAL for concurrent reads. cache_size negative = KiB (16 MiB page cache) to keep hot
     // pages resident on a large DB; temp_store=MEMORY keeps GROUP BY / sort scratch in
     // memory instead of spilling to disk.
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;")
+    conn.execute_batch(&format!(
+        "{} PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;",
+        durability_pragmas()
+    ))
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
     // Room for every hot statement: page loads, unread counts and the persist path together
     // outgrow rusqlite's default of 16, and an evicted statement re-prepares on its next use.
@@ -1207,7 +1244,11 @@ fn downgrade_block(conn: &rusqlite::Connection) -> Option<DowngradeBlock> {
 pub fn inspect_downgrade(npub: &str) -> Result<Option<DowngradeBlock>, String> {
     let db_path = account_dir(npub)?.join("vector.db");
     // Never create the file just to inspect it.
-    if !db_path.exists() {
+    #[cfg(target_arch = "wasm32")]
+    let exists = webfs::db_exists(&db_path);
+    #[cfg(not(target_arch = "wasm32"))]
+    let exists = db_path.exists();
+    if !exists {
         return Ok(None);
     }
     let conn = create_connection(&db_path)?;
@@ -1222,10 +1263,13 @@ pub fn inspect_downgrade(npub: &str) -> Result<Option<DowngradeBlock>, String> {
 pub fn init_database(npub: &str) -> Result<(), String> {
     let profile_dir = account_dir(npub)?;
 
+    #[cfg(not(target_arch = "wasm32"))]
     if !profile_dir.exists() {
         std::fs::create_dir_all(&profile_dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;
     }
+    #[cfg(target_arch = "wasm32")]
+    webfs::register_account(get_app_data_dir()?, npub)?;
 
     let db_path = profile_dir.join("vector.db");
     let mut conn = create_connection(&db_path)?;
@@ -1379,23 +1423,31 @@ pub fn optimize_database() {
 /// Get all available accounts (npub directories in app data).
 pub fn get_accounts() -> Result<Vec<String>, String> {
     let app_data = get_app_data_dir()?;
-    let mut accounts = Vec::new();
+    #[cfg(target_arch = "wasm32")]
+    return Ok(list_account_npubs_in(app_data)
+        .into_iter()
+        .filter(|npub| webfs::db_exists(&app_data.join(npub).join("vector.db")))
+        .collect());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut accounts = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(app_data) {
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("npub1") {
-                    // Check if vector.db exists
-                    if entry.path().join("vector.db").exists() {
-                        accounts.push(name);
+        if let Ok(entries) = std::fs::read_dir(app_data) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("npub1") {
+                        // Check if vector.db exists
+                        if entry.path().join("vector.db").exists() {
+                            accounts.push(name);
+                        }
                     }
                 }
             }
         }
-    }
 
-    Ok(accounts)
+        Ok(accounts)
+    }
 }
 
 /// Get the profile directory path for a given npub.
@@ -1404,6 +1456,7 @@ pub fn get_profile_directory(npub: &str) -> Result<PathBuf, String> {
         return Err(format!("Invalid npub format: {}", npub));
     }
     let dir = account_dir(npub)?;
+    #[cfg(not(target_arch = "wasm32"))]
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;
@@ -1561,7 +1614,7 @@ mod pool_generation_tests {
         let a = Session::bound(dir.path().join("a.db"));
 
         let seen = bound_to(a.clone(), async {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             current_session()
         })
         .await;
@@ -1582,7 +1635,7 @@ mod pool_generation_tests {
         let live_before = current_session().chat_state().lock().await.chats.len();
 
         bound_to(a.clone(), async {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             crate::state::STATE.lock().await.chats.push(Chat::new("a-chat".into(), ChatType::DirectMessage, Vec::new()));
         })
         .await;
@@ -1612,7 +1665,7 @@ mod pool_generation_tests {
 
         let seen = bound_to(a.clone(), async move {
             crate::state::set_my_public_key(a_identity);
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             crate::state::my_public_key()
         })
         .await;
@@ -1647,7 +1700,7 @@ mod pool_generation_tests {
         assert!(session_is_live(), "work for the account on screen paints");
 
         let painted = bound_to(previous, async {
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             session_is_live()
         })
         .await;
@@ -1666,15 +1719,15 @@ mod pool_generation_tests {
         assert!(!previous.stopped(), "running work is not told to stop");
 
         // `on_stop` must be pending until the switch, then resolve.
-        let waiter = { let p = previous.clone(); tokio::spawn(async move { p.on_stop().await }) };
-        tokio::task::yield_now().await;
+        let waiter = { let p = previous.clone(); crate::rt::spawn(async move { p.on_stop().await }) };
+        crate::rt::yield_now().await;
         assert!(!waiter.is_finished(), "nothing to report while the account is current");
 
         close_database();
 
         assert!(previous.stopped(), "the outgoing account is told to stop");
         assert!(!current_session().stopped(), "the incoming one is not");
-        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        crate::rt::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("on_stop resolves on the switch")
             .expect("without panicking");
@@ -1706,7 +1759,7 @@ mod pool_generation_tests {
         // A deliberately fat body: 8KB of state the future must carry.
         let fat = async {
             let block = [0u8; 8192];
-            tokio::task::yield_now().await;
+            crate::rt::yield_now().await;
             block[0]
         };
         let fat_size = std::mem::size_of_val(&fat);

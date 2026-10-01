@@ -413,6 +413,27 @@ pub fn commit_nip55_account_setup(
     biometric_wrap: Option<&str>,
     pin_canary: Option<&str>,
 ) -> Result<(), String> {
+    commit_external_signer_setup(
+        crate::SignerKind::Nip55, user_pubkey_hex, signer_package,
+        encryption_enabled, security_type, biometric_wrap, pin_canary,
+    )
+}
+
+/// [`commit_nip55_account_setup`] for any keyless signer kind. NIP-07 accounts
+/// share the NIP-55 rows: the identity in `nip55_user_pubkey`, the signer's
+/// name in `nip55_signer_package`, the PIN canary in `nip55_pin_check`.
+pub fn commit_external_signer_setup(
+    kind: crate::SignerKind,
+    user_pubkey_hex: &str,
+    signer_package: &str,
+    encryption_enabled: bool,
+    security_type: Option<&str>,
+    biometric_wrap: Option<&str>,
+    pin_canary: Option<&str>,
+) -> Result<(), String> {
+    if kind == crate::SignerKind::Local || kind == crate::SignerKind::Bunker {
+        return Err("not a keyless signer kind".into());
+    }
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin tx: {}", e))?;
@@ -432,8 +453,8 @@ pub fn commit_nip55_account_setup(
         ).map_err(|e| format!("Failed to clear security_type: {}", e))?;
     }
     tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('signer_type', 'nip55')",
-        [],
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('signer_type', ?1)",
+        rusqlite::params![kind.as_setting_str()],
     ).map_err(|e| format!("Failed to set signer_type: {}", e))?;
     tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_user_pubkey', ?1)",

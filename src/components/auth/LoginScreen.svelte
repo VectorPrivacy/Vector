@@ -59,6 +59,14 @@
             else if (e.passwordShown) passwordEl?.focus();
         });
     });
+    // iOS opens the keyboard only for a focus made inside a tap, so on the PIN and
+    // password steps a tap anywhere reaches the field.
+    function tapToType(ev) {
+        if (l.screen !== 'encrypt' || ev.target.closest('button, input, a, select, textarea')) return;
+        if (e.pinShown) pinRow?.focusNext();
+        else if (e.passwordShown) passwordEl?.focus();
+    }
+
     // A fresh password step starts masked.
     $effect(() => { if (!e.passwordShown) reveal = false; });
     function submitPassword(ev) { ev.preventDefault(); h.encrypt.submitPassword(); }
@@ -97,13 +105,15 @@
         {/if}
     </header>
 
-    <main class="lg-stage">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+    <main class="lg-stage" onclick={tapToType}>
         {#if l.screen === 'start'}
             <div id="login-start" class="lg-block">
                 <div class="lg-buttons">
                     <button type="button" class="lg-btn primary" onclick={() => h.createAccount()}>Create Account</button>
                     <button type="button" class="lg-btn accent" onclick={() => h.openImport()}>Login</button>
                 </div>
+                {#if l.privateNote}<p class="lg-private-note">{l.privateNote}</p>{/if}
                 {@render goBack()}
             </div>
         {:else if l.screen === 'import'}
@@ -123,6 +133,9 @@
                 {@render goBack()}
                 {#if l.nip55Shown}
                     <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
+                {/if}
+                {#if l.nip07Shown}
+                    <button type="button" class="lg-link" disabled={l.nip07Busy} onclick={() => h.nip07()}>Sign in with Browser Extension</button>
                 {/if}
             </div>
         {:else if l.screen === 'invite'}
@@ -200,6 +213,8 @@
                 {/if}
                 {#if !e.typeSelectShown && (e.pinShown || e.passwordShown)}{@render goBack()}{/if}
             </div>
+        {:else if l.screen === 'none' && !l.bunker}
+            <div class="lg-booting" role="status" aria-label="Loading"><span></span><span></span><span></span></div>
         {/if}
 
         {#if l.bunker}

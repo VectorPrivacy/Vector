@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Instant;
+use web_time::Instant;
 
 use nostr_sdk::prelude::*;
 use std::sync::LazyLock;
@@ -152,7 +152,7 @@ pub fn get_publish_tracker(event_id: &EventId) -> Option<Arc<EventPublishTracker
 pub fn spawn_tracked_publish(
     resolved: Vec<(RelayUrl, Relay)>,
     event: Event,
-) -> Vec<tokio::task::JoinHandle<(RelayUrl, Result<EventId, String>)>> {
+) -> Vec<crate::rt::JoinHandle<(RelayUrl, Result<EventId, String>)>> {
     let event_id = event.id;
     // Zero relays → zero tasks → nobody ever calls note_settled; a registered tracker
     // would leak forever.
@@ -1036,7 +1036,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
             }
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
     let filter = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
@@ -1358,7 +1358,7 @@ pub fn republish_inbox_relays_debounced() {
     crate::db::spawn_bound(async move {
         // Wait for the relay pool to settle; if another call arrives
         // during this window it will bump the generation and we'll exit.
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen {
             return; // superseded by a newer call
         }
@@ -1828,7 +1828,7 @@ mod tests {
                 get_or_fetch_with_lock(&pk, || async {
                     counter.fetch_add(1, Ordering::SeqCst);
                     // Simulate network delay so concurrent tasks pile up
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    crate::rt::time::sleep(std::time::Duration::from_millis(50)).await;
                     FetchResult {
                         relays: vec!["wss://test.example.com".to_string()],
                         fetch_ok: true,
@@ -1953,7 +1953,7 @@ mod tests {
         let handle = crate::db::spawn_bound(async move {
             get_or_fetch_with_lock(&task_pk, || async move {
                 let _ = started_tx.send(());
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                crate::rt::time::sleep(std::time::Duration::from_secs(30)).await;
                 FetchResult { relays: Vec::new(), fetch_ok: false }
             })
             .await
@@ -1962,7 +1962,7 @@ mod tests {
         started_rx.await.expect("fetch closure should start before abort");
         handle.abort();
         let _ = handle.await;
-        tokio::task::yield_now().await;
+        crate::rt::yield_now().await;
 
         let locks_after = {
             let locks = FETCH_LOCKS.lock().unwrap();
@@ -1995,7 +1995,7 @@ mod tests {
         assert_eq!(gen_after, gen_before + 3);
 
         // Past the 800ms window on the virtual clock (auto-advanced) so all spawned tasks resolve.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(1000)).await;
 
         let pass_after = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);
         // Exactly one task should have passed the generation gate.

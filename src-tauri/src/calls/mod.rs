@@ -11,11 +11,9 @@ pub mod commands;
 pub mod link;
 pub mod media;
 pub mod session;
-pub mod settings;
 pub mod share_native;
-pub mod video;
 
 // The platform-free half lives in vector-core; the device, codec and Tauri halves here.
 pub use vector_core::calls::wire as transport;
-pub use vector_core::calls::{declick, jitter, rate, resample, ring, stats};
+pub use vector_core::calls::{declick, jitter, rate, resample, ring, settings, stats};
 pub use vector_core::calls::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};

@@ -12,6 +12,7 @@ pub mod link;
 pub mod rate;
 pub mod resample;
 pub mod ring;
+pub mod share;
 pub mod stats;
 pub mod wire;
 

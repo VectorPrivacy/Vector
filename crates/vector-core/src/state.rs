@@ -2204,8 +2204,8 @@ mod tests {
         state.create_dm_chat("npub1peer");
 
         // Set a far-future expiry so it's definitely active
-        let far_future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
+        let far_future = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 300;
 
         let active = state.update_typing_and_get_active("npub1peer", "npub1typer", far_future);
         assert_eq!(active.len(), 1, "should have one active typer");
@@ -2229,8 +2229,8 @@ mod tests {
         let mut state = ChatState::new();
         state.create_dm_chat("npub1peer");
 
-        let far_future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
+        let far_future = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 300;
 
         state.update_typing_and_get_active("npub1peer", "npub1typer1", far_future);
         let active = state.update_typing_and_get_active("npub1peer", "npub1typer2", far_future);
@@ -2241,8 +2241,8 @@ mod tests {
     #[test]
     fn update_typing_unknown_chat_returns_empty() {
         let mut state = ChatState::new();
-        let far_future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
+        let far_future = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 300;
 
         let active = state.update_typing_and_get_active("npub1nonexistent", "npub1typer", far_future);
         assert!(active.is_empty(), "unknown chat should return empty typers");
@@ -2253,8 +2253,8 @@ mod tests {
         let mut state = ChatState::new();
         state.create_dm_chat("npub1peer");
 
-        let far_future = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
+        let far_future = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 300;
 
         state.update_typing_and_get_active("npub1peer", "npub1typer", far_future);
         // Update the same typer with a new expiry

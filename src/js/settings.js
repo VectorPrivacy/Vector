@@ -287,6 +287,13 @@ async function fetchPlatformFeatures() {
     // Touch surfaces key off `.mobile` for gesture-driven affordances
     // (long-press menus, swipe-to-reply, bigger hit targets).
     document.body.classList.toggle('mobile', !!platformFeatures.is_mobile);
+    if (platformFeatures.storage === 'session' || platformFeatures.storage === 'memory') {
+        VectorSvelte.patchLogin({
+            privateNote: platformFeatures.storage === 'session'
+                ? 'Private browser: Vector keeps this session until the browser closes. You sign in again next time.'
+                : 'Private browser: Vector keeps nothing here, so a reload or closing the tab signs you out.',
+        });
+    }
 }
 
 /**
@@ -737,8 +744,11 @@ async function logoutAccount() {
     }
 }
 
-/** Show the account's keys in a popup with copy buttons. */
-async function exportAccount() {
+/**
+ * Show the account's keys in a popup with copy buttons. `saving` is the prompt for
+ * a new account in a browser that keeps nothing: the keys are the only way back in.
+ */
+async function exportAccount({ saving = false } = {}) {
     try {
         // Call the backend to export keys
         const keys = await invoke('export_keys');
@@ -751,7 +761,9 @@ async function exportAccount() {
         let exportContent = `
         <div style="text-align: center; padding: 0 8px;">
             <p style="color: var(--danger-pink); font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">
-            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.</p>
+            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">${saving
+                ? 'This browser keeps nothing once it closes. These keys are how you sign in again, and there is no other way back in. Never share them.'
+                : 'These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.'}</p>
         `;
 
         // Both the seed phrase and the nsec are long single-line strings.
@@ -782,7 +794,7 @@ async function exportAccount() {
         </div>
         `;
 
-        await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg', '', null, false, {
+        await popupConfirm(saving ? 'Save Your Keys' : 'Export Account', exportContent, true, '', 'vector_warning.svg', '', saving ? "I've Saved Them" : null, false, {
             'copy-seed': () => navigator.clipboard.writeText(keys.seed_phrase),
             'copy-nsec': () => navigator.clipboard.writeText(keys.nsec),
         });
@@ -1046,6 +1058,7 @@ const NOTIF_HANDLERS = {
     },
     preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
     explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
+    allowBrowser: () => invoke('request_web_notifications').then(initNotificationSettings),
 };
 
 async function initNotificationSettings() {
@@ -1067,8 +1080,11 @@ async function initNotificationSettings() {
         const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
         if (val === 'hide_content' || val === 'hide_all') privacy = val;
     } catch (_) { /* default full */ }
+    // A browser build asks the browser itself, which answers once per site.
+    const ask = platformFeatures.os === 'web' && (await invoke('web_notifications').catch(() => null)) === 'default';
     VectorSvelte.setNotifSettings({
         sounds,
+        ask,
         globalMute: blob.global_mute,
         muteEveryone: blob.mute_everyone,
         sound: { type: blob.sound?.type || 'Default', path: blob.sound?.path || null },
@@ -1150,6 +1166,8 @@ async function initSettings() {
     try {
         const state = await invoke('tor_get_state');
         torApply(state);
+        // A build without Tor has nothing to show or toggle.
+        if (!state.supported) VectorSvelte.setSettingsScreen({ platform: { tor: false } });
         if (state.enabled && !state.running) ensureTorStatePolling();
     } catch (e) {
         console.warn('[Tor] tor_get_state failed:', e);
@@ -1810,6 +1828,17 @@ async function showSettingsHelp(key) {
 
 /** Re-authorize the external signer: a direct Amber intent for NIP-55, the bunker form otherwise. */
 async function reauthorizeSigner() {
+    const nip07 = platformFeatures?.os === 'web' ? await invoke('get_nip07_status').catch(() => null) : null;
+    if (nip07) {
+        try {
+            await invoke('reauthorize_nip07');
+            showToast('Signer re-authorized.');
+            refreshRemoteSignerCard();
+        } catch (err) {
+            popupConfirm(String(err), '', true, '', 'vector_warning.svg');
+        }
+        return;
+    }
     const nip55 = await invoke('get_nip55_status').catch(() => null);
     if (nip55) {
         try {

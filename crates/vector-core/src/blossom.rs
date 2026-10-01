@@ -17,6 +17,7 @@ pub type ProgressCallback = std::sync::Arc<dyn Fn(Option<u8>, Option<u64>) -> Re
 
 /// The upload body: slices of the one ciphertext buffer, counted as the socket pulls
 /// them. A slice shares the buffer, so nothing is copied on the way out.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct ProgressTrackingStream {
     data: bytes::Bytes,
     position: usize,
@@ -24,6 +25,7 @@ struct ProgressTrackingStream {
 }
 
 /// Lends an `Arc`'d buffer to `Bytes` without copying it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct SharedBuffer(Arc<Vec<u8>>);
 
 impl AsRef<[u8]> for SharedBuffer {
@@ -32,6 +34,7 @@ impl AsRef<[u8]> for SharedBuffer {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl ProgressTrackingStream {
     /// Progress is observed per slice pulled, so the slice is the slowest rate that
     /// still reads as progress: 16 KB in a 60 s stall window is about 2 kbit/s.
@@ -93,6 +96,7 @@ impl UploadBody {
     }
 
     /// The body as a stream, counting into `bytes_sent` as slices are pulled.
+    #[cfg(not(target_arch = "wasm32"))]
     fn stream(&self, bytes_sent: Arc<Mutex<u64>>) -> Pin<Box<dyn Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>> {
         match self {
             Self::Memory(data) => Box::pin(ProgressTrackingStream::new(Arc::clone(data), bytes_sent)),
@@ -156,7 +160,7 @@ enum Stall {
 struct StallWatch {
     total: u64,
     last_bytes: u64,
-    last_progress: tokio::time::Instant,
+    last_progress: crate::rt::time::Instant,
     stall_limit: std::time::Duration,
     response_limit: std::time::Duration,
 }
@@ -166,7 +170,7 @@ impl StallWatch {
         Self {
             total,
             last_bytes: 0,
-            last_progress: tokio::time::Instant::now(),
+            last_progress: crate::rt::time::Instant::now(),
             stall_limit,
             response_limit,
         }
@@ -174,7 +178,7 @@ impl StallWatch {
 
     /// Feed the latest byte count; `Some` means give up.
     fn observe(&mut self, bytes_sent: u64) -> Option<Stall> {
-        let now = tokio::time::Instant::now();
+        let now = crate::rt::time::Instant::now();
         if bytes_sent > self.last_bytes {
             self.last_bytes = bytes_sent;
             self.last_progress = now;
@@ -216,11 +220,28 @@ async fn send_upload(
 ) -> Result<reqwest::Response, UploadFailure> {
     let total_size = body.len();
     let bytes_sent = Arc::new(Mutex::new(0u64));
-    let mut request_future = Box::pin(request.body(Body::wrap_stream(body.stream(Arc::clone(&bytes_sent)))).send());
+    #[cfg(not(target_arch = "wasm32"))]
+    let request_body = Body::wrap_stream(body.stream(Arc::clone(&bytes_sent)));
+    // fetch cannot stream a request body, so the web sends it whole.
+    #[cfg(target_arch = "wasm32")]
+    let request_body = match body {
+        UploadBody::Memory(data) => {
+            *bytes_sent.lock().unwrap() = data.len() as u64;
+            Body::from(data.as_ref().clone())
+        }
+        UploadBody::File { .. } => return Err(UploadFailure::Transport("no filesystem on the web".into())),
+    };
+    let mut request_future = Box::pin(request.body(request_body).send());
 
-    let mut watch = StallWatch::new(total_size, stall_limit, RESPONSE_WAIT);
+    // fetch reports no upload progress, so the whole transfer happens inside the
+    // response wait: give it room for the body at a slow 64 KB/s.
+    #[cfg(target_arch = "wasm32")]
+    let response_wait = RESPONSE_WAIT + std::time::Duration::from_secs(total_size / (64 * 1024));
+    #[cfg(not(target_arch = "wasm32"))]
+    let response_wait = RESPONSE_WAIT;
+    let mut watch = StallWatch::new(total_size, stall_limit, response_wait);
     let mut last_percentage = 0;
-    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    let mut poll_interval = crate::rt::time::interval(crate::rt::time::Duration::from_millis(100));
 
     let response = loop {
         tokio::select! {
@@ -350,7 +371,7 @@ where
 
     for attempt in 0..=retry_count {
         if attempt > 0 {
-            tokio::time::sleep(next_delay).await;
+            crate::rt::time::sleep(next_delay).await;
             next_delay = retry_spacing;
         }
 
@@ -468,8 +489,8 @@ async fn preflight(
             HeaderValue::from_str(ct).map_err(|e| UploadFailure::Other(format!("Invalid X-Content-Type: {}", e)))?,
         );
     }
-    let asked_at = std::time::Instant::now();
-    let resp = match tokio::time::timeout(
+    let asked_at = web_time::Instant::now();
+    let resp = match crate::rt::time::timeout(
         std::time::Duration::from_secs(5),
         client.head(upload_url.clone()).headers(head_headers).send(),
     ).await {
@@ -607,7 +628,7 @@ where
     // blossom.data.haus) then 411.
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     let response = send_upload(
         client.put(upload_url.clone()).headers(headers),
         server_url,
@@ -691,7 +712,7 @@ where
     }
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     let response = send_upload(
         client.put(upload_url).headers(headers),
         server_url,
@@ -736,7 +757,7 @@ pub async fn blob_is_served(url: &str, timeout: std::time::Duration) -> bool {
 async fn uploaded_blob_serves(url: &str) -> bool {
     for attempt in 0..2 {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            crate::rt::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         match uploaded_blob_status(url).await {
             Some(404) | Some(410) => continue,
@@ -759,7 +780,7 @@ async fn uploaded_blob_status(url: &str) -> Option<u16> {
         return crate::net::remote_status(url, timeout).await;
     }
     let client = crate::net::build_http_client_with_options(None, None, false).ok()?;
-    let status = tokio::time::timeout(timeout, client.head(url).send()).await.ok()?.ok()?.status();
+    let status = crate::rt::time::timeout(timeout, client.head(url).send()).await.ok()?.ok()?.status();
     if status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_IMPLEMENTED {
         return crate::net::remote_status(url, timeout).await;
     }
@@ -868,7 +889,7 @@ pub async fn warm_upload_connection(server_urls: Vec<String>, mime_type: &str, i
     let Some(url) = ranked.first().and_then(|u| Url::parse(u).ok()) else { return };
     // The same options as `upload_attempt`, so the upload draws from this pool.
     let Ok(client) = crate::net::build_http_client_with_options(None, None, false) else { return };
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), client.head(url).send()).await;
+    let _ = crate::rt::time::timeout(std::time::Duration::from_secs(10), client.head(url).send()).await;
 }
 
 /// Upload with progress + failover, cache-aware routing, and capability learning.
@@ -1150,7 +1171,7 @@ where
     // 15s is generous for a healthy server and short enough that a
     // misbehaving one fails over to the next blob in a batch quickly.
     let timeout = std::time::Duration::from_secs(15);
-    match tokio::time::timeout(timeout, delete_blob(signer, &origin, hash)).await {
+    match crate::rt::time::timeout(timeout, delete_blob(signer, &origin, hash)).await {
         Ok(Ok(())) => {
             crate::log_info!("[Blossom] DELETE successful: {} from {}", hash, origin);
             Ok(())
@@ -1329,7 +1350,7 @@ where
             // Per-target budget: a hung server cancels only itself. A mirror
             // that completed must keep its result — an unrecorded live copy
             // is invisible to every future deletion sweep.
-            match tokio::time::timeout(budget, mirror_blob(signer, &target, &source)).await {
+            match crate::rt::time::timeout(budget, mirror_blob(signer, &target, &source)).await {
                 Ok(Ok(url)) => {
                     crate::log_net_info!("[Blossom Mirror] {} now serves {}", target, url);
                     Some(url)
@@ -1386,7 +1407,7 @@ where
 
         let signer = signer.clone();
         // spawn-detached: deleting one probe blob from a server — signer in hand, no account storage.
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             if let Err(e) = delete_blob(signer, &origin, hash).await {
                 crate::log_warn!("[Blossom delete] {} from {}: {}", hash, origin, e);
             }
@@ -1425,7 +1446,7 @@ where
         };
         // 4s per-server budget bounds worst-case probe pass.
         let no_op_progress: ProgressCallback = Arc::new(|_, _| Ok(()));
-        match tokio::time::timeout(
+        match crate::rt::time::timeout(
             std::time::Duration::from_secs(4),
             upload_blob_with_progress(
                 signer.clone(),
@@ -1455,7 +1476,7 @@ where
                 // a 4s budget bounds the wait, and only a definitive refusal
                 // (403/405/501) sinks the server — transient failures stay optimistic.
                 let delete_result = match extract_hash_from_blossom_url(&url) {
-                    Some(hash) => tokio::time::timeout(
+                    Some(hash) => crate::rt::time::timeout(
                         std::time::Duration::from_secs(4),
                         delete_blob(signer.clone(), &parsed, hash),
                     ).await.ok(),
@@ -1744,7 +1765,7 @@ mod stall_watch_tests {
         let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
         let mut sent = 0u64;
         for _ in 0..8 {
-            tokio::time::advance(Duration::from_secs(50)).await;
+            crate::rt::time::advance(Duration::from_secs(50)).await;
             sent += 16 * 1024;
             assert_eq!(w.observe(sent), None);
         }
@@ -1754,9 +1775,9 @@ mod stall_watch_tests {
     async fn a_transfer_that_stops_is_abandoned_after_the_window() {
         let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
         assert_eq!(w.observe(4096), None);
-        tokio::time::advance(Duration::from_secs(59)).await;
+        crate::rt::time::advance(Duration::from_secs(59)).await;
         assert_eq!(w.observe(4096), None, "inside the window it is only slow");
-        tokio::time::advance(Duration::from_secs(2)).await;
+        crate::rt::time::advance(Duration::from_secs(2)).await;
         assert!(matches!(w.observe(4096), Some(Stall::NoProgress { .. })));
     }
 
@@ -1764,9 +1785,9 @@ mod stall_watch_tests {
     async fn progress_resets_the_window() {
         let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
         w.observe(100);
-        tokio::time::advance(Duration::from_secs(55)).await;
+        crate::rt::time::advance(Duration::from_secs(55)).await;
         w.observe(200);
-        tokio::time::advance(Duration::from_secs(55)).await;
+        crate::rt::time::advance(Duration::from_secs(55)).await;
         assert_eq!(w.observe(200), None, "the clock restarted at the second byte");
     }
 
@@ -1776,18 +1797,18 @@ mod stall_watch_tests {
         let mut w = StallWatch::new(total, STALL, RESPONSE);
         w.observe(total);
         // Long enough for a relay to push a large blob to its origin.
-        tokio::time::advance(Duration::from_secs(240)).await;
+        crate::rt::time::advance(Duration::from_secs(240)).await;
         assert_eq!(w.observe(total), None, "buffers drain and the blob is stored");
-        tokio::time::advance(Duration::from_secs(61)).await;
+        crate::rt::time::advance(Duration::from_secs(61)).await;
         assert!(matches!(w.observe(total), Some(Stall::NoResponse { .. })));
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_empty_upload_is_waiting_on_the_server_from_the_start() {
         let mut w = StallWatch::new(0, STALL, RESPONSE);
-        tokio::time::advance(STALL + Duration::from_secs(1)).await;
+        crate::rt::time::advance(STALL + Duration::from_secs(1)).await;
         assert_eq!(w.observe(0), None, "nothing to send is not a stall");
-        tokio::time::advance(RESPONSE).await;
+        crate::rt::time::advance(RESPONSE).await;
         assert!(matches!(w.observe(0), Some(Stall::NoResponse { .. })));
     }
 }

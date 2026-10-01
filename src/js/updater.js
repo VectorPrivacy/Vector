@@ -367,10 +367,16 @@ async function initializeUpdater() {
     }
 
     // A store flavour (F-Droid) has no updater at all: the store notifies and
-    // installs, so the section only says where updates come from.
+    // installs, so the section only says where updates come from. The web build
+    // is served fresh, so its updates are simply the next load.
     if (platformFeatures.self_update === false) {
         versionInfo = parseVersion(await getCurrentVersion());
         const render = async () => {
+            if (platformFeatures.os === 'web') {
+                VectorSvelte.setSettingsHandlers('updates', {});
+                VectorSvelte.setUpdates({ version: versionInfo.display, preview: versionInfo.preview !== null, phase: 'store', message: 'Updates arrive when you reload Vector' });
+                return;
+            }
             let label = 'F-Droid';
             try {
                 const source = await window.__TAURI__.core.invoke('get_install_source');

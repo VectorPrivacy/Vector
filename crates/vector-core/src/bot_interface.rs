@@ -566,7 +566,7 @@ pub fn assemble_from_store(bot_hexes: &[String]) -> Vec<ChatBotCommands> {
 /// joined/left) counts as stale immediately. The generation tag makes an
 /// account swap a natural invalidation.
 const COMMANDS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-type CommandsFreshness = HashMap<String, (u64, std::time::Instant, Vec<String>)>;
+type CommandsFreshness = HashMap<String, (u64, web_time::Instant, Vec<String>)>;
 static COMMANDS_FRESH: std::sync::LazyLock<std::sync::Mutex<CommandsFreshness>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 /// Chats with a refresh REQ in flight (stampede guard for `/` keystrokes).
@@ -592,7 +592,7 @@ fn mark_commands_fresh(chat_id: &str, generation: u64, bot_hexes: &[String]) {
         if map.len() > 256 {
             map.clear();
         }
-        map.insert(chat_id.to_string(), (generation, std::time::Instant::now(), bot_hexes.to_vec()));
+        map.insert(chat_id.to_string(), (generation, web_time::Instant::now(), bot_hexes.to_vec()));
     }
 }
 

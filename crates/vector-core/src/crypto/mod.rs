@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 /// Parameters: 150MB memory, 10 iterations (matches src-tauri).
 pub async fn hash_pass(password: &str) -> [u8; 32] {
     let password = password.to_string();
-    tokio::task::spawn_blocking(move || {
+    crate::rt::spawn_blocking(move || {
         let salt = b"vectorvectovectvecvev";
         let mut output = [0u8; 32];
 

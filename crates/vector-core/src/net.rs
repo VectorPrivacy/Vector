@@ -165,6 +165,19 @@ fn forget_pooled_clients() {
     }
 }
 
+/// The browser's fetch owns pooling, TLS, redirects and timeouts; a page cannot
+/// pick its user agent or route through a proxy.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::disallowed_methods)]
+fn build_http_client_uncached(
+    _timeout: Option<std::time::Duration>,
+    _read_timeout: Option<std::time::Duration>,
+    _follow_redirects: bool,
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::disallowed_methods)]
 fn build_http_client_uncached(
     timeout: Option<std::time::Duration>,

@@ -1,21 +1,25 @@
-//! The video of a call: frames from the webview go out one QUIC stream each, frames
+//! The video of a call: frames from the link go out one QUIC stream each, frames
 //! from the peer's streams go back to the webview, and per-track latches keep a lost
 //! or reset frame from ever painting a corrupt picture. A side may send its camera
 //! and its screen at once; every frame's flags say which one it belongs to.
 
-use super::link::{self, LinkConn};
-use super::media::{MediaStats, ShareInput};
+use super::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_FRAME};
+use super::platform::{CallPlatform, LinkConn};
 use super::rate::{Rung, VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, SCREEN_LADDER, SCREEN_RELAY_CAP};
-use super::transport::{Control, Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
+use super::share::ShareInput;
+use super::stats::MediaStats;
+use super::wire::{write_control, Control, Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
 use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{Connection, SendStream, VarInt};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use vector_core::calls::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_FRAME};
+use web_time::Instant;
+
+use crate::rt::time::timeout;
+use crate::rt::JoinHandle;
 
 /// Frames on the wire at once before captures are skipped, at a zero round trip. A
 /// frame counts as on the wire until the peer has acknowledged all of it, so the
@@ -201,12 +205,13 @@ impl Shared {
 
 pub struct VideoTrack {
     shared: Arc<Shared>,
+    platform: Arc<dyn CallPlatform>,
     tasks: Vec<JoinHandle<()>>,
     pub stats: Arc<VideoStats>,
 }
 
 impl VideoTrack {
-    pub fn start(conn: Connection, hooks: Hooks) -> Self {
+    pub fn start(conn: Connection, hooks: Hooks, platform: Arc<dyn CallPlatform>) -> Self {
         let stats = Arc::new(VideoStats::default());
         let hooks = Arc::new(hooks);
         let shared = Arc::new(Shared {
@@ -225,26 +230,26 @@ impl VideoTrack {
             prefs: Mutex::new([Prefs::default(), Prefs::default()]),
         });
         let (taker_tx, taker_rx) = mpsc::channel::<LinkConn>(1);
-        link::set_taker(Some(taker_tx));
+        platform.set_video_taker(Some(taker_tx));
 
         let out = {
             let shared = Arc::clone(&shared);
             let hooks = Arc::clone(&hooks);
             let conn = conn.clone();
-            vector_core::db::spawn_bound(async move { outbound(conn, shared, hooks, taker_rx).await })
+            crate::db::spawn_bound(async move { outbound(conn, shared, hooks, taker_rx).await })
         };
         let inn = {
             let shared = Arc::clone(&shared);
             let hooks = Arc::clone(&hooks);
             let conn = conn.clone();
-            vector_core::db::spawn_bound(async move { inbound(conn, shared, hooks).await })
+            crate::db::spawn_bound(async move { inbound(conn, shared, hooks).await })
         };
         let rate = {
             let shared = Arc::clone(&shared);
             let hooks = Arc::clone(&hooks);
-            vector_core::db::spawn_bound(async move { rate_loop(conn, shared, hooks).await })
+            crate::db::spawn_bound(async move { rate_loop(conn, shared, hooks).await })
         };
-        Self { shared, tasks: vec![out, inn, rate], stats }
+        Self { shared, platform, tasks: vec![out, inn, rate], stats }
     }
 
     /// What we send from now on. A track that turns on gets a fresh ladder on a rung
@@ -371,7 +376,7 @@ impl VideoTrack {
 
 impl Drop for VideoTrack {
     fn drop(&mut self) {
-        link::set_taker(None);
+        self.platform.set_video_taker(None);
         for t in self.tasks.drain(..) {
             t.abort();
         }
@@ -429,7 +434,7 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
                     FromLink::Unsupported { codec } => {
                         if shared.peer_video.load(Ordering::Relaxed) {
                             let mut send = hooks.control.lock().await;
-                            let _ = tokio::time::timeout(Duration::from_secs(1), super::transport::write_control(&mut *send, &Control::VideoUnsupported { codec })).await;
+                            let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::VideoUnsupported { codec })).await;
                         }
                     }
                     FromLink::Unknown => {}
@@ -474,11 +479,11 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
     let rtt = Duration::from_millis(rtt_ms as u64);
     let stale = if key { STALE_KEY_MIN.max(rtt * 4) } else { STALE_MIN.max(rtt * 3) };
     let t0 = Instant::now();
-    let opened = tokio::time::timeout(stale, conn.open_uni()).await;
+    let opened = timeout(stale, conn.open_uni()).await;
     let mut s = match opened {
         Ok(Ok(s)) => s,
         other => {
-            log_info!("[VIDEO] stale: open_uni {} after {} ms, key {key}, {len} bytes", if other.is_err() { "timed out" } else { "failed" }, t0.elapsed().as_millis());
+            crate::log_info!("[VIDEO] stale: open_uni {} after {} ms, key {key}, {len} bytes", if other.is_err() { "timed out" } else { "failed" }, t0.elapsed().as_millis());
             shared.in_flight.fetch_sub(1, Ordering::Relaxed);
             shared.stats.stale.fetch_add(1, Ordering::Relaxed);
             shared.need_key_out[i].store(true, Ordering::Relaxed);
@@ -487,16 +492,16 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
         }
     };
     let _ = s.set_priority(if key { 1 } else { 0 });
-    vector_core::db::spawn_bound(async move {
+    crate::db::spawn_bound(async move {
         let result = async {
-            if tokio::time::timeout(stale, s.write_chunk(frame)).await.is_err() {
+            if timeout(stale, s.write_chunk(frame)).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return Err("write");
             }
             if s.finish().is_err() {
                 return Err("finish");
             }
-            if tokio::time::timeout(stale, s.stopped()).await.is_err() {
+            if timeout(stale, s.stopped()).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return Err("stale");
             }
@@ -510,7 +515,7 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
                 shared.stats.bytes_out.fetch_add(len, Ordering::Relaxed);
             }
             Err(reason) => {
-                log_info!("[VIDEO] stale: {reason} after {} ms, key {key}, {len} bytes", t0.elapsed().as_millis());
+                crate::log_info!("[VIDEO] stale: {reason} after {} ms, key {key}, {len} bytes", t0.elapsed().as_millis());
                 shared.stats.stale.fetch_add(1, Ordering::Relaxed);
                 shared.need_key_out[i].store(true, Ordering::Relaxed);
                 shared.tell_web(&ToLink::Keyframe { kind });
@@ -530,7 +535,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
     let mut tick = 0u32;
     let mut was_relay: Option<bool> = None;
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        crate::rt::time::sleep(Duration::from_secs(1)).await;
         let (relay, rtt_ms) = shared.path();
         let stale = shared.stats.stale.load(Ordering::Relaxed);
         let skipped = shared.stats.skipped.load(Ordering::Relaxed);
@@ -561,7 +566,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
                 let rates = shared.rate.lock().unwrap_or_else(|e| e.into_inner());
                 rates.iter().flatten().map(|r| r.rung()).map(|r| format!("{}fps/{}kbps", r.fps, r.kbps)).collect::<Vec<_>>().join("+")
             };
-            log_info!(
+            crate::log_info!(
                 "[VIDEO] rtt {rtt_ms} ms {} cwnd {} lost {} cong {} | blocked: data {} stream_data {} streams_uni {} | out: sent {} skipped {} stale {} in_flight {in_flight}/{cap} rung {rung} | in: received {received} dropped {} key_req {}",
                 if relay { "relay" } else { "direct" },
                 cwnd,
@@ -635,7 +640,7 @@ async fn request_keyframe(shared: &Shared, hooks: &Hooks, kind: VideoKind) {
     }
     shared.stats.key_requests.fetch_add(1, Ordering::Relaxed);
     let mut send = hooks.control.lock().await;
-    let _ = tokio::time::timeout(Duration::from_secs(1), super::transport::write_control(&mut *send, &Control::KeyframeRequest { kind })).await;
+    let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::KeyframeRequest { kind })).await;
 }
 
 /// The peer's streams, in order, each one a frame for the webview.
@@ -649,7 +654,7 @@ async fn inbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         let deadline = Instant::now() + INBOUND_FRAME_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let read = match tokio::time::timeout(left, stream.read_chunk(MAX_VIDEO_FRAME)).await {
+            let read = match timeout(left, stream.read_chunk(MAX_VIDEO_FRAME)).await {
                 Ok(r) => r,
                 Err(_) => {
                     let _ = stream.stop(VarInt::from_u32(3));
@@ -712,7 +717,7 @@ async fn inbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         // a keyframe a second is a slideshow. Waiting holds the stream unread, which
         // holds the sender's acknowledgement, which is what makes it skip captures.
         let delivered = match tx {
-            Some(tx) => tokio::time::timeout(TO_WEB_WAIT, tx.send(buf.freeze())).await.is_ok_and(|r| r.is_ok()),
+            Some(tx) => timeout(TO_WEB_WAIT, tx.send(buf.freeze())).await.is_ok_and(|r| r.is_ok()),
             None => false,
         };
         if delivered {

@@ -308,7 +308,9 @@ async function login(skipAnimations = false) {
 
                 // Prompt for background service / battery optimization (mobile only, once)
                 // Deferred so login animations finish first
-                if (platformFeatures.is_mobile) {
+                if (platformFeatures.os === 'web') {
+                    setTimeout(() => invoke('offer_web_notifications').catch((e) => console.warn('[Notify] offer failed:', e)), 1500);
+                } else if (platformFeatures.is_mobile) {
                     setTimeout(async () => {
                         try {
                             const prompted = await invoke('get_background_service_prompted');
@@ -434,6 +436,12 @@ function showWelcomeScreen() {
 
 /** The open encrypt screen's handlers; the component's controls route here. */
 let encryptFlow = null;
+
+/** Set by Create Account: a key made here exists nowhere else yet. */
+let keysAreNew = false;
+
+/** The browser keeps this session only until it closes, or not at all. */
+const storageIsEphemeral = () => !!platformFeatures?.storage && platformFeatures.storage !== 'persistent';
 
 /**
  * Display the Encryption/Decryption flow.
@@ -585,8 +593,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 
     /** Show the security type selection phase */
     function showSecurityTypeSelector() {
+        // Where the browser deletes everything on close, a PIN would guard nothing.
+        const skipChoice = storageIsEphemeral();
         // The type selector uses the login logo above instead of the lock header.
-        VectorSvelte.patchEncrypt({ headerShown: false, pinShown: false, passwordShown: false, typeSelectShown: true });
+        if (!skipChoice) VectorSvelte.patchEncrypt({ headerShown: false, pinShown: false, passwordShown: false, typeSelectShown: true });
 
         // Biometric-only mode (Android 11+ with capable hardware): a generated
         // 256-bit credential nobody ever knows, unlocked solely by the OS.
@@ -631,6 +641,8 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             setTitle('Setting up your account...', { typeSelectShown: false, headerShown: true, lockShown: false, gradient: true });
             try {
                 await invoke('skip_encryption');
+                if (keysAreNew && storageIsEphemeral()) await exportAccount({ saving: true });
+                keysAreNew = false;
                 login();
             } catch (e) {
                 // Backend rejected (disk full, DB locked by AV, migration
@@ -642,6 +654,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 VectorSvelte.patchEncrypt({ typeSelectShown: true });
             }
         };
+        if (skipChoice) flow.choose('skip');
     }
 
     /** Start the credential entry phase for the chosen type */
@@ -722,7 +735,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     // that instead of leaving "Decrypting…" up the whole time.
                     const loadingMsg = window.__activeSignerType === 'bunker'
                         ? 'Connecting to Signer…'
-                        : window.__activeSignerType === 'nip55'
+                        : window.__activeSignerType === 'nip55' || window.__activeSignerType === 'nip07'
                         ? 'Unlocking…'
                         : DECRYPTING_MSG;
                     updateStatusMessage(loadingMsg, true);
@@ -844,7 +857,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 // RPC, not decryption — show the more accurate message.
                 const loadingMsg = window.__activeSignerType === 'bunker'
                     ? 'Connecting to Signer…'
-                    : window.__activeSignerType === 'nip55'
+                    : window.__activeSignerType === 'nip55' || window.__activeSignerType === 'nip07'
                     ? 'Unlocking…'
                     : DECRYPTING_MSG;
                 updateStatusMessage(loadingMsg, true);
@@ -923,6 +936,7 @@ async function createAccount() {
 
         const { public: pubKey } = await invoke("create_account");
         strPubkey = pubKey;
+        keysAreNew = true;
 
         // Connect to Nostr network
         await invoke("connect");
@@ -991,6 +1005,25 @@ async function loginWithNip55() {
         popupConfirm(String(e), '', true, '', 'vector_warning.svg');
     } finally {
         VectorSvelte.patchLogin({ nip55Busy: false });
+    }
+}
+
+/** NIP-07 browser extension (web): the button only shows when one with NIP-44 is present. */
+async function loginWithNip07() {
+    VectorSvelte.patchLogin({ nip07Busy: true });
+    try {
+        if (addAccountFlow.active) await addAccountFlow.commit();
+        const { public: pubKey, existing } = await invoke('login_with_nip07');
+        strPubkey = pubKey;
+        if (existing) return;
+        openEncryptionFlow(false);
+        invoke('connect').catch((err) => {
+            console.warn('[login_with_nip07] connect() failed:', err);
+        });
+    } catch (e) {
+        popupConfirm(String(e), '', true, '', 'vector_warning.svg');
+    } finally {
+        VectorSvelte.patchLogin({ nip07Busy: false });
     }
 }
 
@@ -1134,6 +1167,7 @@ async function loginBack() {
  * @property {() => void} importKey
  * @property {() => void} invite
  * @property {() => void} nip55
+ * @property {() => void} nip07
  * @property {(key: string) => void} openLink
  * @property {{ toggle: () => void, close: () => void, pick: (meta: object) => void, rowHelpers: () => object }} picker
  * @property {{ open: () => void, copy: () => void, openQr: () => void, closeQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
@@ -1146,6 +1180,7 @@ const LOGIN_HELPERS = {
     importKey: () => importKey(),
     invite: () => submitInvite(),
     nip55: () => loginWithNip55(),
+    nip07: () => loginWithNip07(),
     openLink: (key) => openUrl(SETTINGS_LINKS[key]),
     picker: {
         toggle: () => loginPicker.toggle(),
@@ -1172,8 +1207,14 @@ const LOGIN_HELPERS = {
 };
 VectorSvelte.setScreen('login', { h: LOGIN_HELPERS });
 
-/** The NIP-55 button (Android) shows only when a signer app is installed, so it is never a dead end. */
+/** Signer buttons show only when the signer is there (Amber on Android, an extension on web), so they are never a dead end. */
 async function wireLoginUi() {
+    if (platformFeatures.os === 'web') {
+        try {
+            if (await invoke('is_nip07_available')) VectorSvelte.patchLogin({ nip07Shown: true });
+        } catch (_) { /* leave hidden */ }
+        return;
+    }
     if (platformFeatures.os !== 'android') return;
     try {
         if (await invoke('is_external_signer_installed')) VectorSvelte.patchLogin({ nip55Shown: true });

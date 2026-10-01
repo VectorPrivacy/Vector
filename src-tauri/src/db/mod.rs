@@ -2,7 +2,6 @@
 mod maintenance;
 pub mod settings;
 // profiles: delegates to vector_core::db::profiles (no local file needed)
-mod miniapps;
 pub mod chats;
 mod attachments;
 mod events;
@@ -20,7 +19,7 @@ pub async fn set_profile(profile: SlimProfile) -> Result<(), String> {
     vector_core::db::profiles::set_profile(&profile)
 }
 // Mini Apps database functions
-pub use miniapps::{
+pub use vector_core::db::miniapps::{
     MiniAppHistoryEntry,
     record_miniapp_opened, record_miniapp_opened_with_metadata,
     get_miniapps_history, toggle_miniapp_favorite, set_miniapp_favorite,

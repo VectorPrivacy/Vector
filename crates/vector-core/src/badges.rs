@@ -26,8 +26,8 @@ const BADGE_CHECK_TS_KEY: &str = "badge_check_ts";
 const RECHECK_COOLDOWN_SECS: u64 = 6 * 3600;
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -257,7 +257,7 @@ pub async fn refresh_own_badges() {
                 }
             }
             if attempt < ATTEMPTS {
-                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
             }
         }
         // Record the unsuccessful pass so the cooldown applies before re-sweeping.

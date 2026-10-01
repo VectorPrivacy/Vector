@@ -33,7 +33,7 @@ pub async fn call_start(npub: String, video: Option<bool>) -> Result<CallState, 
 /// The loopback socket the webview sends its encoded video through.
 #[tauri::command]
 pub async fn call_video_link() -> Result<String, String> {
-    session::video_link_url()
+    super::link::url()
 }
 
 /// Start or stop sending the camera or the screen; the other one is unaffected.

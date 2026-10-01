@@ -38,6 +38,9 @@ let _ctxMenuAnchor = { x: 0, y: 0 };
 let _ctxMenuFrame = [];
 /** Bumped on every navigation, so a late repaint can tell its frame is gone. */
 let _ctxMenuNav = 0;
+/** The latest press, so a menu opened at it can step aside and ignore its release. */
+let _ctxMenuPress = { at: 0, x: 0, y: 0, touch: false };
+let _ctxMenuOpenedAt = 0;
 
 /** True if an outside tap just dismissed a visible menu. Lets an underlying
  *  click handler (e.g. the chatlist open) swallow that same tap, so dismissing
@@ -50,6 +53,8 @@ function wasContextMenuJustDismissed() {
 VectorSvelte.setContextMenuHandlers({
     activate: (item) => {
         if (item.disabled) return;
+        // Lifting the finger that opened the menu is not a choice.
+        if (_ctxMenuPress.at < _ctxMenuOpenedAt) return;
         if (item.back) { _ctxMenuNav++; _showContextMenuFrame(_ctxMenuTrail.pop() || []); return; }
         if (item.submenu) {
             const sub = typeof item.submenu === 'function' ? item.submenu() : item.submenu;
@@ -100,6 +105,7 @@ function showContextMenu({ x, y, items }) {
     _ctxMenuNav++;
     _ctxMenuTrail = [];
     _ctxMenuAnchor = { x, y };
+    _ctxMenuOpenedAt = performance.now();
     _showContextMenuFrame(items);
 }
 
@@ -122,10 +128,14 @@ function _showContextMenuFrame(items) {
     const rect = VectorSvelte.contextMenuEls().root.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    let nx = x;
-    let ny = y;
-    if (nx + rect.width > vw - 8)  nx = Math.max(8, vw - rect.width - 8);
-    if (ny + rect.height > vh - 8) ny = Math.max(8, y - rect.height); // flip up
+    // Opened where the pointer is: step clear of it, further for a finger than a cursor.
+    const p = _ctxMenuPress;
+    const atPress = Math.hypot(x - p.x, y - p.y) < 24;
+    const gap = atPress ? (p.touch ? 16 : 4) : 0;
+    let nx = x + gap;
+    let ny = y + gap;
+    if (nx + rect.width > vw - 8)  nx = Math.max(8, atPress ? x - gap - rect.width : vw - rect.width - 8);
+    if (ny + rect.height > vh - 8) ny = Math.max(8, y - gap - rect.height); // flip up
     if (nx < 8) nx = 8;
     if (ny < 8) ny = 8;
     VectorSvelte.setContextMenu({ x: nx, y: ny });
@@ -182,7 +192,15 @@ function attachLongPressContextMenu(el, fireMenu) {
 
 // Global dismissal listeners — install once.
 (function _installContextMenuDismiss() {
+    document.addEventListener('pointerdown', (e) => {
+        _ctxMenuPress = { at: performance.now(), x: e.clientX, y: e.clientY, touch: e.pointerType !== 'mouse' };
+    }, true);
+    // The release of the press that opened the menu: no emulated mouse events, no click.
+    document.addEventListener('touchend', (e) => {
+        if (_ctxMenuVisible && _ctxMenuPress.at < _ctxMenuOpenedAt && e.cancelable) e.preventDefault();
+    }, { capture: true, passive: false });
     document.addEventListener('mousedown', () => {
+        if (_ctxMenuPress.at < _ctxMenuOpenedAt) return;
         if (_ctxMenuVisible) _ctxMenuDismissedAt = Date.now();
         hideContextMenu();
     });

@@ -150,7 +150,7 @@ cc = "1"
 
 [dependencies]
 # Vector Core — the single source of truth for all Vector logic
-vector-core = { path = "../crates/vector-core", default-features = false }
+vector-core = { path = "../crates/vector-core", default-features = false, features = ["calls"] }
 
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.
@@ -159,6 +159,7 @@ nostr-blossom = "=0.45.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
+async-trait = "0.1"
 tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -209,7 +210,7 @@ hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
 rustfft = "6.2"
 lofty = "0.24"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "fallible_uint"] }
 rayon = "1.11.0"
 
 # Transitive Dependencies (re-used from frameworks we already utilise, like Tauri)

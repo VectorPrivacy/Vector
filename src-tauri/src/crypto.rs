@@ -13,10 +13,7 @@ use zeroize::Zeroize;
 // `vector_core::state::is_encryption_enabled_fast()` (atomic, seeded by
 // `init_encryption_enabled()` via the canonical resolver). Routing through
 // the atomic keeps every code site in agreement about the missing-row case.
-pub use vector_core::crypto::{
-    maybe_encrypt, maybe_decrypt,
-    encrypt_blob_with_key, decrypt_blob_with_key,
-};
+pub use vector_core::crypto::{maybe_encrypt, maybe_decrypt};
 
 /// Hash a password using Argon2id (with zeroization of the owned password).
 pub async fn hash_pass(mut password: String) -> [u8; 32] {

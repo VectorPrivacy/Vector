@@ -220,6 +220,7 @@ fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
 
 /// The AEAD and Poly1305 with their paths forced, for measuring crossovers on a device.
 #[doc(hidden)]
+#[cfg(target_pointer_width = "64")]
 pub mod bench {
     use super::chacha::Backend;
     use super::poly1305::r64::{self, Poly1305};

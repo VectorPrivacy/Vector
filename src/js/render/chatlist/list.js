@@ -382,6 +382,11 @@ const VIKTOR_SMILE = '/icons/viktor-smile.gif';
  */
 let viktorIdleSrc = null;
 const viktorIdleReady = (() => {
+    // A garbled read would paint noise; the clip itself is the honest idle there.
+    if (!VectorSvelte.canvasReadsTrue()) {
+        viktorIdleSrc = VIKTOR_SMILE;
+        return Promise.resolve();
+    }
     const probe = new Image();
     probe.src = VIKTOR_SMILE;
     return probe.decode().then(() => {
