@@ -1,6 +1,6 @@
 //! Lightweight localhost WebSocket server for zero-overhead realtime sends.
 //!
-//! Mini App JS connects via `ws://127.0.0.1:{port}/{token}/{label}` and sends
+//! Mini App JS connects via `ws://127.0.0.1:{port}/{ticket}` and sends
 //! raw binary frames — one syscall per message, no HTTP framing, no WebView IPC
 //! bottleneck. This bypasses the WKWebView/WebView2 custom scheme pipeline that
 //! limits `fetch()` to ~100 req/s.
@@ -18,12 +18,15 @@ use super::realtime::SendHandle;
 /// Info returned after starting the WS server.
 pub(crate) struct WsInfo {
     pub port: u16,
-    pub token: String,
 }
+
+/// Ticket → the Mini App window it was issued to. A connection's label comes from its
+/// ticket, never from the client, so one app can't send or listen as another.
+pub(crate) type WsTickets = Arc<std::sync::RwLock<HashMap<String, String>>>;
 
 /// Shared state passed to each WS connection handler.
 struct WsState {
-    token: String,
+    tickets: WsTickets,
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
     /// Map of window label → WS sender. WS handler registers here on connect.
     /// join_channel looks up the sender and wires it into the event target.
@@ -36,12 +39,12 @@ struct WsState {
 /// with a pre-bound listener (needed for Android JNI timing).
 pub(crate) async fn run_accept_loop(
     listener: TcpListener,
-    token: String,
+    tickets: WsTickets,
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
     ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 ) {
     let state = Arc::new(WsState {
-        token,
+        tickets,
         send_handles,
         ws_senders,
     });
@@ -67,16 +70,16 @@ pub(crate) async fn run_accept_loop(
 
 /// Handle a single WebSocket connection.
 ///
-/// The URL path is `/{token}/{percent_encoded_label}`.
+/// The URL path is `/{ticket}`; anything after it is ignored.
 /// After the upgrade handshake, binary frames are forwarded to `fast_send()`.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     state: &WsState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Extract label from the URL during the WebSocket handshake
+    // Resolve the label from the ticket during the WebSocket handshake
     let label: Arc<std::sync::OnceLock<String>> = Arc::new(std::sync::OnceLock::new());
     let label_for_cb = label.clone();
-    let token_ref = state.token.clone();
+    let tickets = state.tickets.clone();
 
     // The callback's error type is fixed by tungstenite.
     #[allow(clippy::result_large_err)]
@@ -88,28 +91,17 @@ async fn handle_connection(
             tokio_tungstenite::tungstenite::handshake::server::Response,
             tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
         > {
-            let path = req.uri().path();
-            // Parse /{token}/{percent_encoded_label}
-            let trimmed = path.trim_start_matches('/');
-            let (req_token, rest) = match trimmed.split_once('/') {
-                Some(pair) => pair,
-                None => {
-                    return Err(http::Response::builder()
-                        .status(http::StatusCode::BAD_REQUEST)
-                        .body(None)
-                        .unwrap());
+            let ticket = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("");
+            match label_for_ticket(&tickets, ticket) {
+                Some(owner) => {
+                    let _ = label_for_cb.set(owner);
+                    Ok(resp)
                 }
-            };
-            if req_token != token_ref {
-                return Err(http::Response::builder()
+                None => Err(http::Response::builder()
                     .status(http::StatusCode::FORBIDDEN)
                     .body(None)
-                    .unwrap());
+                    .unwrap()),
             }
-            // Percent-decode the label (window labels contain colons)
-            let decoded = percent_decode(rest);
-            let _ = label_for_cb.set(decoded);
-            Ok(resp)
         },
     )
     .await?;
@@ -235,30 +227,23 @@ fn fast_send_inline(
     });
 }
 
-/// Simple percent-decode for URL path segments.
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                result.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
+fn label_for_ticket(tickets: &WsTickets, ticket: &str) -> Option<String> {
+    if ticket.is_empty() {
+        return None;
     }
-    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+    tickets.read().unwrap_or_else(|e| e.into_inner()).get(ticket).cloned()
 }
 
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ticket_names_the_window() {
+        let tickets: WsTickets = Default::default();
+        tickets.write().unwrap().insert("aaaa".into(), "miniapp:chat:a".into());
+        assert_eq!(label_for_ticket(&tickets, "aaaa").as_deref(), Some("miniapp:chat:a"));
+        assert_eq!(label_for_ticket(&tickets, "bbbb"), None);
+        assert_eq!(label_for_ticket(&tickets, ""), None);
     }
 }

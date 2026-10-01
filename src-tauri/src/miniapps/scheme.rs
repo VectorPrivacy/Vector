@@ -483,11 +483,10 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
                     // Open WebSocket fast-path if backend returned a URL
                     if (result && result.ws_url) {{
                         var wsUrl = result.ws_url;
-                        var label = encodeURIComponent(window.__TAURI_INTERNALS__.metadata.currentWebview.label || '');
                         var wsRetried = false;
                         function connectWs() {{
                             try {{
-                                rtWs = new WebSocket(wsUrl + '/' + label);
+                                rtWs = new WebSocket(wsUrl);
                                 rtWs.binaryType = 'arraybuffer';
                                 rtWs.onclose = function() {{ rtWs = null; }};
                                 rtWs.onerror = function() {{

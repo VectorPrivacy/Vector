@@ -458,7 +458,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
             // BUT: start the WS server eagerly (sync bind + spawn on main runtime).
             // This ensures ws_url is available BEFORE returning to JS.
             state.realtime.ensure_ws_started();
-            let ws_url = state.realtime.ws_url();
+            let ws_url = state.realtime.ws_url_for(&miniapp_id);
 
             Ok::<_, String>((Some(instance), topic, topic_encoded, ws_url))
         });
@@ -1382,9 +1382,8 @@ fn generate_android_webxdc_bridge(self_addr: &str, self_name: &str) -> String {
                 var resultJson = window.__MINIAPP_IPC__.joinRealtimeChannel();
                 if (resultJson) {{
                     var result = JSON.parse(resultJson);
-                    if (result.ws_url && result.label) {{
-                        var label = encodeURIComponent(result.label);
-                        rtWs = new WebSocket(result.ws_url + '/' + label);
+                    if (result.ws_url) {{
+                        rtWs = new WebSocket(result.ws_url);
                         rtWs.binaryType = 'arraybuffer';
                         rtWs.onclose = function() {{ rtWs = null; }};
                         rtWs.onerror = function() {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }};

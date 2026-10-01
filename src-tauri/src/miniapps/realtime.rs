@@ -867,8 +867,10 @@ pub struct RealtimeManager {
     iroh: tokio::sync::RwLock<Option<Arc<IrohState>>>,
     /// Custom relay URL (if any)
     relay_url: Option<String>,
-    /// WebSocket server info (port + token), set once after WS server starts
+    /// WebSocket server info (port), set once after WS server starts
     ws_info: std::sync::OnceLock<super::rt_ws::WsInfo>,
+    /// Realtime socket tickets, one per Mini App window
+    ws_tickets: super::rt_ws::WsTickets,
     /// Fast-path send handles — owned here so the WS server can start
     /// before IrohState exists (critical for Android JNI timing).
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
@@ -883,6 +885,7 @@ impl RealtimeManager {
             iroh: tokio::sync::RwLock::new(None),
             relay_url,
             ws_info: std::sync::OnceLock::new(),
+            ws_tickets: Default::default(),
             send_handles: Arc::new(std::sync::RwLock::new(HashMap::new())),
             ws_senders: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
@@ -1015,20 +1018,13 @@ impl RealtimeManager {
         };
         std_listener.set_nonblocking(true).ok();
 
-        // Random 32-char hex token (128-bit security)
-        let token = {
-            let mut bytes = [0u8; 16];
-            use rand::RngCore;
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
-            crate::util::bytes_to_hex_16(&bytes)
-        };
-
         log_info!("[WEBXDC] Realtime WS server listening on 127.0.0.1:{port}");
 
-        let _ = self.ws_info.set(super::rt_ws::WsInfo { port, token: token.clone() });
+        let _ = self.ws_info.set(super::rt_ws::WsInfo { port });
         super::scheme::set_rt_ws_port(port);
 
         // Spawn accept loop on the MAIN Tauri runtime (survives JNI temp runtime)
+        let tickets = self.ws_tickets.clone();
         let send_handles = self.send_handles.clone();
         let ws_senders = self.ws_senders.clone();
         tauri::async_runtime::spawn(async move {
@@ -1040,15 +1036,27 @@ impl RealtimeManager {
                     return;
                 }
             };
-            super::rt_ws::run_accept_loop(listener, token, send_handles, ws_senders).await;
+            super::rt_ws::run_accept_loop(listener, tickets, send_handles, ws_senders).await;
         });
     }
 
-    /// Get the WebSocket URL for the realtime fast path, if the server is running.
-    pub fn ws_url(&self) -> Option<String> {
-        self.ws_info.get().map(|info| {
-            format!("ws://127.0.0.1:{}/{}", info.port, info.token)
-        })
+    /// The realtime fast-path URL for one Mini App window, if the server is running.
+    /// `label` must be the caller's own window, never a value the app supplied.
+    pub fn ws_url_for(&self, label: &str) -> Option<String> {
+        let port = self.ws_info.get()?.port;
+        let mut tickets = self.ws_tickets.write().unwrap_or_else(|e| e.into_inner());
+        let ticket = match tickets.iter().find(|(_, owner)| owner.as_str() == label) {
+            Some((ticket, _)) => ticket.clone(),
+            None => {
+                let mut bytes = [0u8; 16];
+                use rand::RngCore;
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                let ticket = crate::util::bytes_to_hex_16(&bytes);
+                tickets.insert(ticket.clone(), label.to_string());
+                ticket
+            }
+        };
+        Some(format!("ws://127.0.0.1:{port}/{ticket}"))
     }
 
     /// Shutdown Iroh if initialized (delegates to shutdown_iroh)

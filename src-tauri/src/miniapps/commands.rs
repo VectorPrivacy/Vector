@@ -1853,7 +1853,7 @@ pub async fn miniapp_join_realtime_channel(
             }));
         }
 
-        let ws_url = state.realtime.ws_url();
+        let ws_url = state.realtime.ws_url_for(label);
         Ok(JoinRealtimeResult { topic: topic_encoded, ws_url })
     })
     .await
