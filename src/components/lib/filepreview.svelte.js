@@ -8,7 +8,8 @@ const fp = $state({
     ext: '',
     size: '',
     spoiler: false,
-    compress: false,     // the Compress Image option is offered
+    compress: false,     // the Compress option is offered
+    compressLabel: 'Compress Image',
     compressChecked: true,
     compressInfo: 'Compressing...',
     metadata: false,     // the Keep Metadata option is shown (the image carries EXIF)
@@ -35,6 +36,7 @@ export function openFilePreview(patch = {}) {
     fp.size = '';
     fp.spoiler = false;
     fp.compress = false;
+    fp.compressLabel = 'Compress Image';
     fp.compressChecked = true;
     fp.compressInfo = 'Compressing...';
     fp.metadata = false;

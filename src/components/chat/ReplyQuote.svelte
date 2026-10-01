@@ -13,7 +13,7 @@
         return { update: render };
     }
     // The snippet is preview HTML the app built from the parent's text, then twemoji
-    // and the custom emoji the parent (and the reader's own packs) can resolve.
+    // and the custom emoji the parent's own tags resolve.
     function snippetInto(node, [html, tags]) {
         let cur;
         const render = ([hh, tg]) => {

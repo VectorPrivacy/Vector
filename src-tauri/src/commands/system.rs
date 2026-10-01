@@ -35,6 +35,8 @@ pub struct PlatformFeatures {
     /// Whether this build looks for and installs its own updates. Off in the
     /// F-Droid flavour, where the store owns updates.
     pub self_update: bool,
+    /// Whether videos can be compressed before sending (the `video` build and an encoder).
+    pub video_compression: bool,
 }
 
 // ============================================================================
@@ -78,6 +80,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
         debug_mode: cfg!(debug_assertions),
         media_url,
         self_update: !cfg!(feature = "fdroid"),
+        video_compression: crate::message::video_compression::available(),
     }
 }
 

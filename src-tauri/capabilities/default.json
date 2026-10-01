@@ -66,6 +66,7 @@
     "allow-clear-all-android-file-cache",
     "allow-start-image-precompression",
     "allow-get-compression-status",
+    "allow-get-compression-progress",
     "allow-clear-compression-cache",
     "allow-send-cached-compressed-file",
     "allow-get-or-cache-image",

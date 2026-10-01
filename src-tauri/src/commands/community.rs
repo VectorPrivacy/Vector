@@ -1324,7 +1324,24 @@ async fn process_outbound_community_attachment(
     let extension = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     // Anything that isn't processed first streams from disk, whatever its size.
     if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        crate::message::files::take_precompressed(file_path, false).await;
+        use crate::message::video_compression;
+        if use_compression && video_compression::is_video_extension(&extension) {
+            // The preview's encode, or one now; only a smaller result replaces the streamed original.
+            let compressed = match crate::message::files::take_precompressed(file_path, true).await {
+                Some(pc) => Some(pc),
+                None => {
+                    let path = file_path.to_string();
+                    tokio::task::spawn_blocking(move || video_compression::compress_file(&path)).await.ok().and_then(Result::ok)
+                }
+            };
+            if let Some(pc) = compressed.filter(|pc| pc.compressed_size < pc.original_size) {
+                let name = video_compression::renamed(&name, &pc.extension);
+                let bytes = std::sync::Arc::try_unwrap(pc.bytes).unwrap_or_else(|a| (*a).clone());
+                return process_outbound_community_attachment_bytes(bytes, &name, false, keep_metadata, None).await;
+            }
+        } else {
+            crate::message::files::take_precompressed(file_path, false).await;
+        }
         return process_outbound_community_attachment_path(std::path::PathBuf::from(file_path), name).await;
     }
 

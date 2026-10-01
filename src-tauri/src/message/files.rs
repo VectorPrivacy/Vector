@@ -777,6 +777,12 @@ pub async fn get_compression_status(file_path: String) -> Result<Option<Compress
     }
 }
 
+/// Fraction done of a video still compressing for the preview; None for anything else.
+#[tauri::command]
+pub async fn get_compression_progress(file_path: String) -> Option<f32> {
+    super::video_compression::progress(&file_path)
+}
+
 /// Clear the compression cache for a file (called on cancel)
 #[tauri::command]
 pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
@@ -784,6 +790,7 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
     let mut cache = COMPRESSION_CACHE.lock().await;
     cache.remove(&file_path);
     drop(cache);
+    super::video_compression::cancel(&file_path);
     
     // Also clear Android file cache
     ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
@@ -1141,6 +1148,10 @@ pub fn cleanup_zip() -> Result<(), String> {
 /// registered before the status is read: a completion in between still wakes it. The
 /// timeout is only a backstop.
 pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<CachedCompressedImage> {
+    let video = super::video_compression::is_video_extension(&path_extension(file_path));
+    if video && !wait {
+        super::video_compression::cancel(file_path);
+    }
     if wait {
         let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(file_path).cloned() };
         if let Some(n) = notify {
@@ -1149,7 +1160,12 @@ pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<Ca
             notified.as_mut().enable();
             let running = matches!(COMPRESSION_CACHE.lock().await.get(file_path), Some(None));
             if running {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), notified).await;
+                // A video encode takes as long as the clip needs, and shows its progress.
+                if video {
+                    notified.await;
+                } else {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), notified).await;
+                }
             }
         }
     }
@@ -1177,8 +1193,11 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
     let processed = match precompressed {
         Some(pc) if !keep_metadata => pc,
         _ => {
-            let path = file_path.clone();
+            let (path, extension) = (file_path.clone(), extension.clone());
             tokio::task::spawn_blocking(move || {
+                if super::video_compression::is_video_extension(&extension) {
+                    return super::video_compression::compress_file(&path);
+                }
                 let bytes = read_file_checked(&path)?;
                 process_image_for_send(Arc::new(bytes), &extension, true, keep_metadata, None)
             })
@@ -1196,6 +1215,10 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
     if !name_override.is_empty() {
         let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
         if !sanitized.is_empty() { attachment_file.name = sanitized; }
+    }
+    // A compressed video's name follows its new container, so the receiver opens it as one.
+    if super::video_compression::is_video_extension(&extension) && attachment_file.extension != extension {
+        attachment_file.name = super::video_compression::renamed(&attachment_file.name, &attachment_file.extension);
     }
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }

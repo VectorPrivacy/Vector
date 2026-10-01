@@ -24,6 +24,7 @@ let pendingReplyRef = null;
 let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
+let sendWhenCompressed = false; // Send was pressed while a video was still encoding
 let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
 let pendingZipPath = null; // For folder zip: temp zip path for cleanup
 let zipInProgress = false; // For folder zip: compression in progress
@@ -360,14 +361,18 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     // Reset compression state
     compressionInProgress = false;
     compressionComplete = false;
+    sendWhenCompressed = false;
     stopCompressionPolling();
 
-    // Keep Metadata shows for any non-GIF image; Compress only above 25KB.
-    // Mini Apps don't get either option.
+    // Compress shows for any image above 25KB, GIFs included, and for videos above 1MB where the
+    // build has an encoder (smaller clips are already under its bitrate); Keep Metadata for any
+    // non-GIF image (GIFs carry none). Mini Apps don't get either option.
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
+    const MIN_VIDEO_COMPRESS_SIZE = 1024 * 1024;
     const isGif = ext === 'gif';
     const offerOptions = isImage && !isGif && !isMiniApp;
-    const showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
+    const compressVideo = isVideo && !isAndroid && !!platformFeatures?.video_compression && fileSize > MIN_VIDEO_COMPRESS_SIZE;
+    const showCompress = !isMiniApp && ((isImage && fileSize > MIN_COMPRESS_SIZE) || compressVideo);
 
     VectorSvelte.fpOpen({
         stem: getFileStem(displayName) || displayName,
@@ -375,14 +380,13 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         size: formatBytes(fileSize),
         spoiler: content.kind === 'image' && detected.spoiler,
         compress: showCompress,
+        ...(compressVideo && { compressLabel: 'Compress Video' }),
     });
     VectorSvelte.fpContent(content);
 
-    if (offerOptions) {
-        // Start pre-compression in background (only when compression is offered)
-        if (showCompress) startPrecompression(filepath);
-        revealMetadataOptionIfPresent(filepath);
-    }
+    // Start pre-compression in background (only when compression is offered)
+    if (showCompress) startPrecompression(filepath);
+    if (offerOptions) revealMetadataOptionIfPresent(filepath);
     // Show/hide publish button for trusted publishers with Mini Apps
     if (isMiniApp) checkAndShowPublishButton();
 }
@@ -435,16 +439,25 @@ async function startPrecompression(filepath) {
         compressionPollingInterval = setInterval(async () => {
             try {
                 const status = await invoke('get_compression_status', { filePath: filepath });
-                if (status !== null) {
+                if (pendingFile !== filepath) return;
+                if (status === null) {
+                    // Only a video encode reports progress; images finish within a poll or two.
+                    const done = await invoke('get_compression_progress', { filePath: filepath });
+                    if (done !== null && compressionInProgress && pendingFile === filepath) {
+                        VectorSvelte.fpPatch({ compressInfo: `Compressing... ${Math.floor(done * 100)}%` });
+                    }
+                } else {
                     // Compression complete
                     compressionInProgress = false;
                     compressionComplete = true;
                     stopCompressionPolling();
                     VectorSvelte.fpPatch({ compressInfo: compressionInfoText(status) });
+                    if (sendWhenCompressed) sendPreviewedFile();
                 }
             } catch (e) {
                 // File might have been cancelled
                 stopCompressionPolling();
+                if (sendWhenCompressed && pendingFile === filepath) sendPreviewedFile();
             }
         }, 200);
     } catch (e) {
@@ -552,7 +565,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         // Compress above 25KB; Keep Metadata for any non-GIF image.
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
         offerOptions = ext !== 'gif';
-        showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
+        showCompress = fileSize > MIN_COMPRESS_SIZE;
     } else if (isVideo) {
         if (isAndroid) {
             // Video preview is unreliable on Android; show a film icon.
@@ -576,12 +589,10 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     });
     VectorSvelte.fpContent(content);
 
-    if (offerOptions) {
-        // Start pre-compression in background (only when compression is offered)
-        if (showCompress) startCachedBytesCompression();
-        // Bytes were cached above via cache_file_bytes.
-        revealMetadataOptionIfPresent('');
-    }
+    // Start pre-compression in background (only when compression is offered)
+    if (showCompress) startCachedBytesCompression();
+    // Bytes were cached above via cache_file_bytes.
+    if (offerOptions) revealMetadataOptionIfPresent('');
     if (isMiniApp) checkAndShowPublishButton();
 }
 
@@ -906,6 +917,7 @@ function closeFilePreview() {
     pendingReplyRef = null;
     compressionInProgress = false;
     compressionComplete = false;
+    sendWhenCompressed = false;
     pendingZipPath = null;
     zipInProgress = false;
     pendingMiniAppInfo = null;
@@ -952,7 +964,16 @@ async function sendPreviewedFile() {
     const isImage = usingBytes
         ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
         : isSupportedImage(filePath);
-    const shouldCompress = !!(isImage && fp.compress && fp.compressChecked && ext !== 'gif');
+    const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+    const shouldCompress = !!((isImage || isVideo) && fp.compress && fp.compressChecked);
+    // A video encode can run long and the chat shows nothing until it lands, so the preview
+    // stays up with its progress and sends on completion.
+    if (isVideo && shouldCompress && compressionInProgress && compressionPollingInterval && !usingBytes) {
+        sendWhenCompressed = true;
+        VectorSvelte.fpPatch({ sendDisabled: true, sendLabel: 'Sending when ready' });
+        return;
+    }
+    sendWhenCompressed = false;
     // Default off = strip EXIF (location, camera, timestamps). When on, metadata
     // is preserved (re-attached onto compressed images, kept as-is otherwise).
     const keepMetadata = !!(isImage && fp.metadata && fp.metadataChecked);

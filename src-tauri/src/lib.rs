@@ -40,6 +40,10 @@ pub struct MediaServerState {
 mod whisper;
 
 mod message;
+
+// Video compression for sending (the `video` feature: a selective static FFmpeg).
+#[cfg(feature = "video")]
+mod video;
 pub use vector_core::{Message, Attachment, Reaction};
 
 mod profile;
@@ -669,6 +673,7 @@ pub fn run() {
             message::clear_all_android_file_cache,
             message::start_image_precompression,
             message::get_compression_status,
+            message::get_compression_progress,
             message::clear_compression_cache,
             message::send_cached_compressed_file,
             message::is_directory,

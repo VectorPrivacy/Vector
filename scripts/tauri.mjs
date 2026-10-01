@@ -8,9 +8,13 @@
  * place the choice is made. TAURI_CLI="cargo tauri" forces it.
  */
 import { spawnSync } from 'child_process';
+import { existsSync } from 'fs';
 import { createRequire } from 'module';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 
 const args = process.argv.slice(2);
+enableVideo(args);
 let command;
 let commandArgs;
 
@@ -35,3 +39,36 @@ if (result.error) {
     process.exit(1);
 }
 process.exit(result.status ?? 1);
+
+/**
+ * A macOS or Windows dev/build turns on video compression when scripts/build-ffmpeg.sh has built
+ * FFmpeg for its target (or FFMPEG_DIR names one). Bare builds and VECTOR_VIDEO=0 leave it out;
+ * elsewhere there is no system encoder to use.
+ */
+function enableVideo(args) {
+    if (!['dev', 'build'].includes(args[0]) || process.env.VECTOR_VIDEO === '0') return;
+    if (args.includes('--no-default-features')) return;
+    const sep = args.indexOf('--');
+    const ours = sep < 0 ? args : args.slice(0, sep);
+    const t = ours.findIndex(a => a === '--target' || a === '-t');
+    const target = t >= 0 ? ours[t + 1] : hostTarget();
+    if (!/-apple-darwin$|-windows-msvc$/.test(target || '')) return;
+    if (!process.env.FFMPEG_DIR) {
+        const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+        const dir = join(root, 'src-tauri', 'native-deps', 'ffmpeg', target || '');
+        if (!target || !['libavcodec.a', 'avcodec.lib'].some(f => existsSync(join(dir, 'lib', f)))) return;
+        process.env.FFMPEG_DIR = dir;
+    }
+    // bindgen needs the macOS SDK named when another clang (the NDK's) is first on PATH.
+    if (target?.endsWith('-apple-darwin') && !process.env.SDKROOT) {
+        const sdk = spawnSync('xcrun', ['--sdk', 'macosx', '--show-sdk-path'], { encoding: 'utf8' });
+        if (sdk.status === 0) process.env.SDKROOT = sdk.stdout.trim();
+    }
+    console.log(`[tauri] video compression on: FFmpeg at ${process.env.FFMPEG_DIR}`);
+    args.splice(sep < 0 ? args.length : sep, 0, '--features', 'video');
+}
+
+function hostTarget() {
+    const r = spawnSync('rustc', ['-vV'], { encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.match(/^host: (\S+)/m)?.[1] : undefined;
+}

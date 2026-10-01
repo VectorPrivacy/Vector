@@ -457,11 +457,9 @@ function _dmsgReplyView(msg, sender) {
     let attachment = null;
     if (content) {
         html = buildReplyPreviewHtml(content);
-        // The parent's tags can lose a hydration race on first paint, so the reader's own
-        // equipped packs backstop them; the parent's come last so the sender's mapping wins.
-        const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null) || msg.replied_to_emoji_tags || [];
-        const equipped = equippedEmojiTags();
-        emojiTags = [...equipped, ...msgTags];
+        // Only the parent's own tags: a reader's pack would turn plain text like a
+        // timestamp's `:16:` into an emoji the sender never sent.
+        emojiTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null) || msg.replied_to_emoji_tags || [];
     } else if (hasAttachment) {
         // The backend-resolved extension covers an off-screen parent (no cMsg then).
         const ext = (hasBackendContext ? msg.replied_to_attachment_extension : null) || cMsg?.attachments?.[0]?.extension;

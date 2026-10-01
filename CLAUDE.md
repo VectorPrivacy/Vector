@@ -26,12 +26,18 @@ When in doubt: would this comment make sense to someone reading the code two yea
 ```bash
 npm run dev              # Desktop development (Tauri dev server)
 npm run build            # Desktop release build
-npm run dev:bare         # Dev without default features — no whisper AND no tor (faster compile)
-npm run build:bare       # Release without default features (no whisper, no tor)
+npm run dev:bare         # Dev without default features — no whisper, tor or video (faster compile)
+npm run build:bare       # Release without default features (no whisper, tor or video)
 npm run android:dev      # Android dev (./scripts/android-dev.sh)
 npm run android:build    # Android release (tauri android build)
 scripts/fdroid-build.sh  # F-Droid flavour: source-only, unsigned, no in-app updater (docs/fdroid/)
 ```
+
+Video compression (`video` feature): `scripts/build-ffmpeg.sh [rust-target]` builds a selective
+static FFmpeg into `src-tauri/native-deps/ffmpeg/<target>/`; `scripts/tauri.mjs` then sets
+`FFMPEG_DIR` (+ `SDKROOT` on macOS) and adds `--features video` to macOS/Windows dev/build. Bare
+builds and `VECTOR_VIDEO=0` leave it out. The macOS (VideoToolbox) and Windows (Media Foundation;
+MSYS2 + clang-cl, see the script) releases build it; Linux has no encoder wired, so never gets it.
 
 Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with optional minification (terser + lightningcss in release).
 

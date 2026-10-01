@@ -24,7 +24,8 @@ use crate::android::filesystem;
 /// - full-res + strip  -> re-encode at full resolution (metadata dropped, orientation baked)
 /// - full-res + keep   -> ship the original bytes untouched (all metadata + orientation intact)
 ///
-/// GIFs are always shipped as-is to preserve animation.
+/// Animations (GIF, animated WebP, APNG) keep moving: compressing re-encodes them as animated
+/// WebP, otherwise they ship as-is.
 ///
 /// `thumbhash_hint` is a thumbhash already made from these pixels (the preview's
 /// pre-compression): a branch that keeps the pixels as they are pairs it with the
@@ -67,12 +68,15 @@ pub(crate) fn prepare_outbound_image(
             })
     };
 
-    // GIF: never re-encode (would drop animation). Metadata is read off the
-    // first frame; GIFs don't carry EXIF anyway.
-    if extension == "gif" {
+    // Stripping or re-encoding as a still would drop every frame but the first, so an
+    // animation takes only the compress choice.
+    if crate::shared::image::animated_format(&bytes).is_some() {
+        if compress {
+            return Ok(compress_animation(bytes, extension));
+        }
         let img_meta = meta_opt(&bytes);
         return Ok(CachedCompressedImage {
-            bytes, extension: "gif".to_string(), img_meta,
+            bytes, extension: extension.to_string(), img_meta,
             original_size, compressed_size: original_size,
         });
     }
@@ -149,6 +153,25 @@ pub(crate) fn prepare_outbound_image(
     })
 }
 
+/// An animation compressed for sending (animated WebP), or the original when that doesn't save
+/// at least a tenth, where re-encoding would only cost detail.
+fn compress_animation(bytes: Arc<Vec<u8>>, extension: &str) -> CachedCompressedImage {
+    let original_size = bytes.len() as u64;
+    let smaller = crate::shared::image::compress_animated_for_send(&bytes)
+        .ok()
+        .filter(|e| (e.bytes.len() as u64) * 10 <= original_size * 9);
+    let (bytes, extension) = match smaller {
+        Some(e) => (Arc::new(e.bytes), e.extension),
+        None => (bytes, extension),
+    };
+    // The first frame gives the preview; a decode failure only costs the placeholder.
+    let img_meta = crate::shared::image::decode_image(&bytes, 100).ok().and_then(|img| {
+        let (width, height) = (img.width(), img.height());
+        crate::util::generate_thumbhash_from_image(&img).map(|thumbhash| ImageMetadata { thumbhash, width, height })
+    });
+    CachedCompressedImage { compressed_size: bytes.len() as u64, bytes, extension: extension.to_string(), img_meta, original_size }
+}
+
 /// Internal function to compress bytes
 /// Takes Arc<Vec<u8>> for zero-copy sharing.
 /// If `min_savings_percent` is Some and compression doesn't meet threshold,
@@ -160,27 +183,8 @@ pub(super) fn compress_bytes_internal(
 ) -> Result<CachedCompressedImage, String> {
     let original_size = bytes.len() as u64;
 
-    // For GIFs, skip compression to preserve animation
-    if extension == "gif" {
-        let img = ::image::load_from_memory(&bytes)
-            .map_err(|e| format!("Failed to decode GIF: {}", e))?;
-
-        let (width, height) = (img.width(), img.height());
-
-        let img_meta = crate::util::generate_thumbhash_from_image(&img)
-            .map(|thumbhash| ImageMetadata {
-                thumbhash,
-                width,
-                height,
-            });
-
-        return Ok(CachedCompressedImage {
-            bytes,
-            extension: "gif".to_string(),
-            img_meta,
-            original_size,
-            compressed_size: original_size,
-        });
+    if crate::shared::image::animated_format(&bytes).is_some() {
+        return Ok(compress_animation(bytes, extension));
     }
 
     // Determine target dimensions (max 1920px on longest side)
@@ -283,35 +287,18 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             .unwrap_or("")
             .to_lowercase();
 
+        if super::video_compression::is_video_extension(&extension) {
+            return super::video_compression::compress_file(file_path);
+        }
+
         // Read the file into memory
         let file_data = std::fs::read(file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
         let original_size = file_data.len() as u64;
 
-        // For GIFs, skip compression entirely to preserve animation
-        // Just decode first frame for thumbhash, then return original bytes
-        if extension == "gif" {
-            // Decode just to get dimensions and generate thumbhash from first frame
-            let img = ::image::load_from_memory(&file_data)
-                .map_err(|e| format!("Failed to decode GIF: {}", e))?;
-
-            let (width, height) = (img.width(), img.height());
-
-            let img_meta = crate::util::generate_thumbhash_from_image(&img)
-                .map(|thumbhash| ImageMetadata {
-                    thumbhash,
-                    width,
-                    height,
-                });
-
-            return Ok(CachedCompressedImage {
-                bytes: Arc::new(file_data),
-                extension: "gif".to_string(),
-                img_meta,
-                original_size,
-                compressed_size: original_size,
-            });
+        if crate::shared::image::animated_format(&file_data).is_some() {
+            return Ok(compress_animation(Arc::new(file_data), &extension));
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
@@ -369,27 +356,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         };
         let original_size = bytes.len() as u64;
 
-        // For GIFs, skip compression entirely to preserve animation
-        if extension == "gif" {
-            let img = ::image::load_from_memory(&bytes)
-                .map_err(|e| format!("Failed to decode GIF: {}", e))?;
-
-            let (width, height) = (img.width(), img.height());
-
-            let img_meta = crate::util::generate_thumbhash_from_image(&img)
-                .map(|thumbhash| ImageMetadata {
-                    thumbhash,
-                    width,
-                    height,
-                });
-
-            return Ok(CachedCompressedImage {
-                bytes,
-                extension: "gif".to_string(),
-                img_meta,
-                original_size,
-                compressed_size: original_size,
-            });
+        if crate::shared::image::animated_format(&bytes).is_some() {
+            return Ok(compress_animation(bytes, &extension));
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
@@ -430,5 +398,81 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             original_size,
             compressed_size,
         })
+    }
+}
+
+#[cfg(test)]
+mod gif_send_tests {
+    use super::*;
+
+    fn gif(w: u16, h: u16, frames: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[]).unwrap();
+            enc.set_repeat(gif::Repeat::Infinite).unwrap();
+            for i in 0..frames {
+                // Grain that shifts every frame, like a dithered video.
+                let mut px: Vec<u8> = (0..u32::from(w) * u32::from(h))
+                    .flat_map(|p| {
+                        let (x, y) = (p % u32::from(w) + i * 7, p / u32::from(w));
+                        let n = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) >> 27;
+                        [(x / 4 % 256) as u8, (y / 3 % 256) as u8, (n * 8) as u8, 255]
+                    })
+                    .collect();
+                let mut f = gif::Frame::from_rgba_speed(w, h, &mut px, 30);
+                f.delay = 7;
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_large_gif_is_sent_smaller_and_still_animated() {
+        let src = gif(1100, 620, 6);
+        let sent = prepare_outbound_image(Arc::new(src.clone()), "gif", true, false, None).unwrap();
+        assert_eq!(sent.extension, "webp");
+        assert!(sent.compressed_size * 10 <= sent.original_size * 9, "{} of {}", sent.compressed_size, sent.original_size);
+        let frames: Vec<(image::RgbaImage, u32)> = crate::shared::animated_webp::Decoder::new(&sent.bytes).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(frames.len(), 6, "every frame kept");
+        assert!(frames.iter().all(|(_, ms)| *ms == 70), "timing kept");
+        let (w, h) = frames[0].0.dimensions();
+        assert_eq!(w.max(h), crate::shared::image::ANIMATED_SEND_MAX_DIM);
+        let meta = sent.img_meta.expect("preview metadata");
+        assert_eq!((meta.width, meta.height), (w, h));
+    }
+
+    fn animated_webp(w: u32, h: u32, frames: u32) -> Vec<u8> {
+        let cfg = webp::WebPConfig::new().unwrap();
+        let px: Vec<Vec<u8>> = (0..frames).map(|i| (0..w * h).flat_map(|p| [(p % w * 2 + i * 40) as u8, (p / w) as u8, 90, 255]).collect()).collect();
+        let mut enc = webp::AnimEncoder::new(w, h, &cfg);
+        enc.set_loop_count(0);
+        for (i, f) in px.iter().enumerate() {
+            enc.add_frame(webp::AnimFrame::from_rgba(f, w, h, i as i32 * 100));
+        }
+        enc.try_encode().unwrap().to_vec()
+    }
+
+    /// Every combination of the send options keeps an animated WebP moving.
+    #[test]
+    fn an_animated_webp_is_never_flattened_to_a_still() {
+        let src = animated_webp(300, 200, 4);
+        assert_eq!(crate::shared::image::animated_format(&src), Some("webp"));
+        for (compress, keep) in [(true, false), (true, true), (false, false), (false, true)] {
+            let sent = prepare_outbound_image(Arc::new(src.clone()), "webp", compress, keep, None).unwrap();
+            assert!(crate::shared::image::animated_format(&sent.bytes).is_some(), "compress {compress}, keep {keep}: flattened to {}", sent.extension);
+        }
+        assert!(crate::shared::image::animated_format(&compress_bytes_internal(Arc::new(src), "webp", None).unwrap().bytes).is_some());
+    }
+
+    #[test]
+    fn a_gif_that_would_not_shrink_ships_untouched() {
+        let src = gif(6, 4, 2);
+        for compress in [true, false] {
+            let sent = prepare_outbound_image(Arc::new(src.clone()), "gif", compress, false, None).unwrap();
+            assert_eq!(*sent.bytes, src);
+            assert_eq!(sent.compressed_size, sent.original_size);
+        }
+        assert_eq!(*compress_bytes_internal(Arc::new(src.clone()), "gif", None).unwrap().bytes, src);
     }
 }

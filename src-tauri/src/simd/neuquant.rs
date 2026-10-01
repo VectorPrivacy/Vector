@@ -53,6 +53,39 @@ impl NeuQuant {
         nq
     }
 
+    /// Lloyd passes over every pixel: each entry moves to the mean of the pixels it serves.
+    /// Training samples a fraction of the image, which can leave a small vivid cluster with
+    /// no entry of its own; a pass pulls the nearest entry onto it.
+    pub fn refine(&mut self, pixels: &[u8], passes: usize) {
+        for _ in 0..passes {
+            let mut sum = [[0u64; 4]; NET];
+            let mut n = [0u64; NET];
+            {
+                let mut memo = IndexCache::new(self);
+                for p in pixels.chunks_exact(4) {
+                    let i = usize::from(memo.index_of([p[0], p[1], p[2], p[3]]));
+                    for c in 0..4 {
+                        sum[i][c] += u64::from(p[c]);
+                    }
+                    n[i] += 1;
+                }
+            }
+            let mut moved = false;
+            for ((entry, s), &n) in self.colormap.iter_mut().zip(&sum).zip(&n) {
+                if n == 0 {
+                    continue;
+                }
+                let mean: [i32; 4] = std::array::from_fn(|c| ((s[c] + n / 2) / n) as i32);
+                moved |= mean != *entry;
+                *entry = mean;
+            }
+            if !moved {
+                break;
+            }
+            self.build_netindex();
+        }
+    }
+
     pub fn color_map_rgb(&self) -> Vec<u8> {
         self.colormap.iter().flat_map(|c| [c[0] as u8, c[1] as u8, c[2] as u8]).collect()
     }

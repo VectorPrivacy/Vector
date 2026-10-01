@@ -14,6 +14,9 @@ tor = ["vector-core/tor"]
 # F-Droid flavour: no in-app updater. The store owns updates, and F-Droid's
 # inclusion policy wants the download path absent, not merely gated.
 fdroid = []
+# Video compression through a selective static FFmpeg: build it with scripts/build-ffmpeg.sh
+# and set FFMPEG_DIR to src-tauri/native-deps/ffmpeg/<target>.
+video = ["dep:ffmpeg-next"]
 
 [profile.release]
 lto = true
@@ -79,6 +82,12 @@ opt-level = 3
 [profile.dev.package.simd-adler32]
 opt-level = 3
 [profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.libwebp-sys]
+opt-level = 3
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+[profile.dev.package.zlib-rs]
 opt-level = 3
 [profile.dev.package.gif]
 opt-level = 3
@@ -184,9 +193,12 @@ simd-adler32 = "0.3"
 little_exif = "0.6.23"
 # libwebp bindings — `image-webp` 0.2.x mishandles ANIM disposal/blend
 # composition (transparent frames flicker as previous-frame residue).
-# Used solely for the animated-WebP frame path in commands/emoji_packs.rs;
 # libwebp is the reference decoder and produces fully-composed RGBA.
 webp = "0.3"
+# libwebp's streaming animation decoder and encoder (shared/animated_webp.rs), which the
+# `webp` crate only offers holding every frame in memory.
+libwebp-sys = "0.9"
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-resampling", "static"], optional = true }
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
 cpal = "0.16.0"
