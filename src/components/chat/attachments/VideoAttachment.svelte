@@ -5,67 +5,83 @@
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { claimPlayback, releasePlayback } from '../../lib/audio.svelte.js';
     import { popOut, takeBack, yieldPopout, popoutPlayingAudio } from '../../lib/popout.svelte.js';
+    import { createVideo, adoptVideo, ownsVideo, parkVideo, dropVideo, videoLane } from '../../lib/videohost.js';
     let { att, msg, h } = $props();   // h: MediaHelpers (js/render/chat/message-row.js)
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let container = $state(null);
-    // The ring covers the media, not the wrapper: the overlay is sized to the media's rendered
-    // box for as long as it is on screen. Pinning the wrapper instead would cap the media
-    // through its percentage max-width and freeze it at its pre-metadata size.
-    function pin(media) {
-        const set = () => {
-            container.style.setProperty('--media-w', media.offsetWidth + 'px');
-            container.style.setProperty('--media-h', media.offsetHeight + 'px');
-        };
-        const ro = new ResizeObserver(set);
-        ro.observe(media);
-        return { destroy: () => ro.disconnect() };
-    }
 
     // Mount-time: a row's chat never changes under it.
     // svelte-ignore state_referenced_locally
     const chatId = h.openChat();
     // svelte-ignore state_referenced_locally
     const back = takeBack(att.id, 'video', chatId);
-    function onMeta(video) {
-        h.onVideoMeta(video);
-        if (!back) return;
-        video.muted = !!back.muted;
-        video.volume = back.volume ?? 1;
-        video.currentTime = back.time;
-        if (back.playing) video.play().catch(() => {});
-    }
+    const owner = {};
+    // The floating player hands back the element it was playing, so nothing reloads.
+    // svelte-ignore state_referenced_locally
+    const adopted = adoptVideo(back?.hostKey, owner);
+    // svelte-ignore state_referenced_locally
+    const { key, el } = adopted ? { key: back.hostKey, el: adopted } : createVideo(h.mediaUrl(att.path), owner);
+    el.className = '';
+    el.style.cssText = 'height: auto; border-radius: 8px; cursor: pointer;';
+    $effect(() => {
+        el.controls = !uploading;
+        el.style.opacity = uploading ? '0.25' : '';
+    });
+
     // One sound at a time, and a playing video follows you out of the chat.
-    function playback(video) {
-        const key = `video:${att.id}`;
-        const onPlay = () => { yieldPopout('video'); claimPlayback(key, () => video.pause(), 'video'); };
-        const onPause = () => releasePlayback(key, 'video');
-        video.addEventListener('play', onPlay);
-        video.addEventListener('pause', onPause);
+    function host(node) {
+        node.prepend(el);
+        // The ring covers the media, not the wrapper: the overlay is sized to the media's
+        // rendered box for as long as it is on screen.
+        const pin = () => {
+            container.style.setProperty('--media-w', el.offsetWidth + 'px');
+            container.style.setProperty('--media-h', el.offsetHeight + 'px');
+        };
+        const ro = new ResizeObserver(pin);
+        ro.observe(el);
+        const lane = videoLane(key);
+        const onPlay = () => { yieldPopout('video'); claimPlayback(lane, () => el.pause(), 'video'); };
+        const onPause = () => releasePlayback(lane, 'video');
+        const onMeta = () => {
+            h.onVideoMeta(el);
+            // The player's element was gone: pick up where it was from its saved place.
+            if (!back) return;
+            el.muted = !!back.muted;
+            el.volume = back.volume ?? 1;
+            el.currentTime = back.time;
+            if (back.playing) el.play().catch(() => {});
+        };
+        el.addEventListener('play', onPlay);
+        el.addEventListener('pause', onPause);
+        if (adopted) {
+            if (!el.paused) claimPlayback(lane, () => el.pause(), 'video');
+        } else {
+            el.addEventListener('loadedmetadata', onMeta, { once: true });
+        }
         return {
             destroy() {
-                video.removeEventListener('play', onPlay);
-                video.removeEventListener('pause', onPause);
-                if (!video.paused && !video.ended && !popoutPlayingAudio()) {
-                    popOut({
-                        kind: 'video', id: att.id, att, msg, chatId, src: video.currentSrc || video.src,
-                        time: video.currentTime, playing: true, muted: video.muted, volume: video.volume,
-                        aspect: video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9,
+                ro.disconnect();
+                el.removeEventListener('play', onPlay);
+                el.removeEventListener('pause', onPause);
+                el.removeEventListener('loadedmetadata', onMeta);
+                releasePlayback(lane, 'video');
+                if (!ownsVideo(key, owner)) return;
+                if (!el.paused && !el.ended && !popoutPlayingAudio()) {
+                    parkVideo(key);
+                    const handed = popOut({
+                        kind: 'video', id: att.id, hostKey: key, att, msg, chatId, src: el.currentSrc || el.src,
+                        time: el.currentTime, playing: true, muted: el.muted, volume: el.volume,
+                        aspect: el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 16 / 9,
                     });
+                    if (handed) return;
                 }
-                releasePlayback(key, 'video');
-                video.pause();
-                video.removeAttribute('src');
-                video.load();
+                dropVideo(key);
             },
         };
     }
 </script>
 
-<div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container}>
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video controlsList="nodownload" controls={!uploading} preload="metadata" playsinline src={h.mediaUrl(att.path)}
-           style="height: auto; border-radius: 8px; cursor: pointer;" style:opacity={uploading ? '0.25' : null}
-           onloadedmetadata={(e) => onMeta(e.currentTarget)} use:pin use:playback></video>
+<div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container} use:host>
     {#if uploading}
         <UploadOverlay pendingId={msg.id} {h} />
     {/if}

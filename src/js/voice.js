@@ -845,7 +845,7 @@ const AUDIO_PLAYER_HELPERS = {
  * @typedef {Object} MediaPopoutHelpers
  * @property {AudioPlayerHelpers} audio
  * @property {(chatId: string) => string} chatName
- * @property {(chatId: string) => {community: string, channel: string, icon: string}|null} channelOf  a community channel's place, null elsewhere
+ * @property {(chatId: string) => {community: string, channel: string, icon: string, round?: boolean}|null} placeOf  a community channel's place, or the person a DM is with
  * @property {(msg: object, chatId: string) => {npub: string, name: string, avatar: string}} who
  * @property {(chatId: string, msgId: string) => void} openAt
  */
@@ -856,8 +856,13 @@ const MEDIA_POPOUT_HELPERS = {
         const chat = arrChats.find(c => c.id === chatId);
         return chat && chatIsGroup(chat) ? communityChatTitle(chat) || '' : getName(chatId);
     },
-    channelOf: (chatId) => {
+    placeOf: (chatId) => {
         const chat = arrChats.find(c => c.id === chatId);
+        if (chatId.startsWith('npub1')) {
+            const p = getProfile(chatId);
+            const name = chatId === strPubkey ? 'Notes' : getName(p || chatId);
+            return { community: name, channel: '', icon: getProfileAvatarSrc(p) || 'icons/user-placeholder.svg', round: true };
+        }
         if (!chat || !communityIdOfChat(chat)) return null;
         const cf = chat.metadata?.custom_fields || {};
         const cid = communityIdOfChat(chat);

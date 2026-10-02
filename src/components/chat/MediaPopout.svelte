@@ -7,6 +7,7 @@
     // One grid holds every layout, so switching between a video and its sound-only form
     // moves the same <video> element rather than remounting it.
     import { untrack, flushSync } from 'svelte';
+    import { createVideo, adoptVideo, ownsVideo, dropVideo, videoLane } from '../lib/videohost.js';
     import { popoutState, closePopout } from '../lib/popout.svelte.js';
     import { audioInfo, claimPlayback, releasePlayback, patchTranscription, modelDownloadState, setLyricsOpen,
              splitTitle, songLyrics, accentOf, ensureAccent, smoothBin, toggleTranscript, transcriptButton } from '../lib/audio.svelte.js';
@@ -71,12 +72,15 @@
         if (!ref) return null;
         chatVersion(ref.chatId);
         const chat = h.chatName(ref.chatId);
-        // A channel says where it is: its community, then the channel.
-        const place = h.channelOf(ref.chatId);
+        // Where it came from: a channel's community and name, or the person a DM is with.
+        profileVersion(ref.chatId);
+        const place = h.placeOf(ref.chatId);
         if (session?.voice) {
             const who = h.who(ref.msg, ref.chatId);
             profileVersion(who.npub);
-            return { title: who.name, sub: chat && chat !== who.name ? chat : 'Voice Message', place, avatar: who.avatar };
+            // Their own voice note already carries their name as the title.
+            const where = place?.round && who.npub === ref.chatId ? null : place;
+            return { title: who.name, sub: chat && chat !== who.name ? chat : 'Voice Message', place: where, avatar: who.avatar };
         }
         if (isAlbum) {
             const t = splitTitle(session.tracks[trackIdx]?.title);
@@ -335,9 +339,50 @@
     });
 
     // ── video ──
+    // The element is the chat row's own, moved here still playing (lib/videohost.js), so it
+    // neither reloads nor restarts. Only when that element is gone is a new one made.
     let video = $state(null);
     let vPlaying = $state(false), vTime = $state(0), vDur = $state(0);
-    const vKey = $derived(isVideo ? `video:${item.id}` : '');
+    // The element's own lane, shared with the row it came from: claiming it here stops nothing.
+    let vKey = $state('');
+    let hosted = null;   // { key, owner } of the element this box holds
+    function popVideo(node, it) {
+        const owner = {};
+        const adopted = adoptVideo(it.hostKey, owner);
+        const { key, el } = adopted ? { key: it.hostKey, el: adopted } : createVideo(it.src, owner);
+        hosted = { key, owner };
+        vKey = videoLane(key);
+        el.className = 'popout-thumb popout-video';
+        el.style.cssText = '';
+        node.append(el);
+        video = el;
+        const listeners = { play: onVideoPlay, pause: onVideoPause, timeupdate: onVideoTime, ended: () => closePopout() };
+        for (const [ev, fn] of Object.entries(listeners)) el.addEventListener(ev, fn);
+        if (adopted && el.readyState >= 1) {
+            vDur = el.duration || 0;
+            vTime = el.currentTime;
+            if (!el.paused) onVideoPlay();
+        } else {
+            el.addEventListener('loadedmetadata', onVideoMeta, { once: true });
+        }
+        return {
+            destroy() {
+                for (const [ev, fn] of Object.entries(listeners)) el.removeEventListener(ev, fn);
+                el.removeEventListener('loadedmetadata', onVideoMeta);
+                // Taken back by its row, the lane and the element are the row's now.
+                if (ownsVideo(key, owner)) {
+                    releasePlayback(videoLane(key), 'video');
+                    dropVideo(key);
+                }
+                if (video === el) video = null;
+                if (hosted?.key === key) {
+                    hosted = null;
+                    vKey = '';
+                }
+            },
+        };
+    }
+    $effect(() => { if (video) video.controls = !soundOnly; });
     function onVideoMeta() {
         if (!item || !video) return;
         vDur = video.duration || 0;
@@ -367,10 +412,6 @@
         item.muted = video.muted;
         item.volume = video.volume;
     }
-    $effect(() => {
-        const key = vKey;
-        return () => { if (key) releasePlayback(key, 'video'); };
-    });
 
     const playing = $derived(isVideo ? vPlaying : !!session?.playing);
     const loading = $derived(!!session?.loading);
@@ -384,7 +425,9 @@
     function cardPop(_, { duration }) {
         return { duration, easing: (t) => t * (2 - t), css: (t) => `opacity: ${t}; transform: scale(${0.92 + 0.08 * t});` };
     }
-    $effect(() => { if (!item && video) video.pause(); });
+    // Closed, the video stops at once rather than playing on under the fade; taken back by its
+    // row, it is the row's now and plays on.
+    $effect(() => { if (!item && video && hosted && ownsVideo(hosted.key, hosted.owner)) video.pause(); });
 
     const fmt = (ms) => h.audio.formatTime(ms / 1000);
     const timeText = $derived(isVideo ? `${fmt(vTime * 1000)} / ${fmt(vDur * 1000)}` : `${fmt(Math.max(0, positionMs - curSpan.start))} / ${fmt(Math.max(0, curSpan.end - curSpan.start))}`);
@@ -411,10 +454,7 @@
 
         {#if isVideo}
             {#key item.id}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video class="popout-thumb popout-video" bind:this={video} src={item.src} playsinline controls={!soundOnly} controlsList="nodownload"
-                       onloadedmetadata={onVideoMeta} onplay={onVideoPlay} onpause={onVideoPause} ontimeupdate={onVideoTime}
-                       onended={() => closePopout()}></video>
+                <div style="display: contents" use:popVideo={item}></div>
             {/key}
         {:else if art}
             <button class="popout-thumb" aria-label="View cover art" onclick={() => h.audio.viewImage(art)}><img src={art} alt=""></button>
@@ -428,7 +468,8 @@
             <div class="popout-title cutoff" title={words?.title}>{words?.title}</div>
             {#if words?.place}
                 <div class="popout-sub popout-place">
-                    {#if words.place.icon}<img class="popout-place-icon" src={words.place.icon} alt="">{/if}
+                    {#if words.place.icon}<img class="popout-place-icon" class:is-round={words.place.round} src={words.place.icon} alt=""
+                             onerror={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = 'icons/user-placeholder.svg'; }}>{/if}
                     <span class="cutoff popout-place-community">{words.place.community}</span>
                     {#if words.place.channel}<span class="popout-place-sep">›</span><span class="cutoff">{words.place.channel}</span>{/if}
                 </div>

@@ -12273,11 +12273,26 @@ button.popout-thumb {
     width: 160px;
     margin: 0;
     margin-left: auto;
+.popout-place-icon.is-round {
+    border-radius: 50%;
+}
+
 }
 
 .relay-form-label {
   font-size: 13px;
   font-weight: 600;
+/* A playing video between hosts (lib/videohost.js): still in the page, so it plays on, but out of sight. */
+.video-parking {
+    position: fixed;
+    left: -10000px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    pointer-events: none;
+}
+
   color: rgba(255, 255, 255, 0.8);
   flex-shrink: 0;
 }
