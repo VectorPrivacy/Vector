@@ -245,7 +245,9 @@ pub fn build_delete_rumor(
 /// content = the replacement text (fields unpinned upstream; this shape
 /// matches the CORD examples). `emoji` carries the NIP-30 pairs for any
 /// `:shortcode:` in the replacement — the edit is what peers render from, so
-/// it must be as self-describing as the message it replaces.
+/// it must be as self-describing as the message it replaces. `expiration` is
+/// the target's own NIP-40 expiry, so the edit dies with the message it edits.
+#[allow(clippy::too_many_arguments)]
 pub fn build_edit_rumor(
     author: PublicKey,
     channel_id: &ChannelId,
@@ -253,12 +255,16 @@ pub fn build_edit_rumor(
     target_rumor_id_hex: &str,
     new_content: &str,
     emoji: &[(&str, &str)],
+    expiration: Option<u64>,
     at_ms: u64,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
     for (shortcode, url) in emoji {
         tags.push(emoji_tag(shortcode, url));
+    }
+    if let Some(exp) = expiration {
+        tags.push(Tag::expiration(Timestamp::from_secs(exp)));
     }
     stream::build_rumor_ms(kind::EDIT, author, new_content, tags, at_ms)
 }
@@ -921,7 +927,7 @@ mod tests {
     #[test]
     fn edit_round_trip_replaces_content() {
         let author = Keys::generate();
-        let rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &"de".repeat(32), "fixed the typo", &[], AT);
+        let rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &"de".repeat(32), "fixed the typo", &[], None, AT);
         let ChatEvent::Edit { opened, target, new_content, .. } = open(&seal(&rumor, &author)).unwrap() else {
             panic!("expected an Edit");
         };

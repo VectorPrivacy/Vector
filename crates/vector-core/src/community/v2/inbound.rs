@@ -121,7 +121,7 @@ pub enum ChatPersist {
 /// [`ChatState`]), mirroring v1's `ingest_message`/`apply_reaction`/`apply_delete`. Sync:
 /// the DB dedup read + STATE mutation run under the caller's lock; the caller then does the
 /// async DB persist on the returned [`ChatPersist`] (see [`persist_chat`]). Returns `None`
-/// for a duplicate, a non-persisted kind (typing/webxdc), an edit (increment 2), or an
+/// for a duplicate, an already-expired rumor, a non-persisted kind (typing/webxdc), or an
 /// aggregate whose target isn't resident in this channel.
 pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey) -> Option<ChatPersist> {
     // CORD-04 §4: a banned npub VANISHES — every chat event they author (message,
@@ -133,13 +133,16 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
     if author_is_banned_here(channel_id, &event.opened().author) {
         return None;
     }
+    // CORD-08 §3: the rumor's own NIP-40 expiry governs, the wrap's copy is relay hygiene.
+    // Never a delete: refusing an expired tombstone would bring back what it erased.
+    if !matches!(event, ChatEvent::Delete { .. })
+        && crate::rumor::already_expired(chat::message_expiration(&event.opened().rumor))
+    {
+        return None;
+    }
     match event {
         ChatEvent::Message { opened, reply_to, emoji } => {
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
-            // CORD-08 §3: readers enforce the rumor's own expiry; the wrap's copy is relay hygiene.
-            if crate::rumor::already_expired(msg.expiration) {
-                return None;
-            }
             // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
             // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
             if crate::db::events::event_exists(&msg.id).unwrap_or(false) {
@@ -690,6 +693,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_edit_expires_with_the_message_it_edits() {
+        use nostr_sdk::prelude::{Tag, Timestamp};
+        let (_tmp, _guard, _me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "EditExp", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        // The edit's expiry as published: (inner rumor, outer wrap).
+        async fn wire_expiry(
+            relay: &MemoryRelay,
+            community: &CommunityV2,
+            group: &super::super::derive::GroupKey,
+            edit_id: &str,
+        ) -> (Option<u64>, Option<u64>) {
+            let general = community.channels[0].id;
+            let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+            let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+            wraps
+                .iter()
+                .find_map(|w| {
+                    let ev = chat::open_chat_event(w, group, &general, community.root_epoch).ok()?;
+                    (ev.opened().rumor_id.to_hex() == edit_id).then(|| {
+                        let outer = w.tags.iter().find_map(|t| {
+                            let s = t.as_slice();
+                            (s.first().map(String::as_str) == Some("expiration")).then(|| s[1].parse::<u64>().unwrap())
+                        });
+                        (chat::message_expiration(&ev.opened().rumor), outer)
+                    })
+                })
+                .expect("the edit is on the relay")
+        }
+
+        let exp = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 3_600;
+        let fleeting = service::send_chat_message(&relay, &community, &general, "fleeting", None, &[], vec![Tag::expiration(Timestamp::from_secs(exp))]).await.unwrap();
+        let edit = service::send_edit(&relay, &community, &general, &fleeting, "still fleeting", &[]).await.unwrap();
+        assert_eq!(wire_expiry(&relay, &community, &group, &edit).await, (Some(exp), Some(exp)), "the rumor and the wrap both carry the message's expiry");
+
+        let permanent = service::send_message(&relay, &community, &general, "forever").await.unwrap();
+        let edit = service::send_edit(&relay, &community, &general, &permanent, "still forever", &[]).await.unwrap();
+        assert_eq!(wire_expiry(&relay, &community, &group, &edit).await, (None, None), "a permanent message's edit is permanent");
+
+        // Paged out of memory, the stored row still answers.
+        crate::state::STATE.lock().await.remove_message(&fleeting);
+        assert_eq!(crate::self_destruct::edit_expiry(&fleeting).await, Ok(Some(exp)));
+
+        let lapsed = Message {
+            id: "ab".repeat(32), content: "gone".into(), at: 1_000, mine: true,
+            expiration: Some(1_000_000_000), ..Default::default()
+        };
+        crate::db::events::save_message(&cid, &lapsed).await.unwrap();
+        assert!(service::send_edit(&relay, &community, &general, &lapsed.id, "too late", &[]).await.is_err(), "an expired message can't be edited");
+    }
+
+    #[tokio::test]
+    async fn an_expired_reaction_or_edit_is_refused_but_an_expired_delete_still_lands() {
+        use nostr_sdk::prelude::{Tag, Timestamp, UnsignedEvent};
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "ExpAgg", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let member = Keys::generate();
+        let expired = |r: &UnsignedEvent| {
+            let mut tags: Vec<Tag> = r.tags.iter().cloned().collect();
+            tags.push(Tag::expiration(Timestamp::from_secs(1_000_000_000)));
+            stream::build_rumor_secs(r.kind.as_u16(), r.pubkey, &r.content, tags, r.created_at.as_secs())
+        };
+        let ingest = |rumor: UnsignedEvent, at: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at), false).unwrap();
+            chat::open_chat_event(&wrap, &group, &general, epoch).unwrap()
+        };
+
+        // A permanent message, so only each aggregate's own expiry is in play.
+        let msg = chat::build_message_rumor(member.public_key(), &general, epoch, "permanent", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        assert!(matches!(persist_chat_event(&ingest(msg, 5), &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
+
+        let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🔥", None, 6_000);
+        assert!(persist_chat_event(&ingest(expired(&reaction), 6), &cid, &me.public_key()).await.is_none(), "an expired reaction is refused");
+        let edit = chat::build_edit_rumor(member.public_key(), &general, epoch, &msg_id, "rewritten", &[], None, 7_000);
+        assert!(persist_chat_event(&ingest(expired(&edit), 7), &cid, &me.public_key()).await.is_none(), "an expired edit is refused");
+        {
+            let st = crate::state::STATE.lock().await;
+            let (_, held) = st.find_message(&msg_id).expect("the message is resident");
+            assert!(held.reactions.is_empty(), "no reaction landed");
+            assert_eq!(held.content, "permanent", "no edit landed");
+        }
+        // The same reaction, unexpired, lands: the refusal is the expiry's alone.
+        assert!(matches!(persist_chat_event(&ingest(reaction, 6), &cid, &me.public_key()).await, Some(ChatPersist::Updated { .. })));
+
+        let delete = chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, 8_000, None);
+        let outcome = persist_chat_event(&ingest(expired(&delete), 8), &cid, &me.public_key()).await;
+        assert!(matches!(outcome, Some(ChatPersist::Removed(id)) if id == msg_id), "an expired delete still erases");
+    }
+
+    #[tokio::test]
     async fn a_guestbook_join_wrap_fires_presence() {
         let (_tmp, _guard, me) = init();
         let relay = MemoryRelay::new();
@@ -1124,7 +1226,7 @@ mod tests {
         let ev = chat::open_chat_event(&w2, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned message is dropped");
 
-        let edit = chat::build_edit_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, "rewritten", &[], 7_000);
+        let edit = chat::build_edit_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, "rewritten", &[], None, 7_000);
         let (we, _) = chat::seal_chat_rumor(&edit, &group, &rogue, Timestamp::from_secs(7), false).unwrap();
         let ev = chat::open_chat_event(&we, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned edit is dropped");
@@ -1262,7 +1364,7 @@ mod tests {
         let msg = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "v1 text", None, &[], vec![], 5_000);
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &group, &member, Timestamp::from_secs(5), false).unwrap();
-        let edit = chat::build_edit_rumor(member.public_key(), &general, community.root_epoch, &msg_id, "v2 text", &[], 6_000);
+        let edit = chat::build_edit_rumor(member.public_key(), &general, community.root_epoch, &msg_id, "v2 text", &[], None, 6_000);
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &member, Timestamp::from_secs(6), false).unwrap();
         for w in [&mw, &ew] {
             if let Ok(ev) = chat::open_chat_event(w, &group, &general, community.root_epoch) {
@@ -1304,7 +1406,7 @@ mod tests {
 
         // A stranger (member, holds the key) forges an edit of the author's message.
         let stranger = Keys::generate();
-        let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", &[], 6_000);
+        let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", &[], None, 6_000);
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &stranger, Timestamp::from_secs(6), false).unwrap();
         let ev = chat::open_chat_event(&ew, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a forged edit yields no outcome");

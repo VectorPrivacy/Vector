@@ -220,6 +220,11 @@ pub fn process_rumor(
     context: RumorContext,
     download_dir: &Path,
 ) -> Result<RumorProcessingResult, String> {
+    // NIP-40: an event arriving already expired is dropped on receipt. Never a delete:
+    // refusing an expired tombstone would bring back what it erased.
+    if rumor.kind != Kind::EventDeletion && already_expired(extract_nip40_expiration(&rumor)) {
+        return Ok(RumorProcessingResult::Ignored);
+    }
     match rumor.kind {
         // Text messages — Kind 14 (NIP-17 DM chat message).
         Kind::PrivateDirectMessage => {
@@ -314,11 +319,6 @@ fn process_text_message(
 
     // Create the message
     let expiration = extract_nip40_expiration(&rumor);
-    // NIP-40: an event arriving already expired is dropped on receipt — it
-    // must never render or persist.
-    if already_expired(expiration) {
-        return Ok(RumorProcessingResult::Ignored);
-    }
     // NIP-92 `imeta` on a kind-14: how other clients (Armada) send a file in a
     // DM, where Vector uses kind 15 with top-level decryption tags. Both are
     // valid NIP-17; without this the file arrives as a bare URL in the text.
@@ -580,10 +580,6 @@ fn process_file_attachment(
 
     // Create the message with attachment
     let expiration = extract_nip40_expiration(&rumor);
-    // NIP-40: an event arriving already expired is dropped on receipt.
-    if already_expired(expiration) {
-        return Ok(RumorProcessingResult::Ignored);
-    }
     let msg = Message {
         expiration,
         id: rumor.id.to_hex(),
@@ -1544,6 +1540,24 @@ mod tests {
         let ctx = dm_context(&keys);
         let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
         assert!(matches!(result, RumorProcessingResult::Ignored));
+    }
+
+    #[test]
+    fn an_expired_reaction_or_edit_is_dropped_but_an_expired_delete_still_applies() {
+        let keys = test_keypair();
+        let target = || Tag::custom("e", ["aa".repeat(32)]);
+        let expired = || Tag::expiration(Timestamp::from_secs(1000000000));
+
+        let reaction = make_rumor(&keys, Kind::Reaction, "🔥", tags(vec![target(), expired()]));
+        assert!(matches!(process_rumor(reaction, dm_context(&keys), &temp_dir()).unwrap(), RumorProcessingResult::Ignored));
+        let edit = make_rumor(&keys, Kind::from(event_kind::MESSAGE_EDIT), "edited", tags(vec![target(), expired()]));
+        assert!(matches!(process_rumor(edit, dm_context(&keys), &temp_dir()).unwrap(), RumorProcessingResult::Ignored));
+
+        let delete = make_rumor(&keys, Kind::EventDeletion, "", tags(vec![target(), expired()]));
+        assert!(matches!(
+            process_rumor(delete, dm_context(&keys), &temp_dir()).unwrap(),
+            RumorProcessingResult::DeletionRequest { .. }
+        ));
     }
 
     #[test]

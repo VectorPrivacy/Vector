@@ -55,6 +55,27 @@ pub fn expiry_after(duration_secs: u64) -> Option<u64> {
     Some(now + duration_secs)
 }
 
+/// The NIP-40 expiry an edit of `message_id` carries: the message's own, so the edit
+/// expires with it and never outlives it. Errs once that moment has passed.
+pub async fn edit_expiry(message_id: &str) -> Result<Option<u64>, String> {
+    let resident = {
+        let state = crate::state::STATE.lock().await;
+        state.find_message(message_id).map(|(_, m)| m.expiration)
+    };
+    let expiry = match resident {
+        Some(exp) => exp,
+        None => crate::db::events::event_expiration(message_id)?,
+    };
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if expiry.is_some_and(|exp| exp <= now) {
+        return Err("That message has already expired".into());
+    }
+    Ok(expiry)
+}
+
 /// Reset the in-flight flag whatever exit `sweep_expired` takes.
 struct SweepGuard;
 impl Drop for SweepGuard {

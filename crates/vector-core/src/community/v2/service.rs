@@ -326,7 +326,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
 
 /// Edit one of your own messages (kind 3302): peers re-render `target_id_hex`
 /// with the replacement text. Author-enforced on the read side — only the
-/// original author's edit folds.
+/// original author's edit folds. Carries the target's own expiry, if it has one.
 pub async fn send_edit<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -336,8 +336,9 @@ pub async fn send_edit<T: Transport + ?Sized>(
     emoji: &[(&str, &str)],
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    let expiration = crate::self_destruct::edit_expiry(target_id_hex).await?;
     let at_ms = next_send_ms();
-    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, at_ms);
+    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, expiration, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 

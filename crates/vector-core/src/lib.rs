@@ -1014,6 +1014,13 @@ impl VectorCore {
 
             // NIP-30: resolve `:shortcode:` so the edit carries emoji image tags.
             let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
+            // On the rumor and the wrap alike, so relays drop the edit with its message.
+            let expiry_tags: Vec<Tag> = crate::self_destruct::edit_expiry(message_id)
+                .await
+                .map_err(VectorError::Other)?
+                .map(|exp| Tag::expiration(Timestamp::from_secs(exp)))
+                .into_iter()
+                .collect();
 
             let mut builder = EventBuilder::new(
                 Kind::from_u16(stored_event::event_kind::MESSAGE_EDIT),
@@ -1025,7 +1032,7 @@ impl VectorCore {
                     [et.shortcode.clone(), et.url.clone()],
                 ));
             }
-            let rumor = builder.finalize_unsigned_with_id(my_public_key);
+            let rumor = builder.tags(expiry_tags.clone()).finalize_unsigned_with_id(my_public_key);
             let edit_id = rumor.id.ok_or(VectorError::Other("Failed to get edit rumor ID".into()))?.to_hex();
             let edit_ts_ms = rumor.created_at.as_secs() * 1000;
 
@@ -1046,7 +1053,7 @@ impl VectorCore {
                 }
             }
 
-            inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), [])
+            inbox_relays::send_gift_wrap(&client, &receiver_pubkey, rumor.clone(), expiry_tags.clone())
                 .await.map_err(VectorError::Other)?;
 
             let self_wrap_client = client.clone();
@@ -1055,6 +1062,7 @@ impl VectorCore {
                 if !self_wrap_session.is_live() { return; }
                 let Ok(signer) = signer::active_signer() else { return };
                 if let Ok(wrap) = nostr_sdk::prelude::GiftWrapBuilder::new(my_public_key, rumor)
+                    .extra_tags(expiry_tags)
                     .finalize_async(&signer)
                     .await
                 {

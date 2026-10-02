@@ -560,7 +560,7 @@ pub async fn save_edit_event(
     save_event(&event).await
 }
 
-/// Delete an event from the events table by ID.
+/// Delete an event from the events table by ID, with the edits and reactions that name it.
 pub async fn delete_event(event_id: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // If this row is a chat's read marker, retreat it to the newest surviving event before it FIRST.
@@ -583,6 +583,11 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
         "DELETE FROM events WHERE id = ?1",
         rusqlite::params![event_id],
     ).map_err(|e| format!("Failed to delete event: {}", e))?;
+    // An edit row holds the message's text, so it must not outlive the message.
+    conn.execute(
+        "DELETE FROM events WHERE reference_id = ?1 AND kind IN (?2, ?3)",
+        rusqlite::params![event_id, event_kind::MESSAGE_EDIT, event_kind::REACTION],
+    ).map_err(|e| format!("Failed to delete dependent events: {}", e))?;
     Ok(())
 }
 
@@ -626,6 +631,23 @@ pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
         .optional()
         .map(|o| o.flatten())
         .map_err(|e| format!("Failed to read event author: {}", e))
+}
+
+/// The stored NIP-40 expiry of an event, read from the row itself: no load filter hides
+/// an expired one, so a caller can tell "expired" from "permanent".
+pub fn event_expiration(event_id: &str) -> Result<Option<u64>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let tags: Option<String> = conn
+        .prepare_cached("SELECT tags FROM events WHERE id = ?1")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![event_id], |row| row.get(0)))
+        .optional()
+        .map_err(|e| format!("Failed to read event expiry: {}", e))?;
+    Ok(tags
+        .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(&t).ok())
+        .and_then(|t| extract_expiration_tag(&t)))
 }
 
 /// The owning chat identifier, `mine` flag, and stored author (npub) of an event, or
@@ -2331,6 +2353,40 @@ mod tests {
         // Cascade: deleting the event removes its attachment rows.
         delete_event("m1").await.unwrap();
         assert!(crate::db::attachments::get_attachments_for_event("m1").unwrap().is_empty(), "ON DELETE CASCADE");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_message_takes_its_edits_and_reactions_with_it() {
+        let (_tmp, _guard) = init_test_db();
+        let react = |id: &str, target: &str| Reaction {
+            id: id.into(), reference_id: target.into(), author_id: "npub1reactor".into(),
+            emoji: "🔥".into(), emoji_url: None,
+        };
+        let msg = |mid: &str| Message {
+            id: mid.into(), content: "original".into(), at: 1_000_000, npub: Some("npub1sender".into()),
+            reactions: vec![react(&format!("r-{mid}"), mid)], ..Default::default()
+        };
+        let chat_id = crate::db::id_cache::get_or_create_chat_id("npub1cascade").unwrap();
+        for mid in ["gone", "kept"] {
+            save_message("npub1cascade", &msg(mid)).await.unwrap();
+            let edit = crate::stored_event::StoredEventBuilder::new()
+                .id(format!("e-{mid}"))
+                .kind(event_kind::MESSAGE_EDIT)
+                .chat_id(chat_id)
+                .content("edited text")
+                .reference_id(Some(mid.into()))
+                .created_at(1_001)
+                .build();
+            save_event(&edit).await.unwrap();
+        }
+
+        delete_event("gone").await.unwrap();
+        for id in ["gone", "r-gone", "e-gone"] {
+            assert!(!event_exists(id).unwrap(), "{id} goes with its message");
+        }
+        for id in ["kept", "r-kept", "e-kept"] {
+            assert!(event_exists(id).unwrap(), "{id} belongs to another message");
+        }
     }
 
     // The download persist path: a re-save must never DOWNGRADE download state (relay re-delivery),
