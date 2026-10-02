@@ -455,6 +455,16 @@ pub use nip55::{
 };
 pub use nip07::{Nip07Backend, Nip07Signer, set_nip07_backend, nip07_backend, nip07_get_public_key};
 pub use error::{DownloadError, VectorError, Result};
+
+/// What [`VectorCore::download_attachment_reporting`] is doing, as it happens.
+#[derive(Debug, Clone, Copy)]
+pub enum DownloadStep {
+    /// Ciphertext received so far from the current source, and the length it declared.
+    /// A source that fails over starts the count again.
+    Received { bytes: u64, total: Option<u64> },
+    /// Every byte is in; it is being decrypted, or checked against its hash.
+    Opening,
+}
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
@@ -698,6 +708,19 @@ impl VectorCore {
         author_npub: Option<&str>,
         max_bytes: usize,
     ) -> std::result::Result<Vec<u8>, DownloadError> {
+        self.download_attachment_reporting(attachment, author_npub, max_bytes, |_| true).await
+    }
+
+    /// [`download_attachment_within`](Self::download_attachment_within), telling `step` what the
+    /// walk is doing as it happens. `step` returning false stops it with
+    /// [`DownloadError::Cancelled`] at the next chunk.
+    pub async fn download_attachment_reporting<F: FnMut(DownloadStep) -> bool>(
+        &self,
+        attachment: &Attachment,
+        author_npub: Option<&str>,
+        max_bytes: usize,
+        mut step: F,
+    ) -> std::result::Result<Vec<u8>, DownloadError> {
         use futures_util::StreamExt;
         let max_download = max_bytes;
         if attachment.url.is_empty() {
@@ -767,6 +790,10 @@ impl VectorCore {
                 // The declared length is the server's word: reserve no more than a few MiB on it.
                 resp.content_length().map(|l| usize::try_from(l).unwrap_or(usize::MAX).min(max_download).min(4 * 1024 * 1024)).unwrap_or(64 * 1024),
             );
+            let total = resp.content_length();
+            if !step(DownloadStep::Received { bytes: 0, total }) {
+                return Err(DownloadError::Cancelled);
+            }
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -781,6 +808,12 @@ impl VectorCore {
                     return Err(DownloadError::TooLarge(max_download));
                 }
                 encrypted.extend_from_slice(&chunk);
+                if !step(DownloadStep::Received { bytes: encrypted.len() as u64, total }) {
+                    return Err(DownloadError::Cancelled);
+                }
+            }
+            if !step(DownloadStep::Opening) {
+                return Err(DownloadError::Cancelled);
             }
             // Plaintext public blob (no decryption tags): the sender's `ox` claim
             // is the only integrity check available, so it is mandatory here —

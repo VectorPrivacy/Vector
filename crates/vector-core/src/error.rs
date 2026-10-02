@@ -46,6 +46,8 @@ pub enum DownloadError {
     Unusable(String),
     /// A source didn't answer; a later attempt may reach it.
     Unreachable(String),
+    /// The caller stopped it.
+    Cancelled,
 }
 
 impl fmt::Display for DownloadError {
@@ -53,6 +55,7 @@ impl fmt::Display for DownloadError {
         match self {
             DownloadError::TooLarge(cap) => write!(f, "attachment exceeds the {} cap", crate::crypto::format_bytes(*cap as u64)),
             DownloadError::Unusable(msg) | DownloadError::Unreachable(msg) => write!(f, "{msg}"),
+            DownloadError::Cancelled => write!(f, "Download cancelled"),
         }
     }
 }

@@ -55,8 +55,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
             to_value(get_messages_around_id(&a.str("chatId")?, &a.str("targetMessageId")?, a.usize("contextBefore")?).await?)?
         }
         "fetch_msg_metadata" => json!(fetch_msg_metadata(a.str("chatId")?, a.str("msgId")?).await),
-        // Web downloads are one uninterruptible fetch; `false` tells the UI no outcome event is owed.
-        "cancel_download" => json!(false),
+        "cancel_download" => json!(crate::attachments::cancel_download(&a.str("attachmentId")?)),
         "verify_remote_media" => verify_remote_media(a.de("urls")?).await,
         "bump_emoji_usage" => {
             if db::get_current_account().is_ok() {
