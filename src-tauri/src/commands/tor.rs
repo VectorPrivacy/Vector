@@ -28,6 +28,8 @@ pub struct TorState {
     /// stream while bootstrap is running. 100 once running. The frontend
     /// drives the comet-trail radial progress bar from this.
     pub bootstrap_progress: u8,
+    /// The welcome screen's Tor choice (install-wide), which the next account inherits.
+    pub prelogin: bool,
     /// `socks5h://127.0.0.1:<port>` while the service is up, else None.
     /// Lets JS-initiated plugin requests (updater) ride the same proxy —
     /// they use their own reqwest client, invisible to the backend failsafe.
@@ -124,30 +126,39 @@ pub async fn stop_and_join_if_running() {
 
 /// Sync the Tor service to the active account's preference: stop any service
 /// from a previous account, then start a fresh one bound to the current
-/// account's data dir if its preference is on. Called from `switch_account`
+/// account's data dir if its preference is on. A sign-in from the welcome screen
+/// instead keeps that service for its first session. Called from `switch_account`
 /// after the new account's DB pool is up so `tor_data_dirs()` resolves
 /// correctly. Failures fall through to a "Tor off" state — better than
 /// crashing the switch.
 pub async fn sync_to_active_account() -> Result<(), String> {
     #[cfg(feature = "tor")]
     {
-        // Drop the previous account's TorClient + circuit cache.
-        stop_if_running();
-
-        // The cache was hydrated by `init_database` for the new account, so
-        // `transport_state()` already reflects this account's preference.
-        let want_on = matches!(
+        let _serial = TOR_LIFECYCLE.lock().await;
+        let want_on = !matches!(
             vector_core::tor::transport_state(),
-            vector_core::tor::TorTransportState::Active(_)
-                | vector_core::tor::TorTransportState::RequiredButInactive
+            vector_core::tor::TorTransportState::Disabled
         );
+        // Keep the welcome screen's service: it carried the sign-up, and a restart here drops
+        // every relay mid-boot. The account's own dirs and guards take over from its next start.
+        if running_prelogin() {
+            if want_on {
+                return vector_core::net::rebuild_shared_http_client();
+            }
+            stop_and_join_if_running().await;
+        } else {
+            // Drop the previous account's TorClient + circuit cache.
+            stop_if_running();
+        }
+
+        // `init_database` hydrated the preference for the new account, so `want_on` is its.
         if want_on {
             // Fail closed before the bootstrap await: the previous account's
             // service is already stopped, so a rebuild here lands the shared
             // client on the blackhole instead of leaving the old (possibly
             // direct) client serving requests during bootstrap.
             vector_core::net::rebuild_shared_http_client()?;
-            let (state_dir, cache_dir) = tor_data_dirs()?;
+            let (state_dir, cache_dir) = tor_data_dirs().await?;
             let bridges = read_saved_bridges();
             // Bounded like the toggle path — account switching must not hang
             // forever on a censored network. Timeout/error leaves the pref ON
@@ -173,14 +184,154 @@ pub async fn sync_to_active_account() -> Result<(), String> {
 }
 
 #[cfg(feature = "tor")]
-fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+async fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let account = vector_core::db::get_current_account()?;
     let base = vector_core::db::account_dir(&account)?.join("tor");
     let state = base.join("state");
     let cache = base.join("cache");
     std::fs::create_dir_all(&state).map_err(|e| format!("create state dir: {e}"))?;
     std::fs::create_dir_all(&cache).map_err(|e| format!("create cache dir: {e}"))?;
+    // Never while a service may still be writing the install cache; the copy is MBs of disk I/O.
+    let ours = PRELOGIN_SVC.lock().unwrap_or_else(|e| e.into_inner()).upgrade().is_some();
+    if !vector_core::tor::is_active() && !vector_core::tor::is_bootstrapping() && !ours {
+        let dst = cache.clone();
+        let _ = tokio::task::spawn_blocking(move || vector_core::tor::seed_cache_from_prelogin(&dst)).await;
+    }
     Ok((state, cache))
+}
+
+/// One service start at a time across the welcome screen and the account paths: two
+/// `TorService::start`s racing leave whichever finishes last in the slot.
+#[cfg(feature = "tor")]
+static TOR_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// An account has booted in this session: the welcome screen's switch no longer applies.
+static ACCOUNT_BOOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_account_booted(booted: bool) {
+    ACCOUNT_BOOTED.store(booted, std::sync::atomic::Ordering::Release);
+}
+
+/// The service the welcome screen started, to tell it apart from an account's.
+#[cfg(feature = "tor")]
+static PRELOGIN_SVC: std::sync::Mutex<std::sync::Weak<vector_core::tor::TorService>> =
+    std::sync::Mutex::new(std::sync::Weak::new());
+
+/// Is the running service the welcome screen's (install-level dirs) rather than an account's?
+#[allow(dead_code)] // bare build never reaches the gated callers
+pub fn running_prelogin() -> bool {
+    #[cfg(feature = "tor")]
+    {
+        let ours = PRELOGIN_SVC.lock().unwrap_or_else(|e| e.into_inner()).upgrade();
+        matches!((vector_core::tor::current(), ours), (Some(a), Some(b)) if std::sync::Arc::ptr_eq(&a, &b))
+    }
+    #[cfg(not(feature = "tor"))]
+    false
+}
+
+#[cfg(feature = "tor")]
+async fn start_prelogin() -> Result<(), String> {
+    // Read before queueing on the lock: a cancel issued while this waits must still count.
+    let generation = vector_core::tor::prelogin_generation();
+    let _serial = TOR_LIFECYCLE.lock().await;
+    if vector_core::tor::is_active() || vector_core::tor::prelogin_generation() != generation {
+        return Ok(());
+    }
+    let (state_dir, cache_dir) = vector_core::tor::prelogin_dirs()?;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        vector_core::tor::TorService::start(state_dir, cache_dir, &[]),
+    )
+    .await
+    {
+        Ok(Ok(svc)) => {
+            // Turned off, abandoned or reset while it bootstrapped: nobody wants it now.
+            if vector_core::tor::prelogin_generation() != generation {
+                svc.stop_and_join().await;
+                return Ok(());
+            }
+            *PRELOGIN_SVC.lock().unwrap_or_else(|e| e.into_inner()) = std::sync::Arc::downgrade(&svc);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            let msg = "Tor bootstrap timed out (120s)".to_string();
+            vector_core::tor::set_last_bootstrap_error(msg.clone());
+            Err(msg)
+        }
+    }
+}
+
+/// Match the transport to the welcome screen's choice while no account is live. On: arm the
+/// carry and fail closed before the bootstrap await. Off: stop before releasing to direct.
+#[cfg(feature = "tor")]
+pub async fn apply_prelogin(enabled: bool) -> Result<(), String> {
+    vector_core::tor::arm_prelogin_carry(enabled);
+    if enabled {
+        vector_core::tor::set_tor_enabled_pref(true);
+        vector_core::net::rebuild_shared_http_client()?;
+        start_prelogin().await?;
+    } else {
+        vector_core::tor::cancel_prelogin_start();
+        stop_and_join_if_running().await;
+        vector_core::tor::clear_last_bootstrap_error();
+        // An account already picked (its unlock screen's way back) keeps its own preference.
+        if vector_core::db::get_current_account().is_ok() {
+            vector_core::tor::init_tor_enabled_pref_from_db();
+        } else {
+            vector_core::tor::set_tor_enabled_pref(false);
+        }
+    }
+    vector_core::net::rebuild_shared_http_client()
+}
+
+/// The welcome screen's Tor switch: remember the choice for this install and bring the
+/// transport in line. Only while no account is signed in.
+#[tauri::command]
+pub async fn tor_set_prelogin(enabled: bool, remember: Option<bool>) -> Result<TorState, String> {
+    if ACCOUNT_BOOTED.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("Tor can only be switched here before signing in.".to_string());
+    }
+    #[cfg(feature = "tor")]
+    {
+        // Add Profile applies its own choice without rewriting the install's remembered one.
+        if remember != Some(false) {
+            vector_core::tor::set_prelogin_preference(enabled)?;
+        }
+        apply_prelogin(enabled).await?;
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        let _ = remember;
+        if enabled {
+            return Err("This Vector build was compiled without the `tor` feature.".to_string());
+        }
+    }
+    Ok(tor_get_state())
+}
+
+/// Leaving Add Profile after its commit: the account being returned to keeps its own choice.
+#[tauri::command]
+pub async fn tor_prelogin_abandon() {
+    #[cfg(feature = "tor")]
+    {
+        vector_core::tor::arm_prelogin_carry(false);
+        stop_prelogin_service().await;
+    }
+}
+
+/// Stop the welcome screen's service, waiting out a start still in flight so it can't land
+/// after an account's own service has taken over.
+#[allow(dead_code)] // bare build never reaches the gated callers
+pub async fn stop_prelogin_service() {
+    #[cfg(feature = "tor")]
+    {
+        vector_core::tor::cancel_prelogin_start();
+        let _serial = TOR_LIFECYCLE.lock().await;
+        if running_prelogin() {
+            stop_and_join_if_running().await;
+        }
+    }
 }
 
 #[cfg(feature = "tor")]
@@ -312,13 +463,18 @@ pub async fn tor_set_bridges(enabled: bool, lines: String) -> Result<BridgesStat
 
     #[cfg(feature = "tor")]
     {
+        // The welcome screen's service runs on install-level dirs: move to the account's own.
+        if running_prelogin() {
+            stop_prelogin_service().await;
+            return tor_set_enabled(true).await.map(|_| tor_get_bridges());
+        }
         // If Tor is currently running, reconfigure the live TorClient with
         // the new bridge list. Reconfigure reuses the same TorClient (and
         // its already-acquired state-dir lock) so it sidesteps the lock
         // contention from a stop+start cycle. Existing relay sockets get
         // cycled afterward so they pick up the new guard via the new bridge.
         if let Some(svc) = vector_core::tor::current() {
-            let (state_dir, cache_dir) = tor_data_dirs()?;
+            let (state_dir, cache_dir) = tor_data_dirs().await?;
             let bridges = read_saved_bridges();
             svc.reconfigure_bridges(state_dir, cache_dir, &bridges).await?;
             vector_core::net::rebuild_shared_http_client()?;
@@ -399,8 +555,15 @@ pub fn tor_get_state() -> TorState {
         #[cfg(not(feature = "tor"))]
         { None }
     };
+    let prelogin = {
+        #[cfg(feature = "tor")]
+        { vector_core::tor::prelogin_preference() }
+        #[cfg(not(feature = "tor"))]
+        { false }
+    };
     TorState {
         enabled,
+        prelogin,
         running,
         supported,
         status: current_status_string(),
@@ -445,8 +608,9 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
             // QUIC/UDP (can't ride Tor) but relay-only, and the user consents
             // per session before launching a realtime app under Tor — killing
             // an active lobby on toggle would punish that informed choice.
+            let _serial = TOR_LIFECYCLE.lock().await;
             if !vector_core::tor::is_active() {
-                let (state_dir, cache_dir) = tor_data_dirs()?;
+                let (state_dir, cache_dir) = tor_data_dirs().await?;
                 let bridges = read_saved_bridges();
                 // Bounded: a censored/blackholed network can stall Arti's
                 // consensus fetch indefinitely, and login awaits this command.
@@ -474,7 +638,10 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
             // OFF: stop the service first so transport_state stays in
             // RequiredButInactive (blackhole) during the transition, THEN
             // flip the preference to release into Disabled (direct).
-            if let Some(svc) = vector_core::tor::current() {
+            // The adopted pre-login service is joined: its cache may seed the account's next.
+            if running_prelogin() {
+                stop_and_join_if_running().await;
+            } else if let Some(svc) = vector_core::tor::current() {
                 svc.stop();
             }
             // A prior failed attempt's error must not survive an off-toggle —

@@ -2001,7 +2001,7 @@ pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str
 /// handshake takes under boot contention.
 async fn wait_for_bootstrap_relay(relays: &[String]) {
     let Some(client) = crate::state::nostr_client() else { return };
-    let deadline = crate::rt::time::Instant::now() + std::time::Duration::from_secs(8);
+    let deadline = crate::rt::time::Instant::now() + crate::relay_connect_timeout(std::time::Duration::from_secs(8));
     loop {
         for url in relays {
             if let Ok(Some(relay)) = client.relay(url).await {

@@ -535,8 +535,9 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
     drop(relays);
 
     let mut retries = 0u32;
+    let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
     loop {
-        match relay.send_event(event).await {
+        match relay.send_event(event).ok_timeout(wait).authentication_timeout(wait).await {
             Ok(_) => {
                 if retries == 0 {
                     crate::log_info!("[delete] relay {} ACK'd NIP-09", url);

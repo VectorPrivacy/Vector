@@ -292,6 +292,14 @@ pub async fn fetch_messages<R: Runtime>(
             return;
         };
 
+        // Booting an account means it committed (setup done or unlocked): it keeps the
+        // welcome screen's Tor choice.
+        if init {
+            crate::commands::tor::set_account_booted(true);
+            #[cfg(feature = "tor")]
+            vector_core::tor::commit_prelogin_carry();
+        }
+
         // One-time (per-account) migration of legacy app-private downloads into the
         // public "Vector" media dir. Runs here — after account selection so the DB
         // is the active account's, before the frontend loads messages for display.
@@ -1020,12 +1028,27 @@ pub async fn fetch_messages<R: Runtime>(
             }
         }
 
-        // Nothing EOSE'd and nothing arrived: the pool is unreachable, not empty —
-        // say so, or this is indistinguishable from having no mail.
+        // Nothing EOSE'd and nothing arrived: the pool may be unreachable, not empty. A slow
+        // network is not an offline one, so warn only if no relay at all connects in a long grace.
         if !any_eose && fetched == 0 {
-            let _ = handle.emit("sync_unreachable", serde_json::json!({
-                "relays": client.relays().await.len(),
-            }));
+            let pool = client.clone();
+            vector_core::db::spawn_bound(async move {
+                let grace = vector_core::relay_connect_timeout(std::time::Duration::from_secs(30));
+                let deadline = std::time::Instant::now() + grace;
+                loop {
+                    let relays = pool.relays().await;
+                    if relays.values().any(|r| r.status() == RelayStatus::Connected) {
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        vector_core::emit_event("sync_unreachable", &serde_json::json!({
+                            "relays": pool.relays().await.len(),
+                        }));
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            });
         }
 
         // Quick phase done — recent messages visible to user

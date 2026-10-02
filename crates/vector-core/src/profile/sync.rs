@@ -317,7 +317,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         .limit(1);
 
     let (status_title, status_purpose, status_url, status_emoji_tags) = match client
-        .fetch_events(status_filter).timeout(Duration::from_secs(15))
+        .fetch_events(status_filter).timeout(crate::relay_request_timeout(Duration::from_secs(15)))
         .await
     {
         Ok(res) => {
@@ -348,7 +348,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 .kind(Kind::Metadata)
                 .limit(1),
         )
-        .timeout(Duration::from_secs(15))
+        .timeout(crate::relay_request_timeout(Duration::from_secs(15)))
         .await
         .map(|events| {
             events

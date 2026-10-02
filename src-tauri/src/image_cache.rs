@@ -1066,7 +1066,7 @@ pub async fn cache_url_image<R: Runtime>(
     // Same routing as every other picture: through Magnitude when it can be.
     // download_with_reporter resolves the proxy itself; handing it an
     // already-proxied URL left the request unsigned.
-    let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
+    let bytes = match download_with_reporter(&url, &reporter, Some(vector_core::net::tor_http_timeout(Duration::from_secs(10)))).await {
         Ok(b) => b,
         Err(e) => {
             cleanup().await;

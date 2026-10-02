@@ -387,6 +387,14 @@ fn install_bg_panic_logger() {
 fn run_standalone_sync_loop(data_dir: &str) {
     install_bg_panic_logger();
 
+    // A sign-in is in progress on the welcome screen with Tor chosen: opening some other
+    // account here would move the transport and the key vault under it.
+    #[cfg(feature = "tor")]
+    if vector_core::tor::prelogin_carry_armed() {
+        logcat("bg-sync skipped: welcome screen sign-in in progress");
+        return;
+    }
+
     // Create a persistent tokio runtime for this thread
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -746,10 +754,11 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
         }
         client.connect().await;
 
-        // Poll for connection (500ms intervals, up to 10 seconds).
+        // Poll for connection (500ms intervals, up to 10 seconds, or the Tor floor).
         // Mobile TLS handshakes can take 3-5s; a single fixed sleep misses slow relays.
         let mut connected = false;
-        for _ in 0..20 {
+        let polls = vector_core::relay_connect_timeout(std::time::Duration::from_secs(10)).as_millis() / 500;
+        for _ in 0..polls {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             // Bail if user foregrounded the app during connection
             if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {

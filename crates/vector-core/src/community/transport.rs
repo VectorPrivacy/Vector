@@ -965,7 +965,7 @@ impl LiveTransport {
         // without pulling the user's DM/profile traffic onto relays they don't own — omitting the
         // capabilities would default them to READ|WRITE and leak the user's own traffic there. An
         // overlap relay already in the pool as a user relay keeps its READ+WRITE (add_relay no-ops).
-        let mut added_new = false;
+        let mut added: Vec<&String> = Vec::new();
         let mut succeeded: Vec<&String> = Vec::new();
         for url in relays {
             match client
@@ -973,7 +973,7 @@ impl LiveTransport {
                 .capabilities(crate::community_relay_capabilities())
                 .await
             {
-                Ok(true) => { added_new = true; succeeded.push(url); }
+                Ok(true) => { added.push(url); succeeded.push(url); }
                 Ok(false) => { succeeded.push(url); }
                 Err(_) => {}
             }
@@ -981,12 +981,24 @@ impl LiveTransport {
         if succeeded.is_empty() {
             return Err("no valid community relays could be added".to_string());
         }
-        if added_new {
-            // A relay we weren't already connected to (a Community on non-default relays). `connect()`
-            // returns before sockets are up, so WAIT for it — otherwise the immediate fetch/send reaches
-            // zero relays. Already-connected relays return instantly in `success`, so the warm majority
-            // adds no latency; only the genuinely-new relay's handshake is awaited (bounded).
-            let _ = client.try_connect().timeout(connect_timeout).await;
+        if !added.is_empty() {
+            // A relay we weren't already connected to (a Community on non-default relays): wait up to
+            // the caller's cap for its socket, or the immediate fetch/send reaches zero relays. Only the
+            // new relays connect, each on the transport's own budget: a pool-wide `try_connect` that
+            // runs out terminates every relay still mid-handshake, and over Tor that is most of them.
+            let budget = crate::relay_connect_timeout(connect_timeout);
+            let mut fresh = Vec::new();
+            for url in &added {
+                if let Ok(Some(relay)) = client.relay(url.as_str()).await {
+                    let connecting = relay.clone();
+                    // spawn-detached: one relay's handshake, socket work only; it outlives the wait.
+                    crate::rt::spawn(async move { let _ = connecting.try_connect().timeout(budget).await; });
+                    fresh.push(relay);
+                }
+            }
+            futures_util::future::join_all(
+                fresh.iter().map(|r| crate::negentropy::wait_connected(r, connect_timeout)),
+            ).await;
         } else {
             // Every relay already warm in the pool — cheap re-kick of any dropped connection, no wait.
             client.connect().await;
@@ -1223,7 +1235,7 @@ impl Transport for LiveTransport {
                 // spawn-detached: relay I/O only — no account storage is touched.
                 crate::rt::spawn(async move {
                     matches!(
-                        crate::rt::time::timeout(timeout, client.send_event(&event).to(vec![r.clone()])).await,
+                        crate::rt::time::timeout(timeout, crate::transport_aware(client.send_event(&event)).to(vec![r.clone()])).await,
                         Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false)
                     )
                 })
@@ -1372,7 +1384,10 @@ impl Transport for LiveTransport {
         // latency), so we fan out one send per relay and take the first winner; the losers are cancelled and
         // re-sent in the background. Retry rounds within CONFIRM_WINDOW; zero ACKs in the window = failure.
         let mut acked_any = false;
-        let _ = crate::rt::time::timeout(CONFIRM_WINDOW, async {
+        // Over Tor one round alone can take the 30 s request floor: the 60 s connect floor leaves
+        // room for a retry. Clearnet keeps 30 s.
+        let confirm_window = crate::relay_connect_timeout(CONFIRM_WINDOW);
+        let _ = crate::rt::time::timeout(confirm_window, async {
             loop {
                 // Per ROUND, not from `pending`: a dead socket stays pending (the
                 // reconcile loop may revive it before the stragglers give up) but a
@@ -1382,7 +1397,7 @@ impl Transport for LiveTransport {
                     let client = &client;
                     let event = &event;
                     Box::pin(async move {
-                        match crate::rt::time::timeout(timeout, client.send_event(event).to(vec![r.clone()])).await {
+                        match crate::rt::time::timeout(timeout, crate::transport_aware(client.send_event(event)).to(vec![r.clone()])).await {
                             Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false) => Ok(r),
                             _ => Err(()),
                         }
@@ -1399,7 +1414,7 @@ impl Transport for LiveTransport {
         .await;
 
         if !acked_any {
-            return Err(format!("no relay accepted the event within {}s", CONFIRM_WINDOW.as_secs()));
+            return Err(format!("no relay accepted the event within {}s", confirm_window.as_secs()));
         }
         if pending.is_empty() {
             return Ok(()); // every relay ACKed during the confirm phase
@@ -1415,7 +1430,7 @@ impl Transport for LiveTransport {
             let event_ref = &event;
             let _ = durable_broadcast(&pending, MAX_PUBLISH_ATTEMPTS, backoff, move |round| {
                 Box::pin(async move {
-                    match crate::rt::time::timeout(timeout, client_ref.send_event(event_ref).to(round.clone())).await {
+                    match crate::rt::time::timeout(timeout, crate::transport_aware(client_ref.send_event(event_ref)).to(round.clone())).await {
                         Ok(Ok(output)) => round.into_iter().filter(|p| RelayUrl::parse(p).map(|u| output.success.contains_key(&u)).unwrap_or(false)).collect(),
                         _ => Vec::new(),
                     }

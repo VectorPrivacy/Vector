@@ -221,7 +221,7 @@ pub async fn fetch_self_lists(
             .limit(2);
 
         let events = client
-            .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
             .await
             .unwrap_or_default();
 
@@ -269,7 +269,7 @@ pub async fn fetch_invite_list(
             .identifier(INVITE_LIST_D_TAG)
             .limit(1);
         let events = client
-            .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
             .await
             .unwrap_or_default();
         match events.into_iter().max_by_key(|e| e.created_at) {

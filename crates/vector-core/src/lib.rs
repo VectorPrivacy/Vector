@@ -141,11 +141,7 @@ impl nostr_sdk::prelude::Authenticator for VectorAuthenticator {
 /// `add_relay`.
 pub fn nostr_client_builder() -> nostr_sdk::prelude::ClientBuilder {
     apply_tor_proxy(
-        nostr_sdk::prelude::ClientBuilder::new()
-            .authenticator(VectorAuthenticator)
-            // The pool's own attempts need the Tor floor too, not just our explicit
-            // `try_connect` calls (0.45 default is 15s — under a circuit build).
-            .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15))),
+        nostr_sdk::prelude::ClientBuilder::new().authenticator(VectorAuthenticator),
     )
 }
 
@@ -267,7 +263,28 @@ pub fn apply_tor_proxy(
 ) -> nostr_sdk::prelude::ClientBuilder {
     #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
     let builder = builder.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
-    builder
+    // The pool's own attempts need the Tor floor too, not just our explicit `try_connect`
+    // calls (0.45 default is 15s, under a circuit build).
+    builder.connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)))
+}
+
+/// A publish waiting on the transport's budget for its OK and NIP-42 challenge: the SDK's
+/// fixed 10 s marks a Tor-slow publish failed while the relay is still answering.
+pub fn transport_aware<'c, 'e, 'u>(
+    send: nostr_sdk::client::SendEvent<'c, 'e, 'u>,
+) -> nostr_sdk::client::SendEvent<'c, 'e, 'u> {
+    let wait = relay_request_timeout(std::time::Duration::from_secs(10));
+    send.ok_timeout(wait).authentication_timeout(wait)
+}
+
+/// Relay options carrying the Tor proxy policy, for clients the SDK builds itself (NIP-46),
+/// whose default options would otherwise connect direct.
+pub fn tor_relay_options() -> nostr_sdk::prelude::RelayOptions {
+    let opts = nostr_sdk::prelude::RelayOptions::default()
+        .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)));
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    let opts = opts.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
+    opts
 }
 
 /// Resolve the proxy every connection attempt must use, for the transport in use.
@@ -308,8 +325,7 @@ pub async fn sign_and_send(
     builder: nostr_sdk::prelude::EventBuilder,
 ) -> std::result::Result<nostr_sdk::prelude::SendEventOutput, String> {
     let event = sign_builder(builder).await?;
-    client
-        .send_event(&event)
+    transport_aware(client.send_event(&event))
         .await
         .map_err(|e| e.to_string())
 }
@@ -340,10 +356,9 @@ where
     let targets: Vec<nostr_sdk::prelude::RelayUrlArg<'u>> =
         relays.into_iter().map(Into::into).collect();
     if targets.is_empty() {
-        client.send_event(&wrap).await.map_err(|e| e.to_string())
+        crate::transport_aware(client.send_event(&wrap)).await.map_err(|e| e.to_string())
     } else {
-        client
-            .send_event(&wrap)
+        transport_aware(client.send_event(&wrap))
             .to(targets)
             .await
             .map_err(|e| e.to_string())
@@ -976,8 +991,7 @@ impl VectorCore {
             .finalize_async(&signer)
             .await
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
-        client
-            .send_event(&wrap)
+        transport_aware(client.send_event(&wrap))
             .to(state::active_trusted_relays().await)
             .await
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
@@ -1043,7 +1057,7 @@ impl VectorCore {
                     .finalize_async(&signer)
                     .await
                 {
-                    let _ = self_wrap_client.send_event(&wrap).await;
+                    let _ = crate::transport_aware(self_wrap_client.send_event(&wrap)).await;
                 }
             });
 
@@ -1208,7 +1222,7 @@ impl VectorCore {
             servers,
             std::sync::Arc::new(bytes),
             Some(mime),
-            Some(std::time::Duration::from_secs(20)),
+            Some(crate::net::tor_http_timeout(std::time::Duration::from_secs(20))),
         )
         .await
         .map_err(VectorError::Other)
@@ -5120,7 +5134,7 @@ impl VectorCore {
             // Dry-run negentropy: exchange fingerprints to identify missing events
             let sync_opts = nostr_sdk::prelude::SyncOptions::new()
                 .direction(nostr_sdk::prelude::SyncDirection::Down)
-                .initial_timeout(std::time::Duration::from_secs(10))
+                .initial_timeout(relay_request_timeout(std::time::Duration::from_secs(10)))
                 .dry_run();
 
             // Race all relays — first to reconcile drives the fetch. Relays with a
@@ -5207,7 +5221,7 @@ impl VectorCore {
                     .stream_events(nostr_sdk::prelude::ReqTarget::manual(
                         skipped_no_neg.iter().cloned().map(|u| (u, vec![req_filter.clone()])),
                     ))
-                    .timeout(std::time::Duration::from_secs(20))
+                    .timeout(relay_request_timeout(std::time::Duration::from_secs(20)))
                     .await
                 {
                     Ok(stream) => {
@@ -5568,17 +5582,21 @@ impl VectorCore {
             db::spawn_bound(async move {
                 crate::rt::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
                 loop {
-                    for (url, relay) in client_health.relays().await {
+                    // A false "unhealthy" costs a full reconnect, so the probe follows the
+                    // transport; probed concurrently so one slow relay can't stall the rest.
+                    let budget = relay_request_timeout(std::time::Duration::from_secs(8));
+                    let client_health = &client_health;
+                    futures_util::future::join_all(client_health.relays().await.into_iter().map(|(url, relay)| async move {
                         match relay.status() {
                             RelayStatus::Connected => {
                                 let probe = crate::rt::time::timeout(
-                                    std::time::Duration::from_secs(10),
+                                    budget + std::time::Duration::from_secs(2),
                                     client_health
                                         .fetch_events(nostr_sdk::prelude::ReqTarget::single(
                                             url.to_string(),
                                             [Filter::new().kind(Kind::Metadata).limit(1)],
                                         ))
-                                        .timeout(std::time::Duration::from_secs(8)),
+                                        .timeout(budget),
                                 )
                                 .await;
                                 if !matches!(probe, Ok(Ok(_))) {
@@ -5592,7 +5610,7 @@ impl VectorCore {
                             }
                             _ => {}
                         }
-                    }
+                    })).await;
                     crate::rt::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });
@@ -5718,6 +5736,24 @@ mod transport_policy_tests {
         );
         assert_eq!(super::relay_connect_timeout(short), super::TOR_RELAY_CONNECT_FLOOR);
         assert_eq!(super::relay_request_timeout(short), super::TOR_RELAY_REQUEST_FLOOR);
+
+        // Tor chosen on the welcome screen: an account whose own preference is off still opens
+        // on Tor until it commits, so a staged sign-in can never connect direct.
+        crate::tor::arm_prelogin_carry(true);
+        assert!(crate::tor::effective_tor_pref(false), "an armed carry raises an off preference");
+        crate::tor::set_tor_enabled_pref(crate::tor::effective_tor_pref(false));
+        assert_eq!(
+            super::tor_proxy_target(),
+            Some(crate::tor::blackhole_proxy_addr()),
+            "an armed carry must blackhole until Tor is up, never connect direct"
+        );
+        crate::tor::arm_prelogin_carry(false);
+        assert!(!crate::tor::effective_tor_pref(false), "a disarmed carry leaves the preference alone");
+        assert!(crate::tor::effective_tor_pref(true));
+
+        // The NIP-46 client the SDK builds for a remote signer gets the same policy.
+        let opts = super::tor_relay_options();
+        assert!(format!("{opts:?}").contains("proxy: Some"), "remote-signer relays must carry the Tor proxy");
 
         // The floor only ever raises. A caller asking for longer than the floor has
         // a reason to, and shortening it would abort operations that used to finish.

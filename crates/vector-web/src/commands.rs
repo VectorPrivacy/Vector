@@ -104,10 +104,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "tor_get_state" => Ok(json!({
-            "enabled": false, "running": false, "supported": false,
+            "enabled": false, "prelogin": false, "running": false, "supported": false,
             "status": "", "bootstrap_progress": 0, "socks_proxy": null,
         })),
         "tor_get_bridges" => Ok(json!([])),
+        "tor_prelogin_abandon" => Ok(Value::Null),
         "get_logs" => Ok(json!("")),
         "get_pending_share" | "get_pending_deep_link" => Ok(Value::Null),
 

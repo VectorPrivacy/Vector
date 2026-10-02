@@ -54,7 +54,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
         .limit(100);
 
     let mut events = client
-        .stream_events(filter).timeout(std::time::Duration::from_secs(10))
+        .stream_events(filter).timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -86,7 +86,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let event = vector_core::sign_builder(event_builder).await.map_err(|e| e.to_string())?;
 
     // Send only to trusted relays
-    client.send_event(&event).to(active_trusted_relays().await).await.map_err(|e| e.to_string())?;
+    vector_core::transport_aware(client.send_event(&event)).to(active_trusted_relays().await).await.map_err(|e| e.to_string())?;
 
     // Store locally
     db::set_sql_setting("invite_code".to_string(), new_code.clone())
@@ -116,7 +116,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     // Find the invite event
     let mut events = client
         .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![filter.clone()]))))
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -178,7 +178,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
 
     let mut events = client
         .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![filter.clone()]))))
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -205,7 +205,7 @@ pub async fn get_invited_users(npub: String) -> Result<u32, String> {
 
     let mut acceptance_events = client
         .stream_events(nostr_sdk::prelude::ReqTarget::manual(active_trusted_relays().await.into_iter().map(|u| (u, vec![acceptance_filter.clone()]))))
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
 

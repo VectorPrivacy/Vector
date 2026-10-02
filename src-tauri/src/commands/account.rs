@@ -664,7 +664,10 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
     // session is drained so nothing half-built survives.
     let setup_result: Result<(), String> = async {
         account_manager::set_pending_account(npub.clone())?;
-        crate::commands::tor::stop_and_join_if_running().await;
+        // Staging rides the welcome screen's service until the account commits.
+        if !crate::commands::tor::running_prelogin() {
+            crate::commands::tor::stop_and_join_if_running().await;
+        }
         account_manager::init_profile_database(&handle, &npub).await?;
 
         vector_core::set_pending_nip55_setup(user_pk_hex.clone(), package.clone());
@@ -908,7 +911,10 @@ pub async fn connect_bunker<R: Runtime>(
     // survives past this command's return.
     let setup_result: Result<(), String> = async {
         account_manager::set_pending_account(remote_npub.clone())?;
-        crate::commands::tor::stop_and_join_if_running().await;
+        // Staging rides the welcome screen's service until the account commits.
+        if !crate::commands::tor::running_prelogin() {
+            crate::commands::tor::stop_and_join_if_running().await;
+        }
         account_manager::init_profile_database(&handle, &remote_npub).await?;
 
         // Stage credentials for the encryption flow.
@@ -1149,7 +1155,10 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             // Bail before any side effect if the user swapped accounts
             // during the long pairing wait.
             account_manager::set_pending_account(remote_npub.clone())?;
-            crate::commands::tor::stop_and_join_if_running().await;
+            // Staging rides the welcome screen's service until the account commits.
+            if !crate::commands::tor::running_prelogin() {
+                crate::commands::tor::stop_and_join_if_running().await;
+            }
             account_manager::init_profile_database(&handle_for_task, &remote_npub).await?;
 
             *PENDING_NSEC.lock().unwrap() = Some(String::clone(&client_nsec));
@@ -1378,7 +1387,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
                 match vector_core::sign_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
-                        match client.send_event(&event).to(active_trusted_relays().await).await {
+                        match vector_core::transport_aware(client.send_event(&event)).to(active_trusted_relays().await).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -1495,6 +1504,26 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     let is_bunker_account = signer_type == "bunker";
     let is_nip55_account = signer_type == "nip55";
 
+    // Tor before anything touches the network: a bunker account's signer handshake below
+    // must ride it too, and the Nostr client picks up the proxy from the start. On failure
+    // the preference stays on with no service, so connections blackhole rather than leak.
+    #[cfg(feature = "tor")]
+    {
+        let stored = matches!(
+            vector_core::db::settings::get_sql_setting("tor_enabled".to_string()),
+            Ok(Some(ref v)) if v == "1" || v == "true"
+        );
+        // The welcome screen's service has install-level guards; the account runs its own.
+        crate::commands::tor::stop_prelogin_service().await;
+        // Picked from the welcome screen with Tor on: inherited, saved once the account boots.
+        if vector_core::tor::effective_tor_pref(stored) && !vector_core::tor::is_active() {
+            vector_core::tor::set_tor_enabled_pref(true);
+            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+                eprintln!("[Login] Tor auto-start failed: {e}");
+            }
+        }
+    }
+
     // The user's identity pubkey for this session. For local/bunker accounts
     // it's derived from the decrypted `pkey`; for NIP-55 it's the cached
     // plaintext identity (nothing secret is stored on this device).
@@ -1603,7 +1632,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
             let remote_pk = vector_core::attempt_bunker_login(
                 &bunker_url,
                 keys.clone(),
-                std::time::Duration::from_secs(15),
+                vector_core::relay_connect_timeout(std::time::Duration::from_secs(15)),
             ).await.map_err(|e| {
                 format!("Remote signer unreachable — please ensure your signer app is online and retry. ({})", e)
             })?;
@@ -1640,26 +1669,6 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // isn't encrypted); ENCRYPTION_KEY is installed by every branch above.
     if let Err(e) = vector_core::db::at_rest::backfill_community_at_rest() {
         eprintln!("[Login] community at-rest backfill deferred: {e}");
-    }
-
-    // If the user previously enabled Tor, bootstrap it BEFORE building the
-    // Nostr client so the client picks up the SOCKS proxy from the start.
-    // First boot takes 5–15s for the consensus fetch; subsequent ~2s from
-    // the cached directory under <account>/tor/. On failure the app still
-    // boots, but fail-closed: pref stays ON with no service, so all
-    // connections blackhole until Tor connects or the user disables it.
-    #[cfg(feature = "tor")]
-    {
-        let tor_enabled = matches!(
-            vector_core::db::settings::get_sql_setting("tor_enabled".to_string()),
-            Ok(Some(ref v)) if v == "1" || v == "true"
-        );
-        if tor_enabled && !vector_core::tor::is_active() {
-            match crate::commands::tor::tor_set_enabled(true).await {
-                Ok(_) => println!("[Login] Tor service started from saved preference."),
-                Err(e) => eprintln!("[Login] Tor auto-start failed: {} — proceeding direct.", e),
-            }
-        }
     }
 
     // A bunker account cannot log in without the signer attempt_bunker_login installed.
@@ -1755,7 +1764,10 @@ pub async fn setup_encryption<R: Runtime>(
         // Create the DB + set current account + restart Tor (mirror the shared
         // path below).
         if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
-            crate::commands::tor::stop_and_join_if_running().await;
+            // The welcome screen's service carries on into the new account's first session.
+            if !crate::commands::tor::running_prelogin() {
+                crate::commands::tor::stop_and_join_if_running().await;
+            }
             if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
                 let _ = crate::commands::tor::sync_to_active_account().await;
                 return Err(e);
@@ -1826,7 +1838,10 @@ pub async fn setup_encryption<R: Runtime>(
     // `init_profile_database` then fails, restart Tor against the still-
     // active account so a retry doesn't leave the user direct-connected.
     if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
-        crate::commands::tor::stop_and_join_if_running().await;
+        // The welcome screen's service carries on into the new account's first session.
+        if !crate::commands::tor::running_prelogin() {
+            crate::commands::tor::stop_and_join_if_running().await;
+        }
         if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
             let _ = crate::commands::tor::sync_to_active_account().await;
             return Err(e);
@@ -1925,7 +1940,10 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
         let (user_pk_hex, package) = vector_core::pending_nip55_setup()
             .ok_or("Offline signer setup state missing. Please re-run Sign in with Amber.")?;
         if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
-            crate::commands::tor::stop_and_join_if_running().await;
+            // The welcome screen's service carries on into the new account's first session.
+            if !crate::commands::tor::running_prelogin() {
+                crate::commands::tor::stop_and_join_if_running().await;
+            }
             if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
                 let _ = crate::commands::tor::sync_to_active_account().await;
                 return Err(e);
@@ -1968,7 +1986,10 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
     };
 
     if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
-        crate::commands::tor::stop_and_join_if_running().await;
+        // The welcome screen's service carries on into the new account's first session.
+        if !crate::commands::tor::running_prelogin() {
+            crate::commands::tor::stop_and_join_if_running().await;
+        }
         if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
             let _ = crate::commands::tor::sync_to_active_account().await;
             return Err(e);
@@ -2106,7 +2127,7 @@ fn stamp_fresh_account_profile() {
             .tag(Tag::custom("client", vec!["vector"]));
         match vector_core::sign_builder(builder).await {
             Ok(event) => {
-                match client.send_event(&event).to(active_trusted_relays().await).await {
+                match vector_core::transport_aware(client.send_event(&event)).to(active_trusted_relays().await).await {
                     Ok(_) => println!("Stamped the new account's profile as a Vector client"),
                     Err(e) => eprintln!("Failed to stamp the new account's profile: {}", e),
                 }
@@ -2135,7 +2156,7 @@ fn broadcast_pending_invite_if_any() {
             .tag(Tag::public_key(inviter_pubkey));
         match vector_core::sign_builder(event_builder).await {
             Ok(event) => {
-                match client.send_event(&event).to(active_trusted_relays().await).await {
+                match vector_core::transport_aware(client.send_event(&event)).to(active_trusted_relays().await).await {
                     Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                     Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                 }

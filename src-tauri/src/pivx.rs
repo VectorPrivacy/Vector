@@ -37,6 +37,11 @@ const BLOCKBOOK_APIS: &[&str] = &[
 /// Per-request timeout for fast failover (3 seconds)
 const BLOCKBOOK_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Per-request Blockbook budget: 3 s on clearnet, the Tor floor while a circuit may still be building.
+fn blockbook_timeout() -> std::time::Duration {
+    vector_core::net::tor_http_timeout(BLOCKBOOK_REQUEST_TIMEOUT)
+}
+
 /// Number of SHA256 iterations for promo key derivation (PoW security)
 const PROMO_KEY_ITERATIONS: u32 = 12_500_000;
 
@@ -262,7 +267,7 @@ pub fn clear_balance_cache() {
 /// Fetch balance from a single explorer (internal helper)
 async fn fetch_balance_from_explorer(api_base: &str, address: &str) -> Result<f64, String> {
     let url = format!("{}/api/v2/address/{}", api_base, address);
-    match pivx_http_client().get(&url).timeout(BLOCKBOOK_REQUEST_TIMEOUT).send().await {
+    match pivx_http_client().get(&url).timeout(blockbook_timeout()).send().await {
         Ok(resp) if resp.status().is_success() => {
             let data: AddressBalance = resp.json().await
                 .map_err(|e| format!("Failed to parse balance: {}", e))?;
@@ -359,7 +364,7 @@ pub async fn fetch_balances_batch(addresses: &[String]) -> HashMap<String, f64> 
 pub async fn fetch_utxos(address: &str) -> Result<Vec<Utxo>, String> {
     for api_base in BLOCKBOOK_APIS {
         let url = format!("{}/api/v2/utxo/{}", api_base, address);
-        match pivx_http_client().get(&url).timeout(BLOCKBOOK_REQUEST_TIMEOUT).send().await {
+        match pivx_http_client().get(&url).timeout(blockbook_timeout()).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let utxos: Vec<Utxo> = resp.json().await
                     .map_err(|e| format!("Failed to parse UTXOs: {}", e))?;
@@ -380,7 +385,7 @@ pub async fn fetch_utxos(address: &str) -> Result<Vec<Utxo>, String> {
 pub async fn broadcast_tx(tx_hex: &str) -> Result<String, String> {
     for api_base in BLOCKBOOK_APIS {
         let url = format!("{}/api/v2/sendtx/{}", api_base, tx_hex);
-        match pivx_http_client().get(&url).timeout(BLOCKBOOK_REQUEST_TIMEOUT).send().await {
+        match pivx_http_client().get(&url).timeout(blockbook_timeout()).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let body = resp.text().await
                     .map_err(|e| format!("Failed to read response: {}", e))?;
@@ -1832,7 +1837,7 @@ pub async fn pivx_get_currencies() -> Result<Vec<CurrencyInfo>, String> {
 
     let resp = pivx_http_client()
         .get(&url)
-        .timeout(BLOCKBOOK_REQUEST_TIMEOUT)
+        .timeout(blockbook_timeout())
         .send()
         .await
         .map_err(|e| format!("Failed to fetch currencies: {}", e))?;
@@ -1854,7 +1859,7 @@ pub async fn pivx_get_price(currency: String) -> Result<CurrencyInfo, String> {
 
     let resp = pivx_http_client()
         .get(&url)
-        .timeout(BLOCKBOOK_REQUEST_TIMEOUT)
+        .timeout(blockbook_timeout())
         .send()
         .await
         .map_err(|e| format!("Failed to fetch price: {}", e))?;

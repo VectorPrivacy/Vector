@@ -4,7 +4,8 @@
     // the credits and links along the bottom, and the illustration behind it all. Painted
     // from lib/login.svelte.js; every control answers through `h` (js/auth.js).
     import { untrack } from 'svelte';
-    import { loginState, bunkerState, pickerState, encryptState, toggleLoginBg } from '../lib/login.svelte.js';
+    import { loginState, loginTorState, bunkerState, pickerState, encryptState, toggleLoginBg } from '../lib/login.svelte.js';
+    import { popIn } from '../lib/popin.js';
     import PinInput from '../ui/PinInput.svelte';
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
@@ -14,6 +15,11 @@
     const b = bunkerState();
     const p = pickerState();
     const e = encryptState();
+    const t = loginTorState();
+
+    // ── Tor ──
+    // Each arrival at Start re-reads the switch and lines the transport up with it.
+    $effect(() => { if (l.screen === 'start') untrack(() => h.tor.refresh()); });
 
     // ── account picker ──
     let pill = $state(null);
@@ -73,11 +79,34 @@
     const onEnter = (fn) => (ev) => { if (ev.key === 'Enter' || ev.code === 'NumpadEnter') { ev.preventDefault(); fn(); } };
 </script>
 
-<svelte:window onkeydown={(ev) => { if (b.qrOpen && ev.key === 'Escape') { ev.preventDefault(); h.bunker.closeQr(); } }} />
+<svelte:window onkeydown={(ev) => {
+    if (b.qrOpen && ev.key === 'Escape') { ev.preventDefault(); h.bunker.closeQr(); }
+    else if (t.info && ev.key === 'Escape') { ev.preventDefault(); h.tor.info(false); }
+}} />
 
 {#snippet goBack()}
     {#if l.backBar}
-        <p class="lg-back">{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
+        <p class="lg-back" class:lg-held={t.busy}>{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
+    {/if}
+{/snippet}
+
+{#snippet torLine()}
+    <!-- Start reserves the line's room so the screen never shifts when it appears. -->
+    <div class="lg-tor-slot" class:reserve={l.screen === 'start'}>{@render torStatus()}</div>
+{/snippet}
+
+{#snippet torStatus()}
+    {#if t.busy}
+        <p class="lg-tor-status" role="status">
+            <span class="lg-tor-spin" aria-hidden="true"></span>
+            <span class="lg-tor-accent">{t.on ? 'Tor connecting…' : 'Tor disconnecting…'}</span>
+            <span>Do not close app.</span>
+        </p>
+    {:else if t.failed}
+        <p class="lg-tor-status error" role="alert">
+            <span>{t.failed}</span>
+            <button type="button" onclick={() => h.tor.retry()}>Retry</button>
+        </p>
     {/if}
 {/snippet}
 
@@ -97,7 +126,7 @@
     <header class="lg-head">
         <img class="lg-lockup" src="./icons/login/lockup.svg" alt="Vector">
         {#if p.shown}
-            <button type="button" id="login-account-picker" class="lg-account" class:open={p.open} bind:this={pill} onclick={() => h.picker.toggle()}>
+            <button type="button" id="login-account-picker" class="lg-account" class:open={p.open} disabled={t.busy} bind:this={pill} onclick={() => h.picker.toggle()}>
                 <Avatar src={p.avatar} size={44} />
                 <span class="lg-account-name">{p.label}</span>
                 <img class="lg-account-chevron" src="./icons/login/chevron.svg" alt="" width="10" height="6">
@@ -109,10 +138,22 @@
     <main class="lg-stage" onclick={tapToType}>
         {#if l.screen === 'start'}
             <div id="login-start" class="lg-block">
-                <div class="lg-buttons">
-                    <button type="button" class="lg-btn primary" onclick={() => h.createAccount()}>Create Account</button>
-                    <button type="button" class="lg-btn accent" onclick={() => h.openImport()}>Login</button>
+                <div class="lg-buttons" class:lg-held={t.hold}>
+                    <button type="button" class="lg-btn primary" disabled={t.hold} onclick={() => h.createAccount()}>Create Account</button>
+                    <button type="button" class="lg-btn accent" disabled={t.hold} onclick={() => h.openImport()}>Login</button>
                 </div>
+                {#if t.shown}
+                    <label class="lg-tor" class:lg-held={t.busy}>
+                        <span class="lg-tor-label">Enable Tor
+                            <span class="lg-tor-info" role="button" tabindex="0" aria-label="About Tor"
+                                  onclick={(ev) => { ev.preventDefault(); ev.stopPropagation(); h.tor.info(true); }}
+                                  onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); h.tor.info(true); } }}></span>
+                        </span>
+                        <input type="checkbox" checked={t.on} onchange={(ev) => { ev.currentTarget.checked = t.on; h.tor.toggle(); }}>
+                        <span class="neon-toggle"></span>
+                    </label>
+                    {@render torLine()}
+                {/if}
                 {#if l.privateNote}<p class="lg-private-note">{l.privateNote}</p>{/if}
                 {@render goBack()}
             </div>
@@ -130,6 +171,7 @@
                         <img src="./icons/login/swap.svg" alt="" width="18" height="20">
                     </button>
                 </div>
+                {#if t.shown}{@render torLine()}{/if}
                 {@render goBack()}
                 {#if l.nip55Shown}
                     <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
@@ -287,3 +329,24 @@
         </div>
     </div>
 {/if}
+
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="lg-tor-modal" class:active={t.info} class:closing={t.infoClosing}
+     onclick={(ev) => { if (ev.target === ev.currentTarget) h.tor.info(false); }}>
+    <div class="lg-tor-card" role="dialog" aria-modal="true" aria-labelledby="lg-tor-title" use:popIn={t.infoTick}>
+        <button type="button" class="lg-tor-close" aria-label="Close" onclick={() => h.tor.info(false)}>&#x2715;</button>
+        <img class="lg-tor-logo" src="./icons/tor-logo.svg" alt="Tor" width="119" height="72">
+        <h3 id="lg-tor-title">Tor Network &amp; Protocol</h3>
+        <p class="lg-tor-lead">For enhanced security, you can enable Tor before you create an account or login, but once you have logged in you can go to Settings &gt; Privacy &gt; Tor and customize further.</p>
+        <div class="lg-tor-path">Settings &gt; Privacy &gt; Tor</div>
+        <ul class="lg-tor-points">
+            <li>IP Obfuscation</li>
+            <li>Censorship Resistance</li>
+            <li>ISP Shielding</li>
+            <li>Decentralized Relays</li>
+        </ul>
+        <p class="lg-tor-about">Tor is a free overlay network that enables anonymous communication. It's built on free and open-source software, run by over seven thousand volunteer-operated relays worldwide alongside millions of users who route their internet traffic along random paths through those relays. This technique is known as onion routing.</p>
+        <p class="lg-tor-disclaimer">Vector Privacy does not endorse or have any affiliation with Tor. Tor is a third-party privacy protocol that is decentralized and runs standalone. Use at your own risk.</p>
+        <button type="button" class="lg-tor-learn" onclick={() => h.openLink('torAttribution')}>Learn more about Tor</button>
+    </div>
+</div>

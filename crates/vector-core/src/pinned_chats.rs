@@ -200,7 +200,7 @@ pub async fn fetch_pinned(client: &Client, my_pk: PublicKey) -> Result<PinnedCha
             .limit(1);
         let events = client
             .fetch_events(filter)
-            .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
             .await
             .map_err(|e| format!("fetch pinned chats (kind 30078): {}", e))?;
 

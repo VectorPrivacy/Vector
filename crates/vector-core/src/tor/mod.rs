@@ -633,6 +633,132 @@ pub fn obfs4proxy_missing_error() -> String {
     )
 }
 
+/// Armed by the welcome screen's Tor toggle: every account opened while it is armed runs on
+/// Tor, so the pre-login service hands over without a direct window.
+static PRELOGIN_CARRY: AtomicBool = AtomicBool::new(false);
+
+/// Arm (Tor chosen on the welcome screen) or disarm the carry.
+pub fn arm_prelogin_carry(armed: bool) {
+    PRELOGIN_CARRY.store(armed, Ordering::Release);
+}
+
+/// Is the welcome screen's Tor choice waiting for an account to commit?
+pub fn prelogin_carry_armed() -> bool {
+    PRELOGIN_CARRY.load(Ordering::Acquire)
+}
+
+/// An account's stored preference, raised to Tor while the carry is armed.
+pub fn effective_tor_pref(stored: bool) -> bool {
+    stored || prelogin_carry_armed()
+}
+
+/// The account on screen just committed (setup finished or unlocked): it keeps the welcome
+/// screen's Tor choice. Writes through the live session's database, then disarms.
+pub fn commit_prelogin_carry() {
+    if !prelogin_carry_armed() {
+        return;
+    }
+    match crate::db::settings::set_sql_setting("tor_enabled".to_string(), "1".to_string()) {
+        Ok(()) => {
+            set_tor_enabled_pref(true);
+            arm_prelogin_carry(false);
+        }
+        Err(e) => log_warn!("[Tor] could not save the inherited preference: {e}"),
+    }
+}
+
+/// Bumped whenever an in-flight pre-login start stops being wanted (toggled off, abandoned,
+/// session reset), so a bootstrap that lands afterwards shuts itself down.
+static PRELOGIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn prelogin_generation() -> u64 {
+    PRELOGIN_GEN.load(Ordering::Acquire)
+}
+
+pub fn cancel_prelogin_start() {
+    PRELOGIN_GEN.fetch_add(1, Ordering::AcqRel);
+}
+
+const PRELOGIN_MARKER: &str = "tor_prelogin";
+
+/// The welcome screen's Tor choice, install-wide: a marker file beside `active_account`.
+pub fn prelogin_preference() -> bool {
+    crate::db::get_app_data_dir().is_ok_and(|d| d.join(PRELOGIN_MARKER).is_file())
+}
+
+/// Remember (or forget) the welcome screen's Tor choice for this install.
+pub fn set_prelogin_preference(enabled: bool) -> Result<(), String> {
+    let dir = crate::db::get_app_data_dir()?;
+    let path = dir.join(PRELOGIN_MARKER);
+    if enabled {
+        // A fresh install has no data dir until its first account.
+        std::fs::create_dir_all(dir).map_err(|e| format!("create data dir: {e}"))?;
+        std::fs::write(&path, b"1").map_err(|e| format!("write Tor marker: {e}"))
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("remove Tor marker: {e}")),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Install-level `(state, cache)` dirs for the service the welcome screen runs.
+pub fn prelogin_dirs() -> Result<(PathBuf, PathBuf), String> {
+    let base = crate::db::get_app_data_dir()?.join("tor");
+    let (state, cache) = (base.join("state"), base.join("cache"));
+    std::fs::create_dir_all(&state).map_err(|e| format!("create state dir: {e}"))?;
+    std::fs::create_dir_all(&cache).map_err(|e| format!("create cache dir: {e}"))?;
+    Ok((state, cache))
+}
+
+/// Fill an empty account cache from the install-level one, so the account's first bootstrap
+/// skips the consensus download. The cache holds only public directory documents; guards live
+/// in `state`, which is never shared. Callers must have stopped the service first.
+pub fn seed_cache_from_prelogin(account_cache: &std::path::Path) {
+    let Ok(app) = crate::db::get_app_data_dir() else { return };
+    match seed_cache(&app.join("tor").join("cache"), account_cache) {
+        Ok(true) => log_info!("[Tor] seeded account cache from the pre-login cache"),
+        Ok(false) => {}
+        Err(e) => log_warn!("[Tor] cache seed skipped: {e}"),
+    }
+}
+
+/// Copy `src` into `dst` only when `dst` is empty. Copies beside it and swaps in whole, so a
+/// torn copy never becomes the cache (an empty one just bootstraps from scratch).
+fn seed_cache(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<bool> {
+    let empty = std::fs::read_dir(dst).map_or(true, |mut d| d.next().is_none());
+    if !empty || !src.is_dir() {
+        return Ok(false);
+    }
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let dest = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir(&entry.path(), &dest)?;
+            } else {
+                std::fs::copy(entry.path(), dest)?;
+            }
+        }
+        Ok(())
+    }
+    let tmp = dst.with_extension("seed");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let swapped = copy_dir(src, &tmp).and_then(|()| {
+        if dst.exists() {
+            std::fs::remove_dir(dst)?;
+        }
+        std::fs::rename(&tmp, dst)
+    });
+    if let Err(e) = swapped {
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(dst);
+        return Err(e);
+    }
+    Ok(true)
+}
+
 fn tor_enabled_pref() -> bool {
     TOR_ENABLED_PREF.load(Ordering::Acquire)
 }
@@ -648,7 +774,7 @@ pub fn init_tor_enabled_pref_from_db() {
         crate::db::settings::get_sql_setting("tor_enabled".to_string()),
         Ok(Some(ref v)) if v == "1" || v == "true"
     );
-    set_tor_enabled_pref(enabled);
+    set_tor_enabled_pref(effective_tor_pref(enabled));
 }
 
 /// Compute the transport state every TCP-bearing client (HTTP, nostr) should
@@ -831,4 +957,35 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
 #[cfg(not(feature = "tor"))]
 pub async fn current_circuit_hops(_force_new: bool) -> Result<Vec<CircuitHop>, String> {
     Err("Vector was built without the `tor` feature.".to_string())
+}
+
+#[cfg(test)]
+mod prelogin_tests {
+    use super::seed_cache;
+
+    #[test]
+    fn seed_fills_only_an_empty_cache_and_leaves_no_temp_dir() {
+        let root = std::env::temp_dir().join(format!("vector-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        std::fs::create_dir_all(src.join("dir_blobs")).unwrap();
+        std::fs::write(src.join("dir.sqlite3"), b"consensus").unwrap();
+        std::fs::write(src.join("dir_blobs").join("a"), b"blob").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        assert!(seed_cache(&src, &dst).unwrap(), "an empty cache is seeded");
+        assert_eq!(std::fs::read(dst.join("dir.sqlite3")).unwrap(), b"consensus");
+        assert_eq!(std::fs::read(dst.join("dir_blobs").join("a")).unwrap(), b"blob");
+        assert!(!dst.with_extension("seed").exists(), "the staging copy is swapped in, not left behind");
+
+        // An account's own cache is never overwritten.
+        std::fs::write(src.join("dir.sqlite3"), b"newer").unwrap();
+        assert!(!seed_cache(&src, &dst).unwrap());
+        assert_eq!(std::fs::read(dst.join("dir.sqlite3")).unwrap(), b"consensus");
+
+        // No install cache yet: nothing to copy, and the account starts from scratch.
+        let fresh = root.join("fresh");
+        assert!(!seed_cache(&root.join("missing"), &fresh).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

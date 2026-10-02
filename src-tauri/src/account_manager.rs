@@ -520,10 +520,21 @@ pub fn clear_active_account() -> Result<(), String> {
 /// the frontend stays on the same document and proceeds straight into
 /// account creation/import.
 #[tauri::command]
-pub async fn enter_add_account_mode() -> Result<(), String> {
+pub async fn enter_add_account_mode(tor: Option<bool>) -> Result<(), String> {
     refuse_if_migration_in_progress("add a new account")?;
     let _ = vector_core::db::clear_active_account_file();
     reset_session().await;
+    // The new account starts from the welcome screen's Tor choice, not the previous account's.
+    // A failed bootstrap stays recorded for the screen to show; the session is already gone.
+    #[cfg(feature = "tor")]
+    {
+        let on = tor.unwrap_or_else(vector_core::tor::prelogin_preference);
+        if let Err(e) = crate::commands::tor::apply_prelogin(on).await {
+            vector_core::log_warn!("[Tor] pre-login start for the new account failed: {e}");
+        }
+    }
+    #[cfg(not(feature = "tor"))]
+    let _ = tor;
     Ok(())
 }
 
@@ -625,7 +636,10 @@ pub async fn reset_session() {
         let _ = client.shutdown().await;
     }
 
+    #[cfg(feature = "tor")]
+    vector_core::tor::cancel_prelogin_start();
     crate::commands::tor::stop_and_join_if_running().await;
+    crate::commands::tor::set_account_booted(false);
 
     close_db_connection();
 

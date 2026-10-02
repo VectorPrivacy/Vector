@@ -1170,7 +1170,7 @@ where
     // UI (e.g. the pack creator's "Deleting…" overlay) indefinitely.
     // 15s is generous for a healthy server and short enough that a
     // misbehaving one fails over to the next blob in a batch quickly.
-    let timeout = std::time::Duration::from_secs(15);
+    let timeout = crate::net::tor_http_timeout(std::time::Duration::from_secs(15));
     match crate::rt::time::timeout(timeout, delete_blob(signer, &origin, hash)).await {
         Ok(Ok(())) => {
             crate::log_info!("[Blossom] DELETE successful: {} from {}", hash, origin);

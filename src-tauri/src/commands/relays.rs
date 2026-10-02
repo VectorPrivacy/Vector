@@ -1255,7 +1255,10 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         loop {
             let relays = client_health.relays().await;
 
-            for (url, relay) in &relays {
+            // Concurrently: a probe may wait its whole Tor budget, and in series one slow relay
+            // delays every other relay's check and revival by that much.
+            let (client_health, handle_health) = (&client_health, &handle_health);
+            futures_util::future::join_all(relays.iter().map(|(url, relay)| async move {
                 let status = relay.status();
 
                 if status == RelayStatus::Connected {
@@ -1326,7 +1329,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         "action": "force_reconnect"
                     }));
                 }
-            }
+            })).await;
 
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
@@ -1404,14 +1407,14 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                 // for nostr-sdk's disabled auto-reconnect. Not `Disconnected`: that
                 // status only occurs on relays whose own reconnect is enabled, which
                 // are already retrying on their own schedule.
-                for (_url, relay) in client.relays().await {
-                    match relay.status() {
-                        RelayStatus::Terminated | RelayStatus::Sleeping => {
-                            let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(5))).await;
-                        }
-                        _ => {}
-                    }
-                }
+                // Concurrently: over Tor each attempt may take its full 60 s budget, and one
+                // unreachable relay must not hold every other relay's revival behind it.
+                let budget = vector_core::relay_connect_timeout(std::time::Duration::from_secs(5));
+                futures_util::future::join_all(
+                    client.relays().await.into_values()
+                        .filter(|r| matches!(r.status(), RelayStatus::Terminated | RelayStatus::Sleeping))
+                        .map(|relay| async move { let _ = relay.try_connect().timeout(budget).await; }),
+                ).await;
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;

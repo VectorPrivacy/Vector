@@ -595,7 +595,7 @@ pub fn build_nostrconnect_session(
         uri_string.push_str("&perms=");
         uri_string.push_str(&perms);
     }
-    let mut nc = NostrConnect::new(uri, client_keys, timeout, None)
+    let mut nc = NostrConnect::new(uri, client_keys, timeout, Some(crate::tor_relay_options()))
         .map_err(|e| format!("Bunker init failed: {}", e))?;
     nc.auth_url_handler(VectorAuthUrlHandler);
     Ok((nc, uri_string))
@@ -614,7 +614,7 @@ pub fn build_bunker_signer(
 ) -> Result<NostrConnect, String> {
     let uri = NostrConnectUri::parse(bunker_url)
         .map_err(|e| format!("Invalid bunker URL: {}", e))?;
-    NostrConnect::new(uri, client_keys, timeout, None)
+    NostrConnect::new(uri, client_keys, timeout, Some(crate::tor_relay_options()))
         .map_err(|e| format!("Bunker init failed: {}", e))
 }
 

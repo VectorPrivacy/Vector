@@ -182,8 +182,11 @@ pub fn spawn_tracked_publish(
         let event = event.clone();
         let tracker = tracker.clone();
         handles.push(crate::db::spawn_bound(async move {
+            let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
             let result = relay
                 .send_event(&event)
+                .ok_timeout(wait)
+                .authentication_timeout(wait)
                 .await
                 .map(|o| *o.id())
                 .map_err(|e| e.to_string());
@@ -331,14 +334,14 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
     let targets = inbox_query_targets(client).await;
     let fetched = if targets.is_empty() {
         client
-            .fetch_events(filter).timeout(std::time::Duration::from_secs(5))
+            .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
             .await
     } else {
         client
             .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
                 targets.into_iter().map(|u| (u, vec![filter.clone()])),
             ))
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
             .await
     };
     let events = match fetched {
@@ -520,7 +523,7 @@ pub async fn send_event_first_ok(
     }
 
     if resolved.is_empty() {
-        return client.send_event(event).await;
+        return crate::transport_aware(client.send_event(event)).await;
     }
 
     // Spawn tracked per-relay tasks. This registers a tracker so any
@@ -824,8 +827,7 @@ pub async fn publish_gift_wrap_to_targets(
     if targets.resolved.is_empty() {
         // No matching relays in the pool — last-ditch broadcast via
         // client.send_event(). No tracker (no per-relay machinery).
-        return client
-            .send_event(event)
+        return crate::transport_aware(client.send_event(event))
             .await
             .map_err(|e| e.to_string());
     }
@@ -1012,7 +1014,7 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     let discovery: HashSet<String> = crate::state::discovery_relay_iter()
         .map(normalize_relay_url)
         .collect();
-    let deadline = Instant::now() + std::time::Duration::from_secs(8);
+    let deadline = Instant::now() + crate::relay_connect_timeout(std::time::Duration::from_secs(8));
     loop {
         let relays = client.relays().all().await;
         let connected: Vec<&RelayUrl> = targets
@@ -1040,13 +1042,26 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     }
 
     let filter = Filter::new().author(me).kind(Kind::Custom(10050)).limit(1);
+    let budget = crate::relay_request_timeout(std::time::Duration::from_secs(6));
+    // Ask only live sockets, so a timeout below means a connected relay went quiet, not that
+    // one target was down.
+    let pool = client.relays().all().await;
+    let live: Vec<RelayUrl> = targets
+        .iter()
+        .filter(|url| pool.get(*url).is_some_and(|r| r.status() == RelayStatus::Connected))
+        .cloned()
+        .collect();
+    drop(pool);
+    let asked = Instant::now();
     let events = client
         .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
-            targets.iter().cloned().map(|u| (u, vec![filter.clone()])),
+            live.iter().cloned().map(|u| (u, vec![filter.clone()])),
         ))
-        .timeout(std::time::Duration::from_secs(6))
+        .timeout(budget)
         .await
         .map_err(|e| e.to_string())?;
+    // A fetch that ran its whole budget returns whatever arrived: some target never answered.
+    let timed_out = asked.elapsed() >= budget;
     // NIP-01 replaceable tie-break: newest created_at, lowest id on a tie.
     let newest = events
         .into_iter()
@@ -1059,6 +1074,9 @@ pub async fn fetch_own_inbox_list(client: &Client) -> Result<Option<(Vec<String>
     // bootstrap gets the newer created_at, so later syncs adopt it and
     // relays delete the old list). Pools with no Discovery Relay at all
     // (SDK/CLI) keep the any-target answer.
+    if newest.is_none() && timed_out {
+        return Err("no 10050 found before a relay answered; refusing to bootstrap".to_string());
+    }
     if newest.is_none() {
         let has_discovery_target = targets
             .iter()
@@ -1286,7 +1304,7 @@ pub async fn publish_inbox_relays_synced(
     if !session.is_live() {
         return Ok(());
     }
-    let pool_send = client.send_event(&event).await;
+    let pool_send = crate::transport_aware(client.send_event(&event)).await;
 
     // Copy to the pooled Discovery Relays (GOSSIP-flagged, so the pool-wide
     // send skipped them). Runs regardless of the pool send: a user with zero
@@ -1306,7 +1324,7 @@ pub async fn publish_inbox_relays_synced(
         .collect();
     let mut discovery_ok = false;
     if !discovery_targets.is_empty() {
-        if let Ok(out) = client.send_event(&event).to(discovery_targets).await {
+        if let Ok(out) = crate::transport_aware(client.send_event(&event)).to(discovery_targets).await {
             discovery_ok = !out.success.is_empty();
         }
     }

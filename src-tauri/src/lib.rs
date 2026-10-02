@@ -518,7 +518,16 @@ pub fn run() {
             // the frontend shows the multi-account picker.
             {
                 let handle_clone = handle.clone();
-                let _ = account_manager::boot_select_account(&handle_clone);
+                let chosen = account_manager::boot_select_account(&handle_clone);
+                // Booting to the welcome screen with Tor remembered: refuse clearnet before the
+                // webview can open anything; the screen then starts the service.
+                #[cfg(feature = "tor")]
+                if matches!(chosen, Ok(None)) && vector_core::tor::prelogin_preference() {
+                    vector_core::tor::arm_prelogin_carry(true);
+                    vector_core::tor::set_tor_enabled_pref(true);
+                }
+                #[cfg(not(feature = "tor"))]
+                let _ = chosen;
             }
 
 
@@ -862,6 +871,8 @@ pub fn run() {
             // Tor (Arti) commands
             commands::tor::tor_get_state,
             commands::tor::tor_set_enabled,
+            commands::tor::tor_set_prelogin,
+            commands::tor::tor_prelogin_abandon,
             commands::tor::tor_get_circuits,
             commands::tor::tor_get_bridges,
             commands::tor::tor_set_bridges,

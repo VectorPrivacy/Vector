@@ -819,7 +819,7 @@ pub async fn commit_prepared_event(
                                 && (att.url.starts_with("https://") || att.url.starts_with("http://"))
                             {
                                 if let Ok(Some(size)) = crate::rt::time::timeout(
-                                    std::time::Duration::from_secs(3),
+                                    crate::net::tor_http_timeout(std::time::Duration::from_secs(3)),
                                     crate::net::get_remote_file_size(&att.url),
                                 ).await {
                                     att.size = size;

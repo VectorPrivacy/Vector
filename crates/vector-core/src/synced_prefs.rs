@@ -340,7 +340,7 @@ pub async fn fetch_raw(client: &Client, my_pk: PublicKey, pref: Pref) -> Option<
         .limit(1);
     let events = client
         .fetch_events(filter)
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
         .await
         .ok()?;
     let event = events.into_iter().next()?;

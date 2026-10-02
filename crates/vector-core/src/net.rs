@@ -167,6 +167,16 @@ fn forget_pooled_clients() {
 
 /// The browser's fetch owns pooling, TLS, redirects and timeouts; a page cannot
 /// pick its user agent or route through a proxy.
+/// Floor for an HTTP budget (a request total, a read, a stall watchdog) while Tor is the
+/// chosen transport: a circuit to a fresh host alone can take 45 s. Clearnet passes through.
+pub fn tor_http_timeout(clearnet: std::time::Duration) -> std::time::Duration {
+    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
+    if !matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled) {
+        return clearnet.max(std::time::Duration::from_secs(90));
+    }
+    clearnet
+}
+
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::disallowed_methods)]
 fn build_http_client_uncached(
@@ -234,8 +244,15 @@ fn build_http_client_uncached(
                 let proxy = reqwest::Proxy::all(&url)
                     .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
                 builder = builder.proxy(proxy);
-                // Circuit builds to a fresh host legitimately take tens of seconds.
+                // Circuit builds to a fresh host legitimately take tens of seconds, and a
+                // caller's total shorter than that would cut every fresh host off mid-connect.
                 builder = builder.connect_timeout(std::time::Duration::from_secs(45));
+                if let Some(t) = timeout {
+                    builder = builder.timeout(tor_http_timeout(t));
+                }
+                if let Some(rt) = read_timeout {
+                    builder = builder.read_timeout(tor_http_timeout(rt));
+                }
             }
             crate::tor::TorTransportState::RequiredButInactive => {
                 // Tor failsafe: route to a blackhole so connections fail safe

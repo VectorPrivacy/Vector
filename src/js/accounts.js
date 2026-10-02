@@ -368,6 +368,7 @@ const addAccountFlow = {
         if (this.active) return;
         this.active = true;
         this.committed = false;
+        loginTor._addChoice = null;
 
         // Cache who we'll need to restore to if the user backs out AFTER
         // committing. We grab it now while CURRENT_ACCOUNT is still set
@@ -408,9 +409,15 @@ const addAccountFlow = {
      * be installed without colliding with the lock-and-check guards.
      */
     async commit() {
-        if (this.committed) return;
-        await invoke('enter_add_account_mode');
-        this.committed = true;
+        if (!this.committed) {
+            // Committed before the await: the session is torn down at once, so Back must
+            // take the reload path even while Tor is still connecting. A refusal comes
+            // before the teardown, so it leaves the flow uncommitted.
+            this.committed = true;
+            try { await loginTor.commitAddAccount(); }
+            catch (e) { this.committed = false; throw e; }
+        }
+        loginTor.ready();
     },
 
     /** Soft restore — only valid before commit. */

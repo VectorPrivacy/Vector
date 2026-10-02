@@ -288,11 +288,12 @@ pub async fn prime_auth(client: &Client, relays: &[String]) {
         .authors(authors)
         .limit(1);
     // Bounded so a dead relay can't stall the subscription refresh behind it.
-    let _ = crate::rt::time::timeout(std::time::Duration::from_secs(8), client
+    let budget = crate::relay_request_timeout(std::time::Duration::from_secs(6));
+    let _ = crate::rt::time::timeout(budget + std::time::Duration::from_secs(2), client
         .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
             urls.into_iter().map(|u| (u, vec![filter.clone()])),
         ))
-        .timeout(std::time::Duration::from_secs(6))).await;
+        .timeout(budget)).await;
 }
 
 #[cfg(test)]

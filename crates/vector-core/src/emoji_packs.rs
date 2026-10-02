@@ -1084,7 +1084,7 @@ async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<Re
         .kind(Kind::RelayList)
         .limit(1);
     let events = match client
-        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS)))
         .await
     {
         Ok(evs) => evs,
@@ -1120,7 +1120,7 @@ async fn prefetch_author_write_relays(client: &Client, authors: &[PublicKey]) {
         .authors(uncached.iter().copied())
         .kind(Kind::RelayList);
     let events = match client
-        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS)))
         .await
     {
         Ok(evs) => evs,
@@ -1157,7 +1157,7 @@ async fn fetch_pack_from_relays(client: &Client, addr: &PackAddress) -> Option<E
         .kind(Kind::Custom(KIND_EMOJI_SET))
         .identifier(&addr.identifier)
         .limit(1);
-    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+    let timeout = crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS));
     let me = crate::state::my_public_key().map(|pk| pk.to_hex());
 
     // 1) Home relays first (the shared pool). Covers our own packs and any
@@ -1399,7 +1399,7 @@ async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Pack
     if addrs.is_empty() {
         return PackSweep { packs: Vec::new(), outcomes: HashMap::new() };
     }
-    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+    let timeout = crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS));
     let me = crate::state::my_public_key().map(|pk| pk.to_hex());
     let wanted: std::collections::HashSet<String> = addrs.iter().map(addr_coord).collect();
     let all_refs: Vec<&PackAddress> = addrs.iter().collect();
@@ -1533,7 +1533,7 @@ async fn sweep_via_isolated_client(
     // least one handshake to complete (bounded) before sampling connectivity —
     // an instant sample reads empty on every run, which would make before ∩
     // after a tautological zero and outbox absences permanently unjudgeable.
-    let connect_deadline = web_time::Instant::now() + std::time::Duration::from_secs(8);
+    let connect_deadline = web_time::Instant::now() + crate::relay_connect_timeout(std::time::Duration::from_secs(8));
     let before = loop {
         let connected = connected_read_relays(&scratch, false).await;
         if !connected.is_empty() || web_time::Instant::now() >= connect_deadline {
@@ -1581,7 +1581,7 @@ pub async fn fetch_subscribed_packs(
             .limit(1);
 
         let list_events = client
-            .fetch_events(list_filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .fetch_events(list_filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
             .await
             .map_err(|e| format!("fetch kind 10030: {}", e))?;
 

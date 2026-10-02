@@ -249,7 +249,9 @@ pub async fn refresh_subscription(client: &Client) {
     // one connected relay is enough to stream.
     {
         let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
-        for _ in 0..24 {
+        // 6 s on clearnet, the connect floor over Tor (a circuit build alone outlasts 6 s).
+        let polls = crate::relay_connect_timeout(std::time::Duration::from_secs(6)).as_millis() / 250;
+        for _ in 0..polls {
             let pool = client.relays().all().await;
             let any_live = wanted.iter().any(|u| {
                 pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)

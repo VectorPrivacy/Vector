@@ -27,17 +27,19 @@ pub async fn set_pkey<R: tauri::Runtime>(handle: tauri::AppHandle<R>, pkey: Stri
         // window where cache reflects the new (empty/false) pref while the
         // slot still holds the old service: transport_state() returns
         // Disabled, but the old proxy is still up. Anything that builds an
-        // HTTP client during that window goes Direct.
-        crate::commands::tor::stop_and_join_if_running().await;
+        // HTTP client during that window goes Direct. The welcome screen's service
+        // is the exception: it carries on into the new account's first session.
+        if !crate::commands::tor::running_prelogin() {
+            crate::commands::tor::stop_and_join_if_running().await;
+        }
 
         // Initialize database for the pending account
         crate::account_manager::init_profile_database(&handle, &npub).await?;
         crate::account_manager::set_current_account(npub.clone())?;
         crate::account_manager::clear_pending_account()?;
 
-        // Start a fresh TorService for the new account if its pref says so.
-        // The slot is already empty from the stop above, so this is just the
-        // "start if wanted" half of sync_to_active_account.
+        // Start a fresh TorService for the new account if its pref says so
+        // (or keep the welcome screen's).
         if let Err(e) = crate::commands::tor::sync_to_active_account().await {
             eprintln!("[Account] Tor start for new account failed: {}", e);
         }

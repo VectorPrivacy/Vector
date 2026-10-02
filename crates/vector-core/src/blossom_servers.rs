@@ -277,7 +277,7 @@ pub async fn fetch_and_merge_own_list(
         .kind(Kind::Custom(10063))
         .limit(1);
     let events = client
-        .fetch_events(filter).timeout(std::time::Duration::from_secs(8))
+        .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(8)))
         .await
         .map_err(|e| format!("Failed to fetch kind 10063: {}", e))?;
 
@@ -377,7 +377,7 @@ pub async fn fetch_user_server_list(client: &Client, author: PublicKey) -> Vec<S
         .limit(1);
     let events = match client
         .fetch_events(filter)
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(8)))
         .await
     {
         Ok(e) => e,

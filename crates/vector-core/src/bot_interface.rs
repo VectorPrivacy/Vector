@@ -642,8 +642,7 @@ pub async fn publish_manifest(manifest: &BotManifest, keys: &Keys, relays: &[Str
         let _ = client.add_managed_relay(r.as_str()).await;
     }
     client.connect().await;
-    let out = client
-        .send_event(&event)
+    let out = crate::transport_aware(client.send_event(&event))
         .to(relays.to_vec())
         .await
         .map_err(|e| e.to_string())?;
@@ -659,13 +658,13 @@ pub async fn fetch_manifest(bot: &nostr_sdk::prelude::PublicKey, relays: &[Strin
         .author(*bot)
         .limit(1);
     let events = if relays.is_empty() {
-        client.fetch_events(filter).timeout(std::time::Duration::from_secs(8)).await.ok()?
+        client.fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(8))).await.ok()?
     } else {
         client
             .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
                 relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
             ))
-            .timeout(std::time::Duration::from_secs(8))
+            .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(8)))
             .await
             .ok()?
     };

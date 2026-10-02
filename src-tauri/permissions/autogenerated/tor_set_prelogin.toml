@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tor-set-prelogin"
+description = "Enables the tor_set_prelogin command without any pre-configured scope."
+commands.allow = ["tor_set_prelogin"]
+
+[[permission]]
+identifier = "deny-tor-set-prelogin"
+description = "Denies the tor_set_prelogin command without any pre-configured scope."
+commands.deny = ["tor_set_prelogin"]

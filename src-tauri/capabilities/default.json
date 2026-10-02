@@ -416,6 +416,8 @@
     "allow-get-logs",
     "allow-tor-get-state",
     "allow-tor-set-enabled",
+    "allow-tor-set-prelogin",
+    "allow-tor-prelogin-abandon",
     "allow-tor-get-circuits",
     "allow-tor-get-bridges",
     "allow-tor-set-bridges",

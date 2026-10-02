@@ -45,7 +45,13 @@ const enc = $state({
     pinTick: 0, pinFocus: true, focusTick: 0,
 });
 
+// The welcome screen's Tor switch. `busy` while it is switching; `hold` keeps the sign-in
+// buttons out of reach while Tor is chosen but not connected; `info` is the explainer.
+const tor = $state({ shown: false, on: false, busy: false, hold: false, failed: '', info: false, infoClosing: false, infoTick: 0 });
+
 export function loginState() { return l; }
+export function loginTorState() { return tor; }
+export function patchLoginTor(patch) { Object.assign(tor, patch); }
 export function bunkerState() { return b; }
 export function pickerState() { return picker; }
 export function encryptState() { return enc; }

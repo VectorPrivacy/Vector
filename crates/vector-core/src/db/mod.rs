@@ -1388,6 +1388,9 @@ pub fn init_database(npub: &str) -> Result<(), String> {
             })
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
+        // Tor chosen on the welcome screen rides every account opened before one commits; the
+        // commit stamps it (`tor::commit_prelogin_carry`), so an abandoned staging keeps nothing.
+        let enabled = crate::tor::effective_tor_pref(enabled);
         crate::tor::set_tor_enabled_pref(enabled);
     }
 

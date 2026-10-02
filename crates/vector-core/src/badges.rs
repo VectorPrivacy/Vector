@@ -57,7 +57,7 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
         .limit(10);
     let mut events = client
         .stream_events(filter)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
     // 0.45 streams (relay, Result<Event>) so callers can attribute per-relay failures.
@@ -339,7 +339,7 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
     let mut awards: Vec<(EventId, u8)> = Vec::new();
     let mut stream = client
         .stream_events(award_filter)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
     while let Some((_relay, res)) = stream.next().await {
@@ -367,7 +367,7 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
     let mut revoked: HashSet<EventId> = HashSet::new();
     let mut rstream = client
         .stream_events(revoke_filter)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| e.to_string())?;
     while let Some((_relay, res)) = rstream.next().await {

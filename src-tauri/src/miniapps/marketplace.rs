@@ -261,7 +261,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
 
     // Fetch events from relays
     let events = client
-        .fetch_events(filter).timeout(std::time::Duration::from_secs(10))
+        .fetch_events(filter).timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(10)))
         .await
         .map_err(|e| format!("Failed to fetch marketplace events: {}", e))?;
 

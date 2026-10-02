@@ -927,8 +927,112 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 // Login screen actions (the component's controls land here through LOGIN_HELPERS)
 // ============================================================================
 
+/**
+ * The welcome screen's Tor switch. Before sign-in it drives the install-wide choice the next
+ * account inherits; while browsing Add Profile it only records the choice, which the commit
+ * applies once the live account's session is gone.
+ */
+const loginTor = {
+    // Add Profile's choice for the whole flow: the live account keeps its transport until the
+    // commit, and the install's remembered choice is never rewritten by it.
+    _addChoice: null,
+    // Only the latest flip may paint: an older call settling late would show a stale result.
+    _seq: 0,
+
+    /** Start appeared: show the switch where Tor is built in, and line the transport up with it. */
+    async refresh() {
+        let s;
+        try { s = await invoke('tor_get_state'); } catch (_) { return; }
+        if (!s.supported) {
+            VectorSvelte.patchLoginTor({ shown: false, hold: false });
+            return;
+        }
+        if (addAccountFlow.active) {
+            if (this._addChoice === null) this._addChoice = !!s.enabled;
+            if (!addAccountFlow.committed) {
+                VectorSvelte.patchLoginTor({ shown: true, on: this._addChoice, busy: false, hold: false, failed: '' });
+                return;
+            }
+            VectorSvelte.patchLoginTor({ shown: true });
+            await this.apply(this._addChoice, this._addChoice === !!s.running);
+            return;
+        }
+        VectorSvelte.patchLoginTor({ shown: true, on: !!s.prelogin });
+        await this.apply(!!s.prelogin, s.prelogin === !!s.running);
+    },
+
+    /** Off is always allowed, even mid-connect: a censored network must not trap the user. */
+    async toggle() {
+        const t = VectorSvelte.loginTorState();
+        if (addAccountFlow.active && !addAccountFlow.committed) {
+            this._addChoice = !t.on;
+            VectorSvelte.patchLoginTor({ on: this._addChoice });
+            return;
+        }
+        if (t.busy && !t.on) return;
+        await this.apply(!t.on);
+    },
+
+    /** `quiet`: nothing visible changes (already there), so skip the transition. */
+    async apply(on, quiet = false) {
+        const seq = ++this._seq;
+        if (addAccountFlow.active) this._addChoice = on;
+        VectorSvelte.patchLoginTor({ on, failed: '', ...(quiet ? {} : { busy: true, hold: true }) });
+        let err = '';
+        try {
+            await invoke('tor_set_prelogin', { enabled: on, remember: !addAccountFlow.active });
+        } catch (e) {
+            err = String(e);
+        }
+        if (seq === this._seq) await this._settle(err);
+    },
+
+    /** Add Profile's commit: the new account starts from this switch, not the previous account's. */
+    async commitAddAccount() {
+        if (!VectorSvelte.loginTorState().shown) await this.refresh();
+        const t = VectorSvelte.loginTorState();
+        const tor = t.shown ? t.on : null;
+        const seq = ++this._seq;
+        if (tor) VectorSvelte.patchLoginTor({ busy: true, hold: true, failed: '' });
+        try {
+            await invoke('enter_add_account_mode', { tor });
+        } finally {
+            if (tor && seq === this._seq) await this._settle('');
+        }
+    },
+
+    /** Sign-in waits for Tor when it is chosen: the transport refuses everything until then. */
+    ready() {
+        const t = VectorSvelte.loginTorState();
+        if (t.shown && t.on && t.hold) throw "Tor isn't connected yet. Try again, or turn Tor off.";
+    },
+
+    info(open) {
+        const t = VectorSvelte.loginTorState();
+        clearTimeout(this._closeTimer);
+        if (open) {
+            VectorSvelte.patchLoginTor({ info: true, infoClosing: false, infoTick: t.infoTick + 1 });
+            return;
+        }
+        if (!t.info || t.infoClosing) return;
+        VectorSvelte.patchLoginTor({ infoClosing: true });
+        this._closeTimer = setTimeout(() => VectorSvelte.patchLoginTor({ info: false, infoClosing: false }), 160);
+    },
+
+    /** Show what the backend holds: the install's choice, or Add Profile's own. */
+    async _settle(err) {
+        const s = await invoke('tor_get_state').catch(() => null);
+        const on = addAccountFlow.active || !s ? VectorSvelte.loginTorState().on : !!s.prelogin;
+        const up = !!s?.running;
+        const status = String(s?.status || '');
+        const reason = err || (status.startsWith('failed: ') ? status.slice(8) : '') || "Tor couldn't connect.";
+        VectorSvelte.patchLoginTor({ on, busy: false, hold: on && !up, failed: on && !up ? reason : '' });
+    },
+};
+
 async function createAccount() {
     try {
+        if (!addAccountFlow.active) loginTor.ready();
         // Add Profile commit point: tear down the existing session
         // before generating a new keypair, otherwise create_account's
         // lock-and-check guard would silently reuse the old client.
@@ -950,6 +1054,7 @@ async function createAccount() {
 }
 
 function openImportScreen() {
+    try { loginTor.ready(); } catch (e) { popupConfirm(e, '', true, '', 'vector_warning.svg'); return; }
     VectorSvelte.loginScreen('import', true);
     // Hide the picker pill — once the user is entering an nsec / seed
     // phrase, the active-account-from-marker context no longer applies.
@@ -1105,6 +1210,8 @@ async function loginBack() {
             return;
         }
         const target = addAccountFlow.backTarget();
+        // The account being returned to keeps its own Tor choice.
+        await invoke('tor_prelogin_abandon').catch(() => {});
         try {
             if (target) {
                 await invoke('set_active_account', { npub: target });
@@ -1172,6 +1279,7 @@ async function loginBack() {
  * @property {{ toggle: () => void, close: () => void, pick: (meta: object) => void, rowHelpers: () => object }} picker
  * @property {{ open: () => void, copy: () => void, openQr: () => void, closeQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
  * @property {{ choose: (type: string) => void, pinFull: (pin: string) => void, pinBackspace: () => void, submitPassword: () => void, biometric: () => void }} encrypt
+ * @property {{ refresh: () => void, toggle: () => void, retry: () => void, info: (open: boolean) => void }} tor
  */
 const LOGIN_HELPERS = {
     back: () => loginBack(),
@@ -1203,6 +1311,12 @@ const LOGIN_HELPERS = {
         pinBackspace: () => encryptFlow?.pinBackspace(),
         submitPassword: () => encryptFlow?.submitPassword(),
         biometric: () => encryptFlow?.biometric(),
+    },
+    tor: {
+        refresh: () => loginTor.refresh(),
+        toggle: () => loginTor.toggle(),
+        retry: () => loginTor.apply(true),
+        info: (open) => loginTor.info(open),
     },
 };
 VectorSvelte.setScreen('login', { h: LOGIN_HELPERS });
