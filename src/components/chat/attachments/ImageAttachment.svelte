@@ -13,6 +13,7 @@
     const spoiler = h.isSpoiler(att);
     // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
     // author: an own message's author is not a participant of its DM.
+    // svelte-ignore state_referenced_locally
     const chatId = h.openChat();
     // An SVG shows as the backend's render of it, never as its own markup; one that refuses to
     // render shows as a file.

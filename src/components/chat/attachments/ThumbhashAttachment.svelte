@@ -14,6 +14,7 @@
 
     // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
     // author: an own message's author is not a participant of its DM.
+    // svelte-ignore state_referenced_locally
     const chatId = h.openChat();
     const downloading = $derived.by(() => { messageVersion(msg.id); return !!att.downloading || auto || started; });
     let started = $state(false);

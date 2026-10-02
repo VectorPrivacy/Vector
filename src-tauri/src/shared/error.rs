@@ -6,7 +6,7 @@
 /// Extension trait for adding context to Result types.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use crate::shared::ResultExt;
 ///
 /// fn example() -> Result<(), String> {

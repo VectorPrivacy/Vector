@@ -11,7 +11,7 @@ use crate::state::{ChatState, STATE};
 /// The lock is held for the duration of the closure execution.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// let profile = with_state(|state| {
 ///     state.get_profile(&npub).cloned()
 /// }).await;
@@ -30,7 +30,7 @@ where
 /// The lock is held for the duration of the closure execution.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// with_state_mut(|state| {
 ///     state.add_message_to_chat(&chat_id, message);
 /// }).await;
@@ -48,7 +48,7 @@ where
 /// If the lock is already held, returns None immediately without blocking.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// if let Some(result) = try_with_state(|state| {
 ///     state.count_unread_messages()
 /// }) {

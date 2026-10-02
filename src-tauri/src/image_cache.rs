@@ -4,7 +4,7 @@
 //! support and graceful fallback when images fail to load.
 //!
 //! ## Storage Structure
-//! ```
+//! ```text
 //! AppData/cache/
 //!   avatars/{hash}.{ext}
 //!   banners/{hash}.{ext}
