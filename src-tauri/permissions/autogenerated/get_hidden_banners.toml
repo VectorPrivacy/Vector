@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-hidden-banners"
+description = "Enables the get_hidden_banners command without any pre-configured scope."
+commands.allow = ["get_hidden_banners"]
+
+[[permission]]
+identifier = "deny-get-hidden-banners"
+description = "Denies the get_hidden_banners command without any pre-configured scope."
+commands.deny = ["get_hidden_banners"]

@@ -227,6 +227,40 @@ async function refreshCommunityRaidAlert(communityId) {
     }
 }
 
+const _bannerResolving = new Set();
+
+/**
+ * A community's banner, resolved once when its pane first shows and again (`force`)
+ * whenever its metadata refreshes. A download that fails leaves it bannerless until then.
+ */
+async function resolveCommunityBanner(communityId, force = false) {
+    if (!communityId || _bannerResolving.has(communityId)) return;
+    if (!force && communityId in VectorSvelte.bannerState().src) return;
+    _bannerResolving.add(communityId);
+    try {
+        const path = await invoke('cache_community_image', { communityId, isBanner: true });
+        VectorSvelte.setCommunityBanner(communityId, path ? convertFileSrc(path) : null);
+    } catch (e) {
+        console.warn('[Banner] could not load the banner:', e);
+        VectorSvelte.setCommunityBanner(communityId, null);
+    } finally {
+        _bannerResolving.delete(communityId);
+    }
+}
+
+/** The account's hidden banners, from the local mirror; edits elsewhere stream in after. */
+async function loadHiddenBanners() {
+    VectorSvelte.setHiddenBanners(await invoke('get_hidden_banners').catch(() => []));
+}
+
+async function setCommunityBannerHidden(communityId, hidden) {
+    try {
+        VectorSvelte.setHiddenBanners(await invoke('set_banner_hidden', { communityId, hidden }));
+    } catch (e) {
+        showToast(String(e));
+    }
+}
+
 /**
  * The community's own menu, hung off its header — Discord's server dropdown.
  * Reuses the context-menu component, so it inherits its viewport clamping,
@@ -281,6 +315,14 @@ async function openCommunityMenu(chat, ev, at) {
     if (cf.community_id) {
         items.push({ divider: true });
         items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
+        const banners = VectorSvelte.bannerState();
+        if (banners.src[cf.community_id] && banners.hidden.includes(cf.community_id)) {
+            items.push({
+                label: 'Show Banner',
+                icon: 'eye',
+                onClick: () => setCommunityBannerHidden(cf.community_id, false),
+            });
+        }
     }
     // Batch containment (raid triage, invite revocation, key rotation). Needs BAN
     // rather than KICK, and only v2 can rotate.

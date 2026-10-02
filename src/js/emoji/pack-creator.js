@@ -656,286 +656,36 @@ function _pcIsCroppableImage(file) {
         || t === 'image/webp';
 }
 
-// Pure display-pixel floor so the crop box's "middle" stays grabbable
-// (move-drag) even when the box is small. The 14px corner dots already
-// eat 7px from each edge — below ~36px the dots crowd the middle out.
-// This floor is display-only; source-pixel output has no minimum.
-const PC_CROP_MIN_DISP = 36;
-
-/** In-panel square cropper. Resolves to a freshly-encoded File (same
- *  mime as input) on confirm, or null on cancel. Caller is expected to
- *  have already vetted the file is `_pcIsCroppableImage`. */
-function _pcShowCropper(file) {
-    return new Promise((resolve) => {
-        const { stage, img, box, preview, cancel, ok } = _cropperEls;
-        if (!stage || !img || !box || !preview || !cancel || !ok) { resolve(null); return; }
-
-        const blobUrl = URL.createObjectURL(file);
-        let srcW = 0, srcH = 0;
-        // Display rect of the image inside the stage (stage-local coords).
-        let imgRect = { left: 0, top: 0, width: 0, height: 0 };
-        // Crop box in stage-local display pixels.
-        let crop = { x: 0, y: 0, size: 0 };
-        // Minimum crop edge in *display* pixels. Updates with imgRect.
-        let minDisp = 0;
-
-        const cleanupListeners = () => {
-            stage.removeEventListener('pointerdown', onStageDown);
-            stage.removeEventListener('pointermove', onPointerMove);
-            stage.removeEventListener('pointerup',   onPointerUp);
-            stage.removeEventListener('pointercancel', onPointerUp);
-            box.removeEventListener('pointerdown', onBoxDown);
-            for (const h of box.querySelectorAll('.epcc-handle')) {
-                h.removeEventListener('pointerdown', onHandleDown);
-            }
-            cancel.removeEventListener('click', onCancel);
-            ok.removeEventListener('click',     onOk);
-            document.removeEventListener('keydown', onKey, true);
-        };
-        const finish = (result) => {
-            cleanupListeners();
-            URL.revokeObjectURL(blobUrl);
-            VectorSvelte.setPickerCropperOpen(false);
-            img.removeAttribute('src');
-            // Drop the preview's background-image so CSS doesn't pin
-            // the (revoked) blob URL alive in the layout tree.
-            preview.style.backgroundImage = '';
-            ok.disabled = false;
-            resolve(result);
-        };
-        const onCancel = () => finish(null);
-        const onOk = async () => {
-            // Convert display-space crop to source-pixel crop.
-            const scale = srcW / imgRect.width;
-            const srcX = Math.max(0, Math.round((crop.x - imgRect.left) * scale));
-            const srcY = Math.max(0, Math.round((crop.y - imgRect.top)  * scale));
-            const srcSize = Math.max(1, Math.min(
-                srcW - srcX,
-                srcH - srcY,
-                Math.round(crop.size * scale),
-            ));
-            ok.disabled = true;
-            try {
-                // Uint8Array, not a bare ArrayBuffer — Android's WebView only
-                // delivers the former as a raw IPC body.
-                const buf = new Uint8Array(await file.arrayBuffer());
-                const out = await invoke('emoji_crop_and_reencode', {
-                    sourceB64: _bytesToB64(buf),
-                    mime: file.type || '',
-                    x: srcX,
-                    y: srcY,
-                    w: srcSize,
-                    h: srcSize,
-                });
-                const cropped = new File(
-                    [_b64ToBytes(out)],
-                    file.name,
-                    { type: file.type },
-                );
-                finish(cropped);
-            } catch (err) {
-                console.warn('[cropper] backend rejected crop:', err);
-                ok.disabled = false;
-                _pcShowError('Oops! Couldn’t Crop That!',
-                    typeof err === 'string' ? err : 'Please try a different image.');
-                finish(null);
-            }
-        };
-
-        // --- pointer interaction --------------------------------------
-        let mode = null;          // 'move' | 'resize'
-        let start = null;         // anchor state at pointerdown
-        let activePointerId = null;
-        // Stage origin in viewport coords, captured once at layout time
-        // so pointer math doesn't pay a getBoundingClientRect() per
-        // pointermove (forces a sync layout read).
-        let stageOriginX = 0, stageOriginY = 0;
-        let previewSize = 48;
-
-        const applyBox = () => {
-            box.style.left   = `${crop.x}px`;
-            box.style.top    = `${crop.y}px`;
-            box.style.width  = `${crop.size}px`;
-            box.style.height = `${crop.size}px`;
-            // Live preview: scale the full source image so the cropped
-            // region fills the preview chip exactly, then offset so the
-            // crop's top-left lands at (0,0) of the chip. backgroundImage
-            // is set once in onload — only size/position varies here.
-            if (crop.size > 0 && imgRect.width > 0) {
-                const k = previewSize / crop.size;
-                preview.style.backgroundSize     = `${imgRect.width  * k}px ${imgRect.height * k}px`;
-                preview.style.backgroundPosition = `${(imgRect.left - crop.x) * k}px ${(imgRect.top - crop.y) * k}px`;
-            }
-        };
-        const clampToImg = () => {
-            // Size first, then position.
-            const maxEdge = Math.min(imgRect.width, imgRect.height);
-            crop.size = Math.max(minDisp, Math.min(maxEdge, crop.size));
-            crop.x = Math.max(imgRect.left, Math.min(imgRect.left + imgRect.width  - crop.size, crop.x));
-            crop.y = Math.max(imgRect.top,  Math.min(imgRect.top  + imgRect.height - crop.size, crop.y));
-        };
-
-        const onBoxDown = (e) => {
-            if (mode || imgRect.width === 0) return;
-            // Stop propagation so the stage's own pointerdown doesn't
-            // also fire and reset mode mid-gesture. Capture lives on
-            // stage so subsequent moves still route correctly.
-            e.stopPropagation();
-            activePointerId = e.pointerId;
-            try { stage.setPointerCapture(e.pointerId); } catch {}
-            mode = 'move';
-            const px = e.clientX - stageOriginX;
-            const py = e.clientY - stageOriginY;
-            start = { px, py, cx: crop.x, cy: crop.y };
-            e.preventDefault();
-        };
-        const onStageDown = (e) => {
-            if (mode || imgRect.width === 0) return;
-            // Marquee: pointerdown on the stage background or the
-            // image itself (NOT box/handle/preview) starts a fresh
-            // resize anchored at the pointer location. Only fire when
-            // the press lands inside the image rect — drawing from the
-            // letterbox empty space is confusing.
-            if (e.target !== stage && e.target !== img) return;
-            const px = e.clientX - stageOriginX;
-            const py = e.clientY - stageOriginY;
-            if (px < imgRect.left || px > imgRect.left + imgRect.width)  return;
-            if (py < imgRect.top  || py > imgRect.top  + imgRect.height) return;
-            activePointerId = e.pointerId;
-            try { stage.setPointerCapture(e.pointerId); } catch {}
-            mode = 'resize';
-            start = { anchorX: px, anchorY: py };
-            e.preventDefault();
-        };
-        const onPointerMove = (e) => {
-            if (!mode || e.pointerId !== activePointerId) return;
-            const px = e.clientX - stageOriginX;
-            const py = e.clientY - stageOriginY;
-            if (mode === 'move') {
-                crop.x = start.cx + (px - start.px);
-                crop.y = start.cy + (py - start.py);
-            } else if (mode === 'resize') {
-                // Anchor stays fixed; the dragged corner tracks the
-                // pointer with a 1:1 aspect lock. Size = max(|dx|, |dy|).
-                // Used by both corner-handle resizes (anchor = opposite
-                // corner) and marquee draws (anchor = pointerdown point).
-                const ax = start.anchorX;
-                const ay = start.anchorY;
-                const dx = Math.abs(px - ax);
-                const dy = Math.abs(py - ay);
-                let size = Math.max(dx, dy);
-                // Clamp size to the image extent in the direction we're
-                // growing so the box never escapes the image rect.
-                const maxX = (px >= ax) ? (imgRect.left + imgRect.width  - ax) : (ax - imgRect.left);
-                const maxY = (py >= ay) ? (imgRect.top  + imgRect.height - ay) : (ay - imgRect.top);
-                size = Math.min(size, maxX, maxY);
-                size = Math.max(minDisp, size);
-                crop.size = size;
-                crop.x = (px >= ax) ? ax : ax - size;
-                crop.y = (py >= ay) ? ay : ay - size;
-            }
-            clampToImg();
-            applyBox();
-        };
-        const onPointerUp = (e) => {
-            if (e.pointerId !== activePointerId) return;
-            try { stage.releasePointerCapture(e.pointerId); } catch {}
-            mode = null;
-            start = null;
-            activePointerId = null;
-        };
-        const onHandleDown = (e) => {
-            if (mode || imgRect.width === 0) return;
-            e.stopPropagation();
-            activePointerId = e.pointerId;
-            try { stage.setPointerCapture(e.pointerId); } catch {}
-            mode = 'resize';
-            const handle = e.currentTarget.dataset.handle;
-            // Anchor = opposite corner of the box, in stage coords.
-            const ax = (handle === 'tl' || handle === 'bl') ? (crop.x + crop.size) : crop.x;
-            const ay = (handle === 'tl' || handle === 'tr') ? (crop.y + crop.size) : crop.y;
-            start = { anchorX: ax, anchorY: ay };
-            e.preventDefault();
-        };
-        const onKey = (e) => {
-            // Capture-phase + stopPropagation so the picker's global
-            // Escape handler (closes the whole panel) doesn't fire on
-            // top of ours.
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                e.stopPropagation();
-                finish(null);
-            } else if (e.key === 'Enter' && !ok.disabled) {
-                e.preventDefault();
-                e.stopPropagation();
-                onOk();
-            }
-        };
-
-        // --- show + layout --------------------------------------------
-        img.onload = () => {
-            srcW = img.naturalWidth;
-            srcH = img.naturalHeight;
-            // Stage size is fixed by CSS — read it after the overlay
-            // is visible so getBoundingClientRect returns real px.
-            // Origin is cached so pointer math doesn't sync-read layout
-            // every move.
-            const sr = stage.getBoundingClientRect();
-            const stageW = sr.width;
-            const stageH = sr.height;
-            stageOriginX = sr.left;
-            stageOriginY = sr.top;
-            previewSize  = preview.offsetWidth || 48;
-            // Letterbox-fit *inside* a small inset so the corner handles
-            // (positioned at -7px from the box edge) never overflow the
-            // stage and get clipped by `overflow: hidden`. Handle radius
-            // is 7px + a px of breathing room.
-            const HANDLE_INSET = 10;
-            const fitW = Math.max(1, stageW - HANDLE_INSET * 2);
-            const fitH = Math.max(1, stageH - HANDLE_INSET * 2);
-            const scale = Math.min(fitW / srcW, fitH / srcH);
-            const dispW = Math.round(srcW * scale);
-            const dispH = Math.round(srcH * scale);
-            imgRect = {
-                left: Math.round((stageW - dispW) / 2),
-                top:  Math.round((stageH - dispH) / 2),
-                width:  dispW,
-                height: dispH,
-            };
-            img.style.left   = `${imgRect.left}px`;
-            img.style.top    = `${imgRect.top}px`;
-            img.style.width  = `${imgRect.width}px`;
-            img.style.height = `${imgRect.height}px`;
-
-            // Initial crop: largest centered square inside the image.
-            const initEdge = Math.min(imgRect.width, imgRect.height);
-            crop.size = initEdge;
-            crop.x = imgRect.left + (imgRect.width  - initEdge) / 2;
-            crop.y = imgRect.top  + (imgRect.height - initEdge) / 2;
-            minDisp = PC_CROP_MIN_DISP;
-            // Set backgroundImage once — only size/position vary per
-            // pointermove inside applyBox.
-            preview.style.backgroundImage = `url("${blobUrl}")`;
-            clampToImg();
-            applyBox();
-        };
-
-        // Wire handlers + show.
-        stage.addEventListener('pointerdown', onStageDown);
-        stage.addEventListener('pointermove', onPointerMove);
-        stage.addEventListener('pointerup',   onPointerUp);
-        stage.addEventListener('pointercancel', onPointerUp);
-        box.addEventListener('pointerdown', onBoxDown);
-        for (const h of box.querySelectorAll('.epcc-handle')) {
-            h.addEventListener('pointerdown', onHandleDown);
-        }
-        cancel.addEventListener('click', onCancel);
-        ok.addEventListener('click',     onOk);
-        document.addEventListener('keydown', onKey, true);
-
-        VectorSvelte.setPickerCropperOpen(true);
-        img.src = blobUrl;
-    });
+/** Square crop for a pack image. Resolves to a freshly-encoded File (same mime as the
+ *  input) on confirm, or null on cancel. Caller has already vetted `_pcIsCroppableImage`. */
+async function _pcShowCropper(file) {
+    const blobUrl = URL.createObjectURL(file);
+    try {
+        const rect = await VectorSvelte.openCropper({
+            src: blobUrl,
+            aspect: 1,
+            title: 'Crop to Square',
+            hint: 'Drag to move. Drag a corner to resize.',
+        });
+        if (!rect) return null;
+        // Uint8Array, not a bare ArrayBuffer — Android's WebView only
+        // delivers the former as a raw IPC body.
+        const buf = new Uint8Array(await file.arrayBuffer());
+        const out = await invoke('emoji_crop_and_reencode', {
+            sourceB64: _bytesToB64(buf),
+            mime: file.type || '',
+            ...rect,
+        });
+        return new File([_b64ToBytes(out)], file.name, { type: file.type });
+    } catch (err) {
+        console.warn('[cropper] backend rejected crop:', err);
+        _pcShowError('Oops! Couldn’t Crop That!',
+            typeof err === 'string' ? err : 'Please try a different image.');
+        return null;
+    } finally {
+        // After the cropper's pop-out, which still shows the image.
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 400);
+    }
 }
 
 /** In-panel confirm overlay. Generalised question modal in the same

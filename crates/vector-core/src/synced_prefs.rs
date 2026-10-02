@@ -28,12 +28,14 @@ pub const MUTES_D_TAG: &str = "vector/mutes";
 pub const NICKNAMES_D_TAG: &str = "vector/nicknames";
 pub const NOTIFY_D_TAG: &str = "vector/notify";
 pub const RAIL_D_TAG: &str = "vector/rail";
+pub const BANNERS_D_TAG: &str = "vector/banners";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
 const NICKNAMES_LOCAL_KEY: &str = "synced_nicknames_local";
 const NOTIFY_LOCAL_KEY: &str = "synced_notify_local";
 const RAIL_LOCAL_KEY: &str = "synced_rail_local";
+const BANNERS_LOCAL_KEY: &str = "synced_banners_local";
 
 /// Set when a list has local edits the relays have not seen, cleared once they
 /// have. Persisted, so a quit during the rail's publish debounce is recoverable
@@ -186,12 +188,14 @@ pub enum Pref {
     Nicknames,
     Notify,
     Rail,
+    /// Communities whose banner the user hid.
+    Banners,
 }
 
 /// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
 /// so a device holding both applies the richer one last and wins the overlap.
-pub const ALL_PREFS: [Pref; 5] =
-    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail];
+pub const ALL_PREFS: [Pref; 6] =
+    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail, Pref::Banners];
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -201,6 +205,7 @@ impl Pref {
             Pref::Nicknames => NICKNAMES_D_TAG,
             Pref::Notify => NOTIFY_D_TAG,
             Pref::Rail => RAIL_D_TAG,
+            Pref::Banners => BANNERS_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -210,6 +215,7 @@ impl Pref {
             Pref::Nicknames => NICKNAMES_LOCAL_KEY,
             Pref::Notify => NOTIFY_LOCAL_KEY,
             Pref::Rail => RAIL_LOCAL_KEY,
+            Pref::Banners => BANNERS_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -220,6 +226,7 @@ impl Pref {
             NICKNAMES_D_TAG => Some(Pref::Nicknames),
             NOTIFY_D_TAG => Some(Pref::Notify),
             RAIL_D_TAG => Some(Pref::Rail),
+            BANNERS_D_TAG => Some(Pref::Banners),
             _ => None,
         }
     }
@@ -311,6 +318,28 @@ pub fn load_nicknames() -> NicknameMap {
 pub fn load_notify() -> NotifyMap {
     load_local_raw(Pref::Notify).map(|s| NotifyMap::from_json(&s)).unwrap_or_default()
 }
+pub fn load_hidden_banners() -> IdList {
+    load_local_raw(Pref::Banners).map(|s| IdList::from_json(&s)).unwrap_or_default()
+}
+
+/// Hide or show a community's banner, committed locally. The caller publishes.
+///
+/// Refused until the relay copy has been read, or a fresh login would publish
+/// its empty list over the banners hidden on another device.
+pub fn set_banner_hidden(community_id: &str, hidden: bool) -> Result<IdList, String> {
+    if !is_hydrated(Pref::Banners) {
+        return Err("Still syncing your settings, try again in a moment".to_string());
+    }
+    let mut list = load_hidden_banners();
+    if hidden {
+        list.add(community_id)?;
+    } else {
+        list.remove(community_id);
+    }
+    save_local_raw(Pref::Banners, &list.to_json())?;
+    Ok(list)
+}
+
 pub fn load_rail() -> crate::rail_layout::RailLayout {
     load_local_raw(Pref::Rail)
         .map(|s| crate::rail_layout::RailLayout::from_json(&s))

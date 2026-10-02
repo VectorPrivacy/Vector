@@ -4384,7 +4384,8 @@ pub async fn cache_community_image(
         Some(img) => img,
         None => return Ok(None),
     };
-    download_decrypt_cache_image(&handle, &image).await.map(Some)
+    let kind = if is_banner { crate::image_cache::ImageType::Banner } else { crate::image_cache::ImageType::Avatar };
+    download_decrypt_cache_image(&handle, &image, kind).await.map(Some)
 }
 
 /// Resolve an invite-preview logo to a local cached file path. Unlike `cache_community_image`
@@ -4395,7 +4396,7 @@ pub async fn cache_invite_logo(
     image: vector_core::community::CommunityImage,
 ) -> Result<String, String> {
     let handle = crate::TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    download_decrypt_cache_image(&handle, &image).await
+    download_decrypt_cache_image(&handle, &image, crate::image_cache::ImageType::Avatar).await
 }
 
 /// Download an encrypted community image blob, decrypt + verify it against the committed hash,
@@ -4404,16 +4405,16 @@ pub async fn cache_invite_logo(
 async fn download_decrypt_cache_image<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     image: &vector_core::community::CommunityImage,
+    kind: crate::image_cache::ImageType,
 ) -> Result<String, String> {
     // Fast path: already cached (keyed by the encrypted blob URL).
-    if let Some(path) =
-        crate::image_cache::get_cached_path(handle, &image.url, crate::image_cache::ImageType::Avatar)
-    {
+    if let Some(path) = crate::image_cache::get_cached_path(handle, &image.url, kind) {
         return Ok(path);
     }
 
-    // Download the ciphertext (Tor failsafe applies via build_http_client), bounded.
-    const MAX_IMG: usize = 10 * 1024 * 1024;
+    // Download the ciphertext (Tor failsafe applies via build_http_client), bounded. Banners get
+    // more room: other clients upload their crops uncompressed.
+    let max_img: usize = if kind == crate::image_cache::ImageType::Banner { 16 } else { 10 } * 1024 * 1024;
     let client = vector_core::net::build_http_client(std::time::Duration::from_secs(30))?;
     // An encrypted community logo is still a download from somebody's Blossom
     // server: proxied and signed like every other picture when the setting is on.
@@ -4427,12 +4428,12 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     }
     // Stream with a hard cap: `content_length` is absent under chunked transfer-encoding, so
     // a single buffered read could OOM on a hostile/oversized blob. Abort as soon as the
-    // running total exceeds MAX_IMG (memory bounded to MAX_IMG + one chunk).
+    // running total exceeds the cap (memory bounded to the cap + one chunk).
     let mut encrypted: Vec<u8> = Vec::with_capacity(
-        resp.content_length().map(|l| (l as usize).min(MAX_IMG)).unwrap_or(64 * 1024),
+        resp.content_length().map(|l| (l as usize).min(max_img)).unwrap_or(64 * 1024),
     );
     while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body: {e}"))? {
-        if encrypted.len() + chunk.len() > MAX_IMG {
+        if encrypted.len() + chunk.len() > max_img {
             return Err("community image too large".to_string());
         }
         encrypted.extend_from_slice(&chunk);
@@ -4443,17 +4444,29 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     if vector_core::crypto::sha256_hex(&decrypted) != image.hash {
         return Err("community image failed integrity check".to_string());
     }
+    if vector_core::svg::looks_like_svg(&decrypted) {
+        return Err(vector_core::community::SVG_REFUSED.to_string());
+    }
 
     match crate::image_cache::precache_image_bytes(
         handle,
         &image.url,
         &decrypted,
-        crate::image_cache::ImageType::Avatar,
+        kind,
     ) {
         crate::image_cache::CacheResult::Cached(p)
         | crate::image_cache::CacheResult::AlreadyCached(p) => Ok(p),
         crate::image_cache::CacheResult::Failed(e) => Err(format!("cache image: {e}")),
     }
+}
+
+/// A source-pixel rectangle the user chose in the cropper.
+#[derive(serde::Deserialize)]
+pub struct CropRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// Set a Community's logo or banner: encrypt the image at `filepath` with a
@@ -4466,6 +4479,7 @@ pub async fn set_community_image(
     community_id: String,
     filepath: String,
     is_banner: bool,
+    crop: Option<CropRect>,
 ) -> Result<(), String> {
     vector_core::db::scoped(async move {
         use vector_core::community::CommunityImage;
@@ -4514,6 +4528,17 @@ pub async fn set_community_image(
             }
         };
 
+        if vector_core::svg::looks_like_svg(&raw_bytes) {
+            return Err(vector_core::community::SVG_REFUSED.to_string());
+        }
+        let raw_bytes = match crop {
+            Some(CropRect { x, y, w, h }) => tokio::task::spawn_blocking(move || {
+                crate::commands::emoji_packs::crop_image(raw_bytes, x, y, w, h)
+            })
+            .await
+            .map_err(|e| format!("crop join: {e}"))??,
+            None => raw_bytes,
+        };
         // Strip metadata + resize + cap before encrypting (parity with profile images).
         // Members, and anyone the community key reaches, must not receive the owner's
         // camera EXIF; the re-encode also shrinks the blob every member downloads.

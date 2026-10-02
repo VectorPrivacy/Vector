@@ -407,9 +407,9 @@ pub struct CommunityMetadata {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relays: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::community::lenient_image")]
     pub icon: Option<ImageRef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::community::lenient_image")]
     pub banner: Option<ImageRef>,
     /// Client-extensible opaque object; folds atomically with the entity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -594,6 +594,28 @@ mod tests {
 
     fn cid() -> CommunityId {
         CommunityId([0x33; 32])
+    }
+
+    #[test]
+    fn a_malformed_image_drops_alone() {
+        let doc = r#"{"name":"Club","description":"hi","icon":{"url":"u","key":"k","nonce":"n","hash":"h"},"banner":{"url":"only"}}"#;
+        let meta: CommunityMetadata = serde_json::from_str(doc).unwrap();
+        assert_eq!(meta.name, "Club");
+        assert_eq!(meta.description.as_deref(), Some("hi"));
+        assert_eq!(meta.icon.as_ref().map(|i| i.url.as_str()), Some("u"));
+        assert!(meta.banner.is_none());
+
+        let meta: CommunityMetadata = serde_json::from_str(r#"{"name":"Club","banner":"not an object"}"#).unwrap();
+        assert!(meta.banner.is_none() && meta.icon.is_none());
+    }
+
+    #[test]
+    fn an_image_round_trips_with_its_extras() {
+        let doc = r#"{"name":"Club","banner":{"url":"u","key":"k","nonce":"n","hash":"h","ext":"webp"}}"#;
+        let meta: CommunityMetadata = serde_json::from_str(doc).unwrap();
+        let again: CommunityMetadata = serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(again, meta);
+        assert_eq!(meta.banner.unwrap().to_community_image().ext, "webp");
     }
 
     fn group_at(epoch: u64) -> GroupKey {

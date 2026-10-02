@@ -224,6 +224,7 @@ async function login(skipAnimations = false) {
             _pinnedLoaded = false; // a fresh account's pins are not the last one's
             await ensurePinnedLoaded();
             loadRailLayout();
+            loadHiddenBanners();
             // Before the first chat paints, so a paused file offers Resume, not Download.
             loadPausedDownloads();
 

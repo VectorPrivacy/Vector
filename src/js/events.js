@@ -53,6 +53,7 @@ async function setupRustListeners() {
     // lookup simply finds it when it arrives.
     // The rail's arrangement changed: an edit here, or one from another device.
     _on('rail_layout_updated', (evt) => VectorSvelte.setRailLayout(evt.payload));
+    _on('hidden_banners_updated', (evt) => VectorSvelte.setHiddenBanners(evt.payload?.ids));
 
     _on('pinned_chats_updated', (evt) => {
         arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
@@ -99,6 +100,8 @@ async function setupRustListeners() {
                 }
             }
         } catch (_) {}
+        // The banner too, once anything has asked for it.
+        if (communityId in VectorSvelte.bannerState().src) resolveCommunityBanner(communityId, true);
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);

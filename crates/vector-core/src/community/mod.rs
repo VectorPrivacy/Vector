@@ -201,6 +201,20 @@ pub struct CommunityImage {
     pub ext: String,
 }
 
+/// Community icons and banners are raster only, sent and shown, like custom emoji.
+pub const SVG_REFUSED: &str = "SVG isn't supported for community icons or banners";
+
+/// Reads an image pointer field so a malformed one from another client drops alone, rather
+/// than failing the whole metadata document and taking the name and description with it.
+pub(crate) fn lenient_image<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 /// A Channel inside a Community: its own independent key, current epoch, and name.
 ///
 /// MULTI-EPOCH READ: `key`/`epoch` are the channel's CURRENT (head) epoch (what SENDS use), while

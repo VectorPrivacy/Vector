@@ -47,6 +47,7 @@ pub fn publish_projection(pref: Pref) {
                 synced_prefs::flush_rail().await;
                 return;
             }
+            Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
                 let state = vector_core::state::STATE.lock().await;
@@ -77,6 +78,7 @@ pub async fn hydrate_prefs() {
             Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
             Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
+            Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
         }
     }
 }
@@ -91,6 +93,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
+        Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
     }
 }
 
@@ -205,3 +208,27 @@ async fn apply_nicknames(map: NicknameMap) {
         vector_core::profile::sync::set_nickname(npub.clone(), String::new(), handler).await;
     }
 }
+
+/// Communities whose banner this account hides, for the first paint.
+#[tauri::command]
+pub async fn get_hidden_banners() -> Result<Vec<String>, String> {
+    vector_core::db::scoped(async move { Ok(synced_prefs::load_hidden_banners().ids) }).await
+}
+
+#[tauri::command]
+pub async fn set_banner_hidden(community_id: String, hidden: bool) -> Result<Vec<String>, String> {
+    vector_core::db::scoped(async move {
+        let list = synced_prefs::set_banner_hidden(&community_id, hidden)?;
+        emit_hidden_banners(&list);
+        publish_projection(Pref::Banners);
+        Ok(list.ids)
+    })
+    .await
+}
+
+/// Through `emit_event` so a list belonging to an account since swapped away paints nothing.
+fn emit_hidden_banners(list: &IdList) {
+    vector_core::traits::emit_event_json("hidden_banners_updated", serde_json::json!({ "ids": list.ids }));
+}
+
+// Handlers: get_hidden_banners, set_banner_hidden

@@ -293,6 +293,14 @@ async fn edit_role(a: &Args) -> Result<Value, String> {
     db::scoped(async move { core(VectorCore.edit_role(&id, &role, &name, color, &perms, channel.as_deref()).await) }).await
 }
 
+#[derive(serde::Deserialize)]
+struct CropRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
 /// Metadata stripped and size capped before encrypting: every member downloads it.
 fn prepare_image(bytes: Vec<u8>, is_banner: bool) -> Result<(Vec<u8>, String), String> {
     let (max_dim, budget, animated_budget) =
@@ -329,6 +337,7 @@ fn prepare_image(bytes: Vec<u8>, is_banner: bool) -> Result<(Vec<u8>, String), S
 
 async fn set_community_image(a: &Args) -> Result<Value, String> {
     let (id, filepath, is_banner) = (a.str("communityId")?, a.str("filepath")?, a.bool("isBanner").unwrap_or(false));
+    let crop = a.de::<Option<CropRect>>("crop").ok().flatten().map(|c| [c.x, c.y, c.w, c.h]);
     db::scoped(async move {
         let session = db::current_session();
         if !is_v2(&id) {
@@ -336,6 +345,13 @@ async fn set_community_image(a: &Args) -> Result<Value, String> {
         }
         let community = load_v2(&id)?;
         let raw = vector_core::webfiles::read(Path::new(&filepath)).await.map_err(|e| format!("read image: {e}"))?;
+        if vector_core::svg::looks_like_svg(&raw) {
+            return Err(vector_core::community::SVG_REFUSED.into());
+        }
+        let raw = match crop {
+            Some([x, y, w, h]) => crate::emoji_ops::crop_image(&raw, x, y, w, h)?,
+            None => raw,
+        };
         let (bytes, ext) = prepare_image(raw, is_banner)?;
         let hash = vector_core::crypto::sha256_hex(&bytes);
         let params = vector_core::crypto::generate_encryption_params();
@@ -390,7 +406,7 @@ pub async fn cache_community_image(a: &Args) -> Result<Value, String> {
         if is_banner { c.banner } else { c.icon }
     };
     match image {
-        Some(img) => Ok(json!(cache_encrypted_image(&img).await?)),
+        Some(img) => Ok(json!(cache_encrypted_image(&img, if is_banner { MAX_BANNER } else { MAX_ICON }).await?)),
         None => Ok(Value::Null),
     }
 }
@@ -398,12 +414,15 @@ pub async fn cache_community_image(a: &Args) -> Result<Value, String> {
 /// An invite preview's logo, before the community is joined.
 pub async fn cache_invite_logo(a: &Args) -> Result<Value, String> {
     let image: CommunityImage = a.de("image")?;
-    Ok(json!(cache_encrypted_image(&image).await?))
+    Ok(json!(cache_encrypted_image(&image, MAX_ICON).await?))
 }
 
+const MAX_ICON: usize = 10 * 1024 * 1024;
+/// Other clients upload banner crops uncompressed.
+const MAX_BANNER: usize = 16 * 1024 * 1024;
+
 /// Download, decrypt and verify against the committed plaintext hash; kept by that hash.
-async fn cache_encrypted_image(image: &CommunityImage) -> Result<String, String> {
-    const MAX_IMG: usize = 10 * 1024 * 1024;
+async fn cache_encrypted_image(image: &CommunityImage, max_bytes: usize) -> Result<String, String> {
     if image.hash.len() != 64 || !image.hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("community image has a malformed hash".into());
     }
@@ -416,10 +435,13 @@ async fn cache_encrypted_image(image: &CommunityImage) -> Result<String, String>
         return Ok(path);
     }
     vector_core::net::validate_url_not_private(&image.url).map_err(str::to_string)?;
-    let encrypted = crate::images::fetch(&image.url, MAX_IMG).await.map_err(|e| format!("download: {e}"))?;
+    let encrypted = crate::images::fetch(&image.url, max_bytes).await.map_err(|e| format!("download: {e}"))?;
     let decrypted = vector_core::crypto::decrypt_data_owned(encrypted, &image.key, &image.nonce)?;
     if !vector_core::crypto::sha256_hex(&decrypted).eq_ignore_ascii_case(&image.hash) {
         return Err("community image failed integrity check".into());
+    }
+    if vector_core::svg::looks_like_svg(&decrypted) {
+        return Err(vector_core::community::SVG_REFUSED.into());
     }
     vector_core::webfiles::write(Path::new(&path), &decrypted).await?;
     Ok(path)

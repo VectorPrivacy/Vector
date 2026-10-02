@@ -1,14 +1,11 @@
 <script>
-    // The pack creator's in-panel overlays: confirm, progress, naming, cropper and error.
+    // The pack creator's in-panel overlays: confirm, progress, naming and error.
     // They live inside the picker so their clicks never reach the outside-click close.
-    // Each is a store view; the app owns the promise behind confirm, naming and the crop.
-    // The cropper stays mounted: its stage, box and preview are the app's pointer leaf.
-    import { onMount } from 'svelte';
+    // Each is a store view; the app owns the promise behind confirm and naming.
     import { panelState } from '../lib/picker.svelte.js';
 
     let { h } = $props();
-    // h: bindCachedImg(img, url, kind), errorRetry(), confirm(ok), namingInput(), namingCommit(value), namingCancel(),
-    //    cropperEls({ stage, img, box, preview, cancel, ok })
+    // h: bindCachedImg(img, url, kind), errorRetry(), confirm(ok), namingInput(), namingCommit(value), namingCancel()
 
     const p = panelState();
 
@@ -19,9 +16,6 @@
         if (typeof src === 'string' && src.startsWith('blob:')) img.src = src;
         else h.bindCachedImg(img, src, 'emoji');
     }
-
-    let stage = $state(null), img = $state(null), box = $state(null), cropPreview = $state(null), cancel = $state(null), ok = $state(null);
-    onMount(() => h.cropperEls({ stage, img, box, preview: cropPreview, cancel, ok }));
 </script>
 
 {#if p.confirm}
@@ -81,27 +75,6 @@
         </div>
     </div>
 {/if}
-
-<div class="emoji-pack-creator-cropper" id="emoji-pack-creator-cropper" hidden={!p.cropperOpen}>
-    <div class="emoji-pack-creator-cropper-body">
-        <p class="emoji-pack-creator-cropper-title">Crop to square</p>
-        <p class="emoji-pack-creator-cropper-hint">Drag to move. Drag a corner to resize.</p>
-        <div class="emoji-pack-creator-cropper-stage" bind:this={stage}>
-            <img class="emoji-pack-creator-cropper-img" alt="" bind:this={img}>
-            <div class="emoji-pack-creator-cropper-box" bind:this={box}>
-                <div class="epcc-handle epcc-handle-tl" data-handle="tl"></div>
-                <div class="epcc-handle epcc-handle-tr" data-handle="tr"></div>
-                <div class="epcc-handle epcc-handle-bl" data-handle="bl"></div>
-                <div class="epcc-handle epcc-handle-br" data-handle="br"></div>
-            </div>
-            <div class="epcc-preview" aria-hidden="true" bind:this={cropPreview}></div>
-        </div>
-        <div class="emoji-pack-creator-cropper-actions">
-            <button type="button" class="emoji-pack-creator-cropper-cancel btn" bind:this={cancel}>CANCEL</button>
-            <button type="button" class="emoji-pack-creator-cropper-ok btn" bind:this={ok}>CROP</button>
-        </div>
-    </div>
-</div>
 
 {#if p.error}
     {@const er = p.error}

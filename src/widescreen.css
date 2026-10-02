@@ -2258,3 +2258,27 @@ body.ws #group-overview .member-pick-row {
     -webkit-user-drag: none;
     user-select: none;
 }
+
+/* ===================== Community banner (channel pane) ===================== */
+/* Over the foot of the pane, outside the scroller so it neither rides the list's
+   overscroll nor sits under its mask. The list ends in a band of the banner's
+   height (`--ws-banner-h`, set by CommunityBanner.svelte), so the last channel
+   always clears it; mostly faded, clicks pass through to the channels beneath. */
+/* Registered so they can transition: a notched wheel jumps further per step than
+   the fade spans. */
+@property --banner-top { syntax: '<number>'; inherits: false; initial-value: 1; }
+@property --banner-bottom { syntax: '<number>'; inherits: false; initial-value: 1; }
+.ws-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  -webkit-mask-image: linear-gradient(rgba(0, 0, 0, var(--banner-top)), rgba(0, 0, 0, var(--banner-bottom)));
+  mask-image: linear-gradient(rgba(0, 0, 0, var(--banner-top)), rgba(0, 0, 0, var(--banner-bottom)));
+  transition: --banner-top 0.18s ease-out, --banner-bottom 0.18s ease-out;
+}
+.ws-banner.faded { pointer-events: none; }
+body.ws #chat-list .chatlist-channels-pane {
+  margin-bottom: max(50px, var(--ws-banner-h, 0px));
+}

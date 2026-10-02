@@ -231,6 +231,16 @@ function mountChatlist() {
                 openCommunityMenu: (chat, e) => openCommunityMenu(chat, e),
             },
     });
+    VectorSvelte.setScreen('communityBanner', {
+        h: {
+            openMenu: (id, x, y) => showContextMenu({
+                x,
+                y,
+                items: [{ label: 'Hide Banner', icon: 'eye-off', onClick: () => setCommunityBannerHidden(id, true) }],
+            }),
+        },
+    });
+    loadHiddenBanners();
     paneChanged();
     VectorSvelte.setOpenChat(strOpenChat);
     renderRailShortcuts();
@@ -306,6 +316,7 @@ function paneChanged() {
     const communityId = wsListCommunityId();
     const dmsOnly = !communityId && wsActive();
     VectorSvelte.setPane(communityId, dmsOnly);
+    if (communityId) resolveCommunityBanner(communityId);
 }
 
 /**

@@ -204,6 +204,8 @@
     "allow-rail-rename-folder",
     "allow-rail-set-folder-hue",
     "allow-rail-dissolve-folder",
+    "allow-get-hidden-banners",
+    "allow-set-banner-hidden",
     "allow-list-emoji-packs",
     "allow-get-pack-share-naddr",
     "allow-refresh-emoji-packs",

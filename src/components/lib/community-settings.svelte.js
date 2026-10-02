@@ -6,13 +6,16 @@ import { popOverlay } from './dialog-lifecycle.svelte.js';
 export const csOverlay = popOverlay({});
 
 const blank = () => ({ name: '', description: '', iconSrc: null });
+// bannerPath: a picked file awaiting upload, with its displayable copy, the crop to make of it
+// on save (source pixels, null when it already fits) and its size for previewing that crop.
+const noBanner = () => ({ bannerPath: null, bannerPreview: null, bannerCrop: null, bannerNatural: null });
 
 const s = $state({
     communityId: null,
     loading: false,
     saved: blank(),
     // iconPath: a picked file awaiting upload; iconPreview: its displayable copy.
-    draft: { name: '', description: '', iconPath: null, iconPreview: null },
+    draft: { name: '', description: '', iconPath: null, iconPreview: null, ...noBanner() },
     relays: [],
     canEdit: false,
     // Bans act at once, not through the save bar: the list IS the published state.
@@ -40,7 +43,8 @@ export function csState() { return s; }
 export function csOverviewDirty() {
     return s.draft.name !== s.saved.name
         || s.draft.description !== s.saved.description
-        || !!s.draft.iconPath;
+        || !!s.draft.iconPath
+        || !!s.draft.bannerPath;
 }
 
 /** Whether a dragged order differs from the published one. */
@@ -98,7 +102,7 @@ export function csOpen(communityId) {
 
 export function csLoaded({ name, description, iconSrc, relays, canEdit, canBan, canRoles }) {
     s.saved = { name, description, iconSrc };
-    s.draft = { name, description, iconPath: null, iconPreview: null };
+    s.draft = { name, description, iconPath: null, iconPreview: null, ...noBanner() };
     s.relays = relays || [];
     s.canEdit = !!canEdit;
     s.canBan = !!canBan;
@@ -133,7 +137,7 @@ export function csRemoveBans(npubs) {
 export function csSetDraft(patch) { Object.assign(s.draft, patch); }
 
 export function csReset() {
-    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null };
+    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null, ...noBanner() };
     s.roles.order = null;
     const e = s.roles.edit;
     // A role never created has nothing to fall back to: resetting discards it.
@@ -150,6 +154,8 @@ export function csCommitted(patch) {
         s.draft.iconPath = null;
         s.draft.iconPreview = null;
     }
+    // The saved banner itself lives in the banner store, which the channel pane shares.
+    if ('banner' in patch) Object.assign(s.draft, noBanner());
 }
 
 export function csSetSaving(on, progress = 0) { s.saving = on; s.progress = progress; }

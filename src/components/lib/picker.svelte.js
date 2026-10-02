@@ -25,7 +25,6 @@ const panel = $state({
     progress: null,        // { title, detail }
     confirm: null,         // { title, detail, icon, tone, okText, cancelText }
     naming: null,          // { src, value, mode, batch, error }
-    cropperOpen: false,    // the cropper leaf is always mounted; the app drives its stage
 });
 export function panelState() { return panel; }
 export function setPanelMode(mode) { panel.mode = mode; }
@@ -37,7 +36,6 @@ export function setPickerProgressDetail(detail) { if (panel.progress) panel.prog
 export function setPickerConfirm(c) { panel.confirm = c; }
 export function setPickerNaming(n) { panel.naming = n; }
 export function setPickerNamingError(message) { if (panel.naming) panel.naming.error = message || ''; }
-export function setPickerCropperOpen(open) { panel.cropperOpen = !!open; }
 
 // The panel's root: its visibility, anchor classes and bottom offset. Every open and
 // close in the app writes here; PickerRoot paints it. `teleporting` suppresses the

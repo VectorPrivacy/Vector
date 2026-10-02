@@ -1035,6 +1035,8 @@ pub fn run() {
             commands::rail::rail_rename_folder,
             commands::rail::rail_set_folder_hue,
             commands::rail::rail_dissolve_folder,
+            commands::prefs::get_hidden_banners,
+            commands::prefs::set_banner_hidden,
             commands::community::sync_communities_boot,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,

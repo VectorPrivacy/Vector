@@ -5948,146 +5948,217 @@ img.emoji-img-loading {
   border-color: var(--danger-color);
   background-color: #03030390;
 }
-/* Pack creator cropper overlay — square-crop UX for non-square static
-   uploads. Mirrors the confirm overlay's chrome (backdrop, body, action
-   buttons). Stage is a centered display rect; the crop box uses a
-   massive outset box-shadow as the "darken outside" mask. */
-.emoji-pack-creator-cropper {
-  position: absolute;
+/* The image cropper (ui/Cropper.svelte): one overlay for every crop, above
+   Community Settings and the emoji picker alike. The box darkens everything
+   outside it with a massive outset shadow. */
+.crop-overlay {
+  position: fixed;
   inset: 0;
-  border-radius: inherit;
-  background: rgba(8, 8, 8, 0.86);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border: 2px solid rgba(255, 255, 255, 0.12);
-  display: flex;
+  z-index: 10050;
+  display: none;
   align-items: center;
   justify-content: center;
-  z-index: 60;
-  padding: 12px;
+  padding: 26px;
   box-sizing: border-box;
+  background-color: rgba(0, 0, 0, 0.82);
 }
-.emoji-pack-creator-cropper[hidden] { display: none; }
-.emoji-pack-creator-cropper-body {
-  text-align: center;
-  width: 100%;
-  max-width: 320px;
+.crop-overlay.active { display: flex; }
+.crop-overlay.closing { animation: modal-overlay-fade-out 0.15s ease-out forwards; pointer-events: none; }
+.crop-overlay.closing .crop-card { animation: modal-card-pop-out 0.15s ease-out forwards; }
+
+.crop-card {
+  font-family: Rubik, sans-serif;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-.emoji-pack-creator-cropper-title {
-  font-size: 16px;
-  font-weight: 800;
-  margin: 0;
-  color: #fff;
-}
-.emoji-pack-creator-cropper-hint {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
-  margin: 0;
-}
-.emoji-pack-creator-cropper-stage {
-  position: relative;
+  gap: 16px;
   width: 100%;
-  height: 200px;
+  max-width: 560px;
+  max-height: 100%;
+  padding: 20px;
+  box-sizing: border-box;
+  background-color: #0b0b0b;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.crop-card.banner { max-width: 760px; }
+.crop-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+.crop-title { margin: 0; font-size: 17px; font-weight: 600; color: #fff; }
+.crop-hint { margin: 4px 0 0; font-size: 12.5px; color: rgba(255, 255, 255, 0.5); }
+
+.crop-body { display: flex; gap: 16px; min-height: 0; }
+
+.crop-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 320px;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #050505;
   touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  /* Crosshair hints at the marquee-draw gesture for pointerdowns
-     outside the current box. Box has its own `cursor: move` and the
-     handles their own resize cursors — both win over this. */
   cursor: crosshair;
 }
-.emoji-pack-creator-cropper-img {
+.crop-img {
   position: absolute;
   pointer-events: none;
-  user-select: none;
-  -webkit-user-select: none;
   -webkit-user-drag: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
-.emoji-pack-creator-cropper-box {
+.crop-img.ready { opacity: 1; }
+.crop-box {
   position: absolute;
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   box-sizing: border-box;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
   cursor: move;
-  /* Disable WebView's tap-highlight + native gesture interception so
-     pointermove fires cleanly during a drag. */
   -webkit-tap-highlight-color: transparent;
 }
-.epcc-handle {
+.crop-guide {
+  position: absolute;
+  inset: 0 0 auto 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 4px;
+  box-sizing: border-box;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.7);
+  background: linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.1));
+  pointer-events: none;
+}
+.crop-guide span {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+.crop-handle {
   position: absolute;
   width: 14px;
   height: 14px;
   background: #fff;
   border-radius: 50%;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
-  /* Hit-target is larger than the visible dot — easier on touch. */
 }
-.epcc-handle::after {
-  content: '';
-  position: absolute;
-}
-/* Hit-target expands only OUTWARD from the corner. Expanding inward
-   would eat the box's middle on tiny crops and steal the move-drag. */
-.epcc-handle-tl { top: -7px; left: -7px; cursor: nwse-resize; }
-.epcc-handle-tr { top: -7px; right: -7px; cursor: nesw-resize; }
-.epcc-handle-bl { bottom: -7px; left: -7px; cursor: nesw-resize; }
-.epcc-handle-br { bottom: -7px; right: -7px; cursor: nwse-resize; }
-.epcc-handle-tl::after { inset: -10px 0     0     -10px; }
-.epcc-handle-tr::after { inset: -10px -10px 0     0;     }
-.epcc-handle-bl::after { inset: 0     0     -10px -10px; }
-.epcc-handle-br::after { inset: 0     -10px -10px 0;     }
-/* Live post-crop preview chip — pinned to the top-right of the stage,
-   above the dark mask. Background-image trick: the full source image
-   is set as the background and we offset/scale it via JS so the chip
-   always renders the same square the user is about to commit. */
-.epcc-preview {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 48px;
-  height: 48px;
-  background: #050505 center / cover no-repeat;
-  border: 1px solid rgba(0, 0, 0, 0.3);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
-  pointer-events: none;
-  z-index: 2;
-}
-.emoji-pack-creator-cropper-actions {
+/* The hit area grows only outward from the corner, so a tiny box keeps its middle for a move. */
+.crop-handle::after { content: ''; position: absolute; }
+.crop-handle-tl { top: -7px; left: -7px; cursor: nwse-resize; }
+.crop-handle-tr { top: -7px; right: -7px; cursor: nesw-resize; }
+.crop-handle-bl { bottom: -7px; left: -7px; cursor: nesw-resize; }
+.crop-handle-br { bottom: -7px; right: -7px; cursor: nwse-resize; }
+.crop-handle-tl::after { inset: -10px 0 0 -10px; }
+.crop-handle-tr::after { inset: -10px -10px 0 0; }
+.crop-handle-bl::after { inset: 0 0 -10px -10px; }
+.crop-handle-br::after { inset: 0 -10px -10px 0; }
+
+.crop-preview {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  justify-content: center;
-  margin-top: 4px;
+  flex-shrink: 0;
 }
-.emoji-pack-creator-cropper-cancel,
-.emoji-pack-creator-cropper-ok {
+.crop-preview-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4);
+}
+.crop-chips { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 120px; }
+.crop-chip {
+  background: #050505 no-repeat;
+  border-radius: 6px;
+}
+/* The banner preview: the channel pane as a member sees it, built from the
+   live pane's own classes. Width and background come from the real pane. */
+.crop-pane {
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid #222;
+  border-radius: 12px;
+  pointer-events: none;
+}
+.crop-pane-surface {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--ws-list-bg);
+}
+.crop-pane-list {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: 8px;
+}
+.crop-pane .crop-pane-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+.crop-card.banner .crop-stage { height: auto; min-height: 320px; }
+.crop-note {
+  position: absolute;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.crop-note.above { transform: translateY(-100%); }
+
+.crop-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.crop-btn {
+  padding: 9px 22px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   background-color: rgba(20, 20, 20, 0.85);
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  padding: 8px 20px;
-  border-radius: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
-.emoji-pack-creator-cropper-ok {
+.crop-btn:hover { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
+.crop-btn.primary {
   background-color: rgba(89, 252, 179, 0.18);
   border-color: var(--icon-color-primary);
   color: var(--icon-color-primary);
 }
-.emoji-pack-creator-cropper-cancel:hover { border-color: rgba(255, 255, 255, 0.28); background-color: #2a2a2a; }
-.emoji-pack-creator-cropper-ok:hover     { background-color: rgba(89, 252, 179, 0.30); }
-.emoji-pack-creator-cropper-ok[disabled] {
-  opacity: 0.5;
-  cursor: not-allowed;
+.crop-btn.primary:hover { background-color: rgba(89, 252, 179, 0.3); }
+.crop-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+@media (max-width: 640px) {
+  .crop-body { flex-direction: column; }
+  .crop-stage { flex: none; height: 260px; }
+  .crop-chips { flex-direction: row; width: auto; justify-content: center; }
+  .crop-pane { align-self: center; }
+}
+
+/* A community banner at the template's 238 x 146. Its top band (50 of 146) is
+   darkened rather than see-through, so rows behind it never ghost through. */
+.banner-art {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 238 / 146;
+  background-color: #111;
+  background-repeat: no-repeat;
+}
+.banner-art::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 34.25%;
+  background: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0));
+  pointer-events: none;
 }
 
 .emoji-pack-creator-confirm-cancel:active,
@@ -23029,6 +23100,33 @@ body.profile-switcher-editing .profile-switcher-add {
   font-weight: 700;
   line-height: 16px;
 }
+
+/* The banner, previewed at the width it gets in the channel list. */
+.cs-banner { display: flex; flex-direction: column; gap: 10px; }
+.cs-banner-frame {
+  position: relative;
+  width: 238px;
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: #161616;
+}
+.cs-banner-frame.editable { cursor: pointer; }
+.cs-banner-frame.editable:hover .cs-icon-edit { opacity: 1; }
+.cs-banner-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  aspect-ratio: 238 / 146;
+  border: 1px dashed #333;
+  border-radius: 12px;
+  box-sizing: border-box;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12.5px;
+}
+.cs-banner-empty .icon { position: relative; width: 22px; height: 22px; background-color: currentColor; }
+.cs-banner-frame.editable:hover .cs-banner-empty { border-color: #555; color: rgba(255, 255, 255, 0.7); }
 
 .cs-field { display: flex; flex-direction: column; }
 .cs-field-grow { flex: 1; min-width: 0; }

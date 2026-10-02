@@ -7,13 +7,15 @@
     import { csOverlay, csState, csDirty, csSetDraft, csSetSection, csSetQuery, csSelectBans, csClearBanSel } from '../lib/community-settings.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
+    import BannerArt from './BannerArt.svelte';
+    import { bannerState } from '../lib/banners.svelte.js';
     import MemberRow from '../people/MemberRow.svelte';
     import RolesSection from './RolesSection.svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
 
-    // h: close(), pickIcon(), save(), reset(), unban() (the selection), name(npub), profile(npub),
+    // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), profile(npub),
     //    avatarSrc(npub), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
@@ -40,6 +42,7 @@
             icon: 'info',
             anchors: [
                 { id: 'identity', label: 'Icon & Name', icon: 'image', keys: 'icon avatar logo picture image name title rename' },
+                { id: 'banner', label: 'Banner', icon: 'image', keys: 'banner cover header art background picture image' },
                 { id: 'description', label: 'Description', icon: 'align-left', keys: 'description about bio summary' },
             ],
         },
@@ -147,6 +150,9 @@
     const bar = $derived(warn && dirty ? 'save' : section.id === 'bans' && st.banSel.size ? 'unban' : dirty ? 'save' : null);
 
     const iconSrc = $derived(st.draft.iconPreview || st.saved.iconSrc);
+    const banners = bannerState();
+    // A staged banner previews its crop on the original; the saved one is already cut.
+    const bannerSrc = $derived(st.draft.bannerPreview || banners.src[st.communityId] || null);
     const nameEmpty = $derived(!st.draft.name.trim());
 
     // The scheme recedes; the rest, path included, IS the relay's address.
@@ -207,6 +213,30 @@
                                            value={st.draft.name} oninput={(e) => csSetDraft({ name: e.currentTarget.value })}>
                                     <p class="cs-hint">The icon shows on the rail and beside every invite. Square images crop best.</p>
                                 </div>
+                            </div>
+                        </section>
+
+                        <section class="cs-block" data-anchor="banner">
+                            <h3 class="cs-heading">Banner</h3>
+                            <div class="cs-banner">
+                                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                                <div class="cs-banner-frame" class:editable={st.canEdit} onclick={st.canEdit ? h.pickBanner : null}
+                                     title={st.canEdit ? (bannerSrc ? 'Change banner' : 'Add a banner') : null}>
+                                    {#if bannerSrc}
+                                        <BannerArt src={bannerSrc} rect={st.draft.bannerPreview ? st.draft.bannerCrop : null}
+                                                   natural={st.draft.bannerNatural} />
+                                    {:else}
+                                        <div class="cs-banner-empty">
+                                            <span class="icon icon-image"></span>
+                                            <span>{st.canEdit ? 'Add a banner' : 'No banner'}</span>
+                                        </div>
+                                    {/if}
+                                    {#if st.canEdit && bannerSrc}
+                                        <span class="cs-icon-edit"><span class="icon icon-edit"></span></span>
+                                    {/if}
+                                    {#if st.draft.bannerPath}<span class="cs-icon-new">New</span>{/if}
+                                </div>
+                                <p class="cs-hint">Shown at the foot of the channel list, in the shape of a 238 × 146 card; larger images in that shape stay sharp. The top band fades under the channels, so keep what matters lower down.</p>
                             </div>
                         </section>
 

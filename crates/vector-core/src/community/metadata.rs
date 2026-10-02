@@ -19,10 +19,10 @@ pub struct CommunityMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Logo (encrypted blob ref — key rides in this ServerRoot-sealed content).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::lenient_image")]
     pub icon: Option<CommunityImage>,
     /// Banner (encrypted blob ref).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::lenient_image")]
     pub banner: Option<CommunityImage>,
     /// Owner attestation (signed event JSON) — lets members verify who the owner is via the
     /// GroupRoot too (the invite bundle is the other carrier). `serde(default)` for old roots.
@@ -48,4 +48,18 @@ impl CommunityMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelMetadata {
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_image_drops_alone() {
+        let doc = r#"{"name":"Club","description":"hi","icon":{"url":"u","key":"k","nonce":"n","hash":"h"},"banner":{"key":"k"}}"#;
+        let meta: CommunityMetadata = serde_json::from_str(doc).unwrap();
+        assert_eq!((meta.name.as_str(), meta.description.as_deref()), ("Club", Some("hi")));
+        assert_eq!(meta.icon.map(|i| i.url), Some("u".to_string()));
+        assert!(meta.banner.is_none());
+    }
 }

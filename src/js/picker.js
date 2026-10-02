@@ -45,7 +45,6 @@ VectorSvelte.onPickerVisibility((visible) => {
 const _pickerEls = { search: null, sidebar: null, main: null, recents: null, all: null, results: null, gif: null, creatorGrid: null };
 /** @type {HTMLInputElement} */
 let emojiSearch = null;
-const _cropperEls = { stage: null, img: null, box: null, preview: null, cancel: null, ok: null };
 
 const _pickerPanelHelpers = {
     mounted: (els) => { Object.assign(_pickerEls, els); emojiSearch = els.search; },
@@ -152,7 +151,6 @@ const _pickerPanelHelpers = {
         namingInput: () => VectorSvelte.setPickerNamingError(''),
         namingCommit: (raw) => _pcNamingTryCommit(raw),
         namingCancel: () => _pcNamingFinish(null),
-        cropperEls: (els) => Object.assign(_cropperEls, els),
     },
 };
 // Synchronous: the listeners and observers below need the hosts at load.
@@ -215,7 +213,10 @@ function openEmojiPanel(e) {
     // the target's ancestry: a panel control that unmounts on click is detached by
     // the time this document listener runs.
     const root = VectorSvelte.pickerEls().root;
-    if (root.contains(e.target) || (e.composedPath?.() || []).includes(root)) return;
+    const path = e.composedPath?.() || [];
+    if (root.contains(e.target) || path.includes(root)) return;
+    // The cropper opens over the picker for the pack creator.
+    if (path.some((n) => n.classList?.contains('crop-overlay'))) return;
 
     if (isDefaultPanel && !VectorSvelte.pickerVisible()) _openPanel({ isDefaultPanel: true, reactionId: '' });
     else closeEmojiPanel();

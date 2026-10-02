@@ -160,7 +160,7 @@ fn prepare_upload(bytes: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
         img
     };
     let rgba = img.to_rgba8();
-    let out = fit_budget(&[(rgba, 0)], img.width().max(img.height()), |f| encode_png(&f[0].0))?;
+    let out = fit_budget(&[(rgba, 0)], Some(MAX_EMOJI_BYTES), |f| encode_png(&f[0].0))?;
     Ok((out, "image/png"))
 }
 
@@ -224,12 +224,22 @@ fn crop_command(a: &Args) -> Result<Value, String> {
     if bytes.len() > MAX_EMOJI_BYTES * 4 {
         return Err("source too large".into());
     }
-    Ok(json!(b64(&crop(&bytes, &a.opt_str("mime").unwrap_or_default().to_lowercase(), x, y, w)?)))
+    Ok(json!(b64(&crop(&bytes, &a.opt_str("mime").unwrap_or_default().to_lowercase(), x, y, w, h, Some(MAX_EMOJI_BYTES))?)))
 }
 
-fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, size: u32) -> Result<Vec<u8>, String> {
+/// Crop any image to a source-pixel rectangle at full resolution, animation kept. The caller
+/// sizes it afterwards (community images go through `prepare_image`).
+pub(crate) fn crop_image(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("crop must be non-empty".into());
+    }
+    crop(bytes, vector_core::crypto::mime_from_magic_bytes(bytes), x, y, w, h, None)
+}
+
+/// `max_bytes`: shrink until the output fits, or `None` to keep the native size.
+fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
     let bounds = |fw: u32, fh: u32| {
-        if x.saturating_add(size) > fw || y.saturating_add(size) > fh {
+        if x.saturating_add(w) > fw || y.saturating_add(h) > fh {
             Err("crop outside source bounds".to_string())
         } else {
             Ok(())
@@ -240,20 +250,22 @@ fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, size: u32) -> Result<Vec<u8>, 
         let first = decoded.first().ok_or("no frames decoded")?;
         bounds(first.0.width(), first.0.height())?;
         let cropped: Vec<(RgbaImage, u32)> =
-            decoded.into_iter().map(|(img, d)| (image::imageops::crop_imm(&img, x, y, size, size).to_image(), d.max(20))).collect();
-        return fit_budget(&cropped, size, encode_gif);
+            decoded.into_iter().map(|(img, d)| (image::imageops::crop_imm(&img, x, y, w, h).to_image(), d.max(20))).collect();
+        return fit_budget(&cropped, max_bytes, encode_gif);
     }
     let img = vector_core::crypto::decode_image_bounded(bytes).map_err(|e| format!("decode: {e}"))?;
     bounds(img.width(), img.height())?;
-    let cropped = img.crop_imm(x, y, size, size).to_rgba8();
+    let cropped = img.crop_imm(x, y, w, h).to_rgba8();
     let jpeg = mime.contains("jpeg") || mime.contains("jpg");
-    fit_budget(&[(cropped, 0)], size, |f| if jpeg { encode_jpeg(&f[0].0) } else { encode_png(&f[0].0) })
+    fit_budget(&[(cropped, 0)], max_bytes, |f| if jpeg { encode_jpeg(&f[0].0) } else { encode_png(&f[0].0) })
 }
 
-/// Encode, then step the size down until it fits the emoji budget or the minimum edge.
-fn fit_budget(frames: &[(RgbaImage, u32)], src_dim: u32, encode: impl Fn(&[(RgbaImage, u32)]) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+/// Encode, then step the size down until it fits `max_bytes` or the minimum edge.
+fn fit_budget(frames: &[(RgbaImage, u32)], max_bytes: Option<usize>, encode: impl Fn(&[(RgbaImage, u32)]) -> Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
     let out = encode(frames)?;
-    if out.len() <= MAX_EMOJI_BYTES || src_dim <= MIN_EMOJI_DIM {
+    let src_dim = frames.first().map(|(img, _)| img.width().max(img.height())).unwrap_or(0);
+    let Some(max_bytes) = max_bytes else { return Ok(out) };
+    if out.len() <= max_bytes || src_dim <= MIN_EMOJI_DIM {
         return Ok(out);
     }
     let mut dim = src_dim;
@@ -268,7 +280,7 @@ fn fit_budget(frames: &[(RgbaImage, u32)], src_dim: u32, encode: impl Fn(&[(Rgba
             })
             .collect();
         let out = encode(&scaled)?;
-        if out.len() <= MAX_EMOJI_BYTES || dim <= MIN_EMOJI_DIM {
+        if out.len() <= max_bytes || dim <= MIN_EMOJI_DIM {
             return Ok(out);
         }
     }

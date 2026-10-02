@@ -21,6 +21,7 @@
     import PickerRoot from '../picker/PickerRoot.svelte';
     import PickerTooltip from '../picker/PickerTooltip.svelte';
     import ImageViewer from '../ui/ImageViewer.svelte';
+    import Cropper from '../ui/Cropper.svelte';
     import Toast from '../ui/Toast.svelte';
     import BadgeCard from '../ui/BadgeCard.svelte';
     import ContextMenu from '../ui/ContextMenu.svelte';
@@ -70,6 +71,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 </script>
 
 <Popup />
+<Cropper />
 <!-- Pack details: opened by deep link (vector://emojis/pack/<naddr>) and the share-pack flow. -->
 {#if screens.packDetails}<PackDetailsOverlay h={screens.packDetails.h} />{/if}
 <!-- A Nostr post, article or video from a chat card, in full. -->

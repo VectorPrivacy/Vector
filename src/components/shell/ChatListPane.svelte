@@ -6,6 +6,7 @@
     import AccountRow from './AccountRow.svelte';
     import Chatlist from '../chatlist/Chatlist.svelte';
     import CommunityHead from '../chatlist/CommunityHead.svelte';
+    import CommunityBanner from '../chatlist/CommunityBanner.svelte';
     import { listHasRows } from '../lib/signals.svelte.js';
     import { loginState } from '../lib/login.svelte.js';
     const panes = shellPanes();
@@ -16,6 +17,7 @@
     const reveals = shellReveals();
     const sync = syncLineState();
     const bindList = bindShellEl('chatList');
+    let listEl = $state(null);
 
     // The scroller's end fades track the scroll that is left in each direction, so a
     // row you have reached is never dimmed. Rows come and go, so the content's height
@@ -84,8 +86,9 @@
     <div id="ws-community-head">
         {#if screens.communityHead}<CommunityHead h={screens.communityHead.h} />{/if}
     </div>
-    <div id="chat-list" use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
+    <div id="chat-list" bind:this={listEl} use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
         {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
     </div>
+    {#if shell.ws && screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} scroller={listEl} />{/if}
     <div class="fadeout-bottom" style="position: fixed; bottom: 65px;" style:display={listHasRows() ? null : 'none'}></div>
 </div>

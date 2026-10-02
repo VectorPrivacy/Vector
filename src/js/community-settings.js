@@ -6,6 +6,7 @@ VectorSvelte.setScreen('communitySettings', {
     h: {
         close: () => closeCommunitySettings(),
         pickIcon: () => csPickIcon(),
+        pickBanner: () => csPickBanner(),
         save: () => csSave(),
         reset: () => VectorSvelte.csReset(),
         unban: () => csUnbanSelected(),
@@ -55,6 +56,7 @@ async function openCommunitySettings(communityId) {
             canBan: !!caps.ban,
             canRoles: !!caps.manage_roles,
         });
+        resolveCommunityBanner(communityId);
         if (caps.ban) csLoadBans(communityId);
         if (caps.manage_roles) csLoadRoles(communityId);
     } catch (e) {
@@ -98,6 +100,76 @@ async function csPickIcon() {
         return;
     }
     VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: preview });
+}
+
+/** The banner template: 238 x 146 at the foot of the channel list. */
+const BANNER_ASPECT = 238 / 146;
+
+/**
+ * Stage a new banner. One in any other shape goes through the cropper first, which previews
+ * it in place; it uploads with the rest on Save.
+ */
+async function csPickBanner() {
+    const st = VectorSvelte.csState();
+    if (!st.canEdit || st.saving) return;
+    const { open } = window.__TAURI__.dialog;
+    const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
+    const filePath = typeof selected === 'string' ? selected : selected?.path;
+    if (!filePath) return;
+    const preview = await invoke('read_image_preview', { path: filePath }).then(convertFileSrc, () => null);
+    const natural = preview && await csImageSize(preview);
+    if (!natural) {
+        showToast('That image could not be read');
+        return;
+    }
+    let crop = null;
+    if (Math.abs(natural.w / natural.h - BANNER_ASPECT) > 0.01) {
+        crop = await VectorSvelte.openCropper({
+            src: preview,
+            aspect: BANNER_ASPECT,
+            title: 'Crop Banner',
+            hint: 'Drag to move, or drag a corner to resize. The shaded top band fades under the channel list.',
+            preview: 'banner',
+            context: csBannerPreviewContext(st.communityId),
+        });
+        if (!crop) return;
+    }
+    VectorSvelte.csSetDraft({ bannerPath: filePath, bannerPreview: preview, bannerCrop: crop, bannerNatural: natural });
+}
+
+/** The real pane around the banner preview: this community's header and channels, at the
+ *  width and on the background the channel list has right now. */
+function csBannerPreviewContext(communityId) {
+    const st = VectorSvelte.csState();
+    const channels = getCommunityChannels(communityId) || [];
+    const row = (c) => {
+        const chat = arrChats.find(x => x.id === c.id);
+        const tier = chat?.muted ? 'is-muted' : chat && computeRowUnreadCount(chat) > 0 ? 'has-unread' : 'is-read';
+        return { name: c.name, tier };
+    };
+    const sections = [];
+    const open = channels.filter(c => !c.private);
+    const shut = channels.filter(c => c.private);
+    if (open.length) sections.push({ label: 'Public', rows: open.map(row) });
+    if (shut.length) sections.push({ label: 'Private', rows: shut.map(row) });
+    const width = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ws-list-w')) || 240;
+    return {
+        width,
+        background: getComputedStyle(document.body).backgroundColor,
+        name: st.saved.name,
+        iconSrc: st.saved.iconSrc,
+        members: communityMemberSubtext(communityId),
+        sections,
+    };
+}
+
+function csImageSize(src) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve(null);
+        img.src = src;
+    });
 }
 
 /**
@@ -151,19 +223,35 @@ async function csSaveOverview(communityId) {
         // A trimmed value committed while the field still shows its spaces would read as unsaved.
         VectorSvelte.csSetDraft({ name, description });
     }
-    if (!iconPath) return null;
+    const { bannerPath, bannerCrop } = st.draft;
+    if (!iconPath && !bannerPath) return null;
+    let uploadingBanner = false;
     const unlisten = await window.__TAURI__.event.listen('community_image_upload_progress', (e) => {
-        if (e.payload?.community_id === communityId && !e.payload?.is_banner) {
+        if (e.payload?.community_id === communityId && !!e.payload?.is_banner === uploadingBanner) {
             VectorSvelte.csSetSaving(true, e.payload.progress || 0);
         }
     });
-    await invoke('set_community_image', { communityId, filepath: iconPath, isBanner: false });
-    const cached = await invoke('cache_community_image', { communityId, isBanner: false }).catch(() => null);
-    for (const chat of csCommunityChats(communityId)) {
-        chat.metadata.custom_fields.icon = '1';
-        if (cached) chat.metadata.avatar_cached = cached;
+    try {
+        if (iconPath) {
+            await invoke('set_community_image', { communityId, filepath: iconPath, isBanner: false });
+            const cached = await invoke('cache_community_image', { communityId, isBanner: false }).catch(() => null);
+            for (const chat of csCommunityChats(communityId)) {
+                chat.metadata.custom_fields.icon = '1';
+                if (cached) chat.metadata.avatar_cached = cached;
+            }
+            VectorSvelte.csCommitted({ iconSrc: cached ? convertFileSrc(cached) : VectorSvelte.csState().draft.iconPreview });
+        }
+        if (bannerPath) {
+            uploadingBanner = true;
+            VectorSvelte.csSetSaving(true, 0);
+            await invoke('set_community_image', { communityId, filepath: bannerPath, isBanner: true, crop: bannerCrop });
+            await resolveCommunityBanner(communityId, true);
+            VectorSvelte.csCommitted({ banner: true });
+        }
+    } catch (e) {
+        unlisten();
+        throw e;
     }
-    VectorSvelte.csCommitted({ iconSrc: cached ? convertFileSrc(cached) : VectorSvelte.csState().draft.iconPreview });
     return unlisten;
 }
 

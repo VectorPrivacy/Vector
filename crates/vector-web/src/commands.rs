@@ -175,6 +175,14 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "get_pinned_chats" => to_value(vector_core::pinned_chats::load_local().chats),
         "get_rail_layout" => to_value(vector_core::synced_prefs::load_rail()),
+        "get_hidden_banners" => to_value(vector_core::synced_prefs::load_hidden_banners().ids),
+        "set_banner_hidden" => {
+            let hidden = a.bool("hidden").ok_or("missing argument `hidden`")?;
+            let list = vector_core::synced_prefs::set_banner_hidden(&a.str("communityId")?, hidden)?;
+            vector_core::traits::emit_event_json("hidden_banners_updated", json!({ "ids": list.ids }));
+            crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Banners);
+            Ok(json!(list.ids))
+        }
         "get_paused_downloads" => Ok(json!({})),
         "get_unread_counts" => to_value(db::events::unread_counts().await?),
         "update_unread_counter" => Ok(json!(messaging::unread_total().await)),

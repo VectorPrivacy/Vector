@@ -1036,7 +1036,7 @@ async fn reconcile() {
     publish_projection(Pref::Mutes);
 }
 
-fn publish_projection(pref: Pref) {
+pub(crate) fn publish_projection(pref: Pref) {
     db::spawn_bound(async move {
         let Some(client) = state::nostr_client() else { return };
         // Never publish over a relay copy this device hasn't reconciled.
@@ -1045,6 +1045,7 @@ fn publish_projection(pref: Pref) {
         }
         let json = match pref {
             Pref::Notify => notify::to_wire().to_json(),
+            Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
             Pref::Mutes => {
                 let mut list = IdList::default();
                 let state = STATE.lock().await;
