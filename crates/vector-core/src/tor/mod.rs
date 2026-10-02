@@ -440,8 +440,7 @@ impl TorService {
         // isolation tag matches, potentially routing new traffic over a
         // pre-bridge guard. Rotating forces every new stream to a freshly
         // built circuit through whichever guard the new config selects.
-        let new_token = tor_circmgr::isolation::IsolationToken::new();
-        *isolation_slot().lock().unwrap_or_else(|e| e.into_inner()) = new_token;
+        rotate_circuits();
 
         Ok(())
     }
@@ -820,6 +819,99 @@ pub fn rotate_circuits() {
     // state; recover the inner value rather than panicking the whole process.
     let mut guard = isolation_slot().lock().unwrap_or_else(|e| e.into_inner());
     *guard = tor_circmgr::isolation::IsolationToken::new();
+    drop(guard);
+    host_isolation().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    host_tunnels().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *LATEST_HOST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Multi-circuit (the default): every host rides its own circuit, so one stalled circuit costs
+/// one connection and no exit sees the whole set of relays and servers. Off: one shared circuit.
+static MULTI_CIRCUIT: AtomicBool = AtomicBool::new(true);
+
+/// Is each host on its own circuit?
+pub fn multi_circuit() -> bool {
+    MULTI_CIRCUIT.load(Ordering::Acquire)
+}
+
+/// Switch circuit mode. Callers rotate the circuits and cycle sockets so live streams move too.
+pub fn set_multi_circuit(on: bool) {
+    MULTI_CIRCUIT.store(on, Ordering::Release);
+}
+
+#[cfg(feature = "tor")]
+type HostTokens = std::collections::HashMap<String, tor_circmgr::isolation::IsolationToken>;
+
+#[cfg(feature = "tor")]
+fn host_isolation() -> &'static Mutex<HostTokens> {
+    static SLOT: OnceLock<Mutex<HostTokens>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(HostTokens::new()))
+}
+
+/// The circuit each host's latest stream rode, held weakly: a closed circuit simply drops out.
+#[cfg(feature = "tor")]
+type HostTunnels = std::collections::HashMap<String, std::sync::Weak<tor_proto::ClientTunnel>>;
+
+#[cfg(feature = "tor")]
+fn host_tunnels() -> &'static Mutex<HostTunnels> {
+    static SLOT: OnceLock<Mutex<HostTunnels>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(HostTunnels::new()))
+}
+
+/// The isolation a new stream to `host` carries: its own per-host token, or the shared one.
+#[cfg(feature = "tor")]
+pub fn isolation_for(host: &str) -> tor_circmgr::isolation::IsolationToken {
+    if !multi_circuit() {
+        return current_isolation_token();
+    }
+    *host_isolation()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(host.to_ascii_lowercase())
+        .or_insert_with(tor_circmgr::isolation::IsolationToken::new)
+}
+
+/// Remember the circuit a stream to `host` was attached to.
+#[cfg(feature = "tor")]
+pub(crate) fn record_tunnel(host: &str, tunnel: &Arc<tor_proto::ClientTunnel>) {
+    let mut map = host_tunnels().lock().unwrap_or_else(|e| e.into_inner());
+    // Bounded by hosts contacted this generation; dead entries go once it grows.
+    if map.len() > 256 {
+        map.retain(|_, t| t.strong_count() > 0);
+    }
+    let host = host.to_ascii_lowercase();
+    map.insert(host.clone(), Arc::downgrade(tunnel));
+    *LATEST_HOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(host);
+}
+
+/// Open circuits carrying traffic now, and how many hosts they serve.
+#[cfg(feature = "tor")]
+pub fn active_circuits() -> (usize, usize) {
+    let map = host_tunnels().lock().unwrap_or_else(|e| e.into_inner());
+    let mut circuits = std::collections::HashSet::new();
+    let mut hosts = 0;
+    for tunnel in map.values().filter_map(std::sync::Weak::upgrade) {
+        hosts += 1;
+        circuits.insert(Arc::as_ptr(&tunnel) as usize);
+    }
+    (circuits.len(), hosts)
+}
+
+/// The circuit `host` is currently using, if a stream to it went over Tor recently and that
+/// circuit is still open.
+#[cfg(feature = "tor")]
+pub fn host_circuit_hops(host: &str) -> Option<Result<Vec<CircuitHop>, String>> {
+    let tunnel = host_tunnels()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&host.to_ascii_lowercase())
+        .and_then(std::sync::Weak::upgrade)?;
+    Some(tunnel_hops(&tunnel))
+}
+
+#[cfg(not(feature = "tor"))]
+pub fn host_circuit_hops(_host: &str) -> Option<Result<Vec<CircuitHop>, String>> {
+    None
 }
 
 /// Read the current isolation token. Used by the SOCKS handler to label
@@ -847,46 +939,30 @@ pub struct CircuitHop {
     pub is_bridge: bool,
 }
 
-/// Return the current circuit's hop list. Awaits bootstrap if it isn't done
-/// yet.
-///
-/// `force_new`: when true, rotates the global circuit isolation token before
-/// querying — so the returned hops describe a brand-new circuit AND every
-/// SOCKS connection opened after this point ends up on circuits matching
-/// the new token. The caller is responsible for cycling existing sockets
-/// (e.g. via the relay-transport switch) so old streams move onto the new
-/// path.
-///
-/// Returns Err if Tor isn't running or no consensus is available yet.
+/// The circuit Vector's traffic is on, with the host whose stream rode it last: the most
+/// recently used circuit that is still open. Before any traffic, one is built for the shared
+/// isolation so the view isn't empty. "New circuit" is `rotate_circuits` plus a socket cycle.
 #[cfg(feature = "tor")]
-pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, String> {
-    use tor_circmgr::isolation::{IsolationToken, StreamIsolation};
+pub async fn current_circuit_hops() -> Result<(Option<String>, Vec<CircuitHop>), String> {
+    use tor_circmgr::isolation::StreamIsolation;
     use tor_dirmgr::Timeliness;
-    use tor_linkspec::{HasAddrs, HasRelayIds, RelayIdType};
+
+    let latest = latest_tunnel();
+    if let Some((host, tunnel)) = latest {
+        return Ok((Some(host), tunnel_hops(&tunnel)?));
+    }
 
     let svc = current().ok_or_else(|| "Tor not running".to_string())?;
-
     let netdir = svc
         .client
         .dirmgr()
         .map_err(|e| format!("dirmgr unavailable: {e}"))?
         .netdir(Timeliness::Timely)
         .map_err(|e| format!("netdir unavailable: {e}"))?;
-
-    // For force_new, build with a fresh local token. Only commit it to the
-    // global slot AFTER the build succeeds — a failed/timed-out build with
-    // the global already rotated would leave every subsequent SOCKS connect
-    // unable to find a matching circuit.
-    let token = if force_new {
-        IsolationToken::new()
-    } else {
-        current_isolation_token()
-    };
     let isolation = StreamIsolation::builder()
-        .owner_token(token)
+        .owner_token(current_isolation_token())
         .build()
         .map_err(|e| format!("isolation build: {e}"))?;
-
     let tunnel = svc
         .client
         .circmgr()
@@ -894,13 +970,24 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
         .get_or_launch_exit(netdir.as_ref().into(), &[], isolation)
         .await
         .map_err(|e| format!("launch exit: {e}"))?;
+    Ok((None, tunnel_hops(tunnel.as_ref())?))
+}
 
-    if force_new {
-        *isolation_slot().lock().unwrap_or_else(|e| e.into_inner()) = token;
-    }
+/// The host whose stream most recently rode a circuit, with that circuit, while it is open.
+#[cfg(feature = "tor")]
+fn latest_tunnel() -> Option<(String, Arc<tor_proto::ClientTunnel>)> {
+    let slot = LATEST_HOST.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let tunnel = host_tunnels().lock().unwrap_or_else(|e| e.into_inner()).get(&slot)?.upgrade()?;
+    Some((slot, tunnel))
+}
 
+#[cfg(feature = "tor")]
+static LATEST_HOST: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(feature = "tor")]
+fn tunnel_hops(tunnel: &tor_proto::ClientTunnel) -> Result<Vec<CircuitHop>, String> {
+    use tor_linkspec::{HasAddrs, HasRelayIds, RelayIdType};
     let path = tunnel
-        .as_ref()
         .all_paths()
         .into_iter()
         .next()
@@ -955,8 +1042,31 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
 }
 
 #[cfg(not(feature = "tor"))]
-pub async fn current_circuit_hops(_force_new: bool) -> Result<Vec<CircuitHop>, String> {
+pub async fn current_circuit_hops() -> Result<(Option<String>, Vec<CircuitHop>), String> {
     Err("Vector was built without the `tor` feature.".to_string())
+}
+
+#[cfg(test)]
+mod circuit_mode_tests {
+    use super::*;
+
+    // ONE test: the mode and tokens are process-global, so split tests would race.
+    #[test]
+    fn isolation_follows_the_circuit_mode() {
+        set_multi_circuit(true);
+        let a = isolation_for("relay.one.example");
+        assert_eq!(a, isolation_for("RELAY.one.example"), "a host keeps its circuit");
+        assert_ne!(a, isolation_for("relay.two.example"), "each host gets its own circuit");
+
+        rotate_circuits();
+        assert_ne!(a, isolation_for("relay.one.example"), "a new circuit replaces every host's");
+
+        set_multi_circuit(false);
+        let shared = current_isolation_token();
+        assert_eq!(isolation_for("relay.one.example"), shared, "single mode shares one circuit");
+        assert_eq!(isolation_for("relay.two.example"), shared);
+        set_multi_circuit(true);
+    }
 }
 
 #[cfg(test)]

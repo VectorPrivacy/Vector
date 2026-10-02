@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tor-get-host-circuit"
+description = "Enables the tor_get_host_circuit command without any pre-configured scope."
+commands.allow = ["tor_get_host_circuit"]
+
+[[permission]]
+identifier = "deny-tor-get-host-circuit"
+description = "Denies the tor_get_host_circuit command without any pre-configured scope."
+commands.deny = ["tor_get_host_circuit"]

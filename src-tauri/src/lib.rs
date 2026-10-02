@@ -872,6 +872,8 @@ pub fn run() {
             commands::tor::tor_get_state,
             commands::tor::tor_set_enabled,
             commands::tor::tor_set_prelogin,
+            commands::tor::tor_get_host_circuit,
+            commands::tor::tor_set_multi_circuit,
             commands::tor::tor_prelogin_abandon,
             commands::tor::tor_get_circuits,
             commands::tor::tor_get_bridges,

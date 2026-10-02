@@ -116,17 +116,27 @@ async function loadTorCircuits(forceRefresh = false, forceNewCircuit = false) {
     if (_torCircuitsLoading) return;
     if (_torCircuitsLoaded && !forceRefresh) return;
     _torCircuitsLoading = true;
-    VectorSvelte.setTorCircuits({ phase: 'loading', hops: [], error: '' });
+    VectorSvelte.setTorCircuits({ phase: 'loading', hops: [], host: '', error: '' });
     try {
-        const hops = await invoke('tor_get_circuits', { forceNew: forceNewCircuit });
-        VectorSvelte.setTorCircuits({ phase: 'ok', hops: Array.isArray(hops) ? hops : [], error: '' });
+        const c = await invoke('tor_get_circuits', { forceNew: forceNewCircuit });
+        VectorSvelte.setTorCircuits(circuitView(c));
         _torCircuitsLoaded = true;
     } catch (err) {
         console.warn('[Tor] tor_get_circuits failed:', err);
-        VectorSvelte.setTorCircuits({ phase: 'error', hops: [], error: String(err) });
+        VectorSvelte.setTorCircuits({ phase: 'error', hops: [], host: '', error: String(err) });
     } finally {
         _torCircuitsLoading = false;
     }
+}
+
+function circuitView(c) {
+    return { phase: 'ok', hops: Array.isArray(c?.hops) ? c.hops : [], host: c?.host || '', count: c?.circuits || 0, hosts: c?.hosts || 0, error: '' };
+}
+
+/** Multi-circuit's count moves as hosts are contacted: re-read it quietly, no loading state. */
+async function refreshTorCircuitCount() {
+    if (_torCircuitsLoading) return;
+    try { VectorSvelte.setTorCircuits(circuitView(await invoke('tor_get_circuits', { forceNew: false }))); } catch (_) { /* the next tick retries */ }
 }
 
 /** Hydrate the bridges editor from the backend. */
@@ -1099,6 +1109,20 @@ function loadBlockedUsersList() {
     VectorSvelte.reloadBlockedUsers();
 }
 
+/** Multi-Circuit: every live connection moves to the new mode at once. */
+async function setTorMultiCircuit(on) {
+    VectorSvelte.setTorLocked(true);
+    try {
+        torApply(await invoke('tor_set_multi_circuit', { enabled: on }));
+        await loadTorCircuits(true);
+    } catch (err) {
+        console.error('[Tor] tor_set_multi_circuit failed:', err);
+        try { torApply(await invoke('tor_get_state')); } catch (_) {}
+    } finally {
+        VectorSvelte.setTorLocked(false);
+    }
+}
+
 /** The Tor toggle: persist the preference and start or stop the embedded service. */
 async function setTorEnabled(desired) {
     VectorSvelte.setTorLocked(true);
@@ -1781,6 +1805,7 @@ const SETTINGS_HELP = {
         'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
         + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
         + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
+    torMultiCircuit: ['Multi-Circuit', 'Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.'],
     torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before turning Tor on.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
     gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
@@ -1871,10 +1896,12 @@ const SETTINGS_HELPERS = {
         help: showSettingsHelp,
         openLink: (key) => openUrl(SETTINGS_LINKS[key]),
         loadCircuits: () => loadTorCircuits(false),
+        refreshCircuitCount: refreshTorCircuitCount,
         // A new circuit rotates the isolation token AND cycles relay sockets; the
         // bridges flows only refresh the display.
         newCircuit: () => loadTorCircuits(true, true),
         setBridgesEnabled: setTorBridgesEnabled,
+        setMultiCircuit: setTorMultiCircuit,
         bridgesInput: onTorBridgesInput,
         applyBridges: applyTorBridges,
     },

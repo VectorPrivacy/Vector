@@ -7,11 +7,13 @@ export const addRelayDialog = fadeDialog({ url: '', mode: 'both' });
 export const relayInfoDialog = popOverlay({
     url: '', status: '', isDefault: false, enabled: true, mode: 'both',
     ping: '--', pingColor: '', lastCheck: '--', copied: false,
+    // The Tor circuit this relay is on (hops), or null when it isn't riding one.
+    circuit: null,
 });
 
 // Pops like the QR overlay: the content is ready in the first frame, so the motion is
 // the only cue that something opened.
-export const blossomInfoDialog = popOverlay({ url: '', enabled: true, isCustom: false, status: null });
+export const blossomInfoDialog = popOverlay({ url: '', enabled: true, isCustom: false, status: null, circuit: null });
 
 
 const blossomCaps = $state({ status: 'loading', caps: [] });

@@ -7,6 +7,7 @@
     import BlossomCaps from './BlossomCaps.svelte';
     import BlossomAccount from './BlossomAccount.svelte';
     import BlossomPerformance from './BlossomPerformance.svelte';
+    import CircuitHops from '../CircuitHops.svelte';
     let { h } = $props();   // h: close(), action(), formatBytes
     const st = blossomInfoDialog.state();
     const doc = blossomInfoState();
@@ -84,6 +85,12 @@
                             This server doesn’t say what it accepts, so Vector learns as you send: the largest file it has taken of each type, and the types it has refused. Uploads are routed to the best-suited server automatically.
                         </p>
                         <div class="blossom-cap-slot"><BlossomCaps {h} /></div>
+                    </div>
+                {/if}
+                {#if st.circuit}
+                    <div class="relay-connection">
+                        <h4>Connection</h4>
+                        <ol class="tor-circuits"><CircuitHops hops={st.circuit} /></ol>
                     </div>
                 {/if}
                 <div class="relay-dialog-buttons">

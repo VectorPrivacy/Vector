@@ -6,18 +6,26 @@
     import TorCircuits from './TorCircuits.svelte';
     import InfoIcon from './InfoIcon.svelte';
 
-    let { h } = $props();   // h: help(key), loadCircuits(), newCircuit(), setBridgesEnabled(on), bridgesInput(), applyBridges(), openLink(key)
+    let { h } = $props();   // h: help(key), loadCircuits(), refreshCircuitCount(), newCircuit(), setBridgesEnabled(on), setMultiCircuit(on), bridgesInput(), applyBridges(), openLink(key)
 
     const tor = torState();
     const sc = settingsScreen();
     const b = $derived(sc.bridges);
     const connected = $derived(!!tor.state?.running);
+    const multi = $derived(tor.state?.multi_circuit !== false);
     const dirty = $derived(b.lines !== b.saved);
     const lineCount = $derived(b.lines.split(/\r?\n/).map(l => l.trim()).filter(Boolean).length);
     const status = $derived(b.status || (lineCount === 0 ? 'No bridges configured.' : `${lineCount} bridge${lineCount === 1 ? '' : 's'} configured`));
 
     // The circuit is read once per connection; New builds another on request.
     $effect(() => { if (connected) h.loadCircuits(); });
+    // The count follows hosts being contacted, so it re-reads while this is on screen.
+    $effect(() => {
+        if (!connected || !multi) return;
+        const t = setInterval(() => h.refreshCircuitCount(), 5000);
+        return () => clearInterval(t);
+    });
+    const c = $derived(tor.circuits);
 </script>
 
 <div class="form-group">
@@ -51,10 +59,18 @@
     </div>
 </div>
 
+<div class="form-group">
+    <label class="toggle-container">
+        <span><InfoIcon onclick={() => h.help('torMultiCircuit')} />Multi-Circuit</span>
+        <input type="checkbox" checked={multi} disabled={tor.locked} onchange={(e) => h.setMultiCircuit(e.currentTarget.checked)}>
+        <span class="neon-toggle"></span>
+    </label>
+</div>
+
 {#if connected}
     <div class="tor-circuit">
         <header class="tor-circuits-head">
-            <span class="tor-circuits-head-label">Active Circuit</span>
+            <span class="tor-circuits-head-label">{multi ? 'Circuits' : 'Active Circuit'}</span>
             <button type="button" id="tor-circuits-refresh" class="tor-circuits-refresh" title="Build a new circuit"
                     disabled={tor.circuits.phase === 'loading'} onclick={() => h.newCircuit()}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -64,6 +80,16 @@
                 <span>New</span>
             </button>
         </header>
-        <ol class="tor-circuits"><TorCircuits /></ol>
+        {#if multi && c.phase === 'ok'}
+            <div class="tor-circuit-count">
+                <span class="tor-circuit-count-num">{c.count}</span>
+                <span class="tor-circuit-count-text">
+                    active circuit{c.count === 1 ? '' : 's'}
+                    <span class="tor-circuit-count-sub">across {c.hosts} {c.hosts === 1 ? 'host' : 'relays and servers'}. Each one's circuit is in its info.</span>
+                </span>
+            </div>
+        {:else}
+            <ol class="tor-circuits"><TorCircuits /></ol>
+        {/if}
     </div>
 {/if}

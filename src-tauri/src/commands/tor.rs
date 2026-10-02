@@ -30,6 +30,8 @@ pub struct TorState {
     pub bootstrap_progress: u8,
     /// The welcome screen's Tor choice (install-wide), which the next account inherits.
     pub prelogin: bool,
+    /// Each host on its own circuit (default), or one shared circuit.
+    pub multi_circuit: bool,
     /// `socks5h://127.0.0.1:<port>` while the service is up, else None.
     /// Lets JS-initiated plugin requests (updater) ride the same proxy —
     /// they use their own reqwest client, invisible to the backend failsafe.
@@ -268,6 +270,8 @@ async fn start_prelogin() -> Result<(), String> {
 pub async fn apply_prelogin(enabled: bool) -> Result<(), String> {
     vector_core::tor::arm_prelogin_carry(enabled);
     if enabled {
+        // No account yet, so no saved circuit mode: the default.
+        vector_core::tor::set_multi_circuit(true);
         vector_core::tor::set_tor_enabled_pref(true);
         vector_core::net::rebuild_shared_http_client()?;
         start_prelogin().await?;
@@ -496,40 +500,95 @@ pub async fn tor_set_bridges(enabled: bool, lines: String) -> Result<BridgesStat
 /// the displayed hops are exactly the path your relays + HTTP traffic
 /// are now riding.
 #[tauri::command]
-pub async fn tor_get_circuits(force_new: Option<bool>) -> Result<Vec<CircuitHopOut>, String> {
+pub async fn tor_get_circuits(force_new: Option<bool>) -> Result<CircuitOut, String> {
     let force_new = force_new.unwrap_or(false);
     #[cfg(feature = "tor")]
     {
+        if force_new {
+            // Every token rotates, then every relay socket reconnects onto a fresh circuit.
+            vector_core::tor::rotate_circuits();
+            vector_core::net::rebuild_shared_http_client()?;
+            switch_relay_transport(true).await?;
+        }
+        let (circuits, hosts) = vector_core::tor::active_circuits();
+        // Multi-circuit has no one circuit to show: the count is the view, and it builds nothing.
+        if vector_core::tor::multi_circuit() {
+            return Ok(CircuitOut { host: None, hops: Vec::new(), circuits, hosts });
+        }
         // Hard cap so the UI can't get stuck on "Building circuit…" if Arti
         // can't find an exit (consensus stale, all candidate exits down, etc.).
-        let timeout = std::time::Duration::from_secs(20);
-        let hops = tokio::time::timeout(
-            timeout,
-            vector_core::tor::current_circuit_hops(force_new),
+        let (host, hops) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            vector_core::tor::current_circuit_hops(),
         )
         .await
         .map_err(|_| "Timed out building/reading circuit (20s)".to_string())??;
-        if force_new {
-            // Force every existing relay socket to reconnect. New sockets
-            // pick up the rotated isolation token via the SOCKS handler and
-            // land on the freshly-built circuit.
-            switch_relay_transport(true).await?;
-        }
-        Ok(hops
-            .into_iter()
-            .map(|h| CircuitHopOut {
-                position: h.position,
-                address: h.address,
-                fingerprint: h.fingerprint,
-                is_bridge: h.is_bridge,
-            })
-            .collect())
+        Ok(CircuitOut { host, hops: hops.into_iter().map(hop_out).collect(), circuits, hosts })
     }
     #[cfg(not(feature = "tor"))]
     {
         let _ = force_new;
         Err("This Vector build was compiled without the `tor` feature.".to_string())
     }
+}
+
+/// The circuit view: in single-circuit mode its hops and the host that last rode it (None before
+/// any traffic); in both modes how many circuits are open and how many hosts they serve.
+#[derive(Debug, Serialize)]
+pub struct CircuitOut {
+    pub host: Option<String>,
+    pub hops: Vec<CircuitHopOut>,
+    pub circuits: usize,
+    pub hosts: usize,
+}
+
+#[cfg(feature = "tor")]
+fn hop_out(h: vector_core::tor::CircuitHop) -> CircuitHopOut {
+    CircuitHopOut { position: h.position, address: h.address, fingerprint: h.fingerprint, is_bridge: h.is_bridge }
+}
+
+/// The circuit one relay or server is on, for its info dialog: present only while Tor carries
+/// traffic to it and that circuit is still open.
+#[tauri::command]
+pub fn tor_get_host_circuit(url: String) -> Result<Option<Vec<CircuitHopOut>>, String> {
+    #[cfg(feature = "tor")]
+    {
+        if !vector_core::tor::is_active() {
+            return Ok(None);
+        }
+        let Some(host) = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)) else {
+            return Ok(None);
+        };
+        match vector_core::tor::host_circuit_hops(&host) {
+            Some(hops) => Ok(Some(hops?.into_iter().map(hop_out).collect())),
+            None => Ok(None),
+        }
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        let _ = url;
+        Ok(None)
+    }
+}
+
+/// Multi-circuit (each host on its own circuit) or one shared circuit. Live streams move at once:
+/// every token rotates and every relay socket reconnects.
+#[tauri::command]
+pub async fn tor_set_multi_circuit(enabled: bool) -> Result<TorState, String> {
+    vector_core::db::settings::set_sql_setting(
+        "tor_multi_circuit".to_string(),
+        if enabled { "1" } else { "0" }.to_string(),
+    )?;
+    #[cfg(feature = "tor")]
+    {
+        vector_core::tor::set_multi_circuit(enabled);
+        vector_core::tor::rotate_circuits();
+        if vector_core::tor::is_active() {
+            vector_core::net::rebuild_shared_http_client()?;
+            switch_relay_transport(true).await?;
+        }
+    }
+    Ok(tor_get_state())
 }
 
 /// Read the current Tor state. Cheap, safe to poll from the UI.
@@ -561,9 +620,16 @@ pub fn tor_get_state() -> TorState {
         #[cfg(not(feature = "tor"))]
         { false }
     };
+    let multi_circuit = {
+        #[cfg(feature = "tor")]
+        { vector_core::tor::multi_circuit() }
+        #[cfg(not(feature = "tor"))]
+        { true }
+    };
     TorState {
         enabled,
         prelogin,
+        multi_circuit,
         running,
         supported,
         status: current_status_string(),

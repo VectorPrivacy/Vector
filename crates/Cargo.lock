@@ -7993,6 +7993,7 @@ dependencies = [
  "tor-dirmgr",
  "tor-guardmgr",
  "tor-linkspec",
+ "tor-proto",
  "tor-rtcompat",
  "unicode-normalization",
  "url",

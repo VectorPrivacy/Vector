@@ -5,7 +5,7 @@ const tor = $state({
     state: null,          // TorState from the backend, or the handler's optimistic one
     statusOverride: '',   // handler-supplied status text ("Bootstrapping…", "Failed: …")
     locked: false,        // an operation is in flight: the toggle stays disabled
-    circuits: { phase: 'idle', hops: [], error: '' },   // idle | loading | ok | error
+    circuits: { phase: 'idle', hops: [], host: '', count: 0, hosts: 0, error: '' },   // idle | loading | ok | error
 });
 
 export function torState() { return tor; }

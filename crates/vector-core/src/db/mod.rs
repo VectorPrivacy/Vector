@@ -1392,6 +1392,17 @@ pub fn init_database(npub: &str) -> Result<(), String> {
         // commit stamps it (`tor::commit_prelogin_carry`), so an abandoned staging keeps nothing.
         let enabled = crate::tor::effective_tor_pref(enabled);
         crate::tor::set_tor_enabled_pref(enabled);
+        // Multi-circuit unless this account chose a single shared circuit.
+        let single = create_connection(&db_path)
+            .ok()
+            .and_then(|c| {
+                c.query_row("SELECT value FROM settings WHERE key = 'tor_multi_circuit'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok()
+            })
+            .is_some_and(|v| v == "0" || v == "false");
+        crate::tor::set_multi_circuit(!single);
     }
 
     // Read the notification preferences now: every badge recount resolves every

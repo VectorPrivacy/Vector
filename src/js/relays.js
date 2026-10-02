@@ -121,6 +121,9 @@ async function refreshRelayInfoDialog() {
         console.error('Failed to refresh relay data:', err);
     }
 
+    // The circuit moves when Tor rebuilds it, so it refreshes with the rest.
+    hostCircuit(url).then((circuit) => { if (currentRelayInfo?.url === url) dialog.patch({ circuit }); });
+
     // Refresh metrics
     try {
         const metrics = await invoke('get_relay_metrics', { url });
@@ -170,7 +173,7 @@ async function openRelayInfoDialog(relay) {
     VectorSvelte.relayInfoDialog.patch({
         url: relay.url.replace(/^wss?:\/\//, ''), status: relay.status || '',
         isDefault: !!relay.is_default, enabled: relay.enabled !== false, mode: relay.mode || 'both',
-        ping: '--', pingColor: '', lastCheck: '--', copied: false,
+        ping: '--', pingColor: '', lastCheck: '--', copied: false, circuit: null,
     });
 
     // Open on the relay we already hold; ping, last check and logs fill in.
@@ -224,7 +227,7 @@ function openBlossomServerInfoDialog(server) {
     currentBlossomInfo = server;
     VectorSvelte.blossomInfoDialog.open({
         url: server.url.replace(/^https?:\/\//, ''), enabled: !!server.enabled, isCustom: !!server.is_custom,
-        status: server.status || null,
+        status: server.status || null, circuit: null,
     });
     // Reset synchronously so stale data doesn't flash mid-fetch.
     VectorSvelte.setBlossomCaps('loading', []);
@@ -280,6 +283,19 @@ async function renderBlossomInfo(url, token) {
         VectorSvelte.blossomInfoDialog.patch({ status });
     } catch (err) {
         console.warn('Failed to load blossom server stats:', err);
+    }
+    // Last: the fetches above are what put this server on a circuit.
+    const circuit = await hostCircuit(url);
+    if (token === _blossomCapsToken) VectorSvelte.blossomInfoDialog.patch({ circuit });
+}
+
+/** The Tor circuit a relay or server is on, or null (Tor off, or nothing sent there lately). */
+async function hostCircuit(url) {
+    try {
+        const hops = await invoke('tor_get_host_circuit', { url });
+        return Array.isArray(hops) && hops.length ? hops : null;
+    } catch (_) {
+        return null;
     }
 }
 

@@ -137,15 +137,13 @@ async fn handle(
     let port = u16::from_be_bytes(port_buf);
 
     // ---- Connect via Arti ----
-    // Tag the stream with the current isolation token so all of Vector's
-    // traffic shares circuits matching that token. When the user clicks
-    // "New circuit", super::rotate_circuits() bumps the token and new
-    // streams land on a fresh circuit.
+    // Tag the stream with its host's isolation (or the shared one in single-circuit mode).
+    // "New circuit" rotates every token, so new streams land on fresh circuits.
     let addr = (host.as_str(), port)
         .into_tor_addr()
         .map_err(|e| format!("addr parse: {e}"))?;
     let mut prefs = StreamPrefs::new();
-    prefs.set_isolation(super::current_isolation_token());
+    prefs.set_isolation(super::isolation_for(&host));
     let stream = match tor.connect_with_prefs(addr, &prefs).await {
         Ok(s) => s,
         Err(e) => {
@@ -154,6 +152,12 @@ async fn handle(
             return Err(format!("tor connect: {e}"));
         }
     };
+    {
+        use tor_proto::client::stream::ClientStreamCtrl;
+        if let Some(tunnel) = stream.client_stream_ctrl().and_then(|c| c.tunnel()) {
+            super::record_tunnel(&host, &tunnel);
+        }
+    }
     write_reply(&mut conn, REP_SUCCEEDED).await;
 
     // ---- Splice ----

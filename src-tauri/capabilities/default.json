@@ -417,6 +417,8 @@
     "allow-tor-get-state",
     "allow-tor-set-enabled",
     "allow-tor-set-prelogin",
+    "allow-tor-get-host-circuit",
+    "allow-tor-set-multi-circuit",
     "allow-tor-prelogin-abandon",
     "allow-tor-get-circuits",
     "allow-tor-get-bridges",

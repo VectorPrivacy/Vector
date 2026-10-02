@@ -8628,6 +8628,34 @@ select {
 
 /* The circuit, once connected: a faint label with New beside it, the hops below. */
 .tor-circuit { margin-top: 14px; }
+/* Multi-circuit: the count stands in for a single circuit's hops. */
+.tor-circuit-count {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0 2px;
+}
+.tor-circuit-count-num {
+  min-width: 2ch;
+  color: #c9a4ff;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.tor-circuit-count-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 14px;
+  line-height: 17px;
+}
+.tor-circuit-count-sub {
+  color: #474747;
+  font-size: 12px;
+  line-height: 15px;
+}
 .tor-circuits-head {
   display: flex;
   align-items: center;
@@ -12313,12 +12341,20 @@ button.popout-thumb {
 
 /* Relay Info Dialog Specific */
 .relay-metrics-section h4,
-.relay-logs-section h4 {
+.relay-logs-section h4,
+.relay-connection h4 {
   font-size: 13px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.7);
   margin: 0;
 }
+
+/* The Tor circuit this relay or server rides, set apart from its own settings. */
+.relay-connection {
+  padding-top: 12px;
+  border-top: 1px solid #262626;
+}
+.relay-connection .tor-circuits { margin-top: 8px; }
 
 .relay-metrics-header,
 .relay-logs-header {

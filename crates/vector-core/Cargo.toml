@@ -99,6 +99,8 @@ arti-client = { version = "0.45", default-features = false, features = ["tokio",
 tor-rtcompat = { version = "0.45", default-features = false, features = ["tokio", "rustls"], optional = true }
 # For circuit introspection (the "Advanced" panel showing live hops).
 tor-circmgr = { version = "0.45", default-features = false, optional = true }
+# `stream-ctrl`: the circuit a stream actually rides, for the per-host circuit view.
+tor-proto = { version = "0.45", default-features = false, features = ["stream-ctrl"], optional = true }
 tor-dirmgr = { version = "0.45", default-features = false, optional = true }
 tor-linkspec = { version = "0.45", default-features = false, optional = true }
 tor-guardmgr = { version = "0.45", default-features = false, features = ["bridge-client", "pt-client"], optional = true }
@@ -137,7 +139,7 @@ xdc = ["dep:iroh", "dep:iroh-gossip", "dep:noq-proto", "dep:zip", "dep:toml"]
 # Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
 # bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
 # `tor::proxy_url()` returning `Some(socks5h://127.0.0.1:<port>)` when active.
-tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
+tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-proto", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
 
 [dev-dependencies]
 # Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.
