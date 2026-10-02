@@ -95,6 +95,7 @@ pub mod webxdc_permissions;
 pub mod xdc;
 #[cfg(feature = "tor")]
 pub mod tor;
+pub mod svg;
 
 /// NIP-42 authenticator.
 ///

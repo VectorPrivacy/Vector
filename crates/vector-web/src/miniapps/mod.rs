@@ -109,11 +109,16 @@ pub(crate) async fn end_sessions() {
 
 // ─── Package info ───────────────────────────────────────────────────────────
 
+/// The icon as a data URL the page can show: an SVG as the pixels it draws, never its markup.
 fn icon_data_url(icon: &Option<(Vec<u8>, &'static str)>) -> Value {
-    match icon {
-        Some((bytes, mime)) => json!(format!("data:{mime};base64,{}", base64_simd::STANDARD.encode_to_string(bytes))),
-        None => Value::Null,
+    let Some((bytes, mime)) = icon else { return Value::Null };
+    if vector_core::svg::looks_like_svg(bytes) {
+        return match vector_core::svg::rasterize_png(bytes, 256) {
+            Ok(png) => json!(format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png))),
+            Err(_) => Value::Null,
+        };
     }
+    json!(format!("data:{mime};base64,{}", base64_simd::STANDARD.encode_to_string(bytes)))
 }
 
 fn info_json(pkg: &package::Package, uses_realtime: bool) -> Value {

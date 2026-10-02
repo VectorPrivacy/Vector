@@ -40,12 +40,19 @@ pub struct MiniAppInfo {
     pub uses_realtime: bool,
 }
 
+/// A Mini App icon as a data URI the webview can show: an SVG as the pixels it draws, never its
+/// markup; one that refuses to render shows no icon.
+fn icon_data_uri(bytes: &[u8]) -> Option<String> {
+    if vector_core::svg::looks_like_svg(bytes) {
+        let png = vector_core::svg::rasterize_png(bytes, 256).ok()?;
+        return Some(crate::util::data_uri("image/png", &png));
+    }
+    Some(crate::util::data_uri(crate::util::mime_from_magic_bytes(bytes), bytes))
+}
+
 impl MiniAppInfo {
     pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
-        let icon_data = pkg.get_icon().map(|bytes| {
-            let mime = crate::util::mime_from_magic_bytes(&bytes);
-            crate::util::data_uri(mime, &bytes)
-        });
+        let icon_data = pkg.get_icon().and_then(|bytes| icon_data_uri(&bytes));
 
         Self {
             id: pkg.id.clone(),
@@ -811,10 +818,7 @@ fn load_info_from_bytes(bytes: &[u8], file_name: &str) -> Result<MiniAppInfo, Er
     let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(bytes, &fallback_name)?;
 
     // Convert icon bytes to base64 data URL
-    let icon_data = icon_bytes.map(|bytes| {
-        let mime = crate::util::mime_from_magic_bytes(&bytes);
-        crate::util::data_uri(mime, &bytes)
-    });
+    let icon_data = icon_bytes.and_then(|bytes| icon_data_uri(&bytes));
 
     Ok(MiniAppInfo {
         id: format!("miniapp_preview_{}", md5_hash(file_name)),

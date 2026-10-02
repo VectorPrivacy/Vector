@@ -66,15 +66,15 @@ collect(join(OUT, 'icons'), '/icons/');
 collect(join(OUT, 'fonts'), '/fonts/');
 writeFileSync(join(OUT, 'web', 'warm.json'), JSON.stringify(warm));
 
-// Desktop's policy, minus Tauri's schemes. Remote images are allowed because
-// without a media proxy the page loads them directly, as desktop does.
+// Desktop's policy, minus Tauri's schemes. Nothing remote: every remote file reaches the page
+// as a local copy the worker fetched and checked.
 export const CSP = [
     "default-src 'self'",
     "script-src 'self'",
-    "img-src 'self' data: blob: https:",
-    "media-src 'self' blob: https://gifverse.net",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
     "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' blob: https://gifverse.net",
+    "connect-src 'self' blob:",
     "worker-src 'self'",
     // Mini apps run on subdomains of whatever host serves Vector; the server narrows
     // this to its own `*.xdc.<host>` with a header, and both policies apply.

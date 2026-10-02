@@ -2,9 +2,10 @@
     // A downloaded picture: the real image, or a thumbhash blur behind a Spoiler veil
     // until tapped. An upload in flight dims it under a progress ring.
     import UploadOverlay from './UploadOverlay.svelte';
+    import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, h } = $props();
-    // h: assetUrl(path), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
+    // h: assetUrl(path), svgRender(path, dim), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
@@ -13,7 +14,23 @@
     // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
     // author: an own message's author is not a participant of its DM.
     const chatId = h.openChat();
-    const real = $derived(h.assetUrl(att.path));
+    // An SVG shows as the backend's render of it, never as its own markup; one that refuses to
+    // render shows as a file.
+    const isSvg = $derived(att.extension?.toLowerCase() === 'svg');
+    let svgSrc = $state(null);
+    let svgRefused = $state(false);
+    $effect(() => {
+        if (!isSvg) return;
+        const path = att.path;
+        let live = true;
+        h.svgRender(path, 1024).then((src) => {
+            if (!live) return;
+            svgSrc = src;
+            svgRefused = !src;
+        });
+        return () => { live = false; };
+    });
+    const real = $derived(isSvg ? svgSrc : h.assetUrl(att.path));
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
@@ -51,7 +68,9 @@
     }
 </script>
 
-{#if spoiler && !blurFailed}
+{#if svgRefused}
+    <FileBox {att} {msg} {sender} phase="downloaded" {h} />
+{:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
             <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} alt=""
@@ -71,8 +90,8 @@
     </div>
 {:else}
     <div style="position: relative; display: inline-block; line-height: 0; max-width: 100%;" bind:this={container}>
-        {#if att.extension === 'svg'}
-            <img data-attachment-type="svg" src={real} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
+        {#if isSvg}
+            {#if real}<img data-attachment-type="svg" data-svg-path={att.path} src={real} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
             <img class="dmsg-image-attachment" src={real} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
         {/if}

@@ -275,8 +275,10 @@ async function _pcRenameEmoji(idx) {
 // MIME detection is unreliable for renamed files; the backend's magic-
 // bytes check is the final word.
 function _pcIsSupportedImage(file) {
-    if (file.type && file.type.startsWith('image/')) return true;
     const name = (file.name || '').toLowerCase();
+    // An SVG would be drawn by the webview itself here, outside the Rust renderer.
+    if (file.type === 'image/svg+xml' || name.endsWith('.svg')) return false;
+    if (file.type && file.type.startsWith('image/')) return true;
     return /\.(png|jpe?g|gif|webp)$/.test(name);
 }
 

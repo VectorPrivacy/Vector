@@ -557,9 +557,11 @@ pub async fn fetch_messages<R: Runtime>(
                             let handle = handle.clone();
                             // spawn-detached: global image cache maintenance inside spawn_blocking, no account state
                             let _ = tokio::task::spawn_blocking(move || {
+                                crate::image_cache::migrate_svg_cache(&handle);
                                 crate::image_cache::backfill_animated_cache(&handle);
                                 crate::image_cache::backfill_avatar_thumbs(&handle);
                                 crate::message::files::prune_preview_cache(&handle);
+                                crate::message::files::prune_svg_renders(&handle);
                             })
                             .await;
                         }

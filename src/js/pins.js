@@ -264,11 +264,15 @@ async function pinsUpgradeMediaPreview(row, body, pin, kind) {
     }
     // The drawer may have re-rendered or collapsed while we fetched.
     if (!att?.path || !row.classList.contains('pins-expanded') || !body.isConnected) return;
-    const src = convertFileSrc(att.path);
+    // An SVG shows as the backend's render of it; one that refuses keeps the chip.
+    const svg = kind === 'image' && /\.svg$/i.test(att.path);
+    const src = svg ? await svgRenderSrc(att.path, 1024) : convertFileSrc(att.path);
+    if (!src || !row.classList.contains('pins-expanded') || !body.isConnected) return;
     const media = kind === 'video'
         ? Object.assign(document.createElement('video'), { src, controls: true, preload: 'metadata' })
         : Object.assign(document.createElement('img'), { src, alt: '' });
     media.className = 'pins-drawer-row-media';
+    if (svg) media.dataset.svgPath = att.path;
     if (kind === 'image') {
         // The chat's fullscreen previewer, verbatim: pointer styling, its own
         // stopPropagation (the row never jumps under it), zoom/rotate included.

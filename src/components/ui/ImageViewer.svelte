@@ -28,7 +28,8 @@
             <!-- The image is the zoom and pan gesture surface. -->
             <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <img class="image-viewer-image" class:zoomed={v.zoomed} class:no-anim={v.settling || v.noAnim} class:dragging={v.dragging} draggable="false" alt=""
-                 src={v.src} use:bindImage style:transform={v.transform} style:visibility={v.settling ? 'hidden' : null}
+                 src={v.src} use:bindImage style:transform={v.transform}
+                 style:width={v.size ? `${v.size.w}px` : null} style:height={v.size ? `${v.size.h}px` : null} style:visibility={v.settling ? 'hidden' : null}
                  onload={() => h().load?.()} onerror={() => h().error?.()}
                  onmousedown={(e) => h().mouseDown?.(e)}
                  ontouchstart={(e) => h().touchStart?.(e)} ontouchmove={(e) => h().touchMove?.(e)} ontouchend={(e) => h().touchEnd?.(e)}>

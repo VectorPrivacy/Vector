@@ -2,6 +2,7 @@
 // pan arithmetic stays in previewer.js and writes here; the component paints it.
 const v = $state({
     open: false, active: false, src: '',
+    size: null,                 // { w, h } in CSS px: an SVG fills the viewer at any render size
     transform: 'translate(0, 0) scale(1)', zoomed: false,
     settling: false,            // hidden and unanimated until the first measured frame
     noAnim: false, dragging: false,   // the gesture's own transition suppression and cursor

@@ -30,14 +30,24 @@ VectorSvelte.setImageViewerHandlers({
     close: () => closeViewer(),
     rotate: () => rotateCCW(),
     load: () => {
+        // A sharper render of the same SVG: same size on screen, so the view stays where it is.
+        if (svgSwapping) {
+            svgSwapping = false;
+            return;
+        }
+        if (viewerSvg) fitViewedSvg();
         measureBaseSize();
         centerImage();
         updateTransform();
         VectorSvelte.flushSync();
         void viewerImage()?.offsetWidth;   // commit the settled transform before re-arming the transition
         VectorSvelte.setImageViewer({ settling: false });
+        if (viewerSvg) sharpenViewedSvg();
     },
-    error: () => VectorSvelte.setImageViewer({ settling: false }),
+    error: () => {
+        svgSwapping = false;
+        VectorSvelte.setImageViewer({ settling: false });
+    },
     wheel: (e) => handleWheel(e),
     mouseDown: (e) => handleMouseDown(e),
     touchStart: (e) => handleTouchStart(e),
@@ -49,6 +59,7 @@ document.addEventListener('mousemove', handleMouseMove);
 document.addEventListener('mouseup', handleMouseUp);
 window.addEventListener('resize', () => {
     if (viewerOpen && baseWidth > 0) {
+        if (viewerSvg) fitViewedSvg();
         measureBaseSize();
         updateTransform();
     }
@@ -107,10 +118,55 @@ function rotationFix() {
     return ` translate(0px, 0px) rotate(${rotation}deg)`;
 }
 
+/** An SVG drawn by the backend at `dim` px, as a URL the webview can show; null when it refuses. */
+function svgRenderSrc(path, dim) {
+    return invoke('render_svg', { path, maxDim: Math.round(dim) }).then((p) => (p ? convertFileSrc(p) : null), () => null);
+}
+
+// An SVG in the viewer is the backend's render, drawn again at the pixels it covers as it zooms.
+let viewerSvg = null;
+let svgSharpenTimer = 0;
+let svgSwapping = false;
+
+const svgViewDim = (zoom) =>
+    Math.min(4096, Math.ceil(Math.max(window.innerWidth, window.innerHeight) * (window.devicePixelRatio || 1) * Math.max(1, zoom)));
+
+/** A vector fills the viewer whatever its render's pixel size, so a sharper render swaps in place. */
+function fitViewedSvg() {
+    const img = viewerImage();
+    if (!img?.naturalWidth) return;
+    const fit = Math.min((window.innerWidth * 0.95) / img.naturalWidth, (window.innerHeight * 0.95) / img.naturalHeight);
+    VectorSvelte.setImageViewer({ size: { w: img.naturalWidth * fit, h: img.naturalHeight * fit } });
+    VectorSvelte.flushSync();
+}
+
+/** Draw the viewed SVG again once zoom outgrows its pixels. */
+function sharpenViewedSvg() {
+    const svg = viewerSvg;
+    if (!svg || !viewerOpen || VectorSvelte.imageViewerState().settling) return;
+    const dim = svgViewDim(scale);
+    if (dim <= svg.dim) return;
+    svg.dim = dim;
+    svgRenderSrc(svg.path, dim).then((src) => {
+        const view = VectorSvelte.imageViewerState();
+        // Renders come in size steps, so a nearby zoom can return the same file: no load event follows.
+        if (!src || viewerSvg !== svg || !viewerOpen || src === view.src) return;
+        svgSwapping = true;
+        VectorSvelte.setImageViewer({ src });
+    });
+}
+
 /**
  * Open image in viewer
  */
-function openImageViewer(imageSrc) {
+async function openImageViewer(imageSrc, svgPath = null) {
+    viewerSvg = null;
+    svgSwapping = false;
+    if (svgPath) {
+        // Opens on the render already on screen; the load swaps in one drawn at screen size.
+        if (!imageSrc) imageSrc = await svgRenderSrc(svgPath, svgViewDim(1));
+        if (imageSrc) viewerSvg = { path: svgPath, dim: 0 };
+    }
     scale = 1;
     translateX = 0;
     translateY = 0;
@@ -122,7 +178,7 @@ function openImageViewer(imageSrc) {
 
     // Hidden and unanimated until the first settled frame: the image otherwise paints at
     // the container's top-left and slides to centre once the load measures it.
-    VectorSvelte.setImageViewer({ open: true, active: false, src: imageSrc, settling: true, zoomed: false, transform: 'translate(0, 0) scale(1)' });
+    VectorSvelte.setImageViewer({ open: true, active: false, src: imageSrc, size: null, settling: true, zoomed: false, transform: 'translate(0, 0) scale(1)' });
     VectorSvelte.setImageViewerTip(platformFeatures.is_mobile ? 'Pinch to zoom' : 'Scroll to zoom', false);
     setTimeout(() => VectorSvelte.setImageViewer({ active: true }), 10);
 
@@ -144,6 +200,8 @@ function openImageViewer(imageSrc) {
 function closeViewer() {
     if (!viewerOpen) return;
     viewerOpen = false;
+    viewerSvg = null;
+    clearTimeout(svgSharpenTimer);
     popBack('image-viewer');
     VectorSvelte.setImageViewer({ active: false });
     setTimeout(() => { if (!viewerOpen) VectorSvelte.setImageViewer({ open: false, src: '' }); }, 200);
@@ -366,6 +424,8 @@ function updateTransform() {
  * Update zoom info display
  */
 function updateZoomInfo() {
+    clearTimeout(svgSharpenTimer);
+    if (viewerSvg) svgSharpenTimer = setTimeout(sharpenViewedSvg, 250);
     VectorSvelte.setImageViewerZoom(`${Math.round(scale * 100)}%`, true);
     // Hide after a second without zoom activity.
     if (zoomInfoTimeout) clearTimeout(zoomInfoTimeout);
@@ -389,7 +449,7 @@ function attachImagePreview(imgElement) {
         e.preventDefault();
         e.stopPropagation();
         if (imgElement.src && !imgElement.src.startsWith('data:')) {
-            openImageViewer(imgElement.src);
+            openImageViewer(imgElement.src, imgElement.dataset.svgPath || null);
         }
     });
 

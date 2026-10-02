@@ -71,9 +71,11 @@ const SUPPORTED_VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov'];
  */
 function validateImageSrc(src) {
     if (!src || typeof src !== 'string') return null;
-    // Inline images, blobs, and the app's own asset route — never a remote origin.
+    // Inline images, blobs, the app's own asset route, and Vector Web's stored files (a
+    // same-origin `/vfs/` path its service worker serves sandboxed): never a remote origin.
     if (src.startsWith('data:image/') || src.startsWith('blob:') || src.startsWith('asset://')
-        || src.startsWith('http://asset.localhost/') || src.startsWith('https://asset.localhost/')) {
+        || src.startsWith('http://asset.localhost/') || src.startsWith('https://asset.localhost/')
+        || src.startsWith('/vfs/')) {
         return src;
     }
     console.warn('[file-preview] Rejected invalid image src:', src.substring(0, 50));
@@ -176,7 +178,7 @@ function isSupportedVideo(filepath) {
 function getFileIcon(filepath) {
     const ext = getFileExtension(filepath);
     
-    if (SUPPORTED_IMAGE_EXTENSIONS.includes(ext)) {
+    if (SUPPORTED_IMAGE_EXTENSIONS.includes(ext) || ext === 'svg') {
         return 'icon-image';
     }
     
@@ -283,6 +285,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     let fileName = getFileName(filepath);
     let ext = getFileExtension(filepath);
     let androidPreview = null; // Android: the backend's preview file, as an asset URL
+    let androidPreviewPath = null;
 
     try {
         // On Android, cache the file bytes immediately while we still have permission
@@ -298,15 +301,16 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         console.error('Failed to get/cache file info:', e);
     }
     if (filePreviewGeneration !== myGeneration) return;
-    if (isAndroid && SUPPORTED_IMAGE_EXTENSIONS.includes(ext)) {
+    if (isAndroid && (SUPPORTED_IMAGE_EXTENSIONS.includes(ext) || ext === 'svg')) {
         // The pick is cached under its URI; the downscaled preview file is a second call.
         const previewPath = await invoke('preview_cached_file', { filePath: filepath }).catch(() => null);
         if (filePreviewGeneration !== myGeneration) return;
-        if (previewPath) androidPreview = convertFileSrc(previewPath);
+        if (previewPath) { androidPreview = convertFileSrc(previewPath); androidPreviewPath = previewPath; }
     }
 
     // Determine file type using the resolved extension
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
+    const isSvg = ext === 'svg';
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
     const isMiniApp = isMiniAppExtension(ext);
 
@@ -332,6 +336,12 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     let content;
     if (isMiniApp) {
         content = miniAppPreviewContent(miniAppInfo);
+    } else if (isSvg) {
+        // The pixels the backend rendered it to: an SVG's own markup never reaches the webview.
+        const previewPath = isAndroid ? androidPreviewPath : await invoke('read_image_preview', { path: filepath }).catch(() => null);
+        if (filePreviewGeneration !== myGeneration) return;
+        const src = previewPath ? validateImageSrc(convertFileSrc(previewPath)) : null;
+        content = src ? { kind: 'image', src, path: previewPath } : { kind: 'icon', icon: 'icon-image' };
     } else if (isImage) {
         const validatedAndroidPreview = validateImageSrc(androidPreview);
         if (isAndroid && validatedAndroidPreview) {
@@ -489,6 +499,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
 
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
+    const isSvg = ext === 'svg';
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
     const isMiniApp = isMiniAppExtension(ext);
 
@@ -503,6 +514,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     // Cache bytes in Rust immediately; the preview is a second call so the decode
     // runs off the IPC thread.
     let preview = null;
+    let previewPath = null;
     try {
         await invoke('cache_file_bytes', bytes, {
             headers: {
@@ -515,8 +527,8 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
         return;
     }
     if (filePreviewGeneration !== myGeneration) return;
-    if (isImage) {
-        const previewPath = await invoke('preview_cached_file', { filePath: '' }).catch(() => null);
+    if (isImage || isSvg) {
+        previewPath = await invoke('preview_cached_file', { filePath: '' }).catch(() => null);
         if (filePreviewGeneration !== myGeneration) return;
         if (previewPath) preview = convertFileSrc(previewPath);
     }
@@ -558,6 +570,10 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     let showCompress = false;
     if (isMiniApp) {
         content = miniAppPreviewContent(miniAppInfo);
+    } else if (isSvg) {
+        // Rendered to pixels by the backend; its own path keeps a spoiler's blur off the SVG.
+        const validatedPreview = validateImageSrc(preview);
+        content = validatedPreview ? { kind: 'image', src: validatedPreview, path: previewPath } : { kind: 'icon', icon: 'icon-image' };
     } else if (isImage) {
         // The backend's preview file, or an image icon when it could not make one.
         const validatedPreview = validateImageSrc(preview);

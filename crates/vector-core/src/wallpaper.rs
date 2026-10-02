@@ -42,6 +42,24 @@ const WALLPAPER_DTAG_VALUE: &str = "vector-wallpaper";
 /// caps plaintext at 5 MB; 10 MB leaves headroom for encryption overhead
 /// while still bounding memory against a malicious/oversized blob.
 const MAX_WALLPAPER_DOWNLOAD_BYTES: u64 = 10 * 1024 * 1024;
+/// Longest side a received SVG wallpaper is rendered at.
+const WALLPAPER_SVG_DIM: u32 = 2560;
+
+/// A received wallpaper, judged by its bytes: a raster image keeps its own format, an SVG becomes
+/// the pixels it draws (its markup never reaches the webview), anything else is refused.
+fn normalize_received(bytes: Vec<u8>) -> Result<(Vec<u8>, &'static str), String> {
+    let ext = match crypto::mime_from_magic_bytes(&bytes) {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ if crate::svg::looks_like_svg(&bytes) => {
+            return Ok((crate::svg::rasterize_png(&bytes, WALLPAPER_SVG_DIM)?, "png"));
+        }
+        _ => return Err("Wallpaper is not an image".into()),
+    };
+    Ok((bytes, ext))
+}
 
 /// Maximum allowed source-image size (pre-encryption). Matches the user-
 /// facing cap; enforced both at preview prep and at the picker UI.
@@ -93,7 +111,8 @@ pub async fn prepare_wallpaper_preview(
     }
 
     let mime = crypto::mime_from_magic_bytes(&bytes).to_string();
-    if !mime.starts_with("image/") {
+    let is_svg = crate::svg::looks_like_svg(&bytes);
+    if !mime.starts_with("image/") && !is_svg {
         return Err("Wallpapers must be image files.".to_string());
     }
 
@@ -101,7 +120,7 @@ pub async fn prepare_wallpaper_preview(
     // estimate share the same decoded pixels — no second decode. Off the runtime:
     // a full-size decode would stall every task queued behind it.
     let (final_bytes, final_extension, was_animated, recommended_dim) =
-        crate::rt::spawn_blocking(move || normalize_wallpaper_image(&bytes, &mime))
+        crate::rt::spawn_blocking(move || normalize_picked(&bytes, &mime, is_svg))
             .await
             .map_err(|e| format!("Image processing task failed: {e}"))??;
 
@@ -177,6 +196,16 @@ pub async fn cancel_wallpaper_preview(chat_npub: &str) -> Result<(), String> {
 /// Downscaling uses Triangle (bilinear): a wallpaper is shown behind blur + dim,
 /// so the extra sharpness of a wide-kernel filter is invisible and not worth the
 /// cost on slow devices.
+/// A picked SVG is published as its render, so no peer ever receives the markup.
+fn normalize_picked(bytes: &[u8], mime: &str, is_svg: bool) -> Result<(Vec<u8>, String, bool, u8), String> {
+    if !is_svg {
+        return normalize_wallpaper_image(bytes, mime);
+    }
+    let png = crate::svg::rasterize_png(bytes, WALLPAPER_SVG_DIM)
+        .map_err(|_| "That SVG is too complex to use as a wallpaper.".to_string())?;
+    normalize_wallpaper_image(&png, "image/png")
+}
+
 fn normalize_wallpaper_image(
     src: &[u8],
     mime: &str,
@@ -601,8 +630,7 @@ pub async fn apply_received_wallpaper(
         return Ok(());
     }
 
-    let mime_str = mime.unwrap_or("image/png").to_string();
-    let extension = crypto::extension_from_mime(&mime_str);
+    let _ = mime; // The sender's word on the type is never used: the bytes decide.
 
     // SSRF guard: the URL is attacker-controlled (it arrives in a rumor),
     // and this fetch is zero-interaction. Block private/internal targets.
@@ -645,6 +673,8 @@ pub async fn apply_received_wallpaper(
             return Err("Wallpaper integrity check failed".to_string());
         }
     }
+
+    let (plaintext, extension) = normalize_received(plaintext)?;
 
     // Account swap during the download invalidates everything below — the
     // chat npub, the DB pool, and the per-account wallpapers dir all belong
@@ -919,6 +949,38 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod wallpaper_strip_tests {
+    #[test]
+    fn a_received_wallpaper_is_judged_by_its_bytes() {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(super::normalize_received(png.clone()).unwrap(), (png, "png"));
+
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>"##.to_vec();
+        let (out, ext) = super::normalize_received(svg).unwrap();
+        assert_eq!(ext, "png");
+        assert!(out.starts_with(b"\x89PNG"), "an SVG arrives as the pixels it draws");
+
+        assert!(super::normalize_received(b"<html><script>x</script></html>".to_vec()).is_err());
+    }
+
+    #[test]
+    fn a_picked_svg_is_published_as_pixels() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#59fcb3"/></svg>"##;
+        let (out, ext, was_animated, _) = super::normalize_picked(svg, "image/svg+xml", true).unwrap();
+        assert_eq!((ext.as_str(), was_animated), ("jpg", false));
+        let img = ::image::load_from_memory(&out).unwrap();
+        assert_eq!(img.width(), super::WALLPAPER_SVG_DIM);
+
+        let mut bomb = String::from(r##"<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><defs><rect id="l0" width="1" height="1"/>"##);
+        for i in 1..8 {
+            bomb += &format!(r##"<g id="l{i}">{}</g>"##, format!(r##"<use href="#l{}"/>"##, i - 1).repeat(10));
+        }
+        bomb += r##"</defs><use href="#l7"/></svg>"##;
+        assert!(super::normalize_picked(bomb.as_bytes(), "image/svg+xml", true).is_err());
+    }
+
     use super::*;
     use ::image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
     use std::io::Cursor;

@@ -83,6 +83,24 @@ pub enum ImageType {
 }
 
 impl ImageType {
+    const ALL: [ImageType; 6] = [
+        ImageType::Avatar,
+        ImageType::Banner,
+        ImageType::MiniAppIcon,
+        ImageType::InlineImage,
+        ImageType::Emoji,
+        ImageType::EmojiPackIcon,
+    ];
+
+    /// Longest side an SVG of this kind is rendered at: its largest display, at up to 3x density.
+    fn svg_dim(&self) -> u32 {
+        match self {
+            ImageType::Avatar => 512,
+            ImageType::Banner | ImageType::InlineImage => 2048,
+            ImageType::MiniAppIcon | ImageType::Emoji | ImageType::EmojiPackIcon => 256,
+        }
+    }
+
     /// Get the subdirectory name for this image type
     pub fn subdir(&self) -> &'static str {
         match self {
@@ -276,6 +294,19 @@ pub fn precache_image_bytes<R: Runtime>(
             return CacheResult::Failed("Invalid image format".to_string());
         }
     };
+    // An SVG is kept as the pixels it draws: its markup never reaches the webview.
+    let rendered;
+    let (bytes, extension) = if extension == "svg" {
+        match vector_core::svg::rasterize_png(bytes, image_type.svg_dim()) {
+            Ok(png) => {
+                rendered = png;
+                (&rendered[..], "png")
+            }
+            Err(e) => return CacheResult::Failed(format!("SVG refused: {e}")),
+        }
+    } else {
+        (bytes, extension)
+    };
 
     // Get cache directory
     let cache_dir = match get_cache_dir(handle, image_type) {
@@ -460,6 +491,21 @@ async fn cache_image_uncached<R: Runtime>(
         }
     };
 
+    // An SVG is kept as the pixels it draws: its markup never reaches the webview.
+    let bytes = if extension == "svg" {
+        let dim = image_type.svg_dim();
+        match tokio::task::spawn_blocking(move || vector_core::svg::rasterize_png(&bytes, dim)).await {
+            Ok(Ok(png)) => {
+                extension = "png";
+                png
+            }
+            Ok(Err(e)) => return CacheResult::Failed(format!("SVG refused: {e}")),
+            Err(e) => return CacheResult::Failed(format!("SVG render task: {e}")),
+        }
+    } else {
+        bytes
+    };
+
     // Oversized ANIMATIONS get normalized before they ever touch the webview:
     // WebKit decodes a GIF's full logical screen for every <img> showing it, so
     // one 800px animated avatar shreds render cycles in every chat row at once.
@@ -542,18 +588,21 @@ pub fn avatar_thumb_path(avatar_path: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Write the display-sized still for a cached avatar. An animation is already
-/// normalized to the display ceiling, and a vector or undecodable file costs
-/// nothing to draw small, so those are copied as they are.
+/// normalized to the display ceiling, and an undecodable file costs nothing to
+/// draw small, so those are copied as they are; an SVG never is.
 pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let dest = avatar_thumb_path(avatar_path).ok_or("avatar path has no file name")?;
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("thumb dir: {e}"))?;
     }
     let mut out: Option<Vec<u8>> = None;
+    if vector_core::svg::looks_like_svg(bytes) && !vector_core::svg::is_raster_wrapped(bytes) {
+        out = Some(vector_core::svg::rasterize_wrapped(bytes, AVATAR_THUMB_DIM).unwrap_or_else(|_| vector_core::svg::empty_wrapped()));
+    }
     // Size from the header: a JPEG decodes DCT-scaled to just above the thumb, so the
     // decoded size no longer says whether the original needed shrinking.
     let big = crate::shared::image::animated_dims(bytes).is_some_and(|(w, h)| w.max(h) > AVATAR_THUMB_DIM);
-    if big && crate::shared::image::animated_format(bytes).is_none() {
+    if out.is_none() && big && crate::shared::image::animated_format(bytes).is_none() {
         if let Ok(img) = crate::shared::image::decode_image(bytes, AVATAR_THUMB_DIM) {
             out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
         }
@@ -562,6 +611,48 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
     std::fs::write(&tmp, out.as_deref().unwrap_or(bytes))
         .and_then(|_| std::fs::rename(&tmp, &dest))
         .map_err(|e| format!("thumb write: {e}"))
+}
+
+/// Cache files written before SVGs were rendered: each `.svg` is rewritten in place as a render
+/// wrapped in an SVG Vector writes (stored paths keep their extension), or blanked when it refuses
+/// to render. Covers every image kind, avatar thumbs, and every account's received wallpapers.
+/// Idempotent: a wrapped file is recognised and skipped.
+pub fn migrate_svg_cache<R: Runtime>(handle: &AppHandle<R>) -> usize {
+    let mut dirs: Vec<(PathBuf, u32)> = ImageType::ALL
+        .iter()
+        .filter_map(|t| get_cache_dir(handle, *t).ok().map(|d| (d, t.svg_dim())))
+        .collect();
+    if let Ok(avatars) = get_cache_dir(handle, ImageType::Avatar) {
+        dirs.push((avatars.join("thumbs"), AVATAR_THUMB_DIM));
+    }
+    if let Ok(entries) = handle.path().app_data_dir().and_then(|d| std::fs::read_dir(d).map_err(Into::into)) {
+        for account in entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("npub1")) {
+            dirs.push((account.path().join("wallpapers"), 2560));
+        }
+    }
+    let mut rewritten = 0usize;
+    for (dir, dim) in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for path in entries.flatten().map(|e| e.path()) {
+            if !path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if vector_core::svg::is_raster_wrapped(&bytes) {
+                continue;
+            }
+            let out = vector_core::svg::rasterize_wrapped(&bytes, dim).unwrap_or_else(|_| vector_core::svg::empty_wrapped());
+            // Temp + rename: the webview may be reading this path right now.
+            let tmp = path.with_extension("svg.tmp");
+            if std::fs::write(&tmp, &out).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+                rewritten += 1;
+            }
+        }
+    }
+    if rewritten > 0 {
+        log_info!("[ImageCache] {} cached SVG(s) replaced by their renders", rewritten);
+    }
+    rewritten
 }
 
 /// Thumbs for every cached avatar that has none yet (a cache that predates them).
@@ -1079,7 +1170,7 @@ pub async fn cache_url_image<R: Runtime>(
     };
 
     // Validate the image
-    let extension = match validate_image(&bytes) {
+    let mut extension = match validate_image(&bytes) {
         Some(ext) => ext,
         None => {
             cleanup().await;
@@ -1089,6 +1180,24 @@ pub async fn cache_url_image<R: Runtime>(
             emit_failure(&handle, &url);
             return Ok(None);
         }
+    };
+    // An SVG is kept as the pixels it draws: its markup never reaches the webview.
+    let bytes = if extension == "svg" {
+        let dim = ImageType::InlineImage.svg_dim();
+        match tokio::task::spawn_blocking(move || vector_core::svg::rasterize_png(&bytes, dim)).await {
+            Ok(Ok(png)) => {
+                extension = "png";
+                png
+            }
+            _ => {
+                cleanup().await;
+                log_debug!("[ImageCache] SVG refused from {}", url);
+                emit_failure(&handle, &url);
+                return Ok(None);
+            }
+        }
+    } else {
+        bytes
     };
 
     // Get cache directory and create filename

@@ -254,6 +254,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "read_image_preview" => files::image_preview(&a.str("path")?).await,
+        "render_svg" => files::render_svg(&a.str("path")?, a.usize("maxDim").unwrap_or(1024) as u32).await,
         "allow_video_preview" | "clear_android_file_cache" | "clear_all_android_file_cache" => Ok(Value::Null),
         "generate_thumbhash_for_preview" => files::thumbhash_preview(&a.opt_str("filePath").unwrap_or_default()).await,
         "file_has_metadata" => Ok(json!(files::has_metadata(&a.str("filePath")?).await)),

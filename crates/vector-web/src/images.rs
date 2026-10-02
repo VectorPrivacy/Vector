@@ -2,9 +2,9 @@
 //! inline images. Fetched through the media proxy when one is offered, kept in
 //! OPFS under `/cache/<kind>/`, and served by the service worker.
 //!
-//! When the fetch can't be made (no proxy, and the host sends no CORS headers),
-//! the remote URL itself is returned: the page's `<img>` loads it directly,
-//! which is the same direct fallback desktop takes when no proxy is offered.
+//! When the fetch can't be made (no proxy, and the host sends no CORS headers) the
+//! image stays a placeholder: the page never loads a remote image itself, since the
+//! browser would draw whatever it got, SVG included, outside the Rust renderer.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -41,6 +41,15 @@ impl Kind {
         })
     }
 
+    /// Longest side an SVG of this kind is rendered at: its largest display, at up to 3x density.
+    fn svg_dim(self) -> u32 {
+        match self {
+            Kind::Avatar => 512,
+            Kind::Banner | Kind::InlineImage => 2048,
+            Kind::MiniAppIcon | Kind::Emoji | Kind::EmojiPackIcon => 256,
+        }
+    }
+
     fn dir(self) -> &'static str {
         match self {
             Kind::Avatar => "avatars",
@@ -74,6 +83,29 @@ fn remembered(url: &str, kind: Kind) -> Option<String> {
     let path = String::from_utf8(bytes).ok()?;
     KNOWN.with(|k| k.borrow_mut().insert((url.to_string(), kind as u8), path.clone()));
     Some(path)
+}
+
+/// A copy stored before SVGs were rendered: rewritten in place as a wrapped render, so the
+/// remembered path keeps working, or blanked when it refuses to render. Once per path a session.
+async fn defuse(path: &str, kind: Kind) {
+    thread_local! {
+        static CHECKED: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
+    }
+    if !path.ends_with(".svg") || !CHECKED.with(|c| c.borrow_mut().insert(path.to_string())) {
+        return;
+    }
+    let mut paths = vec![path.to_string()];
+    if kind == Kind::Avatar {
+        paths.push(path.replacen("/cache/avatars/", "/cache/avatars/thumbs/", 1));
+    }
+    for p in paths {
+        let Ok(bytes) = vector_core::webfiles::read(Path::new(&p)).await else { continue };
+        if vector_core::svg::is_raster_wrapped(&bytes) {
+            continue;
+        }
+        let out = vector_core::svg::rasterize_wrapped(&bytes, kind.svg_dim()).unwrap_or_else(|_| vector_core::svg::empty_wrapped());
+        let _ = vector_core::webfiles::write(Path::new(&p), &out).await;
+    }
 }
 
 fn remember(url: &str, kind: Kind, path: &str) {
@@ -132,37 +164,28 @@ fn thumb(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A displayable src for `url`: the local copy's path, or the URL itself when no
-/// media proxy is in use (the page then loads it directly, as desktop fetches it).
-/// With a proxy in play a failure stays a failure: falling back would leak the IP.
+/// A displayable src for `url`: the local copy's path.
 pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     vector_core::net::validate_url_not_private(url).map_err(str::to_string)?;
     if let Some(path) = remembered(url, kind) {
+        defuse(&path, kind).await;
         return Ok(path);
     }
     while IN_FLIGHT.with(|f| f.borrow().contains(url)) {
         vector_core::rt::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     if let Some(path) = remembered(url, kind) {
+        defuse(&path, kind).await;
         return Ok(path);
     }
     IN_FLIGHT.with(|f| f.borrow_mut().insert(url.to_string()));
-    let proxied = vector_core::proxy::proxied(url).await.is_some();
     let result = vector_core::rt::time::timeout(FETCH_BUDGET, fetch_and_store(url, kind))
         .await
         .unwrap_or_else(|_| Err("timed out".into()));
     IN_FLIGHT.with(|f| f.borrow_mut().remove(url));
-    match result {
-        Ok(path) => {
-            remember(url, kind, &path);
-            Ok(path)
-        }
-        Err(e) if proxied => Err(e),
-        Err(e) => {
-            vector_core::log_debug!("[Images] {url}: {e}; the page loads it directly");
-            Ok(url.to_string())
-        }
-    }
+    let path = result?;
+    remember(url, kind, &path);
+    Ok(path)
 }
 
 async fn fetch_and_store(url: &str, kind: Kind) -> Result<String, String> {
@@ -172,6 +195,14 @@ async fn fetch_and_store(url: &str, kind: Kind) -> Result<String, String> {
 }
 
 async fn store(url: &str, kind: Kind, bytes: &[u8]) -> Result<String, String> {
+    // An SVG is kept as the pixels it draws: its markup never reaches the page.
+    let rendered;
+    let bytes = if vector_core::svg::looks_like_svg(bytes) {
+        rendered = vector_core::svg::rasterize_png(bytes, kind.svg_dim())?;
+        &rendered[..]
+    } else {
+        bytes
+    };
     let ext = extension_for(vector_core::crypto::mime_from_magic_bytes(bytes)).ok_or("Not an image")?;
     let key = &vector_core::crypto::sha256_hex(url.as_bytes())[..16];
     let path = format!("/cache/{}/{key}.{ext}", kind.dir());

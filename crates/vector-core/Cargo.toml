@@ -92,6 +92,11 @@ web-time = "1"
 rand = "0.8"
 base64-simd = "0.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# SVG to pixels in Rust, so untrusted SVG markup never reaches a webview (see `svg.rs`). No
+# SVGZ (a decompression bomb), no GIF/WebP decoders for embedded images, no text (an SVG with any is refused).
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+# The preflight parse that budgets a document before resvg sees it (resvg's own XML parser).
+roxmltree = "0.21"
 
 # Tor (Arti) — stock crates.io. Now that Vector is on rusqlite 0.37+ we share
 # libsqlite3-sys with Arti's tor-dirmgr directly, so the rusqlite-0.32 fork is gone.

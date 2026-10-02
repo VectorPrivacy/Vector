@@ -31,30 +31,14 @@ const gifSearchCache = new Map();
 /** GIFGalaxy API base URL */
 const GIF_API_BASE = 'https://gifverse.net';
 
-/** Preconnect link element for GIFGalaxy */
-let gifPreconnectLink = null;
-
-/** Rust fetches the service when proxying is on or Tor is chosen: the WebView never rides Tor. */
-function gifsViaBackend() {
-    return fProxyMediaEnabled || !!VectorSvelte.torState().state?.enabled;
-}
-
 /**
- * One GIF API query, as parsed JSON. With "Proxy Previews & Media" on, Rust
- * asks the service through the user's Magnitude, so neither the listing nor
- * the search term leaves from this device; with Tor on, Rust asks over Tor.
- * Otherwise the WebView asks directly.
- * `signal` only guards the direct path; the proxied answer is checked for
- * `signal.aborted` by every caller after the await.
+ * One GIF API query, as parsed JSON. Rust asks the service through whatever egress the
+ * privacy settings choose (Magnitude, Tor or direct): the WebView never fetches remote content.
+ * Callers check `signal.aborted` after the await.
  * @param {string} query - e.g. `trending?limit=12&offset=0&sort=popular`
- * @param {AbortSignal} [signal]
  */
-async function gifApi(query, signal) {
-    if (gifsViaBackend()) {
-        return JSON.parse(await invoke('gif_api', { query }));
-    }
-    const response = await fetch(`${GIF_API_BASE}/api/v1/${query}`, { signal });
-    return await response.json();
+async function gifApi(query) {
+    return JSON.parse(await invoke('gif_api', { query }));
 }
 
 /** Pagination state for GIFs */
@@ -70,8 +54,7 @@ let gifCurrentQuery = '';
  * AbortController for the in-flight GIF request (trending / search / load-more).
  * Each new request aborts the previous so a slow trending response can't
  * overwrite a faster search response, and a slow search response for an old
- * query can't overwrite the current one. Severs the underlying HTTP request,
- * which also frees bandwidth on slow connections.
+ * query can't overwrite the current one.
  */
 let gifFetchController = null;
 
@@ -81,23 +64,6 @@ let gifFetchController = null;
  */
 function showGifSkeletons(count) {
     VectorSvelte.gifLoading(count);
-}
-
-/**
- * Establish early connection to GIF API server
- * Called when opening a chat to warm up connection before user needs GIFs
- *
- * GIFs are the one granted exception to "the frontend never fetches remote", and only
- * while Tor is off: gifverse.net is Vector's own service.
- */
-function preconnectGifServer() {
-    if (gifPreconnectLink) return; // Already connected
-    if (gifsViaBackend()) return; // Nothing here talks to the service directly
-    gifPreconnectLink = document.createElement('link');
-    gifPreconnectLink.rel = 'preconnect';
-    gifPreconnectLink.href = 'https://gifverse.net';
-    gifPreconnectLink.crossOrigin = 'anonymous';
-    document.head.appendChild(gifPreconnectLink);
 }
 
 /**
@@ -238,7 +204,7 @@ async function loadTrendingGifs() {
     showGifSkeletons(gifPageSize);
 
     try {
-        const data = await gifApi(`trending?limit=${gifPageSize}&offset=0&sort=popular`, signal);
+        const data = await gifApi(`trending?limit=${gifPageSize}&offset=0&sort=popular`);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -309,7 +275,7 @@ async function searchGifs(query) {
 
     try {
         const encodedQuery = encodeURIComponent(gifCurrentQuery);
-        const data = await gifApi(`search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`, signal);
+        const data = await gifApi(`search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -365,7 +331,7 @@ async function loadMoreGifs() {
             query = `search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
         }
 
-        const data = await gifApi(query, signal);
+        const data = await gifApi(query);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -448,25 +414,16 @@ function loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, f
         };
 
         const remote = `${mediaBase}/${encodeURIComponent(gifId)}/${format.ext}`;
-        if (gifsViaBackend()) {
-            // Fetched by Rust through the privacy setting's egress into a
-            // small local cache, then played from the file; the WebView
-            // never talks to the service. The AV1 clip is ~14x smaller than
-            // the GIF, so this is also the fast path.
-            invoke('cache_gif_preview', { url: remote })
-                .then(path => {
-                    if (!path) { video.onerror(); return; }
-                    video.src = mediaUrl(path);
-                    gifItem.appendChild(video);
-                    video.load();
-                })
-                .catch(() => video.onerror());
-        } else {
-            // Set src and explicitly call load() for WebKit
-            video.src = remote;
-            gifItem.appendChild(video);
-            video.load();
-        }
+        // Fetched by Rust into a small local cache, then played from the file. The AV1 clip
+        // is ~14x smaller than the GIF, so this is also the fast path.
+        invoke('cache_gif_preview', { url: remote })
+            .then(path => {
+                if (!path) { video.onerror(); return; }
+                video.src = mediaUrl(path);
+                gifItem.appendChild(video);
+                video.load();
+            })
+            .catch(() => video.onerror());
     } else {
         // Image format (GIF)
         const img = document.createElement('img');
@@ -483,21 +440,16 @@ function loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, f
             loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, formatIndex + 1);
         };
 
-        if (gifsViaBackend()) {
-            // The element joins the grid only once its bytes exist: an <img>
-            // without a src paints a broken frame and the alt text over the
-            // thumbhash, which is meant to stand alone until the picture lands.
-            invoke('cache_gif_preview', { url: remote })
-                .then(path => {
-                    if (!path) { img.onerror(); return; }
-                    img.src = mediaUrl(path);
-                    gifItem.appendChild(img);
-                })
-                .catch(() => img.onerror());
-        } else {
-            img.src = remote;
-            gifItem.appendChild(img);
-        }
+        // The element joins the grid only once its bytes exist: an <img>
+        // without a src paints a broken frame and the alt text over the
+        // thumbhash, which is meant to stand alone until the picture lands.
+        invoke('cache_gif_preview', { url: remote })
+            .then(path => {
+                if (!path) { img.onerror(); return; }
+                img.src = mediaUrl(path);
+                gifItem.appendChild(img);
+            })
+            .catch(() => img.onerror());
     }
 }
 

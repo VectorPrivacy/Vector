@@ -55,7 +55,7 @@ fn path_extension(file_path: &str) -> String {
 }
 
 fn is_previewable_extension(extension: &str) -> bool {
-    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico")
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico" | "svg")
 }
 
 fn preview_cache_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -80,8 +80,9 @@ pub(crate) fn write_preview_file(app: &tauri::AppHandle, bytes: &[u8]) -> Result
     write_preview_into(&dir, bytes).map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The preview itself: a small GIF is copied verbatim so it animates; everything else is
-/// bounded to `PREVIEW_MAX_DIM` and re-encoded (PNG when transparent, JPEG otherwise).
+/// The preview itself: a small GIF is copied verbatim so it animates; an SVG is rendered to
+/// pixels (its markup never reaches the webview); everything else is bounded to
+/// `PREVIEW_MAX_DIM` and re-encoded (PNG when transparent, JPEG otherwise).
 /// Keyed by content hash, so re-previewing the same bytes is a stat, not a decode.
 fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     use crate::shared::image::{animated_dims, encode_rgba_auto};
@@ -106,6 +107,9 @@ fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::
 
     let (ext, out): (&str, std::borrow::Cow<[u8]>) = if verbatim_gif {
         ("gif", std::borrow::Cow::Borrowed(bytes))
+    } else if vector_core::svg::looks_like_svg(bytes) {
+        // Always PNG: JPEG would soften the hard edges and text an SVG is drawn with.
+        ("png", std::borrow::Cow::Owned(vector_core::svg::rasterize_png(bytes, PREVIEW_MAX_DIM)?))
     } else {
         let img = crate::shared::image::decode_image(bytes, PREVIEW_MAX_DIM)?;
         let (w, h) = (img.width(), img.height());
@@ -853,15 +857,77 @@ pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<S
     }
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        // An explicit list, not a prefix: the sniffer also names SVG (any XML) an image.
+        // An explicit list, not a prefix: the sniffer also names SVG (any XML) an image. An SVG
+        // passes only as the pixels the preview renders; any other XML fails to render.
         let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
-        if !matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/x-icon" | "image/bmp") {
+        if !matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/x-icon" | "image/bmp")
+            && !vector_core::svg::looks_like_svg(&bytes)
+        {
             return Err("not an image".to_string());
         }
         write_preview_file(&app, &bytes)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// An SVG attachment drawn for display: the file itself stays as received, and the webview only
+/// ever shows this render. Cached by content and size (sizes rounded up to 256 px steps, so a
+/// viewer's many window sizes share renders); `None` when the SVG refuses to render.
+#[tauri::command]
+pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Result<Option<String>, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > vector_core::svg::MAX_SVG_BYTES as u64 {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        if !vector_core::svg::looks_like_svg(&bytes) {
+            return Ok(None);
+        }
+        let dim = max_dim.clamp(256, vector_core::svg::MAX_RENDER_DIM).div_ceil(256) * 256;
+        let dir = svg_render_dir(&app)?;
+        let key = crate::util::bytes_to_hex_string(&Sha256::digest(&bytes)[..16]);
+        let out = dir.join(format!("{key}-{dim}.png"));
+        if out.is_file() {
+            // A hit is a use: keep it out of the age sweep.
+            if let Ok(f) = std::fs::File::open(&out) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            return Ok(Some(out.to_string_lossy().into_owned()));
+        }
+        let Ok(png) = vector_core::svg::rasterize_png(&bytes, dim) else { return Ok(None) };
+        let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{key}-{dim}.png.tmp-{}-{seq}", std::process::id()));
+        std::fs::write(&tmp, &png).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &out).map_err(|e| e.to_string())?;
+        Ok(Some(out.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn svg_render_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("cache").join("svg_renders");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Delete SVG renders nothing has shown for a while; any is re-drawn on demand in milliseconds.
+pub fn prune_svg_renders(app: &tauri::AppHandle) -> usize {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+    let Ok(dir) = svg_render_dir(app) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    entries
+        .flatten()
+        .filter(|e| {
+            e.metadata().and_then(|m| m.modified()).is_ok_and(|t| now.duration_since(t).unwrap_or_default() > MAX_AGE)
+        })
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
 }
 
 /// Let the webview play one video the user picked from outside the asset scope.

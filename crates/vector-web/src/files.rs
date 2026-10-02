@@ -227,9 +227,37 @@ pub fn clear_cached() {
 /// The pasted image as a file the page can show.
 pub async fn preview_cached() -> Result<Value, String> {
     let (bytes, ext) = PASTED.with(|p| p.borrow().as_ref().map(|p| (p.bytes.clone(), p.extension.clone()))).ok_or("No cached file")?;
+    if vector_core::svg::looks_like_svg(&bytes) {
+        return svg_preview(&bytes).await;
+    }
     let hash = vector_core::crypto::sha256_hex(&bytes);
     let path = format!("/cache/previews/{hash}.{}", if ext.is_empty() { "png" } else { &ext });
     vector_core::webfiles::write(Path::new(&path), &bytes).await?;
+    Ok(json!(path))
+}
+
+/// An SVG attachment drawn for display (the file itself stays as received); null when it refuses.
+pub async fn render_svg(path: &str, max_dim: u32) -> Result<Value, String> {
+    let bytes = read(path).await?;
+    if bytes.len() > vector_core::svg::MAX_SVG_BYTES || !vector_core::svg::looks_like_svg(&bytes) {
+        return Ok(Value::Null);
+    }
+    let dim = max_dim.clamp(256, vector_core::svg::MAX_RENDER_DIM).div_ceil(256) * 256;
+    let out = format!("/cache/svg_renders/{}-{dim}.png", &vector_core::crypto::sha256_hex(&bytes)[..32]);
+    if vector_core::webfiles::size(Path::new(&out)).await.is_some() {
+        return Ok(json!(out));
+    }
+    let Ok(png) = vector_core::svg::rasterize_png(&bytes, dim) else { return Ok(Value::Null) };
+    vector_core::webfiles::write(Path::new(&out), &png).await?;
+    Ok(json!(out))
+}
+
+/// An SVG's preview is the pixels it renders to: its markup never reaches the page.
+async fn svg_preview(bytes: &[u8]) -> Result<Value, String> {
+    const PREVIEW_MAX_DIM: u32 = 1024;
+    let png = vector_core::svg::rasterize_png(bytes, PREVIEW_MAX_DIM)?;
+    let path = format!("/cache/previews/{}.png", vector_core::crypto::sha256_hex(bytes));
+    vector_core::webfiles::write(Path::new(&path), &png).await?;
     Ok(json!(path))
 }
 
@@ -288,6 +316,9 @@ pub async fn has_metadata(path: &str) -> bool {
 /// A picked file to preview inline: itself, if it really is an image.
 pub async fn image_preview(path: &str) -> Result<Value, String> {
     let bytes = read(path).await?;
+    if vector_core::svg::looks_like_svg(&bytes) {
+        return svg_preview(&bytes).await;
+    }
     let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
     if !matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/x-icon" | "image/bmp") {
         return Err("not an image".into());

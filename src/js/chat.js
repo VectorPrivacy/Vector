@@ -499,7 +499,7 @@ async function startWallpaperChange(chatId) {
             multiple: false,
             directory: false,
             filters: [
-                { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+                { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'] },
             ],
         });
         if (!filePath) return;
@@ -1085,9 +1085,6 @@ async function openChat(contact) {
     // Pins: resolve this chat's pin context (v2 community channels only) —
     // shows/hides the header pin button and closes a stale drawer.
     pinsOnChatOpened(contact);
-
-    // Warm up GIF server connection early (non-blocking)
-    preconnectGifServer();
 
     // Get the chat (could be DM or Group)
     const chat = arrChats.find(c => c.id === contact);
