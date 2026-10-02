@@ -215,16 +215,19 @@ function setRate(t, r) {
     } catch (_) {}
 }
 
-// The size a captured frame is sent at: the rung's size for a camera, at most the
-// rung's height for a screen, always even, never upscaled.
+// The size a captured frame is sent at: the rung's size for a camera, turned for one held
+// upright, at most the rung's height for a screen, always even, never upscaled.
 function targetSize(t, cw, ch) {
     let w = cw, h = ch;
     const c = t.capture;
     if (t.kind === 'screen') {
         if (c.maxH && h > c.maxH) { w = Math.round(cw * c.maxH / ch); h = c.maxH; }
-    } else if (c.targetW && c.targetH && (cw > c.targetW || ch > c.targetH)) {
-        const s = Math.min(c.targetW / cw, c.targetH / ch);
-        w = Math.round(cw * s); h = Math.round(ch * s);
+    } else if (c.targetW && c.targetH) {
+        const [tw, th] = (ch > cw) === (c.targetH > c.targetW) ? [c.targetW, c.targetH] : [c.targetH, c.targetW];
+        if (cw > tw || ch > th) {
+            const s = Math.min(tw / cw, th / ch);
+            w = Math.round(cw * s); h = Math.round(ch * s);
+        }
     }
     return [w & ~1, h & ~1];
 }

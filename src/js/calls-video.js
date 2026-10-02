@@ -210,6 +210,16 @@ async function setShareAudio(on) {
  *  as soon as another window covers this one, so a timer takes over then and the
  *  callback gets the job back when the page shows again. */
 const capturePumps = { camera: null, screen: null };
+
+/** Whether a captured frame's pixels lie turned from the picture the element draws. A phone
+ *  held upright can hand over its sensor's landscape buffer with a rotation the encoder
+ *  ignores, while the element shows it upright. */
+function frameIsTurned(frame, el) {
+    if (frame.rotation) return true;
+    const fw = frame.codedWidth, fh = frame.codedHeight, ew = el.videoWidth, eh = el.videoHeight;
+    return fw !== fh && ew !== eh && (fw > fh) !== (ew > eh);
+}
+
 function pumpFrames(kind, stream) {
     const worker = ensureVideoWorker();
     // A detached element plays the stream so frames can be pulled off it.
@@ -220,10 +230,24 @@ function pumpFrames(kind, stream) {
     captureEls[kind] = el;
     el.play().catch(() => {});
     let gen = 0;
+    // A turned frame is redrawn from the element, which paints it the way it is shown.
+    let upright = null;
+    let uprightCtx = null;
     const pull = (g) => () => {
         if (g !== gen || captureEls[kind] !== el) return;
         if (el.videoWidth) {
-            const frame = new VideoFrame(el, { timestamp: Math.round(performance.now() * 1000) });
+            const timestamp = Math.round(performance.now() * 1000);
+            let frame = new VideoFrame(el, { timestamp });
+            if (frameIsTurned(frame, el)) {
+                const w = el.videoWidth, h = el.videoHeight;
+                if (!upright || upright.width !== w || upright.height !== h) {
+                    upright = new OffscreenCanvas(w, h);
+                    uprightCtx = upright.getContext('2d', { alpha: false });
+                }
+                uprightCtx.drawImage(el, 0, 0, w, h);
+                frame.close();
+                frame = new VideoFrame(upright, { timestamp });
+            }
             worker.postMessage({ t: 'frame', kind, frame }, [frame]);
         }
         schedule();
