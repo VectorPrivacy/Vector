@@ -166,8 +166,9 @@ async function predecodeThumbhashes(gifs) {
 }
 
 // ===== Video Format Detection =====
-// Detect best supported video format for GIF previews (AV1 > WebM > MP4 > GIF)
-// Also builds a fallback chain starting from the best supported format
+// The formats this engine says it plays, best first (AV1 > WebM > MP4 > GIF): a
+// format it disowns is never tried, since WebKit gives a WebM source no event at
+// all and the preview would wait on it forever.
 const gifFormatFallbackChain = (() => {
     const video = document.createElement('video');
     const allFormats = [
@@ -176,14 +177,7 @@ const gifFormatFallbackChain = (() => {
         { ext: 'video.mp4', type: 'video', test: 'video/mp4; codecs="avc1.42E01E"' },
         { ext: 'original.gif', type: 'image', test: null } // Always supported
     ];
-
-    // Find the first supported format and build chain from there
-    let startIndex = allFormats.findIndex(f =>
-        f.test === null || video.canPlayType(f.test) === 'probably' || video.canPlayType(f.test) === 'maybe'
-    );
-    if (startIndex === -1) startIndex = allFormats.length - 1; // Fallback to GIF
-
-    return allFormats.slice(startIndex);
+    return allFormats.filter(f => f.test === null || video.canPlayType(f.test) !== '');
 })();
 const gifPreviewFormat = gifFormatFallbackChain[0];
 

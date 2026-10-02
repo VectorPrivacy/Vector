@@ -457,11 +457,15 @@ async fn verify_remote_media(urls: Vec<String>) -> Value {
 const GIF_SERVICE: &str = "https://gifverse.net";
 
 /// `None` on a non-success status or a body past `cap`.
-async fn fetch_capped(url: &str, cap: usize) -> Result<Option<Vec<u8>>, String> {
+/// `fresh` skips the browser's HTTP cache, for answers the caller keeps itself.
+async fn fetch_capped(url: &str, cap: usize, fresh: bool) -> Result<Option<Vec<u8>>, String> {
     use futures_util::StreamExt;
     let client = vector_core::net::shared_http_client();
-    let resp = vector_core::net::proxied_request(&client, reqwest::Method::GET, url)
-        .await
+    let mut req = vector_core::net::proxied_request(&client, reqwest::Method::GET, url).await;
+    if fresh {
+        req = req.fetch_cache_no_store();
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -485,7 +489,7 @@ async fn gif_api(query: &str) -> Result<String, String> {
     if !matches!(path, "trending" | "search") || query.contains('/') || query.contains("..") || query.contains('#') {
         return Err("unknown GIF query".into());
     }
-    let body = fetch_capped(&format!("{GIF_SERVICE}/api/v1/{query}"), 1024 * 1024)
+    let body = fetch_capped(&format!("{GIF_SERVICE}/api/v1/{query}"), 1024 * 1024, false)
         .await
         .map_err(|e| format!("gif service: {e}"))?
         .ok_or("gif service: no usable answer")?;
@@ -507,7 +511,9 @@ async fn cache_gif_preview(url: &str) -> Result<Option<String>, String> {
     if vector_core::webfiles::exists(Path::new(&path)).await {
         return Ok(Some(path));
     }
-    let Some(body) = fetch_capped(url, 8 * 1024 * 1024).await.map_err(|e| format!("preview: {e}"))? else {
+    // Kept in OPFS, so the browser's cache adds nothing, and an entry of it stored
+    // without CORS headers would refuse this cross-origin read.
+    let Some(body) = fetch_capped(url, 8 * 1024 * 1024, true).await.map_err(|e| format!("preview: {e}"))? else {
         return Ok(None);
     };
     // Judged by its bytes, never by what the service said.
