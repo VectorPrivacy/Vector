@@ -1,7 +1,7 @@
 <script>
     // A picture not on disk yet: its thumbhash blur sized to the box the real image will
     // take, under a download ring (downloading or auto-download) or a Download box.
-    // A missing blur falls back to the file box leaf.
+    // A missing or undecodable blur falls back to the file box leaf.
     //
     // Both overlays size themselves off the rendered blur, because a thumbnail can be
     // anything from a wide banner to a sliver: the box drops its text when there is no
@@ -80,7 +80,8 @@
              style="max-width: min(100%, 450px); max-height: 350px; height: auto; border-radius: 8px;"
              style:aspect-ratio={fit?.ratio ?? null}
              style:opacity={downloading ? (att.downloading ? '0.7' : '0.8') : '0.6'}
-             onload={() => h.onThumbLoad()}>
+             onload={() => h.onThumbLoad()}
+             onerror={() => { blurFailed = true; }}>
         {#if downloading}
             <div class="attachment-progress-overlay">
                 <!-- No rate to show means the original DOM, so the overlay's own rule still

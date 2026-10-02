@@ -300,9 +300,9 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             let thumb = VectorCore.get_message(&msg_id).await.and_then(|(_, m)| {
                 m.attachments.iter().find_map(|a| a.img_meta.as_ref().map(|i| i.thumbhash.clone()))
             });
-            Ok(json!(files::thumbhash_data_url(&thumb.unwrap_or_default())))
+            Ok(json!(files::thumbhash_data_url(&thumb.ok_or("No image attachment found")?).ok_or("Failed to decode thumbhash")?))
         }
-        "decode_thumbhash" => Ok(json!(files::thumbhash_data_url(&a.str("thumbhash")?))),
+        "decode_thumbhash" => Ok(json!(files::thumbhash_data_url(&a.str("thumbhash")?).ok_or("Failed to decode thumbhash")?)),
 
         "get_or_cache_image" => {
             let kind = crate::images::Kind::parse(&a.str("imageType")?).ok_or("Invalid image type")?;

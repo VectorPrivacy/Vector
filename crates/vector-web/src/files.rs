@@ -283,19 +283,18 @@ pub async fn thumbhash_preview(path: &str) -> Result<Value, String> {
         Arc::new(read(path).await?)
     };
     let meta = vector_core::crypto::generate_image_metadata(&bytes).ok_or("Failed to generate thumbhash")?;
-    Ok(json!(thumbhash_data_url(&meta.thumbhash)))
+    Ok(json!(thumbhash_data_url(&meta.thumbhash).ok_or("Failed to decode thumbhash")?))
 }
 
-pub fn thumbhash_data_url(thumbhash: &str) -> String {
-    const EMPTY: &str = "data:image/png;base64,";
-    let Ok(hash) = fast_thumbhash::base91_decode(thumbhash) else { return EMPTY.into() };
-    let Ok((w, h, rgba)) = fast_thumbhash::thumb_hash_to_rgba(&hash) else { return EMPTY.into() };
-    let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else { return EMPTY.into() };
+/// A thumbhash as a PNG data URL; None when it does not decode, so a caller falls back to
+/// its file box instead of sizing an empty image.
+pub fn thumbhash_data_url(thumbhash: &str) -> Option<String> {
+    let hash = fast_thumbhash::base91_decode(thumbhash).ok()?;
+    let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&hash).ok()?;
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
     let mut png = Vec::new();
-    if DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
-        return EMPTY.into();
-    }
-    format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png))
+    DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png)))
 }
 
 /// Whether a picked image carries metadata worth offering to strip.
