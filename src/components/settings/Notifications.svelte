@@ -26,6 +26,7 @@
     const PRIVACY = [
         { value: 'full', label: 'Show sender and message' },
         { value: 'hide_content', label: 'Hide message' },
+        { value: 'hide_sender', label: 'Hide sender' },
         { value: 'hide_all', label: 'Hide sender and message' },
     ];
     const SOUNDS = [

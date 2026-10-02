@@ -481,9 +481,154 @@ pub fn apply_wire(map: &crate::synced_prefs::NotifyMap) -> Result<Vec<String>, S
     Ok(moved)
 }
 
+/// How much of a message a system notification reveals: the account's
+/// `notif_content_privacy` setting, read at notify time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentPrivacy {
+    /// Sender and message.
+    Full,
+    /// Who wrote, not what.
+    HideContent,
+    /// What was written, not who.
+    HideSender,
+    /// Only that something arrived.
+    HideAll,
+}
+
+impl ContentPrivacy {
+    pub fn load() -> Self {
+        Self::parse(crate::db::get_sql_setting("notif_content_privacy".to_string()).ok().flatten().as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("hide_content") => Self::HideContent,
+            Some("hide_sender") => Self::HideSender,
+            Some("hide_all") => Self::HideAll,
+            _ => Self::Full,
+        }
+    }
+}
+
+/// What a notification shows. Every platform passes its notification through
+/// [`Preview::apply`], so the setting means the same thing everywhere.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Preview {
+    pub title: String,
+    pub body: String,
+    pub sender: Option<String>,
+    pub avatar: Option<String>,
+    /// Where a community message was posted; None in a DM.
+    pub group: Option<String>,
+    pub group_avatar: Option<String>,
+}
+
+impl Preview {
+    /// Rewrite what is shown. Idempotent: a notification may pass through twice.
+    pub fn apply(&mut self, privacy: ContentPrivacy) {
+        match privacy {
+            ContentPrivacy::Full => {}
+            ContentPrivacy::HideContent => {
+                self.body = if self.group.is_some() { "Sent a message" } else { "Sent you a message" }.to_string();
+            }
+            ContentPrivacy::HideSender => {
+                self.title = self.group.clone().unwrap_or_else(|| "New message".to_string());
+                self.sender = None;
+                self.avatar = None;
+            }
+            ContentPrivacy::HideAll => {
+                *self = Preview {
+                    title: "Vector".to_string(),
+                    body: "You received a message".to_string(),
+                    ..Default::default()
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dm() -> Preview {
+        Preview {
+            title: "Alice".into(),
+            body: "see you at 8".into(),
+            sender: Some("Alice".into()),
+            avatar: Some("/a.png".into()),
+            ..Default::default()
+        }
+    }
+
+    fn channel() -> Preview {
+        Preview {
+            title: "Alice - Rust Club".into(),
+            body: "see you at 8".into(),
+            sender: Some("Alice".into()),
+            avatar: Some("/a.png".into()),
+            group: Some("Rust Club".into()),
+            group_avatar: Some("/club.png".into()),
+        }
+    }
+
+    #[test]
+    fn content_privacy_reads_every_stored_value() {
+        assert_eq!(ContentPrivacy::parse(None), ContentPrivacy::Full);
+        assert_eq!(ContentPrivacy::parse(Some("full")), ContentPrivacy::Full);
+        assert_eq!(ContentPrivacy::parse(Some("hide_content")), ContentPrivacy::HideContent);
+        assert_eq!(ContentPrivacy::parse(Some("hide_sender")), ContentPrivacy::HideSender);
+        assert_eq!(ContentPrivacy::parse(Some("hide_all")), ContentPrivacy::HideAll);
+        assert_eq!(ContentPrivacy::parse(Some("true")), ContentPrivacy::Full);
+    }
+
+    #[test]
+    fn hiding_the_sender_keeps_the_message_and_the_community() {
+        let mut p = dm();
+        p.apply(ContentPrivacy::HideSender);
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("New message", "see you at 8"));
+        assert_eq!((p.sender, p.avatar), (None, None));
+
+        let mut p = channel();
+        p.apply(ContentPrivacy::HideSender);
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("Rust Club", "see you at 8"));
+        assert_eq!((p.sender, p.avatar), (None, None));
+        assert_eq!(p.group_avatar.as_deref(), Some("/club.png"));
+    }
+
+    #[test]
+    fn hiding_the_message_keeps_the_sender() {
+        let mut p = dm();
+        p.apply(ContentPrivacy::HideContent);
+        assert_eq!((p.title.as_str(), p.body.as_str()), ("Alice", "Sent you a message"));
+        assert_eq!(p.avatar.as_deref(), Some("/a.png"));
+
+        let mut p = channel();
+        p.apply(ContentPrivacy::HideContent);
+        assert_eq!(p.body, "Sent a message");
+        assert_eq!(p.sender.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn hiding_everything_leaves_nothing_identifying() {
+        for mut p in [dm(), channel()] {
+            p.apply(ContentPrivacy::HideAll);
+            assert_eq!(p, Preview { title: "Vector".into(), body: "You received a message".into(), ..Default::default() });
+        }
+    }
+
+    #[test]
+    fn content_privacy_is_idempotent() {
+        for privacy in [ContentPrivacy::Full, ContentPrivacy::HideContent, ContentPrivacy::HideSender, ContentPrivacy::HideAll] {
+            for base in [dm(), channel()] {
+                let mut once = base.clone();
+                once.apply(privacy);
+                let mut twice = once.clone();
+                twice.apply(privacy);
+                assert_eq!(once, twice, "{privacy:?}");
+            }
+        }
+    }
 
     #[test]
     fn mute_clamps_the_level_to_mentions() {

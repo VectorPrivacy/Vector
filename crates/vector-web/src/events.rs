@@ -59,13 +59,19 @@ async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_la
     if !rings {
         return;
     }
-    let private = db::get_sql_setting("notif_content_privacy".into()).ok().flatten().is_some_and(|v| v == "true");
-    let body = if private || content.is_empty() { "New message".to_string() } else { content.chars().take(200).collect() };
-    let title = match community_label {
-        Some(label) => format!("{name} · {label}"),
-        None => name,
+    let mut shown = vector_core::notify::Preview {
+        title: match &community_label {
+            Some(label) => format!("{name} · {label}"),
+            None => name.clone(),
+        },
+        body: if content.is_empty() { "New message".to_string() } else { content.chars().take(200).collect() },
+        sender: Some(name),
+        avatar: icon,
+        group: community_label,
+        group_avatar: None,
     };
-    vector_core::emit_event("web_notify", &json!({ "chat_id": chat_id, "title": title, "body": body, "icon": icon }));
+    shown.apply(vector_core::notify::ContentPrivacy::load());
+    vector_core::emit_event("web_notify", &json!({ "chat_id": chat_id, "title": shown.title, "body": shown.body, "icon": shown.avatar }));
 }
 
 impl InboundEventHandler for WebEventHandler {

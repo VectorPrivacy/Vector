@@ -963,7 +963,7 @@ async function confirmStorageDelete(cat, sizeText) {
 const NOTIF_EXPLAINERS = {
     mute: ['Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.'],
     everyone: ['Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.'],
-    privacy: ['Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.'],
+    privacy: ['Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender</b>: shows the message, not who sent it.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.'],
 };
 
 const DISPLAY_EXPLAINERS = {
@@ -1044,7 +1044,7 @@ function soundWire(sound) {
 /**
  * Mount the Notifications section and load its state. Sound preferences live in the
  * desktop-only settings blob; the @everyone mute and content privacy are per-key
- * settings the backend reads at notify time (values: full | hide_content | hide_all).
+ * settings the backend reads at notify time (values: full | hide_content | hide_sender | hide_all).
  */
 const NOTIF_HANDLERS = {
     saveSounds: ({ globalMute, muteEveryone, sound }) =>
@@ -1088,7 +1088,7 @@ async function initNotificationSettings() {
     let privacy = 'full';
     try {
         const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
-        if (val === 'hide_content' || val === 'hide_all') privacy = val;
+        if (['hide_content', 'hide_sender', 'hide_all'].includes(val)) privacy = val;
     } catch (_) { /* default full */ }
     // A browser build asks the browser itself, which answers once per site.
     const ask = platformFeatures.os === 'web' && (await invoke('web_notifications').catch(() => null)) === 'default';

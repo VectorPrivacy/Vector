@@ -1065,27 +1065,18 @@ pub fn post_notification_jni(
     // for every Android notification: the foreground path (show_notification_generic)
     // and the background-sync service both land here. chat_id is untouched so
     // tap-to-open still works (it isn't displayed).
-    let (title, body, avatar_path, sender_name, group_name, group_avatar_path):
-        (String, String, Option<String>, Option<String>, Option<String>, Option<String>) =
-        match crate::services::notif_content_privacy() {
-            crate::services::NotifContentPrivacy::Full => (
-                title.to_string(), body.to_string(),
-                avatar_path.map(str::to_string), sender_name.map(str::to_string),
-                group_name.map(str::to_string), group_avatar_path.map(str::to_string),
-            ),
-            crate::services::NotifContentPrivacy::HideContent => {
-                let b = if group_name.is_some() { "Sent a message" } else { "Sent you a message" };
-                (
-                    title.to_string(), b.to_string(),
-                    avatar_path.map(str::to_string), sender_name.map(str::to_string),
-                    group_name.map(str::to_string), group_avatar_path.map(str::to_string),
-                )
-            }
-            crate::services::NotifContentPrivacy::HideAll => (
-                "Vector".to_string(), "You received a message".to_string(),
-                None, None, None, None,
-            ),
-        };
+    let mut shown = vector_core::notify::Preview {
+        title: title.to_string(),
+        body: body.to_string(),
+        sender: sender_name.map(str::to_string),
+        avatar: avatar_path.map(str::to_string),
+        group: group_name.map(str::to_string),
+        group_avatar: group_avatar_path.map(str::to_string),
+    };
+    shown.apply(vector_core::notify::ContentPrivacy::load());
+    let vector_core::notify::Preview {
+        title, body, sender: sender_name, avatar: avatar_path, group: group_name, group_avatar: group_avatar_path,
+    } = shown;
 
     let vm = match BG_JAVA_VM.get() {
         Some(vm) => vm,
