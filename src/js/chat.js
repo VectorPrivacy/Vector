@@ -1028,6 +1028,7 @@ async function openChat(contact) {
     _unreadJumpResolving = false;
     // A command composer belongs to the chat it was opened in.
     if (commandCtrl) commandCtrl.exitComposer();
+    dismissNostrEmbed();
     // A direct chat-to-chat jump never passes through closeChat: stash the
     // outgoing chat's draft here so it doesn't bleed into the new one.
     if (strOpenChat && strOpenChat !== contact) {

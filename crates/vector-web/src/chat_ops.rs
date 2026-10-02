@@ -66,6 +66,13 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
         }
         "gif_api" => Value::String(gif_api(&a.str("query")?).await?),
         "cache_gif_preview" => cache_gif_preview(&a.str("url")?).await?.map_or(Value::Null, Value::String),
+        "fetch_nostr_embed" => to_value(vector_core::nostr_embed::fetch(&a.str("reference")?).await?)?,
+        "cache_embed_video" => {
+            let fallbacks: Option<Vec<String>> = a.de("fallbacks")?;
+            let sha256 = a.opt_str("sha256");
+            Value::String(cache_embed_video(&a.str("url")?, sha256.as_deref(), fallbacks.unwrap_or_default()).await?)
+        }
+        "cancel_embed_video" => json!(false),
         _ => return Ok(None),
     }))
 }
@@ -410,6 +417,10 @@ async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         if INVITE_PREFIXES.iter().any(|p| url.starts_with(p)) {
             continue;
         }
+        // A link to a Nostr post, article or video gets its own card from relays.
+        if vector_core::nostr_embed::EmbedRef::from_url(&url).is_some() {
+            continue;
+        }
         let Ok(metadata) = site_metadata(&url).await else { continue };
         let has_content = metadata.og_title.is_some()
             || metadata.og_description.is_some()
@@ -480,6 +491,59 @@ async fn fetch_capped(url: &str, cap: usize, fresh: bool) -> Result<Option<Vec<u
         }
     }
     Ok(Some(out))
+}
+
+/// Held in the worker's memory while it downloads, so smaller than the desktop's cap.
+const MAX_EMBED_VIDEO_BYTES: usize = 128 * 1024 * 1024;
+
+/// An embedded Nostr video as a file in OPFS, kept only if its bytes are a video and,
+/// when the event names one, its hash matches.
+async fn cache_embed_video(url: &str, sha256: Option<&str>, fallbacks: Vec<String>) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Not a web video".into());
+    }
+    // Reused only for the same link and the same promised hash.
+    let stem = &vector_core::crypto::sha256_hex(format!("{url}\n{}", sha256.unwrap_or("").to_ascii_lowercase()).as_bytes())[..32];
+    for ext in ["mp4", "webm", "mov"] {
+        let path = format!("/cache/embed_videos/{stem}.{ext}");
+        if vector_core::webfiles::exists(Path::new(&path)).await {
+            return Ok(path);
+        }
+    }
+    vector_core::emit_event("embed_video_progress", &json!({ "url": url, "progress": -1 }));
+    let mut last_err = "Failed to download".to_string();
+    let mirrors = fallbacks.into_iter().filter(|u| u.starts_with("https://")).take(3);
+    for source in std::iter::once(url.to_string()).chain(mirrors) {
+        if vector_core::net::validate_url_not_private(&source).is_err() {
+            continue;
+        }
+        let body = match fetch_capped(&source, MAX_EMBED_VIDEO_BYTES, true).await {
+            Ok(Some(body)) => body,
+            Ok(None) => {
+                last_err = "This video is too large or unavailable".into();
+                continue;
+            }
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        let ext = if body.len() > 12 && &body[4..8] == b"ftyp" {
+            if &body[8..12] == b"qt  " { "mov" } else { "mp4" }
+        } else if body.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            "webm"
+        } else {
+            return Err("Not a video".into());
+        };
+        if sha256.is_some_and(|h| !vector_core::crypto::sha256_hex(&body).eq_ignore_ascii_case(h)) {
+            return Err("The video doesn't match the post's fingerprint".into());
+        }
+        let path = format!("/cache/embed_videos/{stem}.{ext}");
+        vector_core::webfiles::write(Path::new(&path), &body).await?;
+        vector_core::emit_event("embed_video_progress", &json!({ "url": url, "progress": 100 }));
+        return Ok(path);
+    }
+    Err(last_err)
 }
 
 /// The path is fixed here; the caller only picks the query.

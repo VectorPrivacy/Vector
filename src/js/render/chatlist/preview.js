@@ -163,5 +163,6 @@ function generateChatPreviewText(chat) {
     let previewSource = cLastMsg.content;
     // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
             previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
+    previewSource = replaceNostrEmbedRefsForPreview(previewSource);
     return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
 }

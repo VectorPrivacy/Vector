@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-embed-video"
+description = "Enables the cache_embed_video command without any pre-configured scope."
+commands.allow = ["cache_embed_video"]
+
+[[permission]]
+identifier = "deny-cache-embed-video"
+description = "Denies the cache_embed_video command without any pre-configured scope."
+commands.deny = ["cache_embed_video"]

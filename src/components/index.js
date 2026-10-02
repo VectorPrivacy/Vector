@@ -61,6 +61,7 @@ import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetB
 import { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
+import { openNostrEmbedModal, pushNostrEmbedModal, popNostrEmbedModal, closeNostrEmbedModal, embedVideoProgressed } from './lib/nostrembed.svelte.js';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
@@ -95,6 +96,7 @@ export { uploadProgressed, uploadPublishing, transferPublishing, downloadProgres
 export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen };
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName };
 export { openPackDetails, resolvePackDetails, closePackDetails };
+export { openNostrEmbedModal, pushNostrEmbedModal, popNostrEmbedModal, closeNostrEmbedModal, embedVideoProgressed };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
 export { setChatPaneHandlers, setChatHeaderHandlers } from './lib/chatpane.svelte.js';

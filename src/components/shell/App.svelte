@@ -54,6 +54,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
     import PublishDialog from '../marketplace/PublishDialog.svelte';
     import Popup from '../ui/Popup.svelte';
     import PackDetailsOverlay from '../picker/PackDetailsOverlay.svelte';
+    import NostrEmbedModal from '../chat/embeds/NostrEmbedModal.svelte';
     import AttachmentPanelRoot from '../miniapps/AttachmentPanelRoot.svelte';
     import MarketplaceRoot from '../marketplace/MarketplaceRoot.svelte';
     import LaunchDialogRoot from '../miniapps/LaunchDialogRoot.svelte';
@@ -71,6 +72,8 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 <Popup />
 <!-- Pack details: opened by deep link (vector://emojis/pack/<naddr>) and the share-pack flow. -->
 {#if screens.packDetails}<PackDetailsOverlay h={screens.packDetails.h} />{/if}
+<!-- A Nostr post, article or video from a chat card, in full. -->
+{#if screens.nostrEmbed}<NostrEmbedModal h={screens.nostrEmbed.h} />{/if}
 
 <WindowChrome />
 <main class="container">

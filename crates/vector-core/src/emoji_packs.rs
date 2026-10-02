@@ -1074,7 +1074,7 @@ fn extract_write_relays(ev: &Event) -> Vec<RelayUrl> {
 /// Returns an empty Vec on absence or fetch error; callers must treat absence
 /// as "no extra hints," not a failure. Cached per-pubkey. Used by the
 /// single-pack path; the batched list path uses `prefetch_author_write_relays`.
-async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<RelayUrl> {
+pub(crate) async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<RelayUrl> {
     if let Some(relays) = cached_write_relays(&pubkey) {
         return relays;
     }

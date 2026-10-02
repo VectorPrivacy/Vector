@@ -477,7 +477,7 @@ function balanceInlineMarkdown(text) {
  * renders inline markdown to safe HTML.
  */
 function buildReplyPreviewHtml(content, maxLength = 50) {
-    const resolved = resolveMentionText(content);
+    const resolved = resolveMentionText(replaceNostrEmbedRefsForPreview(content));
     const plain = contentToPreviewText(resolved);
     const truncated = truncateEmojiAware(plain, maxLength);
     const balanced = balanceInlineMarkdown(truncated);

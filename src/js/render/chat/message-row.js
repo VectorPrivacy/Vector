@@ -186,6 +186,8 @@ const _dmsgLookups = {
  *   xdcUrl: (msg: object) => string|null,
  *   renderXdcUrlCard: (node: Element, msg: object, url: string) => void,
  *   webPreviewsEnabled: () => boolean,
+ *   nostrEmbedsOn: (ctx: object) => boolean,
+ *   embeds: NostrEmbedHelpers,
  *   linkPreviewData: (msg: object) => object|null,
  *   fmtCountdown: (secs: number) => string,
  *   selfDestructTooltip: (el: Element) => void,
@@ -214,6 +216,8 @@ const _dmsgContentHelpers = {
     xdcUrl: (msg) => findXdcUrl(msg.content),
     renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
     webPreviewsEnabled: () => !!fWebPreviewsEnabled,
+    nostrEmbedsOn: (ctx) => !!fWebPreviewsEnabled && !ctx.revealedBlocked,
+    get embeds() { return NOSTR_EMBED_HELPERS; },
     linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
     fmtCountdown: (secs) => _fmtCountdown(secs),
     selfDestructTooltip: (el) => _selfDestructTooltip(el),
@@ -529,6 +533,8 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
             textBody = stripEmojiPackNaddrs(textBody);
     // Community invite links likewise render as their own card.
             textBody = stripCommunityInviteUrls(textBody);
+    // Nostr posts, articles and videos too, while web previews are on.
+    if (fWebPreviewsEnabled && !isRevealedBlockedMsg) textBody = stripNostrEmbedRefs(textBody);
     // Defensive: displayContent can be null/undefined for attachment-only messages.
     span.innerHTML = parseMarkdown(textBody);
     linkifyUrls(span);
@@ -631,12 +637,14 @@ function _dmsgLinkPreviewData(msg) {
         && /https?:\/\/(?:www\.)?vectorapp\.io\/invite(?:\/|$|#|\?)/i.test(url);
     const meta = msg.preview_metadata;
     if (meta && (isPackShareUrl(meta.og_url) || isInviteShareUrl(meta.og_url))) return null;
+    // A link the Nostr card covers: a card fetched before those existed must not sit beside it.
+    if (meta && !/https:\/\//i.test(withoutNostrEmbedUrls(msg.content || ''))) return null;
 
     const hasMetadata = meta && (meta.og_image || meta.og_title || meta.title || meta.og_description || meta.description);
     if (!hasMetadata) {
         if (!meta && msg.content) {
             // Pack-share URLs and bare naddrs are not links to preview.
-            const contentForPreview = msg.content
+            const contentForPreview = withoutNostrEmbedUrls(msg.content)
                 .replace(/<https?:\/\/[^\s>]+>/g, '')
                 .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '')
                 .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?)#[A-Za-z0-9_-]+/gi, '');

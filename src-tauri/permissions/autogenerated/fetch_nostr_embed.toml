@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-nostr-embed"
+description = "Enables the fetch_nostr_embed command without any pre-configured scope."
+commands.allow = ["fetch_nostr_embed"]
+
+[[permission]]
+identifier = "deny-fetch-nostr-embed"
+description = "Denies the fetch_nostr_embed command without any pre-configured scope."
+commands.deny = ["fetch_nostr_embed"]

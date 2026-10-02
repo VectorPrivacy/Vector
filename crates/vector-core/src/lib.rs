@@ -87,6 +87,7 @@ pub mod blossom_stats;
 pub mod inbox_relays;
 pub mod emoji_packs;
 pub mod emoji_usage;
+pub mod nostr_embed;
 pub mod badges;
 pub mod bot_interface;
 pub mod webxdc;

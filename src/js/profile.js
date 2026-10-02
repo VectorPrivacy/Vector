@@ -138,6 +138,7 @@ document.addEventListener('DOMContentLoaded', registerProfileScreen, { once: tru
  * @param {Profile} cProfile - An optional profile to render
  */
 async function openProfile(cProfile) {
+    dismissNostrEmbed();
     pushBack('profile', () => {
         VectorSvelte.showPane('profile', false);
         if (previousChatBeforeProfile) openChat(previousChatBeforeProfile);

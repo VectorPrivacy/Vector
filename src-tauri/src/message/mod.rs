@@ -117,6 +117,10 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
 
     // Only try the first few URLs
     for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+        // A link to a Nostr post, article or video gets its own card from relays.
+        if vector_core::nostr_embed::EmbedRef::from_url(&url).is_some() {
+            continue;
+        }
         // Community invite links render as a dedicated in-chat card — an OG preview
         // would stack a duplicate website-style card under it.
         if url.starts_with("https://vectorapp.io/invite")

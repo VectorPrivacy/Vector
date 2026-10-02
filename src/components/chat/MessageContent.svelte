@@ -6,6 +6,7 @@
     // content, and a rebuild would reset playback and spoiler reveals).
     import Attachments from './Attachments.svelte';
     import InvitePreviews from './InvitePreviews.svelte';
+    import NostrEmbeds from './embeds/NostrEmbeds.svelte';
     import LinkPreview from './LinkPreview.svelte';
     import CommandLine from './CommandLine.svelte';
     import CryptoAddress from './CryptoAddress.svelte';
@@ -58,6 +59,9 @@
     {#if msg.content}
         <span style="display:contents" use:packPreviews={msg.content}></span>
         <InvitePreviews text={msg.content} {h} />
+        {#if h.nostrEmbedsOn(ctx)}
+            <NostrEmbeds text={msg.content} origin={{ chatId: h.openChat(), msgId: msg.id }} h={h.embeds} />
+        {/if}
     {/if}
     {#if xdcUrl}
         <!-- An .xdc link is a playable card, and supersedes the OpenGraph card. -->

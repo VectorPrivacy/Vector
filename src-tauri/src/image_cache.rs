@@ -945,6 +945,7 @@ pub async fn clear_image_cache<R: Runtime>(
     total += clear_cache(&handle, ImageType::InlineImage)?;
     total += clear_cache(&handle, ImageType::Emoji)?;
     total += clear_cache(&handle, ImageType::EmojiPackIcon)?;
+    total += crate::commands::embeds::clear_embed_videos(&handle);
 
     // Clear stale cached path references in profiles (DB + in-memory state),
     // and remember what to fetch again: the frontend keeps every avatar it was

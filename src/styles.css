@@ -6508,6 +6508,584 @@ img.emoji-img-loading {
   margin-top: 4px;
 }
 
+/* ── In-chat Nostr embed (post, article, video) ──
+   A referenced note / nevent / naddr renders as this card while web previews are on. A bare
+   or nostr: reference is cut from the text; a web link stays and gains Open Externally. */
+.nostr-embed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px;
+  background-color: rgba(10, 10, 10, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  max-width: 420px;
+  min-width: 0;
+}
+
+.nostr-embed.ne-ready {
+  animation: cic-pop-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.ne-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.ne-author,
+.ne-author-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ne-author-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ne-when {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.ne-text {
+  font-size: 14px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.88);
+  max-height: calc(1.4em * 8);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ne-text.is-small {
+  font-size: 12px;
+  max-height: calc(1.4em * 3);
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.ne-text.is-clamped {
+  cursor: pointer;
+  -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent);
+  mask-image: linear-gradient(to bottom, #000 65%, transparent);
+}
+
+.ne-title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.3;
+  color: #fff;
+  overflow-wrap: anywhere;
+}
+
+.ne-summary {
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.ne-article {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ne-article-cover {
+  width: 100%;
+  max-height: 200px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.ne-media {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ne-media.is-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.ne-media-img {
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+.ne-media.is-grid .ne-media-img {
+  aspect-ratio: 1;
+  height: auto;
+}
+
+.ne-media-more {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ne-video {
+  position: relative;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  line-height: 0;
+}
+
+.ne-video.is-portrait {
+  width: auto;
+  height: 360px;
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+/* Out of flow, so the box is sized by its aspect ratio alone and never by the video's own height. */
+.ne-video video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.ne-video-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: #0b0b0b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.ne-video-poster img,
+.ne-video-poster .ne-poster-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ne-video-play {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  /* The audio player's play button: the theme colour with the app's own icon. */
+  background: var(--icon-color-primary);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+
+.ne-video-poster:hover .ne-video-play {
+  transform: scale(1.06);
+  filter: brightness(1.08);
+}
+
+.ne-video-poster:active .ne-video-play {
+  transform: scale(0.95);
+}
+
+.ne-video-play .icon {
+  width: 30px;
+  height: 30px;
+  background-color: #0a0a0a;
+  mask-size: 30px;
+}
+
+/* A download or an error keeps a dark backing, so the ring and the glyph read on it. */
+.ne-video-play.is-loading,
+.ne-video-play.is-error {
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.ne-video-play svg {
+  width: 40px;
+  height: 40px;
+}
+
+.ne-video-play circle {
+  fill: none;
+  stroke-width: 3;
+}
+
+.ne-ring-track {
+  stroke: rgba(255, 255, 255, 0.15);
+}
+
+.ne-ring {
+  stroke: var(--accent-color, #59fcb3);
+  stroke-dasharray: 100.5;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset 0.2s ease;
+}
+
+.ne-video-play svg.is-spinning {
+  animation: ne-spin 1s linear infinite;
+}
+
+@keyframes ne-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ne-video-glyph {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.ne-video-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.ne-video-error {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #ffb4b4;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.ne-veil {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ne-veil-action {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--accent-color, #59fcb3);
+}
+
+.ne-unavailable {
+  font-weight: 600;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.ne-error {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  overflow-wrap: anywhere;
+}
+
+.ne-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ne-btn {
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
+}
+
+.ne-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.ne-btn.ne-btn-primary {
+  border-color: transparent;
+  background: var(--accent-color, #59fcb3);
+  color: #0e0e0e;
+}
+
+.ne-btn.ne-btn-primary:hover {
+  background: var(--accent-color, #59fcb3);
+  filter: brightness(1.1);
+}
+
+.ne-skel-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ne-skel-name {
+  width: 40%;
+  height: 12px;
+  border-radius: 4px;
+}
+
+.ne-skel-line {
+  display: block;
+  width: 90%;
+  height: 12px;
+  border-radius: 4px;
+}
+
+.ne-skel-line.ne-skel-short {
+  width: 60%;
+}
+
+/* A backend-cached picture still on its way: the image waits out of sight behind a shimmer. */
+.ne-img-pending {
+  display: none !important;
+}
+
+.ne-img-skel {
+  display: block;
+  min-height: 96px;
+}
+
+.ne-img-skel.ne-quote-thumb,
+.ne-video-poster .ne-img-skel {
+  min-height: 0;
+}
+
+.ne-video-poster .ne-img-skel {
+  border-radius: 0;
+}
+
+.ne-img-skel.ne-article-cover {
+  min-height: 140px;
+}
+
+.ne-img-skel.nem-cover {
+  min-height: 180px;
+}
+
+/* A reference inside an embedded post: a chip that opens it, never fetched until asked. */
+.ne-chip {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-color, #59fcb3) 14%, transparent);
+  color: var(--accent-color, #59fcb3);
+  font-size: 0.9em;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* A post the expanded one quotes. */
+.ne-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
+}
+
+.ne-quote.btn:hover {
+  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent);
+}
+
+.ne-quote-body {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ne-quote-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ne-quote-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff;
+  overflow-wrap: anywhere;
+}
+
+.ne-quote-text {
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.75);
+  max-height: calc(1.4em * 3);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ne-quote-cw {
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.ne-quote-thumb {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.nostr-embed-modal .pack-details-close.nem-back {
+  left: 12px;
+  right: auto;
+}
+
+.nem-scroll.has-back > .ne-eyebrow:first-child,
+.nem-scroll.has-back > .ne-author:first-child {
+  padding-left: 36px;
+}
+
+/* The expanded view rides the pack-details overlay and card. */
+.nostr-embed-modal {
+  max-width: 560px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.nostr-embed-modal.is-article {
+  max-width: 720px;
+}
+
+.nem-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nostr-embed-modal .ne-author {
+  padding-right: 36px;
+}
+
+.nem-cover {
+  width: calc(100% + 40px);
+  max-height: 280px;
+  margin: -20px -20px 0;
+  object-fit: cover;
+}
+
+.nem-title {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.25;
+  color: #fff;
+  overflow-wrap: anywhere;
+}
+
+.nem-summary {
+  font-size: 14px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.nem-body {
+  font-size: 15px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.9);
+  overflow-wrap: anywhere;
+}
+
+.nostr-article-body .markdown-paragraph {
+  display: block;
+  margin-bottom: 0.8em;
+}
+
+.nostr-article-img {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+  border-radius: 8px;
+}
+
+/* A mini profile opened from the modal (its author, a mention) must sit above it. */
+body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-backdrop { z-index: 5001; }
+body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002; }
+
+/* The modal sits outside .dmsg, so it sizes its own twemoji to the text run. */
+.nostr-embed-modal .emoji {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+  display: inline-block;
+}
+
+.nem-actions {
+  padding: 12px 20px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .emoji-pack-preview {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 140px;
@@ -11695,9 +12273,24 @@ button.popout-thumb {
     object-fit: cover;
 }
 
+.popout-place-icon.is-round {
+    border-radius: 50%;
+}
+
 .popout-place-sep {
     flex: none;
     opacity: 0.6;
+}
+
+/* A playing video between hosts (lib/videohost.js): still in the page, so it plays on, but out of sight. */
+.video-parking {
+    position: fixed;
+    left: -10000px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    pointer-events: none;
 }
 
 .popout-actions {
@@ -12273,26 +12866,11 @@ button.popout-thumb {
     width: 160px;
     margin: 0;
     margin-left: auto;
-.popout-place-icon.is-round {
-    border-radius: 50%;
-}
-
 }
 
 .relay-form-label {
   font-size: 13px;
   font-weight: 600;
-/* A playing video between hosts (lib/videohost.js): still in the page, so it plays on, but out of sight. */
-.video-parking {
-    position: fixed;
-    left: -10000px;
-    top: 0;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    pointer-events: none;
-}
-
   color: rgba(255, 255, 255, 0.8);
   flex-shrink: 0;
 }
