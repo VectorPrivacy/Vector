@@ -34,17 +34,23 @@ const GIF_API_BASE = 'https://gifverse.net';
 /** Preconnect link element for GIFGalaxy */
 let gifPreconnectLink = null;
 
+/** Rust fetches the service when proxying is on or Tor is chosen: the WebView never rides Tor. */
+function gifsViaBackend() {
+    return fProxyMediaEnabled || !!VectorSvelte.torState().state?.enabled;
+}
+
 /**
  * One GIF API query, as parsed JSON. With "Proxy Previews & Media" on, Rust
  * asks the service through the user's Magnitude, so neither the listing nor
- * the search term leaves from this device; off, the WebView asks directly.
+ * the search term leaves from this device; with Tor on, Rust asks over Tor.
+ * Otherwise the WebView asks directly.
  * `signal` only guards the direct path; the proxied answer is checked for
  * `signal.aborted` by every caller after the await.
  * @param {string} query - e.g. `trending?limit=12&offset=0&sort=popular`
  * @param {AbortSignal} [signal]
  */
 async function gifApi(query, signal) {
-    if (fProxyMediaEnabled) {
+    if (gifsViaBackend()) {
         return JSON.parse(await invoke('gif_api', { query }));
     }
     const response = await fetch(`${GIF_API_BASE}/api/v1/${query}`, { signal });
@@ -81,13 +87,12 @@ function showGifSkeletons(count) {
  * Establish early connection to GIF API server
  * Called when opening a chat to warm up connection before user needs GIFs
  *
- * GIFs are the ONE granted exception to "the frontend never fetches remote",
- * Tor included: gifverse.net is Vector's own service, so the WebView talks
- * to it directly even while Tor is on (user-accepted tradeoff).
+ * GIFs are the one granted exception to "the frontend never fetches remote", and only
+ * while Tor is off: gifverse.net is Vector's own service.
  */
 function preconnectGifServer() {
     if (gifPreconnectLink) return; // Already connected
-    if (fProxyMediaEnabled) return; // Nothing here talks to the service directly
+    if (gifsViaBackend()) return; // Nothing here talks to the service directly
     gifPreconnectLink = document.createElement('link');
     gifPreconnectLink.rel = 'preconnect';
     gifPreconnectLink.href = 'https://gifverse.net';
@@ -443,7 +448,7 @@ function loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, f
         };
 
         const remote = `${mediaBase}/${encodeURIComponent(gifId)}/${format.ext}`;
-        if (fProxyMediaEnabled) {
+        if (gifsViaBackend()) {
             // Fetched by Rust through the privacy setting's egress into a
             // small local cache, then played from the file; the WebView
             // never talks to the service. The AV1 clip is ~14x smaller than
@@ -478,7 +483,7 @@ function loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, f
             loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, formatIndex + 1);
         };
 
-        if (fProxyMediaEnabled) {
+        if (gifsViaBackend()) {
             // The element joins the grid only once its bytes exist: an <img>
             // without a src paints a broken frame and the alt text over the
             // thumbhash, which is meant to stand alone until the picture lands.
