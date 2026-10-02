@@ -46,17 +46,6 @@
                         <span class="badge-card-access-text">{badge.access}</span>
                     </div>
                 {/if}
-                {#if badge.perks?.length}
-                    <div class="badge-card-perks">
-                        <div class="badge-card-perks-label">{badge.perks.length === 1 ? 'Perk' : 'Perks'}</div>
-                        {#each badge.perks as p}
-                            <div class="badge-card-perk">
-                                <span class="badge-card-perk-text">{p.text}</span>
-                                {#if p.sub}<span class="badge-card-perk-sub">{p.sub}</span>{/if}
-                            </div>
-                        {/each}
-                    </div>
-                {/if}
             </div>
         </div>
     </div>

@@ -60,13 +60,13 @@ function _resetBadgeTilt() {
     VectorSvelte.setBadgeTiltVars({ rx: '0deg', ry: '0deg', mx: '50%', my: '50%', holo: '0', idle: true });
 }
 
-/** @param {{title:string, html:string, svg:string, perks?:{text:string,sub?:string}[], subtitle?:string, tierProgress?:{current:number,total:number,icons:string[]}, access?:string}} badge */
-function showBadgeCard({ title, html, svg, perks, subtitle, tierProgress, access }) {
+/** @param {{title:string, html:string, svg:string, subtitle?:string, tierProgress?:{current:number,total:number,icons:string[]}, access?:string}} badge */
+function showBadgeCard({ title, html, svg, subtitle, tierProgress, access }) {
     VectorSvelte.setBadgeCard({
         badge: {
             src: /:\/\/|^data:|^blob:/.test(svg) ? svg : './icons/' + svg,
             title: title || '', subtitle: subtitle || '', html: html || '',
-            tiers: tierProgress || null, access: access || '', perks: perks || [],
+            tiers: tierProgress || null, access: access || '',
         },
         open: true, visible: false,
     });

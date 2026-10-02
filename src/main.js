@@ -109,7 +109,7 @@ function showFawkesCard() {
         title: 'V for Vector Badge',
         html: `Acquired by logging in on Guy Fawkes Day&nbsp;(November 5, 2025).<br><br><i style="opacity: 0.5; font-size: 13px;">Remember, remember the 5th of November...</i>`,
         svg: 'fawkes_mask.svg',
-        perks: [{ text: 'Unlimited emoji packs', sub: 'up from 3' }, { text: 'Up to 90 emoji per pack', sub: 'up from 30' }, { text: 'Unlimited accounts', sub: 'up from 3' }],
+        access: 'Full Premium Access',
     });
 }
 

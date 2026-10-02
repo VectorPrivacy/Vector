@@ -2,7 +2,7 @@
 // badge-card.js owns the input math and writes `tilt`; the card paints it as CSS vars.
 const b = $state({
     open: false, visible: false,
-    badge: { src: '', title: '', subtitle: '', html: '', tiers: null, access: '', perks: [] },
+    badge: { src: '', title: '', subtitle: '', html: '', tiers: null, access: '' },
     tilt: { rx: '0deg', ry: '0deg', mx: '50%', my: '50%', holo: '0', idle: true },
 });
 const els = { card: null };
