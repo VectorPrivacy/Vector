@@ -8,9 +8,6 @@ use tauri::{AppHandle, Runtime};
 
 use crate::voice::AudioRecorder;
 
-#[cfg(target_os = "android")]
-use crate::android;
-
 #[cfg(feature = "whisper")]
 use crate::{audio, whisper};
 
@@ -21,19 +18,7 @@ use crate::{audio, whisper};
 /// Start audio recording
 #[tauri::command]
 pub async fn start_recording() -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        // Check if we already have permission
-        if !android::permissions::check_audio_permission().unwrap() {
-            // This will block until the user responds to the permission dialog
-            let granted = android::permissions::request_audio_permission_blocking()?;
-
-            if !granted {
-                return Err("Audio permission denied by user".to_string());
-            }
-        }
-    }
-
+    crate::mic_access::require().await?;
     AudioRecorder::global().start()
 }
 

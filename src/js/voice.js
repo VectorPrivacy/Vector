@@ -271,9 +271,10 @@ class VoiceRecorder {
             this.recordingStartTime = Date.now();
             this._startTimer();
         } catch (err) {
+            this._setState(RecordingState.IDLE);
+            if (String(err) === 'MIC_DENIED') return promptMicAccess();
             console.error('Recording start failed:', err);
             await popupConfirm('Recording Error', err, true, '', 'vector_warning.svg');
-            this._setState(RecordingState.IDLE);
         }
     }
 

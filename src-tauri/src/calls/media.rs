@@ -55,6 +55,8 @@ fn level_of(frame: &[i16]) -> f32 {
 pub struct MediaEngine {
     stop: Arc<AtomicBool>,
     pub muted: Arc<AtomicBool>,
+    /// False when the call went ahead without a microphone (access refused, or none there).
+    mic: Arc<AtomicBool>,
     pub stats: Arc<MediaStats>,
     pub link: Arc<LiveLink>,
     on_mixer: bool,
@@ -93,6 +95,7 @@ impl MediaEngine {
 
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
+        let mic = Arc::new(AtomicBool::new(true));
         let stats = stats.unwrap_or_else(|| Arc::new(MediaStats::default()));
         let jitter = Arc::new(Mutex::new(Jitter::default()));
         let share_jitter = Arc::new(Mutex::new(Jitter::default()));
@@ -102,12 +105,13 @@ impl MediaEngine {
         let capture = {
             let stop = Arc::clone(&stop);
             let muted = Arc::clone(&muted);
+            let mic = Arc::clone(&mic);
             let stats = Arc::clone(&stats);
             let link = Arc::clone(&link);
             let conn = conn.clone();
             std::thread::Builder::new()
                 .name("calls-capture".into())
-                .spawn(move || capture_thread(conn, link, out_rate, stop, muted, stats, ready_tx))
+                .spawn(move || capture_thread(conn, link, out_rate, stop, muted, mic, stats, ready_tx))
                 .map_err(|e| e.to_string())?
         };
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
@@ -130,7 +134,7 @@ impl MediaEngine {
         }
 
         let Some(conn) = conn else {
-            return Ok(Self { stop, muted, stats, link, on_mixer, threads: vec![capture], rx_task: None });
+            return Ok(Self { stop, muted, mic, stats, link, on_mixer, threads: vec![capture], rx_task: None });
         };
 
         // Receive: datagrams into the jitter buffers until the connection closes; the
@@ -191,7 +195,7 @@ impl MediaEngine {
             threads.push(t);
         }
 
-        Ok(Self { stop, muted, stats, link, on_mixer, threads, rx_task: Some(rx_task) })
+        Ok(Self { stop, muted, mic, stats, link, on_mixer, threads, rx_task: Some(rx_task) })
     }
 }
 
@@ -201,6 +205,9 @@ impl CallAudio for MediaEngine {
     }
     fn set_muted(&self, on: bool) {
         self.muted.store(on, Ordering::Relaxed);
+    }
+    fn has_mic(&self) -> bool {
+        self.mic.load(Ordering::Relaxed)
     }
     fn set_volume(&self, volume: f32) {
         self.link.set_gain(volume);
@@ -282,12 +289,14 @@ impl NetSim {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_thread(
     conn: Option<Connection>,
     link: Arc<LiveLink>,
     out_rate: u32,
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
+    mic: Arc<AtomicBool>,
     stats: Arc<MediaStats>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
@@ -325,16 +334,27 @@ fn capture_thread(
             )
             .map_err(|e| format!("Failed to build input stream: {e}"))?;
         stream.play().map_err(|e| format!("Failed to start input stream: {e}"))?;
+        AudioEngine::input_opened();
         Ok((stream, ring, in_rate))
     };
 
-    let (_stream, cap_ring, in_rate) = match setup() {
-        Ok(v) => v,
+    let opened = if crate::mic_access::granted() { setup() } else { Err(crate::mic_access::DENIED.to_string()) };
+    let (_stream, cap_ring, in_rate) = match opened {
+        Ok((stream, ring, rate)) => (Some(stream), ring, rate),
+        // A call goes on without a microphone: muted, but still hearing the peer and still
+        // sending the muted frames that tell them we are here.
+        Err(e) if conn.is_some() => {
+            vector_core::log_warn!("[Calls] no microphone, the call goes on muted: {e}");
+            mic.store(false, Ordering::Relaxed);
+            (None, Arc::new(SpscRing::new(ENGINE_RATE as usize)), ENGINE_RATE)
+        }
         Err(e) => {
             let _ = ready.send(Err(e));
             return;
         }
     };
+    let silent = _stream.is_none();
+    let mut silent_samples: u64 = 0;
     let mut aec = match SpeexAec::new(ENGINE_RATE, FRAME, AEC_TAIL_MS) {
         Ok(a) => a,
         Err(e) => {
@@ -386,6 +406,13 @@ fn capture_thread(
         if n > 0 {
             near_rs.process(&scratch[..n], &mut near);
         }
+        if silent {
+            // Silence on the clock a microphone would keep, so frames still go out on time.
+            let due = (started.elapsed().as_secs_f64() * ENGINE_RATE as f64) as u64;
+            let add = due.saturating_sub(silent_samples) as usize;
+            near.extend(std::iter::repeat_n(0.0, add));
+            silent_samples += add as u64;
+        }
         let m = link.tap.pop(&mut scratch);
         if m > 0 {
             far_rs.process(&scratch[..m], &mut far);
@@ -424,7 +451,7 @@ fn capture_thread(
                 continue;
             };
             let ts = started.elapsed().as_millis() as u32;
-            let datagram = if muted.load(Ordering::Relaxed) {
+            let datagram = if silent || muted.load(Ordering::Relaxed) {
                 pack(seq, ts, FLAG_MUTED, &[])
             } else {
                 match enc.encode(&clean, &mut packet) {

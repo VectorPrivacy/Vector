@@ -87,6 +87,9 @@ pub struct AudioEngine {
     wake: (std::sync::Mutex<bool>, std::sync::Condvar),
     /// Bumped whenever the input device changes, for capture loops to notice.
     input_generation: AtomicU64,
+    /// The microphone is followed only once something has opened it: asking which one it is
+    /// counts as using it on macOS, whose permission prompt would otherwise greet the login screen.
+    input_watched: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: cpal::Stream stores a boxed callback that is !Send+!Sync. The stream
@@ -350,6 +353,14 @@ impl AudioEngine {
         ENGINE.get().map_or(0, |e| e.input_generation.load(Ordering::Relaxed))
     }
 
+    /// A microphone stream opened: from here on the watchdog follows input changes too.
+    pub fn input_opened() {
+        let Some(engine) = ENGINE.get() else { return };
+        if !engine.input_watched.swap(true, Ordering::Relaxed) {
+            *engine.input_name.lock().unwrap_or_else(|e| e.into_inner()) = crate::audio_devices::resolved_input_name();
+        }
+    }
+
     fn create() -> Result<Self, String> {
         // cpal's AAudio host reads device params through `ndk_context`, which
         // panics unregistered (service-only process, or pre-registration) — and a
@@ -389,10 +400,11 @@ impl AudioEngine {
             shared,
             stream: std::sync::Mutex::new(Some(stream)),
             output_name: std::sync::Mutex::new(output_name),
-            input_name: std::sync::Mutex::new(crate::audio_devices::resolved_input_name()),
+            input_name: std::sync::Mutex::new(String::new()),
             device_listeners: std::sync::Mutex::new(Vec::new()),
             wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
             input_generation: AtomicU64::new(0),
+            input_watched: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -417,7 +429,11 @@ impl AudioEngine {
                         std::mem::replace(&mut *guard, false)
                     };
                     let output_now = crate::audio_devices::resolved_output_name();
-                    let input_now = crate::audio_devices::resolved_input_name();
+                    let input_now = if self.input_watched.load(Ordering::Relaxed) {
+                        crate::audio_devices::resolved_input_name()
+                    } else {
+                        String::new()
+                    };
                     let output_changed = {
                         let mut held = self.output_name.lock().unwrap_or_else(|e| e.into_inner());
                         if *held != output_now && !output_now.is_empty() {

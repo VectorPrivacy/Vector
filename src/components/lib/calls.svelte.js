@@ -4,7 +4,7 @@
 const HISTORY = 60;
 
 const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: null,
-    muted: false, peerMuted: false, volume: 1, activeMs: 0, receivedAt: 0,
+    muted: false, peerMuted: false, micOff: false, volume: 1, activeMs: 0, receivedAt: 0,
     stats: null, history: [], quality: null, levels: { mic: 0, peer: 0 }, tick: 0,
     // Video: which pictures each side sends, what the peer can decode, whether the
     // offer was for a video call, and whether the peer has hidden our pictures.
@@ -97,7 +97,7 @@ export function setCallState(s) {
     }
     if (s.id !== c.id) { c.stats = null; c.history = []; c.quality = null; }
     c.id = s.id; c.peer = s.peer; c.outgoing = s.outgoing; c.phase = s.phase;
-    c.reason = s.reason || null; c.muted = s.muted; c.peerMuted = s.peer_muted;
+    c.reason = s.reason || null; c.muted = s.muted; c.peerMuted = s.peer_muted; c.micOff = !!s.mic_off;
     c.volume = typeof s.volume === 'number' ? s.volume : 1;
     c.activeMs = s.active_ms; c.receivedAt = Date.now();
     c.videoMine = { camera: !!s.video_mine?.camera, screen: !!s.video_mine?.screen };

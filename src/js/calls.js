@@ -23,9 +23,34 @@ async function micTestStart() {
     try {
         await invoke('call_mic_test_start');
         VectorSvelte.setMicTest(true, 0);
+        // Access may have just been granted: the microphones can be listed now.
+        loadAudioDevices();
     } catch (e) {
-        VectorSvelte.showToast(String(e));
+        if (String(e) === 'MIC_DENIED') promptMicAccess();
+        else VectorSvelte.showToast(String(e));
     }
+}
+
+/**
+ * Microphone access was refused. The system won't ask a second time, so this says where it
+ * is turned back on, and opens that page where the platform can.
+ */
+async function promptMicAccess() {
+    const os = platformFeatures.os;
+    const where = os === 'macos' ? 'System Settings → Privacy & Security → Microphone'
+        : os === 'windows' ? 'Settings → Privacy → Microphone' : "your device's app settings";
+    const canOpen = os === 'macos' || os === 'windows';
+    const text = `Vector doesn't have access to your microphone. Allow it in ${where}, then try again.`;
+    const open = await popupConfirm('Microphone Access', text, !canOpen, '', 'vector_warning.svg', '', canOpen ? 'Open Settings' : null);
+    if (open && canOpen) invoke('open_mic_settings').catch((e) => VectorSvelte.showToast(String(e)));
+}
+
+let _micOffToldFor = null;
+/** Once per call: it went ahead without a microphone, so say why it is muted. */
+function callMicOnState(s) {
+    if (!s || !s.mic_off || s.phase !== 'active' || _micOffToldFor === s.id) return;
+    _micOffToldFor = s.id;
+    VectorSvelte.showToast("You're muted: Vector doesn't have access to your microphone.");
 }
 
 async function micTestStop() {
@@ -33,10 +58,17 @@ async function micTestStop() {
     await invoke('call_mic_test_stop').catch(() => {});
 }
 
+let _audioDevicesShown = false;
 async function loadAudioDevices() {
+    _audioDevicesShown = true;
     try {
         VectorSvelte.setAudioDevices(await invoke('audio_devices_list'));
     } catch (_) {}
+}
+
+/** A device came or went: refresh the pickers, only if they were ever shown. */
+function reloadAudioDevices() {
+    if (_audioDevicesShown) loadAudioDevices();
 }
 
 /** `name` null means the system default; the change applies to live streams at once. */
@@ -75,6 +107,7 @@ function registerCallScreen() {
             reject: () => invoke('call_reject').catch(() => {}),
             hangup: () => invoke('call_hangup').catch(() => {}),
             setMuted: (on) => invoke('call_set_muted', { muted: on }).catch(() => {}),
+            micAccess: () => promptMicAccess(),
             setVolume: (volume) => invoke('call_set_volume', { volume }).catch(() => {}),
             setVideo: (kind, on) => startVideo(kind, on),
             changeScreen: () => changeScreenSource(),
@@ -93,7 +126,6 @@ function registerCallScreen() {
     // A reloaded webview finds the call the backend still holds, and the switches it saved.
     invoke('call_status').then((s) => { if (s) { VectorSvelte.setCallState(s); callVideoOnState(s); } }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
-    loadAudioDevices();
 }
 
 /** A held quality rung or frame rate for one of our pictures; null lets the ladder decide. */

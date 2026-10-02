@@ -93,6 +93,7 @@ mod chapters;
 
 // Which microphone and speaker every audio path opens
 mod audio_devices;
+mod mic_access;
 /// Sleep and App Nap holds for calls and Mini Apps.
 mod awake;
 
@@ -870,6 +871,7 @@ pub fn run() {
             commands::audio::audio_stop_all,
             commands::audio::audio_devices_list,
             commands::audio::audio_devices_set,
+            commands::audio::open_mic_settings,
             commands::audio::audio_set_volume,
             commands::audio::send_recording,
             // Tor (Arti) commands

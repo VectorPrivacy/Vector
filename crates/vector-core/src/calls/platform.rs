@@ -42,6 +42,10 @@ pub struct AudioStart {
 pub trait CallAudio: Send {
     fn stats(&self) -> Arc<MediaStats>;
     fn set_muted(&self, on: bool);
+    /// False when the call went ahead without a microphone, so it can only be heard muted.
+    fn has_mic(&self) -> bool {
+        true
+    }
     /// Listener-side gains, 1.0 is unity.
     fn set_volume(&self, volume: f32);
     fn set_share_volume(&self, volume: f32);

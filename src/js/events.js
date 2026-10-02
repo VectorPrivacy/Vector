@@ -1228,13 +1228,13 @@ async function setupRustListeners() {
     // before setupRustListeners has run.
 
     // Native calls: the backend owns the state machine; the overlay mirrors it.
-    _on('call_state', (evt) => { VectorSvelte.setCallState(evt.payload); callVideoOnState(evt.payload); });
+    _on('call_state', (evt) => { VectorSvelte.setCallState(evt.payload); callVideoOnState(evt.payload); callMicOnState(evt.payload); });
     _on('call_stats', (evt) => VectorSvelte.setCallStats(evt.payload));
     _on('call_video_refused', () => { stopAllVideo(false); VectorSvelte.showToast('They cannot receive video from this device'); });
     _on('call_level', (evt) => VectorSvelte.setCallLevels(evt.payload));
     _on('mic_level', (evt) => VectorSvelte.setMicTest(null, evt.payload?.mic || 0));
     // A device came or went: the pickers show what is there now.
-    _on('audio_devices_changed', () => loadAudioDevices());
+    _on('audio_devices_changed', () => reloadAudioDevices());
 
     await Promise.all(_p);
 

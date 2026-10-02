@@ -18,6 +18,7 @@
      * @property {() => void} reject
      * @property {() => void} hangup
      * @property {(on: boolean) => void} setMuted
+     * @property {() => void} micAccess   the call has no microphone: explain, and offer the system settings
      * @property {(volume: number) => void} setVolume
      * @property {(kind: 'camera'|'screen', on: boolean) => void} setVideo
      * @property {() => void} changeScreen
@@ -45,6 +46,13 @@
         account_changed: 'Call ended', answered_elsewhere: 'Answered on another device',
     };
     const QUALITY = { excellent: 'Excellent', good: 'Good', fair: 'Fair', poor: 'Poor' };
+
+    // A call without microphone access goes on muted; the button leads to where access is given.
+    const micTitle = $derived(c.micOff ? 'Microphone access is off' : c.muted ? 'Unmute microphone' : 'Mute microphone');
+    function toggleMic() {
+        if (c.micOff) h.micAccess();
+        else h.setMuted(!c.muted);
+    }
 
     const peer = $derived.by(() => {
         c.tick;
@@ -384,8 +392,8 @@
                 <button class="call-btn" class:call-btn-on={c.videoMine.screen} title={c.videoMine.screen ? 'Stop sharing the screen' : 'Share the screen'} disabled={!canSend} onclick={() => h.setVideo('screen', !c.videoMine.screen)}>
                     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                 </button>
-                <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
-                    <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
+                <button class="call-btn" class:call-btn-on={c.muted || c.micOff} title={micTitle} onclick={toggleMic}>
+                    <span class="icon" class:icon-mic-off={c.muted || c.micOff} class:icon-mic-on={!c.muted && !c.micOff}></span>
                 </button>
                 <button class="call-btn call-btn-hangup" title="Hang up" onclick={() => h.hangup()}>
                     <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -420,8 +428,8 @@
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
-                <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
-                    <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
+                <button class="call-btn" class:call-btn-on={c.muted || c.micOff} title={micTitle} onclick={toggleMic}>
+                    <span class="icon" class:icon-mic-off={c.muted || c.micOff} class:icon-mic-on={!c.muted && !c.micOff}></span>
                 </button>
                 <button class="call-btn call-btn-hangup" title="Hang up" onclick={() => h.hangup()}>
                     <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -495,7 +503,7 @@
                         <span class="call-panel-value">{Math.round(c.shareVolume * 100)}%</span>
                     </label>
                 {/if}
-                {#if !c.muted}
+                {#if !c.muted && !c.micOff}
                     <div class="call-panel-meters" transition:curtain>
                         <span class="call-panel-label">Your voice</span>
                         <VoiceMeter level={c.levels.mic} active={live} />

@@ -4,29 +4,12 @@ use super::session::{self, CallState};
 use super::settings::{self, AudioSettings};
 use super::transport::VideoKind;
 
-#[cfg(target_os = "android")]
-fn ensure_microphone() -> Result<(), String> {
-    use crate::android::permissions::{check_audio_permission, request_audio_permission_blocking};
-    if check_audio_permission()? {
-        return Ok(());
-    }
-    if request_audio_permission_blocking()? {
-        Ok(())
-    } else {
-        Err("Microphone permission denied".to_string())
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn ensure_microphone() -> Result<(), String> {
-    Ok(())
-}
-
 /// Ring `npub`. Returns the ringing state; the rest arrives as `call_state` events.
 /// `video` only tells the other side what kind of call this is; no camera starts here.
 #[tauri::command]
 pub async fn call_start(npub: String, video: Option<bool>) -> Result<CallState, String> {
-    ensure_microphone()?;
+    // Asked now, not at launch. A refusal still places the call: it goes on muted.
+    crate::mic_access::ask().await;
     session::start(npub, video.unwrap_or(false)).await
 }
 
@@ -75,7 +58,7 @@ pub async fn call_video_caps(encode: Vec<String>, decode: Vec<String>) {
 
 #[tauri::command]
 pub async fn call_accept() -> Result<(), String> {
-    ensure_microphone()?;
+    crate::mic_access::ask().await;
     session::accept().await
 }
 
@@ -118,7 +101,7 @@ pub async fn call_mic_test_start() -> Result<(), String> {
     if session::snapshot().is_some() {
         return Err("A call is in progress".into());
     }
-    ensure_microphone()?;
+    crate::mic_access::require().await?;
     session::mic_test_start().await
 }
 

@@ -190,6 +190,7 @@ impl AudioRecorder {
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?;
                 stream.play().map_err(|e| format!("Failed to start audio stream: {e}"))?;
+                AudioEngine::input_opened();
                 Ok(stream)
             };
 

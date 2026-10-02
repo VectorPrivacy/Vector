@@ -46,6 +46,8 @@ pub struct CallState {
     pub reason: Option<String>,
     pub muted: bool,
     pub peer_muted: bool,
+    /// The call has no microphone (access refused, or none there): it stays muted.
+    pub mic_off: bool,
     /// Listener-side volume, 1.0 is unity.
     pub volume: f32,
     /// Milliseconds since the call went active; 0 before that.
@@ -113,6 +115,7 @@ struct Call {
     active_since: Option<Instant>,
     muted: bool,
     peer_muted: bool,
+    mic_off: bool,
     volume: f32,
     video: Option<VideoTrack>,
     video_mine: Tracks,
@@ -154,6 +157,7 @@ impl Call {
             reason,
             muted: self.muted,
             peer_muted: self.peer_muted,
+            mic_off: self.mic_off,
             volume: self.volume,
             active_ms: self.active_since.map_or(0, |t| t.elapsed().as_millis() as u64),
             video_mine: self.video_mine,
@@ -343,6 +347,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             active_since: None,
             muted: false,
             peer_muted: false,
+            mic_off: false,
             volume: 1.0,
             video: None,
             video_mine: Tracks::default(),
@@ -647,8 +652,17 @@ pub async fn restart_audio() {
     match platform.start_audio(conn, AudioStart { volume, share_volume, stats, share }).await {
         Ok(m) => {
             m.set_muted(muted);
-            if with_call_id(&id, |c| c.media = Some(m)).is_some() {
+            let mic_off = !m.has_mic();
+            if with_call_id(&id, |c| {
+                c.mic_off = mic_off;
+                c.media = Some(m);
+            })
+            .is_some()
+            {
                 log_info!("[CALLS] Audio reopened on the new default devices");
+                if let Some(s) = snapshot() {
+                    emit_state(&s);
+                }
             }
         }
         Err(e) => {
@@ -701,6 +715,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             active_since: None,
                             muted: false,
                             peer_muted: false,
+                            mic_off: false,
                             volume: 1.0,
                             video: None,
                             video_mine: Tracks::default(),
@@ -876,8 +891,10 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         },
         platform,
     );
+    let mic_off = !media.has_mic();
     let installed = with_call_id(id, |c| {
         c.conn = Some(conn.clone());
+        c.mic_off = mic_off;
         c.media = Some(media);
         c.control = Some(Arc::clone(&control));
         c.video = Some(video);

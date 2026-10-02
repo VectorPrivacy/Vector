@@ -24,6 +24,12 @@ pub async fn audio_devices_set(prefs: DevicePrefs) -> Result<(), String> {
     Ok(())
 }
 
+/// The system's microphone privacy settings, where a refused permission is turned back on.
+#[tauri::command]
+pub async fn open_mic_settings() -> Result<(), String> {
+    crate::mic_access::open_settings()
+}
+
 /// Probe an audio file for its duration without loading it for playback.
 /// Fast: reads file headers only, no decoding.
 #[tauri::command]
