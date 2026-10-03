@@ -406,6 +406,7 @@ pub mod pinned_chats;
 pub mod rail_layout;
 pub mod synced_prefs;
 pub mod notify;
+pub mod push;
 pub mod wallpaper;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===

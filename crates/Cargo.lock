@@ -1714,6 +1714,8 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf",
+ "pem-rfc7468 0.7.0",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
  "sec1",
@@ -8169,12 +8171,42 @@ dependencies = [
  "unicode-normalization",
  "url",
  "vector-calls",
+ "vector-push",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasmtimer",
  "web-time",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "vector-push"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "base64-simd",
+ "getrandom 0.2.17",
+ "hkdf",
+ "hmac",
+ "nostr",
+ "p256",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "vector-pusher"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nostr-sdk",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "vector-push",
 ]
 
 [[package]]

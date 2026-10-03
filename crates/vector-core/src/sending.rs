@@ -281,6 +281,7 @@ async fn rescue_failed_as_sent(entry: &WrapConfirm) {
             spawn_self_send(client, my_pk, entry.rumor.clone());
         }
     }
+    crate::push::after_delivery(&entry.chat_id, &entry.rumor);
 }
 
 /// Fire-and-forget the self-send recovery copy + persist its wrap key.
@@ -578,6 +579,7 @@ async fn finalize_gift_wrap_sent(
     if config.self_send {
         spawn_self_send(client.clone(), my_pk, rumor.clone());
     }
+    crate::push::after_delivery(receiver_npub, rumor);
 
     SendResult {
         pending_id: pending_id.to_string(),

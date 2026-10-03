@@ -32,16 +32,19 @@ export function setStorageDistribution(distribution) {
 // Notifications: the account's sound preferences plus the cross-platform toggles.
 // `sounds` is false on mobile, where only the @everyone mute and content privacy apply.
 // `ask`: a browser that has not yet been asked for notification permission.
+// `push`: Vector Web's notify-when-closed: unsupported | install | denied | off | on | busy.
 const notif = $state({
-    loaded: false, sounds: true, ask: false,
+    loaded: false, sounds: true, ask: false, push: 'unsupported',
     globalMute: false, muteEveryone: false,
     sound: { type: 'Default', path: null },
     privacy: 'full',
 });
 export function notifState() { return notif; }
-export function setNotifSettings({ sounds, ask, globalMute, muteEveryone, sound, privacy }) {
+export function setNotifPush(push) { notif.push = push; }
+export function setNotifSettings({ sounds, ask, globalMute, muteEveryone, sound, privacy, push }) {
     notif.sounds = !!sounds;
     notif.ask = !!ask;
+    notif.push = push || 'unsupported';
     notif.globalMute = !!globalMute;
     notif.muteEveryone = !!muteEveryone;
     notif.sound = sound || { type: 'Default', path: null };

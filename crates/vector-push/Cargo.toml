@@ -1,0 +1,26 @@
+[package]
+name = "vector-push"
+version = "0.1.0"
+edition = "2021"
+description = "Vector's sealed push notifications: the sender encrypts to the device, a blind pusher forwards."
+license = "MIT"
+repository = "https://github.com/VectorPrivacy/Vector"
+homepage = "https://vectorapp.io"
+keywords = ["nostr", "webpush", "notifications", "vector"]
+categories = ["cryptography", "network-programming"]
+
+[dependencies]
+# Exact-pinned with the rest of the workspace's nostr family (see vector-core).
+nostr = { version = "=0.45.1", features = ["nip44", "std", "rand", "os-rng"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+base64-simd = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

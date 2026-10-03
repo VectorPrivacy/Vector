@@ -4,7 +4,7 @@
     // desktop (settings blob) and mobile (per-key) persistence stay in the app.
     import { notifState } from '../lib/settings.svelte.js';
     import Select from '../ui/Select.svelte';
-    let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind), allowBrowser
+    let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind), allowBrowser, setPush(on)
 
     const n = notifState();
     // The dropdown shows Custom while a file is still being picked, so it is local.
@@ -64,6 +64,23 @@
     <div class="form-group notif-allow">
         <span class="notif-privacy-label">Alerts for new messages</span>
         <button class="btn accept-btn btn-bounce" onclick={() => h.allowBrowser()}>Allow</button>
+    </div>
+{/if}
+
+{#if n.push !== 'unsupported'}
+    <div class="form-group">
+        <label class="toggle-container">
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span><span class="icon icon-info btn notif-info" onclick={info('push')}></span>Notify When Closed</span>
+            <input type="checkbox" checked={n.push === 'on'} disabled={n.push === 'install' || n.push === 'denied' || n.push === 'busy'}
+                   onchange={(e) => h.setPush(e.target.checked)}>
+            <span class="neon-toggle"></span>
+        </label>
+        {#if n.push === 'install'}
+            <span class="notif-privacy-label">Add Vector to your Home Screen to turn this on.</span>
+        {:else if n.push === 'denied'}
+            <span class="notif-privacy-label">Notifications are blocked for this site in your browser settings.</span>
+        {/if}
     </div>
 {/if}
 

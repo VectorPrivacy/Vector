@@ -134,7 +134,7 @@ export {
     patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
 // Settings: every section's state and the handler registries the sections read.
-export { torState, setTorState, setTorLocked, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
+export { torState, setTorState, setTorLocked, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply,

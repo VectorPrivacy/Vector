@@ -264,12 +264,16 @@
     window.__TAURI__.event.listen('web_notify', async ({ payload }) => {
         if (window.Notification?.permission !== 'granted') return;
         if (document.visibilityState === 'visible' && document.hasFocus()) return;
+        // Through the service worker: iOS web apps have no Notification constructor, and a
+        // push for the same chat replaces this rather than stacking under it.
+        const reg = await navigator.serviceWorker?.ready.catch(() => null);
+        if (!reg) return;
         const icon = payload.icon ? await fileUrl(payload.icon) : null;
-        const n = new Notification(payload.title, {
+        await reg.showNotification(payload.title, {
             body: payload.body,
-            icon: icon || '/icons/vector-mark.svg',
-            tag: payload.chat_id,
-        });
-        n.onclick = () => { window.focus(); n.close(); };
+            icon: icon || '/icon-192.png',
+            tag: `chat:${payload.chat_id}`,
+            data: { chat: payload.chat_id },
+        }).catch((e) => console.warn('[Notify] not shown:', e));
     });
 })();

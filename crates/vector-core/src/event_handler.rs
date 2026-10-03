@@ -371,6 +371,14 @@ impl InboundEventHandler for BatchingPersist<'_> {
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
 #[allow(clippy::large_enum_variant)] // boxing a public variant's payload is an API break
 pub enum PreparedEvent {
+    /// A contact's push tickets (`vector-push`): kept so our DMs can wake their devices.
+    PushTickets {
+        contact: String,
+        is_mine: bool,
+        content: String,
+        wrapper_event_id_bytes: [u8; 32],
+        wrapper_created_at: u64,
+    },
     /// Fully processed DM rumor — ready for state commit.
     Processed {
         result: RumorProcessingResult,
@@ -533,6 +541,18 @@ fn finish_prepare(
     if rumor.tags.public_keys().count() > 1 {
         return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        };
+    }
+
+    if rumor.kind == Kind::ApplicationSpecificData
+        && crate::tags::TagsExt::find_kind(&rumor.tags, "d").and_then(|t| t.content()) == Some(vector_push::TICKET_RUMOR_D)
+    {
+        return PreparedEvent::PushTickets {
+            contact,
+            is_mine,
+            content: rumor.content,
+            wrapper_event_id_bytes,
+            wrapper_created_at,
         };
     }
 
@@ -1052,6 +1072,13 @@ pub async fn commit_prepared_event(
                 Ok(false) => {} // raced — already parked
                 Err(e) => log_warn!("[community] v2 invite park failed: {}", e),
             }
+            false
+        }
+        PreparedEvent::PushTickets { contact, is_mine, content, wrapper_event_id_bytes, wrapper_created_at } => {
+            if !is_mine {
+                crate::push::store_tickets(&contact, &content).await;
+            }
+            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
             false
         }
         PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {

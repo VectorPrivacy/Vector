@@ -963,6 +963,7 @@ async function confirmStorageDelete(cat, sizeText) {
 const NOTIF_EXPLAINERS = {
     mute: ['Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.'],
     everyone: ['Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.'],
+    push: ['Notify When Closed', 'Lets the people you talk to on Vector wake this device with a notification while Vector is closed.<br><br>Their app encrypts each notification for this device alone, so the server that delivers it can\'t read it, and doesn\'t know who it is from or who it is for.<br><br>Messages from other Nostr apps still arrive the next time you open Vector.'],
     privacy: ['Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender</b>: shows the message, not who sent it.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.'],
 };
 
@@ -1069,6 +1070,13 @@ const NOTIF_HANDLERS = {
     preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
     explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
     allowBrowser: () => invoke('request_web_notifications').then(initNotificationSettings),
+    // Called inside the tap: iOS only lets a web app subscribe to push while handling one.
+    setPush: (on) => {
+        VectorSvelte.setNotifPush('busy');
+        return invoke(on ? 'push_enable' : 'push_disable')
+            .catch((e) => popupConfirm('Notifications', String(e), true))
+            .then(initNotificationSettings);
+    },
 };
 
 async function initNotificationSettings() {
@@ -1092,6 +1100,7 @@ async function initNotificationSettings() {
     } catch (_) { /* default full */ }
     // A browser build asks the browser itself, which answers once per site.
     const ask = platformFeatures.os === 'web' && (await invoke('web_notifications').catch(() => null)) === 'default';
+    const push = platformFeatures.os === 'web' ? await invoke('push_status').catch(() => 'unsupported') : 'unsupported';
     VectorSvelte.setNotifSettings({
         sounds,
         ask,
@@ -1099,6 +1108,7 @@ async function initNotificationSettings() {
         muteEveryone: blob.mute_everyone,
         sound: { type: blob.sound?.type || 'Default', path: blob.sound?.path || null },
         privacy,
+        push,
     });
 }
 
