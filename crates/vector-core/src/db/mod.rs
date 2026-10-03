@@ -959,6 +959,15 @@ pub fn session_is_live() -> bool {
     current_session().id == CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id
 }
 
+/// Whether THIS work writes to the account on screen. The at-rest vault and the encryption flag
+/// describe that account only, so sealing for any other is refused. A rebind of the same account
+/// keeps its database, so it still counts.
+pub fn writes_to_live_account() -> bool {
+    let mine = current_session();
+    let live = CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner());
+    mine.id == live.id || (mine.db_path.is_some() && mine.db_path == live.db_path)
+}
+
 fn next_session_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -973,6 +982,10 @@ fn replace_session() {
 
 /// Install `next` and tell the outgoing account's work to stop.
 fn install(next: Arc<Session>) {
+    // Sealed writes check the live account under a ticket; waiting them out here means none
+    // straddles the switch.
+    let _switch = crate::crypto::gate::switching();
+    crate::crypto::forget_previous_key();
     let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
     if current.id != next.id {
         current.stop();

@@ -1348,68 +1348,6 @@ pub async fn export_keys() -> Result<serde_json::Value, String> {
 }
 
 // ============================================================================
-// PIN Encryption Commands
-// ============================================================================
-
-/// Encrypt data with PIN (used during account setup)
-/// Also handles post-encryption tasks like saving seed phrase and broadcasting invite acceptance
-#[tauri::command]
-pub async fn encrypt(input: String, password: Option<String>) -> String {
-    let res = crypto::internal_encrypt(input, password).await;
-
-    // If we have one; save the in-memory seedphrase in an encrypted at-rest format
-    let seed_copy = MNEMONIC_SEED.lock().unwrap().clone();
-    if let Some(seed) = seed_copy {
-        let _ = db::set_seed(seed).await;
-    }
-
-    // Check if we have a pending invite acceptance to broadcast
-    if let Some(pending_invite) = crate::state::pending_invite() {
-        // Consume the slot up-front so a re-entry of this code path doesn't
-        // re-broadcast the same invite. The spawned task owns the data.
-        crate::state::clear_pending_invite();
-
-        // Get the Nostr client
-        if let Some(client) = nostr_client() {
-            // Clone the data we need before the async block
-            let invite_code = pending_invite.invite_code.clone();
-            let inviter_pubkey = pending_invite.inviter_pubkey;
-
-            // Spawn the broadcast in a separate task to avoid blocking
-            vector_core::db::spawn_bound(async move {
-                // Create and publish the acceptance event
-                let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
-                    .tag(Tag::custom("l", vec!["vector"]))
-                    .tag(Tag::custom("d", vec![invite_code.as_str()]))
-                    .tag(Tag::public_key(inviter_pubkey));
-
-                // Build the event
-                match vector_core::sign_builder(event_builder).await {
-                    Ok(event) => {
-                        // Send only to trusted relays
-                        match vector_core::transport_aware(client.send_event(&event)).to(active_trusted_relays().await).await {
-                            Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
-                            Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to sign invite acceptance event: {}", e),
-                }
-            });
-        }
-    }
-
-    res
-}
-
-/// Decrypt data with PIN (used during login)
-#[tauri::command]
-pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    let res = crypto::internal_decrypt(ciphertext, password).await;
-
-    res
-}
-
-// ============================================================================
 // Backend-Only Key Management (keys never cross IPC)
 // ============================================================================
 
@@ -1527,6 +1465,8 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     // The user's identity pubkey for this session. For local/bunker accounts
     // it's derived from the decrypted `pkey`; for NIP-55 it's the cached
     // plaintext identity (nothing secret is stored on this device).
+    // The typed credential and the key it proved, kept for the salt upgrade below.
+    let mut unlocked: Option<(zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>)> = None;
     let public_key = if is_nip55_account {
         // NIP-55 offline account: no pkey to decrypt. The at-rest ENCRYPTION_KEY
         // (which protects only the local message DB, never signing) is derived
@@ -1534,8 +1474,11 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         // side-effect, but NIP-55 has nothing to decrypt. MY_SECRET_KEY stays
         // empty for the whole session.
         if let Some(pwd) = password {
-            let key_bytes = crypto::hash_pass(pwd).await;
-            crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
+            let pwd = zeroize::Zeroizing::new(pwd);
+            let kdf = crypto::Kdf::of_account()?;
+            let key = zeroize::Zeroizing::new(crypto::derive_key((*pwd).clone(), &kdf).await);
+            vector_core::crypto::install_unlocked_key(&key, &kdf)?;
+            unlocked = Some((pwd, key));
         }
         // A keyless account has no pkey whose failed decrypt would reject a
         // wrong key, so verify against the canary written at setup. Checked
@@ -1588,10 +1531,15 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         // ENCRYPTION_KEY here so the bunker_url decryption below (a separate
         // settings read) doesn't have to redo Argon2id.
         let mut nsec = if let Some(pwd) = password {
-            let key_bytes = crypto::hash_pass(pwd.clone()).await;
-            crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
-            crypto::internal_decrypt(stored_pkey, Some(pwd)).await
-                .map_err(|_| "Incorrect password".to_string())?
+            // One derivation, and the vault takes the key only once it has opened the stored key.
+            let pwd = zeroize::Zeroizing::new(pwd);
+            let kdf = crypto::Kdf::of_account()?;
+            let key = zeroize::Zeroizing::new(crypto::derive_key((*pwd).clone(), &kdf).await);
+            let nsec = crypto::decrypt_with_key(&stored_pkey, &key)
+                .map_err(|_| "Incorrect password".to_string())?;
+            vector_core::crypto::install_unlocked_key(&key, &kdf)?;
+            unlocked = Some((pwd, key));
+            nsec
         } else if !stored_pkey.starts_with("nsec1") && crate::ENCRYPTION_KEY.has_key() {
             // Vault-primed login (biometric unlock): the caller installed and
             // verified the derived key, so decrypt with the vault directly.
@@ -1664,10 +1612,16 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     };
     set_my_public_key(public_key);
 
+    // A legacy-salted account moves onto its own salt here: the credential just proved itself,
+    // and nothing that writes has started yet.
+    if let Some((pwd, key)) = unlocked.take() {
+        crate::commands::encryption::upgrade_after_unlock(&pwd, &key).await;
+    }
+
     // One-time wrap of pre-existing plaintext community rows on an already-
     // encrypted account. Runs for every signer kind (a no-op when the account
     // isn't encrypted); ENCRYPTION_KEY is installed by every branch above.
-    if let Err(e) = vector_core::db::at_rest::backfill_community_at_rest() {
+    if let Err(e) = vector_core::db::at_rest::backfill_at_rest() {
         eprintln!("[Login] community at-rest backfill deferred: {e}");
     }
 
@@ -1735,8 +1689,6 @@ pub async fn setup_encryption<R: Runtime>(
     security_type: String,
     biometric_wrap: Option<String>,
 ) -> Result<(), String> {
-    use zeroize::{Zeroize, Zeroizing};
-
     // Snapshot session generation up-front. Argon2id takes hundreds of ms;
     // a concurrent `swap_session` in that window would land the commit in
     // the wrong account's DB. Re-validated before every write.
@@ -1744,20 +1696,55 @@ pub async fn setup_encryption<R: Runtime>(
 
     // Defense in depth — frontend enforces minimum length, but a hostile
     // IPC caller passing "" would otherwise produce an encrypted account
-    // whose key is `hash_pass("")`, unlockable by anyone passing "".
+    // whose key is derived from "", unlockable by anyone passing "".
     if password.trim().is_empty() {
         return Err("Password must not be empty.".to_string());
     }
 
-    // Zeroize wrapper scrubs the heap on Drop along every exit path.
-    // `hash_pass` borrows by `&str` and doesn't zeroize what it borrows,
-    // so without this the plaintext password would survive on the heap.
-    let password = Zeroizing::new(password);
+    // One setup at a time: two would each mint a salt, and whichever committed second would
+    // leave the vault holding the first one's key.
+    let _setup = SetupLatch::try_enter()?;
+    // One derivation, under a fresh salt, seals everything this setup writes.
+    let kdf = crypto::Kdf::fresh();
+    let key = zeroize::Zeroizing::new(crypto::derive_key(password, &kdf).await);
+    setup_encryption_with_key(handle, session, key, kdf, security_type, biometric_wrap).await
+}
+
+static SETUP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Held across one account setup; a second is refused, never queued.
+struct SetupLatch;
+
+impl SetupLatch {
+    fn try_enter() -> Result<Self, String> {
+        SETUP_IN_FLIGHT
+            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .map(|_| SetupLatch)
+            .map_err(|_| "Account setup is already running".to_string())
+    }
+}
+
+impl Drop for SetupLatch {
+    fn drop(&mut self) {
+        SETUP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// [`setup_encryption`] with the key already derived. A biometric setup passes the key its wrap
+/// holds: deriving again would salt a different one, and nobody knows the credential to recover.
+pub(crate) async fn setup_encryption_with_key<R: Runtime>(
+    handle: AppHandle<R>,
+    session: std::sync::Arc<vector_core::db::Session>,
+    key: zeroize::Zeroizing<[u8; 32]>,
+    kdf: crypto::Kdf,
+    security_type: String,
+    biometric_wrap: Option<String>,
+) -> Result<(), String> {
+    use zeroize::{Zeroize, Zeroizing};
 
     // NIP-55 offline account: nothing secret to encrypt, so it stages no
     // PENDING_NSEC. It needs its own top-level commit path — the shared path
-    // below bails on the missing PENDING_NSEC, and relies on the pkey decrypt
-    // to install ENCRYPTION_KEY, which a keyless account has nothing to do.
+    // below bails on the missing PENDING_NSEC.
     if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
         let (user_pk_hex, package) = vector_core::pending_nip55_setup()
             .ok_or("Offline signer setup state missing. Please re-run Sign in with Amber.")?;
@@ -1781,28 +1768,16 @@ pub async fn setup_encryption<R: Runtime>(
         if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
-        // Install ENCRYPTION_KEY explicitly — it protects the local message DB
-        // only (signing never touches this device). No pkey means no
-        // decrypt-side-effect install, so derive it here.
-        let key_bytes = crypto::hash_pass((*password).clone()).await;
-        crate::ENCRYPTION_KEY.set(key_bytes, &[&MY_SECRET_KEY]);
-        if !session.is_live() {
-            return Err("Account changed during setup. Please try again.".into());
-        }
-        // The canary (a keyless account's only wrong-PIN detector) rides the
-        // commit transaction. Encrypted with the raw derived key: the vault is
-        // set, but encryption_enabled only flips true inside the commit, so
-        // maybe_encrypt would pass it through as plaintext here.
-        let canary = {
-            let mut k: [u8; 32] = crate::ENCRYPTION_KEY.get()
-                .ok_or("Encryption key vanished during setup")?;
-            let c = crate::crypto::encrypt_with_key(NIP55_PIN_CANARY, &k);
-            use zeroize::Zeroize as _;
-            k.zeroize();
-            c
-        };
-        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, true, Some(&security_type), biometric_wrap.as_deref(), Some(&canary))?;
+        // The canary (a keyless account's only wrong-PIN detector) rides the commit, sealed
+        // with the key itself. The key protects the local message DB only; signing never
+        // touches this device.
+        let canary = crate::crypto::encrypt_with_key(NIP55_PIN_CANARY, &key);
+        vector_core::db::commit_nip55_account_setup(
+            &user_pk_hex, &package, true, Some(&security_type), biometric_wrap.as_deref(),
+            Some(&canary), kdf.descriptor().as_deref(),
+        )?;
         vector_core::clear_pending_nip55_setup();
+        crate::ENCRYPTION_KEY.set(*key, &[&MY_SECRET_KEY]);
         crate::state::set_encryption_enabled(true);
         vector_core::blossom_servers::refresh_cache();
         broadcast_pending_invite_if_any();
@@ -1818,19 +1793,12 @@ pub async fn setup_encryption<R: Runtime>(
             .ok_or("No pending key — call create_account or login first")?
     );
 
-    // internal_encrypt zeroizes the plaintext it owns; we hand it a
-    // clone so the wrapped original stays valid for error paths.
-    let encrypted = crypto::internal_encrypt((*nsec).clone(), Some((*password).clone())).await;
-
-    // Encrypt the seed (if any) BEFORE the tx so the transaction stays
-    // short. Zeroizing wrapper scrubs the plaintext mnemonic on Drop.
+    // The seed is sealed with the key itself: encryption only counts as on once the commit
+    // lands, so a vault-based seal here would store it in plaintext.
+    let encrypted = crypto::encrypt_with_key(&nsec, &key);
     let seed_plain: Option<Zeroizing<String>> =
         MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
-    let encrypted_seed = if let Some(ref s) = seed_plain {
-        Some(crate::crypto::maybe_encrypt((**s).clone()).await)
-    } else {
-        None
-    };
+    let encrypted_seed = seed_plain.as_ref().map(|s| crypto::encrypt_with_key(s, &key));
 
     // For a fresh account: create the DB, set CURRENT_ACCOUNT, restart
     // Tor against the new account's saved pref. Tor is stopped up-front
@@ -1864,13 +1832,11 @@ pub async fn setup_encryption<R: Runtime>(
     // or `start_nostrconnect_session`), commit the bunker rows instead of
     // the local ones — `pkey` holds the client keypair, and `bunker_url` +
     // `bunker_remote_pubkey` get written under the same transaction. The
-    // bunker URL is encrypted with the same explicit-password path as the
-    // pkey so on-disk encryption coverage is uniform.
+    // bunker URL is sealed with the same key as the pkey.
     if vector_core::signer_kind() == vector_core::SignerKind::Bunker {
         let (url, remote_pk_hex) = vector_core::pending_bunker_setup()
             .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?;
-        let encrypted_url =
-            crypto::internal_encrypt(url, Some((*password).clone())).await;
+        let encrypted_url = crypto::encrypt_with_key(&url, &key);
         if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
@@ -1881,10 +1847,11 @@ pub async fn setup_encryption<R: Runtime>(
             &encrypted_url,
             &remote_pk_hex,
             biometric_wrap.as_deref(),
+            kdf.descriptor().as_deref(),
         )?;
         vector_core::clear_pending_bunker_setup();
     } else {
-        // pkey + encryption_enabled + security_type + seed in one tx. Err
+        // pkey + encryption_enabled + security_type + seed + derivation in one tx. Err
         // rolls back, leaving the new DB with no setup rows so retry is clean.
         vector_core::db::settings::commit_account_setup(
             &encrypted,
@@ -1892,6 +1859,7 @@ pub async fn setup_encryption<R: Runtime>(
             Some(&security_type),
             encrypted_seed.as_deref(),
             biometric_wrap.as_deref(),
+            kdf.descriptor().as_deref(),
         )?;
     }
 
@@ -1911,6 +1879,8 @@ pub async fn setup_encryption<R: Runtime>(
     drop(nsec);
     drop(seed_plain);
 
+    // The vault and the flag change only once the commit has landed.
+    crate::ENCRYPTION_KEY.set(*key, &[&MY_SECRET_KEY]);
     crate::state::set_encryption_enabled(true);
     vector_core::blossom_servers::refresh_cache();
 
@@ -1957,7 +1927,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
         if !session.is_live() {
             return Err("Account changed during setup. Please try again.".into());
         }
-        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None, None, None)?;
+        vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None, None, None, None)?;
         vector_core::clear_pending_nip55_setup();
         crate::state::set_encryption_enabled(false);
         vector_core::blossom_servers::refresh_cache();
@@ -1976,14 +1946,8 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 
     let seed_plain: Option<Zeroizing<String>> =
         MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
-    // Route through maybe_encrypt even though it's a no-op when encryption
-    // is off — keeps the on-disk seed format consistent with the encrypted
-    // flow so migrations don't have to special-case unencrypted accounts.
-    let encrypted_seed = if let Some(ref s) = seed_plain {
-        Some(crate::crypto::maybe_encrypt((**s).clone()).await)
-    } else {
-        None
-    };
+    // Skipping encryption stores the seed as written; enabling it later seals it.
+    let stored_seed = seed_plain.as_ref().map(|s| s.to_string());
 
     if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
         // The welcome screen's service carries on into the new account's first session.
@@ -2018,6 +1982,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             &url,
             &remote_pk_hex,
             None,
+            None,
         )?;
         vector_core::clear_pending_bunker_setup();
     } else {
@@ -2025,7 +1990,8 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             &nsec,
             false,
             None,
-            encrypted_seed.as_deref(),
+            stored_seed.as_deref(),
+            None,
             None,
         )?;
     }

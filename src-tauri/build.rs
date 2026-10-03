@@ -21,10 +21,6 @@ fn main() {
         tauri_build::AppManifest::default().commands(&[
             // Database commands
             "get_theme",
-            "get_pkey",
-            "set_pkey",
-            "get_seed",
-            "set_seed",
             "get_sql_setting",
             "set_sql_setting",
             "remove_setting",
@@ -101,8 +97,6 @@ fn main() {
             "monitor_relay_connections",
             "start_typing",
             "connect",
-            "encrypt",
-            "decrypt",
             "start_recording",
             "call_start",
             "call_accept",

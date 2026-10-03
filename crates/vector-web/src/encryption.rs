@@ -25,7 +25,13 @@ pub async fn enable(credential: String, security_type: String) -> Result<(), Str
     if state::is_encryption_enabled_fast() {
         return Err("Encryption is already enabled".into());
     }
-    let mut key = vector_core::crypto::hash_pass(&credential).await;
+    let kdf = vector_core::crypto::Kdf::fresh();
+    let mut key = vector_core::crypto::derive_key(&credential, &kdf).await;
+    // Checked again after the derivation: a second Enable can start while the first awaits it.
+    if state::is_encryption_enabled_fast() {
+        key.zeroize();
+        return Err("Encryption is already enabled".into());
+    }
     // An account with no sealed key has nothing to reject a wrong PIN; the canary does.
     let canary = match vector_core::signer_kind() {
         SignerKind::Nip55 | SignerKind::Nip07 => {
@@ -40,7 +46,7 @@ pub async fn enable(credential: String, security_type: String) -> Result<(), Str
         _ => None,
     };
     ENCRYPTION_KEY.set(key, &[&MY_SECRET_KEY]);
-    let result = at_rest::enable(&key, &security_type, None, canary.as_deref(), &progress);
+    let result = at_rest::enable(&key, &kdf, &security_type, None, canary.as_deref(), &progress);
     key.zeroize();
     match result {
         Ok(()) => {
@@ -59,22 +65,22 @@ pub fn disable() -> Result<(), String> {
     let result = at_rest::disable(&key, &progress);
     key.zeroize();
     result?;
-    ENCRYPTION_KEY.clear(&[&MY_SECRET_KEY]);
     finish();
     Ok(())
 }
 
 pub async fn rekey(old_credential: String, new_credential: String, security_type: String) -> Result<(), String> {
-    let mut old_key = vector_core::crypto::hash_pass(&old_credential).await;
+    if !state::is_encryption_enabled_fast() {
+        return Err("Local Encryption is not enabled".into());
+    }
+    let mut old_key = vector_core::crypto::derive_key(&old_credential, &vector_core::crypto::Kdf::of_account()?).await;
     if !at_rest::key_matches_account(&old_key) {
         old_key.zeroize();
         return Err("Incorrect current credential.".into());
     }
-    let mut new_key = vector_core::crypto::hash_pass(&new_credential).await;
-    let result = at_rest::rekey(&old_key, &new_key, &security_type, None, &progress);
-    if result.is_ok() {
-        ENCRYPTION_KEY.set(new_key, &[&MY_SECRET_KEY]);
-    }
+    let new_kdf = vector_core::crypto::Kdf::fresh();
+    let mut new_key = vector_core::crypto::derive_key(&new_credential, &new_kdf).await;
+    let result = at_rest::rekey(&old_key, &new_key, &new_kdf, &security_type, None, &progress);
     old_key.zeroize();
     new_key.zeroize();
     result?;

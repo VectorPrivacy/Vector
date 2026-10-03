@@ -4,6 +4,10 @@
 //! (`ON DELETE CASCADE`) and indexed by content hash. This module is the single source of truth for
 //! attachment persistence; the legacy `["attachments", …]` tag in `events.tags` is left in place on
 //! pre-migration events as an untouched safety net but is never read.
+//!
+//! With Local Encryption on, the fields that open or describe a file (`key`, `nonce`, `name`,
+//! `url`, `fallback_urls`, `img_meta`) are sealed at rest; an empty one stays empty so `<> ''`
+//! still means "unset". `hash` stays readable: dedup and file sharing look rows up by it.
 
 use std::collections::HashMap;
 
@@ -14,26 +18,27 @@ const SELECT_COLS: &str = "event_id, att_index, hash, key, nonce, extension, nam
 
 /// Rebuild `(event_id, Attachment)` from a row selecting `SELECT_COLS`. `downloading` is transient
 /// runtime state and is never persisted (always false on load).
-fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<(String, Attachment)> {
+fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpener) -> rusqlite::Result<(String, Attachment)> {
     let event_id: String = row.get(0)?;
     let img_meta_json: Option<String> = row.get(10)?;
+    let mut open = |i: usize| -> rusqlite::Result<String> { Ok(at_rest.open_or_keep(row.get(i)?)) };
     let att = Attachment {
         id: row.get(2)?,
-        key: row.get(3)?,
-        nonce: row.get(4)?,
+        key: open(3)?,
+        nonce: open(4)?,
         extension: row.get(5)?,
-        name: row.get(6)?,
-        url: row.get(7)?,
+        name: open(6)?,
+        url: open(7)?,
         path: row.get(8)?,
         size: row.get::<_, i64>(9)? as u64,
-        img_meta: img_meta_json.and_then(|j| serde_json::from_str(&j).ok()),
+        img_meta: img_meta_json.and_then(|j| serde_json::from_str(&at_rest.open_or_keep(j)).ok()),
         downloading: false,
         downloaded: row.get::<_, i64>(11)? != 0,
         webxdc_topic: row.get(12)?,
         group_id: row.get(13)?,
         original_hash: row.get(14)?,
-        fallback_urls: row
-            .get::<_, String>(15)?
+        fallback_urls: at_rest
+            .open_or_keep(row.get::<_, String>(15)?)
             .split_whitespace()
             .map(|s| s.to_string())
             .collect(),
@@ -49,8 +54,14 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<(String, Attachmen
 /// carries a completed download (`downloaded=1`) — the nonce→content-hash rewrite the download path
 /// performs. So a relay re-delivery (downloaded=0) preserves the downloaded file, its content-hash
 /// key, and its path; a completed download persists all three in one pass. Explicit un-download goes
-/// through `clear_attachment_download`, never here.
-pub fn insert_attachment_rows(conn: &rusqlite::Connection, event_id: &str, attachments: &[Attachment]) -> Result<(), String> {
+/// through `clear_attachment_download`, never here. Sealed with the caller's sealer, inside its
+/// at-rest ticket.
+pub fn insert_attachment_rows(
+    conn: &rusqlite::Connection,
+    event_id: &str,
+    attachments: &[Attachment],
+    seal: &mut crate::crypto::AtRestSealer,
+) -> Result<(), String> {
     if attachments.is_empty() {
         return Ok(());
     }
@@ -74,10 +85,11 @@ pub fn insert_attachment_rows(conn: &rusqlite::Connection, event_id: &str, attac
         let img_meta_json = a.img_meta.as_ref().and_then(|m| serde_json::to_string(m).ok());
         stmt.execute(
             rusqlite::params![
-                event_id, i as i64, a.id, a.key, a.nonce, a.extension, a.name, a.url,
-                a.path, a.size as i64, img_meta_json, a.downloaded as i64,
+                event_id, i as i64, a.id, seal.seal_set(&a.key)?, seal.seal_set(&a.nonce)?, a.extension,
+                seal.seal_set(&a.name)?, seal.seal_set(&a.url)?, a.path, a.size as i64,
+                img_meta_json.as_deref().map(|j| seal.seal(j)).transpose()?, a.downloaded as i64,
                 a.webxdc_topic, a.group_id, a.original_hash,
-                a.fallback_urls.join(" "),
+                seal.seal_set(&a.fallback_urls.join(" "))?,
             ],
         ).map_err(|e| format!("insert attachment: {e}"))?;
     }
@@ -96,12 +108,15 @@ pub fn get_attachments_for_events(event_ids: &[String]) -> Result<HashMap<String
         "SELECT {SELECT_COLS} FROM attachments WHERE event_id IN (SELECT value FROM json_each(?1)) ORDER BY event_id, att_index"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(|e| format!("prepare get_attachments: {e}"))?;
-    let rows = stmt.query_map([super::events::id_list_param(event_ids)], row_to_attachment)
-        .map_err(|e| format!("query get_attachments: {e}"))?;
-    for r in rows.flatten() {
-        out.entry(r.0).or_default().push(r.1);
-    }
-    Ok(out)
+    crate::crypto::open_batch(|at_rest| {
+        let rows = stmt
+            .query_map([super::events::id_list_param(event_ids)], |row| row_to_attachment(row, at_rest))
+            .map_err(|e| format!("query get_attachments: {e}"))?;
+        for r in rows.flatten() {
+            out.entry(r.0).or_default().push(r.1);
+        }
+        Ok(out)
+    })
 }
 
 /// Attachments for a single event, ordered by `att_index`.
@@ -125,7 +140,9 @@ pub fn find_by_webxdc_topic_in(chat_identifier: &str, topic: &str) -> Result<Opt
         .map_err(|e| format!("prepare topic lookup: {e}"))?;
     let mut rows = stmt.query(rusqlite::params![topic, chat]).map_err(|e| format!("topic lookup: {e}"))?;
     match rows.next().map_err(|e| format!("topic lookup: {e}"))? {
-        Some(row) => row_to_attachment(row).map(Some).map_err(|e| format!("topic row: {e}")),
+        Some(row) => crate::crypto::open_batch(|at_rest| row_to_attachment(row, at_rest))
+            .map(Some)
+            .map_err(|e| format!("topic row: {e}")),
         None => Ok(None),
     }
 }
@@ -374,17 +391,21 @@ pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, Strin
              ORDER BY COALESCE(e.mine, 0) DESC, a.id DESC LIMIT 1",
         )
         .map_err(|e| format!("find_reusable_by_hash prepare: {e}"))?;
-    let row = stmt
-        .query_row(rusqlite::params![hash], |r| {
-            Ok(ReusableUpload {
-                url: r.get(0)?,
-                key: r.get(1)?,
-                nonce: r.get(2)?,
-                size: r.get::<_, i64>(3)? as u64,
-                mine: r.get::<_, i64>(4)? != 0,
+    // A row that won't open would hand a forward its ciphertext as the file reference.
+    let row = crate::crypto::open_batch(|at_rest| {
+        let (url, key, nonce, size, mine) = stmt
+            .query_row(rusqlite::params![hash], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
             })
+            .ok()?;
+        Some(ReusableUpload {
+            url: at_rest.open(url).ok()?,
+            key: at_rest.open(key).ok()?,
+            nonce: at_rest.open(nonce).ok()?,
+            size: size as u64,
+            mine: mine != 0,
         })
-        .ok();
+    });
     Ok(row)
 }
 
@@ -392,24 +413,35 @@ pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, Strin
 /// ones a delete may scrub from Blossom. One blob can back many messages
 /// (smart-forward), and the shared copy must outlive every send but the last.
 /// DB-backed on purpose: the in-memory STATE windows to recent messages, so a
-/// reference in an older message is invisible there.
+/// reference in an older message is invisible there. Sealed URLs can't be
+/// matched in SQL, so every other row's URL is opened and compared here.
 pub fn urls_unreferenced_elsewhere(urls: &[String], excluding_event_id: &str) -> Result<Vec<String>, String> {
     if urls.is_empty() {
         return Ok(Vec::new());
     }
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
-        .prepare("SELECT 1 FROM attachments WHERE url = ?1 AND event_id <> ?2 LIMIT 1")
+        .prepare("SELECT url, fallback_urls FROM attachments WHERE (url <> '' OR fallback_urls <> '') AND event_id <> ?1")
         .map_err(|e| format!("urls_unreferenced prepare: {e}"))?;
-    let mut out = Vec::with_capacity(urls.len());
-    for url in urls {
-        let referenced = stmt.exists(rusqlite::params![url, excluding_event_id])
-            .map_err(|e| format!("urls_unreferenced query: {e}"))?;
-        if !referenced {
-            out.push(url.clone());
+    // A URL that won't open could be any of them, so it refuses the whole scrub.
+    let referenced: std::collections::HashSet<String> = crate::crypto::open_batch(|at_rest| {
+        let mut rows = stmt.query([excluding_event_id]).map_err(|e| format!("urls_unreferenced query: {e}"))?;
+        let mut set = std::collections::HashSet::new();
+        while let Some(row) = rows.next().map_err(|e| format!("urls_unreferenced row: {e}"))? {
+            for i in 0..2 {
+                let field: String = row.get(i).map_err(|e| format!("urls_unreferenced row: {e}"))?;
+                if field.is_empty() {
+                    continue;
+                }
+                let opened = at_rest
+                    .open(field)
+                    .map_err(|_| "An attachment URL could not be opened, so nothing was scrubbed".to_string())?;
+                set.extend(opened.split_whitespace().map(str::to_string));
+            }
         }
-    }
-    Ok(out)
+        Ok::<_, String>(set)
+    })?;
+    Ok(urls.iter().filter(|u| !referenced.contains(*u)).cloned().collect())
 }
 
 /// Whether any OTHER event's attachment shares this plaintext hash — the local
@@ -585,6 +617,32 @@ mod tests {
         // A row whose file was swapped out from under it: hash fails, no trust.
         std::fs::write(&good, b"not the game").unwrap();
         assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_none());
+    }
+
+    /// Sealed URLs still protect a shared blob, mirrors included, and a URL that won't open
+    /// refuses the scrub rather than counting as unused.
+    #[tokio::test]
+    async fn a_sealed_or_unreadable_reference_never_frees_a_blob() {
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        crate::state::ENCRYPTION_KEY.set([0x71; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let url = "https://b.example/shared".to_string();
+        save("chat_a", "evt_first", true, att("HH", &url, true, true)).await;
+        let mirror = Attachment { fallback_urls: vec![url.clone()], ..att("JJ", "https://c.example/own", true, true) };
+        save("chat_b", "evt_mirror", true, mirror).await;
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").unwrap().is_empty(), "a sealed mirror URL still holds the blob");
+
+        crate::state::ENCRYPTION_KEY.set([0x72; 32], &[]);
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").is_err(), "unreadable references scrub nothing");
+        assert!(find_reusable_by_hash("HH").unwrap().is_none(), "nor hand out ciphertext for a forward");
     }
 
     /// One blob, many messages: the shared copy must outlive every send but

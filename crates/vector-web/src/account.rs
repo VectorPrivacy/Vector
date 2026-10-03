@@ -278,40 +278,60 @@ pub async fn create_account() -> Result<Value, String> {
 }
 
 /// Commit the pending account: its key sealed under `password`, or plaintext without one.
+static COMMIT_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Held across one account commit: a second, interleaved at the derivation's await, would mint
+/// its own salt and leave the vault holding the other's key.
+struct CommitLatch;
+
+impl Drop for CommitLatch {
+    fn drop(&mut self) {
+        COMMIT_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 async fn commit_pending_account(password: Option<&str>, security_type: Option<&str>) -> Result<(), String> {
     if password.is_some_and(|p| p.trim().is_empty()) {
         return Err("Password must not be empty.".into());
     }
+    COMMIT_IN_FLIGHT
+        .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+        .map_err(|_| "Account setup is already running".to_string())?;
+    let _latch = CommitLatch;
     if matches!(vector_core::signer_kind(), SignerKind::Nip55 | SignerKind::Nip07) {
         return crate::signers::commit_keyless(password, security_type).await;
     }
     let nsec = Zeroizing::new(PENDING_NSEC.lock().unwrap().clone().ok_or("No pending key — call create_account or login first")?);
     let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
 
-    // Sealing with the password derives the key once and leaves it in the vault,
-    // where the seed and every later at-rest write pick it up.
-    let stored_key = match password {
-        Some(pwd) => {
-            let sealed = vector_core::crypto::maybe_encrypt_inner(nsec.to_string(), Some(pwd.to_string())).await;
-            state::set_encryption_enabled(true);
-            sealed
+    // One derivation seals the key, the seed and any bunker URL; the vault and the flag change
+    // only once the commit has landed, so a failed commit leaves nothing behind for a retry.
+    let kdf = password.map(|_| vector_core::crypto::Kdf::fresh());
+    let key = match (password, &kdf) {
+        (Some(pwd), Some(kdf)) => Some(Zeroizing::new(vector_core::crypto::derive_key(pwd, kdf).await)),
+        _ => None,
+    };
+    let seal = |plain: &str| -> Result<String, String> {
+        match &key {
+            Some(k) => vector_core::crypto::encrypt_with_key(plain, k),
+            None => Ok(plain.to_string()),
         }
-        None => nsec.to_string(),
     };
-    let stored_seed = match seed.as_ref() {
-        Some(s) => Some(vector_core::crypto::maybe_encrypt(s.to_string()).await),
-        None => None,
-    };
+    let stored_key = seal(&nsec)?;
+    let kdf_row = kdf.as_ref().and_then(|k| k.descriptor());
+    let stored_seed = seed.as_deref().map(|s| seal(s)).transpose()?;
 
     take_pending_into_current()?;
 
     // A bunker account's key is its client keypair; the pairing rides the same commit.
     if let Some((url, remote_hex)) = vector_core::pending_bunker_setup().filter(|_| vector_core::is_bunker()) {
-        let stored_url = vector_core::crypto::maybe_encrypt(url).await;
-        db::commit_bunker_account_setup(&stored_key, password.is_some(), security_type, &stored_url, &remote_hex, None)?;
+        db::commit_bunker_account_setup(&stored_key, password.is_some(), security_type, &seal(&url)?, &remote_hex, None, kdf_row.as_deref())?;
         vector_core::clear_pending_bunker_setup();
     } else {
-        db::settings::commit_account_setup(&stored_key, password.is_some(), security_type, stored_seed.as_deref(), None)?;
+        db::settings::commit_account_setup(&stored_key, password.is_some(), security_type, stored_seed.as_deref(), None, kdf_row.as_deref())?;
+    }
+    if let Some(k) = &key {
+        vector_core::ENCRYPTION_KEY.set(**k, &[&MY_SECRET_KEY]);
     }
 
     for slot in [&PENDING_NSEC, &MNEMONIC_SEED] {
@@ -360,9 +380,14 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         SignerKind::Local | SignerKind::Bunker => {
             let stored = db::get_pkey()?.ok_or("No private key found")?;
             let mut nsec = if let Some(pwd) = password {
-                vector_core::crypto::maybe_decrypt_inner(stored, Some(pwd))
-                    .await
-                    .map_err(|_| "Incorrect password".to_string())?
+                // The vault takes the key only once it has opened the stored key.
+                let kdf = vector_core::crypto::Kdf::of_account()?;
+                let key = Zeroizing::new(vector_core::crypto::derive_key(&pwd, &kdf).await);
+                let nsec = vector_core::crypto::decrypt_with_key(&stored, &key)
+                    .map_err(|_| "Incorrect password".to_string())?;
+                vector_core::crypto::install_unlocked_key(&key, &kdf)?;
+                crate::signers::upgrade_after_unlock(&pwd, &key).await;
+                nsec
             } else {
                 stored
             };
@@ -385,6 +410,9 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         Ok(()) => {
             touch_last_active();
             state::init_encryption_enabled();
+            if let Err(e) = db::at_rest::backfill_at_rest() {
+                vector_core::log_warn!("[Login] community at-rest backfill deferred: {e}");
+            }
             vector_core::blossom_servers::refresh_cache();
         }
         Err(e) => emitter::emit("loading_error", &e),

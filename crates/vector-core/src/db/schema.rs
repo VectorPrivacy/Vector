@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 94;
+pub const HIGHEST_MIGRATION_ID: u32 = 95;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1402,6 +1402,11 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("rebuild chat page index: {e}"))
     })?;
+
+    // A fence, no schema change: from here an encrypted account may carry a per-account salt
+    // (the `kdf` settings row), which an older build would ignore and then reject the right PIN.
+    // The downgrade guard refuses such a build cleanly instead.
+    run_atomic_migration(conn, 95, "Per-account key derivation salt", |_tx| Ok(()))?;
 
     Ok(())
 }

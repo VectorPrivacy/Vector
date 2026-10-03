@@ -740,6 +740,12 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         ? 'Unlocking…'
                         : DECRYPTING_MSG;
                     updateStatusMessage(loadingMsg, true);
+                    // A once-only upgrade onto a per-account salt can follow the unlock.
+                    const unlistenUpgrade = await listen('encryption_upgrading', (e) => {
+                        const p = e.payload || {};
+                        const pct = p.total > 0 ? ` ${Math.floor(p.completed * 100 / p.total)}%` : '';
+                        VectorSvelte.patchEncrypt({ title: `Strengthening your encryption…${pct}` });
+                    });
                     try {
                         // Decrypt and login entirely in backend (key never crosses IPC).
                         // The wrapper polls Tor's bootstrap state so the title flips
@@ -747,7 +753,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         // instead of leaving "Decrypting…" up for 5-15s.
                         const npub = await runWithTorBootstrapStatus(() =>
                             invoke("login_from_stored_key", { password: currentPinString })
-                        );
+                        ).finally(unlistenUpgrade);
                         loginDispatched = true;
                         strPubkey = npub;
                         login();
@@ -862,13 +868,19 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     ? 'Unlocking…'
                     : DECRYPTING_MSG;
                 updateStatusMessage(loadingMsg, true);
+                // A once-only upgrade onto a per-account salt can follow the unlock.
+                const unlistenUpgrade = await listen('encryption_upgrading', (e) => {
+                    const p = e.payload || {};
+                    const pct = p.total > 0 ? ` ${Math.floor(p.completed * 100 / p.total)}%` : '';
+                    VectorSvelte.patchEncrypt({ title: `Strengthening your encryption…${pct}` });
+                });
                 try {
                     // Decrypt and login entirely in backend (key never crosses IPC).
                     // Wrapper flips the title to "Bootstrapping Tor…" if Arti is
                     // mid-bootstrap during the call.
                     const npub = await runWithTorBootstrapStatus(() =>
                         invoke("login_from_stored_key", { password })
-                    );
+                    ).finally(unlistenUpgrade);
                     loginDispatched = true;
                     strPubkey = npub;
                     login();

@@ -209,6 +209,10 @@ pub fn clear_pending_nip55_setup() {
 
 pub static ENCRYPTION_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
 
+/// The at-rest key a PIN change just replaced, kept openable for a few seconds so a read that
+/// straddled the change still opens. Empty at every other time.
+pub static PREVIOUS_AT_REST_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
+
 pub static ENCRYPTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[inline]

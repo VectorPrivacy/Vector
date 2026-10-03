@@ -642,10 +642,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Settings commands (db/settings.rs)
             db::settings::get_theme,
-            db::settings::get_pkey,
-            db::settings::set_pkey,
-            db::settings::get_seed,
-            db::settings::set_seed,
             db::settings::get_sql_setting,
             db::settings::set_sql_setting,
             db::settings::remove_setting,
@@ -738,8 +734,6 @@ pub fn run() {
             calls::commands::call_status,
             commands::relays::connect,
             // Account crypto commands (commands/account.rs)
-            commands::account::encrypt,
-            commands::account::decrypt,
             // Media commands (commands/media.rs)
             commands::media::start_recording,
             commands::media::stop_recording,

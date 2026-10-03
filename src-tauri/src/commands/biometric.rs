@@ -159,7 +159,7 @@ pub async fn biometric_status<R: Runtime>(_handle: AppHandle<R>) -> Result<Biome
 #[cfg(target_os = "android")]
 async fn generate_and_wrap(
     npub: &str,
-) -> Result<(zeroize::Zeroizing<String>, String, [u8; 32]), String> {
+) -> Result<(String, zeroize::Zeroizing<[u8; 32]>, crate::crypto::Kdf), String> {
     vector_core::db::scoped(async move {
         use rand::RngCore;
         use zeroize::{Zeroize, Zeroizing};
@@ -174,14 +174,16 @@ async fn generate_and_wrap(
         raw.zeroize();
 
         // Derive the vault key NOW and wrap it FIRST, so the wrap exists before
-        // any store gets locked to this credential. The caller gets the key back
-        // rather than re-deriving it.
-        let key = crate::crypto::hash_pass((*secret).clone()).await;
+        // any store gets locked to this credential. The caller gets the key and its
+        // salt back: deriving again would salt a different key than the wrap holds.
+        let kdf = crate::crypto::Kdf::fresh();
+        let key = Zeroizing::new(crate::crypto::derive_key((*secret).clone(), &kdf).await);
 
         let alias = keystore_alias(npub);
 
+        let to_wrap = *key;
         let wrapped = tokio::task::spawn_blocking(move || {
-            let mut k = key;
+            let mut k = to_wrap;
             let res = crate::android::biometric::enroll_wrap(&alias, &k);
             k.zeroize();
             res
@@ -196,7 +198,8 @@ async fn generate_and_wrap(
             crate::android::biometric::BiometricError::Other(msg) => msg,
         })?;
 
-        Ok((secret, wrapped, key))
+        drop(secret);
+        Ok((wrapped, key, kdf))
     })
     .await
 }
@@ -216,13 +219,16 @@ pub async fn setup_encryption_biometric<R: Runtime>(handle: AppHandle<R>) -> Res
             .flatten()
             .map(Ok)
             .unwrap_or_else(|| crate::account_manager::get_current_account())?;
-        let (secret, wrapped, _key) = generate_and_wrap(&npub).await?;
+        let session = vector_core::db::current_session();
+        let (wrapped, key, kdf) = generate_and_wrap(&npub).await?;
         // The wrap rides INSIDE the setup commit transaction: the row is the
         // account's sole credential and must land atomically with the store
         // being locked to it.
-        let res = crate::commands::account::setup_encryption(
+        let res = crate::commands::account::setup_encryption_with_key(
             handle,
-            (*secret).clone(),
+            session,
+            key,
+            kdf,
             "biometric".to_string(),
             Some(wrapped),
         )
@@ -252,10 +258,11 @@ pub async fn enable_encryption_biometric<R: Runtime>(handle: AppHandle<R>) -> Re
         // Settings runs on a committed session: current-only, never pending
         // (a stale pending from an aborted add-profile must not hijack this).
         let npub = crate::account_manager::get_current_account()?;
-        let (secret, wrapped, _key) = generate_and_wrap(&npub).await?;
-        let res = crate::commands::encryption::enable_encryption(
+        let (wrapped, key, kdf) = generate_and_wrap(&npub).await?;
+        let res = crate::commands::encryption::enable_encryption_with_key(
             handle,
-            (*secret).clone(),
+            key,
+            kdf,
             "biometric".to_string(),
             Some(wrapped),
         )
@@ -290,12 +297,11 @@ pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>) -> Result<(),
         let _switch = SwitchGuard::try_enter()?;
         let session = vector_core::db::current_session();
         let npub = crate::account_manager::get_current_account()?;
-        // The derived key comes back from the wrap step: deriving it twice is
-        // two full Argon2id runs AND an unwritten assumption that both agree
-        // (which a per-account salt would silently break).
-        let (_secret, wrapped, new_key) = generate_and_wrap(&npub).await?;
+        // The derived key and its salt come back from the wrap step, so the store is
+        // re-keyed to exactly what the wrap holds.
+        let (wrapped, new_key, kdf) = generate_and_wrap(&npub).await?;
         let res = crate::commands::encryption::rekey_from_vault(
-            handle, new_key, "biometric", Some(wrapped), session,
+            handle, *new_key, kdf, "biometric", Some(wrapped), session,
         )
         .await;
         if res.is_err() {

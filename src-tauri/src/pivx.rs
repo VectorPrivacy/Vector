@@ -611,7 +611,8 @@ async fn save_promo<R: Runtime>(
 ) -> Result<(), String> {
     // Conditionally encrypt private key based on user setting
     let privkey_hex = bytes_to_hex_string(privkey);
-    let privkey_encrypted = crate::crypto::maybe_encrypt(privkey_hex).await;
+    let _seal = vector_core::crypto::gate::sealing();
+    let privkey_encrypted = vector_core::crypto::maybe_encrypt_text(&privkey_hex)?;
 
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

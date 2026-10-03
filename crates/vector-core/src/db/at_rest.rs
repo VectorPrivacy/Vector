@@ -1,9 +1,10 @@
 //! Local Encryption at-rest sweep: enable, disable and rekey every encrypted
 //! column inside one transaction, so a crash leaves the store on one key.
 //!
-//! Adding an encrypted column is a two-place change: the `save_*` writer that
-//! wraps it and `migrate_community_in_tx` here. A column the sweep misses stays
-//! under the old key after a rekey and garbles on the next read.
+//! Adding an encrypted column is a two-place change: name it in
+//! `SWEEP` (enable finds plaintext by that list alone) and add its writer
+//! to `every_encrypting_writer_is_covered_by_the_at_rest_sweep`. Rekey and disable
+//! also run `sweep_residue_in_tx`, so a missed column still moves with the key.
 
 use zeroize::Zeroize;
 use crate::state::set_encryption_enabled;
@@ -47,6 +48,12 @@ pub fn disable(
     key: &[u8; 32],
     progress: &dyn Fn(MigrationProgress),
 ) -> Result<(), String> {
+    // Held from before the transaction until the vault and the flag show the result, so no
+    // write sealed under the outgoing key can land after it.
+    let _change = crate::crypto::gate::key_change()?;
+    if !crate::db::writes_to_live_account() {
+        return Err("The account changed before encryption could be turned off".to_string());
+    }
     let mut conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -57,11 +64,13 @@ pub fn disable(
         [],
     ).map_err(|e| format!("Failed to set migration_state: {}", e))?;
 
+    prove_key_in_tx(&tx, key, false)?;
+
     // 1. Collect encrypted event IDs (memory-efficient: just ID strings)
     let all_ids: Vec<String> = {
         let mut stmt = tx.prepare(
             r#"SELECT id FROM events
-               WHERE kind IN (?1, ?2, ?3)
+               WHERE kind IN (?1, ?2, ?3, ?4)
                AND length(content) >= 56
                AND content NOT GLOB '*[^0-9a-f]*'"#,
         ).map_err(|e| format!("Failed to prepare ID query: {}", e))?;
@@ -71,6 +80,7 @@ pub fn disable(
                 event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
+                event_kind::FILE_ATTACHMENT as i32,
             ],
             |row| row.get::<_, String>(0),
         ).map_err(|e| format!("Failed to query IDs: {}", e))?;
@@ -135,7 +145,8 @@ pub fn disable(
     decrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
     decrypt_setting_in_tx(&tx, "bunker_url", key, |v| v.starts_with("bunker://"))?;
     decrypt_pivx_in_tx(&tx, key)?;
-    decrypt_community_in_tx(&tx, key)?;
+    decrypt_columns_in_tx(&tx, key)?;
+    sweep_residue_in_tx(&tx, key, None)?;
 
     // 4. Verify plaintext state within the transaction (before committing)
     verify_plaintext_state_in_tx(&tx)?;
@@ -145,6 +156,7 @@ pub fn disable(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('encryption_enabled', 'false')",
         [],
     ).map_err(|e| format!("Failed to update encryption_enabled: {}", e))?;
+    super::settings::write_kdf_in_tx(&tx, None)?;
 
     // Plaintext account needs no wrong-PIN detector and no unlock method —
     // drop both in-tx so no reader can infer a mode that no longer exists.
@@ -172,8 +184,9 @@ pub fn disable(
     // 6. COMMIT — the atomic point. Everything succeeds or nothing does.
     tx.commit().map_err(|e| format!("Failed to commit disable transaction: {}", e))?;
 
-    // Update cached flag now that transaction committed successfully
     set_encryption_enabled(false);
+    crate::state::ENCRYPTION_KEY.clear(&[&crate::state::MY_SECRET_KEY]);
+    crate::crypto::forget_previous_key();
 
     if skipped > 0 {
         crate::log_info!("[Encryption] Skipped {} false-positive hex events", skipped);
@@ -193,11 +206,21 @@ pub fn disable(
 /// Memory-efficient: collects only event IDs upfront, processes one at a time.
 pub fn enable(
     key: &[u8; 32],
+    kdf: &crate::crypto::Kdf,
     security_type: &str,
     biometric_wrap: Option<&str>,
     nip55_canary: Option<&str>,
     progress: &dyn Fn(MigrationProgress),
 ) -> Result<(), String> {
+    if kdf.is_legacy() {
+        return Err("A new key needs its own salt".to_string());
+    }
+    // Held from before the transaction until the vault and the flag show the result, so no
+    // write sealed under the outgoing key can land after it.
+    let _change = crate::crypto::gate::key_change()?;
+    if !crate::db::writes_to_live_account() {
+        return Err("The account changed before encryption could be turned on".to_string());
+    }
     let mut conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -212,7 +235,7 @@ pub fn enable(
     let all_ids: Vec<String> = {
         let mut stmt = tx.prepare(
             r#"SELECT id FROM events
-               WHERE kind IN (?1, ?2, ?3)
+               WHERE kind IN (?1, ?2, ?3, ?4) AND content <> ''
                AND (length(content) < 56 OR content GLOB '*[^0-9a-f]*')"#,
         ).map_err(|e| format!("Failed to prepare ID query: {}", e))?;
 
@@ -221,6 +244,7 @@ pub fn enable(
                 event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
+                event_kind::FILE_ATTACHMENT as i32,
             ],
             |row| row.get::<_, String>(0),
         ).map_err(|e| format!("Failed to query IDs: {}", e))?;
@@ -272,11 +296,13 @@ pub fn enable(
         phase: "finalizing".to_string(),
     });
 
+    // The loop above picks plaintext by its look; this catches text that only looks sealed.
+    seal_plain_messages_in_tx(&tx, key)?;
     encrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
     encrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
     encrypt_setting_in_tx(&tx, "bunker_url", key, |v| v.starts_with("bunker://"))?;
     encrypt_pivx_in_tx(&tx, key)?;
-    encrypt_community_in_tx(&tx, key)?;
+    encrypt_columns_in_tx(&tx, key)?;
 
     // 4. Verify encrypted state within the transaction (before committing)
     verify_encrypted_state_in_tx(&tx, key)?;
@@ -286,6 +312,7 @@ pub fn enable(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('encryption_enabled', 'true')",
         [],
     ).map_err(|e| format!("Failed to update encryption_enabled: {}", e))?;
+    super::settings::write_kdf_in_tx(&tx, kdf.descriptor().as_deref())?;
 
     tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
@@ -328,7 +355,7 @@ pub fn enable(
     // 6. COMMIT — the atomic point. Everything succeeds or nothing does.
     tx.commit().map_err(|e| format!("Failed to commit enable transaction: {}", e))?;
 
-    // Update cached flag now that transaction committed successfully
+    crate::state::ENCRYPTION_KEY.set(*key, &[&crate::state::MY_SECRET_KEY]);
     set_encryption_enabled(true);
 
     crate::log_info!("[Encryption] Enable complete: encrypted {} events", total);
@@ -457,53 +484,46 @@ fn encrypt_pivx_in_tx(
 // ============================================================================
 //
 // The community tables hold their own secrets + identifying metadata, wrapped the same way as the
-// pkey/event-content/PIVX fields. These helpers re-wrap them in lockstep with the three lifecycle
-// flows. One direction-agnostic engine: `dec` decrypts with the given key first, then `enc` encrypts
-// with the given key — so enable = enc only, disable = dec only, rekey = dec(old) then enc(new). The
-// discriminators (text `looks_encrypted`; blob 32-byte-raw vs longer) make every step idempotent, so
-// a re-run or the one-time backfill never double-wraps or fails on already-migrated rows.
-
-// Idempotency discriminator for both directions is the AEAD tag itself — "already encrypted under
-// key `k`" iff the value decrypts cleanly under `k` — NOT a hex/length content heuristic. A content
-// heuristic (`looks_encrypted`) silently mis-classifies plaintext that happens to be bare hex (invite
-// tokens, creator pubkeys) as ciphertext and skips wrapping it; the tag check can't be fooled (a
-// 16-byte Poly1305 tag won't validate on non-ciphertext), and it never double-wraps on re-run.
+// pkey/event-content/PIVX fields. One direction-agnostic engine: `dec` decrypts with the given key
+// first, then `enc` encrypts with the given key, so enable = enc only, disable = dec only, rekey =
+// dec(old) then enc(new).
+//
+// The discriminator in both directions is the AEAD tag: "already encrypted under `k`" iff the value
+// opens under `k`. A hex/length heuristic would mistake bare-hex plaintext (invite tokens, creator
+// pubkeys) for ciphertext; the tag can't be fooled, and a re-run never double-wraps.
 
 fn xform_text(v: &str, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<String, String> {
-    let mut s = v.to_string();
+    // Empty means unset in every sealed column, and queries test it with `<> ''`.
+    if v.is_empty() {
+        return Ok(String::new());
+    }
+    let mut s = zeroize::Zeroizing::new(v.to_string());
     if let Some(k) = dec {
-        // Try to decrypt; anything that isn't ciphertext under `k` fails the tag and is kept as-is.
         if let Ok(p) = decrypt_with_key(&s, k) {
-            s = p;
+            s = zeroize::Zeroizing::new(p);
         }
     }
     if let Some(k) = enc {
-        // Encrypt unless it already decrypts under `k` (already wrapped → leave it).
-        if decrypt_with_key(&s, k).is_err() {
-            s = encrypt_with_key(&s, k);
+        if decrypt_with_key(&s, k).map(zeroize::Zeroizing::new).is_err() {
+            return Ok(encrypt_with_key(&s, k));
         }
     }
-    Ok(s)
-}
-
-fn xform_text_opt(v: &Option<String>, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<Option<String>, String> {
-    v.as_deref().map(|s| xform_text(s, enc, dec)).transpose()
+    Ok(s.to_string())
 }
 
 fn xform_blob(v: &[u8], enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>) -> Result<Vec<u8>, String> {
-    let mut b = v.to_vec();
+    let mut b = zeroize::Zeroizing::new(v.to_vec());
     if let Some(k) = dec {
-        // A raw 32-byte key (or anything not ciphertext under `k`) fails the tag and is kept as-is.
         if let Ok(p) = crate::crypto::decrypt_blob_with_key(&b, k) {
-            b = p;
+            b = zeroize::Zeroizing::new(p);
         }
     }
     if let Some(k) = enc {
-        if crate::crypto::decrypt_blob_with_key(&b, k).is_err() {
-            b = crate::crypto::encrypt_blob_with_key(&b, k)?;
+        if crate::crypto::decrypt_blob_with_key(&b, k).map(zeroize::Zeroizing::new).is_err() {
+            return crate::crypto::encrypt_blob_with_key(&b, k);
         }
     }
-    Ok(b)
+    Ok(b.to_vec())
 }
 
 #[cfg(test)]
@@ -552,7 +572,8 @@ mod xform_tests {
 
     #[test]
     fn nonhex_plaintext_roundtrips() {
-        for v in ["general", "{\"roles\":[]}", "wss://relay.example", ""] {
+        assert_eq!(xform_text("", Some(&K), None).unwrap(), "", "empty stays empty");
+        for v in ["general", "{\"roles\":[]}", "wss://relay.example"] {
             let enc = xform_text(v, Some(&K), None).unwrap();
             assert_eq!(decrypt_with_key(&enc, &K).unwrap(), v);
             assert_eq!(xform_text(&enc, None, Some(&K)).unwrap(), v);
@@ -563,15 +584,22 @@ mod xform_tests {
     /// not touch omitted).
     fn migrate_test_schema(conn: &rusqlite::Connection) {
         conn.execute_batch(
-            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB);
-             CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT);
+            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, banlist_marks TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB, migration_pointer TEXT);
+             CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT, meta_extra TEXT);
              CREATE TABLE community_epoch_keys (key BLOB);
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
+             CREATE TABLE pending_channel_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_key BLOB, sender TEXT);
              CREATE TABLE pending_community_invites (community_id TEXT, bundle_json TEXT, inviter_npub TEXT);
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
              CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);
              CREATE TABLE community_guestbook (community_id TEXT, events TEXT, cursor_secs INTEGER);
-             CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);",
+             CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);
+             CREATE TABLE community_migrations (community_id TEXT PRIMARY KEY, twin TEXT NOT NULL DEFAULT '');
+             CREATE TABLE community_pins (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
+             CREATE TABLE attachments (key TEXT, nonce TEXT, name TEXT, url TEXT, fallback_urls TEXT, img_meta TEXT);
+             CREATE TABLE events (preview_metadata TEXT);
+             CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
+             CREATE TABLE community_bans (community_id TEXT, npub TEXT);",
         ).unwrap();
     }
 
@@ -605,7 +633,7 @@ mod xform_tests {
         let k2 = [0x22u8; 32];
         let step = |c: &mut rusqlite::Connection, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>| {
             let tx = c.transaction().unwrap();
-            migrate_community_in_tx(&tx, enc, dec).unwrap();
+            sweep_columns_in_tx(&tx, enc, dec).unwrap();
             tx.commit().unwrap();
         };
         step(&mut conn, Some(&k1), None);
@@ -642,7 +670,7 @@ mod xform_tests {
         };
 
         let tx = conn.transaction().unwrap();
-        encrypt_community_in_tx(&tx, &K).unwrap();
+        encrypt_columns_in_tx(&tx, &K).unwrap();
         tx.commit().unwrap();
         let (owner_pk, control_pk, root) = read(&conn);
         assert_ne!(owner_pk, "ab".repeat(32), "owner commitment must be wrapped after enable");
@@ -650,11 +678,11 @@ mod xform_tests {
         assert_ne!(root, vec![0x5Au8; 32], "control_root must be wrapped after enable");
 
         let tx = conn.transaction().unwrap();
-        rekey_community_in_tx(&tx, &K, &K2).unwrap();
+        rekey_columns_in_tx(&tx, &K, &K2).unwrap();
         tx.commit().unwrap();
 
         let tx = conn.transaction().unwrap();
-        decrypt_community_in_tx(&tx, &K2).unwrap();
+        decrypt_columns_in_tx(&tx, &K2).unwrap();
         tx.commit().unwrap();
         let (owner_pk, control_pk, root) = read(&conn);
         assert_eq!(owner_pk, "ab".repeat(32), "owner commitment survives enable → rekey → disable");
@@ -677,18 +705,186 @@ mod xform_tests {
         };
 
         let tx = conn.transaction().unwrap();
-        encrypt_community_in_tx(&tx, &K).unwrap();
+        encrypt_columns_in_tx(&tx, &K).unwrap();
         tx.commit().unwrap();
         assert_ne!(read_label(&conn), "Reddit", "label must be wrapped after enable");
 
         let tx = conn.transaction().unwrap();
-        rekey_community_in_tx(&tx, &K, &K2).unwrap();
+        rekey_columns_in_tx(&tx, &K, &K2).unwrap();
         tx.commit().unwrap();
 
         let tx = conn.transaction().unwrap();
-        decrypt_community_in_tx(&tx, &K2).unwrap();
+        decrypt_columns_in_tx(&tx, &K2).unwrap();
         tx.commit().unwrap();
         assert_eq!(read_label(&conn), "Reddit", "label must survive enable → rekey → disable");
+    }
+
+    /// The sweep list must name real columns: a typo would fail every PIN change with
+    /// "no such column" instead of quietly sweeping nothing.
+    #[test]
+    fn sweep_list_matches_the_real_schema() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::db::schema::SQL_SCHEMA).unwrap();
+        crate::db::schema::run_migrations(&mut conn).unwrap();
+        for (table, cols) in SWEEP {
+            conn.prepare(&format!("SELECT {} FROM {table}", cols.join(", ")))
+                .unwrap_or_else(|e| panic!("{table}: {e}"));
+        }
+    }
+
+    /// Every listed column, with NULLs where a column allows them, round-trips through
+    /// enable, rekey and disable, and a NULL never costs its row the sweep.
+    #[test]
+    fn every_swept_column_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
+        let mut n = 0u8;
+        for (table, cols) in SWEEP {
+            for with_nulls in [false, true] {
+                let vals: Vec<rusqlite::types::Value> = cols.iter().map(|c| {
+                    n += 1;
+                    let blob = conn
+                        .query_row("SELECT type FROM pragma_table_info(?1) WHERE name = ?2", [table, c], |r| r.get::<_, String>(0))
+                        .unwrap() == "BLOB";
+                    if with_nulls && *c != cols[0] {
+                        rusqlite::types::Value::Null
+                    } else if blob {
+                        rusqlite::types::Value::Blob(vec![n; 32])
+                    } else {
+                        rusqlite::types::Value::Text(format!("{c}-{n}"))
+                    }
+                }).collect();
+                let marks = vec!["?"; cols.len()].join(", ");
+                let sql = format!("INSERT OR REPLACE INTO {table} ({}) VALUES ({marks})", cols.join(", "));
+                conn.execute(&sql, rusqlite::params_from_iter(vals.iter())).unwrap();
+            }
+        }
+        let snapshot = |c: &rusqlite::Connection| -> Vec<Vec<rusqlite::types::Value>> {
+            SWEEP.iter().flat_map(|(table, cols)| {
+                let mut stmt = c.prepare(&format!("SELECT {} FROM {table} ORDER BY rowid", cols.join(", "))).unwrap();
+                let rows = stmt
+                    .query_map([], |r| (0..cols.len()).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect())
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect::<Vec<Vec<rusqlite::types::Value>>>();
+                rows
+            }).collect()
+        };
+        let before = snapshot(&conn);
+        let step = |c: &mut rusqlite::Connection, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>| {
+            let tx = c.transaction().unwrap();
+            sweep_columns_in_tx(&tx, enc, dec).unwrap();
+            tx.commit().unwrap();
+        };
+
+        step(&mut conn, Some(&K), None);
+        let enabled = snapshot(&conn);
+        for (row_before, row_enabled) in before.iter().zip(&enabled) {
+            for (b, e) in row_before.iter().zip(row_enabled) {
+                match b {
+                    rusqlite::types::Value::Null => assert_eq!(e, b, "NULL stays NULL"),
+                    _ => assert_ne!(e, b, "every listed value must actually be wrapped by enable"),
+                }
+            }
+        }
+        step(&mut conn, Some(&K2), Some(&K));
+        {
+            let tx = conn.transaction().unwrap();
+            assert_eq!(sweep_residue_in_tx(&tx, &K, Some(&K2)).unwrap(), 0, "the list alone leaves nothing on the old key");
+        }
+        step(&mut conn, None, Some(&K2));
+        assert_eq!(snapshot(&conn), before, "enable, rekey and disable return every value it started with");
+    }
+
+    /// The net under the lists: a column nobody listed still moves with the key, in its own
+    /// storage class, and only what opens under the old key is touched.
+    #[test]
+    fn residue_sweep_moves_unlisted_ciphertext_and_nothing_else() {
+        const K3: [u8; 32] = [11u8; 32];
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE future (t TEXT, b BLOB, n INTEGER);").unwrap();
+        let text_ct = encrypt_with_key("hello", &K);
+        let blob_ct = crate::crypto::encrypt_blob_with_key(&[0x42u8; 32], &K).unwrap();
+        let foreign = encrypt_with_key("someone else's", &K3);
+        let bare_hex = "ab".repeat(32);
+        conn.execute("INSERT INTO future VALUES (?1, ?2, 1)", rusqlite::params![text_ct, blob_ct]).unwrap();
+        conn.execute("INSERT INTO future VALUES (?1, NULL, 2)", rusqlite::params![foreign]).unwrap();
+        conn.execute("INSERT INTO future VALUES (?1, x'00ff', 3)", rusqlite::params![bare_hex]).unwrap();
+
+        let tx = conn.transaction().unwrap();
+        assert_eq!(sweep_residue_in_tx(&tx, &K, Some(&K2)).unwrap(), 2);
+        tx.commit().unwrap();
+        let (t, b): (String, Vec<u8>) = conn.query_row("SELECT t, b FROM future WHERE n = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(decrypt_with_key(&t, &K2).unwrap(), "hello");
+        assert_eq!(crate::crypto::decrypt_blob_with_key(&b, &K2).unwrap(), vec![0x42u8; 32]);
+        let untouched: (String, String) = conn.query_row(
+            "SELECT (SELECT t FROM future WHERE n = 2), (SELECT t FROM future WHERE n = 3)", [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(untouched, (foreign, bare_hex), "values not under the old key are left alone");
+
+        let tx = conn.transaction().unwrap();
+        assert_eq!(sweep_residue_in_tx(&tx, &K2, None).unwrap(), 2);
+        tx.commit().unwrap();
+        let (t, b): (String, Vec<u8>) = conn.query_row("SELECT t, b FROM future WHERE n = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((t.as_str(), b), ("hello", vec![0x42u8; 32]), "disable opens text to text and blob to blob");
+    }
+
+    /// Ciphertext the sweep cannot address or cannot open to text aborts the transaction
+    /// rather than being left on a key the store stops using.
+    #[test]
+    fn residue_sweep_refuses_what_it_cannot_move() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE keyed (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID;").unwrap();
+        conn.execute("INSERT INTO keyed VALUES ('a', ?1)", [encrypt_with_key("x", &K)]).unwrap();
+        let tx = conn.transaction().unwrap();
+        assert!(sweep_residue_in_tx(&tx, &K, Some(&K2)).is_err());
+        drop(tx);
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE odd (v TEXT);").unwrap();
+        let sealed = crate::crypto::encrypt_blob_with_key(&[0xff, 0xfe, 0x00], &K).unwrap();
+        conn.execute("INSERT INTO odd VALUES (?1)", [crate::simd::hex::bytes_to_hex_string(&sealed)]).unwrap();
+        let tx = conn.transaction().unwrap();
+        assert!(sweep_residue_in_tx(&tx, &K, None).is_err(), "bytes that are not text never land in a text column");
+    }
+
+    /// The key proof on the real schema: whichever anchor the store has decides, and a store
+    /// with none passes only when the caller does not need one.
+    #[test]
+    fn a_key_is_proven_by_whatever_the_store_holds() {
+        let fresh = || {
+            let mut c = rusqlite::Connection::open_in_memory().unwrap();
+            c.execute_batch(crate::db::schema::SQL_SCHEMA).unwrap();
+            crate::db::schema::run_migrations(&mut c).unwrap();
+            c
+        };
+        let proves = |c: &mut rusqlite::Connection, k: &[u8; 32], require: bool| {
+            let tx = c.transaction().unwrap();
+            prove_key_in_tx(&tx, k, require).is_ok()
+        };
+
+        let mut empty = fresh();
+        assert!(proves(&mut empty, &K, false), "nothing encrypted, nothing to lose");
+        assert!(!proves(&mut empty, &K, true), "an enable-direction pass needs an anchor");
+
+        let mut local = fresh();
+        local.execute("INSERT INTO settings (key, value) VALUES ('pkey', ?1)", [encrypt_with_key("nsec1abc", &K)]).unwrap();
+        assert!(proves(&mut local, &K, true));
+        assert!(!proves(&mut local, &K2, false));
+
+        let mut keyless = fresh();
+        keyless.execute("INSERT INTO settings (key, value) VALUES ('nip55_pin_check', ?1)", [encrypt_with_key(NIP55_PIN_CANARY, &K)]).unwrap();
+        assert!(proves(&mut keyless, &K, true));
+        assert!(!proves(&mut keyless, &K2, false));
+
+        let mut no_canary = fresh();
+        let blob = crate::crypto::encrypt_blob_with_key(&[7u8; 32], &K).unwrap();
+        no_canary.execute(
+            "INSERT INTO community_epoch_keys (community_id, scope_id, epoch, key, created_at) VALUES ('c', 's', 0, ?1, 0)",
+            [blob],
+        ).unwrap();
+        assert!(proves(&mut no_canary, &K, true), "a sealed community key is proof enough");
+        assert!(!proves(&mut no_canary, &K2, false), "a key that opens none of the samples is refused");
     }
 
     #[test]
@@ -704,183 +900,310 @@ mod xform_tests {
     }
 }
 
-fn migrate_community_in_tx(
+/// Every encrypted column outside the hand-swept message content, settings and PIVX rows, by
+/// table. Enable depends on this list alone (plaintext carries nothing to find it by); rekey and
+/// disable are also backed by `sweep_residue_in_tx`, which catches a column missing here by its tag.
+const SWEEP: &[(&str, &[&str])] = &[
+    ("attachments", &["key", "nonce", "name", "url", "fallback_urls", "img_meta"]),
+    ("events", &["preview_metadata"]),
+    ("nip17_wrap_keys", &["rumor_json"]),
+    ("communities", &[
+        "server_root_key", "name", "relays", "description", "icon", "banner", "banlist",
+        "banlist_marks", "owner_attestation", "roles", "invite_registry", "owner_pubkey",
+        "owner_salt", "meta_extra", "control_pk", "control_root", "migration_pointer",
+    ]),
+    ("community_channels", &["channel_key", "name", "meta_extra"]),
+    ("community_epoch_keys", &["key"]),
+    ("community_message_keys", &["ephemeral_secret", "relays"]),
+    ("pending_channel_keys", &["channel_key", "sender"]),
+    ("pending_community_invites", &["bundle_json", "inviter_npub"]),
+    ("community_guestbook", &["events"]),
+    ("community_policies", &["bytes"]),
+    ("community_public_invites", &["token", "url", "label"]),
+    ("community_invite_link_sets", &["creator", "locators"]),
+    ("community_migrations", &["twin"]),
+    ("community_pins", &["content"]),
+    ("community_bans", &["npub"]),
+];
+
+fn sweep_columns_in_tx(
     tx: &rusqlite::Transaction,
     enc: Option<&[u8; 32]>,
     dec: Option<&[u8; 32]>,
 ) -> Result<(), String> {
-    // communities: 2 secret BLOBs + identifying text (some nullable). Every
-    // encrypted column save_community / save_community_v2 writes MUST appear
-    // here, or it stays under the old key after a rekey and garbles on read.
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<Vec<u8>>)> = {
-        let mut stmt = tx.prepare(
-            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry, owner_pubkey, owner_salt, meta_extra, control_pk, control_root FROM communities",
-        ).map_err(|e| format!("prepare communities: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((
-            r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
-            r.get::<_, String>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
-            r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, Option<String>>(13)?,
-            r.get::<_, Option<String>>(14)?, r.get::<_, Option<Vec<u8>>>(15)?,
-        ))).map_err(|e| format!("query communities: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry, owner_pk, owner_salt, meta_extra, control_pk, control_root) in rows {
-        tx.execute(
-            "UPDATE communities SET server_root_key=?1, name=?2, relays=?3, description=?4, icon=?5,
-                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10,
-                owner_pubkey=?11, owner_salt=?12, meta_extra=?13, control_pk=?14, control_root=?15 WHERE community_id=?16",
-            rusqlite::params![
-                xform_blob(&root, enc, dec)?, xform_text(&name, enc, dec)?, xform_text(&relays, enc, dec)?,
-                xform_text_opt(&desc, enc, dec)?, xform_text_opt(&icon, enc, dec)?, xform_text_opt(&banner, enc, dec)?,
-                xform_text(&banlist, enc, dec)?, xform_text_opt(&owner, enc, dec)?, xform_text(&roles, enc, dec)?,
-                xform_text(&registry, enc, dec)?, xform_text_opt(&owner_pk, enc, dec)?, xform_text_opt(&owner_salt, enc, dec)?,
-                xform_text_opt(&meta_extra, enc, dec)?, xform_text_opt(&control_pk, enc, dec)?,
-                control_root.as_deref().map(|b| xform_blob(b, enc, dec)).transpose()?, id,
-            ],
-        ).map_err(|e| format!("update communities: {e}"))?;
+    for (table, cols) in SWEEP {
+        xform_columns_in_tx(tx, table, cols, enc, dec)?;
     }
-
-    // community_channels: channel_key BLOB + name.
-    let chans: Vec<(String, Vec<u8>, String)> = {
-        let mut stmt = tx.prepare("SELECT channel_id, channel_key, name FROM community_channels")
-            .map_err(|e| format!("prepare channels: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query channels: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (cid, key, name) in chans {
-        tx.execute(
-            "UPDATE community_channels SET channel_key=?1, name=?2 WHERE channel_id=?3",
-            rusqlite::params![xform_blob(&key, enc, dec)?, xform_text(&name, enc, dec)?, cid],
-        ).map_err(|e| format!("update channel: {e}"))?;
-    }
-
-    // community_epoch_keys: key BLOB (rowid-keyed — coordinate columns aren't unique enough alone).
-    let eks: Vec<(i64, Vec<u8>)> = {
-        let mut stmt = tx.prepare("SELECT rowid, key FROM community_epoch_keys")
-            .map_err(|e| format!("prepare epoch keys: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-            .map_err(|e| format!("query epoch keys: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (rowid, key) in eks {
-        tx.execute("UPDATE community_epoch_keys SET key=?1 WHERE rowid=?2",
-            rusqlite::params![xform_blob(&key, enc, dec)?, rowid])
-            .map_err(|e| format!("update epoch key: {e}"))?;
-    }
-
-    // community_message_keys: ephemeral_secret BLOB + relays.
-    let mks: Vec<(String, Vec<u8>, String)> = {
-        let mut stmt = tx.prepare("SELECT outer_event_id, ephemeral_secret, relays FROM community_message_keys")
-            .map_err(|e| format!("prepare msg keys: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query msg keys: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (oid, secret, relays) in mks {
-        tx.execute("UPDATE community_message_keys SET ephemeral_secret=?1, relays=?2 WHERE outer_event_id=?3",
-            rusqlite::params![xform_blob(&secret, enc, dec)?, xform_text(&relays, enc, dec)?, oid])
-            .map_err(|e| format!("update msg key: {e}"))?;
-    }
-
-    // pending_community_invites: bundle_json + inviter_npub.
-    let pend: Vec<(String, String, String)> = {
-        let mut stmt = tx.prepare("SELECT community_id, bundle_json, inviter_npub FROM pending_community_invites")
-            .map_err(|e| format!("prepare pending: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query pending: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (id, bundle, inviter) in pend {
-        tx.execute("UPDATE pending_community_invites SET bundle_json=?1, inviter_npub=?2 WHERE community_id=?3",
-            rusqlite::params![xform_text(&bundle, enc, dec)?, xform_text(&inviter, enc, dec)?, id])
-            .map_err(|e| format!("update pending: {e}"))?;
-    }
-
-    // community_guestbook: the folded Join/Leave/Kick/Snapshot events. Missed
-    // since the store landed — a rekey left them under the old key, the read
-    // silently `unwrap_or_default()`s to empty, and every member count collapses
-    // until the next full plane walk rebuilds it.
-    let gbs: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT community_id, events FROM community_guestbook")
-            .map_err(|e| format!("prepare guestbook: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| format!("query guestbook: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (id, events) in gbs {
-        tx.execute("UPDATE community_guestbook SET events=?1 WHERE community_id=?2",
-            rusqlite::params![xform_text(&events, enc, dec)?, id])
-            .map_err(|e| format!("update guestbook: {e}"))?;
-    }
-
-    // community_policies: the exact policy bytes a community declared.
-    let pols: Vec<(String, String, String)> = {
-        let mut stmt = tx.prepare("SELECT community_id, policy_id, bytes FROM community_policies")
-            .map_err(|e| format!("prepare policies: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query policies: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (cid, pid, bytes) in pols {
-        tx.execute("UPDATE community_policies SET bytes=?1 WHERE community_id=?2 AND policy_id=?3",
-            rusqlite::params![xform_text(&bytes, enc, dec)?, cid, pid])
-            .map_err(|e| format!("update policies: {e}"))?;
-    }
-
-    // community_public_invites: token + url + label (rowid-keyed — token is itself wrapped).
-    let pubs: Vec<(i64, String, String, Option<String>)> = {
-        let mut stmt = tx.prepare("SELECT rowid, token, url, label FROM community_public_invites")
-            .map_err(|e| format!("prepare public invites: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((
-            r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?,
-        ))).map_err(|e| format!("query public invites: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (rowid, token, url, label) in pubs {
-        tx.execute("UPDATE community_public_invites SET token=?1, url=?2, label=?3 WHERE rowid=?4",
-            rusqlite::params![xform_text(&token, enc, dec)?, xform_text(&url, enc, dec)?, xform_text_opt(&label, enc, dec)?, rowid])
-            .map_err(|e| format!("update public invite: {e}"))?;
-    }
-
-    // community_invite_link_sets: creator + locators (rowid-keyed — creator is itself wrapped).
-    let sets: Vec<(i64, String, String)> = {
-        let mut stmt = tx.prepare("SELECT rowid, creator, locators FROM community_invite_link_sets")
-            .map_err(|e| format!("prepare link sets: {e}"))?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-            .map_err(|e| format!("query link sets: {e}"))?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    for (rowid, creator, locators) in sets {
-        tx.execute("UPDATE community_invite_link_sets SET creator=?1, locators=?2 WHERE rowid=?3",
-            rusqlite::params![xform_text(&creator, enc, dec)?, xform_text(&locators, enc, dec)?, rowid])
-            .map_err(|e| format!("update link set: {e}"))?;
-    }
-
     Ok(())
 }
 
-/// Encrypt all Concord secrets + metadata (enable flow).
-fn encrypt_community_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
-    migrate_community_in_tx(tx, Some(key), None)
-}
-/// Decrypt all Concord secrets + metadata (disable flow).
-fn decrypt_community_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
-    migrate_community_in_tx(tx, None, Some(key))
-}
-/// Re-wrap all Concord secrets + metadata old key → new key (PIN-rekey flow).
-fn rekey_community_in_tx(tx: &rusqlite::Transaction, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<(), String> {
-    migrate_community_in_tx(tx, Some(new_key), Some(old_key))
+/// Transform the named columns of every row by storage class (text, blob; NULL and numbers kept).
+/// A row that fails to read aborts the transaction: skipping it would leave it on the old key.
+/// A column this database never gained holds nothing to move, so it is skipped, not fatal.
+fn xform_columns_in_tx(
+    tx: &rusqlite::Transaction,
+    table: &str,
+    cols: &[&str],
+    enc: Option<&[u8; 32]>,
+    dec: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    use rusqlite::types::Value;
+    let present: Vec<String> = {
+        let mut stmt = tx
+            .prepare("SELECT name FROM pragma_table_info(?1)")
+            .map_err(|e| format!("columns of {table}: {e}"))?;
+        let mapped = stmt.query_map([table], |r| r.get::<_, String>(0)).map_err(|e| format!("columns of {table}: {e}"))?;
+        mapped.collect::<Result<_, _>>().map_err(|e| format!("columns of {table}: {e}"))?
+    };
+    let cols: Vec<&str> = cols.iter().copied().filter(|c| present.iter().any(|p| p == c)).collect();
+    if cols.is_empty() {
+        crate::log_warn!("[Encryption] {table} is missing from this database; nothing to sweep there");
+        return Ok(());
+    }
+    let rows: Vec<(i64, Vec<Value>)> = {
+        let mut stmt = tx
+            .prepare(&format!("SELECT rowid, {} FROM {table}", cols.join(", ")))
+            .map_err(|e| format!("prepare {table}: {e}"))?;
+        let mapped = stmt
+            .query_map([], |r| {
+                let vals = (1..=cols.len()).map(|i| r.get::<_, Value>(i)).collect::<Result<Vec<_>, _>>()?;
+                Ok((r.get::<_, i64>(0)?, vals))
+            })
+            .map_err(|e| format!("query {table}: {e}"))?;
+        mapped.collect::<Result<_, _>>().map_err(|e| format!("read {table}: {e}"))?
+    };
+    let set = cols.iter().enumerate().map(|(i, c)| format!("{c} = ?{}", i + 1)).collect::<Vec<_>>().join(", ");
+    let mut update = tx
+        .prepare(&format!("UPDATE {table} SET {set} WHERE rowid = ?{}", cols.len() + 1))
+        .map_err(|e| format!("prepare update {table}: {e}"))?;
+    for (rowid, vals) in rows {
+        let mut out = Vec::with_capacity(vals.len() + 1);
+        for v in &vals {
+            out.push(match v {
+                Value::Text(s) => Value::Text(xform_text(s, enc, dec)?),
+                Value::Blob(b) => Value::Blob(xform_blob(b, enc, dec)?),
+                other => other.clone(),
+            });
+        }
+        if out == vals {
+            continue;
+        }
+        out.push(Value::Integer(rowid));
+        update
+            .execute(rusqlite::params_from_iter(out.iter()))
+            .map_err(|e| format!("update {table}: {e}"))?;
+    }
+    Ok(())
 }
 
-/// One-time backfill for an account that already had Local Encryption ON *before* Concord at-rest
-/// encryption shipped: its community rows are still plaintext. Wrap them once, gated by a per-account
-/// settings flag. Idempotent (the field discriminators skip already-wrapped rows), so a crash mid-pass
-/// re-runs next login. No-op when encryption is off, the key vault is empty, or the flag is set.
+/// The tag-based net under the sweep lists: any text or blob cell, in any table, that opens under
+/// `from` moves to `to` (None = plaintext). Nothing is left behind on a key the store stops using,
+/// even in a column no list names yet. Returns how many cells the lists had missed.
+pub(crate) fn sweep_residue_in_tx(
+    tx: &rusqlite::Transaction,
+    from: &[u8; 32],
+    to: Option<&[u8; 32]>,
+) -> Result<usize, String> {
+    let tables: Vec<(String, bool)> = {
+        let mut stmt = tx
+            .prepare("SELECT name, wr FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .map_err(|e| format!("residue: list tables: {e}"))?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
+            .map_err(|e| format!("residue: list tables: {e}"))?;
+        mapped.collect::<Result<_, _>>().map_err(|e| format!("residue: list tables: {e}"))?
+    };
+
+    let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let cipher = crate::crypto::chachapoly::ChaCha20Poly1305::new(from);
+    let mut scratch = Vec::new();
+    let mut total = 0;
+    for (table, without_rowid) in tables {
+        let cols: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT name FROM pragma_table_info(?1)")
+                .map_err(|e| format!("residue: columns of {table}: {e}"))?;
+            let mapped = stmt
+                .query_map([&table], |r| r.get::<_, String>(0))
+                .map_err(|e| format!("residue: columns of {table}: {e}"))?;
+            mapped.collect::<Result<_, _>>().map_err(|e| format!("residue: columns of {table}: {e}"))?
+        };
+        if cols.is_empty() {
+            continue;
+        }
+        let quoted: Vec<String> = cols.iter().map(|c| quote(c)).collect();
+        let rowid = if without_rowid { "NULL" } else { "rowid" };
+        // Positions only: holding the moved values for a whole table would put every
+        // ciphertext it holds in memory at once.
+        let mut found: Vec<(i64, usize)> = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare(&format!("SELECT {rowid}, {} FROM {}", quoted.join(", "), quote(&table)))
+                .map_err(|e| format!("residue: scan {table}: {e}"))?;
+            let mut rows = stmt.query([]).map_err(|e| format!("residue: scan {table}: {e}"))?;
+            while let Some(row) = rows.next().map_err(|e| format!("residue: scan {table}: {e}"))? {
+                for (i, col) in cols.iter().enumerate() {
+                    let cell = row.get_ref(i + 1).map_err(|e| format!("residue: read {table}.{col}: {e}"))?;
+                    if !opens_under(cell, &cipher, &mut scratch) {
+                        continue;
+                    }
+                    if without_rowid {
+                        return Err(format!("residue: {table}.{col} holds ciphertext but the table has no rowid to address it"));
+                    }
+                    found.push((row.get(0).map_err(|e| format!("residue: rowid of {table}: {e}"))?, i));
+                }
+            }
+        }
+        for &(id, i) in &found {
+            let col = &quoted[i];
+            let moved = tx
+                .query_row(&format!("SELECT {col} FROM {} WHERE rowid = ?1", quote(&table)), [id], |r| {
+                    Ok(move_cell(r.get_ref(0)?, from, to))
+                })
+                .map_err(|e| format!("residue: reread {table}.{}: {e}", cols[i]))?
+                .map_err(|e| format!("residue: {table}.{}: {e}", cols[i]))?;
+            let Some(moved) = moved else { continue };
+            tx.execute(&format!("UPDATE {} SET {col} = ?1 WHERE rowid = ?2", quote(&table)), rusqlite::params![moved, id])
+                .map_err(|e| format!("residue: update {table}.{}: {e}", cols[i]))?;
+        }
+        let mut by_col = std::collections::BTreeMap::<&str, usize>::new();
+        for &(_, i) in &found {
+            *by_col.entry(cols[i].as_str()).or_default() += 1;
+        }
+        for (col, n) in by_col {
+            crate::log_warn!("[Encryption] {n} value(s) in {table}.{col} were outside the sweep lists; moved with the key");
+        }
+        total += found.len();
+    }
+    Ok(total)
+}
+
+/// Seal every message, file caption and edit whose text is still plaintext under `key`: rows that
+/// landed before encryption counted as on, and text a hex-looking heuristic once skipped. Sealed
+/// rows open under `key` and are left as they are. Returns how many were sealed.
+fn seal_plain_messages_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<usize, String> {
+    let cipher = crate::crypto::chachapoly::ChaCha20Poly1305::new(key);
+    let mut scratch = Vec::new();
+    let sealed: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT rowid, content FROM events WHERE kind IN (?1, ?2, ?3, ?4) AND content <> ''")
+            .map_err(|e| format!("plain messages: {e}"))?;
+        let mut rows = stmt
+            .query(rusqlite::params![
+                event_kind::CHAT_MESSAGE as i32,
+                event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+                event_kind::MESSAGE_EDIT as i32,
+                event_kind::FILE_ATTACHMENT as i32,
+            ])
+            .map_err(|e| format!("plain messages: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| format!("plain messages: {e}"))? {
+            let cell = row.get_ref(1).map_err(|e| format!("plain messages: {e}"))?;
+            if opens_under(cell, &cipher, &mut scratch) {
+                continue;
+            }
+            let rusqlite::types::ValueRef::Text(text) = cell else { continue };
+            let Ok(text) = std::str::from_utf8(text) else { continue };
+            out.push((row.get(0).map_err(|e| format!("plain messages: {e}"))?, encrypt_with_key(text, key)));
+        }
+        out
+    };
+    for (rowid, content) in &sealed {
+        tx.execute("UPDATE events SET content = ?1 WHERE rowid = ?2", rusqlite::params![content, rowid])
+            .map_err(|e| format!("seal message: {e}"))?;
+    }
+    Ok(sealed.len())
+}
+
+/// Whether a cell is ciphertext under the cipher's key, in either at-rest encoding. `scratch`
+/// holds each candidate's bytes and is wiped after every check.
+fn opens_under(
+    cell: rusqlite::types::ValueRef<'_>,
+    cipher: &crate::crypto::chachapoly::ChaCha20Poly1305,
+    scratch: &mut Vec<u8>,
+) -> bool {
+    use rusqlite::types::ValueRef;
+    scratch.clear();
+    match cell {
+        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(s) if crate::crypto::looks_encrypted(s) => match crate::simd::hex::hex_string_to_bytes_checked(s) {
+                Some(framed) => *scratch = framed,
+                None => return false,
+            },
+            _ => return false,
+        },
+        ValueRef::Blob(bytes) => scratch.extend_from_slice(bytes),
+        _ => return false,
+    }
+    let opened = cipher.open_framed_in_place(scratch).is_ok();
+    crate::crypto::wipe(scratch);
+    opened
+}
+
+/// A cell under `from`, re-sealed under `to` or opened to plaintext in its own storage class.
+/// None when the cell is not ciphertext under `from`.
+fn move_cell(
+    cell: rusqlite::types::ValueRef<'_>,
+    from: &[u8; 32],
+    to: Option<&[u8; 32]>,
+) -> Result<Option<rusqlite::types::Value>, String> {
+    use rusqlite::types::{Value, ValueRef};
+    match cell {
+        ValueRef::Text(bytes) => {
+            let Ok(s) = std::str::from_utf8(bytes) else { return Ok(None) };
+            if !crate::crypto::looks_encrypted(s) {
+                return Ok(None);
+            }
+            let Some(framed) = crate::simd::hex::hex_string_to_bytes_checked(s) else { return Ok(None) };
+            let Ok(mut plain) = crate::crypto::decrypt_blob_with_key(&framed, from) else { return Ok(None) };
+            let moved = match to {
+                Some(k) => crate::crypto::encrypt_blob_with_key(&plain, k)
+                    .map(|sealed| Value::Text(crate::simd::hex::bytes_to_hex_string(&sealed))),
+                None => String::from_utf8(plain.clone())
+                    .map(Value::Text)
+                    .map_err(|_| "opens to bytes that are not text".to_string()),
+            };
+            plain.zeroize();
+            moved.map(Some)
+        }
+        ValueRef::Blob(bytes) => {
+            let Ok(mut plain) = crate::crypto::decrypt_blob_with_key(bytes, from) else { return Ok(None) };
+            let moved = match to {
+                Some(k) => crate::crypto::encrypt_blob_with_key(&plain, k).map(Value::Blob),
+                None => Ok(Value::Blob(plain.clone())),
+            };
+            plain.zeroize();
+            moved.map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Encrypt all Concord secrets + metadata (enable flow).
+fn encrypt_columns_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
+    sweep_columns_in_tx(tx, Some(key), None)
+}
+/// Decrypt all Concord secrets + metadata (disable flow).
+fn decrypt_columns_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32]) -> Result<(), String> {
+    sweep_columns_in_tx(tx, None, Some(key))
+}
+/// Re-wrap all Concord secrets + metadata old key → new key (PIN-rekey flow).
+pub(crate) fn rekey_columns_in_tx(tx: &rusqlite::Transaction, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<(), String> {
+    sweep_columns_in_tx(tx, Some(new_key), Some(old_key))
+}
+
+/// Bumped whenever `SWEEP` gains a column or the backfill gains a step: an account that turned
+/// encryption on before then may still hold that data in plaintext, and the backfill runs once
+/// more to wrap it.
+/// The flag row keeps its first name, `community_at_rest_encrypted`.
+const BACKFILL_VERSION: &str = "5";
+
+/// One-time backfill for an account whose Local Encryption predates some of what it now covers:
+/// any swept column, message text, seed or bunker URL still in plaintext is sealed once, gated by a
+/// per-account settings flag. Idempotent (the field discriminators skip already-wrapped rows), so a crash mid-pass
+/// re-runs next login. No-op when encryption is off, the key vault is empty, or the flag is current.
 /// Best-effort at the call site — a failure leaves the flag unset and retries, never blocks login.
-pub fn backfill_community_at_rest() -> Result<(), String> {
+pub fn backfill_at_rest() -> Result<(), String> {
     if !crate::state::is_encryption_enabled_fast() {
         return Ok(());
     }
@@ -888,22 +1211,29 @@ pub fn backfill_community_at_rest() -> Result<(), String> {
         .ok()
         .flatten()
         .as_deref()
-        == Some("1")
+        == Some(BACKFILL_VERSION)
     {
         return Ok(());
     }
+    let _change = crate::crypto::gate::key_change()?;
     let mut key = match crate::state::ENCRYPTION_KEY.get() {
         Some(k) => k,
         None => return Ok(()), // locked / not yet derived — retry on a later login
     };
     let conn = crate::db::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("backfill tx: {e}"))?;
-    let res = encrypt_community_in_tx(&tx, &key);
+    // Setup used to seal the seed through the vault before encryption counted as on, which
+    // stored it in plaintext; any plaintext seed or bunker URL is wrapped here too.
+    let res = prove_key_in_tx(&tx, &key, true)
+        .and_then(|_| encrypt_setting_in_tx(&tx, "seed", &key, |v| v.contains(' ')))
+        .and_then(|_| encrypt_setting_in_tx(&tx, "bunker_url", &key, |v| v.starts_with("bunker://")))
+        .and_then(|_| encrypt_columns_in_tx(&tx, &key))
+        .and_then(|_| seal_plain_messages_in_tx(&tx, &key).map(|_| ()));
     key.zeroize();
     res?;
     tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('community_at_rest_encrypted', '1')",
-        [],
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('community_at_rest_encrypted', ?1)",
+        [BACKFILL_VERSION],
     )
     .map_err(|e| format!("backfill flag: {e}"))?;
     tx.commit().map_err(|e| format!("backfill commit: {e}"))?;
@@ -1078,12 +1408,108 @@ pub fn key_matches_account(key: &[u8; 32]) -> bool {
 pub fn rekey(
     old_key: &[u8; 32],
     new_key: &[u8; 32],
+    new_kdf: &crate::crypto::Kdf,
     security_type: &str,
     biometric_wrap: Option<&str>,
     progress: &dyn Fn(MigrationProgress),
 ) -> Result<(), String> {
-    let mut conn = crate::db::get_write_connection_guard_static()?;
+    let wrap = match biometric_wrap {
+        Some(w) => Wrap::Set(w),
+        None => Wrap::Drop,
+    };
+    rekey_with(old_key, new_key, new_kdf, Some(security_type), wrap, Upgrade::No, progress).map(|_| ())
+}
 
+/// Move a legacy-salted account onto its own salt: the same transaction as [`rekey`], from the
+/// key the unlock just proved, keeping the account's mode. The key must prove against something
+/// the account holds, since a wrong one would be locked in under the new salt. The space the old
+/// ciphertext freed is zeroed as it goes, the WAL is emptied after, and the next maintenance pass
+/// vacuums the rest. `Ok(false)` when another unlock got there first.
+pub fn upgrade_legacy_derivation(
+    legacy_key: &[u8; 32],
+    new_key: &[u8; 32],
+    new_kdf: &crate::crypto::Kdf,
+    progress: &dyn Fn(MigrationProgress),
+) -> Result<bool, String> {
+    if new_kdf.is_legacy() {
+        return Err("an upgrade needs a salted derivation".to_string());
+    }
+    // Upgrades run only for typed credentials, so any wrap left here holds a key from an older
+    // layout and goes with the legacy key.
+    rekey_with(legacy_key, new_key, new_kdf, None, Wrap::Drop, Upgrade::Legacy, progress)
+}
+
+/// What a re-key does with the biometric wrap: it always moves with the key it protects.
+enum Wrap<'a> {
+    /// The new key's wrap (switching TO biometric).
+    Set(&'a str),
+    /// No wrap (a credential change, switching AWAY from biometric, or an upgrade).
+    Drop,
+}
+
+/// Whether a re-key is the one-time move off the legacy salt, which proves its key positively,
+/// re-checks under the key change that nothing moved the account first, and wipes as it goes.
+#[derive(Clone, Copy, PartialEq)]
+enum Upgrade {
+    No,
+    Legacy,
+}
+
+fn rekey_with(
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+    new_kdf: &crate::crypto::Kdf,
+    security_type: Option<&str>,
+    wrap: Wrap<'_>,
+    upgrade: Upgrade,
+    progress: &dyn Fn(MigrationProgress),
+) -> Result<bool, String> {
+    if !same_key(old_key, new_key) && new_kdf.is_legacy() {
+        return Err("A new key needs its own salt".to_string());
+    }
+    // Held from before the transaction until the vault and the flag show the result, so no
+    // write sealed under the outgoing key can land after it.
+    let _change = crate::crypto::gate::key_change()?;
+    if !crate::db::writes_to_live_account() {
+        return Err("The account changed before its key could".to_string());
+    }
+    if upgrade == Upgrade::Legacy {
+        // A second unlock may have moved the account while this one derived.
+        let vault_holds_legacy = crate::state::ENCRYPTION_KEY.get().map(zeroize::Zeroizing::new).is_some_and(|k| same_key(&k, old_key));
+        if !crate::crypto::Kdf::of_account()?.is_legacy() || !vault_holds_legacy {
+            return Ok(false);
+        }
+    }
+    let mut conn = crate::db::get_write_connection_guard_static()?;
+    let wipe = upgrade == Upgrade::Legacy;
+    let secure_delete_before: i64 = if wipe {
+        let before = conn.query_row("PRAGMA secure_delete", [], |r| r.get(0)).map_err(|e| format!("secure_delete: {e}"))?;
+        conn.execute_batch("PRAGMA secure_delete = ON;").map_err(|e| format!("secure_delete: {e}"))?;
+        before
+    } else {
+        0
+    };
+    let result = rekey_tx(&mut conn, old_key, new_key, new_kdf, security_type, wrap, upgrade, progress);
+    if wipe {
+        // Best-effort: the commit is what matters, and the next VACUUM catches what this misses.
+        let _ = conn.execute_batch(&format!("PRAGMA secure_delete = {secure_delete_before};"));
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+    result.map(|_| true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rekey_tx(
+    conn: &mut rusqlite::Connection,
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+    new_kdf: &crate::crypto::Kdf,
+    security_type: Option<&str>,
+    wrap: Wrap<'_>,
+    upgrade: Upgrade,
+    progress: &dyn Fn(MigrationProgress),
+) -> Result<(), String> {
+    let (require_anchor, wipe) = (upgrade == Upgrade::Legacy, upgrade == Upgrade::Legacy);
     // Begin transaction — auto-rolls back on drop if not committed
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
@@ -1094,11 +1520,151 @@ pub fn rekey(
         [],
     ).map_err(|e| format!("Failed to set migration_state: {}", e))?;
 
+    prove_key_in_tx(&tx, old_key, require_anchor)?;
+    // The same key on both sides changes only the mode rows: re-sealing a store to itself
+    // gains nothing and would hold the transaction for a full sweep.
+    if !same_key(old_key, new_key) {
+        rekey_listed_in_tx(&tx, old_key, new_key, progress)?;
+        sweep_residue_in_tx(&tx, old_key, Some(new_key))?;
+        verify_encrypted_state_in_tx(&tx, new_key)?;
+    }
+
+    // 5. Update metadata within the same transaction: the derivation lands with the data
+    // sealed under it, so a crash can never leave one without the other.
+    super::settings::write_kdf_in_tx(&tx, new_kdf.descriptor().as_deref())?;
+    if let Some(security_type) = security_type {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
+            rusqlite::params![security_type],
+        ).map_err(|e| format!("Failed to update security_type: {}", e))?;
+    }
+
+    // The wrap always moves with the key it protects, inside this transaction, so a crash can
+    // never leave a wrap that holds a key the store no longer uses.
+    match wrap {
+        Wrap::Set(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        Wrap::Drop => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
+    if wipe {
+        // The free pages still hold the old ciphertext; the post-sync maintenance pass
+        // vacuums once this mark is gone.
+        tx.execute("DELETE FROM settings WHERE key = 'last_vacuum'", [])
+            .map_err(|e| format!("Failed to schedule vacuum: {}", e))?;
+    }
+
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_state', '')",
+        [],
+    ).map_err(|e| format!("Failed to clear migration_state: {}", e))?;
+
+    // Other connections see the old rows until COMMIT and the new ones after, and a read can
+    // straddle it. The vault takes the new key first and the old one stays openable a moment,
+    // so every read opens whichever it got.
+    let moving = !same_key(old_key, new_key);
+    if moving {
+        crate::crypto::hold_previous_key(old_key);
+        crate::state::ENCRYPTION_KEY.set(*new_key, &[]);
+    }
+
+    // 6. COMMIT — the atomic point. Everything succeeds or nothing does.
+    if let Err(e) = tx.commit() {
+        // A commit that reports failure may still have reached disk; the recorded derivation
+        // says which key the store is under.
+        let landed = crate::crypto::Kdf::of_account().is_ok_and(|k| k == *new_kdf) && !new_kdf.is_legacy();
+        if moving && !landed {
+            crate::state::ENCRYPTION_KEY.set(*old_key, &[]);
+            crate::crypto::forget_previous_key();
+        } else if moving {
+            crate::crypto::forget_previous_key_later();
+        }
+        return Err(format!("Failed to commit re-key transaction: {}", e));
+    }
+    if moving {
+        crate::crypto::forget_previous_key_later();
+    }
+    Ok(())
+}
+
+/// After a verified unlock with `password`, whose legacy-salt key `legacy_key` just proved
+/// itself, move the account onto its own salt. `Ok(false)` when there is nothing to move: an
+/// account already salted, a plaintext store, a biometric one (its key never came from a typed
+/// credential), one with nothing to prove the key against, or one whose last attempt failed less
+/// than a day ago. Any failure leaves the account exactly as it was.
+pub async fn upgrade_after_unlock(password: &str, legacy_key: &[u8; 32]) -> Result<bool, String> {
+    const RETRY_AFTER_SECS: u64 = 24 * 60 * 60;
+    if !crate::crypto::Kdf::of_account()?.is_legacy() || !crate::state::is_encryption_enabled_fast() {
+        return Ok(false);
+    }
+    if crate::db::get_sql_setting("security_type".to_string())?.as_deref() == Some("biometric") {
+        return Ok(false);
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let last_try: u64 = crate::db::get_sql_setting("kdf_upgrade_attempt".to_string())?.and_then(|v| v.parse().ok()).unwrap_or(0);
+    if now.saturating_sub(last_try) < RETRY_AFTER_SECS {
+        return Ok(false);
+    }
+    // Checked before the slow derivation: a store with nothing to prove against never upgrades.
+    if !key_proves_positively(legacy_key)? {
+        return Ok(false);
+    }
+
+    // The unlock screen says why this first unlock takes longer.
+    crate::emit_event("encryption_upgrading", &MigrationProgress { total: 0, completed: 0, phase: "deriving".to_string() });
+    let new_kdf = crate::crypto::Kdf::fresh();
+    let new_key = zeroize::Zeroizing::new(crate::crypto::derive_key(password, &new_kdf).await);
+    let progress = |p: MigrationProgress| crate::emit_event("encryption_upgrading", &p);
+    match upgrade_legacy_derivation(legacy_key, &new_key, &new_kdf, &progress) {
+        Ok(moved) => {
+            if moved {
+                crate::log_info!("[Encryption] Moved this account onto its own key derivation salt");
+            }
+            Ok(moved)
+        }
+        Err(e) => {
+            let _ = crate::db::set_sql_setting("kdf_upgrade_attempt".to_string(), now.to_string());
+            Err(e)
+        }
+    }
+}
+
+/// Whether `key` opens a positive anchor in this store (the pkey, the canary, or sampled
+/// ciphertext), read-only.
+fn key_proves_positively(key: &[u8; 32]) -> Result<bool, String> {
+    let mut conn = crate::db::get_db_connection_guard_static()?;
+    let tx = conn.transaction().map_err(|e| format!("key proof: {e}"))?;
+    Ok(prove_key_in_tx(&tx, key, true).is_ok())
+}
+
+/// Rebuild the database file so nothing an upgrade replaced survives in its free pages. For hosts
+/// with no maintenance pass of their own; slow on a large store.
+pub fn vacuum_now() -> Result<(), String> {
+    let conn = crate::db::get_write_connection_guard_static()?;
+    conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);").map_err(|e| format!("vacuum: {e}"))
+}
+
+/// Everything [`rekey`] moves by list: message content, the sealed settings, PIVX keys and
+/// every `SWEEP` column, from `old_key` to `new_key` inside the caller's transaction.
+pub(crate) fn rekey_listed_in_tx(
+    tx: &rusqlite::Transaction,
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+    progress: &dyn Fn(MigrationProgress),
+) -> Result<(), String> {
     // 1. Collect all encrypted event IDs (memory-efficient: just ID strings)
     let all_ids: Vec<String> = {
         let mut stmt = tx.prepare(
             r#"SELECT id FROM events
-               WHERE kind IN (?1, ?2, ?3)
+               WHERE kind IN (?1, ?2, ?3, ?4)
                AND length(content) >= 56
                AND content NOT GLOB '*[^0-9a-f]*'"#,
         ).map_err(|e| format!("Failed to prepare ID query: {}", e))?;
@@ -1108,6 +1674,7 @@ pub fn rekey(
                 event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::MESSAGE_EDIT as i32,
+                event_kind::FILE_ATTACHMENT as i32,
             ],
             |row| row.get::<_, String>(0),
         ).map_err(|e| format!("Failed to query IDs: {}", e))?;
@@ -1167,54 +1734,83 @@ pub fn rekey(
         phase: "finalizing".to_string(),
     });
 
-    rekey_setting_in_tx(&tx, "pkey", old_key, new_key)?;
-    rekey_setting_in_tx(&tx, "seed", old_key, new_key)?;
+    rekey_setting_in_tx(tx, "pkey", old_key, new_key)?;
+    rekey_setting_in_tx(tx, "seed", old_key, new_key)?;
     // A keyless (NIP-55) account has no pkey, so the canary is its ONLY
     // wrong-credential detector; a bunker account cannot log in without its
     // url. Both are key-derived, so both move with the key or the account is
     // locked out at the NEXT boot rather than at the failing operation.
-    rekey_setting_in_tx(&tx, "nip55_pin_check", old_key, new_key)?;
-    rekey_setting_in_tx(&tx, "bunker_url", old_key, new_key)?;
-    rekey_pivx_in_tx(&tx, old_key, new_key)?;
-    rekey_community_in_tx(&tx, old_key, new_key)?;
-
-    // 4. Verify re-keyed state within the transaction (before committing)
-    verify_encrypted_state_in_tx(&tx, new_key)?;
-
-    // 5. Update metadata within the same transaction
-    tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
-        rusqlite::params![security_type],
-    ).map_err(|e| format!("Failed to update security_type: {}", e))?;
-
-    // The wrap always moves with the key it protects, inside this transaction:
-    // Some = the new key's wrap (switching TO biometric), None = drop any wrap
-    // (credential change, or switching AWAY from biometric). A crash can never
-    // leave a wrap that holds a key the store no longer uses.
-    match biometric_wrap {
-        Some(w) => {
-            tx.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
-                rusqlite::params![w],
-            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
-        }
-        None => {
-            tx.execute(
-                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
-                [],
-            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
-        }
-    }
-
-    tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_state', '')",
-        [],
-    ).map_err(|e| format!("Failed to clear migration_state: {}", e))?;
-
-    // 6. COMMIT — the atomic point. Everything succeeds or nothing does.
-    tx.commit().map_err(|e| format!("Failed to commit re-key transaction: {}", e))?;
+    rekey_setting_in_tx(tx, "nip55_pin_check", old_key, new_key)?;
+    rekey_setting_in_tx(tx, "bunker_url", old_key, new_key)?;
+    rekey_pivx_in_tx(tx, old_key, new_key)?;
+    rekey_columns_in_tx(tx, old_key, new_key)?;
 
     Ok(())
+}
+
+fn same_key(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Prove `key` opens this store before a sweep writes under it. The pkey or the canary decides
+/// when present; otherwise the newest message ciphertexts and community key blobs must include
+/// one that opens. `require_anchor` also refuses a store with nothing to prove against: an
+/// enable-direction pass wraps plaintext under whatever key it is handed.
+fn prove_key_in_tx(tx: &rusqlite::Transaction, key: &[u8; 32], require_anchor: bool) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
+    const WRONG: &str = "This key does not open the account's encrypted data; nothing was changed";
+    let setting = |name: &str| -> Result<Option<String>, String> {
+        tx.query_row("SELECT value FROM settings WHERE key = ?1", [name], |r| r.get::<_, String>(0))
+            .optional()
+            .map_err(|e| format!("read {name}: {e}"))
+    };
+    if let Some(pkey) = setting("pkey")? {
+        if !pkey.starts_with("nsec") {
+            let opened = decrypt_with_key(&pkey, key).map(zeroize::Zeroizing::new);
+            return match opened {
+                Ok(nsec) if nsec.starts_with("nsec") => Ok(()),
+                _ => Err(WRONG.to_string()),
+            };
+        }
+    }
+    if let Some(canary) = setting("nip55_pin_check")? {
+        return match decrypt_with_key(&canary, key) {
+            Ok(plain) if plain == NIP55_PIN_CANARY => Ok(()),
+            _ => Err(WRONG.to_string()),
+        };
+    }
+    let samples = [
+        "SELECT content FROM events WHERE kind IN (?1, ?2, ?3, ?4) AND length(content) >= 56
+           AND content NOT GLOB '*[^0-9a-f]*' ORDER BY created_at DESC LIMIT 256",
+        "SELECT server_root_key FROM communities WHERE length(server_root_key) > 32 LIMIT 256",
+        "SELECT channel_key FROM community_channels WHERE length(channel_key) > 32 LIMIT 256",
+        "SELECT key FROM community_epoch_keys WHERE length(key) > 32 LIMIT 256",
+    ];
+    let kinds = [
+        event_kind::CHAT_MESSAGE as i64,
+        event_kind::PRIVATE_DIRECT_MESSAGE as i64,
+        event_kind::MESSAGE_EDIT as i64,
+        event_kind::FILE_ATTACHMENT as i64,
+    ];
+    let cipher = crate::crypto::chachapoly::ChaCha20Poly1305::new(key);
+    let mut scratch = Vec::new();
+    let mut seen = false;
+    for sql in samples {
+        let mut stmt = tx.prepare(sql).map_err(|e| format!("key proof: {e}"))?;
+        let params: &[i64] = if sql.contains("?1") { &kinds } else { &[] };
+        let mut rows = stmt.query(rusqlite::params_from_iter(params)).map_err(|e| format!("key proof: {e}"))?;
+        while let Some(row) = rows.next().map_err(|e| format!("key proof: {e}"))? {
+            seen = true;
+            if opens_under(row.get_ref(0).map_err(|e| format!("key proof: {e}"))?, &cipher, &mut scratch) {
+                return Ok(());
+            }
+        }
+    }
+    match (seen, require_anchor) {
+        (true, _) => Err(WRONG.to_string()),
+        (false, true) => Err("Nothing here can confirm the key, so the store was left as it is".to_string()),
+        (false, false) => Ok(()),
+    }
 }
 
 /// Re-key a single settings value within a transaction.

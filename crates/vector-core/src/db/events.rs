@@ -2,34 +2,37 @@
 
 use crate::stored_event::{StoredEvent, event_kind};
 use rusqlite::OptionalExtension;
-use crate::crypto::maybe_encrypt;
 use crate::types::{Message, Attachment, Reaction};
 
-/// Save a StoredEvent to the events table.
-///
-/// Primary storage function for the flat event architecture.
-/// Conditionally encrypts message/edit content based on user setting.
-/// Uses INSERT OR REPLACE with COALESCE to preserve existing wrapper_event_id.
-/// Conditionally encrypt an event's content per kind (messages/edits are encrypted at rest). Async,
-/// so callers run it BEFORE opening a sync transaction.
-async fn encrypt_event_content(event: &StoredEvent) -> String {
-    if event.kind == event_kind::CHAT_MESSAGE
+/// An event's content and link preview as stored: message, file caption and edit text and every
+/// preview sealed at rest, other kinds' content as-is.
+fn seal_event_fields(event: &StoredEvent, sealer: &mut crate::crypto::AtRestSealer) -> Result<(String, Option<String>), String> {
+    let content = if event.kind == event_kind::CHAT_MESSAGE
         || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+        || event.kind == event_kind::FILE_ATTACHMENT
         || event.kind == event_kind::MESSAGE_EDIT
     {
-        maybe_encrypt(event.content.clone()).await
+        sealer.seal_set(&event.content)?
     } else {
         event.content.clone()
-    }
+    };
+    let preview = event.preview_metadata.as_deref().map(|p| sealer.seal(p)).transpose()?;
+    Ok((content, preview))
 }
 
 /// Upsert the event row onto the given connection or transaction (so it can commit atomically with
-/// its attachment rows). `content` must already be encrypted (see `encrypt_event_content`).
+/// its attachment rows), sealing its content with the caller's sealer, inside its at-rest ticket.
 ///
 /// UPSERT (not INSERT OR REPLACE) so a re-save (reaction/edit) UPDATES in place and PRESERVES the
 /// rowid. get_messages_around's (created_at, received_at, rowid) cursor needs a stable final
 /// tiebreak to page through same-timestamp bursts; INSERT OR REPLACE churns the rowid and drops rows.
-fn insert_event_row(conn: &rusqlite::Connection, event: &StoredEvent, content: &str, tags_json: &str) -> Result<(), String> {
+fn insert_event_row(
+    conn: &rusqlite::Connection,
+    event: &StoredEvent,
+    tags_json: &str,
+    sealer: &mut crate::crypto::AtRestSealer,
+) -> Result<(), String> {
+    let (content, preview) = seal_event_fields(event, sealer)?;
     // prepare_cached: this is the hottest write statement in the app — the cache lives on the
     // connection, so bulk-sync batches and every realtime save skip the SQL re-parse.
     let mut stmt = conn.prepare_cached(
@@ -49,20 +52,21 @@ fn insert_event_row(conn: &rusqlite::Connection, event: &StoredEvent, content: &
     ).map_err(|e| format!("prepare save event: {}", e))?;
     stmt.execute(
         rusqlite::params![
-            event.id, event.kind as i32, event.chat_id, event.user_id, content, tags_json,
+            event.id, event.kind as i32, event.chat_id, event.user_id, &content, tags_json,
             event.reference_id, event.created_at as i64, event.received_at as i64,
             event.mine as i32, event.pending as i32, event.failed as i32,
-            event.wrapper_event_id, event.npub, event.preview_metadata,
+            event.wrapper_event_id, event.npub, preview,
         ],
     ).map_err(|e| format!("Failed to save event: {}", e))?;
     Ok(())
 }
 
+/// Save a StoredEvent to the events table, its message content sealed at rest.
 pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
     let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
-    let content = encrypt_event_content(event).await;
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
-    insert_event_row(&conn, event, &content, &tags_json)
+    crate::crypto::seal_batch(|sealer| insert_event_row(&conn, event, &tags_json, sealer))
 }
 
 /// Extract persisted `["bot", npub]` routing tags (the write side lives in
@@ -176,14 +180,16 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
     // Commit the event row and its attachment rows (the dedicated table is the sole source of truth;
     // pre-migration events keep their legacy tag as an un-read fallback) in ONE transaction, so a
     // file message can never persist without its attachments — new events have no tag to fall back
-    // on. Encrypt first: encryption is async and can't run inside the sync transaction.
+    // on.
     let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
-    let content = encrypt_event_content(&event).await;
     {
+        let _seal = crate::crypto::gate::sealing();
         let conn = super::get_write_connection_guard_static()?;
         let tx = conn.unchecked_transaction().map_err(|e| format!("save_message tx: {e}"))?;
-        insert_event_row(&tx, &event, &content, &tags_json)?;
-        super::attachments::insert_attachment_rows(&tx, &message.id, &message.attachments)?;
+        crate::crypto::seal_batch(|sealer| {
+            insert_event_row(&tx, &event, &tags_json, sealer)?;
+            super::attachments::insert_attachment_rows(&tx, &message.id, &message.attachments, sealer)
+        })?;
         tx.commit().map_err(|e| format!("save_message commit: {e}"))?;
     }
 
@@ -201,13 +207,12 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
     Ok(())
 }
 
-/// One fully-prepared batch row: the message, its encrypted event row, its prepared
-/// reaction rows, and (DM stream only) the gift-wrap ledger entry that must commit in the
+/// One fully-prepared batch row: the message, its event row (sealed as phase 2 writes it), its
+/// prepared reaction rows, and (DM stream only) the gift-wrap ledger entry that must commit in the
 /// SAME transaction — everything phase 2 needs with zero async work and zero id_cache calls.
 struct BatchRow<'a> {
     message: &'a Message,
     event: StoredEvent,
-    content: String,
     tags_json: String,
     reactions: Vec<(StoredEvent, String)>,
     /// `(wrapper_id_bytes, wrapper_created_at)` — written to `processed_wrappers` only
@@ -221,7 +226,7 @@ pub(crate) type WrapperStamp = ([u8; 32], u64);
 /// One chat's messages in a multi-chat batch save.
 pub(crate) type ChatBatch<'a> = (String, Vec<(&'a Message, Option<WrapperStamp>)>);
 
-/// Phase 1 of a batched save (async): resolve ids, build StoredEvents, encrypt contents.
+/// Phase 1 of a batched save (async): resolve ids and build StoredEvents.
 /// ALL id_cache lookups happen here — get_or_create can write a fresh chat/user row, so it
 /// must never run while phase 2 holds the write-connection guard.
 async fn prepare_batch_rows<'a>(
@@ -238,7 +243,6 @@ async fn prepare_batch_rows<'a>(
         };
         let event = message_to_stored_event(message, chat_int_id, user_int_id);
         let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
-        let content = encrypt_event_content(&event).await;
         let mut reactions: Vec<(StoredEvent, String)> = Vec::with_capacity(message.reactions.len());
         for reaction in &message.reactions {
             let user_id = super::id_cache::get_or_create_user_id(&reaction.author_id)?;
@@ -247,7 +251,7 @@ async fn prepare_batch_rows<'a>(
             let rtags = serde_json::to_string(&rev.tags).unwrap_or_else(|_| "[]".to_string());
             reactions.push((rev, rtags));
         }
-        rows.push(BatchRow { message, event, content, tags_json, reactions, wrapper: *wrapper });
+        rows.push(BatchRow { message, event, tags_json, reactions, wrapper: *wrapper });
     }
     Ok(())
 }
@@ -258,8 +262,20 @@ async fn prepare_batch_rows<'a>(
 /// aborting the batch — one bad row must not lose the other 49. Returns how many messages
 /// were written.
 fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("batch tx: {e}"))?;
+    // One sealer for the page: the vault is read once, not once per message.
+    let saved = crate::crypto::seal_batch(|sealer| write_batch_rows_in(&tx, rows, sealer))?;
+    tx.commit().map_err(|e| format!("batch commit: {e}"))?;
+    Ok(saved)
+}
+
+fn write_batch_rows_in(
+    tx: &rusqlite::Transaction,
+    rows: &[BatchRow<'_>],
+    sealer: &mut crate::crypto::AtRestSealer,
+) -> Result<usize, String> {
     let mut saved = 0usize;
     for row in rows {
         // Per-row savepoint = save_message's per-message atomicity inside the batch: a
@@ -267,8 +283,8 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
         // attachment upserts onto a pre-existing row, which a bare DELETE would destroy
         // (a re-saved old file message must keep its download record on a transient error).
         tx.execute_batch("SAVEPOINT batch_row").map_err(|e| format!("batch savepoint: {e}"))?;
-        let row_written = insert_event_row(&tx, &row.event, &row.content, &row.tags_json)
-            .and_then(|_| super::attachments::insert_attachment_rows(&tx, &row.message.id, &row.message.attachments));
+        let row_written = insert_event_row(tx, &row.event, &row.tags_json, sealer)
+            .and_then(|_| super::attachments::insert_attachment_rows(tx, &row.message.id, &row.message.attachments, sealer));
         if let Err(e) = row_written {
             crate::log_warn!("[DB] batch skip {}: {}", &row.message.id[..8.min(row.message.id.len())], e);
             let _ = tx.execute_batch("ROLLBACK TO batch_row; RELEASE batch_row");
@@ -278,10 +294,10 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
         for (rev, rtags) in &row.reactions {
             // Exists-check ON the tx so a reaction already inserted earlier in this batch dedups
             // (a fresh reaction row must not clobber one that arrived with a wrapper id).
-            if event_exists_on(&tx, &rev.id).unwrap_or(true) {
+            if event_exists_on(tx, &rev.id).unwrap_or(true) {
                 continue;
             }
-            if let Err(e) = insert_event_row(&tx, rev, &rev.content, rtags) {
+            if let Err(e) = insert_event_row(tx, rev, rtags, sealer) {
                 crate::log_warn!("[DB] batch reaction {}: {}", &rev.id[..8.min(rev.id.len())], e);
             }
         }
@@ -298,7 +314,6 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
         }
         tx.execute_batch("RELEASE batch_row").map_err(|e| format!("batch release: {e}"))?;
     }
-    tx.commit().map_err(|e| format!("batch commit: {e}"))?;
     Ok(saved)
 }
 
@@ -306,14 +321,8 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
 /// (community backfill pages, negentropy catch-up). One commit amortizes the per-transaction
 /// WAL overhead across the whole page instead of paying it per message.
 ///
-/// Structure mirrors `save_message` exactly: contents are encrypted FIRST (encryption is
-/// async and can't run inside the sync transaction), then one transaction writes every event
-/// row + its attachment rows + its reaction rows (kind-7 content is never encrypted at rest,
-/// so reactions are tx-safe).
-///
-/// `session`: phase 1 awaits through encryption + id resolution, so a swap can land inside
-/// it — when provided, the guard is re-checked between the phases and a stale batch is
-/// dropped before it can write into the next account's DB.
+/// Structure mirrors `save_message`: one transaction, under one at-rest ticket and one sealer,
+/// writes every event row + its attachment rows + its reaction rows, sealing as it goes.
 pub async fn save_messages_batch(
     chat_id: &str,
     messages: &[&Message],
@@ -806,7 +815,7 @@ pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
     ).map_err(|e| format!("Failed to prepare: {}", e))?;
 
     let rows = stmt.query_map(
-        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32, community_of_chat(&conn, chat_id)],
+        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32, ban_param(&conn, chat_id)],
         |row| {
             let tags_json: String = row.get(5)?;
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -891,10 +900,47 @@ pub(super) fn id_list_param(ids: &[String]) -> String {
 /// predicate short-circuits.
 fn ban_filter_sql(param: usize) -> String {
     format!(
-        " AND (?{param} IS NULL OR events.npub IS NULL OR NOT EXISTS ( \
-            SELECT 1 FROM community_bans b \
-            WHERE b.community_id = ?{param} AND b.npub = events.npub))"
+        " AND (?{param} IS NULL OR events.npub IS NULL OR events.npub NOT IN ( \
+            SELECT value FROM json_each(?{param})))"
     )
+}
+
+/// The banned authors of a chat's community as a JSON array of npubs, the parameter
+/// `ban_filter_sql` reads; `None` for a DM or a community with no bans. Bans are sealed at
+/// rest, so SQL is handed the opened list, from the write-through cache.
+fn ban_param(conn: &rusqlite::Connection, chat_id: i64) -> Option<String> {
+    banned_npubs_json(&community_of_chat(conn, chat_id)?)
+}
+
+fn banned_npubs_json(community_id: &str) -> Option<String> {
+    use nostr_sdk::prelude::ToBech32;
+    let set = super::community::banned_set(community_id);
+    if set.is_empty() {
+        return None;
+    }
+    let npubs: Vec<String> = set
+        .iter()
+        .filter_map(|b| nostr_sdk::prelude::PublicKey::from_slice(b).ok()?.to_bech32().ok())
+        .collect();
+    serde_json::to_string(&npubs).ok()
+}
+
+/// Every community's bans as `"<community_id> <npub>"` strings, for the all-chats unread count.
+fn all_ban_pairs_json(conn: &rusqlite::Connection) -> String {
+    use nostr_sdk::prelude::ToBech32;
+    let communities: Vec<String> = conn
+        .prepare_cached("SELECT DISTINCT community_id FROM community_bans")
+        .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    let mut pairs = Vec::new();
+    for cid in communities {
+        for b in super::community::banned_set(&cid).iter() {
+            if let Some(npub) = nostr_sdk::prelude::PublicKey::from_slice(b).ok().and_then(|pk| pk.to_bech32().ok()) {
+                pairs.push(format!("{cid} {npub}"));
+            }
+        }
+    }
+    serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".into())
 }
 
 /// Get events for a chat with pagination, optionally filtered by kind.
@@ -907,7 +953,7 @@ pub async fn get_events(
 ) -> Result<Vec<StoredEvent>, String> {
     let events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
-        let community = community_of_chat(&conn, chat_id);
+        let community = ban_param(&conn, chat_id);
 
         if let Some(k) = kinds {
             let kind_placeholders: String = (0..k.len())
@@ -1388,7 +1434,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         };
 
         let preview_metadata = event.preview_metadata
-            .and_then(|json| serde_json::from_str(&json).ok());
+            .and_then(|json| serde_json::from_str(&crate::crypto::maybe_decrypt_text(&json)).ok());
 
         let addressed_bots = extract_bot_tags(&event.tags);
         let expiration = extract_expiration_tag(&event.tags);
@@ -1480,7 +1526,7 @@ pub async fn get_messages_around(
 
     let message_events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
-        let community = community_of_chat(&conn, chat_id);
+        let community = ban_param(&conn, chat_id);
 
         // Resolve the anchor's FULL sort key (created_at, received_at, rowid). Paging by created_at
         // alone wedges on a wall of equal timestamps (a message burst): the query keeps returning the
@@ -1707,7 +1753,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             };
 
             let preview_metadata = event.preview_metadata
-                .and_then(|json| serde_json::from_str(&json).ok());
+                .and_then(|json| serde_json::from_str(&at_rest.open_or_keep(json)).ok());
 
             result.entry(chat_identifier).or_default().push(Message {
                 expiration,
@@ -1768,6 +1814,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// channel sends the reader to look for a message the client will not render.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
+    let bans = all_ban_pairs_json(&conn);
     // Anchor: newest own message, or the chat's `last_read` event of any kind. A max per kind reads
     // the end of idx_events_unread rather than the whole chat; MATERIALIZED runs each CTE once.
     let mut stmt = conn
@@ -1792,8 +1839,8 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                             SELECT npub FROM profiles WHERE is_blocked = 1)) \
                       AND NOT EXISTS ( \
                             SELECT 1 FROM community_channels cc \
-                            JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
-                            WHERE cc.channel_id = a.chat_identifier) \
+                            WHERE cc.channel_id = a.chat_identifier \
+                              AND (cc.community_id || ' ' || e.npub) IN (SELECT value FROM json_each(?4))) \
                 ) AS unread \
                 FROM anchors a \
              ) \
@@ -1805,7 +1852,8 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
             rusqlite::params![
                 event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
-                event_kind::FILE_ATTACHMENT as i32
+                event_kind::FILE_ATTACHMENT as i32,
+                bans
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32)),
         )
@@ -1821,6 +1869,10 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
 /// reconcile one chat (open / delete / retreat) without recomputing every chat's count.
 pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String> {
     let conn = super::get_db_connection_guard_static()?;
+    let bans = super::community::community_id_for_channel(chat_identifier)
+        .ok()
+        .flatten()
+        .and_then(|cid| banned_npubs_json(&cid));
     let count: i64 = conn
         .prepare_cached(
             "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
@@ -1829,10 +1881,7 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
-               AND NOT EXISTS ( \
-                     SELECT 1 FROM community_channels cc \
-                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
-                     WHERE cc.channel_id = c.chat_identifier) \
+               AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5))) \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
@@ -1844,7 +1893,8 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                     event_kind::CHAT_MESSAGE as i32,
                     event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                     event_kind::FILE_ATTACHMENT as i32,
-                    chat_identifier
+                    chat_identifier,
+                    bans
                 ],
                 |row| row.get(0),
             )

@@ -230,6 +230,26 @@ pub struct GuardedKey {
     active: AtomicUsize,
 }
 
+/// The process's standing vaults, always kept clear of whatever a caller passes, then the
+/// caller's own, each once. A standing vault a call site forgets can't then share its lane.
+fn partners<'a>(others: &'a [&'a GuardedKey]) -> impl Iterator<Item = &'a GuardedKey> {
+    let standing: [&'static GuardedKey; 3] = [
+        &crate::state::ENCRYPTION_KEY,
+        &crate::state::MY_SECRET_KEY,
+        &crate::state::PREVIOUS_AT_REST_KEY,
+    ];
+    let mut seen: Vec<usize> = Vec::with_capacity(standing.len() + others.len());
+    standing.into_iter().chain(others.iter().copied()).filter(move |k| {
+        let addr = *k as *const GuardedKey as usize;
+        if seen.contains(&addr) {
+            false
+        } else {
+            seen.push(addr);
+            true
+        }
+    })
+}
+
 impl GuardedKey {
     pub const fn empty() -> Self {
         Self { active: AtomicUsize::new(0) }
@@ -262,7 +282,7 @@ impl GuardedKey {
     /// not separately stored, so it adds no searchable fingerprint.
     fn pick_marker(&self, others: &[&GuardedKey], rng: &mut rand::rngs::OsRng) -> usize {
         let mut taken = [false; LANE_COUNT];
-        for &key in others {
+        for key in partners(others) {
             if std::ptr::eq(key, self) || !key.has_key() { continue; }
             taken[key.lane()] = true;
         }
@@ -288,7 +308,7 @@ impl GuardedKey {
     fn collect_other_protected(&self, others: &[&GuardedKey]) -> ([VaultPos; (3 + SHARE_ENTRIES) * LANE_COUNT], usize) {
         let mut buf = [VaultPos { array: 0, slot: 0 }; (3 + SHARE_ENTRIES) * LANE_COUNT];
         let mut n = 0;
-        for &key in others {
+        for key in partners(others) {
             if std::ptr::eq(key, self) || !key.has_key() { continue; }
             if n + 3 + SHARE_ENTRIES > buf.len() { break; }
             let addr = key.instance_addr();
@@ -756,6 +776,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A standing vault keeps its lane even when a set or clear elsewhere doesn't name it.
+    #[test]
+    fn a_standing_vault_survives_sets_that_forget_it() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let standing = &crate::state::PREVIOUS_AT_REST_KEY;
+        standing.set([0xAB; 32], &[]);
+        for i in 0..64u8 {
+            let other = GuardedKey::empty();
+            other.set([i; 32], &[]);
+            assert_ne!(other.lane(), standing.lane());
+            other.clear(&[]);
+        }
+        assert_eq!(standing.get(), Some([0xAB; 32]));
+        standing.clear(&[]);
     }
 
     #[test]

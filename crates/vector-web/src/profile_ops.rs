@@ -368,7 +368,9 @@ async fn export_keys() -> Result<Value, String> {
 
 async fn verify_credential(a: &Args) -> Result<Value, String> {
     let credential = zeroize::Zeroizing::new(a.str("credential")?);
-    let key = zeroize::Zeroizing::new(vector_core::crypto::hash_pass(&credential).await);
+    let key = zeroize::Zeroizing::new(
+        vector_core::crypto::derive_key(&credential, &vector_core::crypto::Kdf::of_account()?).await,
+    );
     let stored = db::get_pkey()?.ok_or("No private key found — cannot verify credential.")?;
     match vector_core::crypto::decrypt_with_key(&stored, &key).map(zeroize::Zeroizing::new) {
         Ok(plain) if plain.starts_with("nsec") => Ok(Value::Null),

@@ -11,6 +11,26 @@ pub fn get_sql_setting(key: String) -> Result<Option<String>, String> {
     Ok(result)
 }
 
+/// A setting where a failed read is an error, not an absent row: for rows whose absence means
+/// something, like the key derivation's.
+pub fn get_sql_setting_strict(key: &str) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", rusqlite::params![key], |row| row.get(0))
+        .optional()
+        .map_err(|e| format!("read {key}: {e}"))
+}
+
+/// Rows only the key and migration code may change: a write or delete through the generic
+/// settings commands could lock an account out of its own data.
+pub const PROTECTED_SETTINGS: &[&str] = &[
+    "pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key", "kdf",
+    "encryption_enabled", "security_type", "signer_type", "migration_state", "community_at_rest_encrypted",
+];
+
+/// Rows the generic settings commands never hand out: sealed secrets and their checks.
+pub const SECRET_SETTINGS: &[&str] = &["pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key"];
+
 /// Set a SQL setting key-value pair.
 pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
@@ -104,7 +124,11 @@ pub fn commit_account_setup(
     security_type: Option<&str>,
     encrypted_seed: Option<&str>,
     biometric_wrap: Option<&str>,
+    kdf: Option<&str>,
 ) -> Result<(), String> {
+    if encryption_enabled && kdf.is_none() {
+        return Err("An encrypted account needs its key derivation recorded".to_string());
+    }
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin tx: {}", e))?;
@@ -162,8 +186,20 @@ pub fn commit_account_setup(
         }
     }
 
+    write_kdf_in_tx(&tx, kdf)?;
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
+}
+
+/// Record how the key everything in this transaction is sealed under was derived. `None` (no
+/// encryption) leaves no row; a missing row on an encrypted account means the legacy salt.
+pub(crate) fn write_kdf_in_tx(tx: &rusqlite::Transaction, kdf: Option<&str>) -> Result<(), String> {
+    match kdf {
+        Some(k) => tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('kdf', ?1)", rusqlite::params![k]),
+        None => tx.execute("DELETE FROM settings WHERE key = 'kdf'", []),
+    }
+    .map(|_| ())
+    .map_err(|e| format!("Failed to record key derivation: {e}"))
 }
 
 // ============================================================================
@@ -177,9 +213,8 @@ pub fn commit_account_setup(
 //                             pkey). Contains the connection secret.
 //   - `bunker_remote_pubkey`— signer pubkey, plaintext (routing info only).
 //
-// The `bunker_url` getter/setter is `async` because `maybe_encrypt`/
-// `maybe_decrypt` await on Argon2id key derivation when the user is logged
-// into an encrypted account. The two plaintext fields stay sync.
+// The `bunker_url` getter/setter keep their `async` signatures; both seal and
+// open against the vault without awaiting.
 
 /// Read the active signer kind from settings. Missing rows pre-date migration
 /// 27 and are treated as `"local"` so pre-NIP-46 accounts behave unchanged.
@@ -228,7 +263,8 @@ pub async fn get_bunker_url() -> Result<Option<String>, String> {
 /// Persist the `bunker://` URL, encrypting if the account uses encryption.
 /// The plaintext form is never written to disk for encrypted accounts.
 pub async fn set_bunker_url(url: &str) -> Result<(), String> {
-    let stored = crate::crypto::maybe_encrypt(url.to_string()).await;
+    let _seal = crate::crypto::gate::sealing();
+    let stored = crate::crypto::maybe_encrypt_text(url)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('bunker_url', ?1)",
@@ -279,7 +315,11 @@ pub fn commit_bunker_account_setup(
     bunker_url_stored: &str,
     bunker_remote_pubkey_hex: &str,
     biometric_wrap: Option<&str>,
+    kdf: Option<&str>,
 ) -> Result<(), String> {
+    if encryption_enabled && kdf.is_none() {
+        return Err("An encrypted account needs its key derivation recorded".to_string());
+    }
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
         .map_err(|e| format!("Failed to begin tx: {}", e))?;
@@ -336,6 +376,7 @@ pub fn commit_bunker_account_setup(
         }
     }
 
+    write_kdf_in_tx(&tx, kdf)?;
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }
@@ -412,10 +453,11 @@ pub fn commit_nip55_account_setup(
     security_type: Option<&str>,
     biometric_wrap: Option<&str>,
     pin_canary: Option<&str>,
+    kdf: Option<&str>,
 ) -> Result<(), String> {
     commit_external_signer_setup(
         crate::SignerKind::Nip55, user_pubkey_hex, signer_package,
-        encryption_enabled, security_type, biometric_wrap, pin_canary,
+        encryption_enabled, security_type, biometric_wrap, pin_canary, kdf,
     )
 }
 
@@ -430,7 +472,11 @@ pub fn commit_external_signer_setup(
     security_type: Option<&str>,
     biometric_wrap: Option<&str>,
     pin_canary: Option<&str>,
+    kdf: Option<&str>,
 ) -> Result<(), String> {
+    if encryption_enabled && kdf.is_none() {
+        return Err("An encrypted account needs its key derivation recorded".to_string());
+    }
     if kind == crate::SignerKind::Local || kind == crate::SignerKind::Bunker {
         return Err("not a keyless signer kind".into());
     }
@@ -509,6 +555,7 @@ pub fn commit_external_signer_setup(
         }
     }
 
+    write_kdf_in_tx(&tx, kdf)?;
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }

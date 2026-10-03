@@ -264,13 +264,8 @@ fn disable_encryption_work<R: Runtime>(handle: &AppHandle<R>) -> Result<(), Stri
     // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
     let result = at_rest::disable(&key, &progress_emitter(handle));
 
-    // Zeroize local key copy
+    // The vault is cleared inside the migration, before writers resume.
     key.zeroize();
-
-    // Clear the guarded vault (only after successful commit)
-    if result.is_ok() {
-        crate::ENCRYPTION_KEY.clear(&[&crate::MY_SECRET_KEY]);
-    }
 
     result
 }
@@ -278,7 +273,7 @@ fn disable_encryption_work<R: Runtime>(handle: &AppHandle<R>) -> Result<(), Stri
 /// Enable encryption - bulk encrypt all plaintext content
 ///
 /// This command:
-/// 1. Derives encryption key from credential (slow Argon2 step)
+/// 1. Derives the key from the credential under a fresh salt (slow Argon2 step)
 /// 2. Closes the processing gate
 /// 3. Bulk encrypts all message content, seed phrase, and PIVX keys
 /// 4. Sets encryption_enabled = true
@@ -296,16 +291,29 @@ pub async fn enable_encryption<R: Runtime>(
     security_type: String,
     biometric_wrap: Option<String>,
 ) -> Result<(), String> {
-    let _guard = MigrationGuard::try_enter()?;
-    // Already-enabled guard: re-running would derive a key from the given
-    // credential, fail verification against the existing ciphertext, roll
-    // back, and CLEAR the correct in-session vault key on the way out.
+    // Checked before the slow derivation too, so a doomed attempt costs nothing.
     if vector_core::state::is_encryption_enabled_fast() {
         return Err("Encryption is already enabled".to_string());
     }
-    // Derive key from credential (this is the slow Argon2 step)
-    let key = crate::crypto::hash_pass(credential).await;
-    crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
+    let kdf = crate::crypto::Kdf::fresh();
+    let key = zeroize::Zeroizing::new(crate::crypto::derive_key(credential, &kdf).await);
+    enable_encryption_with_key(handle, key, kdf, security_type, biometric_wrap).await
+}
+
+/// [`enable_encryption`] with the key already derived. A biometric enable passes the key its wrap
+/// holds: deriving again would salt a different one.
+pub(crate) async fn enable_encryption_with_key<R: Runtime>(
+    handle: AppHandle<R>,
+    key: zeroize::Zeroizing<[u8; 32]>,
+    kdf: crate::crypto::Kdf,
+    security_type: String,
+    biometric_wrap: Option<String>,
+) -> Result<(), String> {
+    let _guard = MigrationGuard::try_enter()?;
+    // Already-enabled guard: re-running would seal an encrypted store a second time.
+    if vector_core::state::is_encryption_enabled_fast() {
+        return Err("Encryption is already enabled".to_string());
+    }
 
     // Keyless account: the canary (its only wrong-PIN detector at boot) rides
     // the migration transaction below, encrypted under the new key directly.
@@ -315,47 +323,18 @@ pub async fn enable_encryption<R: Runtime>(
         None
     };
 
-    // Close the processing gate
     close_processing_gate();
-
-    // Do the actual migration work
-    let result = enable_encryption_work(&handle, &security_type, biometric_wrap.as_deref(), nip55_canary.as_deref());
+    // The migration installs the key and flips the flag only once its commit has landed.
+    let result = at_rest::enable(
+        &key, &kdf, &security_type, biometric_wrap.as_deref(), nip55_canary.as_deref(), &progress_emitter(&handle),
+    );
 
     // ALWAYS reopen gate and drain queued events, regardless of success/failure (audit C2)
     drain_pending_events(&handle).await;
 
-    match result {
-        Ok(()) => {
-            let _ = handle.emit("encryption_migration_complete", ());
-            Ok(())
-        }
-        Err(e) => {
-            // Transaction rolled back — database is still plaintext.
-            // Clear key from memory so maybe_encrypt doesn't encrypt new events
-            // while old events remain plaintext (would create mixed state).
-            crate::ENCRYPTION_KEY.clear(&[&crate::MY_SECRET_KEY]);
-            Err(e)
-        }
-    }
-}
-
-/// Inner work for enable_encryption — separated so the outer function
-/// can guarantee the processing gate is always reopened.
-fn enable_encryption_work<R: Runtime>(
-    handle: &AppHandle<R>,
-    security_type: &str,
-    biometric_wrap: Option<&str>,
-    nip55_canary: Option<&str>,
-) -> Result<(), String> {
-    // Read the encryption key from the guarded vault
-    let mut key: [u8; 32] = crate::ENCRYPTION_KEY.get()
-        .ok_or("No encryption key available".to_string())?;
-
-    // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
-    let result = at_rest::enable(&key, security_type, biometric_wrap, nip55_canary, &progress_emitter(handle));
-    key.zeroize();
-
-    result
+    result?;
+    let _ = handle.emit("encryption_migration_complete", ());
+    Ok(())
 }
 
 // ============================================================================
@@ -405,7 +384,7 @@ pub async fn verify_credential<R: Runtime>(
     handle: AppHandle<R>,
     credential: String,
 ) -> Result<(), String> {
-    let key = crate::crypto::hash_pass(credential).await;
+    let key = crate::crypto::derive_key(credential, &crate::crypto::Kdf::of_account()?).await;
 
     let conn = crate::account_manager::get_db_connection_guard(&handle)?;
     let pkey: Option<String> = conn
@@ -437,6 +416,7 @@ pub async fn verify_credential<R: Runtime>(
 pub(crate) async fn rekey_from_vault<R: Runtime>(
     handle: AppHandle<R>,
     mut new_key: [u8; 32],
+    new_kdf: crate::crypto::Kdf,
     security_type: &str,
     biometric_wrap: Option<String>,
     session: std::sync::Arc<vector_core::db::Session>,
@@ -469,15 +449,10 @@ pub(crate) async fn rekey_from_vault<R: Runtime>(
 
     close_processing_gate();
     let result = at_rest::rekey(
-        &old_key, &new_key, security_type, biometric_wrap.as_deref(), &progress_emitter(&handle),
+        &old_key, &new_key, &new_kdf, security_type, biometric_wrap.as_deref(), &progress_emitter(&handle),
     );
     old_key.zeroize();
-
-    // Vault flips to the new key BEFORE the drain so queued events encrypt
-    // under the key the database now holds.
-    if result.is_ok() {
-        crate::ENCRYPTION_KEY.set(new_key, &[&crate::MY_SECRET_KEY]);
-    }
+    // The vault moved to the new key inside the migration, before the drain below.
     new_key.zeroize();
     drain_pending_events(&handle).await;
 
@@ -487,6 +462,17 @@ pub(crate) async fn rekey_from_vault<R: Runtime>(
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Move a legacy-salted account onto its own salt right after a verified unlock. Best-effort: on
+/// any failure the account stays as it was, and the next unlock tries again.
+pub(crate) async fn upgrade_after_unlock(password: &str, key: &[u8; 32]) {
+    let Ok(_guard) = MigrationGuard::try_enter() else { return };
+    match vector_core::db::at_rest::upgrade_after_unlock(password, key).await {
+        Ok(true) => println!("[Encryption] Account moved onto its own key derivation salt"),
+        Ok(false) => {}
+        Err(e) => eprintln!("[Encryption] Salt upgrade deferred: {e}"),
     }
 }
 
@@ -507,8 +493,9 @@ pub async fn switch_to_credential<R: Runtime>(
     }
     let session = vector_core::db::current_session();
     let _switch = crate::commands::biometric::SwitchGuard::try_enter()?;
-    let new_key = crate::crypto::hash_pass(credential).await;
-    rekey_from_vault(handle, new_key, &security_type, None, session).await
+    let kdf = crate::crypto::Kdf::fresh();
+    let new_key = crate::crypto::derive_key(credential, &kdf).await;
+    rekey_from_vault(handle, new_key, kdf, &security_type, None, session).await
 }
 
 /// Re-key all encrypted data with a new credential (PIN or password).
@@ -533,7 +520,9 @@ pub async fn rekey_encryption<R: Runtime>(
     let _guard = MigrationGuard::try_enter()?;
 
     // 1. Derive old key and verify it by test-decrypting pkey
-    let old_key = crate::crypto::hash_pass(old_credential).await;
+    let old_key = zeroize::Zeroizing::new(
+        crate::crypto::derive_key(old_credential, &crate::crypto::Kdf::of_account()?).await,
+    );
     {
         let conn = crate::account_manager::get_db_connection_guard(&handle)?;
         let pkey: Option<String> = conn
@@ -551,23 +540,17 @@ pub async fn rekey_encryption<R: Runtime>(
     }
 
     // 2. Derive new key
-    let new_key = crate::crypto::hash_pass(new_credential).await;
+    let new_kdf = crate::crypto::Kdf::fresh();
+    let new_key = zeroize::Zeroizing::new(crate::crypto::derive_key(new_credential, &new_kdf).await);
 
     // 3. Close processing gate
     close_processing_gate();
 
     // 4. Perform transactional re-key (all-or-nothing via SQLite transaction)
-    let result = at_rest::rekey(&old_key, &new_key, &security_type, None, &progress_emitter(&handle));
+    let result = at_rest::rekey(&old_key, &new_key, &new_kdf, &security_type, None, &progress_emitter(&handle));
 
-    // 5. Update vault to new key BEFORE draining queued events.
-    // Events queued during the rekey must be encrypted with the NEW key so they
-    // match the rest of the database. Previously, the vault update happened AFTER
-    // drain, causing drained events to be encrypted with the old key — orphaning
-    // them permanently (the new key couldn't decrypt them, and subsequent rekeys
-    // silently skipped them).
-    if result.is_ok() {
-        crate::ENCRYPTION_KEY.set(new_key, &[&crate::MY_SECRET_KEY]);
-    }
+    // 5. The migration moved the vault to the new key before releasing writers,
+    // so the queued events below seal under the key the database now holds.
 
     // 6. ALWAYS reopen gate and drain queued events (audit C2)
     drain_pending_events(&handle).await;

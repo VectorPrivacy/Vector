@@ -624,8 +624,13 @@ impl VectorCore {
 
         if has_encryption {
             if let Some(pwd) = password {
-                let key = crate::crypto::hash_pass(pwd).await;
-                state::ENCRYPTION_KEY.set(key, &[&state::MY_SECRET_KEY]);
+                // The vault takes the key only once it proves against this account's material:
+                // a wrong password here would seal everything this session writes under it.
+                // No salt upgrade here: a tool can share a data dir with a running app, which
+                // upgrades at its own unlock.
+                let kdf = crate::crypto::Kdf::of_account().map_err(VectorError::Crypto)?;
+                let key = zeroize::Zeroizing::new(crate::crypto::derive_key(pwd, &kdf).await);
+                crate::crypto::install_unlocked_key(&key, &kdf).map_err(VectorError::Crypto)?;
             }
         }
         // Seed the atomic unconditionally — `is_encryption_enabled_fast()`

@@ -130,9 +130,10 @@ fn to_npub(pk: PublicKey) -> Result<Value, String> {
 pub async fn commit_keyless(password: Option<&str>, security_type: Option<&str>) -> Result<(), String> {
     let (pk_hex, signer_name) =
         vector_core::pending_nip55_setup().ok_or("Signer setup state missing. Please sign in again.")?;
-    let canary = match password {
-        Some(pwd) => {
-            let mut key = vector_core::crypto::hash_pass(pwd).await;
+    let kdf = password.map(|_| vector_core::crypto::Kdf::fresh());
+    let canary = match (password, &kdf) {
+        (Some(pwd), Some(kdf)) => {
+            let mut key = vector_core::crypto::derive_key(pwd, kdf).await;
             let sealed = vector_core::crypto::encrypt_with_key(db::at_rest::NIP55_PIN_CANARY, &key);
             if sealed.is_ok() {
                 vector_core::ENCRYPTION_KEY.set(key, &[&MY_SECRET_KEY]);
@@ -140,7 +141,7 @@ pub async fn commit_keyless(password: Option<&str>, security_type: Option<&str>)
             zeroize::Zeroize::zeroize(&mut key);
             Some(sealed?)
         }
-        None => None,
+        _ => None,
     };
     account::take_pending_into_current()?;
     db::commit_external_signer_setup(
@@ -151,6 +152,7 @@ pub async fn commit_keyless(password: Option<&str>, security_type: Option<&str>)
         security_type,
         None,
         canary.as_deref(),
+        kdf.as_ref().and_then(|k| k.descriptor()).as_deref(),
     )?;
     vector_core::clear_pending_nip55_setup();
     state::set_encryption_enabled(password.is_some());
@@ -158,12 +160,33 @@ pub async fn commit_keyless(password: Option<&str>, security_type: Option<&str>)
     Ok(())
 }
 
+/// Move a legacy-salted account onto its own salt right after a verified unlock, then vacuum so
+/// nothing under the legacy key survives in free pages. Only on persistent storage: a session or
+/// memory store can't rewrite itself crash-safely, and keeps nothing worth protecting.
+pub(crate) async fn upgrade_after_unlock(password: &str, key: &[u8; 32]) {
+    if crate::storage::Storage::current() != crate::storage::Storage::Persistent {
+        return;
+    }
+    match db::at_rest::upgrade_after_unlock(password, key).await {
+        Ok(true) => {
+            if let Err(e) = db::at_rest::vacuum_now() {
+                vector_core::log_warn!("[Encryption] Post-upgrade vacuum deferred: {e}");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => vector_core::log_warn!("[Encryption] Salt upgrade deferred: {e}"),
+    }
+}
+
 /// Unlock a keyless account: verify the PIN against the canary, then adopt the
 /// stored identity.
 pub async fn unlock_keyless(kind: SignerKind, password: Option<String>) -> Result<PublicKey, String> {
+    let mut unlocked = None;
     if let Some(pwd) = password {
-        let key = vector_core::crypto::hash_pass(&pwd).await;
-        vector_core::ENCRYPTION_KEY.set(key, &[&MY_SECRET_KEY]);
+        let kdf = vector_core::crypto::Kdf::of_account()?;
+        let key = zeroize::Zeroizing::new(vector_core::crypto::derive_key(&pwd, &kdf).await);
+        vector_core::crypto::install_unlocked_key(&key, &kdf)?;
+        unlocked = Some((zeroize::Zeroizing::new(pwd), key));
     }
     if vector_core::ENCRYPTION_KEY.has_key() {
         if let Ok(Some(stored)) = db::get_sql_setting("nip55_pin_check".into()) {
@@ -174,6 +197,11 @@ pub async fn unlock_keyless(kind: SignerKind, password: Option<String>) -> Resul
                 return Err("Incorrect password".into());
             }
         }
+    }
+    // A legacy-salted account moves onto its own salt before anything writes; the upgrade
+    // itself refuses a key nothing here can confirm.
+    if let Some((pwd, key)) = unlocked {
+        upgrade_after_unlock(&pwd, &key).await;
     }
     let hex = db::get_nip55_user_pubkey()?.ok_or("Signer account missing its identity")?;
     let pk = PublicKey::parse(&hex).map_err(|_| "Stored signer identity is invalid".to_string())?;

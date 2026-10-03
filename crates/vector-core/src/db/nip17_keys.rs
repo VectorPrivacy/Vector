@@ -6,9 +6,9 @@
 //! kind-1059 wrap event — actually removing the message from inbox
 //! relays rather than relying on "throw the keys away and hope".
 //!
-//! Encryption-at-rest is handled by Vector's per-account database
-//! envelope: ChaCha20 if the account has a password, plaintext if it
-//! doesn't (passwordless accounts are unencrypted by design).
+//! With Local Encryption on, the retained rumor of an unconfirmed send (the
+//! message itself) is sealed at rest. The ephemeral secrets are not: they open
+//! only the outer wrap, never the message.
 
 use nostr_sdk::prelude::*;
 use rusqlite::{params, OptionalExtension};
@@ -215,13 +215,15 @@ pub fn stash_resend_payload(
     wrap_event: &Event,
     rumor: &UnsignedEvent,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let rumor_json = crate::crypto::maybe_encrypt_text(&rumor.as_json())?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE nip17_wrap_keys SET wrap_json = ?1, rumor_json = ?2, pending_id = ?3
          WHERE wrap_event_id = ?4",
         params![
             wrap_event.as_json(),
-            rumor.as_json(),
+            rumor_json,
             pending_id,
             wrap_event_id.to_hex(),
         ],
@@ -268,7 +270,8 @@ pub fn get_resend_payload_by_pending(pending_id: &str) -> Result<Option<ResendPa
     let relay_urls: Vec<String> =
         serde_json::from_str(&relays_json).map_err(|e| format!("Bad relay urls: {}", e))?;
     let wrap_event = Event::from_json(&wrap_json).map_err(|e| format!("Bad wrap json: {}", e))?;
-    let rumor = UnsignedEvent::from_json(&rumor_json).map_err(|e| format!("Bad rumor json: {}", e))?;
+    let rumor = UnsignedEvent::from_json(crate::crypto::maybe_decrypt_text(&rumor_json))
+        .map_err(|e| format!("Bad rumor json: {}", e))?;
     Ok(Some(ResendPayload {
         wrap_event,
         rumor,

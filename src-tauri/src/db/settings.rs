@@ -2,13 +2,12 @@
 //!
 //! This module handles:
 //! - Theme preferences
-//! - Private key (pkey) storage
-//! - Seed phrase storage (encrypted)
+//! - Reading the private key (pkey) and seed phrase, for Rust only
 //! - Generic SQL settings key-value store
 
 use tauri::command;
 
-use crate::crypto::{maybe_encrypt, maybe_decrypt};
+use crate::crypto::maybe_decrypt;
 
 #[command]
 pub fn get_theme() -> Result<Option<String>, String> {
@@ -18,53 +17,7 @@ pub fn get_theme() -> Result<Option<String>, String> {
     Ok(None)
 }
 
-#[command]
-pub async fn set_pkey<R: tauri::Runtime>(handle: tauri::AppHandle<R>, pkey: String) -> Result<(), String> {
-    // Check if there's a pending account (new account creation flow)
-    if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
-        // Stop any previous account's TorService BEFORE init_profile_database
-        // hydrates the new account's Tor pref cache. Otherwise there's a
-        // window where cache reflects the new (empty/false) pref while the
-        // slot still holds the old service: transport_state() returns
-        // Disabled, but the old proxy is still up. Anything that builds an
-        // HTTP client during that window goes Direct. The welcome screen's service
-        // is the exception: it carries on into the new account's first session.
-        if !crate::commands::tor::running_prelogin() {
-            crate::commands::tor::stop_and_join_if_running().await;
-        }
-
-        // Initialize database for the pending account
-        crate::account_manager::init_profile_database(&handle, &npub).await?;
-        crate::account_manager::set_current_account(npub.clone())?;
-        crate::account_manager::clear_pending_account()?;
-
-        // Start a fresh TorService for the new account if its pref says so
-        // (or keep the welcome screen's).
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
-            eprintln!("[Account] Tor start for new account failed: {}", e);
-        }
-
-        // Now save the pkey to the newly created database
-        let conn = crate::account_manager::get_write_connection_guard_static()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-            rusqlite::params!["pkey", pkey],
-        ).map_err(|e| format!("Failed to insert pkey: {}", e))?;
-
-
-        return Ok(());
-    }
-
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params!["pkey", pkey],
-    ).map_err(|e| format!("Failed to insert pkey: {}", e))?;
-
-    Ok(())
-}
-
-#[command]
+/// The stored key, sealed when Local Encryption is on. Rust-only: it never crosses IPC.
 pub fn get_pkey() -> Result<Option<String>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
     let result: Option<String> = conn.query_row(
@@ -75,18 +28,7 @@ pub fn get_pkey() -> Result<Option<String>, String> {
     Ok(result)
 }
 
-#[command]
-pub async fn set_seed(seed: String) -> Result<(), String> {
-    let stored_seed = maybe_encrypt(seed).await;
-    let conn = crate::account_manager::get_write_connection_guard_static()?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params!["seed", stored_seed],
-    ).map_err(|e| format!("Failed to insert seed: {}", e))?;
-    Ok(())
-}
-
-#[command]
+/// The seed phrase, opened. Rust-only: it never crosses IPC.
 pub async fn get_seed() -> Result<Option<String>, String> {
     let conn = crate::account_manager::get_db_connection_guard_static()?;
     let stored_seed: Option<String> = conn.query_row(
@@ -107,6 +49,9 @@ pub async fn get_seed() -> Result<Option<String>, String> {
 /// Set a setting value in SQL database
 #[command]
 pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
+    if vector_core::db::settings::PROTECTED_SETTINGS.contains(&key.as_str()) {
+        return Err(format!("`{key}` is managed by the app and can't be set here"));
+    }
     // The media-proxy pick is remembered for a few minutes; a change to the
     // setting must take effect on the next picture, not after that.
     if key == crate::magnitude::SETTING_KEY {
@@ -126,6 +71,9 @@ pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
 /// Get a setting value from SQL database
 #[command]
 pub fn get_sql_setting(key: String) -> Result<Option<String>, String> {
+    if vector_core::db::settings::SECRET_SETTINGS.contains(&key.as_str()) {
+        return Err(format!("`{key}` is not readable here"));
+    }
     if let Ok(_npub) = crate::account_manager::get_current_account() {
         let conn = crate::account_manager::get_db_connection_guard_static()?;
         let result: Option<String> = conn.query_row(
@@ -140,6 +88,9 @@ pub fn get_sql_setting(key: String) -> Result<Option<String>, String> {
 
 #[command]
 pub fn remove_setting(key: String) -> Result<bool, String> {
+    if vector_core::db::settings::PROTECTED_SETTINGS.contains(&key.as_str()) {
+        return Err(format!("`{key}` is managed by the app and can't be removed here"));
+    }
     let conn = crate::account_manager::get_write_connection_guard_static()?;
     let rows_affected = conn.execute(
         "DELETE FROM settings WHERE key = ?1",

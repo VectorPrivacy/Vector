@@ -1,4 +1,5 @@
 pub mod chachapoly;
+pub mod gate;
 pub mod gcm;
 pub mod guarded_key;
 pub mod sha256;
@@ -13,36 +14,112 @@ use argon2::Argon2;
 use chachapoly::{ChaCha20Poly1305, NONCE_LEN, TAG_LEN};
 use zeroize::Zeroize;
 
-/// Derive a 32-byte key from a password using Argon2id.
-/// Parameters: 150MB memory, 10 iterations (matches src-tauri).
-pub async fn hash_pass(password: &str) -> [u8; 32] {
-    let password = password.to_string();
+/// How an account's at-rest key is derived from its PIN or password. Stored as the `kdf`
+/// settings row, in plaintext since it is needed before the key exists. No row is `Legacy`: the
+/// fixed salt every account used before per-account salts. A label names a whole parameter set,
+/// so a stored value can never ask for costs this build doesn't know.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Kdf {
+    Legacy,
+    /// Argon2id, 150 MB, 10 passes, one lane, with this account's random salt.
+    V2 { salt: [u8; 16] },
+}
+
+impl std::fmt::Debug for Kdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { Kdf::Legacy => "Kdf::Legacy", Kdf::V2 { .. } => "Kdf::V2" })
+    }
+}
+
+const KDF_V2_LABEL: &str = "argon2id-v2:";
+
+impl Kdf {
+    /// A new random salt, for any credential being set.
+    pub fn fresh() -> Kdf {
+        use rand::RngCore;
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        Kdf::V2 { salt }
+    }
+
+    /// The stored form, or `None` for `Legacy`, which is stored as no row.
+    pub fn descriptor(&self) -> Option<String> {
+        match self {
+            Kdf::Legacy => None,
+            Kdf::V2 { salt } => Some(format!("{KDF_V2_LABEL}{}", crate::simd::hex::bytes_to_hex_string(salt))),
+        }
+    }
+
+    pub fn parse(stored: &str) -> Result<Kdf, String> {
+        let Some(hex) = stored.strip_prefix(KDF_V2_LABEL) else {
+            return Err("This account's key derivation is from a newer Vector; update to unlock it".to_string());
+        };
+        let salt = crate::simd::hex::hex_string_to_bytes_checked(hex)
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+            .ok_or("This account's key derivation record is damaged")?;
+        Ok(Kdf::V2 { salt })
+    }
+
+    /// The derivation of the account this work belongs to. An unreadable row is an error,
+    /// never a quiet fall back to the legacy salt.
+    pub fn of_account() -> Result<Kdf, String> {
+        match crate::db::settings::get_sql_setting_strict("kdf")? {
+            None => Ok(Kdf::Legacy),
+            Some(stored) => Kdf::parse(&stored),
+        }
+    }
+
+    pub fn is_legacy(&self) -> bool {
+        matches!(self, Kdf::Legacy)
+    }
+}
+
+/// Install the key an unlock derived under `kdf`, once it proves against this account and the
+/// account still derives that way. Under a key change, so it can't interleave with an upgrade
+/// another unlock is running: a key derived before that upgrade committed is refused, never
+/// installed over the one the store moved to.
+pub fn install_unlocked_key(key: &[u8; 32], kdf: &Kdf) -> Result<(), String> {
+    let _change = gate::key_change()?;
+    if Kdf::of_account()? != *kdf {
+        return Err("This account's encryption changed while unlocking; enter your PIN again".to_string());
+    }
+    if !crate::db::at_rest::key_matches_account(key) {
+        return Err("Incorrect password".to_string());
+    }
+    crate::state::ENCRYPTION_KEY.set(*key, &[]);
+    Ok(())
+}
+
+/// Derive the 32-byte at-rest key from a PIN or password under `kdf` (Argon2id, 150 MB, 10
+/// passes). Slow on purpose, so it runs off the async workers.
+pub async fn derive_key(password: &str, kdf: &Kdf) -> [u8; 32] {
+    let password = zeroize::Zeroizing::new(password.to_string());
+    let kdf = kdf.clone();
     crate::rt::spawn_blocking(move || {
-        let salt = b"vectorvectovectvecvev";
+        let salt: &[u8] = match &kdf {
+            Kdf::Legacy => b"vectorvectovectvecvev",
+            Kdf::V2 { salt } => salt,
+        };
         let mut output = [0u8; 32];
-
-        let params = argon2::Params::new(
-            150_000, // 150 MB
-            10,      // iterations
-            1,       // parallelism
-            Some(32),
-        ).unwrap();
-
+        let params = argon2::Params::new(150_000, 10, 1, Some(32)).unwrap();
         let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         argon2.hash_password_into(password.as_bytes(), salt, &mut output).unwrap();
-
         output
     }).await.unwrap()
 }
 
 /// Seal `plaintext` as `nonce(12) || ciphertext || tag(16)` under a fresh nonce.
 fn seal_framed(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, chachapoly::Error> {
+    seal_framed_with(&ChaCha20Poly1305::new(key), plaintext)
+}
+
+fn seal_framed_with(cipher: &ChaCha20Poly1305, plaintext: &[u8]) -> Result<Vec<u8>, chachapoly::Error> {
     use rand::Rng;
     let nonce: [u8; NONCE_LEN] = rand::thread_rng().gen();
     let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(plaintext);
-    let tag = ChaCha20Poly1305::new(key).seal_in_place(&nonce, &[], &mut out[NONCE_LEN..])?;
+    let tag = cipher.seal_in_place(&nonce, &[], &mut out[NONCE_LEN..])?;
     out.extend_from_slice(&tag);
     Ok(out)
 }
@@ -57,6 +134,64 @@ fn open_framed_with(cipher: &ChaCha20Poly1305, mut framed: Vec<u8>) -> Option<Ve
     framed.copy_within(NONCE_LEN..NONCE_LEN + len, 0);
     framed.truncate(len);
     Some(framed)
+}
+
+/// A value the vault key didn't open, tried under the key a PIN change just replaced: a read
+/// that straddled the change can hold rows sealed under either.
+fn open_hex_previous(hex_data: &str) -> Option<String> {
+    let mut key = crate::state::PREVIOUS_AT_REST_KEY.get()?;
+    let out = open_hex(hex_data, &key);
+    key.zeroize();
+    out
+}
+
+/// How long a replaced at-rest key stays openable: past any read that straddled the change.
+#[cfg(not(test))]
+const PREVIOUS_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const PREVIOUS_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+static PREVIOUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep `old` openable while the vault moves to its replacement. Called under a key change.
+pub(crate) fn hold_previous_key(old: &[u8; 32]) {
+    PREVIOUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    crate::state::PREVIOUS_AT_REST_KEY.set(*old, &[]);
+}
+
+/// Forget the held key once the grace has passed, unless a newer change has replaced it.
+pub(crate) fn forget_previous_key_later() {
+    let generation = PREVIOUS_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let forget = move || {
+        // Under a key change, so a newer PIN change can't hold its key between check and clear.
+        let _change = gate::key_change();
+        if PREVIOUS_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            crate::state::PREVIOUS_AT_REST_KEY.clear(&[]);
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        std::thread::sleep(PREVIOUS_GRACE);
+        forget();
+    });
+    #[cfg(target_arch = "wasm32")]
+    // spawn-detached: wipes a process-wide vault slot, no account state.
+    crate::rt::spawn(async move {
+        crate::rt::time::sleep(PREVIOUS_GRACE).await;
+        forget();
+    });
+}
+
+/// Forget the held key now: the account is changing, or encryption is going off.
+pub(crate) fn forget_previous_key() {
+    PREVIOUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    crate::state::PREVIOUS_AT_REST_KEY.clear(&[]);
+}
+
+fn open_blob_previous(stored: &[u8]) -> Option<Vec<u8>> {
+    let mut key = crate::state::PREVIOUS_AT_REST_KEY.get()?;
+    let out = decrypt_blob_with_key(stored, &key).ok();
+    key.zeroize();
+    out
 }
 
 /// Open a hex at-rest string into its plaintext, decrypting inside the decode buffer.
@@ -712,34 +847,12 @@ fn is_all_lowercase_hex(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| IS_LOWER_HEX[b as usize])
 }
 
-/// Encrypt a string using ENCRYPTION_KEY vault (ChaCha20-Poly1305).
-/// If `password` is Some, derives a key from it instead.
-pub async fn maybe_encrypt_inner(mut input: String, password: Option<String>) -> String {
-    let mut key: [u8; 32] = match password {
-        None => crate::state::ENCRYPTION_KEY.get().expect("Encryption key must be set"),
-        Some(password) => hash_pass(&password).await,
-    };
-
-    let framed = seal_framed(input.as_bytes(), &key).expect("Encryption should not fail");
-    // SAFETY: wiping leaves the String empty, which is valid UTF-8.
-    wipe_vec(unsafe { input.as_mut_vec() });
-
-    if !crate::state::ENCRYPTION_KEY.has_key() {
-        crate::state::ENCRYPTION_KEY.set(key, &[&crate::state::MY_SECRET_KEY]);
-    }
-
-    key.zeroize();
-
-    crate::simd::hex::bytes_to_hex_string(&framed)
-}
-
 /// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext using ENCRYPTION_KEY vault.
 /// If `password` is Some, derives a key from it instead.
 pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    let has_password = password.is_some();
-
     let mut key: [u8; 32] = if let Some(pass) = password {
-        hash_pass(&pass).await
+        let Ok(kdf) = Kdf::of_account() else { return Err(()) };
+        derive_key(&pass, &kdf).await
     } else {
         match crate::state::ENCRYPTION_KEY.get() {
             Some(k) => k,
@@ -747,26 +860,13 @@ pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -
         }
     };
 
-    let Some(plaintext) = open_hex(&ciphertext, &key) else {
+    let Some(plaintext) = open_hex(&ciphertext, &key).or_else(|| open_hex_previous(&ciphertext)) else {
         key.zeroize();
         return Err(());
     };
 
-    if has_password && !crate::state::ENCRYPTION_KEY.has_key() {
-        crate::state::ENCRYPTION_KEY.set(key, &[&crate::state::MY_SECRET_KEY]);
-    }
-
     key.zeroize();
     Ok(plaintext)
-}
-
-/// Conditionally encrypt content based on encryption_enabled setting.
-pub async fn maybe_encrypt(input: String) -> String {
-    if crate::state::is_encryption_enabled_fast() {
-        maybe_encrypt_inner(input, None).await
-    } else {
-        input
-    }
 }
 
 /// Conditionally decrypt content. Handles crash recovery — if decryption fails
@@ -784,10 +884,12 @@ pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
 }
 
 fn open_with_vault(hex_data: &str) -> Option<String> {
-    let mut key = crate::state::ENCRYPTION_KEY.get()?;
-    let out = open_hex(hex_data, &key);
-    key.zeroize();
-    out
+    let opened = crate::state::ENCRYPTION_KEY.get().and_then(|mut key| {
+        let out = open_hex(hex_data, &key);
+        key.zeroize();
+        out
+    });
+    opened.or_else(|| open_hex_previous(hex_data))
 }
 
 /// Opens many at-rest strings for one vault read and one key schedule, where
@@ -805,6 +907,22 @@ pub struct AtRestOpener {
 }
 
 impl AtRestOpener {
+    /// `maybe_decrypt_text` for one string, sharing the batch's cipher: the plaintext, or the
+    /// value unchanged when it is not ciphertext under the vault key.
+    pub fn open_or_keep(&mut self, input: String) -> String {
+        if !looks_encrypted(&input) {
+            return input;
+        }
+        if !self.loaded {
+            self.loaded = true;
+            if let Some(mut key) = crate::state::ENCRYPTION_KEY.get() {
+                self.cipher = Some(ChaCha20Poly1305::new(&key));
+                key.zeroize();
+            }
+        }
+        self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)).unwrap_or(input)
+    }
+
     /// `maybe_decrypt` for one string, sharing the batch's cipher.
     #[allow(clippy::result_unit_err)] // maybe_decrypt's own contract, which every caller already handles
     pub fn open(&mut self, input: String) -> Result<String, ()> {
@@ -818,10 +936,48 @@ impl AtRestOpener {
                 key.zeroize();
             }
         }
-        if let Some(plaintext) = self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)) {
+        // The batch's cipher came from the vault at its first ciphertext; a PIN change since
+        // can leave rows under the fresh key or the one it replaced.
+        if let Some(plaintext) = self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)) {
             return Ok(plaintext);
         }
         if crate::state::is_encryption_enabled_fast() { Err(()) } else { Ok(input) }
+    }
+}
+
+/// Seals many at-rest strings for one vault read, where `maybe_encrypt_text` pays it per string.
+/// Sync, so the caller's at-rest ticket covers every seal and the write that follows.
+pub fn seal_batch<R>(f: impl FnOnce(&mut AtRestSealer) -> R) -> R {
+    gate::require_held("seal_batch");
+    f(&mut AtRestSealer { cipher: None })
+}
+
+/// The per-string half of [`seal_batch`].
+pub struct AtRestSealer {
+    /// `Some(None)`: a plaintext store; `Some(Some(cipher))`: sealed; `None`: not yet resolved.
+    cipher: Option<Option<ChaCha20Poly1305>>,
+}
+
+impl AtRestSealer {
+    /// `maybe_encrypt_text` for one string, sharing the batch's cipher.
+    pub fn seal(&mut self, plaintext: &str) -> Result<String, String> {
+        if self.cipher.is_none() {
+            self.cipher = Some(gate::sealing_key()?.map(|mut key| {
+                let cipher = ChaCha20Poly1305::new(&key);
+                key.zeroize();
+                cipher
+            }));
+        }
+        let Some(Some(cipher)) = self.cipher.as_ref() else {
+            return Ok(plaintext.to_string());
+        };
+        let framed = seal_framed_with(cipher, plaintext.as_bytes()).map_err(|e| format!("Encryption failed: {e}"))?;
+        Ok(crate::simd::hex::bytes_to_hex_string(&framed))
+    }
+
+    /// [`Self::seal`], leaving an empty string empty so `<> ''` checks keep meaning "unset".
+    pub fn seal_set(&mut self, plaintext: &str) -> Result<String, String> {
+        if plaintext.is_empty() { Ok(String::new()) } else { self.seal(plaintext) }
     }
 }
 
@@ -852,12 +1008,10 @@ pub fn decrypt_blob_with_key(stored: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, S
 /// Encrypt a secret key BLOB for at-rest storage. Off → unchanged. Enabled but
 /// the vault is empty → Err (never silently persists a secret in plaintext).
 pub fn maybe_encrypt_blob(plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    if !crate::state::is_encryption_enabled_fast() {
+    gate::require_held("maybe_encrypt_blob");
+    let Some(mut key) = gate::sealing_key()? else {
         return Ok(plaintext.to_vec());
-    }
-    let mut key = crate::state::ENCRYPTION_KEY
-        .get()
-        .ok_or_else(|| "encryption enabled but key vault is empty".to_string())?;
+    };
     let out = encrypt_blob_with_key(plaintext, &key);
     key.zeroize();
     out
@@ -871,25 +1025,21 @@ pub fn maybe_decrypt_blob(stored: &[u8]) -> Vec<u8> {
     if stored.len() == 32 {
         return stored.to_vec();
     }
-    match crate::state::ENCRYPTION_KEY.get() {
-        Some(mut key) => {
-            let out = decrypt_blob_with_key(stored, &key).unwrap_or_else(|_| stored.to_vec());
-            key.zeroize();
-            out
-        }
-        None => stored.to_vec(),
-    }
+    let opened = crate::state::ENCRYPTION_KEY.get().and_then(|mut key| {
+        let out = decrypt_blob_with_key(stored, &key).ok();
+        key.zeroize();
+        out
+    });
+    opened.or_else(|| open_blob_previous(stored)).unwrap_or_else(|| stored.to_vec())
 }
 
 /// Encrypt a text field for at-rest storage. Off → unchanged. Enabled but the
 /// vault is empty → Err.
 pub fn maybe_encrypt_text(plaintext: &str) -> Result<String, String> {
-    if !crate::state::is_encryption_enabled_fast() {
+    gate::require_held("maybe_encrypt_text");
+    let Some(mut key) = gate::sealing_key()? else {
         return Ok(plaintext.to_string());
-    }
-    let mut key = crate::state::ENCRYPTION_KEY
-        .get()
-        .ok_or_else(|| "encryption enabled but key vault is empty".to_string())?;
+    };
     let out = encrypt_with_key(plaintext, &key);
     key.zeroize();
     out
@@ -901,14 +1051,7 @@ pub fn maybe_decrypt_text(stored: &str) -> String {
     if !looks_encrypted(stored) {
         return stored.to_string();
     }
-    match crate::state::ENCRYPTION_KEY.get() {
-        Some(mut key) => {
-            let out = decrypt_with_key(stored, &key).unwrap_or_else(|_| stored.to_string());
-            key.zeroize();
-            out
-        }
-        None => stored.to_string(),
-    }
+    open_with_vault(stored).unwrap_or_else(|| stored.to_string())
 }
 
 #[cfg(test)]
@@ -1431,29 +1574,40 @@ mod tests {
     }
 
     // ========================================================================
-    // hash_pass tests
+    // Key derivation
     // ========================================================================
 
+    /// Every account before per-account salts derives exactly this; if it ever changed, no
+    /// existing PIN would unlock. The value comes from the argon2 crate run on its own.
     #[tokio::test]
-    async fn hash_pass_deterministic() {
-        let key1 = hash_pass("my_password").await;
-        let key2 = hash_pass("my_password").await;
-        assert_eq!(key1, key2, "same password should always produce the same key");
+    async fn the_legacy_derivation_is_unchanged() {
+        let key = derive_key("legacy-check", &Kdf::Legacy).await;
+        assert_eq!(
+            crate::simd::hex::bytes_to_hex_string(&key),
+            "3be43f3aae893d0a07de2d1820ebdb9908ce98e07f50dab5cbfaded6fd8a5dcf"
+        );
     }
 
     #[tokio::test]
-    async fn hash_pass_different_passwords_different_keys() {
-        let key1 = hash_pass("password_one").await;
-        let key2 = hash_pass("password_two").await;
-        assert_ne!(key1, key2, "different passwords should produce different keys");
+    async fn a_salt_makes_the_same_pin_a_different_key() {
+        let (a, b) = (Kdf::fresh(), Kdf::fresh());
+        assert_ne!(a, b, "every credential gets its own salt");
+        let ka = derive_key("123456", &a).await;
+        assert_eq!(ka, derive_key("123456", &a).await, "deterministic for one salt");
+        assert_ne!(ka, derive_key("123456", &b).await);
+        assert_ne!(ka, derive_key("123456", &Kdf::Legacy).await);
     }
 
-    #[tokio::test]
-    async fn hash_pass_output_is_32_bytes() {
-        let key = hash_pass("test_password").await;
-        assert_eq!(key.len(), 32, "hash_pass should produce exactly 32 bytes");
-        // Ensure it is not all zeros (i.e. hashing actually happened)
-        assert!(key.iter().any(|&b| b != 0), "hash output should not be all zeros");
+    #[test]
+    fn the_stored_derivation_round_trips_and_refuses_what_it_does_not_know() {
+        let kdf = Kdf::fresh();
+        let stored = kdf.descriptor().unwrap();
+        assert!(stored.starts_with("argon2id-v2:"));
+        assert_eq!(Kdf::parse(&stored).unwrap(), kdf);
+        assert_eq!(Kdf::Legacy.descriptor(), None, "legacy is stored as no row");
+        for bad in ["argon2id-v3:00", "argon2id-v2:abcd", "argon2id-v2:zz", "", "legacy"] {
+            assert!(Kdf::parse(bad).is_err(), "{bad:?} must not parse");
+        }
     }
 
     #[test]

@@ -82,11 +82,19 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             if db::get_current_account().is_err() {
                 return Ok(Value::Null);
             }
-            to_value(db::get_sql_setting(a.str("key")?)?)
+            let key = a.str("key")?;
+            if db::settings::SECRET_SETTINGS.contains(&key.as_str()) {
+                return Err(format!("`{key}` is not readable here"));
+            }
+            to_value(db::get_sql_setting(key)?)
         }
         "set_sql_setting" => {
+            let key = a.str("key")?;
+            if db::settings::PROTECTED_SETTINGS.contains(&key.as_str()) {
+                return Err(format!("`{key}` is managed by the app and can't be set here"));
+            }
             if db::get_current_account().is_ok() {
-                db::set_sql_setting(a.str("key")?, a.str("value")?)?;
+                db::set_sql_setting(key, a.str("value")?)?;
             }
             Ok(Value::Null)
         }

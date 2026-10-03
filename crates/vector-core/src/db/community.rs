@@ -51,6 +51,7 @@ pub(crate) fn hex_id_to_32(hex: &str) -> Result<[u8; 32], String> {
 /// Persist a Community and all its channels (upsert). Secrets are stored as raw
 /// blobs in the account-scoped DB.
 pub fn save_community(community: &Community) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let relays_json = serde_json::to_string(&community.relays).map_err(|e| e.to_string())?;
@@ -188,6 +189,7 @@ pub fn park_channel_key(
     key: &[u8; 32],
     sender: &str,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("park channel key tx: {e}"))?;
     let enc = enc_key(key)?;
@@ -268,6 +270,7 @@ pub fn seat_channel_key(
     epoch: u64,
     key: &[u8; 32],
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("seat channel key tx: {e}"))?;
     // "Keyless" is the caller's read of a snapshot; re-establish it HERE, inside the
@@ -330,6 +333,7 @@ pub fn drop_pending_channel_keys_for(community_id: &str, channel_id: &str) -> Re
 /// key for a contested epoch over a previously-stored loser (the only legitimate same-coordinate
 /// overwrite; an epoch key is otherwise immutable).
 pub fn store_epoch_key(community_id: &str, scope_id: &str, epoch: u64, key: &[u8; 32]) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     store_epoch_key_tx(&conn, community_id, scope_id, epoch, key)
 }
@@ -368,6 +372,7 @@ pub fn advance_channel_epoch(
     new_epoch: u64,
     new_key: &[u8; 32],
 ) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance channel epoch tx: {e}"))?;
     // Archive always (PK includes epoch → never clobbers another epoch's key).
@@ -416,6 +421,7 @@ pub fn get_server_root_epoch(community_id: &str) -> Result<Option<u64>, String> 
 }
 
 pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance server root tx: {e}"))?;
     // Archive always, under the all-zero server-root scope sentinel (PK includes epoch → never clobbers
@@ -449,6 +455,7 @@ pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &
 /// swaps the head, but ONLY while we're still AT `epoch` (a later real rotation must win over a stale
 /// converge). Returns whether it switched.
 pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("converge server root tx: {e}"))?;
     store_epoch_key_tx(&tx, community_id, crate::community::SERVER_ROOT_SCOPE_HEX, epoch, new_root)?;
@@ -469,6 +476,7 @@ pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8
 /// addressed under the converged server root), replacing the one we minted in our own losing fork. Switches
 /// only while the channel is still AT `epoch`. Returns whether it switched.
 pub fn converge_channel_epoch(community_id: &str, channel_id: &str, epoch: u64, new_key: &[u8; 32]) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("converge channel tx: {e}"))?;
     store_epoch_key_tx(&tx, community_id, channel_id, epoch, new_key)?;
@@ -592,7 +600,7 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
         .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
         .and_then(|mut st| {
             st.query_map(params![id_hex], |r| r.get::<_, String>(0))
-                .map(|rows| rows.flatten().collect::<Vec<String>>())
+                .map(|rows| crate::crypto::open_batch(|at_rest| rows.flatten().map(|b| at_rest.open_or_keep(b)).collect::<Vec<String>>()))
         })
         .unwrap_or_default();
     if banned_hex.is_empty() {
@@ -717,6 +725,7 @@ pub fn store_message_key(
     ephemeral: &Keys,
     relays: &[String],
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let relays_json = serde_json::to_string(relays).map_err(|e| e.to_string())?;
     let sk_bytes = to_32(ephemeral.secret_key().as_secret_bytes())?;
@@ -866,6 +875,7 @@ pub fn save_pending_invite(
     inviter_npub: &str,
     expires_at: i64,
 ) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     /// Cap on parked invites. Each row is one gift-wrapped invite from an arbitrary sender, so an
     /// attacker fabricating unbounded community_ids could otherwise grow this table without limit
     /// (#298). Newest-wins: a stale months-old park is the safe thing to shed.
@@ -1051,6 +1061,7 @@ pub fn save_public_invite(
     expires_at: Option<i64>,
     label: Option<&str>,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     // token + url are the link's secret; encrypted, the token PK becomes per-write-unique (random
     // nonce) so this is effectively an INSERT — fine, mints generate a fresh token each time.
@@ -1171,6 +1182,7 @@ pub fn upsert_public_invite(
     created_at: i64,
     label: Option<&str>,
 ) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let already = {
         let mut stmt = conn
@@ -1561,6 +1573,7 @@ pub fn set_community_policy(
     enabled: bool,
     updated_at: u64,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
         "INSERT INTO community_policies (community_id, policy_id, bytes, hash, enabled, updated_at)
@@ -1796,6 +1809,7 @@ fn forget_console_verdict(community_id: &str) {
 }
 
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC in the edition version. Un-banning is the fail-OPEN direction — the
     // un-banned party's rotations and messages start being honored again — so an
@@ -1825,21 +1839,27 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
         .map_err(|e| format!("clear banlist: {e}"))?;
     {
         let mut ins = tx
-            .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
+            .prepare("INSERT INTO community_bans (community_id, npub) VALUES (?1, ?2)")
             .map_err(|e| format!("prepare banlist insert: {e}"))?;
-        for hex in banned_hex {
-            // Stored BECH32, because that is what `events.npub` holds and the whole
-            // point is comparing the two in SQL. The protocol speaks hex, so the
-            // conversion happens here and in `get_community_banlist`, never in the
-            // query. An unparseable entry is stored verbatim rather than dropped —
-            // it simply matches nothing, exactly as before.
-            let joinable = PublicKey::from_hex(hex)
-                .ok()
-                .and_then(|pk| pk.to_bech32().ok())
-                .unwrap_or_else(|| hex.clone());
-            ins.execute(params![community_id, joinable])
-                .map_err(|e| format!("insert ban: {e}"))?;
-        }
+        // Stored as bech32, what `events.npub` holds, and sealed at rest: SQL is handed the
+        // opened list (see `banned_npubs_json`). An unparseable entry is kept verbatim and
+        // matches nothing. Sealed values never collide, so duplicates are dropped here.
+        let joinable: std::collections::BTreeSet<String> = banned_hex
+            .iter()
+            .map(|hex| {
+                PublicKey::from_hex(hex)
+                    .ok()
+                    .and_then(|pk| pk.to_bech32().ok())
+                    .unwrap_or_else(|| hex.clone())
+            })
+            .collect();
+        crate::crypto::seal_batch(|seal| {
+            for npub in &joinable {
+                ins.execute(params![community_id, seal.seal(npub)?])
+                    .map_err(|e| format!("insert ban: {e}"))?;
+            }
+            Ok::<_, String>(())
+        })?;
     }
     tx.execute(
         "UPDATE communities SET banlist_at = ?1 WHERE community_id = ?2",
@@ -1879,6 +1899,7 @@ pub fn get_community_ban_marks(community_id: &str) -> Result<std::collections::B
 /// wholesale would forget every ban that has since aged out — precisely the history the
 /// suppression depends on.
 pub fn merge_community_ban_marks(community_id: &str, marks: &std::collections::BTreeMap<String, u64>) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     if marks.is_empty() {
         return Ok(false);
     }
@@ -1928,6 +1949,7 @@ pub fn set_community_roles(
     roles: &crate::community::roles::CommunityRoles,
     at: i64,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
     let json = enc_txt(&serde_json::to_string(roles).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
@@ -2228,6 +2250,8 @@ pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collecti
 
 /// A Community's current banlist (hex pubkeys). Empty for an unknown community or empty list.
 pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> {
+    // A ticket, because the first read may adopt the legacy blob, which seals.
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
@@ -2235,11 +2259,13 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
     let rows = stmt
         .query_map(params![community_id], |r| r.get::<_, String>(0))
         .map_err(|e| format!("get banlist: {e}"))?;
-    // Back to hex for the protocol; the table holds the bech32 the join needs.
-    let mut out: Vec<String> = rows
-        .flatten()
-        .map(|b| PublicKey::parse(&b).map(|pk| pk.to_hex()).unwrap_or(b))
-        .collect();
+    // Back to hex for the protocol; the table holds the sealed bech32.
+    let mut out: Vec<String> = crate::crypto::open_batch(|at_rest| {
+        rows.flatten()
+            .map(|b| at_rest.open_or_keep(b))
+            .map(|b| PublicKey::parse(&b).map(|pk| pk.to_hex()).unwrap_or(b))
+            .collect()
+    });
     if !out.is_empty() {
         return Ok(out);
     }
@@ -2266,17 +2292,26 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
     let tx = conn.unchecked_transaction().map_err(|e| format!("adopt tx: {e}"))?;
     {
         let mut ins = tx
-            .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
+            .prepare("INSERT INTO community_bans (community_id, npub) VALUES (?1, ?2)")
             .map_err(|e| format!("prepare adopt: {e}"))?;
-        for hex in &list {
-            let joinable = PublicKey::from_hex(hex)
-                .ok()
-                .and_then(|pk| pk.to_bech32().ok())
-                .unwrap_or_else(|| hex.clone());
-            ins.execute(params![community_id, joinable]).map_err(|e| format!("adopt ban: {e}"))?;
-        }
+        let joinable: std::collections::BTreeSet<String> = list
+            .iter()
+            .map(|hex| {
+                PublicKey::from_hex(hex)
+                    .ok()
+                    .and_then(|pk| pk.to_bech32().ok())
+                    .unwrap_or_else(|| hex.clone())
+            })
+            .collect();
+        crate::crypto::seal_batch(|seal| {
+            for npub in &joinable {
+                ins.execute(params![community_id, seal.seal(npub)?]).map_err(|e| format!("adopt ban: {e}"))?;
+            }
+            Ok::<_, String>(())
+        })?;
     }
-    tx.execute("UPDATE communities SET banlist = NULL WHERE community_id = ?1", params![community_id])
+    // The column is NOT NULL; an empty list retires it just as well and reads as "adopted".
+    tx.execute("UPDATE communities SET banlist = '[]' WHERE community_id = ?1", params![community_id])
         .map_err(|e| format!("retire legacy banlist: {e}"))?;
     tx.commit().map_err(|e| format!("commit adopt: {e}"))?;
     crate::log_info!("[Banlist] adopted {} legacy ban(s) into community_bans", list.len());
@@ -2288,6 +2323,7 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
 /// owner-signed vsk=5 edition. Empty = Private. The version floor lives in `community_edition_heads`
 /// (the registry's own entity), so this is just the content cache (mirrors `set_community_banlist`).
 pub fn set_community_invite_registry(community_id: &str, link_locators: &[String]) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let json = enc_txt(&serde_json::to_string(link_locators).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
@@ -2340,6 +2376,7 @@ pub fn invite_link_set_creators(community_id: &str) -> Result<Vec<String>, Strin
 /// Replacing wholesale (not upserting) drops a creator who has revoked every link, so the per-creator
 /// view stays in lockstep with the flat registry computed in the same fold.
 pub fn replace_invite_link_sets(community_id: &str, sets: &[InviteLinkSetRow]) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction().map_err(|e| format!("invite-link-sets tx: {e}"))?;
     tx.execute("DELETE FROM community_invite_link_sets WHERE community_id = ?1", params![community_id])
@@ -2365,6 +2402,7 @@ pub fn replace_invite_link_sets(community_id: &str, sets: &[InviteLinkSetRow]) -
 /// Upsert ONE creator's invite-link set (optimistic local update after the local user mints/revokes their
 /// own links, mirroring the flat-registry merge). An empty set removes the row.
 pub fn upsert_invite_link_set(community_id: &str, creator_hex: &str, locators: &[String]) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     // `creator` is encrypted (random nonce), so locate any existing row by decrypting + matching.
     let existing_rowid: Option<i64> = {
@@ -2475,6 +2513,7 @@ pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
 /// Persist the extracted migration payload. Overwrite-idempotent (pointer selection is
 /// total: the newest payload-carrying owner tombstone wins, so re-persisting is harmless).
 pub fn set_migration_pointer(community_id: &str, payload_json: &str) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let wrapped = enc_txt(payload_json)?;
     conn.execute(
@@ -2545,6 +2584,7 @@ pub fn set_migration_checked(community_id: &str) -> Result<(), String> {
 
 /// Upsert the wizard's ledger row (phase reached + serialized twin state).
 pub fn set_migration_ledger(v1_community_id: &str, v2_community_id: &str, phase: i64, twin_json: &str) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     let wrapped = enc_txt(twin_json)?;
     // Stamp every write: a row parked mid-ladder is the crash-resume signal, and
@@ -2797,6 +2837,7 @@ struct ChannelMetaStash {
 /// Persist a v2 community + its channels atomically. UPSERT so a metadata
 /// re-save preserves banlist/roles (managed by the fold, not here).
 pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let id_hex = crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0);
@@ -3102,6 +3143,7 @@ pub fn set_guestbook(
     events: &[crate::community::v2::guestbook::GuestbookEvent],
     cursor_secs: u64,
 ) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
     let conn = super::get_write_connection_guard_static()?;
     let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
@@ -3357,25 +3399,16 @@ mod tests {
             assert_eq!(root_len, 60, "server_root_key must be ciphertext, not a raw 32-byte key");
             assert_ne!(name, "Secret HQ", "name must not be plaintext on disk");
             assert!(crate::crypto::looks_encrypted(&name), "name column is ciphertext");
-            // The banlist is NOT here any more: it lives in `community_bans`, in
-            // plaintext, because SQL has to compare it against `events.npub` to drop a
-            // banned author's rows before LIMIT. Deliberate — every message author is
-            // already stored in the clear. The legacy column stays in the at-rest sweep
-            // so a PIN change before adoption cannot garble a row that still holds one.
+            // The banlist lives in `community_bans`, sealed; SQL filters are handed the opened
+            // list. The legacy column stays in the sweep so a PIN change before adoption cannot
+            // garble a row that still holds one.
             let _ = &banlist;
             let banned_npub: String = conn
                 .query_row("SELECT npub FROM community_bans WHERE community_id = ?1 LIMIT 1", params![cid], |r| r.get(0))
                 .unwrap();
-            // Usable as-is: an encrypted value would not parse, and SQL could not
-            // compare it against `events.npub` to drop a banned author before LIMIT.
-            assert!(
-                PublicKey::parse(&banned_npub).is_ok(),
-                "the banlist is queryable plaintext by design, got {banned_npub}"
-            );
-            assert!(
-                banned_npub.starts_with("npub1"),
-                "stored in the form `events.npub` uses, or the join matches nothing"
-            );
+            assert!(crate::crypto::looks_encrypted(&banned_npub), "who is banned is sealed on disk, got {banned_npub}");
+            let opened = crate::crypto::maybe_decrypt_text(&banned_npub);
+            assert!(opened.starts_with("npub1"), "and opens to the form `events.npub` uses");
             let key_len: i64 = conn
                 .query_row(
                     "SELECT length(key) FROM community_epoch_keys WHERE community_id = ?1 LIMIT 1",
@@ -3841,6 +3874,656 @@ mod tests {
         assert!(list_pending_invites().unwrap().is_empty(), "receipt time does not extend the deadline");
         assert!(get_pending_invite(&cid).unwrap().is_none());
     }
+
+    /// A legacy banlist blob is adopted into `community_bans` on first read, and the blob is retired
+    /// without tripping the column's NOT NULL: a failed adoption read as "nobody is banned".
+    #[test]
+    fn a_legacy_banlist_is_adopted_on_first_read() {
+        let (_tmp, _guard) = init_test_db();
+        let community = Community::create("Legacy bans", "general", vec![]);
+        save_community(&community).unwrap();
+        let cid = community.id.to_hex();
+        let banned = "ab".repeat(32);
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("DELETE FROM community_bans WHERE community_id = ?1", params![cid]).unwrap();
+            conn.execute("UPDATE communities SET banlist = ?1 WHERE community_id = ?2", params![format!("[\"{banned}\"]"), cid]).unwrap();
+        }
+        assert_eq!(get_community_banlist(&cid).unwrap(), vec![banned.clone()]);
+        assert_eq!(get_community_banlist(&cid).unwrap(), vec![banned], "and stays adopted");
+    }
+
+    /// A task of a swapped-out account can't seal into its own store: not as plaintext right after
+    /// the swap, and not under the next account's key once that one has unlocked.
+    #[test]
+    fn a_task_of_a_swapped_out_account_cannot_seal() {
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        const KA: [u8; 32] = [0x61; 32];
+        const KB: [u8; 32] = [0x62; 32];
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let account_a = crate::db::get_current_account().unwrap();
+        crate::db::set_sql_setting("encryption_enabled".to_string(), "true".to_string()).unwrap();
+        crate::state::ENCRYPTION_KEY.set(KA, &[]);
+        crate::state::set_encryption_enabled(true);
+        let community = Community::create("A", "general", vec![]);
+        save_community(&community).unwrap();
+        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let late_write = |label: &'static str| {
+            let (go, wait) = tokio::sync::oneshot::channel::<()>();
+            let (cid, ch) = (cid.clone(), ch.clone());
+            let task = {
+                let _rt = rt.enter();
+                crate::db::spawn_bound(async move {
+                    let _ = wait.await;
+                    set_community_pins(&cid, &ch, &format!("{{\"{label}\":1}}"), 1)
+                })
+            };
+            (go, task)
+        };
+        let (go_plain, plain) = late_write("plain");
+        let (go_foreign, foreign) = late_write("foreign");
+
+        // The swap: the vault and the flag drop first, then account B opens and unlocks.
+        let account_b = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+        crate::state::set_encryption_enabled(false);
+        crate::db::set_current_account(account_b.clone()).unwrap();
+        crate::db::init_database(&account_b).unwrap();
+        go_plain.send(()).unwrap();
+        assert!(rt.block_on(plain).unwrap().is_err(), "no plaintext into an encrypted store");
+        crate::state::ENCRYPTION_KEY.set(KB, &[]);
+        crate::state::set_encryption_enabled(true);
+        go_foreign.send(()).unwrap();
+        assert!(rt.block_on(foreign).unwrap().is_err(), "no seal under another account's key");
+
+        crate::db::set_current_account(account_a.clone()).unwrap();
+        crate::db::init_database(&account_a).unwrap();
+        crate::state::ENCRYPTION_KEY.set(KA, &[]);
+        assert_eq!(get_community_pins(&cid, &ch).unwrap(), None, "account A's store is untouched");
+    }
+
+    /// A legacy-salted account moves onto its own salt at its first unlock: everything reads back,
+    /// nothing anywhere still opens under the legacy key, and the derivation is recorded. A wrong
+    /// key or a biometric account changes nothing.
+    #[test]
+    fn a_legacy_account_moves_onto_its_own_salt_at_unlock() {
+        use crate::crypto::{derive_key, Kdf};
+        use crate::db::at_rest;
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let pin = "123456";
+        let legacy = rt.block_on(derive_key(pin, &Kdf::Legacy));
+        crate::state::ENCRYPTION_KEY.set(legacy, &[]);
+        crate::state::set_encryption_enabled(true);
+        crate::db::set_sql_setting("encryption_enabled".to_string(), "true".to_string()).unwrap();
+        crate::db::set_sql_setting("security_type".to_string(), "pin".to_string()).unwrap();
+        crate::db::set_sql_setting("last_vacuum".to_string(), "1".to_string()).unwrap();
+        crate::db::set_pkey(&crate::crypto::encrypt_with_key("nsec1legacyaccount", &legacy).unwrap()).unwrap();
+        let community = Community::create("Old", "general", vec![]);
+        save_community(&community).unwrap();
+        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        set_community_pins(&cid, &ch, r#"{"pins":["old"]}"#, 1).unwrap();
+        let dm_chat = make_test_npub(900_002);
+        let dm = crate::types::Message { id: "e1".repeat(32), content: "said long ago".into(), at: 1_600_000_000_000, mine: true, ..Default::default() };
+        rt.block_on(crate::db::events::save_message(&dm_chat, &dm)).unwrap();
+        let dm_int = crate::db::id_cache::get_or_create_chat_id(&dm_chat).unwrap();
+        let read = || {
+            (
+                get_community_pins(&cid, &ch).unwrap(),
+                load_community(&community.id).unwrap().map(|c| *c.server_root_key.as_bytes()),
+                rt.block_on(crate::db::events::get_message_views(dm_int, 10, 0)).unwrap().into_iter().map(|m| m.content).collect::<Vec<_>>(),
+            )
+        };
+        let before = read();
+        assert_eq!(before.2, vec!["said long ago".to_string()]);
+
+        assert!(!rt.block_on(at_rest::upgrade_after_unlock(pin, &[0x77; 32])).unwrap(), "a key that proves nothing moves nothing");
+        assert_eq!(Kdf::of_account().unwrap(), Kdf::Legacy);
+        crate::db::set_sql_setting("security_type".to_string(), "biometric".to_string()).unwrap();
+        assert!(!rt.block_on(at_rest::upgrade_after_unlock(pin, &legacy)).unwrap(), "a biometric account stays put");
+        crate::db::set_sql_setting("security_type".to_string(), "pin".to_string()).unwrap();
+        assert_eq!(read(), before);
+
+        // A failed upgrade leaves everything as it was and waits a day before the next attempt.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute_batch("CREATE TABLE unaddressable (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID;").unwrap();
+            conn.execute("INSERT INTO unaddressable VALUES ('a', ?1)", [crate::crypto::encrypt_with_key("x", &legacy).unwrap()]).unwrap();
+        }
+        assert!(rt.block_on(at_rest::upgrade_after_unlock(pin, &legacy)).is_err());
+        assert_eq!((Kdf::of_account().unwrap(), read()), (Kdf::Legacy, before.clone()), "nothing moved");
+        assert_eq!(crate::state::ENCRYPTION_KEY.get(), Some(legacy));
+        assert!(!rt.block_on(at_rest::upgrade_after_unlock(pin, &legacy)).unwrap(), "backed off");
+        crate::db::get_write_connection_guard_static().unwrap().execute_batch("DROP TABLE unaddressable;").unwrap();
+        crate::db::settings::remove_setting("kdf_upgrade_attempt").unwrap();
+
+        assert!(rt.block_on(at_rest::upgrade_after_unlock(pin, &legacy)).unwrap());
+        let kdf = Kdf::of_account().unwrap();
+        assert!(!kdf.is_legacy(), "the salt is recorded");
+        let salted = rt.block_on(derive_key(pin, &kdf));
+        assert_eq!(crate::state::ENCRYPTION_KEY.get(), Some(salted), "the session carries on under the new key");
+        assert_eq!(read(), before, "everything reads back");
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            assert_eq!(at_rest::sweep_residue_in_tx(&tx, &legacy, None).unwrap(), 0, "nothing opens under the legacy key");
+        }
+        assert_eq!(crate::db::get_sql_setting("last_vacuum".to_string()).unwrap(), None, "a vacuum is due");
+        assert!(!rt.block_on(at_rest::upgrade_after_unlock(pin, &salted)).unwrap(), "the next unlock has nothing to do");
+
+        // A second unlock that derived under the legacy salt before this upgrade committed can't
+        // put that key back, and can't run an upgrade of its own.
+        assert!(crate::crypto::install_unlocked_key(&legacy, &Kdf::Legacy).is_err());
+        assert_eq!(crate::state::ENCRYPTION_KEY.get(), Some(salted));
+        let again = Kdf::fresh();
+        let again_key = rt.block_on(derive_key(pin, &again));
+        assert!(!at_rest::upgrade_legacy_derivation(&legacy, &again_key, &again, &|_| {}).unwrap());
+        assert_eq!(Kdf::of_account().unwrap(), kdf);
+    }
+
+    const CRASH_PIN: &str = "424242";
+
+    /// Child half of `the_upgrade_survives_a_kill_at_any_moment`: open the account, unlock with
+    /// the legacy key and run the upgrade until killed. Inert unless the parent set it up.
+    #[test]
+    #[ignore = "driven by the_upgrade_survives_a_kill_at_any_moment"]
+    fn upgrade_crash_child() {
+        use std::io::Write;
+        let (Ok(root), Ok(npub)) = (std::env::var("VECTOR_CRASH_ROOT"), std::env::var("VECTOR_CRASH_NPUB")) else { return };
+        crate::db::set_app_data_dir(root.into());
+        crate::db::set_current_account(npub.clone()).unwrap();
+        crate::db::init_database(&npub).unwrap();
+        crate::state::init_encryption_enabled();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let legacy = rt.block_on(crate::crypto::derive_key(CRASH_PIN, &crate::crypto::Kdf::Legacy));
+        crate::state::ENCRYPTION_KEY.set(legacy, &[]);
+        // Derived before READY, so the parent's kills fall across the transaction alone.
+        let kdf = crate::crypto::Kdf::fresh();
+        let salted = rt.block_on(crate::crypto::derive_key(CRASH_PIN, &kdf));
+        println!("CHILD READY");
+        std::io::stdout().flush().unwrap();
+        assert!(crate::db::at_rest::upgrade_legacy_derivation(&legacy, &salted, &kdf, &|_| {}).unwrap());
+        println!("CHILD DONE");
+        std::io::stdout().flush().unwrap();
+    }
+
+    /// The upgrade killed at moments swept across a whole run, in a separate process: every
+    /// database left behind opens whole under exactly the key its recorded derivation names,
+    /// and nothing is left under the other.
+    #[test]
+    #[ignore = "spawns and kills child processes; run with --ignored"]
+    fn the_upgrade_survives_a_kill_at_any_moment() {
+        use crate::crypto::{derive_key, Kdf};
+        use std::io::BufRead;
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let legacy = rt.block_on(derive_key(CRASH_PIN, &Kdf::Legacy));
+
+        // A legacy account big enough that the transaction takes real time.
+        let template = crate::db::get_current_account().unwrap();
+        crate::state::ENCRYPTION_KEY.set(legacy, &[]);
+        crate::state::set_encryption_enabled(true);
+        crate::db::set_sql_setting("encryption_enabled".to_string(), "true".to_string()).unwrap();
+        crate::db::set_sql_setting("security_type".to_string(), "pin".to_string()).unwrap();
+        crate::db::set_pkey(&crate::crypto::encrypt_with_key("nsec1crashaccount", &legacy).unwrap()).unwrap();
+        let community = Community::create("Crash", "general", vec![]);
+        save_community(&community).unwrap();
+        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        set_community_pins(&cid, &ch, r#"{"pins":["kept"]}"#, 1).unwrap();
+        let chat = crate::db::id_cache::get_or_create_chat_id(&make_test_npub(900_003)).unwrap();
+        {
+            let mut conn = crate::db::get_write_connection_guard_static().unwrap();
+            let tx = conn.transaction().unwrap();
+            for i in 0..20_000u32 {
+                tx.execute(
+                    "INSERT INTO events (id, kind, chat_id, content, created_at, received_at) VALUES (?1, 14, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![format!("{i:064x}"), chat, crate::crypto::encrypt_with_key(&format!("message {i}"), &legacy).unwrap(), i],
+                ).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        crate::db::close_database();
+        let root = crate::db::shared_test_data_dir().to_path_buf();
+
+        let copy_of_template = || -> String {
+            let npub = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            std::fs::create_dir_all(root.join(&npub)).unwrap();
+            for entry in std::fs::read_dir(root.join(&template)).unwrap().flatten() {
+                std::fs::copy(entry.path(), root.join(&npub).join(entry.file_name())).unwrap();
+            }
+            npub
+        };
+        // One child run, killed `after` READY, or left to finish when `None`.
+        let run_child = |npub: &str, after: Option<std::time::Duration>| -> std::time::Duration {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "db::community::tests::upgrade_crash_child", "--ignored", "--nocapture", "--test-threads=1"])
+                .env("VECTOR_CRASH_ROOT", &root)
+                .env("VECTOR_CRASH_NPUB", npub)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+            while let Some(Ok(line)) = lines.next() {
+                if line.contains("CHILD READY") {
+                    break;
+                }
+            }
+            let ready = std::time::Instant::now();
+            match after {
+                Some(delay) => {
+                    std::thread::sleep(delay);
+                    let _ = child.kill();
+                }
+                None => {
+                    while let Some(Ok(line)) = lines.next() {
+                        if line.contains("CHILD DONE") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = child.wait();
+            ready.elapsed()
+        };
+        let verify = |npub: &str| -> bool {
+            crate::db::set_current_account(npub.to_string()).unwrap();
+            crate::db::init_database(npub).unwrap();
+            let kdf = Kdf::of_account().unwrap();
+            let key = rt.block_on(derive_key(CRASH_PIN, &kdf));
+            crate::state::ENCRYPTION_KEY.set(key, &[]);
+            let pkey = crate::db::get_pkey().unwrap().unwrap();
+            assert_eq!(crate::crypto::decrypt_with_key(&pkey, &key).unwrap(), "nsec1crashaccount", "{npub}: the stored key opens");
+            assert_eq!(get_community_pins(&cid, &ch).unwrap().map(|p| p.0).as_deref(), Some(r#"{"pins":["kept"]}"#));
+            let conn = crate::db::get_db_connection_guard_static().unwrap();
+            let mut stmt = conn.prepare("SELECT content FROM events WHERE chat_id = ?1").unwrap();
+            let unopened = stmt
+                .query_map([chat], |r| r.get::<_, String>(0)).unwrap()
+                .flatten()
+                .filter(|c| crate::crypto::decrypt_with_key(c, &key).is_err())
+                .count();
+            assert_eq!(unopened, 0, "{npub}: every message opens under the recorded derivation");
+            !kdf.is_legacy()
+        };
+
+        // Measure one whole run, then kill at moments spread across it and a little past.
+        let first = copy_of_template();
+        let whole = run_child(&first, None);
+        assert!(verify(&first), "an uninterrupted run upgrades");
+        let mut outcomes = (0, 0);
+        let mut trace = String::new();
+        for step in 0..24u32 {
+            let npub = copy_of_template();
+            run_child(&npub, Some(whole * step / 21));
+            let upgraded = verify(&npub);
+            trace.push(if upgraded { 'U' } else { 'L' });
+            if upgraded { outcomes.1 += 1 } else { outcomes.0 += 1 }
+        }
+        println!("kill outcomes in time order: {trace}");
+        println!("crash sweep over a {whole:?} transaction: {} left legacy, {} upgraded", outcomes.0, outcomes.1);
+        assert!(outcomes.0 >= 10, "most kills land inside the transaction and roll it back");
+        assert!(outcomes.1 > 0, "and the sweep reaches past the commit");
+    }
+
+    /// The stored derivation always describes the key the data is under: setup records it, enable
+    /// and a PIN change replace it in their own transaction, disable drops it, and a refused PIN
+    /// change leaves it alone.
+    #[test]
+    fn the_key_derivation_moves_with_every_migration() {
+        use crate::crypto::Kdf;
+        use crate::db::at_rest;
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        assert_eq!(Kdf::of_account().unwrap(), Kdf::Legacy, "no row reads as the legacy salt");
+        save_community(&Community::create("K", "general", vec![])).unwrap();
+
+        let (k1, key1) = (Kdf::fresh(), [0x51; 32]);
+        at_rest::enable(&key1, &k1, "pin", None, None, &|_| {}).unwrap();
+        assert_eq!(Kdf::of_account().unwrap(), k1);
+
+        let (k2, key2) = (Kdf::fresh(), [0x52; 32]);
+        assert!(at_rest::rekey(&[0x5F; 32], &key2, &k2, "pin", None, &|_| {}).is_err());
+        assert_eq!(Kdf::of_account().unwrap(), k1, "a refused change keeps the derivation");
+        at_rest::rekey(&key1, &key2, &k2, "pin", None, &|_| {}).unwrap();
+        assert_eq!(Kdf::of_account().unwrap(), k2);
+
+        at_rest::disable(&key2, &|_| {}).unwrap();
+        assert_eq!(Kdf::of_account().unwrap(), Kdf::Legacy, "a plaintext store keeps no derivation");
+
+        let k3 = Kdf::fresh();
+        let sealed = crate::crypto::encrypt_with_key("nsec1setup", &[0x53; 32]).unwrap();
+        crate::db::settings::commit_account_setup(&sealed, true, Some("pin"), None, None, k3.descriptor().as_deref()).unwrap();
+        assert_eq!(Kdf::of_account().unwrap(), k3, "setup records the salt with the key it sealed");
+    }
+
+    /// Reads racing a stream of PIN changes always open: a row read just before a commit and
+    /// opened just after, or read just after and opened before the vault moved, never comes
+    /// back as ciphertext.
+    #[test]
+    fn reads_racing_pin_changes_always_open() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let keys: Vec<[u8; 32]> = (0u8..31).map(|i| [0x90 + i; 32]).collect();
+        crate::state::ENCRYPTION_KEY.set(keys[0], &[]);
+        crate::state::set_encryption_enabled(true);
+        let community = Community::create("Read", "general", vec![]);
+        save_community(&community).unwrap();
+        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let pinned = r#"{"pins":["kept"]}"#;
+        set_community_pins(&cid, &ch, pinned, 1).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reads, garbled) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let reader = {
+            let (stop, reads, garbled, cid, ch) = (stop.clone(), reads.clone(), garbled.clone(), cid.clone(), ch.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let got = get_community_pins(&cid, &ch).unwrap().map(|(c, _)| c);
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    if got.as_deref() != Some(pinned) {
+                        garbled.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+        for pair in keys.windows(2) {
+            crate::db::at_rest::rekey(&pair[0], &pair[1], &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+        assert!(reads.load(Ordering::SeqCst) > 0);
+        assert_eq!(garbled.load(Ordering::SeqCst), 0, "no read across a PIN change came back unopened");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(!crate::state::PREVIOUS_AT_REST_KEY.has_key(), "the replaced key is wiped after its grace");
+    }
+
+    /// Writes racing a stream of PIN changes all land on the key the store ends on, and a
+    /// read-modify-write never loses what it merged into.
+    #[test]
+    fn writes_racing_pin_changes_land_on_the_final_key() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let keys: Vec<[u8; 32]> = (0u8..21).map(|i| [0x40 + i; 32]).collect();
+        crate::state::ENCRYPTION_KEY.set(keys[0], &[]);
+        crate::state::set_encryption_enabled(true);
+        let community = Community::create("Race", "general", vec![]);
+        save_community(&community).unwrap();
+        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let last = Arc::new(AtomicU64::new(0));
+        let writer = {
+            let (stop, last, cid, ch) = (stop.clone(), last.clone(), cid.clone(), ch.clone());
+            std::thread::spawn(move || {
+                let mut i = 0u64;
+                while !stop.load(Ordering::SeqCst) {
+                    i += 1;
+                    set_community_pins(&cid, &ch, &format!("{{\"v\":{i}}}"), i as i64).unwrap();
+                    merge_community_ban_marks(&cid, &[(format!("npub{i}"), i)].into_iter().collect()).unwrap();
+                    last.store(i, Ordering::SeqCst);
+                }
+            })
+        };
+        while last.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        for pair in keys.windows(2) {
+            crate::db::at_rest::rekey(&pair[0], &pair[1], &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+
+        let n = last.load(Ordering::SeqCst);
+        assert_eq!(get_community_pins(&cid, &ch).unwrap(), Some((format!("{{\"v\":{n}}}"), n as i64)));
+        let marks = get_community_ban_marks(&cid).unwrap();
+        assert_eq!(marks.len() as u64, n, "every merged mark survives the key changes");
+    }
+
+    /// Every encrypting writer, on the real schema, through a PIN change and a disable. The
+    /// sweep list alone must leave nothing on the old key, so a writer whose column it misses
+    /// fails here. A new writer that encrypts a column belongs in this test.
+    #[test]
+    fn every_encrypting_writer_is_covered_by_the_at_rest_sweep() {
+        use crate::db::at_rest;
+        const K: [u8; 32] = [0x31; 32];
+        const K2: [u8; 32] = [0x32; 32];
+        const WRONG: [u8; 32] = [0x39; 32];
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        crate::state::ENCRYPTION_KEY.set(K, &[]);
+        crate::state::set_encryption_enabled(true);
+
+        let v1 = Community::create("HQ", "general", vec!["wss://r".into()]);
+        save_community(&v1).unwrap();
+        let cid = v1.id.to_hex();
+        let ch = v1.channels[0].id.to_hex();
+        park_channel_key(&cid, &ch, 3, &[0x33; 32], &"ab".repeat(32)).unwrap();
+        store_message_key("m1", "o1", &nostr_sdk::prelude::Keys::generate(), &["wss://r".into()]).unwrap();
+        save_pending_invite(&"de".repeat(32), r#"{"bundle":1}"#, "npub1inviter", now_secs() + 3600).unwrap();
+        save_public_invite(&"ab".repeat(32), &cid, "https://vectorapp.io/invite#x", None, Some("Label")).unwrap();
+        set_community_policy(&cid, "p1", r#"{"format":1}"#, "hh", true, 0).unwrap();
+        merge_community_ban_marks(&cid, &[("npub1banned".to_string(), 5u64)].into_iter().collect()).unwrap();
+        set_community_roles(&cid, &crate::community::roles::CommunityRoles::default(), 1).unwrap();
+        set_community_invite_registry(&cid, &["loc1".into()]).unwrap();
+        replace_invite_link_sets(&cid, &[InviteLinkSetRow { creator_hex: "cd".repeat(32), locators: vec!["l1".into()] }]).unwrap();
+        set_migration_pointer(&cid, r#"{"pointer":1}"#).unwrap();
+        set_migration_ledger(&cid, &"ef".repeat(32), 1, r#"{"twin":1}"#).unwrap();
+
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Two".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let mut v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Two", None, vec!["wss://r".into()], 1_000);
+        v2.channels[0].voice = Some(true);
+        v2.channels[0].meta_extra.insert("vnd".into(), serde_json::Value::from(7));
+        save_community_v2(&v2).unwrap();
+        let v2cid = v2.id().to_hex();
+        let v2ch = v2.channels[0].id.to_hex();
+        set_guestbook(&v2cid, &[], 9).unwrap();
+        set_community_pins(&v2cid, &v2ch, r#"{"pins":["x"]}"#, 1).unwrap();
+
+        // A DM with a link preview and a file, and an unconfirmed send's retained rumor.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let dm_chat = make_test_npub(900_000);
+        let dm = crate::types::Message {
+            id: "a1".repeat(32),
+            content: "the message itself".into(),
+            at: 1_700_000_000_000,
+            mine: true,
+            preview_metadata: Some(crate::types::SiteMetadata {
+                domain: "example.com".into(), og_title: Some("A title".into()), og_description: None,
+                og_image: None, og_url: Some("https://example.com/a".into()), og_type: None,
+                title: None, description: None, favicon: None,
+            }),
+            attachments: vec![crate::types::Attachment {
+                id: "b2".repeat(32), key: "c3".repeat(32), nonce: "d4".repeat(16), extension: "jpg".into(),
+                name: "passport.jpg".into(), url: "https://blossom.example/x.jpg".into(), size: 42,
+                img_meta: Some(crate::types::ImageMetadata { thumbhash: "thumb".into(), width: 4, height: 3 }),
+                fallback_urls: vec!["https://mirror.example/x.jpg".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rt.block_on(crate::db::events::save_message(&dm_chat, &dm)).unwrap();
+        let dm_chat_int = crate::db::id_cache::get_or_create_chat_id(&dm_chat).unwrap();
+        let (wrap, rumor) = {
+            use crate::event_ext::FinalizeUnsignedWithId;
+            use nostr_sdk::prelude::*;
+            let ephemeral = Keys::generate();
+            let wrap = EventBuilder::new(Kind::TextNote, "wrap").finalize(&ephemeral).unwrap();
+            let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "still sending")
+                .finalize_unsigned_with_id(Keys::generate().public_key());
+            crate::db::nip17_keys::store_wrap_key(
+                &wrap.id, &rumor.id.unwrap(), &Keys::generate().public_key(),
+                crate::db::nip17_keys::WrapRole::Recipient, ephemeral.secret_key(), &[],
+            ).unwrap();
+            (wrap, rumor)
+        };
+        crate::db::nip17_keys::stash_resend_payload(&wrap.id, "pending-1", &wrap, &rumor).unwrap();
+
+        // A ban set while sealed still hides its author from the channel and its unread count.
+        let (banned, allowed) = {
+            use nostr_sdk::prelude::ToBech32;
+            (nostr_sdk::prelude::Keys::generate().public_key(), nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap())
+        };
+        set_community_banlist(&cid, &[banned.to_hex()], 1).unwrap();
+        for (id, author) in [("c7", { use nostr_sdk::prelude::ToBech32; banned.to_bech32().unwrap() }), ("d8", allowed)] {
+            let msg = crate::types::Message { id: id.repeat(32), content: "in the channel".into(), at: 1_700_000_000_000, npub: Some(author), ..Default::default() };
+            rt.block_on(crate::db::events::save_message(&ch, &msg)).unwrap();
+        }
+        let ch_int = crate::db::id_cache::get_or_create_chat_id(&ch).unwrap();
+
+        let read = || {
+            (
+                get_pending_channel_keys(&cid).unwrap().iter().map(|k| (k.key, k.sender.clone())).collect::<Vec<_>>(),
+                get_community_ban_marks(&cid).unwrap(),
+                get_migration_pointer(&cid).unwrap(),
+                get_migration_ledger(&cid).unwrap(),
+                get_community_pins(&v2cid, &v2ch).unwrap(),
+                load_community_v2(v2.id()).unwrap().map(|c| (c.channels[0].voice, c.channels[0].meta_extra.clone())),
+                load_community(&v1.id).unwrap().map(|c| (*c.server_root_key.as_bytes(), c.name.clone())),
+                rt.block_on(crate::db::events::get_message_views(dm_chat_int, 10, 0)).unwrap()
+                    .into_iter().map(|m| (m.content, m.preview_metadata, m.attachments)).collect::<Vec<_>>(),
+                crate::db::nip17_keys::get_resend_payload_by_pending("pending-1").unwrap().map(|p| p.rumor.content),
+                (
+                    get_community_banlist(&cid).unwrap(),
+                    rt.block_on(crate::db::events::get_message_views(ch_int, 10, 0)).unwrap().into_iter().map(|m| m.id).collect::<Vec<_>>(),
+                    rt.block_on(crate::db::events::unread_count_for_chat(&ch)).unwrap(),
+                    rt.block_on(crate::db::events::unread_counts()).unwrap().get(&ch).copied(),
+                ),
+            )
+        };
+        let before = read();
+        assert_eq!(before.0, vec![([0x33; 32], "ab".repeat(32))]);
+        assert_eq!(before.2.as_deref(), Some(r#"{"pointer":1}"#));
+        assert_eq!(before.4, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
+        // File captions are stored but not shown again yet; the view still carries the rest.
+        assert_eq!(before.7, vec![(String::new(), dm.preview_metadata.clone(), dm.attachments.clone())]);
+        assert_eq!(before.8.as_deref(), Some("still sending"));
+        assert_eq!(before.9, (vec![banned.to_hex()], vec!["d8".repeat(32)], 1, Some(1)), "the banned author stays hidden");
+        let sealed: (String, String, String) = crate::db::get_db_connection_guard_static().unwrap().query_row(
+            "SELECT a.name || e.preview_metadata || e.content, w.rumor_json, a.key FROM attachments a, events e, nip17_wrap_keys w
+             WHERE e.id = a.event_id AND w.pending_id = 'pending-1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        for plain in ["passport", "A title", "the message itself"] {
+            assert!(!sealed.0.contains(plain), "{plain} is sealed on disk");
+        }
+        assert!(!sealed.1.contains("still sending") && sealed.2 != "c3".repeat(32), "unconfirmed sends and file keys are sealed");
+
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            at_rest::rekey_listed_in_tx(&tx, &K, &K2, &|_| {}).unwrap();
+            assert_eq!(
+                at_rest::sweep_residue_in_tx(&tx, &K, Some(&K2)).unwrap(),
+                0,
+                "the sweep list must name every column these writers encrypt"
+            );
+        }
+
+        assert!(at_rest::rekey(&WRONG, &K2, &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).is_err(), "a key the store does not open is refused");
+        at_rest::rekey(&K, &K2, &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
+        crate::state::ENCRYPTION_KEY.set(K2, &[]);
+        assert_eq!(read(), before, "every value reads back after a PIN change");
+
+        let mode = || crate::db::get_sql_setting("security_type".to_string()).unwrap();
+        at_rest::rekey(&K2, &K2, &crate::crypto::Kdf::of_account().unwrap(), "password", None, &|_| {}).unwrap();
+        assert_eq!((read(), mode().as_deref()), (before.clone(), Some("password")), "the same key on both sides only switches the mode");
+
+        // Rows from before this build: a plaintext caption and a DM whose plaintext looks sealed.
+        let legacy_chat = crate::db::id_cache::get_or_create_chat_id(&make_test_npub(900_001)).unwrap();
+        let hexish = "ab".repeat(40);
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            for (id, kind, content) in [("e5", 15, "old caption"), ("f6", 14, hexish.as_str())] {
+                conn.execute(
+                    "INSERT INTO events (id, kind, chat_id, content, created_at, received_at) VALUES (?1, ?2, ?3, ?4, 1, 1)",
+                    rusqlite::params![id.repeat(32), kind, legacy_chat, content],
+                ).unwrap();
+            }
+        }
+        let flag = || crate::db::get_sql_setting("community_at_rest_encrypted".to_string()).unwrap();
+        crate::db::set_sql_setting("community_at_rest_encrypted".to_string(), "1".to_string()).unwrap();
+        crate::state::ENCRYPTION_KEY.set(WRONG, &[]);
+        assert!(at_rest::backfill_at_rest().is_err(), "the backfill never wraps under a key it cannot prove");
+        assert_eq!(flag().as_deref(), Some("1"));
+        crate::state::ENCRYPTION_KEY.set(K2, &[]);
+        at_rest::backfill_at_rest().unwrap();
+        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("5")));
+        let stored = |id: &str| -> String {
+            crate::db::get_db_connection_guard_static().unwrap()
+                .query_row("SELECT content FROM events WHERE id = ?1", [id.repeat(32)], |r| r.get(0)).unwrap()
+        };
+        assert!(stored("e5") != "old caption" && stored("f6") != hexish, "the backfill seals legacy plaintext messages");
+        let legacy = rt.block_on(crate::db::events::get_message_views(legacy_chat, 10, 0)).unwrap();
+        assert!(legacy.iter().any(|m| m.content == hexish), "and they still read back");
+
+        assert!(at_rest::disable(&WRONG, &|_| {}).is_err(), "a wrong key never turns encryption off");
+        assert_eq!(read(), before);
+        at_rest::disable(&K2, &|_| {}).unwrap();
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+        assert_eq!(read(), before, "every value reads back after Local Encryption is turned off");
+    }
 }
 
 // ── Pin lists (CORD-04 §7) ───────────────────────────────────────────────────
@@ -3855,6 +4538,7 @@ mod tests {
 /// stale fold clobber a newer echo. Equal versions still write — a same-version
 /// fork's converged winner must be adoptable. Returns whether a row changed.
 pub fn set_community_pins(community_id: &str, channel_id: &str, content: &str, version: i64) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
     let enc = enc_txt(content)?;
     let conn = super::get_write_connection_guard_static()?;
     let changed = conn
