@@ -49,6 +49,8 @@ const ISSUED_KEY: &str = "push_issued";
 const HELD_KEY: &str = "push_held";
 /// A contact keeps at most this many devices' tickets.
 const MAX_TICKETS_PER_CONTACT: usize = 8;
+/// Upper bound of the random wait between delivering a DM and asking for its push.
+const SEND_JITTER_MS: u64 = 4000;
 /// How long a push service holds a notification for a device that is offline.
 const TTL: u32 = 2 * 24 * 3600;
 
@@ -99,7 +101,7 @@ pub async fn disable() -> Result<(), String> {
         (old, issued)
     };
     let Some(old) = old else { return Ok(()) };
-    let holders: Vec<String> = issued.into_iter().filter(|(_, i)| i.sent == old.id).map(|(npub, _)| npub).collect();
+    let holders: Vec<String> = issued.into_iter().filter(|(_, i)| i.sent.starts_with(&old.id)).map(|(npub, _)| npub).collect();
     crate::db::spawn_bound(async move {
         let list = TicketList { v: 1, tickets: vec![], revoked: vec![old.id] };
         for npub in holders {
@@ -121,7 +123,8 @@ pub async fn share_with(npub: &str) -> Result<bool, String> {
     let ticket = {
         let _g = lock().lock_owned().await;
         let mut issued: HashMap<String, Issued> = load(ISSUED_KEY);
-        if issued.get(npub).is_some_and(|i| i.sent == device.id) {
+        let version = ticket_version(&device);
+        if issued.get(npub).is_some_and(|i| i.sent == version) {
             return Ok(false);
         }
         let fresh = !issued.contains_key(npub);
@@ -139,7 +142,7 @@ pub async fn share_with(npub: &str) -> Result<bool, String> {
     let _g = lock().lock_owned().await;
     let mut issued: HashMap<String, Issued> = load(ISSUED_KEY);
     if let Some(i) = issued.get_mut(npub) {
-        i.sent = device.id.clone();
+        i.sent = ticket_version(&device);
     }
     save(ISSUED_KEY, &issued)?;
     Ok(true)
@@ -158,6 +161,13 @@ pub async fn prepare(npubs: &[String]) -> Result<(), String> {
         issued.entry(npub.clone()).or_insert_with(new_issued);
     }
     save(ISSUED_KEY, &issued)
+}
+
+/// What a contact's ticket must match to be current: this subscription, at this pusher, on
+/// these relays. Any change re-issues tickets with the next message to each contact.
+fn ticket_version(device: &Device) -> String {
+    let (key, relays) = pusher();
+    format!("{}|{}|{}", device.id, &key[..16], relays.join(","))
 }
 
 /// The pusher tickets name. A build can point at its own (`VECTOR_PUSHER`, a hex pubkey,
@@ -362,6 +372,10 @@ pub(crate) fn after_delivery(receiver_npub: &str, rumor: &UnsignedEvent) {
     let notice = notice_for(rumor);
     crate::db::spawn_bound(async move {
         if let Some(notice) = notice {
+            // A beat apart from the DM landing on the recipient's relays, so the two aren't
+            // paired by arrival time alone.
+            let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..SEND_JITTER_MS);
+            crate::rt::time::sleep(std::time::Duration::from_millis(jitter)).await;
             notify(&receiver, &notice).await;
         }
         if let Err(e) = share_with(&receiver).await {
@@ -430,23 +444,32 @@ async fn notify(receiver: &str, notice: &Notice) {
     }
 }
 
-/// Publish to the pusher's relays, joining any we aren't on just for this.
+/// Publish to the pusher's relays we're already connected to; join them just for this only
+/// when we hold none, so a request travels the connections this client already keeps.
 async fn publish(client: &Client, relays: &[String], event: &Event) -> Result<(), String> {
     use crate::inbox_relays::normalize_relay_url;
     let pool = client.relays().all().await;
-    let mut targets: Vec<Relay> = Vec::new();
+    let wanted: Vec<String> = relays.iter().map(|r| normalize_relay_url(r)).collect();
+    let mut targets: Vec<Relay> = pool
+        .iter()
+        .filter(|(u, r)| wanted.contains(&normalize_relay_url(&u.to_string())) && r.status() == RelayStatus::Connected)
+        .map(|(_, r)| r.clone())
+        .collect();
     let mut transient: Vec<RelayUrl> = Vec::new();
-    for r in relays {
-        let norm = normalize_relay_url(r);
-        if let Some((_, relay)) = pool.iter().find(|(u, _)| normalize_relay_url(&u.to_string()) == norm) {
-            targets.push(relay.clone());
-            continue;
-        }
-        if client.add_managed_relay(r.as_str()).await.is_ok() {
-            if let Ok(Some(relay)) = client.relay(r.as_str()).await {
+    if targets.is_empty() {
+        for r in relays {
+            let norm = normalize_relay_url(r);
+            if let Some((_, relay)) = pool.iter().find(|(u, _)| normalize_relay_url(&u.to_string()) == norm) {
                 let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(6))).await;
-                transient.push(relay.url().clone());
-                targets.push(relay);
+                targets.push(relay.clone());
+                continue;
+            }
+            if client.add_managed_relay(r.as_str()).await.is_ok() {
+                if let Ok(Some(relay)) = client.relay(r.as_str()).await {
+                    let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(6))).await;
+                    transient.push(relay.url().clone());
+                    targets.push(relay);
+                }
             }
         }
     }

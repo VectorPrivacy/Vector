@@ -13,7 +13,7 @@
 //!   `holds.json`. Random ids and times, nothing else: the one thing this keeps on disk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +27,14 @@ const REFILL_EVERY: Duration = Duration::from_secs(3);
 /// A push service that answered 404/410 is not asked again for this long.
 const GONE_FOR: Duration = Duration::from_secs(3600);
 const MAX_TTL: u32 = 7 * 24 * 3600;
+/// Deliveries talking to push services at once; the rest wait their turn.
+const IN_FLIGHT: usize = 256;
+/// Requests waiting or in flight before new ones are dropped, so a flood can't grow memory.
+const QUEUE_LIMIT: usize = 20_000;
+/// Waits before each retry of a push the service couldn't take yet ("slow down", or a 5xx).
+const RETRY_AFTER: [u64; 3] = [2, 10, 30];
+/// A service's own Retry-After is honoured up to this.
+const MAX_RETRY_WAIT: u64 = 120;
 
 #[derive(Default)]
 struct Stats {
@@ -37,6 +45,8 @@ struct Stats {
     limited: AtomicU64,
     held: AtomicU64,
     controls: AtomicU64,
+    retried: AtomicU64,
+    overflow: AtomicU64,
 }
 
 struct Pusher {
@@ -50,6 +60,17 @@ struct Pusher {
     /// Capability id → unix seconds its pushes are held until (`HOLD_FOREVER` for a block).
     holds: Mutex<HashMap<String, u64>>,
     holds_file: String,
+    slots: tokio::sync::Semaphore,
+    pending: AtomicUsize,
+}
+
+/// What one try at a push service came to.
+enum Outcome {
+    Delivered,
+    Gone,
+    /// Worth another try, after the service's own wait if it named one.
+    Retry(Option<u64>),
+    Failed(String),
 }
 
 #[tokio::main]
@@ -73,6 +94,8 @@ async fn main() {
         gone: Mutex::new(HashMap::new()),
         holds: Mutex::new(holds),
         holds_file,
+        slots: tokio::sync::Semaphore::new(IN_FLIGHT),
+        pending: AtomicUsize::new(0),
     });
 
     let client = ClientBuilder::new().build();
@@ -109,8 +132,16 @@ async fn main() {
                 let Some(n) = n else { break };
                 if let ClientNotification::Event { event, .. } = n {
                     if event.kind == Kind::Custom(request::KIND) && pusher.first_sighting(event.id) {
+                        if pusher.pending.fetch_add(1, Ordering::Relaxed) >= QUEUE_LIMIT {
+                            pusher.pending.fetch_sub(1, Ordering::Relaxed);
+                            pusher.stats.overflow.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                         let pusher = pusher.clone();
-                        tokio::spawn(async move { pusher.handle(*event).await });
+                        tokio::spawn(async move {
+                            pusher.handle(*event).await;
+                            pusher.pending.fetch_sub(1, Ordering::Relaxed);
+                        });
                     }
                 }
             }
@@ -165,12 +196,47 @@ impl Pusher {
             self.stats.limited.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        let started = Instant::now();
+        for (attempt, wait) in std::iter::once(0).chain(RETRY_AFTER).enumerate() {
+            if attempt > 0 {
+                self.stats.retried.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            match self.attempt(&cap, &body, ttl).await {
+                Outcome::Delivered => {
+                    self.stats.delivered.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Outcome::Gone => {
+                    self.gone.lock().unwrap().insert(cap.endpoint, Instant::now());
+                    self.stats.gone.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Outcome::Retry(asked) => {
+                    // The service named its own wait: take it, then let the loop's own wait stack on top.
+                    if let Some(secs) = asked {
+                        tokio::time::sleep(Duration::from_secs(secs.min(MAX_RETRY_WAIT))).await;
+                    }
+                    if started.elapsed().as_secs() >= u64::from(ttl) {
+                        break;
+                    }
+                }
+                Outcome::Failed(why) => {
+                    eprintln!("push failed: {why}");
+                    self.stats.failed.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        eprintln!("push given up after retries");
+        self.stats.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    async fn attempt(&self, cap: &ticket::Capability, body: &[u8], ttl: u32) -> Outcome {
+        let Ok(_slot) = self.slots.acquire().await else { return Outcome::Failed("shutting down".into()) };
         let auth = match vapid::authorization(&cap.vapid, &cap.endpoint, &self.subject, unix_now()) {
             Ok(a) => a,
-            Err(_) => {
-                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+            Err(e) => return Outcome::Failed(e.to_string()),
         };
         let sent = self
             .http
@@ -180,25 +246,17 @@ impl Pusher {
             .header("Content-Encoding", "aes128gcm")
             .header("Content-Type", "application/octet-stream")
             .header("Authorization", auth)
-            .body(body)
+            .body(body.to_vec())
             .send()
             .await;
-        match sent.map(|r| r.status().as_u16()) {
-            Ok(s) if (200..300).contains(&s) => {
-                self.stats.delivered.fetch_add(1, Ordering::Relaxed);
+        match sent {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                let asked = r.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+                outcome(status, asked)
             }
-            Ok(404) | Ok(410) => {
-                self.gone.lock().unwrap().insert(cap.endpoint, Instant::now());
-                self.stats.gone.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(s) => {
-                eprintln!("push service answered {s}");
-                self.stats.failed.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(e) => {
-                eprintln!("push failed: {}", e.without_url());
-                self.stats.failed.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(e) if e.is_timeout() || e.is_connect() || e.is_request() => Outcome::Retry(None),
+            Err(e) => Outcome::Failed(e.without_url().to_string()),
         }
     }
 
@@ -268,7 +326,7 @@ impl Pusher {
     fn report(&self) {
         let s = &self.stats;
         println!(
-            "delivered {} held {} gone {} failed {} rejected {} limited {} controls {}",
+            "delivered {} held {} gone {} failed {} rejected {} limited {} controls {} retried {} overflow {} pending {}",
             s.delivered.load(Ordering::Relaxed),
             s.held.load(Ordering::Relaxed),
             s.gone.load(Ordering::Relaxed),
@@ -276,7 +334,19 @@ impl Pusher {
             s.rejected.load(Ordering::Relaxed),
             s.limited.load(Ordering::Relaxed),
             s.controls.load(Ordering::Relaxed),
+            s.retried.load(Ordering::Relaxed),
+            s.overflow.load(Ordering::Relaxed),
+            self.pending.load(Ordering::Relaxed),
         );
+    }
+}
+
+fn outcome(status: u16, asked: Option<u64>) -> Outcome {
+    match status {
+        200..=299 => Outcome::Delivered,
+        404 | 410 => Outcome::Gone,
+        429 | 500..=599 => Outcome::Retry(asked),
+        s => Outcome::Failed(format!("push service answered {s}")),
     }
 }
 
@@ -296,4 +366,20 @@ fn load_keys(path: &str) -> Keys {
 
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_slow_downs_and_outages_are_retried() {
+        assert!(matches!(outcome(201, None), Outcome::Delivered));
+        assert!(matches!(outcome(410, None), Outcome::Gone));
+        assert!(matches!(outcome(429, Some(7)), Outcome::Retry(Some(7))));
+        assert!(matches!(outcome(503, None), Outcome::Retry(None)));
+        assert!(matches!(outcome(400, None), Outcome::Failed(_)));
+        assert!(matches!(outcome(403, None), Outcome::Failed(_)), "a bad VAPID key won't fix itself");
+        assert!(matches!(outcome(413, None), Outcome::Failed(_)));
+    }
 }

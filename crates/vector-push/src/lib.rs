@@ -24,7 +24,9 @@ pub use ticket::{Capability, Ticket};
 
 /// The pusher Vector runs. A ticket names its own, so a device may pick another.
 pub const DEFAULT_PUSHER: &str = "cdfdb82459cb5f6a328fa8df5150e0f8482efe12f6a571f801b59ecd53ecbb9c";
-pub const DEFAULT_PUSHER_RELAYS: &[&str] = &["wss://jskitty.com/nostr"];
+/// Where the default pusher listens. Two operators: whichever a sender already holds a
+/// connection to carries the request, and either one alone is enough.
+pub const DEFAULT_PUSHER_RELAYS: &[&str] = &["wss://jskitty.com/nostr", "wss://asia.vectorapp.io/nostr"];
 
 /// `d` tag of the rumor that carries a device's tickets to a contact.
 pub const TICKET_RUMOR_D: &str = "vector-push";
