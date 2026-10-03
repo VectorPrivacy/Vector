@@ -2,12 +2,10 @@
 //!
 //! This module handles:
 //! - Theme preferences
-//! - Reading the private key (pkey) and seed phrase, for Rust only
+//! - Reading the private key (pkey), for Rust only
 //! - Generic SQL settings key-value store
 
 use tauri::command;
-
-use crate::crypto::maybe_decrypt;
 
 #[command]
 pub fn get_theme() -> Result<Option<String>, String> {
@@ -26,24 +24,6 @@ pub fn get_pkey() -> Result<Option<String>, String> {
         |row| row.get(0)
     ).ok();
     Ok(result)
-}
-
-/// The seed phrase, opened. Rust-only: it never crosses IPC.
-pub async fn get_seed() -> Result<Option<String>, String> {
-    let conn = crate::account_manager::get_db_connection_guard_static()?;
-    let stored_seed: Option<String> = conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        rusqlite::params!["seed"],
-        |row| row.get(0)
-    ).ok();
-
-    if let Some(seed_value) = stored_seed {
-        match maybe_decrypt(seed_value).await {
-            Ok(decrypted) => return Ok(Some(decrypted)),
-            Err(_) => return Err("Failed to decrypt seed phrase".to_string()),
-        }
-    }
-    Ok(None)
 }
 
 /// Set a setting value in SQL database

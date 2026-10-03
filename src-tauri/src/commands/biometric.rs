@@ -97,6 +97,32 @@ impl Drop for SwitchGuard {
     }
 }
 
+/// The vault key, unwrapped behind the OS prompt and proven against the store: a biometric
+/// account's answer to "type your PIN".
+#[cfg(target_os = "android")]
+pub(crate) async fn prove_with_prompt() -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let session = vector_core::db::current_session();
+    let alias = keystore_alias(&crate::account_manager::get_current_account()?);
+    let wrapped = vector_core::db::get_sql_setting(WRAPPED_KEY_SETTING.to_string())
+        .ok()
+        .flatten()
+        .ok_or("BIOMETRIC_NOT_ENROLLED")?;
+    let key = tokio::task::spawn_blocking(move || crate::android::biometric::unlock_unwrap(&alias, &wrapped))
+        .await
+        .map_err(|e| format!("join error: {:?}", e))?
+        .map(zeroize::Zeroizing::new)
+        .map_err(|e| match e {
+            crate::android::biometric::BiometricError::Cancelled => "BIOMETRIC_CANCELLED".to_string(),
+            crate::android::biometric::BiometricError::Invalidated => "BIOMETRIC_INVALIDATED".to_string(),
+            crate::android::biometric::BiometricError::Other(msg) => msg,
+        })?;
+    if !session.is_live() {
+        return Err("Account changed, nothing was modified".to_string());
+    }
+    vector_core::db::at_rest::prove_key(&key)?;
+    Ok(key)
+}
+
 /// Whether the CURRENT account's wrap is its sole credential.
 #[cfg(target_os = "android")]
 fn is_biometric_only() -> bool {
@@ -280,12 +306,13 @@ pub async fn enable_encryption_biometric<R: Runtime>(handle: AppHandle<R>) -> Re
 }
 
 /// Switch an already-encrypted account from a typed credential to
-/// biometrics-only. Generates a credential nobody will ever know, wraps it
-/// behind the OS prompt FIRST (a cancel changes nothing), then re-keys the
-/// store from the live vault key to it — plaintext never touching disk, and
-/// the wrap landing in the same transaction as the new `security_type`.
+/// biometrics-only, once the current credential is proven. Generates a
+/// credential nobody will ever know, wraps it behind the OS prompt FIRST (a
+/// cancel changes nothing), then re-keys the store from the live vault key to
+/// it — plaintext never touching disk, and the wrap landing in the same
+/// transaction as the new `security_type`.
 #[command]
-pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>, credential: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         if !vector_core::state::is_encryption_enabled_fast() {
@@ -296,6 +323,7 @@ pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>) -> Result<(),
         }
         let _switch = SwitchGuard::try_enter()?;
         let session = vector_core::db::current_session();
+        drop(crate::commands::encryption::prove_user(credential).await?);
         let npub = crate::account_manager::get_current_account()?;
         // The derived key and its salt come back from the wrap step, so the store is
         // re-keyed to exactly what the wrap holds.
@@ -312,7 +340,7 @@ pub async fn switch_to_biometric<R: Runtime>(handle: AppHandle<R>) -> Result<(),
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = handle;
+        let _ = (handle, credential);
         Err("Biometric unlock is Android-only".to_string())
     }
 }

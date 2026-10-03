@@ -4228,6 +4228,38 @@ mod tests {
         assert_eq!(Kdf::of_account().unwrap(), k3, "setup records the salt with the key it sealed");
     }
 
+    #[test]
+    fn the_identity_opens_under_the_users_proof_and_nothing_else() {
+        use crate::crypto::{derive_key, Kdf};
+        use crate::db::at_rest::{self, open_identity_secrets, CREDENTIAL_INCORRECT};
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+                crate::state::set_encryption_enabled(false);
+            }
+        }
+        let (_tmp, _guard) = init_test_db();
+        let _vault = Vault;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        crate::db::set_pkey("nsec1identity").unwrap();
+        crate::db::set_seed("abandon ability able").unwrap();
+        let plain = open_identity_secrets(None).unwrap();
+        assert_eq!((plain.0.as_str(), plain.1.as_deref().map(|s| s.as_str())), ("nsec1identity", Some("abandon ability able")));
+
+        let kdf = Kdf::fresh();
+        let key = rt.block_on(derive_key("424242", &kdf));
+        at_rest::enable(&key, &kdf, "pin", None, None, &|_| {}).unwrap();
+        assert!(crate::state::ENCRYPTION_KEY.get().is_some(), "the session holds the key");
+        assert!(open_identity_secrets(None).is_err(), "a sealed store opens nothing on the session alone");
+        assert_eq!(rt.block_on(at_rest::prove_credential("000000")).unwrap_err(), CREDENTIAL_INCORRECT);
+        assert_eq!(open_identity_secrets(Some(&[0x09; 32])).unwrap_err(), CREDENTIAL_INCORRECT);
+
+        let proven = rt.block_on(at_rest::prove_credential("424242")).unwrap();
+        let (nsec, seed) = open_identity_secrets(Some(&proven)).unwrap();
+        assert_eq!((nsec.as_str(), seed.as_deref().map(|s| s.as_str())), ("nsec1identity", Some("abandon ability able")));
+    }
+
     /// Reads racing a stream of PIN changes always open: a row read just before a commit and
     /// opened just after, or read just after and opened before the vault moved, never comes
     /// back as ciphertext.

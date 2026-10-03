@@ -9,7 +9,7 @@ mod events;
 // Re-exports
 pub use maintenance::{check_and_vacuum_if_needed, check_and_optimize_if_needed};
 // Settings functions used internally (not just as Tauri commands)
-pub use settings::{get_sql_setting, set_sql_setting, get_seed, get_pkey};
+pub use settings::{get_sql_setting, set_sql_setting, get_pkey};
 // Profile types and functions
 pub use vector_core::SlimProfile;
 pub async fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {

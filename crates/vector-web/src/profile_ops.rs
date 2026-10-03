@@ -36,7 +36,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             // --- Accounts ---
             "logout" => logout().await.map(|_| Value::Null),
             "delete_account" => delete_account(a).await,
-            "export_keys" => export_keys().await,
+            "export_keys" => export_keys(a).await,
             "enter_add_account_mode" => {
                 let _ = db::clear_active_account_file();
                 reset_session().await;
@@ -44,7 +44,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             }
             "clear_active_account" => db::clear_active_account_file().map(|_| Value::Null),
             "verify_credential" => verify_credential(a).await,
-            "disable_encryption" => crate::encryption::disable().map(|_| Value::Null),
+            "disable_encryption" => crate::encryption::disable(a.opt_str("credential")).await.map(|_| Value::Null),
             "enable_encryption" => crate::encryption::enable_cmd(a).await,
             "rekey_encryption" => crate::encryption::rekey_cmd(a).await,
 
@@ -343,39 +343,27 @@ async fn remove_account(npub: String) -> Result<bool, String> {
     Ok(was_active)
 }
 
-async fn export_keys() -> Result<Value, String> {
+/// An encrypted account opens its key with one derived from the user's proof, never the vault.
+async fn export_keys(a: &Args) -> Result<Value, String> {
     if vector_core::is_keyless() {
         return Err("This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.".into());
     }
-    let stored = db::get_pkey()?.ok_or("No nsec found in database")?;
-    let nsec = if state::is_encryption_enabled_fast() {
-        vector_core::crypto::maybe_decrypt_inner(stored, None).await.map_err(|_| "Failed to decrypt nsec".to_string())?
+    let session = db::current_session();
+    let key = if state::is_encryption_enabled_fast() {
+        Some(crate::encryption::prove_user(a.opt_str("credential")).await?)
     } else {
-        stored
+        None
     };
-    let pending_seed = state::MNEMONIC_SEED.lock().unwrap().clone();
-    let seed_phrase = match pending_seed {
-        Some(seed) => Some(seed),
-        None => match db::get_seed()? {
-            Some(stored) => {
-                Some(vector_core::crypto::maybe_decrypt(stored).await.map_err(|_| "Failed to decrypt seed phrase".to_string())?)
-            }
-            None => None,
-        },
-    };
-    Ok(json!({ "nsec": nsec, "seed_phrase": seed_phrase }))
+    let (nsec, seed) = db::at_rest::open_identity_secrets(key.as_deref())?;
+    if !session.is_live() {
+        return Err("The account changed, so nothing was exported".into());
+    }
+    Ok(json!({ "nsec": *nsec, "seed_phrase": seed.as_deref().map(|s| s.as_str()) }))
 }
 
 async fn verify_credential(a: &Args) -> Result<Value, String> {
     let credential = zeroize::Zeroizing::new(a.str("credential")?);
-    let key = zeroize::Zeroizing::new(
-        vector_core::crypto::derive_key(&credential, &vector_core::crypto::Kdf::of_account()?).await,
-    );
-    let stored = db::get_pkey()?.ok_or("No private key found — cannot verify credential.")?;
-    match vector_core::crypto::decrypt_with_key(&stored, &key).map(zeroize::Zeroizing::new) {
-        Ok(plain) if plain.starts_with("nsec") => Ok(Value::Null),
-        _ => Err("Incorrect credential.".into()),
-    }
+    db::at_rest::prove_credential(&credential).await.map(|_| Value::Null)
 }
 
 // ---------------------------------------------------------------------------

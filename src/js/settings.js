@@ -760,8 +760,17 @@ async function logoutAccount() {
  */
 async function exportAccount({ saving = false } = {}) {
     try {
-        // Call the backend to export keys
-        const keys = await invoke('export_keys');
+        // A PIN or password account answers CREDENTIAL_REQUIRED; a biometric one raises the OS prompt.
+        let keys;
+        try {
+            keys = await invoke('export_keys');
+        } catch (e) {
+            if (String(e) !== 'CREDENTIAL_REQUIRED') throw e;
+            const label = fSecurityType === 'password' ? 'password' : 'PIN';
+            keys = await withCurrentCredential('Export Account', `Enter your ${label} to show your keys.`,
+                (credential) => invoke('export_keys', { credential }));
+            if (!keys) return;
+        }
         
         // Create the export content with security warnings
         // Escape values to prevent XSS from malicious DB content
@@ -809,6 +818,7 @@ async function exportAccount({ saving = false } = {}) {
             'copy-nsec': () => navigator.clipboard.writeText(keys.nsec),
         });
     } catch (error) {
+        if (String(error).includes('BIOMETRIC_CANCELLED')) return;
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
     }
@@ -1339,12 +1349,21 @@ async function switchUnlockMethod() {
 /** Vector-backed to OS-backed. The prompt happens before anything commits. */
 async function switchToBiometricMode() {
     if (!(await confirmBiometricOnlyWarning())) return;
+    const label = fSecurityType === 'password' ? 'Password' : 'PIN';
+    let credential;
+    try {
+        credential = await askCurrentCredential(`Enter Current ${label}`, `Enter your current ${label.toLowerCase()} to switch to biometric unlock.`);
+    } catch (e) {
+        await popupConfirm('Could not verify', escapeHtml(String(e)), true);
+        return;
+    }
+    if (!credential) return;
     const prev = fSecurityType;
     fSecurityType = 'biometric';
     fMigrationRekeying = true;
     showMigrationModal(true);
     try {
-        await invoke('switch_to_biometric');
+        await invoke('switch_to_biometric', { credential });
         syncSecurityState();
     } catch (e) {
         fSecurityType = prev;
@@ -1358,7 +1377,7 @@ async function switchToBiometricMode() {
     }
 }
 
-/** OS-backed to Vector-backed. Needs a NEW credential, never the old one. */
+/** OS-backed to Vector-backed. The backend's OS prompt proves the current mode. */
 async function switchToCredentialMode() {
     const result = await promptSecurityCredential(
         'Switch to PIN or Password',
@@ -1379,7 +1398,9 @@ async function switchToCredentialMode() {
         fSecurityType = prev;
         fMigrationRekeying = false;
         hideMigrationModal();
-        await popupConfirm('Could not switch', escapeHtml(String(e)), true);
+        if (!String(e).includes('BIOMETRIC_CANCELLED')) {
+            await popupConfirm('Could not switch', escapeHtml(String(e)), true);
+        }
         syncSecurityState();
     }
 }
@@ -1478,6 +1499,39 @@ function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm' })
 }
 
 /**
+ * Ask for the current PIN or password until `attempt(credential)` accepts it; the modal holds,
+ * controls gone, while Argon2 runs. Resolves to attempt's result, or undefined on cancel.
+ */
+async function withCurrentCredential(title, subtitle, attempt) {
+    const label = fSecurityType === 'password' ? 'Password' : 'PIN';
+    let prompt = subtitle;
+    while (true) {
+        const entered = await showCredentialModal({ mode: fSecurityType, title, subtitle: prompt });
+        if (!entered) return undefined;
+        VectorSvelte.openCredentialDialog(
+            { mode: 'validating', title: `Validating ${label}...`, subtitle: 'Please wait', subtitleGradient: true },
+            { cancel: () => {}, submit: () => {} },
+        );
+        try {
+            return await attempt(entered);
+        } catch (e) {
+            if (String(e) !== 'CREDENTIAL_INCORRECT') throw e;
+            prompt = `Incorrect ${label.toLowerCase()}, try again.`;
+        } finally {
+            VectorSvelte.closeCredentialDialog();
+        }
+    }
+}
+
+/** The current PIN or password once the backend accepts it, or undefined on cancel. */
+function askCurrentCredential(title, subtitle) {
+    return withCurrentCredential(title, subtitle, async (credential) => {
+        await invoke('verify_credential', { credential });
+        return credential;
+    });
+}
+
+/**
  * Prompt user to choose a security type and enter + confirm a credential.
  * Uses the custom credential modal for all phases.
  * @param {string} title - Overall flow title
@@ -1539,33 +1593,17 @@ async function handleChangeCredential() {
 
     // Step 1: Ask for current credential and verify it
     const currentLabel = fSecurityType === 'password' ? 'Password' : 'PIN';
-    let oldCredential = null;
-    let subtitle = `Please enter your current ${currentLabel.toLowerCase()} to continue.`;
-    while (true) {
-        const entered = await showCredentialModal({
-            mode: fSecurityType,
-            title: `Enter Current ${currentLabel}`,
-            subtitle,
-        });
-        if (!entered) return;
-
-        // The modal holds, controls gone, while Argon2 hashes.
-        VectorSvelte.openCredentialDialog(
-            { mode: 'validating', title: `Validating ${currentLabel}...`, subtitle: 'Please wait', subtitleGradient: true },
-            { cancel: () => {}, submit: () => {} },
+    let oldCredential;
+    try {
+        oldCredential = await askCurrentCredential(
+            `Enter Current ${currentLabel}`,
+            `Please enter your current ${currentLabel.toLowerCase()} to continue.`,
         );
-
-        // Verify the credential without exposing key material over IPC
-        try {
-            await invoke('verify_credential', { credential: entered });
-            oldCredential = entered;
-            VectorSvelte.closeCredentialDialog();
-            break;
-        } catch (e) {
-            VectorSvelte.closeCredentialDialog();
-            subtitle = `Incorrect ${currentLabel.toLowerCase()}, try again.`;
-        }
+    } catch (e) {
+        await popupConfirm('Could not verify', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        return;
     }
+    if (!oldCredential) return;
 
     // Step 2: Choose new security type + credential
     const result = await promptSecurityCredential(
@@ -1617,14 +1655,33 @@ async function handleDisableEncryption() {
         return;
     }
 
+    // A biometric account proves itself at the OS prompt the backend raises.
+    let credential;
+    if (fSecurityType !== 'biometric') {
+        const label = fSecurityType === 'password' ? 'Password' : 'PIN';
+        try {
+            credential = await askCurrentCredential(`Enter ${label}`, `Enter your ${label.toLowerCase()} to turn off Local Encryption.`);
+        } catch (e) {
+            await popupConfirm('Could not verify', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        }
+        if (!credential) {
+            syncSecurityState();
+            return;
+        }
+    }
+
     // Show migration modal and start decryption
     showMigrationModal(false);
 
     try {
-        await invoke('disable_encryption');
+        await invoke('disable_encryption', { credential });
         // Success - migration complete event will hide modal
     } catch (e) {
         hideMigrationModal();
+        if (String(e).includes('BIOMETRIC_CANCELLED')) {
+            syncSecurityState();
+            return;
+        }
         await popupConfirm(
             'Decryption Failed',
             `Failed to disable encryption: ${escapeHtml(String(e))}`,

@@ -1308,43 +1308,25 @@ pub async fn create_account() -> Result<LoginResult, String> {
 /// mislead the user into importing a non-identity key elsewhere and losing
 /// access. Gated on `is_keyless()`, not `is_bunker()`, so a NIP-55 account
 /// doesn't fall through to the confusing "No nsec found" path.
+///
+/// An encrypted account opens its key with one derived from the user's own proof, never the vault:
+/// a page that can call commands still can't read the key out without the PIN or password.
 #[tauri::command]
-pub async fn export_keys() -> Result<serde_json::Value, String> {
+pub async fn export_keys(credential: Option<String>) -> Result<serde_json::Value, String> {
     if vector_core::is_keyless() {
         return Err("This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.".into());
     }
-    let stored = db::get_pkey()?
-        .ok_or("No nsec found in database")?;
-
-    // If encryption is disabled the stored value is already plaintext.
-    // Use the atomic fast-path: it's seeded by `init_encryption_enabled()`
-    // through the canonical resolver, so we agree with every other call
-    // site about the missing-row case.
-    let nsec = if vector_core::state::is_encryption_enabled_fast() {
-        crypto::internal_decrypt(stored, None).await
-            .map_err(|_| "Failed to decrypt nsec".to_string())?
+    let session = vector_core::db::current_session();
+    let key = if vector_core::state::is_encryption_enabled_fast() {
+        Some(crate::commands::encryption::prove_user(credential).await?)
     } else {
-        stored
+        None
     };
-
-    // Try to get seed phrase from memory first, then from database
-    let seed_from_mem = MNEMONIC_SEED.lock().unwrap().clone();
-    let seed_phrase = if seed_from_mem.is_some() {
-        seed_from_mem
-    } else {
-        match db::get_seed().await {
-            Ok(Some(seed)) => Some(seed),
-            _ => None,
-        }
-    };
-
-    // Create response object
-    let response = serde_json::json!({
-        "nsec": nsec,
-        "seed_phrase": seed_phrase
-    });
-
-    Ok(response)
+    let (nsec, seed) = vector_core::db::at_rest::open_identity_secrets(key.as_deref())?;
+    if !session.is_live() {
+        return Err("The account changed, so nothing was exported".to_string());
+    }
+    Ok(serde_json::json!({ "nsec": *nsec, "seed_phrase": seed.as_deref().map(|s| s.as_str()) }))
 }
 
 // ============================================================================

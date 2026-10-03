@@ -10,7 +10,7 @@
 
 use tauri::{command, AppHandle, Emitter, Runtime};
 use zeroize::Zeroize;
-use crate::crypto::{encrypt_with_key, decrypt_with_key};
+use crate::crypto::encrypt_with_key;
 use crate::state::{close_processing_gate, open_processing_gate, PENDING_EVENTS};
 use vector_core::db::at_rest::{self, MigrationProgress};
 
@@ -229,15 +229,21 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
 /// GATE SAFE: The processing gate is ALWAYS reopened on both success and error
 /// paths (audit C2).
 #[command]
-pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
+pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>, credential: Option<String>) -> Result<(), String> {
+    let session = vector_core::db::current_session();
+    let key = prove_user(credential).await?;
     // Mark migration in flight so reset_session() refuses to fire mid-tx.
     let _guard = MigrationGuard::try_enter()?;
+    if !session.is_live() {
+        return Err("Account changed, nothing was modified".to_string());
+    }
 
     // Close the processing gate — events are queued until we reopen
     close_processing_gate();
 
-    // Do the actual migration work
-    let result = disable_encryption_work(&handle);
+    // The vault is cleared inside the migration, before writers resume.
+    let result = at_rest::disable(&key, &progress_emitter(&handle));
+    drop(key);
 
     // ALWAYS reopen gate and drain queued events, regardless of success/failure.
     // This prevents the gate from being stuck closed forever (audit C2).
@@ -252,22 +258,6 @@ pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), 
         }
         Err(e) => Err(e),
     }
-}
-
-/// Inner work for disable_encryption — separated so the outer function
-/// can guarantee the processing gate is always reopened.
-fn disable_encryption_work<R: Runtime>(handle: &AppHandle<R>) -> Result<(), String> {
-    // Read the encryption key from the guarded vault
-    let mut key: [u8; 32] = crate::ENCRYPTION_KEY.get()
-        .ok_or("No encryption key available".to_string())?;
-
-    // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
-    let result = at_rest::disable(&key, &progress_emitter(handle));
-
-    // The vault is cleared inside the migration, before writers resume.
-    key.zeroize();
-
-    result
 }
 
 /// Enable encryption - bulk encrypt all plaintext content
@@ -375,30 +365,26 @@ async fn drain_pending_events<R: Runtime>(_handle: &AppHandle<R>) {
 // ============================================================================
 
 /// Verify a credential (PIN/password) without returning any key material.
-///
-/// Reads the encrypted pkey from the database, derives the Argon2 key from
-/// the given credential, and attempts to decrypt. Returns Ok(()) if the
-/// credential is correct, Err otherwise. The private key never leaves Rust.
 #[command]
-pub async fn verify_credential<R: Runtime>(
-    handle: AppHandle<R>,
-    credential: String,
-) -> Result<(), String> {
-    let key = crate::crypto::derive_key(credential, &crate::crypto::Kdf::of_account()?).await;
+pub async fn verify_credential(credential: String) -> Result<(), String> {
+    let credential = zeroize::Zeroizing::new(credential);
+    at_rest::prove_credential(&credential).await.map(drop)
+}
 
-    let conn = crate::account_manager::get_db_connection_guard(&handle)?;
-    let pkey: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'pkey'", [], |row| row.get(0))
-        .ok();
-
-    if let Some(ref encrypted_pkey) = pkey {
-        match decrypt_with_key(encrypted_pkey, &key) {
-            Ok(decrypted) if decrypted.starts_with("nsec") => Ok(()),
-            _ => Err("Incorrect credential.".to_string()),
-        }
-    } else {
-        Err("No private key found — cannot verify credential.".to_string())
+/// The account's key from the user's own proof: the typed credential, or the OS prompt on a
+/// biometric account. Never the vault, so a call from the page alone proves nothing.
+pub(crate) async fn prove_user(credential: Option<String>) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    if !vector_core::state::is_encryption_enabled_fast() {
+        return Err("Local Encryption is not enabled".to_string());
     }
+    #[cfg(target_os = "android")]
+    if vector_core::db::get_sql_setting("security_type".to_string()).ok().flatten().as_deref() == Some("biometric") {
+        return crate::commands::biometric::prove_with_prompt().await;
+    }
+    let credential = zeroize::Zeroizing::new(
+        credential.filter(|c| !c.is_empty()).ok_or(at_rest::CREDENTIAL_REQUIRED)?,
+    );
+    at_rest::prove_credential(&credential).await
 }
 
 // ============================================================================
@@ -477,13 +463,14 @@ pub(crate) async fn upgrade_after_unlock(password: &str, key: &[u8; 32]) {
 }
 
 /// Switch an encrypted account to a typed credential (PIN or password),
-/// dropping any OS-held wrap. Used to leave biometric mode, and as the
-/// credential-change path that doesn't require retyping the old one.
+/// dropping any OS-held wrap. Used to leave biometric mode; the current
+/// credential (or the OS prompt) is proven first.
 #[command]
 pub async fn switch_to_credential<R: Runtime>(
     handle: AppHandle<R>,
     credential: String,
     security_type: String,
+    current_credential: Option<String>,
 ) -> Result<(), String> {
     if credential.trim().is_empty() {
         return Err("Credential must not be empty".to_string());
@@ -493,6 +480,7 @@ pub async fn switch_to_credential<R: Runtime>(
     }
     let session = vector_core::db::current_session();
     let _switch = crate::commands::biometric::SwitchGuard::try_enter()?;
+    drop(prove_user(current_credential).await?);
     let kdf = crate::crypto::Kdf::fresh();
     let new_key = crate::crypto::derive_key(credential, &kdf).await;
     rekey_from_vault(handle, new_key, kdf, &security_type, None, session).await
@@ -519,25 +507,9 @@ pub async fn rekey_encryption<R: Runtime>(
 ) -> Result<(), String> {
     let _guard = MigrationGuard::try_enter()?;
 
-    // 1. Derive old key and verify it by test-decrypting pkey
-    let old_key = zeroize::Zeroizing::new(
-        crate::crypto::derive_key(old_credential, &crate::crypto::Kdf::of_account()?).await,
-    );
-    {
-        let conn = crate::account_manager::get_db_connection_guard(&handle)?;
-        let pkey: Option<String> = conn
-            .query_row("SELECT value FROM settings WHERE key = 'pkey'", [], |row| row.get(0))
-            .ok();
-
-        if let Some(ref encrypted_pkey) = pkey {
-            match decrypt_with_key(encrypted_pkey, &old_key) {
-                Ok(decrypted) if decrypted.starts_with("nsec") => {}
-                _ => return Err("Incorrect current credential.".to_string()),
-            }
-        } else {
-            return Err("No private key found — cannot verify credential.".to_string());
-        }
-    }
+    // 1. Derive the old key and prove it opens this store
+    let old_credential = zeroize::Zeroizing::new(old_credential);
+    let old_key = at_rest::prove_credential(&old_credential).await?;
 
     // 2. Derive new key
     let new_kdf = crate::crypto::Kdf::fresh();

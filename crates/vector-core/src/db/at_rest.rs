@@ -1645,6 +1645,52 @@ fn key_proves_positively(key: &[u8; 32]) -> Result<bool, String> {
     Ok(prove_key_in_tx(&tx, key, true).is_ok())
 }
 
+/// An encrypted account was asked for a gated action without the user's PIN or password.
+pub const CREDENTIAL_REQUIRED: &str = "CREDENTIAL_REQUIRED";
+/// The PIN or password typed does not open this account.
+pub const CREDENTIAL_INCORRECT: &str = "CREDENTIAL_INCORRECT";
+
+/// The account's key, derived from what the user typed and proven against the store. Gated actions
+/// run on this rather than the session's vault, so a caller holding only the session gets nothing.
+pub async fn prove_credential(credential: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let kdf = crate::crypto::Kdf::of_account()?;
+    let key = zeroize::Zeroizing::new(crate::crypto::derive_key(credential, &kdf).await);
+    prove_key(&key)?;
+    Ok(key)
+}
+
+/// `Ok` only when `key` opens a positive anchor in this store.
+pub fn prove_key(key: &[u8; 32]) -> Result<(), String> {
+    if key_proves_positively(key)? { Ok(()) } else { Err(CREDENTIAL_INCORRECT.to_string()) }
+}
+
+/// The identity key and seed phrase as stored, opened under `key`: a proven key for an encrypted
+/// store, `None` for a plaintext one.
+pub fn open_identity_secrets(
+    key: Option<&[u8; 32]>,
+) -> Result<(zeroize::Zeroizing<String>, Option<zeroize::Zeroizing<String>>), String> {
+    use rusqlite::OptionalExtension;
+    let conn = crate::db::get_db_connection_guard_static()?;
+    let read = |name: &str| -> Result<Option<String>, String> {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [name], |r| r.get::<_, String>(0))
+            .optional()
+            .map_err(|e| format!("read {name}: {e}"))
+    };
+    let open = |stored: String| -> Result<zeroize::Zeroizing<String>, String> {
+        let stored = zeroize::Zeroizing::new(stored);
+        match key {
+            Some(k) => decrypt_with_key(&stored, k).map(zeroize::Zeroizing::new).map_err(|_| CREDENTIAL_INCORRECT.to_string()),
+            None => Ok(stored),
+        }
+    };
+    let nsec = open(read("pkey")?.ok_or("No private key is stored for this account")?)?;
+    if !nsec.starts_with("nsec1") {
+        return Err("The stored private key is unreadable".to_string());
+    }
+    let seed = read("seed")?.map(open).transpose()?;
+    Ok((nsec, seed))
+}
+
 /// Rebuild the database file so nothing an upgrade replaced survives in its free pages. For hosts
 /// with no maintenance pass of their own; slow on a large store.
 pub fn vacuum_now() -> Result<(), String> {

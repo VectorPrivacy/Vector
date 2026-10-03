@@ -60,11 +60,18 @@ pub async fn enable(credential: String, security_type: String) -> Result<(), Str
     }
 }
 
-pub fn disable() -> Result<(), String> {
-    let mut key = ENCRYPTION_KEY.get().ok_or("No encryption key available")?;
-    let result = at_rest::disable(&key, &progress);
-    key.zeroize();
-    result?;
+/// The account's key from the PIN or password the user typed, never the vault.
+pub async fn prove_user(credential: Option<String>) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    if !state::is_encryption_enabled_fast() {
+        return Err("Local Encryption is not enabled".into());
+    }
+    let credential = zeroize::Zeroizing::new(credential.filter(|c| !c.is_empty()).ok_or(at_rest::CREDENTIAL_REQUIRED)?);
+    at_rest::prove_credential(&credential).await
+}
+
+pub async fn disable(credential: Option<String>) -> Result<(), String> {
+    let key = prove_user(credential).await?;
+    at_rest::disable(&key, &progress)?;
     finish();
     Ok(())
 }
@@ -73,15 +80,11 @@ pub async fn rekey(old_credential: String, new_credential: String, security_type
     if !state::is_encryption_enabled_fast() {
         return Err("Local Encryption is not enabled".into());
     }
-    let mut old_key = vector_core::crypto::derive_key(&old_credential, &vector_core::crypto::Kdf::of_account()?).await;
-    if !at_rest::key_matches_account(&old_key) {
-        old_key.zeroize();
-        return Err("Incorrect current credential.".into());
-    }
+    let old_key = at_rest::prove_credential(&zeroize::Zeroizing::new(old_credential)).await?;
     let new_kdf = vector_core::crypto::Kdf::fresh();
     let mut new_key = vector_core::crypto::derive_key(&new_credential, &new_kdf).await;
     let result = at_rest::rekey(&old_key, &new_key, &new_kdf, &security_type, None, &progress);
-    old_key.zeroize();
+    drop(old_key);
     new_key.zeroize();
     result?;
     finish();
