@@ -715,6 +715,7 @@ pub async fn block_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool 
         drop(state);
         emit_event("profile_update", &slim);
         handler.on_profile_fetched(&slim, "", "");
+        crate::push::controls_changed();
         true
     } else {
         false
@@ -737,6 +738,7 @@ pub async fn unblock_user(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         drop(state);
         emit_event("profile_update", &slim);
         handler.on_profile_fetched(&slim, "", "");
+        crate::push::controls_changed();
         true
     } else {
         false

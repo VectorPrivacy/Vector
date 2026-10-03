@@ -231,6 +231,8 @@ pub fn set_prefs(scope_id: &str, next: ScopePrefs) -> Result<(), String> {
             g.scopes.insert(scope_id.to_string(), next);
         }
     }
+    // A muted contact's pushes are held at the pusher: iOS can't drop one once it arrives.
+    crate::push::controls_changed();
     Ok(())
 }
 
@@ -477,6 +479,7 @@ pub fn apply_wire(map: &crate::synced_prefs::NotifyMap) -> Result<Vec<String>, S
         .filter(|(id, p)| before.get(*id) != Some(p))
         .map(|(id, _)| id.clone())
         .collect();
+    crate::push::controls_changed();
     moved.extend(before.keys().filter(|id| !next.contains_key(*id)).cloned());
     Ok(moved)
 }

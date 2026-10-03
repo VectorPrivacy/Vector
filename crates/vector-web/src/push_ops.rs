@@ -24,6 +24,7 @@ pub fn dispatch<'a>(
             "push_set_device" => set_device(a).await,
             "push_disable" => push::disable().await.map(|_| Value::Null),
             "push_worker_state" => Ok(worker_state().await),
+            "push_viewing" => push::viewing(a.opt_str("npub").filter(|n| n.starts_with("npub1"))).await.map(|_| Value::Null),
             _ => return None,
         };
         Some(result)
@@ -48,6 +49,8 @@ async fn set_device(a: &Args) -> Result<Value, String> {
             }
         });
     }
+    // Mutes and blocks made on another device, or before this one turned push on.
+    push::controls_changed();
     Ok(worker_state().await)
 }
 

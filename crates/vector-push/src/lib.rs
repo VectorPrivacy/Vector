@@ -19,7 +19,7 @@ pub mod vapid;
 pub mod webpush;
 
 pub use payload::Notice;
-pub use request::Request;
+pub use request::{Control, Hold, Incoming, Request, HOLD_FOREVER};
 pub use ticket::{Capability, Ticket};
 
 /// The pusher Vector runs. A ticket names its own, so a device may pick another.

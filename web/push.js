@@ -136,6 +136,7 @@
         signedIn = true;
         sync().catch((e) => console.warn('[Push] sync failed:', e));
         openFromHash();
+        setTimeout(clearRead, 3000);
     });
     window.__TAURI__.event.listen('push_contacts_changed', () => refresh());
     // Names change while open; the worker reads them only after the app is gone.
@@ -144,6 +145,40 @@
         if (document.visibilityState === 'hidden' && signedIn) refresh();
         if (document.visibilityState === 'visible') navigator.clearAppBadge?.().catch(() => {});
     });
+
+    // The chat on screen holds its contact's pushes at the pusher, on a lease renewed while it
+    // stays there: iOS shows every push it receives, even for the conversation already open.
+    let viewed = null;
+    let renewed = 0;
+    function watch() {
+        if (!signedIn || !kept()) return;
+        const chat = document.visibilityState === 'visible' && strOpenChat.startsWith('npub1') ? strOpenChat : null;
+        if (chat !== viewed || (chat && Date.now() - renewed > 20000)) {
+            if (chat !== viewed) clearRead();
+            viewed = chat;
+            renewed = Date.now();
+            backend('push_viewing', { npub: chat }).catch(() => {});
+        }
+    }
+    setInterval(watch, 5000);
+    document.addEventListener('visibilitychange', () => { watch(); if (document.visibilityState === 'visible') clearRead(); });
+
+    // Notifications for chats read since: gone. iOS refuses to close one in its first 30 seconds,
+    // so whatever was too young is tried once more after that.
+    async function clearRead(retry = true) {
+        if (!signedIn) return;
+        const reg = await navigator.serviceWorker?.ready.catch(() => null);
+        const shown = await reg?.getNotifications().catch(() => []) || [];
+        let young = false;
+        for (const n of shown) {
+            const chat = n.data?.chat;
+            const open = document.visibilityState === 'visible' && chat === strOpenChat;
+            if (!chat || !(open || arrChats.find((c) => c.id === chat)?.unread === 0)) continue;
+            try { n.close(); } catch {}
+            young = true;
+        }
+        if (young && retry) setTimeout(() => clearRead(false), 31000);
+    }
 
     // A tapped notification names the chat: in the hash when it opened the app, in a
     // message from the worker when the app was already open.

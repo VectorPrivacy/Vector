@@ -8,6 +8,9 @@
 //! - `PUSHER_RELAYS`: comma-separated relays to listen on. Default Vector's.
 //! - `PUSHER_SUBJECT`: the VAPID `sub` claim push services may contact. Default
 //!   `https://vectorapp.io`.
+//! - `PUSHER_REPORT_SECS`: how often the counts are printed. Default 600.
+//! - `PUSHER_HOLDS_FILE`: where held capability ids live across restarts. Default
+//!   `holds.json`. Random ids and times, nothing else: the one thing this keeps on disk.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use nostr_sdk::prelude::*;
-use vector_push::{request, ticket, vapid, webpush, Request};
+use vector_push::{request, ticket, vapid, webpush, Incoming, Request, HOLD_FOREVER};
 
 /// A contact may wake a device about this often: a burst, then one per interval.
 const BURST: f64 = 20.0;
@@ -32,6 +35,8 @@ struct Stats {
     failed: AtomicU64,
     rejected: AtomicU64,
     limited: AtomicU64,
+    held: AtomicU64,
+    controls: AtomicU64,
 }
 
 struct Pusher {
@@ -42,6 +47,9 @@ struct Pusher {
     seen: Mutex<(HashSet<EventId>, VecDeque<EventId>)>,
     buckets: Mutex<HashMap<String, (f64, Instant)>>,
     gone: Mutex<HashMap<String, Instant>>,
+    /// Capability id → unix seconds its pushes are held until (`HOLD_FOREVER` for a block).
+    holds: Mutex<HashMap<String, u64>>,
+    holds_file: String,
 }
 
 #[tokio::main]
@@ -51,6 +59,8 @@ async fn main() {
         .map(|s| s.split(',').map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect())
         .unwrap_or_else(|_| vector_push::DEFAULT_PUSHER_RELAYS.iter().map(|r| r.to_string()).collect());
     let subject = std::env::var("PUSHER_SUBJECT").unwrap_or_else(|_| "https://vectorapp.io".into());
+    let holds_file = std::env::var("PUSHER_HOLDS_FILE").unwrap_or_else(|_| "holds.json".into());
+    let holds: HashMap<String, u64> = std::fs::read_to_string(&holds_file).ok().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
     println!("vector-pusher {} listening on {}", keys.public_key().to_hex(), relays.join(", "));
 
     let pusher = Arc::new(Pusher {
@@ -61,6 +71,8 @@ async fn main() {
         seen: Mutex::new((HashSet::new(), VecDeque::new())),
         buckets: Mutex::new(HashMap::new()),
         gone: Mutex::new(HashMap::new()),
+        holds: Mutex::new(holds),
+        holds_file,
     });
 
     let client = ClientBuilder::new().build();
@@ -81,7 +93,8 @@ async fn main() {
 
     let reporter = pusher.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(600));
+        let every = std::env::var("PUSHER_REPORT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let mut tick = tokio::time::interval(Duration::from_secs(every));
         tick.tick().await;
         loop {
             tick.tick().await;
@@ -128,10 +141,22 @@ impl Pusher {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let Some((cap, body, ttl)) = self.open(&event) else {
+        let req = match Incoming::open(&self.keys, &event) {
+            Ok(Incoming::Push(req)) => req,
+            Ok(Incoming::Control(ctl)) => return self.control(ctl.ctl),
+            Err(_) => {
+                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        let Some((cap, body, ttl)) = self.open(req) else {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        if self.is_held(&cap.cap) {
+            self.stats.held.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         if self.is_gone(&cap.endpoint) {
             self.stats.gone.fetch_add(1, Ordering::Relaxed);
             return;
@@ -177,8 +202,7 @@ impl Pusher {
         }
     }
 
-    fn open(&self, event: &Event) -> Option<(ticket::Capability, Vec<u8>, u32)> {
-        let req = Request::open(&self.keys, event).ok()?;
+    fn open(&self, req: Request) -> Option<(ticket::Capability, Vec<u8>, u32)> {
         let body = req.body().ok()?;
         // Every honest body is exactly this size; anything else is not ours to send.
         if body.len() != webpush::BODY_LEN {
@@ -187,6 +211,36 @@ impl Pusher {
         let cap = ticket::unseal(self.keys.secret_key(), &req.s).ok()?;
         vapid::origin(&cap.endpoint)?;
         Some((cap, body, req.t.min(MAX_TTL)))
+    }
+
+    /// A device holding or releasing some of its contacts. Ids are only ever learned from a
+    /// ticket's sealed part, so whoever names one owns it.
+    fn control(&self, holds: Vec<vector_push::Hold>) {
+        self.stats.controls.fetch_add(1, Ordering::Relaxed);
+        let now = unix_now();
+        let snapshot = {
+            let mut map = self.holds.lock().unwrap();
+            for h in holds.into_iter().take(10_000) {
+                if h.c.len() != 32 || !h.c.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                if h.until == HOLD_FOREVER || h.until > now {
+                    map.insert(h.c, h.until);
+                } else {
+                    map.remove(&h.c);
+                }
+            }
+            map.retain(|_, until| *until == HOLD_FOREVER || *until > now);
+            serde_json::to_string(&*map).unwrap_or_default()
+        };
+        let tmp = format!("{}.tmp", self.holds_file);
+        if std::fs::write(&tmp, snapshot).and_then(|_| std::fs::rename(&tmp, &self.holds_file)).is_err() {
+            eprintln!("holds not saved");
+        }
+    }
+
+    fn is_held(&self, cap: &str) -> bool {
+        self.holds.lock().unwrap().get(cap).is_some_and(|&until| until == HOLD_FOREVER || until > unix_now())
     }
 
     fn take_token(&self, key: &str) -> bool {
@@ -214,12 +268,14 @@ impl Pusher {
     fn report(&self) {
         let s = &self.stats;
         println!(
-            "delivered {} gone {} failed {} rejected {} limited {}",
+            "delivered {} held {} gone {} failed {} rejected {} limited {} controls {}",
             s.delivered.load(Ordering::Relaxed),
+            s.held.load(Ordering::Relaxed),
             s.gone.load(Ordering::Relaxed),
             s.failed.load(Ordering::Relaxed),
             s.rejected.load(Ordering::Relaxed),
             s.limited.load(Ordering::Relaxed),
+            s.controls.load(Ordering::Relaxed),
         );
     }
 }

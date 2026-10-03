@@ -39,6 +39,9 @@ struct Issued {
     /// The device id this contact last received a ticket for.
     #[serde(default)]
     sent: String,
+    /// The hold last confirmed at the pusher, unix seconds (0 = none).
+    #[serde(default)]
+    held: u64,
 }
 
 const DEVICE_KEY: &str = "push_device";
@@ -112,7 +115,7 @@ pub async fn disable() -> Result<(), String> {
 /// Returns whether a ticket was sent.
 pub async fn share_with(npub: &str) -> Result<bool, String> {
     let Some(device) = device() else { return Ok(false) };
-    if my_public_key().and_then(|pk| pk.to_bech32().ok()).as_deref() == Some(npub) {
+    if my_public_key().and_then(|pk| pk.to_bech32().ok()).as_deref() == Some(npub) || is_blocked(npub).await {
         return Ok(false);
     }
     let ticket = {
@@ -127,6 +130,8 @@ pub async fn share_with(npub: &str) -> Result<bool, String> {
         save(ISSUED_KEY, &issued)?;
         if fresh {
             crate::emit_event("push_contacts_changed", &serde_json::json!({}));
+            // Someone muted before they ever held a ticket starts out held.
+            controls_changed();
         }
         ticket
     };
@@ -141,7 +146,7 @@ pub async fn share_with(npub: &str) -> Result<bool, String> {
 }
 
 fn new_issued() -> Issued {
-    Issued { cap: random_hex::<16>(), h: random_hex::<8>(), mk: random_hex::<32>(), sent: String::new() }
+    Issued { cap: random_hex::<16>(), h: random_hex::<8>(), mk: random_hex::<32>(), sent: String::new(), held: 0 }
 }
 
 /// Make the handles and keys for these contacts now, so the device's service worker knows
@@ -224,6 +229,101 @@ pub async fn worker_contacts() -> serde_json::Value {
         out.insert(i.h, serde_json::json!({ "npub": npub, "name": name, "mk": i.mk }));
     }
     serde_json::Value::Object(out)
+}
+
+// ============================================================================
+// Holds: muted, blocked, or on screen right now
+// ============================================================================
+
+/// How long "I'm looking at this chat" holds pushes without being renewed. The page renews it
+/// well inside this, and a lost release (the app frozen as it left) runs out on its own.
+const VIEWING_LEASE: u64 = 45;
+
+/// The chat on screen on this device, and until when that holds its pushes.
+struct Viewing;
+fn viewing_slot() -> Arc<std::sync::Mutex<Option<(String, u64)>>> {
+    crate::db::current_session().scoped::<Viewing, _>()
+}
+
+fn now_secs() -> u64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+async fn is_blocked(npub: &str) -> bool {
+    STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked())
+}
+
+/// The chat on screen, or None once it isn't. Renewing the same chat extends its lease.
+pub async fn viewing(npub: Option<String>) -> Result<(), String> {
+    *viewing_slot().lock().unwrap() = npub.map(|n| (n, now_secs() + VIEWING_LEASE));
+    reconcile_holds().await
+}
+
+/// How long `npub`'s pushes should be held: forever if blocked or muted indefinitely, until a
+/// timed mute ends, or while their chat is on screen, whichever is longest.
+async fn wanted_hold(npub: &str, now: u64) -> u64 {
+    if is_blocked(npub).await {
+        return vector_push::HOLD_FOREVER;
+    }
+    let mute = crate::notify::prefs(npub).mute_until;
+    let muted = match mute {
+        -1 => vector_push::HOLD_FOREVER,
+        ms if ms > 0 && (ms / 1000) as u64 > now => (ms / 1000) as u64,
+        _ => 0,
+    };
+    let seen = viewing_slot().lock().unwrap().as_ref().filter(|(n, until)| n == npub && *until > now).map_or(0, |(_, until)| *until);
+    muted.max(seen)
+}
+
+/// Mutes, blocks or the chat on screen moved: bring the pusher's holds in line.
+pub fn controls_changed() {
+    if device().is_none() {
+        return;
+    }
+    crate::db::spawn_bound(async {
+        if let Err(e) = reconcile_holds().await {
+            crate::log_warn!("[Push] holds not updated: {}", e);
+        }
+    });
+}
+
+/// Tell the pusher every hold that differs from what it last confirmed. A hold that ran out on
+/// its own already matches "none", so expiry costs nothing.
+pub async fn reconcile_holds() -> Result<(), String> {
+    if device().is_none() {
+        return Ok(());
+    }
+    let now = now_secs();
+    let issued: HashMap<String, Issued> = {
+        let _g = lock().lock_owned().await;
+        load(ISSUED_KEY)
+    };
+    let mut changes: Vec<(String, vector_push::Hold)> = Vec::new();
+    for (npub, i) in &issued {
+        let want = wanted_hold(npub, now).await;
+        let have = if i.held != vector_push::HOLD_FOREVER && i.held <= now { 0 } else { i.held };
+        if want != have {
+            changes.push((npub.clone(), vector_push::Hold { c: i.cap.clone(), until: want }));
+        }
+    }
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let (key, relays) = pusher();
+    let pusher_pk = PublicKey::from_hex(key).map_err(|e| e.to_string())?;
+    let event = vector_push::Control::new(changes.iter().map(|(_, h)| h.clone()).collect())
+        .event(&pusher_pk)
+        .map_err(|e| e.to_string())?;
+    let client = nostr_client().ok_or("Not connected")?;
+    publish(&client, &relays, &event).await?;
+    let _g = lock().lock_owned().await;
+    let mut issued: HashMap<String, Issued> = load(ISSUED_KEY);
+    for (npub, hold) in changes {
+        if let Some(i) = issued.get_mut(&npub).filter(|i| i.cap == hold.c) {
+            i.held = hold.until;
+        }
+    }
+    save(ISSUED_KEY, &issued)
 }
 
 // ============================================================================
