@@ -411,7 +411,7 @@ fn get_bunker_status() -> Result<Value, String> {
 }
 
 /// Back out of a signer login that never committed. A committed account is left alone.
-async fn cancel_session() -> Result<Value, String> {
+pub(crate) async fn cancel_session() -> Result<Value, String> {
     PAIRING.fetch_add(1, Ordering::AcqRel);
     if !account::has_pending() {
         // A pairing still waiting on the signer; a signed-in session keeps its signer.

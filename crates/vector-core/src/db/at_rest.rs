@@ -1608,7 +1608,7 @@ pub async fn upgrade_after_unlock(password: &str, legacy_key: &[u8; 32]) -> Resu
     if crate::db::get_sql_setting("security_type".to_string())?.as_deref() == Some("biometric") {
         return Ok(false);
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let last_try: u64 = crate::db::get_sql_setting("kdf_upgrade_attempt".to_string())?.and_then(|v| v.parse().ok()).unwrap_or(0);
     if now.saturating_sub(last_try) < RETRY_AFTER_SECS {
         return Ok(false);
@@ -1650,13 +1650,64 @@ pub const CREDENTIAL_REQUIRED: &str = "CREDENTIAL_REQUIRED";
 /// The PIN or password typed does not open this account.
 pub const CREDENTIAL_INCORRECT: &str = "CREDENTIAL_INCORRECT";
 
+/// Too many wrong credentials in a row: `CREDENTIAL_LOCKED:<seconds until the next try>`.
+pub const CREDENTIAL_LOCKED: &str = "CREDENTIAL_LOCKED";
+/// Wrong credentials allowed before each further miss doubles the wait.
+const FREE_TRIES: u32 = 5;
+/// The longest wait a miss can earn.
+const MAX_WAIT_SECS: u64 = 15 * 60;
+/// One proof at a time, so parallel guesses can't all pass the wait before any miss is counted.
+static PROVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The account's key, derived from what the user typed and proven against the store. Gated actions
 /// run on this rather than the session's vault, so a caller holding only the session gets nothing.
+/// Misses past the first few wait longer each time, across restarts, so a script that can call
+/// this can't walk the PIN space.
 pub async fn prove_credential(credential: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let _one_at_a_time = PROVING.lock().await;
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let read = |key: &str| crate::db::get_sql_setting(key.to_string()).ok().flatten().and_then(|v| v.parse::<u64>().ok());
+    if let Some(retry_at) = read("credential_retry_at").filter(|&t| t > now) {
+        // A wait longer than any miss earns means the clock went back; count it from now instead.
+        let wait = if retry_at - now > MAX_WAIT_SECS {
+            let _ = crate::db::set_sql_setting("credential_retry_at".to_string(), (now + MAX_WAIT_SECS).to_string());
+            MAX_WAIT_SECS
+        } else {
+            retry_at - now
+        };
+        return Err(format!("{CREDENTIAL_LOCKED}:{wait}"));
+    }
     let kdf = crate::crypto::Kdf::of_account()?;
     let key = zeroize::Zeroizing::new(crate::crypto::derive_key(credential, &kdf).await);
-    prove_key(&key)?;
+    if let Err(e) = prove_key(&key) {
+        if e == CREDENTIAL_INCORRECT {
+            let failures = record_miss()?;
+            if failures >= FREE_TRIES {
+                let wait = (30u64 << (failures - FREE_TRIES).min(5)).min(MAX_WAIT_SECS);
+                let _ = crate::db::set_sql_setting("credential_retry_at".to_string(), (now + wait).to_string());
+            }
+        }
+        return Err(e);
+    }
+    if read("credential_failures").is_some() {
+        let _ = crate::db::remove_setting("credential_failures");
+        let _ = crate::db::remove_setting("credential_retry_at");
+    }
     Ok(key)
+}
+
+/// Count one miss in a single statement and return the running total.
+fn record_miss() -> Result<u32, String> {
+    let conn = crate::db::get_write_connection_guard_static()?;
+    conn.query_row(
+        "INSERT INTO settings (key, value) VALUES ('credential_failures', '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         RETURNING CAST(value AS INTEGER)",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n.clamp(0, u32::MAX as i64) as u32)
+    .map_err(|e| format!("count credential miss: {e}"))
 }
 
 /// `Ok` only when `key` opens a positive anchor in this store.
@@ -1687,7 +1738,20 @@ pub fn open_identity_secrets(
     if !nsec.starts_with("nsec1") {
         return Err("The stored private key is unreadable".to_string());
     }
-    let seed = read("seed")?.map(open).transpose()?;
+    let seed = match (read("seed")?, key) {
+        (None, _) => None,
+        (Some(stored), None) => Some(zeroize::Zeroizing::new(stored)),
+        (Some(stored), Some(k)) => match decrypt_with_key(&stored, k) {
+            Ok(plain) => Some(zeroize::Zeroizing::new(plain)),
+            // A seed written before encryption covered it is still a phrase; anything else
+            // unreadable stays behind rather than failing the whole export.
+            Err(_) if stored.contains(' ') => Some(zeroize::Zeroizing::new(stored)),
+            Err(_) => {
+                crate::log_warn!("[Encryption] The stored seed phrase doesn't open; leaving it out");
+                None
+            }
+        },
+    };
     Ok((nsec, seed))
 }
 

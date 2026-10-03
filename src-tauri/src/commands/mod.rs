@@ -26,6 +26,7 @@ pub mod messaging;
 pub mod self_destruct;
 pub mod realtime;
 pub mod encryption;
+pub mod transfer;
 pub mod audio;
 pub mod tor;
 pub mod emoji_packs;

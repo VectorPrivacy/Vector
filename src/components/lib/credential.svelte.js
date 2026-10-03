@@ -2,7 +2,7 @@
 // encryption migration overlay. settings.js opens each and owns the promise; the modal
 // answers through `handlers`.
 const c = $state({
-    open: false, mode: 'pin', title: '', subtitle: '', subtitleGradient: false,
+    open: false, mode: 'pin', title: '', subtitle: '', subtitleGradient: false, subtitleError: false,
     confirmText: 'Confirm', selectedType: 'pin', password: '', pinTick: 0,
 });
 let handlers = $state.raw(null);   // { cancel(), submit(value) }
@@ -10,7 +10,7 @@ let handlers = $state.raw(null);   // { cancel(), submit(value) }
 export function credentialState() { return c; }
 export function credentialHandlers() { return handlers; }
 export function openCredentialDialog(view, h) {
-    Object.assign(c, { mode: 'pin', subtitle: '', subtitleGradient: false, confirmText: 'Confirm', selectedType: 'pin', password: '' }, view, { open: true });
+    Object.assign(c, { mode: 'pin', subtitle: '', subtitleGradient: false, subtitleError: false, confirmText: 'Confirm', selectedType: 'pin', password: '' }, view, { open: true });
     c.pinTick++;
     handlers = h;
 }

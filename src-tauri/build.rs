@@ -128,6 +128,12 @@ fn main() {
             "load_mls_device_id",
             "load_mls_keypackages",
             "export_keys",
+            "transfer_start",
+            "transfer_check_number",
+            "transfer_approve",
+            "transfer_deny",
+            "transfer_cancel",
+            "transfer_finish",
             "regenerate_device_keypackage",
             // MLS core commands
             "upload_group_avatar",

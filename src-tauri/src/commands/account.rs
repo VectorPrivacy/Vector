@@ -9,7 +9,7 @@
 
 use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use std::sync::atomic::AtomicBool;
 use crate::{STATE, TAURI_APP, nostr_client, set_my_public_key, MY_SECRET_KEY, MNEMONIC_SEED, PENDING_NSEC, active_trusted_relays};
@@ -127,52 +127,45 @@ pub async fn login<R: Runtime>(
     handle: AppHandle<R>,
     mut import_key: String,
 ) -> Result<LoginResult, String> {
+    let keys = if import_key.starts_with("nsec") {
+        let parsed = Keys::parse(&import_key).map_err(|_| String::from("Invalid nsec"));
+        import_key.zeroize();
+        parsed?
+    } else {
+        // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
+        let mnemonic_copy = Zeroizing::new(std::mem::take(&mut import_key));
+        Keys::from_mnemonic(mnemonic_copy.as_str(), Some("")).map_err(|_| String::from("Invalid Seed Phrase"))?
+    };
+    login_with_keys(handle, keys, None).await
+}
+
+/// Sign in with keys already in hand: a typed import, or an account another device sent. `seed`
+/// rides into the setup commit with the key.
+pub(crate) async fn login_with_keys<R: Runtime>(
+    handle: AppHandle<R>,
+    keys: Keys,
+    seed: Option<Zeroizing<String>>,
+) -> Result<LoginResult, String> {
     // Not account creation: an abandoned creation must not stamp
     // an empty kind-0 over this identity's real profile (login (import / paste)).
     disarm_fresh_account_stamp();
-    let keys: Keys;
 
     // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
     if let Some(_client) = nostr_client() {
-        // Validated user input — propagate the parse error instead of
-        // panicking on malformed nsec/mnemonic.
-        let new_keys = Keys::parse(&import_key)
-            .map_err(|_| String::from("Invalid key — could not parse"))?;
-
-        /* Derive our Public Key from the Import and Existing key sets.
-         * Both bech32 conversions are infallible for a valid PublicKey, but
+        /* Both bech32 conversions are infallible for a valid PublicKey, but
          * we surface the error rather than panic to keep the function
          * panic-free under partial-reset / swap-race conditions. */
         let prev_npub = crate::my_public_key()
             .ok_or("Public key not initialized")?
             .to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;
-        let new_npub = new_keys.public_key().to_bech32()
+        let new_npub = keys.public_key().to_bech32()
             .map_err(|e| format!("Bech32 error: {}", e))?;
         if prev_npub == new_npub {
             return Ok(LoginResult { public: prev_npub, existing: false });
         } else {
             return Err(String::from("An existing Nostr Client instance exists, but a second incompatible key import was requested."));
         }
-    }
-
-    // If it's an nsec, import that
-    if import_key.starts_with("nsec") {
-        match Keys::parse(&import_key) {
-            Ok(parsed) => keys = parsed,
-            Err(_) => return Err(String::from("Invalid nsec")),
-        };
-        // Zeroize the nsec string — Keys struct has the parsed data
-        import_key.zeroize();
-    } else {
-        // Otherwise, we'll try importing it as a mnemonic seed phrase (BIP-39)
-        // from_mnemonic takes ownership, so clone for zeroize
-        let mnemonic_copy = import_key.clone();
-        import_key.zeroize();
-        match Keys::from_mnemonic(mnemonic_copy, Some(String::new())) {
-            Ok(parsed) => keys = parsed,
-            Err(_) => return Err(String::from("Invalid Seed Phrase")),
-        };
     }
 
     // Existing-account collision: typing in / pasting an nsec for an account
@@ -195,6 +188,11 @@ pub async fn login<R: Runtime>(
     {
         let mut pending = PENDING_NSEC.lock().unwrap();
         *pending = Some(keys.secret_key().to_bech32().unwrap());
+    }
+    {
+        let mut pending_seed = MNEMONIC_SEED.lock().unwrap();
+        if let Some(stale) = pending_seed.as_mut() { stale.zeroize(); }
+        *pending_seed = seed.map(|s| s.to_string());
     }
 
     // Store secret key in the guarded vault, then construct the client with GuardedSigner
@@ -518,11 +516,21 @@ pub async fn cancel_bunker_session() -> Result<(), String> {
     // Only drain when there's no committed account — if the user is fully
     // logged in (e.g. they hit Back from an active-account context), we
     // mustn't tear down their session.
-    if account_manager::get_current_account().is_ok() {
+    if staged_account_is_committed() {
         return Ok(());
     }
     clear_pending_bunker_session().await;
     Ok(())
+}
+
+/// Whether the account this session points at is committed. An import picks its account (and
+/// makes its database) before the security step commits the key; that one doesn't count.
+fn staged_account_is_committed() -> bool {
+    let Ok(npub) = account_manager::get_current_account() else { return false };
+    match TAURI_APP.get() {
+        Some(handle) => account_manager::account_is_valid(handle, &npub).unwrap_or(true),
+        None => true,
+    }
 }
 
 /// Drain a half-staged bunker session — the in-memory state installed by
@@ -531,14 +539,19 @@ pub async fn cancel_bunker_session() -> Result<(), String> {
 /// top of those commands AND from the back-button path, so a user who
 /// bails out of the bunker screen doesn't leak a NOSTR_CLIENT into the
 /// next attempt.
-async fn clear_pending_bunker_session() {
+pub(crate) async fn clear_pending_bunker_session() {
     use zeroize::Zeroize;
     // Defensive re-check: a concurrent `setup_encryption` / `skip_encryption`
     // could have committed the account between the public guard and here.
     // Refusing to drain a fully-committed session means a TOCTOU race
     // window can't accidentally tear down an active login.
-    if account_manager::get_current_account().is_ok() {
+    if staged_account_is_committed() {
         return;
+    }
+    // An abandoned import left its uncommitted account selected.
+    if account_manager::get_current_account().is_ok() {
+        account_manager::close_db_connection();
+        vector_core::db::clear_current_account_in_memory();
     }
     if let Some(b) = vector_core::drain_bunker_state() {
         let _ = b.shutdown().await;
@@ -547,6 +560,7 @@ async fn clear_pending_bunker_session() {
     crate::ENCRYPTION_KEY.clear(&[&MY_SECRET_KEY]);
     vector_core::clear_my_public_key();
     vector_core::clear_pending_bunker_setup();
+    vector_core::clear_pending_nip55_setup();
     {
         let mut g = PENDING_NSEC.lock().unwrap();
         if let Some(ref mut s) = *g { s.zeroize(); }

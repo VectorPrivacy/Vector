@@ -1100,6 +1100,17 @@ async function importKey() {
     }
 }
 
+/** Sign in with the account another device sent. Connecting runs on behind the security step, as
+ *  for a signer login, so a slow relay can't hold the card open. */
+async function finishTransfer() {
+    if (addAccountFlow.active && !addAccountFlow.committed) await addAccountFlow.commit();
+    const { public: pubKey, existing } = await invoke('transfer_finish');
+    strPubkey = pubKey;
+    if (existing) return;
+    openEncryptionFlow(false);
+    invoke('connect').catch((err) => console.warn('[transfer] connect() failed:', err));
+}
+
 /** NIP-55 offline signer (Amber): the button only shows once the signer app is known to be installed. */
 async function loginWithNip55() {
     VectorSvelte.patchLogin({ nip55Busy: true });
@@ -1243,7 +1254,8 @@ async function loginBack() {
     // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
     // staged session exists.
     const wasOnBunkerForm = VectorSvelte.loginState().bunker;
-    if (wasOnBunkerForm) {
+    // Leaving the security step abandons a created or imported key the same way.
+    if (wasOnBunkerForm || VectorSvelte.loginState().screen === 'encrypt') {
         invoke('cancel_bunker_session').catch((err) => {
             console.warn('[back] cancel_bunker_session failed:', err);
         });
@@ -1285,6 +1297,7 @@ async function loginBack() {
  * @property {() => void} createAccount
  * @property {() => void} openImport
  * @property {() => void} importKey
+ * @property {() => void} transfer
  * @property {() => void} invite
  * @property {() => void} nip55
  * @property {() => void} nip07
@@ -1299,6 +1312,7 @@ const LOGIN_HELPERS = {
     createAccount: () => createAccount(),
     openImport: () => openImportScreen(),
     importKey: () => importKey(),
+    transfer: () => openTransfer(false),
     invite: () => submitInvite(),
     nip55: () => loginWithNip55(),
     nip07: () => loginWithNip07(),

@@ -307,7 +307,7 @@ pub fn touch_last_active() -> Result<(), String> {
 /// Opens read-only + `NO_MUTEX` so probing an inactive account never
 /// creates WAL/SHM sidecar files and never blocks the active account's
 /// writer.
-fn account_is_valid<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<bool, String> {
+pub(crate) fn account_is_valid<R: Runtime>(handle: &AppHandle<R>, npub: &str) -> Result<bool, String> {
     let db_path = get_database_path(handle, npub)?;
 
     if !db_path.exists() {

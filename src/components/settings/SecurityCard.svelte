@@ -5,7 +5,7 @@
     import { securityState } from '../lib/settings.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
 
-    let { h } = $props();   // h: toggleEncryption(on), changeCredential(), switchUnlock(), reauthorize(), exportAccount(), help(key)
+    let { h } = $props();   // h: toggleEncryption(on), changeCredential(), switchUnlock(), reauthorize(), exportAccount(), transfer(), help(key)
 
     const s = securityState();
     const isBio = $derived(s.type === 'biometric');
@@ -15,6 +15,8 @@
     // The box follows the user's flip until the app confirms or reverts the state.
     let checked = $state(false);
     $effect(() => { s.seq; checked = s.enabled; });
+    // The raw keys sit behind Advanced: moving devices is what nearly everyone wants.
+    let advancedOpen = $state(false);
 </script>
 
 {#if s.signer}
@@ -67,13 +69,25 @@
     </div>
 {/if}
 
-<!-- An external signer keeps the identity key off this device, so Export goes. -->
+<!-- An external signer keeps the identity key off this device, so Export and transfer go. -->
 {#if !s.signer}
     <div class="danger-option">
         <div class="left-group">
-            <InfoIcon onclick={() => h.help('exportAccount')} />
-            <span>Export Account</span>
+            <InfoIcon onclick={() => h.help('transfer')} />
+            <span>Sign in on Another Device</span>
         </div>
-        <button class="cancel-btn" onclick={() => h.exportAccount()}>Export</button>
+        <button class="cancel-btn" onclick={() => h.transfer()}>Start</button>
     </div>
+    <button type="button" class="sec-advanced-toggle" aria-expanded={advancedOpen} onclick={() => { advancedOpen = !advancedOpen; }}>
+        <span class="icon icon-chevron-down sec-advanced-chevron" class:open={advancedOpen} aria-hidden="true"></span>Advanced
+    </button>
+    {#if advancedOpen}
+        <div class="danger-option sec-advanced-row">
+            <div class="left-group">
+                <InfoIcon onclick={() => h.help('exportAccount')} />
+                <span>Private Keys</span>
+            </div>
+            <button class="cancel-btn" onclick={() => h.exportAccount()}>Show</button>
+        </div>
+    {/if}
 {/if}

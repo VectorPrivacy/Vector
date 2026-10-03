@@ -5,6 +5,8 @@
 let qrScanStream = null;
 let qrScanRafId = 0;
 let qrScanToastGate = false;
+/** A flow that opened the scanner for itself gets what it reads; it answers true if it took it. */
+let qrScanTaker = null;
 // The scanner's video element, handed over by the component once it mounts.
 let qrScanVideo = null;
 VectorSvelte.setScreen('qrScanner', { h: { video: (el) => { qrScanVideo = el; }, close: () => closeQrScanner() } });
@@ -30,7 +32,9 @@ async function pickPrimaryRearCamera() {
 
 const QR_SCAN_RESOLUTION = { width: { ideal: 1280 }, height: { ideal: 720 } };
 
-async function openQrScanner() {
+/** Open the camera. A `taker` gets the reads only once the camera is live, so a refused or busy
+ *  camera never leaves one waiting for a later scan. */
+async function openQrScanner(taker = null) {
     if (qrScanStream) return;
     const video = qrScanVideo;
     try {
@@ -75,6 +79,7 @@ async function openQrScanner() {
     if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(reveal);
     else video.addEventListener('loadeddata', reveal, { once: true });
     video.play().catch(() => {});
+    qrScanTaker = taker;
     VectorSvelte.setQrScanner({ active: true });
     pushBack('qr-scanner', closeQrScanner);
 
@@ -100,7 +105,13 @@ async function openQrScanner() {
     qrScanRafId = requestAnimationFrame(tick);
 }
 
+/** Open the scanner for one flow: `taker(text)` sees every read and says whether it was its own. */
+function scanFor(taker) {
+    openQrScanner(taker);
+}
+
 function closeQrScanner() {
+    qrScanTaker = null;
     cancelAnimationFrame(qrScanRafId);
     qrScanRafId = 0;
     if (qrScanStream) {
@@ -143,6 +154,20 @@ function parseContactInput(text) {
 
 /** Route a decoded QR payload: profile npubs and Community invites. */
 async function handleScannedQr(text) {
+    if (qrScanTaker) {
+        if (qrScanTaker(text)) closeQrScanner();
+        else nudgeNotOurQr('Not a transfer code');
+        return;
+    }
+    // A transfer code is never routed from here: sending an account starts only from Settings.
+    if (/^\s*vector transfer code:/i.test(text)) {
+        closeQrScanner();
+        await dismissNewChatForScan();
+        popupConfirm('Transfer Code',
+            'To sign this account in on another device, open Settings and choose Sign in on another device.',
+            true, '', 'vector_warning.svg');
+        return;
+    }
     const parsed = parseContactInput(text);
     if (parsed) {
         closeQrScanner();
@@ -154,11 +179,14 @@ async function handleScannedQr(text) {
         }
         return;
     }
-    // Unrecognised: stay live so the user can re-aim, without toast-spamming
-    if (!qrScanToastGate) {
-        qrScanToastGate = true;
-        showToast('Not a Vector QR code');
-        setTimeout(() => { qrScanToastGate = false; }, 3000);
-    }
+    // Unrecognised: stay live so the user can re-aim
+    nudgeNotOurQr('Not a Vector QR code');
+}
+
+function nudgeNotOurQr(message) {
+    if (qrScanToastGate) return;
+    qrScanToastGate = true;
+    showToast(message);
+    setTimeout(() => { qrScanToastGate = false; }, 3000);
 }
 

@@ -151,3 +151,74 @@ impl<T: ?Sized> MaybeSend for T {}
 /// Wall clock and `Instant` that work on both targets, for `#[macro_export]`
 /// macros that expand in crates without a `web-time` dependency.
 pub use web_time as time_std;
+
+#[cfg(test)]
+mod clock_audit {
+    /// `std::time::{SystemTime, Instant}` panic on wasm32 ("time not implemented on this
+    /// platform"), so Vector Web dies wherever one runs. Code shared with the web reads the clock
+    /// through `web_time` or `rt::time`; test modules may use std.
+    #[test]
+    fn shared_code_never_reads_the_std_clock() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        let mut scanned = 0usize;
+        let mut stack = vec![root.join("src"), root.join("../vector-web/src")];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                stack.extend(std::fs::read_dir(&path).into_iter().flatten().flatten().map(|e| e.path()));
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            scanned += 1;
+            // Inside a `#[cfg(test)]` item: the depth its braces must close back to.
+            let (mut depth, mut skip_to): (i64, Option<i64>) = (0, None);
+            let mut pending_test = false;
+            // Inside a `use std::time::{ ... }` that spans lines.
+            let mut in_time_use = false;
+            for (i, line) in src.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if code.trim_start().starts_with("#[cfg(test)]") {
+                    pending_test = true;
+                    continue;
+                }
+                let before = depth;
+                depth += code.matches('{').count() as i64 - code.matches('}').count() as i64;
+                if pending_test && !code.trim().is_empty() && !code.trim_start().starts_with("#[") {
+                    // The first real line after the attribute starts the test item: a block to skip,
+                    // or a one-line item (`static ..;`, `fn f() { .. }`) that is test code by itself.
+                    pending_test = false;
+                    if depth > before {
+                        skip_to = Some(before);
+                    } else {
+                        continue;
+                    }
+                }
+                if let Some(level) = skip_to {
+                    if depth <= level {
+                        skip_to = None;
+                    }
+                    continue;
+                }
+                if code.contains("use std::time::{") || code.contains("use std::{") {
+                    in_time_use = true;
+                }
+                let names_clock = code.contains("SystemTime") || code.contains("Instant");
+                if code.contains("std::time::SystemTime") || code.contains("std::time::Instant")
+                    || code.contains("use std::time::*")
+                    || (code.contains("use std::time::") && names_clock)
+                    || (in_time_use && names_clock && (code.contains("time::") || !code.contains("use std::{")))
+                {
+                    offenders.push(format!("{}:{}", path.display(), i + 1));
+                }
+                if in_time_use && code.contains('}') {
+                    in_time_use = false;
+                }
+            }
+        }
+        assert!(scanned > 50, "only scanned {scanned} files: the trees moved");
+        assert!(offenders.is_empty(), "std clock in code Vector Web runs, use web_time:\n  {}", offenders.join("\n  "));
+    }
+}

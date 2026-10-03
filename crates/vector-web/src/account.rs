@@ -223,17 +223,6 @@ fn touch_last_active() {
 }
 
 pub async fn login(mut import_key: String) -> Result<Value, String> {
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
-    if state::nostr_client().is_some() {
-        let keys = Keys::parse(&import_key).map_err(|_| "Invalid key — could not parse".to_string())?;
-        import_key.zeroize();
-        let current = vector_core::my_public_key().ok_or("Public key not initialized")?;
-        if current == keys.public_key() {
-            return Ok(json!({ "public": current.to_bech32().map_err(|e| e.to_string())?, "existing": false }));
-        }
-        return Err("An existing Nostr Client instance exists, but a second incompatible key import was requested.".into());
-    }
-
     let keys = if import_key.starts_with("nsec") {
         let parsed = Keys::parse(&import_key).map_err(|_| "Invalid nsec".to_string());
         import_key.zeroize();
@@ -242,6 +231,20 @@ pub async fn login(mut import_key: String) -> Result<Value, String> {
         let phrase = Zeroizing::new(std::mem::take(&mut import_key));
         Keys::from_mnemonic(phrase.as_str(), Some("")).map_err(|_| "Invalid Seed Phrase".to_string())?
     };
+    login_with_keys(keys, None).await
+}
+
+/// Sign in with keys already in hand: a typed import, or an account another device sent. `seed`
+/// rides into the setup commit with the key.
+pub async fn login_with_keys(keys: Keys, seed: Option<Zeroizing<String>>) -> Result<Value, String> {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+    if state::nostr_client().is_some() {
+        let current = vector_core::my_public_key().ok_or("Public key not initialized")?;
+        if current == keys.public_key() {
+            return Ok(json!({ "public": current.to_bech32().map_err(|e| e.to_string())?, "existing": false }));
+        }
+        return Err("An existing Nostr Client instance exists, but a second incompatible key import was requested.".into());
+    }
 
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
     if is_committed(&npub) {
@@ -251,6 +254,13 @@ pub async fn login(mut import_key: String) -> Result<Value, String> {
     }
 
     *PENDING_NSEC.lock().unwrap() = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
+    {
+        let mut pending_seed = MNEMONIC_SEED.lock().unwrap();
+        if let Some(stale) = pending_seed.as_mut() {
+            stale.zeroize();
+        }
+        *pending_seed = seed.map(|s| s.to_string());
+    }
     store_identity(&keys);
     drop(keys);
     install_client();

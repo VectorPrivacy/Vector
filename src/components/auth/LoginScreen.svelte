@@ -171,6 +171,9 @@
                         <img src="./icons/login/swap.svg" alt="" width="18" height="20">
                     </button>
                 </div>
+                <button type="button" class="lg-transfer" onclick={() => h.transfer()}>
+                    <span class="lg-transfer-glyph" aria-hidden="true"></span>Sign in with another device
+                </button>
                 {#if t.shown}{@render torLine()}{/if}
                 {@render goBack()}
                 {#if l.nip55Shown}

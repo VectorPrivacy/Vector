@@ -4258,6 +4258,32 @@ mod tests {
         let proven = rt.block_on(at_rest::prove_credential("424242")).unwrap();
         let (nsec, seed) = open_identity_secrets(Some(&proven)).unwrap();
         assert_eq!((nsec.as_str(), seed.as_deref().map(|s| s.as_str())), ("nsec1identity", Some("abandon ability able")));
+
+        // Misses past the free ones lock even the right PIN out for a while, and a success clears them.
+        for _ in 0..4 {
+            assert_eq!(rt.block_on(at_rest::prove_credential("000000")).unwrap_err(), CREDENTIAL_INCORRECT);
+        }
+        assert_eq!(rt.block_on(at_rest::prove_credential("000000")).unwrap_err(), CREDENTIAL_INCORRECT);
+        let locked = rt.block_on(at_rest::prove_credential("424242")).unwrap_err();
+        assert!(locked.starts_with("CREDENTIAL_LOCKED:"), "{locked}");
+        crate::db::remove_setting("credential_retry_at").unwrap();
+        rt.block_on(at_rest::prove_credential("424242")).unwrap();
+        assert!(crate::db::get_sql_setting("credential_failures".to_string()).unwrap().is_none());
+
+        // A clock set back far can't stretch the wait past the longest one a miss earns.
+        let far = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_secs() + 86_400 * 30;
+        crate::db::set_sql_setting("credential_retry_at".to_string(), far.to_string()).unwrap();
+        let locked = rt.block_on(at_rest::prove_credential("424242")).unwrap_err();
+        let secs: u64 = locked.strip_prefix("CREDENTIAL_LOCKED:").unwrap().parse().unwrap();
+        assert!(secs <= 15 * 60, "{secs}");
+        crate::db::remove_setting("credential_retry_at").unwrap();
+
+        // A seed left in plaintext from before encryption still exports; one that won't open stays behind.
+        crate::db::set_seed("abandon ability able").unwrap();
+        assert_eq!(open_identity_secrets(Some(&proven)).unwrap().1.as_deref().map(|s| s.as_str()), Some("abandon ability able"));
+        crate::db::set_seed("deadbeef").unwrap();
+        let (nsec, seed) = open_identity_secrets(Some(&proven)).unwrap();
+        assert!(nsec.starts_with("nsec1") && seed.is_none());
     }
 
     /// Reads racing a stream of PIN changes always open: a row read just before a commit and

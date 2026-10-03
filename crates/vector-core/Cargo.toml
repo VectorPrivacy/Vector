@@ -80,6 +80,13 @@ hkdf = "0.12"
 # encrypt in tests. Both crates are already in the tree transitively.
 hmac = "0.12"
 chacha20 = "0.9"
+# Device transfer: SPAKE2 turns a short typed code into a strong shared key (the construction
+# magic-wormhole uses); curve25519-dalek checks the peer's point is not of small order.
+spake2 = "0.4"
+curve25519-dalek = "4"
+# Post-quantum half of the transfer key: ML-KEM-1024 (FIPS 203). Cryspen's implementation is
+# formally verified for correctness and secret independence; randomness comes from our own RNG.
+libcrux-ml-kem = { version = "0.0.10", default-features = false, features = ["mlkem1024"] }
 zeroize = { version = "1.8", features = ["derive"] }
 
 # HTTP
@@ -152,6 +159,8 @@ tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr
 # Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.
 aes-gcm = "0.11"
 chacha20poly1305 = "0.10.1"
+# Independent FIPS 203 implementation the transfer's ML-KEM is differentially tested against.
+ml-kem = { version = "0.2", features = ["deterministic"] }
 poly1305 = "0.8"
 tempfile = "3"
 # `test-util` (test-only — NOT in the production tokio features) enables tokio's virtual clock

@@ -754,74 +754,78 @@ async function logoutAccount() {
     }
 }
 
+/** Resolves the open Your Keys card's caller once the card closes. */
+let keysModalDone = null;
+/** Answers the "Show Private Keys?" step: true to go on to the keys. */
+let keysWarnAnswer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    VectorSvelte.setScreen('keysModal', { h: {
+        copy: (text) => navigator.clipboard.writeText(text),
+        close: closeKeysModal,
+        transfer: () => { closeKeysModal(); openTransfer(true); },
+        proceed: () => { keysWarnAnswer?.(true); keysWarnAnswer = null; },
+    } });
+}, { once: true });
+
+function closeKeysModal() {
+    if (VectorSvelte.keysModal.closing()) return;
+    popBack('keys-modal');
+    VectorSvelte.keysModal.close();
+    // The values leave the page once the card is gone.
+    setTimeout(() => {
+        if (!VectorSvelte.keysModal.state().active) VectorSvelte.keysModal.patch({ nsec: '', seed: '' });
+    }, 200);
+    keysModalDone?.();
+    keysModalDone = null;
+}
+
 /**
- * Show the account's keys in a popup with copy buttons. `saving` is the prompt for
- * a new account in a browser that keeps nothing: the keys are the only way back in.
+ * Show the account's keys. From Settings it first points at Sign in on Another Device, which is
+ * what nearly everyone wants. `saving` is the prompt for a new account in a browser that keeps
+ * nothing: the keys are the only way back in, so it goes straight to them and closes only on its
+ * button. Resolves when the card closes.
  */
 async function exportAccount({ saving = false } = {}) {
+    if (!saving && !(await confirmShowKeys())) return;
+    let keys;
     try {
         // A PIN or password account answers CREDENTIAL_REQUIRED; a biometric one raises the OS prompt.
-        let keys;
         try {
             keys = await invoke('export_keys');
         } catch (e) {
             if (String(e) !== 'CREDENTIAL_REQUIRED') throw e;
             const label = fSecurityType === 'password' ? 'password' : 'PIN';
-            keys = await withCurrentCredential('Export Account', `Enter your ${label} to show your keys.`,
+            keys = await withCurrentCredential('Show Private Keys', `Enter your ${label} to show your keys.`,
                 (credential) => invoke('export_keys', { credential }));
-            if (!keys) return;
         }
-        
-        // Create the export content with security warnings
-        // Escape values to prevent XSS from malicious DB content
-        const safeSeed = keys.seed_phrase ? escapeHtml(keys.seed_phrase) : '';
-        const safeNsec = escapeHtml(keys.nsec);
-
-        let exportContent = `
-        <div style="text-align: center; padding: 0 8px;">
-            <p style="color: var(--danger-pink); font-weight: bold; font-size: 15px; margin: 0 0 10px 0;">
-            <p style="opacity: 0.75; font-size: 13px; margin: 0 0 16px 0; word-break: break-word;">${saving
-                ? 'This browser keeps nothing once it closes. These keys are how you sign in again, and there is no other way back in. Never share them.'
-                : 'These keys are your identity on Vector. There are no recovery options! If lost, your account cannot be restored. Never share them.'}</p>
-        `;
-
-        // Both the seed phrase and the nsec are long single-line strings.
-        // We render each in its own horizontally-scrollable container with
-        // `min-width: 0` on the flex child so the popup doesn't get pushed
-        // wider than the viewport. The content stays on one line and the
-        // user scrolls/swipes horizontally to read it.
-        if (keys.seed_phrase) {
-        exportContent += `
-            <div style="text-align: left; padding: 0 8px; margin-bottom: 12px;">
-            <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Seed Phrase</p>
-            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
-                <p id="export-seed-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeSeed}</p>
-                <button data-action="copy-seed" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
-            </div>
-            </div>
-        `;
-        }
-
-        exportContent += `
-        <div style="text-align: left; padding: 0 8px;">
-            <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Private Key (nsec)</p>
-            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
-            <p id="export-nsec-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeNsec}</p>
-            <button data-action="copy-nsec" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
-            </div>
-            <p style="color: #4de0a0; font-size: 12px; margin: 8px 0 -10px 0; text-align: center;">Do Not Store on Device. Backup Offline.</p>
-        </div>
-        `;
-
-        await popupConfirm(saving ? 'Save Your Keys' : 'Export Account', exportContent, true, '', 'vector_warning.svg', '', saving ? "I've Saved Them" : null, false, {
-            'copy-seed': () => navigator.clipboard.writeText(keys.seed_phrase),
-            'copy-nsec': () => navigator.clipboard.writeText(keys.nsec),
-        });
     } catch (error) {
+        closeKeysModal();
         if (String(error).includes('BIOMETRIC_CANCELLED')) return;
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
+        return;
     }
+    if (!keys) {
+        closeKeysModal();
+        return;
+    }
+    await new Promise((resolve) => {
+        keysModalDone = resolve;
+        if (saving) VectorSvelte.keysModal.open({ stage: 'keys', saving, nsec: keys.nsec, seed: keys.seed_phrase || '' });
+        else VectorSvelte.keysModal.patch({ stage: 'keys', nsec: keys.nsec, seed: keys.seed_phrase || '' });
+    });
+}
+
+/** The "Show Private Keys?" step: resolves true to go on, false if the user went elsewhere or closed it. */
+function confirmShowKeys() {
+    keysModalDone?.();
+    return new Promise((resolve) => {
+        keysWarnAnswer = resolve;
+        keysModalDone = () => resolve(false);
+        VectorSvelte.keysModal.open({ stage: 'warn', saving: false, nsec: '', seed: '' });
+        pushBack('keys-modal', closeKeysModal);
+    });
 }
 
 // Privacy Settings - Simple global variables
@@ -1352,7 +1356,7 @@ async function switchToBiometricMode() {
     const label = fSecurityType === 'password' ? 'Password' : 'PIN';
     let credential;
     try {
-        credential = await askCurrentCredential(`Enter Current ${label}`, `Enter your current ${label.toLowerCase()} to switch to biometric unlock.`);
+        credential = await askCurrentCredential(`Enter Current ${label}`, `Enter your current ${credNoun(label)} to switch to biometric unlock.`);
     } catch (e) {
         await popupConfirm('Could not verify', escapeHtml(String(e)), true);
         return;
@@ -1480,23 +1484,30 @@ async function handleEnableEncryption() {
  * @param {string} opts.title - Modal title
  * @param {string} opts.subtitle - Subtitle / description text
  * @param {string} [opts.confirmText='Confirm'] - Text for the action button
+ * @param {boolean} [opts.error=false] - The subtitle reports a mistake (wrong or mismatched entry)
  * @returns {Promise<string|null>} - credential string, type string, or null if cancelled
  */
-function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm' }) {
+function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm', error = false }) {
     return new Promise((resolve) => {
         let done = false;
         const finish = (value) => {
             if (done) return;
             done = true;
+            popBack('credential');
             VectorSvelte.closeCredentialDialog();
             resolve(value);
         };
+        // Back answers the prompt, never the card it was opened over.
+        pushBack('credential', () => finish(null));
         VectorSvelte.openCredentialDialog(
-            { mode, title, subtitle, confirmText: mode === 'type-select' ? (confirmText || 'Continue') : confirmText },
+            { mode, title, subtitle, subtitleError: error, confirmText: mode === 'type-select' ? (confirmText || 'Continue') : confirmText },
             { cancel: () => finish(null), submit: (value) => finish(value) },
         );
     });
 }
+
+/** A credential as it reads mid-sentence: "PIN" keeps its capitals, "password" doesn't. */
+const credNoun = (label) => (label === 'PIN' ? 'PIN' : label.toLowerCase());
 
 /**
  * Ask for the current PIN or password until `attempt(credential)` accepts it; the modal holds,
@@ -1505,19 +1516,33 @@ function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm' })
 async function withCurrentCredential(title, subtitle, attempt) {
     const label = fSecurityType === 'password' ? 'Password' : 'PIN';
     let prompt = subtitle;
+    let mistake = false;
     while (true) {
-        const entered = await showCredentialModal({ mode: fSecurityType, title, subtitle: prompt });
+        const entered = await showCredentialModal({ mode: fSecurityType, title, subtitle: prompt, error: mistake });
         if (!entered) return undefined;
+        mistake = true;
         VectorSvelte.openCredentialDialog(
-            { mode: 'validating', title: `Validating ${label}...`, subtitle: 'Please wait', subtitleGradient: true },
+            { mode: 'validating', title, subtitle: `Checking your ${credNoun(label)}…` },
             { cancel: () => {}, submit: () => {} },
         );
+        // Back can't close what's underneath while the check runs.
+        let checking = true;
+        const hold = () => { if (checking) pushBack('credential', hold); };
+        pushBack('credential', hold);
         try {
             return await attempt(entered);
         } catch (e) {
+            const locked = String(e).match(/^CREDENTIAL_LOCKED:(\d+)/)?.[1];
+            if (locked) {
+                const secs = Number(locked);
+                prompt = `Too many wrong tries. Try again in ${secs >= 60 ? `${Math.ceil(secs / 60)} min` : `${secs} s`}.`;
+                continue;
+            }
             if (String(e) !== 'CREDENTIAL_INCORRECT') throw e;
-            prompt = `Incorrect ${label.toLowerCase()}, try again.`;
+            prompt = `Incorrect ${credNoun(label)}, try again.`;
         } finally {
+            checking = false;
+            popBack('credential');
             VectorSvelte.closeCredentialDialog();
         }
     }
@@ -1551,6 +1576,7 @@ async function promptSecurityCredential(title, message) {
     const label = secType === 'pin' ? 'PIN' : 'Password';
     const defaultSubtitle = secType === 'pin' ? 'Enter a 6-digit PIN.' : 'Enter a password (4+ characters).';
     let entrySubtitle = defaultSubtitle;
+    let entryError = false;
 
     // Loop: enter + confirm, retry inline on mismatch or too-short
     while (true) {
@@ -1559,12 +1585,14 @@ async function promptSecurityCredential(title, message) {
             mode: secType,
             title: `Create ${label}`,
             subtitle: entrySubtitle,
+            error: entryError,
         });
         if (!credential) return null;
 
         // Password length validation
         if (secType === 'password' && credential.length < 4) {
-            entrySubtitle = 'Too short! Must be at least 4 characters.';
+            entrySubtitle = 'Too short. Use at least 4 characters.';
+            entryError = true;
             continue;
         }
 
@@ -1572,12 +1600,13 @@ async function promptSecurityCredential(title, message) {
         const confirmed = await showCredentialModal({
             mode: secType,
             title: `Confirm ${label}`,
-            subtitle: `Re-enter your ${label.toLowerCase()}.`,
+            subtitle: `Re-enter your ${credNoun(label)}.`,
         });
         if (!confirmed) return null;
 
         if (confirmed !== credential) {
             entrySubtitle = `${label}s didn't match. Try again.`;
+            entryError = true;
             continue;
         }
 
@@ -1597,7 +1626,7 @@ async function handleChangeCredential() {
     try {
         oldCredential = await askCurrentCredential(
             `Enter Current ${currentLabel}`,
-            `Please enter your current ${currentLabel.toLowerCase()} to continue.`,
+            `Please enter your current ${credNoun(currentLabel)} to continue.`,
         );
     } catch (e) {
         await popupConfirm('Could not verify', escapeHtml(String(e)), true, '', 'vector_warning.svg');
@@ -1660,7 +1689,7 @@ async function handleDisableEncryption() {
     if (fSecurityType !== 'biometric') {
         const label = fSecurityType === 'password' ? 'Password' : 'PIN';
         try {
-            credential = await askCurrentCredential(`Enter ${label}`, `Enter your ${label.toLowerCase()} to turn off Local Encryption.`);
+            credential = await askCurrentCredential(`Enter ${label}`, `Enter your ${credNoun(label)} to turn off Local Encryption.`);
         } catch (e) {
             await popupConfirm('Could not verify', escapeHtml(String(e)), true, '', 'vector_warning.svg');
         }
@@ -1884,7 +1913,8 @@ const SETTINGS_HELP = {
         'Your local data is always encrypted. This chooses what unlocks it:<br><br>'
         + '<b>Biometrics</b> uses your device security (fingerprint, face, or device PIN) with a key held in hardware.<br><br>'
         + '<b>PIN or Password</b> uses a credential you type and remember.', 'vector-check.svg'],
-    exportAccount: ['Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.'],
+    exportAccount: ['Private Keys', 'Shows your private key and seed phrase. You only need these to back up your account offline or to use it in another Nostr app. To use Vector on another device, use Sign in on Another Device instead.'],
+    transfer: ['Sign in on Another Device', 'Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in.'],
     changePin: () => fSecurityType === 'password'
         ? ['Change Password', 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.']
         : ['Change PIN', 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.'],
@@ -2025,6 +2055,7 @@ const SETTINGS_HELPERS = {
         switchUnlock: switchUnlockMethod,
         reauthorize: reauthorizeSigner,
         exportAccount,
+        transfer: () => openTransfer(true),
         help: showSettingsHelp,
     },
     copyLogs,

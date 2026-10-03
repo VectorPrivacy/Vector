@@ -947,6 +947,12 @@ pub fn run() {
             commands::account::logout,
             commands::account::create_account,
             commands::account::export_keys,
+            commands::transfer::transfer_start,
+            commands::transfer::transfer_check_number,
+            commands::transfer::transfer_approve,
+            commands::transfer::transfer_deny,
+            commands::transfer::transfer_cancel,
+            commands::transfer::transfer_finish,
             // Relay commands (commands/relays.rs)
             commands::relays::get_relays,
             commands::relays::get_media_servers,

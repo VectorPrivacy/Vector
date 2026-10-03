@@ -33,6 +33,8 @@ export { setLaunchDialogHandlers, launchDialog } from './lib/miniapps.svelte.js'
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/network.svelte.js';
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
+export { keysModal } from './lib/keys.svelte.js';
+export { transferModal } from './lib/transfer.svelte.js';
 export { modOverlay } from './lib/moderation.svelte.js';
 export { csOverlay, csState, csDirty, csOpen, csLoaded, csSetDraft, csReset, csCommitted, csSetSaving, csNudge, csSetBans, csSetUnbanning, csRemoveBans, csOverviewDirty, csRoleOrderDirty, csRoleEditDirty, csSetRolesView, csSetRoleMembers, csSetRolesBusy, csSetRoleOrder, csEditRole } from './lib/community-settings.svelte.js';
 export { showDowngradeBlock } from './lib/overlays.svelte.js';

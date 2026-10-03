@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-cancel"
+description = "Enables the transfer_cancel command without any pre-configured scope."
+commands.allow = ["transfer_cancel"]
+
+[[permission]]
+identifier = "deny-transfer-cancel"
+description = "Denies the transfer_cancel command without any pre-configured scope."
+commands.deny = ["transfer_cancel"]

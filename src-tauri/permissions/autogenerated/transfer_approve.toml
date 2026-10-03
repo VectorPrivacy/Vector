@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-approve"
+description = "Enables the transfer_approve command without any pre-configured scope."
+commands.allow = ["transfer_approve"]
+
+[[permission]]
+identifier = "deny-transfer-approve"
+description = "Denies the transfer_approve command without any pre-configured scope."
+commands.deny = ["transfer_approve"]

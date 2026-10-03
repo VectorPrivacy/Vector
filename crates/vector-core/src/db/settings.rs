@@ -26,6 +26,7 @@ pub fn get_sql_setting_strict(key: &str) -> Result<Option<String>, String> {
 pub const PROTECTED_SETTINGS: &[&str] = &[
     "pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key", "kdf",
     "encryption_enabled", "security_type", "signer_type", "migration_state", "community_at_rest_encrypted",
+    "credential_failures", "credential_retry_at",
 ];
 
 /// Rows the generic settings commands never hand out: sealed secrets and their checks.
@@ -194,6 +195,9 @@ pub fn commit_account_setup(
 /// Record how the key everything in this transaction is sealed under was derived. `None` (no
 /// encryption) leaves no row; a missing row on an encrypted account means the legacy salt.
 pub(crate) fn write_kdf_in_tx(tx: &rusqlite::Transaction, kdf: Option<&str>) -> Result<(), String> {
+    // A new credential, or none, starts with fresh tries.
+    tx.execute("DELETE FROM settings WHERE key IN ('credential_failures', 'credential_retry_at')", [])
+        .map_err(|e| format!("Failed to reset credential tries: {e}"))?;
     match kdf {
         Some(k) => tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('kdf', ?1)", rusqlite::params![k]),
         None => tx.execute("DELETE FROM settings WHERE key = 'kdf'", []),
