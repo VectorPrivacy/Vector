@@ -35,6 +35,8 @@ const WAVEFORM_FPS: u32 = 30;
 const SMOOTHING_FACTOR: f32 = 0.85;
 /// Maximum number of decoded sources kept in memory
 const MAX_LOADED_SOURCES: usize = 5;
+/// A stopped source is let go after this long; a later play reloads it from disk.
+const IDLE_SOURCE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Crossfade length after seek (samples at device rate). ~10ms at 48kHz — old audio
 /// fades out while new audio fades in, eliminating clicks from sample discontinuities.
 const CROSSFADE_SAMPLES: u32 = 480;
@@ -163,6 +165,8 @@ struct AudioSource {
     /// Where a redirect sent the window, until its decoder takes it (with the generation,
     /// in one critical section, so a later redirect is never mistaken for this one).
     pending_seek: Option<u64>,
+    /// When the maintenance sweep first saw it stopped; cleared by any play or seek.
+    idle_since: Option<std::time::Instant>,
 }
 
 /// How the engine redirects a streamed file's decoder.
@@ -575,6 +579,7 @@ impl AudioEngine {
             stream: None,
             window_gen: 0,
             pending_seek: None,
+            idle_since: None,
         };
 
         self.shared
@@ -636,6 +641,7 @@ impl AudioEngine {
             stream: Some(Arc::clone(&ctl)),
             window_gen: 0,
             pending_seek: None,
+            idle_since: None,
         };
         self.shared.sources.lock().map_err(|_| "Lock poisoned")?.insert(id, source);
 
@@ -708,6 +714,7 @@ impl AudioEngine {
             stream: None,
             window_gen: 0,
             pending_seek: None,
+            idle_since: None,
         };
 
         self.shared
@@ -740,6 +747,7 @@ impl AudioEngine {
             }
         }
         source.playing = true;
+        source.idle_since = None;
         let pos_ms = (source.position / source.source_sample_rate as f64 * 1000.0) as u64;
         Ok(pos_ms)
     }
@@ -757,6 +765,7 @@ impl AudioEngine {
     pub fn seek(&self, id: u32, position_ms: u64) -> Result<(), String> {
         let mut sources = self.shared.sources.lock().map_err(|_| "Lock poisoned")?;
         let source = sources.get_mut(&id).ok_or("Source not found")?;
+        source.idle_since = None;
         // Never past the file: the mixer indexes from this position on the audio thread.
         let end_frame = (source.duration_ms.saturating_mul(source.source_sample_rate as u64) / 1000).max(1);
         let frame_pos = (position_ms as f64 * source.source_sample_rate as f64 / 1000.0).min((end_frame - 1) as f64);
@@ -842,6 +851,7 @@ impl AudioEngine {
             stream: None,
             window_gen: 0,
             pending_seek: None,
+            idle_since: None,
         };
 
         self.shared
@@ -865,6 +875,22 @@ impl AudioEngine {
     /// Get the device sample rate
     pub fn device_sample_rate(&self) -> u32 {
         self.shared.device_sample_rate.load(Ordering::Relaxed)
+    }
+
+    /// Drop decoded sources that have sat stopped past `IDLE_SOURCE_TTL`.
+    pub fn evict_idle(&self) -> usize {
+        let Ok(mut sources) = self.shared.sources.lock() else { return 0 };
+        let before = sources.len();
+        let now = std::time::Instant::now();
+        sources.retain(|_, s| {
+            if s.playing || s.oneshot {
+                s.idle_since = None;
+                return true;
+            }
+            let since = *s.idle_since.get_or_insert(now);
+            now.duration_since(since) < IDLE_SOURCE_TTL
+        });
+        before - sources.len()
     }
 
     /// Evict oldest paused sources if we're at capacity
@@ -2267,6 +2293,7 @@ mod window_tests {
             stream: Some(Arc::clone(ctl)),
             window_gen: 0,
             pending_seek: None,
+            idle_since: None,
         });
         shared
     }

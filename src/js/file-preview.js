@@ -904,7 +904,7 @@ function closeFilePreview() {
 
     // Cancel any pending compression
     if (pendingFile) {
-        invoke('cancel_compression', { filePath: pendingFile }).catch(() => {});
+        invoke('clear_compression_cache', { filePath: pendingFile }).catch(() => {});
     }
     // A cancelled paste must not leave its bytes behind: the byte-cache commands
     // would serve them to the next preview.

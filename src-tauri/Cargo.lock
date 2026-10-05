@@ -12028,6 +12028,7 @@ dependencies = [
  "nostr",
  "nostr-blossom",
  "nostr-connect",
+ "nostr-database",
  "nostr-sdk",
  "rand 0.8.7",
  "reqwest 0.12.24",

@@ -1395,7 +1395,7 @@ async function jumpToUnread(lastReadId) {
     let boundaryAt = chat.messages.find(m => m.id === lastReadId)?.at ?? null;
     if (boundaryAt == null) {
         try {
-            const around = await invoke('get_messages_around_id', { chatId, targetMessageId: lastReadId, contextBefore: 0 });
+            const around = await invoke('get_messages_around', { chatId, anchorId: lastReadId, before: 1, after: 0 });
             boundaryAt = (around || []).find(m => m.id === lastReadId)?.at ?? null;
         } catch (e) { if (strOpenChat === chatId) console.warn('[unread-jump] last_read lookup failed:', e); }
     }

@@ -19,6 +19,38 @@ struct CachedWhisperCtx {
 
 static WHISPER_CTX_CACHE: Mutex<Option<CachedWhisperCtx>> = Mutex::new(None);
 
+/// Weights and GPU buffers stay resident only through a burst of use.
+const WHISPER_CTX_TTL: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
+/// Millis since `WHISPER_EPOCH` when a transcription last released the context.
+static WHISPER_LAST_USED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WHISPER_EPOCH: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Stamps the last use when dropped, which is while the cache lock is still held.
+struct StampLastUse;
+impl Drop for StampLastUse {
+    fn drop(&mut self) {
+        WHISPER_LAST_USED_MS.store(WHISPER_EPOCH.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Drop the cached context once it has sat idle past the TTL. Never waits on the
+/// lock: a held lock means a transcription is running.
+pub fn check_ctx_ttl() -> bool {
+    let Ok(mut cache) = WHISPER_CTX_CACHE.try_lock() else { return false };
+    if cache.is_none() {
+        return false;
+    }
+    let idle_ms = (WHISPER_EPOCH.elapsed().as_millis() as u64)
+        .saturating_sub(WHISPER_LAST_USED_MS.load(Ordering::Relaxed));
+    if idle_ms < WHISPER_CTX_TTL.as_millis() as u64 {
+        return false;
+    }
+    *cache = None;
+    println!("[Maintenance] Whisper context idle {}s - unloaded", idle_ms / 1000);
+    true
+}
+
 #[derive(Serialize, Clone)]
 pub struct TranscriptionSection {
     pub text: String,
@@ -145,6 +177,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     // This is safe: no await points while held, and concurrent transcriptions
     // would contend for GPU/CPU anyway.
     let mut cache_guard = WHISPER_CTX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let _stamp = StampLastUse;
 
     let t0 = Instant::now();
     let cache_hit = matches!(cache_guard.as_ref(), Some(cached) if cached.model_path == model_path);

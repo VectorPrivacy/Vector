@@ -692,6 +692,7 @@ fn encode_animated_webp(bytes: &[u8], max_dim: u32, quality: f32) -> Result<Enco
         Ok(())
     };
     for frame in animation_frames(bytes)? {
+        super::cancel::check()?;
         let (img, delay) = frame?;
         let img = if img.width() > max_dim || img.height() > max_dim {
             resize_fit(&DynamicImage::ImageRgba8(img), max_dim, max_dim, image::imageops::FilterType::Triangle).into_rgba8()
@@ -733,6 +734,7 @@ fn w_h_bytes(canvas: Option<(u32, u32)>) -> usize {
 fn encode_animated_webp_serial(bytes: &[u8], max_dim: u32, quality: f32) -> Result<EncodedImage, String> {
     let mut enc: Option<super::animated_webp::Encoder> = None;
     for frame in animation_frames(bytes)? {
+        super::cancel::check()?;
         let (img, delay) = frame?;
         let img = if img.width() > max_dim || img.height() > max_dim {
             resize_fit(&DynamicImage::ImageRgba8(img), max_dim, max_dim, image::imageops::FilterType::Triangle).into_rgba8()

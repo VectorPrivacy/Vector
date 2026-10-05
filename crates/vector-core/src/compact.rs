@@ -1496,6 +1496,26 @@ impl CompactMessageVec {
             // Note: doesn't include heap allocations inside CompactMessage
     }
 
+    /// Keep the newest `keep` messages plus any still pending (a pending send exists nowhere
+    /// else until it lands), then hand the freed capacity back. Returns how many went.
+    pub fn retain_newest(&mut self, keep: usize) -> usize {
+        let n = self.messages.len();
+        if n <= keep {
+            return 0;
+        }
+        let cut = n - keep;
+        let mut i = 0;
+        self.messages.retain(|m| {
+            let kept = i >= cut || m.is_pending();
+            i += 1;
+            kept
+        });
+        self.rebuild_index();
+        self.messages.shrink_to_fit();
+        self.id_index.shrink_to_fit();
+        n - self.messages.len()
+    }
+
     /// Drain messages from a range (rebuilds index after)
     pub fn drain(&mut self, range: std::ops::Range<usize>) -> std::vec::Drain<'_, CompactMessage> {
         let drain = self.messages.drain(range);

@@ -76,6 +76,7 @@ pub mod spawn_audit;
 
 // === Network ===
 pub mod net;
+pub mod events_tracker;
 pub mod proxy;
 pub mod negentropy;
 pub mod blossom;
@@ -267,7 +268,9 @@ pub fn apply_tor_proxy(
     let builder = builder.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
     // The pool's own attempts need the Tor floor too, not just our explicit `try_connect`
     // calls (0.45 default is 15s, under a circuit build).
-    builder.connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)))
+    builder
+        .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)))
+        .database(events_tracker::LazyEventsTracker::default())
 }
 
 /// A publish waiting on the transport's budget for its OK and NIP-42 challenge: the SDK's
@@ -4143,6 +4146,7 @@ impl VectorCore {
                     }
                     continue;
                 }
+                crate::community::v2::inbound::hydrate_target(&f.event, channel_id).await;
                 let outcome = {
                     let mut st = state::STATE.lock().await;
                     apply_chat_to_state(&mut st, &f.event, channel_id, &my_pk)

@@ -84,25 +84,41 @@ pub async fn get_platform_features() -> PlatformFeatures {
     }
 }
 
-/// Run periodic maintenance tasks to keep memory usage low
-/// Called every ~45s from the JS profile sync loop
-///
-/// Current tasks:
-/// - Purge expired notification sound cache (10 min TTL, desktop only)
-/// - Cleanup stale in-progress download tracking entries
-///
-/// Future tasks could include:
-/// - Image cache cleanup
-/// - Temporary file cleanup
-/// - Memory pressure responses
+/// Periodic memory upkeep, called every ~45s from the JS profile sync loop: idle caches and
+/// decoded media are dropped once nothing has used them for a while.
 #[tauri::command]
 pub async fn run_maintenance() {
-    // Audio: purge expired notification sound cache (desktop only)
     #[cfg(desktop)]
     audio::check_cache_ttl();
 
-    // Cleanup stale download tracking entries
+    let mut freed = false;
+    if let Ok(engine) = crate::audio_engine::AudioEngine::get() {
+        freed |= engine.evict_idle() > 0;
+    }
+
+    #[cfg(feature = "whisper")]
+    {
+        freed |= crate::whisper::check_ctx_ttl();
+    }
+
+    freed |= crate::message::files::sweep_compression_cache().await > 0;
+    freed |= STATE.lock().await.trim_unheld_chats() > 0;
+
     image_cache::cleanup_stale_downloads().await;
+
+    if freed {
+        release_free_heap();
+    }
+}
+
+/// glibc keeps freed pages in its arenas until told otherwise; the other platforms'
+/// allocators return them on their own.
+fn release_free_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free pages back to the kernel; no allocation moves.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// Get storage information for the Vector directory

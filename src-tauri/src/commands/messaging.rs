@@ -49,6 +49,7 @@ async fn serve_window_from_state(
                 (m.id.clone(), quote)
             })
             .collect();
+        vector_core::state::note_chat_held(chat_id);
         let mut served = {
             let mut state = STATE.lock().await;
             state.add_messages_to_chat_batch(chat_id, messages);
@@ -215,22 +216,10 @@ pub async fn get_system_events<R: Runtime>(
 /// Called by frontend when LRU eviction occurs to keep caches in sync
 #[tauri::command]
 pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(), String> {
+    vector_core::state::note_chat_released(&chat_id);
     let mut state = STATE.lock().await;
     if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-        let total = chat.message_count();
-        if total > keep_count {
-            // Keep only the last `keep_count` messages (most recent). A pending send
-            // lives nowhere but here until it lands: evicting it would leave the
-            // finished send with nothing to finalize, so it is never sent or saved.
-            let drain_count = total - keep_count;
-            let mut unsent: Vec<_> = chat.messages.drain(0..drain_count).filter(|m| m.is_pending()).collect();
-            if !unsent.is_empty() {
-                let mut kept = std::mem::take(chat.messages.messages_mut());
-                unsent.append(&mut kept);
-                *chat.messages.messages_mut() = unsent;
-            }
-            chat.messages.rebuild_index();
-        }
+        chat.messages.retain_newest(keep_count);
     }
     Ok(())
 }

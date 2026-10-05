@@ -648,7 +648,7 @@ struct SessionStop {
 }
 
 impl Session {
-    fn empty() -> Arc<Self> {
+    pub(crate) fn empty() -> Arc<Self> {
         Arc::new(Session {
             id: next_session_id(),
             db_path: None,
@@ -1019,11 +1019,22 @@ impl DerefMut for ConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target { self.conn.as_mut().expect("Connection already taken") }
 }
 
+/// Read connections kept idle per session. A burst past it opens extras that close on
+/// return, so the pool never stays at its peak (each holds its own page and statement cache).
+fn max_idle_readers() -> usize {
+    static N: LazyLock<usize> = LazyLock::new(|| {
+        std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(4, 8)
+    });
+    *N
+}
+
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             if let Ok(mut pool) = self.session.read_pool.lock() {
-                pool.push(conn);
+                if pool.len() < max_idle_readers() {
+                    pool.push(conn);
+                }
             }
         }
     }
@@ -1567,6 +1578,14 @@ mod pool_generation_tests {
         let session = Session::empty();
         drop(ConnectionGuard::new(fake_conn(), session.clone()));
         assert_eq!(session.read_pool.lock().unwrap().len(), 1, "the connection goes home");
+    }
+
+    #[test]
+    fn a_burst_of_readers_settles_back_to_the_idle_cap() {
+        let session = Session::empty();
+        let burst: Vec<_> = (0..max_idle_readers() + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
+        drop(burst);
+        assert_eq!(session.read_pool.lock().unwrap().len(), max_idle_readers());
     }
 
     #[test]

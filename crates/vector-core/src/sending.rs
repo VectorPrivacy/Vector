@@ -195,7 +195,9 @@ struct WrapConfirm {
     /// failed — from then on `note_relay_ok` performs the rescue itself.
     loop_exited: AtomicBool,
     notify: tokio::sync::Notify,
-    session: std::sync::Arc<crate::db::Session>,
+    /// Weak: the entry lives in this session's own scoped map, so a strong
+    /// reference would keep a swapped-out account alive forever.
+    session: std::sync::Weak<crate::db::Session>,
     registered_at: web_time::Instant,
 }
 
@@ -244,7 +246,7 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
     {
         return;
     }
-    if !entry.session.is_live() {
+    if !entry.session.upgrade().is_some_and(|s| s.is_live()) {
         remove_wrap_confirm(&entry.wrap_id);
         return;
     }
@@ -397,7 +399,7 @@ async fn retry_send_gift_wrap(
                 rescued: AtomicBool::new(false),
                 loop_exited: AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
-                session: crate::db::current_session(),
+                session: std::sync::Arc::downgrade(&crate::db::current_session()),
                 registered_at: web_time::Instant::now(),
             });
             register_wrap_confirm(entry.clone());
@@ -1597,5 +1599,36 @@ mod seal_tests {
             }
         }
         let _ = std::fs::remove_file(&src);
+    }
+
+    #[tokio::test]
+    async fn a_pending_wrap_confirm_does_not_keep_its_account_alive() {
+        let session = crate::db::Session::empty();
+        struct NoCallback;
+        impl SendCallback for NoCallback {}
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hi").finalize_unsigned_with_id(Keys::generate().public_key());
+        crate::db::with_session(session.clone(), async {
+            register_wrap_confirm(Arc::new(WrapConfirm {
+                wrap_id: EventId::from_byte_array([0; 32]),
+                chat_id: String::new(),
+                pending_id: String::new(),
+                rumor_event_id: String::new(),
+                rumor,
+                callback: Arc::new(NoCallback),
+                self_send: false,
+                confirmed: AtomicBool::new(false),
+                rescued: AtomicBool::new(false),
+                loop_exited: AtomicBool::new(true),
+                notify: tokio::sync::Notify::new(),
+                session: Arc::downgrade(&crate::db::current_session()),
+                registered_at: web_time::Instant::now(),
+            }));
+            assert_eq!(wrap_confirms().lock().unwrap().len(), 1, "registered on this session");
+        })
+        .await;
+        assert_eq!(Arc::strong_count(&session), 1, "the registry's entry holds no strong reference");
+        let weak = Arc::downgrade(&session);
+        drop(session);
+        assert!(weak.upgrade().is_none(), "the account is freed once nothing else holds it");
     }
 }

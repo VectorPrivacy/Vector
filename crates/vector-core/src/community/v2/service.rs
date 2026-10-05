@@ -519,6 +519,7 @@ async fn publish_chat<T: Transport + ?Sized>(
         if !ephemeral {
             if let Ok(event) = chat::open_chat_event(&wrap, group, channel_id, epoch) {
                 let channel_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+                super::inbound::hydrate_target(&event, &channel_hex).await;
                 let outcome = {
                     let mut st = crate::state::STATE.lock().await;
                     super::inbound::apply_chat_to_state(&mut st, &event, &channel_hex, &author_pk)
@@ -1556,7 +1557,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // A preview verified the SAME (id, root) moments ago → reuse its fold instead
         // of re-walking the plane (the bundle re-fetch above kept the revocation gate).
         let handoff = VERIFIED_PREVIEW.lock().unwrap().take().filter(|v| {
-            v.session.is_live()
+            v.session.upgrade().is_some_and(|s| s.is_live())
                 && v.at.elapsed() < VERIFIED_PREVIEW_TTL
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
@@ -2024,7 +2025,8 @@ async fn wait_for_bootstrap_relay(relays: &[String]) {
 /// a different delivered root never matches. The join's own bundle re-fetch is
 /// untouched, so the revocation gate always runs live.
 struct VerifiedPreview {
-    session: std::sync::Arc<crate::db::Session>,
+    /// Weak: the slot is process-wide and must not keep a swapped-out account alive.
+    session: std::sync::Weak<crate::db::Session>,
     at: web_time::Instant,
     community_id: [u8; 32],
     community_root: [u8; 32],
@@ -2064,7 +2066,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
         Ok(vj) => {
             let folded = vj.community;
             *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
-                session: crate::db::current_session(),
+                session: std::sync::Arc::downgrade(&crate::db::current_session()),
                 at: web_time::Instant::now(),
                 community_id: folded.id().0,
                 community_root: folded.community_root,

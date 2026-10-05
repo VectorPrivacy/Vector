@@ -713,11 +713,17 @@ pub struct CompressionEstimate {
 /// This is called when the file preview opens
 #[tauri::command]
 pub async fn start_image_precompression(file_path: String) -> Result<(), String> {
-    // Mark as "in progress" by inserting None, and create a notify for waiters
-    {
+    // Mark as in progress, and create a notify for waiters
+    let cancel = {
         let mut cache = COMPRESSION_CACHE.lock().await;
-        cache.insert(file_path.clone(), None);
-    }
+        if let Some(old) = cache.get(&file_path) {
+            old.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let slot = super::types::CompressionSlot::running();
+        let cancel = slot.cancel.clone();
+        cache.insert(file_path.clone(), slot);
+        cancel
+    };
     {
         let mut notifiers = super::types::COMPRESSION_NOTIFY.lock().await;
         notifiers.insert(file_path.clone(), Arc::new(tokio::sync::Notify::new()));
@@ -728,14 +734,15 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
     // spawn-detached: same, for a path already resolved.
     tokio::spawn(async move {
         let path_for_work = path_clone.clone();
-        let result = tokio::task::spawn_blocking(move || compress_image_internal(&path_for_work))
+        let flag = cancel.clone();
+        let result = tokio::task::spawn_blocking(move || crate::shared::cancel::scoped(flag, || compress_image_internal(&path_for_work)))
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         let mut cache = COMPRESSION_CACHE.lock().await;
 
-        // Only store if still in cache (not cancelled)
-        if cache.contains_key(&path_clone) {
-            cache.insert(path_clone.clone(), result.ok());
+        // Only into the slot this run was started for: a cancel removed it, a reopen replaced it.
+        if let Some(slot) = cache.get_mut(&path_clone).filter(|s| Arc::ptr_eq(&s.cancel, &cancel)) {
+            slot.result = result.ok();
         }
         drop(cache);
 
@@ -755,7 +762,7 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
 pub async fn get_compression_status(file_path: String) -> Result<Option<CompressionEstimate>, String> {
     let cache = COMPRESSION_CACHE.lock().await;
     
-    match cache.get(&file_path) {
+    match cache.get(&file_path).map(|slot| &slot.result) {
         Some(Some(cached)) => {
             // Compression complete
             let savings_percent = if cached.original_size > 0 && cached.compressed_size < cached.original_size {
@@ -790,10 +797,10 @@ pub async fn get_compression_progress(file_path: String) -> Option<f32> {
 /// Clear the compression cache for a file (called on cancel)
 #[tauri::command]
 pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
-    // Clear compression cache
-    let mut cache = COMPRESSION_CACHE.lock().await;
-    cache.remove(&file_path);
-    drop(cache);
+    let removed = COMPRESSION_CACHE.lock().await.remove(&file_path);
+    if let Some(slot) = removed {
+        slot.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     super::video_compression::cancel(&file_path);
     
     // Also clear Android file cache
@@ -1224,7 +1231,7 @@ pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<Ca
             let notified = n.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let running = matches!(COMPRESSION_CACHE.lock().await.get(file_path), Some(None));
+            let running = COMPRESSION_CACHE.lock().await.get(file_path).is_some_and(|s| s.result.is_none());
             if running {
                 // A video encode takes as long as the clip needs, and shows its progress.
                 if video {
@@ -1235,7 +1242,24 @@ pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<Ca
             }
         }
     }
-    COMPRESSION_CACHE.lock().await.remove(file_path).flatten()
+    let slot = COMPRESSION_CACHE.lock().await.remove(file_path)?;
+    if slot.result.is_none() {
+        slot.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    slot.result
+}
+
+/// Backstop for previews that never closed through the frontend (a reload, a crash):
+/// finished pre-compressions nobody collected go after `PRECOMPRESSION_TTL`.
+const PRECOMPRESSION_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+pub(crate) async fn sweep_compression_cache() -> usize {
+    let running: std::collections::HashSet<String> =
+        super::types::COMPRESSION_NOTIFY.lock().await.keys().cloned().collect();
+    let mut cache = COMPRESSION_CACHE.lock().await;
+    let before = cache.len();
+    cache.retain(|path, slot| running.contains(path) || slot.started.elapsed() < PRECOMPRESSION_TTL);
+    before - cache.len()
 }
 
 /// Send a file using the cached compressed version if available
@@ -1271,17 +1295,24 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
             .map_err(|e| e.to_string())??
         }
     };
+    // The picked file's bytes were only needed to compress it.
+    #[cfg(target_os = "android")]
+    ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
 
+    let mut name = file_name;
+    if !name_override.is_empty() {
+        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+        if !sanitized.is_empty() { name = sanitized; }
+    }
+    if processed.is_original_on_disk() {
+        return super::sending::send_file_from_path(receiver, replied_to, std::path::PathBuf::from(&file_path), name, processed.extension).await;
+    }
     let mut attachment_file = AttachmentFile {
         bytes: processed.bytes,
         extension: processed.extension,
         img_meta: processed.img_meta,
-        name: file_name,
+        name,
     };
-    if !name_override.is_empty() {
-        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-        if !sanitized.is_empty() { attachment_file.name = sanitized; }
-    }
     // A compressed video's name follows its new container, so the receiver opens it as one.
     if super::video_compression::is_video_extension(&extension) && attachment_file.extension != extension {
         attachment_file.name = super::video_compression::renamed(&attachment_file.name, &attachment_file.extension);

@@ -28,7 +28,9 @@ pub(crate) async fn clear_all_message_caches() {
             let _ = std::fs::remove_file(path);
         }
     }
-    { types::COMPRESSION_CACHE.lock().await.clear(); }
+    for (_, slot) in types::COMPRESSION_CACHE.lock().await.drain() {
+        slot.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // Drop any pending COMPRESSION_NOTIFY entries. These are
     // content-hash-keyed so they aren't correctness-critical, but they
     // accumulate `Arc<Notify>` allocations across the process lifetime

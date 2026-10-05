@@ -681,6 +681,33 @@ pub fn get_active_chat() -> Option<String> {
     active_chat().read().ok().and_then(|g| g.clone())
 }
 
+/// Chats whose messages the UI holds (a page was served, not since evicted). The rest keep
+/// only a short tail in memory: their pages are read from the database when opened.
+struct UiHeldChats;
+
+fn ui_held_chats() -> std::sync::Arc<RwLock<std::collections::HashSet<String>>> {
+    crate::db::current_session().scoped::<UiHeldChats, _>()
+}
+
+pub fn note_chat_held(chat_id: &str) {
+    let held = ui_held_chats();
+    if held.read().is_ok_and(|g| g.contains(chat_id)) {
+        return;
+    }
+    if let Ok(mut g) = held.write() {
+        g.insert(chat_id.to_string());
+    };
+}
+
+pub fn note_chat_released(chat_id: &str) {
+    if let Ok(mut g) = ui_held_chats().write() {
+        g.remove(chat_id);
+    };
+}
+
+/// Messages a chat the UI doesn't hold keeps in memory: enough for its preview and unread run.
+pub const UNHELD_CHAT_TAIL: usize = 20;
+
 // ============================================================================
 // Processing Gate — Controls event processing during encryption migration
 // ============================================================================
@@ -923,6 +950,18 @@ impl ChatState {
         }
 
         is_msg_added
+    }
+
+    /// Trim every chat the UI doesn't hold down to its tail. Amortised: a chat is only cut
+    /// once it holds twice the tail, so one arriving message never triggers a trim.
+    pub fn trim_unheld_chats(&mut self) -> usize {
+        let held = ui_held_chats();
+        let Ok(held) = held.read() else { return 0 };
+        self.chats
+            .iter_mut()
+            .filter(|c| c.messages.len() > UNHELD_CHAT_TAIL * 2 && !held.contains(&c.id))
+            .map(|c| c.messages.retain_newest(UNHELD_CHAT_TAIL))
+            .sum()
     }
 
     pub fn add_messages_to_chat_batch(&mut self, chat_id: &str, messages: Vec<Message>) -> usize {

@@ -18,8 +18,28 @@ pub struct CachedCompressedImage {
     pub compressed_size: u64,
 }
 
+impl CachedCompressedImage {
+    /// A video that didn't compress: no bytes held, the send streams the original from disk.
+    pub fn is_original_on_disk(&self) -> bool {
+        self.bytes.is_empty() && self.original_size > 0
+    }
+}
+
+/// A preview's pre-compression: running while `result` is None.
+pub struct CompressionSlot {
+    pub result: Option<CachedCompressedImage>,
+    pub started: std::time::Instant,
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CompressionSlot {
+    pub fn running() -> Self {
+        Self { result: None, started: std::time::Instant::now(), cancel: Default::default() }
+    }
+}
+
 /// Global cache for pre-compressed images
-pub static COMPRESSION_CACHE: LazyLock<TokioMutex<HashMap<String, Option<CachedCompressedImage>>>> =
+pub static COMPRESSION_CACHE: LazyLock<TokioMutex<HashMap<String, CompressionSlot>>> =
     LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
 /// Notifiers for compression completion — waiters subscribe, compressor signals

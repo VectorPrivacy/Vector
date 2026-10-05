@@ -254,6 +254,33 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
     }
 }
 
+/// Bring the message a reaction, edit or un-react aims at into STATE from the database when
+/// it isn't resident: STATE holds a window, and the aggregate must land on older rows too.
+pub async fn hydrate_target(event: &ChatEvent, channel_id: &str) {
+    let msg_id = match event {
+        ChatEvent::Reaction { target, .. } | ChatEvent::Edit { target, .. } => crate::simd::hex::bytes_to_hex_32(target),
+        ChatEvent::Delete { target, .. } => {
+            let id = crate::simd::hex::bytes_to_hex_32(target);
+            if crate::state::STATE.lock().await.find_reaction(&id).is_some() {
+                return;
+            }
+            match crate::db::events::reaction_target(&id) {
+                Ok(Some(parent)) => parent,
+                _ => return,
+            }
+        }
+        _ => return,
+    };
+    if crate::state::STATE.lock().await.find_message(&msg_id).is_some() {
+        return;
+    }
+    if let Ok(Some((chat, msg))) = crate::db::events::get_message_by_id(&msg_id).await {
+        if chat == channel_id {
+            crate::state::STATE.lock().await.add_message_to_chat(channel_id, &msg);
+        }
+    }
+}
+
 /// Apply an already-opened chat event to STATE + the shared store — the LIVE
 /// counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up persistence.
 /// The dispatcher opened the wrap (so nothing decrypts twice); the returned outcome
@@ -264,6 +291,7 @@ pub async fn persist_chat_event(
     channel_id: &str,
     my_pubkey: &PublicKey,
 ) -> Option<ChatPersist> {
+    hydrate_target(event, channel_id).await;
     let outcome = {
         let mut st = crate::state::STATE.lock().await;
         apply_chat_to_state(&mut st, event, channel_id, my_pubkey)
@@ -789,6 +817,48 @@ mod tests {
         let delete = chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, 8_000, None);
         let outcome = persist_chat_event(&ingest(expired(&delete), 8), &cid, &me.public_key()).await;
         assert!(matches!(outcome, Some(ChatPersist::Removed(id)) if id == msg_id), "an expired delete still erases");
+    }
+
+    #[tokio::test]
+    async fn a_reaction_edit_or_unreact_lands_on_a_message_paged_out_of_memory() {
+        use nostr_sdk::prelude::{Timestamp, UnsignedEvent};
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "PagedOut", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let member = Keys::generate();
+        let ingest = |rumor: UnsignedEvent, at: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at), false).unwrap();
+            chat::open_chat_event(&wrap, &group, &general, epoch).unwrap()
+        };
+        let page_out = || async {
+            let mut st = crate::state::STATE.lock().await;
+            st.chats.iter_mut().find(|c| c.id == cid).unwrap().messages.retain_newest(0);
+        };
+
+        let msg = chat::build_message_rumor(member.public_key(), &general, epoch, "hello", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        assert!(matches!(persist_chat_event(&ingest(msg, 5), &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
+
+        page_out().await;
+        let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🔥", None, 6_000);
+        let reaction_id = reaction.id.unwrap().to_hex();
+        assert!(matches!(persist_chat_event(&ingest(reaction, 6), &cid, &me.public_key()).await, Some(ChatPersist::Updated { .. })), "the reaction lands");
+
+        page_out().await;
+        let edit = chat::build_edit_rumor(member.public_key(), &general, epoch, &msg_id, "rewritten", &[], None, 7_000);
+        assert!(matches!(persist_chat_event(&ingest(edit, 7), &cid, &me.public_key()).await, Some(ChatPersist::Updated { .. })), "the edit lands");
+
+        page_out().await;
+        let unreact = chat::build_delete_rumor(member.public_key(), &general, epoch, &reaction_id, super::super::kind::REACTION, 8_000, None);
+        assert!(matches!(persist_chat_event(&ingest(unreact, 8), &cid, &me.public_key()).await, Some(ChatPersist::ReactionRemoved { .. })), "the un-react lands");
+
+        let (_, stored) = crate::db::events::get_message_by_id(&msg_id).await.unwrap().unwrap();
+        assert_eq!(stored.content, "rewritten");
+        assert!(stored.reactions.is_empty());
     }
 
     #[tokio::test]

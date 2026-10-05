@@ -32,6 +32,7 @@ opt-level = 1
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
 # saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
 # (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
 # and its saturating ops evaluate those limits eagerly — so tor-netdoc's first

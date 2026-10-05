@@ -31,6 +31,8 @@ vector-push = { path = "../vector-push", version = "0.1.0" }
 # or not at all.
 nostr = { version = "=0.45.1", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
 nostr-sdk = "=0.45.1"
+# Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).
+nostr-database = "=0.45.1"
 nostr-blossom = "=0.45.0"
 nostr-connect = "=0.45.1"
 # Blossom blob hashing. Must track nostr-blossom's own bitcoin_hashes major, or

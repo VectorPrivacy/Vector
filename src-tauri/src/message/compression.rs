@@ -303,6 +303,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
         let img = crate::shared::image::decode_image(&file_data, crate::shared::image::MAX_DIMENSION)?;
+        crate::shared::cancel::check()?;
 
         // Determine target dimensions (max 1920px on longest side)
         use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
@@ -316,6 +317,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             img
         };
 
+        crate::shared::cancel::check()?;
         let actual_width = resized_img.width();
         let actual_height = resized_img.height();
 
@@ -375,6 +377,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             img
         };
 
+        crate::shared::cancel::check()?;
         let actual_width = resized_img.width();
         let actual_height = resized_img.height();
 

@@ -1279,6 +1279,9 @@ async fn process_outbound_community_attachment(
     // bytes and the real display name. Same routing the community image picker already uses.
     #[cfg(target_os = "android")]
     if file_path.starts_with("content://") {
+        // Neither the preview's byte copy nor its pre-compression is used from here.
+        crate::message::types::ANDROID_FILE_CACHE.lock().unwrap().remove(file_path);
+        crate::message::files::take_precompressed(file_path, false).await;
         // A pick copied to disk at selection streams from that copy, which goes once sealed.
         let picked = crate::message::types::ANDROID_PICKED_FILES.lock().unwrap().get(file_path).cloned();
         if let Some((copy, _, cached_name, _)) = picked {

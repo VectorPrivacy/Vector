@@ -642,6 +642,21 @@ pub fn event_author(event_id: &str) -> Result<Option<String>, String> {
         .map_err(|e| format!("Failed to read event author: {}", e))
 }
 
+/// The message a stored reaction is attached to.
+pub fn reaction_target(reaction_id: &str) -> Result<Option<String>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    conn.prepare_cached("SELECT reference_id FROM events WHERE id = ?1 AND kind = ?2")
+        .and_then(|mut stmt| {
+            stmt.query_row(rusqlite::params![reaction_id, event_kind::REACTION], |row| row.get::<_, Option<String>>(0))
+        })
+        .optional()
+        .map(|o| o.flatten())
+        .map_err(|e| format!("Failed to read reaction target: {}", e))
+}
+
 /// The stored NIP-40 expiry of an event, read from the row itself: no load filter hides
 /// an expired one, so a caller can tell "expired" from "permanent".
 pub fn event_expiration(event_id: &str) -> Result<Option<u64>, String> {

@@ -64,25 +64,31 @@ pub(crate) fn cancel_all() {
 }
 
 /// Compress the video at `path` for sending: an MP4 kept only when at least a tenth smaller,
-/// else the original file (already under the target bitrate, it would only lose detail).
+/// else the original file (already under the target bitrate, it would only lose detail),
+/// which is left on disk to stream rather than read into memory.
 pub(crate) fn compress_file(path: &str) -> Result<CachedCompressedImage, String> {
-    let original = std::fs::read(path).map_err(|e| format!("Failed to read video: {e}"))?;
-    let original_size = original.len() as u64;
+    let original_size = std::fs::metadata(path).map_err(|e| format!("Failed to read video: {e}"))?.len();
     let extension = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_lowercase();
-    let keep = |bytes: Vec<u8>, extension: String| CachedCompressedImage {
-        compressed_size: bytes.len() as u64,
-        bytes: Arc::new(bytes),
-        extension,
+    let original = || CachedCompressedImage {
+        bytes: Arc::new(Vec::new()),
+        extension: extension.clone(),
         img_meta: None,
         original_size,
+        compressed_size: original_size,
     };
     match encode(path) {
-        Ok(out) if (out.len() as u64) * 10 <= original_size * 9 => Ok(keep(out, "mp4".into())),
-        Ok(_) => Ok(keep(original, extension)),
+        Ok(out) if (out.len() as u64) * 10 <= original_size * 9 => Ok(CachedCompressedImage {
+            compressed_size: out.len() as u64,
+            bytes: Arc::new(out),
+            extension: "mp4".into(),
+            img_meta: None,
+            original_size,
+        }),
+        Ok(_) => Ok(original()),
         Err(e) if e.contains("cancelled") => Err(e),
         Err(e) => {
             log_warn!("[Video] compression failed, sending the original: {e}");
-            Ok(keep(original, extension))
+            Ok(original())
         }
     }
 }
@@ -134,9 +140,11 @@ mod tests {
             let sent = compress_file(p).unwrap();
             eprintln!("{p}: {} -> {} .{}", sent.original_size, sent.compressed_size, sent.extension);
             assert!(sent.compressed_size <= sent.original_size);
-            assert_eq!(sent.bytes.len() as u64, sent.compressed_size);
             if sent.compressed_size < sent.original_size {
                 assert_eq!(sent.extension, "mp4");
+                assert_eq!(sent.bytes.len() as u64, sent.compressed_size);
+            } else {
+                assert!(sent.is_original_on_disk());
             }
             assert!(progress(p).is_none());
         }

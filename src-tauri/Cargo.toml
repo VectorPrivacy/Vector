@@ -348,6 +348,7 @@ whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", bran
 # Fork: https://github.com/VectorPrivacy/nostr/tree/vector-v0.45.1
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
 # noq's published BBR3 (through 1.1.1) is a partial merge with an unchecked subtraction
 # that underflows whenever loss exceeds the loss threshold — panic in dev builds, garbage
 # inflight estimate in release (n0-computer/noq#768). Pinned to the quinn-sync commit that

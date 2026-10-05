@@ -8382,6 +8382,7 @@ dependencies = [
  "nostr",
  "nostr-blossom",
  "nostr-connect",
+ "nostr-database",
  "nostr-sdk",
  "poly1305",
  "rand 0.8.6",
