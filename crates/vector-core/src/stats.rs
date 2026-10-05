@@ -232,7 +232,7 @@ impl DeepSize for MessageFlags {
 
 impl DeepSize for CompactReaction {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<CompactReaction>() + self.emoji.len()
+        std::mem::size_of::<CompactReaction>()
     }
 }
 
@@ -255,21 +255,29 @@ impl DeepSize for CompactMessage {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactMessage>()
             + self.content.len()
-            + self.replied_to_content.as_ref().map(|s| s.len()).unwrap_or(0)
-            + self.preview_metadata.as_ref().map(|m| m.deep_size()).unwrap_or(0)
-            + self.attachments.iter().map(|a| a.deep_size()).sum::<usize>()
-            + self.reactions.iter().map(|r| r.deep_size()).sum::<usize>()
-            + self.edit_history.as_ref().map(|h| h.iter().map(|e| e.deep_size()).sum::<usize>()).unwrap_or(0)
-            + self.addressed_bots.as_ref().map(|b| std::mem::size_of_val(&**b) + b.capacity() * 2).unwrap_or(0)
+            + self.attachments.heap_bytes()
+            + self.attachments.iter().map(|a| a.deep_size() - std::mem::size_of::<CompactAttachment>()).sum::<usize>()
+            + self.reactions.heap_bytes()
+            + self.reply.as_ref().map_or(0, |r| {
+                std::mem::size_of::<crate::compact::CompactReply>()
+                    + r.content.as_ref().map_or(0, |c| c.len())
+                    + r.emoji_tags.heap_bytes()
+            })
+            + self.extras.as_ref().map_or(0, |x| {
+                std::mem::size_of::<crate::compact::MessageExtras>()
+                    + x.edit_history.capacity() * std::mem::size_of::<EditEntry>()
+                    + x.edit_history.iter().map(|e| e.deep_size() - std::mem::size_of::<EditEntry>()).sum::<usize>()
+                    + x.preview_metadata.as_ref().map_or(0, |m| m.deep_size())
+                    + x.emoji_tags.heap_bytes()
+                    + x.addressed_bots.heap_bytes()
+            })
     }
 }
 
 impl DeepSize for CompactMessageVec {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<CompactMessageVec>()
-            + std::mem::size_of_val(self.messages())
-            + self.iter().map(|m| m.deep_size().saturating_sub(std::mem::size_of::<CompactMessage>())).sum::<usize>()
-            + self.len() * std::mem::size_of::<([u8; 32], u32)>()
+        std::mem::size_of::<CompactMessageVec>() + self.memory_usage()
+            + self.iter().map(|m| m.deep_size() - std::mem::size_of::<CompactMessage>()).sum::<usize>()
     }
 }
 

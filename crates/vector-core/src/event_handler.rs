@@ -1272,8 +1272,8 @@ async fn commit_edit(
 
     let msg_for_emit = {
         let mut state = crate::state::STATE.lock().await;
-        state.update_message_in_chat(contact, message_id, |msg| {
-            msg.apply_edit(new_content.to_string(), edited_at, emoji_tags.clone());
+        state.update_message_in_chat_with(contact, message_id, |msg, i| {
+            msg.apply_edit(new_content.to_string(), edited_at, emoji_tags.clone(), i);
         })
     };
     if let Some(mut msg) = msg_for_emit {

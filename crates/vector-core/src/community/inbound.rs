@@ -495,8 +495,8 @@ fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicK
     }
     // The canonical edit applier seeds history with the original ONCE, dedups by `edited_at` (a
     // relay-replayed edit is a no-op, not history corruption), sorts, and swaps the content.
-    let (_chat_id, message) = state.update_message(&target_id, |m| {
-        m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone());
+    let (_chat_id, message) = state.update_message_with(&target_id, |m, i| {
+        m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), i);
     })?;
     // Persist the edit as a folded MESSAGE_EDIT event (caller sets chat_id), mirroring DMs —
     // no row overwrite, no JSON snapshot.

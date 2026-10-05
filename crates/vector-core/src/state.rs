@@ -1030,8 +1030,9 @@ impl ChatState {
     }
 
     pub fn find_message(&self, message_id: &str) -> Option<(&Chat, Message)> {
-        let chat = &self.chats[self.chat_index_of_message(message_id)?];
-        chat.get_compact_message(message_id).map(|compact| (chat, compact.to_message(&self.interner)))
+        if message_id.is_empty() { return None; }
+        let id = crate::compact::encode_message_id(message_id);
+        self.chats.iter().find_map(|chat| chat.messages.find_by_id(&id).map(|m| (chat, m.to_message(&self.interner))))
     }
 
     pub fn find_chat_for_message(&self, message_id: &str) -> Option<(usize, String)> {
@@ -1042,28 +1043,50 @@ impl ChatState {
     pub fn update_message<F>(&mut self, message_id: &str, f: F) -> Option<(String, Message)>
     where F: FnOnce(&mut CompactMessage)
     {
+        self.update_message_with(message_id, |m, _| f(m))
+    }
+
+    /// [`Self::update_message`] for a change that interns (an edit's emoji).
+    pub fn update_message_with<F>(&mut self, message_id: &str, f: F) -> Option<(String, Message)>
+    where F: FnOnce(&mut CompactMessage, &mut NpubInterner)
+    {
         if message_id.is_empty() { return None; }
-        let chat_idx = self.chat_index_of_message(message_id)?;
-        if let Some(msg) = self.chats[chat_idx].get_compact_message_mut(message_id) { f(msg); }
-        let chat_id = self.chats[chat_idx].id.clone();
-        self.chats[chat_idx].get_compact_message(message_id).map(|m| (chat_id, m.to_message(&self.interner)))
+        let id = crate::compact::encode_message_id(message_id);
+        let chat = self.chats.iter_mut().find(|c| c.messages.contains_id(&id))?;
+        let msg = chat.messages.find_by_id_mut(&id)?;
+        f(msg, &mut self.interner);
+        Some((chat.id.clone(), msg.to_message(&self.interner)))
     }
 
     pub fn update_message_in_chat<F>(&mut self, chat_id: &str, message_id: &str, f: F) -> Option<Message>
     where F: FnOnce(&mut CompactMessage)
     {
-        let chat_idx = self.chats.iter().position(|c| c.id == chat_id)?;
-        if let Some(msg) = self.chats[chat_idx].get_compact_message_mut(message_id) { f(msg); }
-        self.chats[chat_idx].get_compact_message(message_id).map(|m| m.to_message(&self.interner))
+        self.update_message_in_chat_with(chat_id, message_id, |m, _| f(m))
+    }
+
+    /// [`Self::update_message_in_chat`] for a change that interns (an edit's emoji).
+    pub fn update_message_in_chat_with<F>(&mut self, chat_id: &str, message_id: &str, f: F) -> Option<Message>
+    where F: FnOnce(&mut CompactMessage, &mut NpubInterner)
+    {
+        let chat = self.chats.iter_mut().find(|c| c.id == chat_id)?;
+        let msg = chat.messages.find_by_hex_id_mut(message_id)?;
+        f(msg, &mut self.interner);
+        Some(msg.to_message(&self.interner))
     }
 
     pub fn finalize_pending_message(&mut self, chat_id: &str, pending_id: &str, real_id: &str) -> Option<(String, Message)> {
         let chat_idx = self.chats.iter().position(|c| c.id == chat_id)?;
-        if let Some(msg) = self.chats[chat_idx].get_compact_message_mut(pending_id) {
-            msg.id = crate::simd::hex::hex_to_bytes_32(real_id);
+        let messages = &mut self.chats[chat_idx].messages;
+        let pending = crate::compact::encode_message_id(pending_id);
+        let real = crate::simd::hex::hex_to_bytes_32(real_id);
+        if let Some(msg) = messages.find_by_id_mut(&pending) {
             msg.set_pending(false);
         }
-        self.chats[chat_idx].messages.rebuild_index();
+        // The real id can already be held (an echo landed first): that copy stands, the
+        // pending one goes rather than leaving two rows under one id.
+        if !messages.rekey(&pending, real) && messages.contains_id(&real) {
+            messages.remove_by_id(&pending);
+        }
         self.chats[chat_idx].get_compact_message(real_id)
             .map(|m| (pending_id.to_string(), m.to_message(&self.interner)))
     }

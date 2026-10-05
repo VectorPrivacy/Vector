@@ -1083,9 +1083,9 @@ impl VectorCore {
             // Optimistic local echo + best-effort persistence.
             let msg_for_emit = {
                 let mut st = state::STATE.lock().await;
-                st.update_message_in_chat(to_npub, message_id, |msg| {
-                    msg.apply_edit(new_content.to_string(), edit_ts_ms, emoji_tags.clone());
-                    msg.preview_metadata = None;
+                st.update_message_in_chat_with(to_npub, message_id, |msg, i| {
+                    msg.apply_edit(new_content.to_string(), edit_ts_ms, emoji_tags.clone(), i);
+                    msg.set_preview_metadata(None);
                 })
             };
             if let Some(mut msg) = msg_for_emit {
@@ -1137,14 +1137,11 @@ impl VectorCore {
     /// Get messages for a chat (paginated).
     pub async fn get_messages(&self, chat_id: &str, limit: usize, offset: usize) -> Vec<Message> {
         let state = state::STATE.lock().await;
-        if let Some(chat) = state.get_chat(chat_id) {
-            let msgs = chat.get_all_messages(&state.interner);
-            let start = offset.min(msgs.len());
-            let end = (offset + limit).min(msgs.len());
-            msgs[start..end].to_vec()
-        } else {
-            Vec::new()
-        }
+        let Some(chat) = state.get_chat(chat_id) else { return Vec::new() };
+        let msgs = chat.messages.messages();
+        let start = offset.min(msgs.len());
+        let end = offset.saturating_add(limit).min(msgs.len());
+        msgs[start..end].iter().map(|m| m.to_message(&state.interner)).collect()
     }
 
     /// One message by id, with the chat it was said in. Reads STATE first, then
@@ -1203,15 +1200,7 @@ impl VectorCore {
         let Some(chat) = state.get_chat(chat_id) else {
             return Vec::new();
         };
-        let mut msgs = chat.get_all_messages(&state.interner);
-        if let Some((at, id)) = before {
-            msgs.retain(|m| (m.at, m.id.as_str()) < (at, id));
-        }
-        msgs.sort_by(|a, b| (a.at, a.id.as_str()).cmp(&(b.at, b.id.as_str())));
-        if msgs.len() > limit {
-            msgs.drain(..msgs.len() - limit);
-        }
-        msgs
+        page_before(chat.messages.messages(), &state.interner, before, limit)
     }
 
     /// Get a profile by npub.
@@ -5749,6 +5738,74 @@ impl VectorCore {
         // So is disconnecting: the pooled clients are AUTHENTICATED as the prior
         // account's plane secret keys, and must not be left holding sockets.
         crate::community::transport::clear_plane_pool();
+    }
+}
+
+/// Up to `limit` messages strictly before the `(at_ms, id)` cursor, chronological, from a
+/// chat's held messages (sorted by `at` alone). Only the page is converted, never the chat:
+/// the cursor's own same-`at` run filtered by id, then older rows back to `limit`, widened to
+/// a whole same-`at` run at that edge since the id tiebreak decides inside it.
+fn page_before(
+    held: &[compact::CompactMessage],
+    interner: &compact::NpubInterner,
+    before: Option<(u64, &str)>,
+    limit: usize,
+) -> Vec<Message> {
+    let (lo, mut msgs) = match before {
+        None => (held.len(), Vec::new()),
+        Some((at, id)) => {
+            let lo = held.partition_point(|m| m.at < at);
+            let hi = held.partition_point(|m| m.at <= at);
+            let tie = held[lo..hi].iter().map(|m| m.to_message(interner)).filter(|m| m.id.as_str() < id).collect();
+            (lo, tie)
+        }
+    };
+    let mut start = lo.saturating_sub(limit.saturating_sub(msgs.len()));
+    while start > 0 && start < lo && held[start - 1].at == held[start].at {
+        start -= 1;
+    }
+    msgs.extend(held[start..lo].iter().map(|m| m.to_message(interner)));
+    msgs.sort_by(|a, b| (a.at, a.id.as_str()).cmp(&(b.at, b.id.as_str())));
+    if msgs.len() > limit {
+        msgs.drain(..msgs.len() - limit);
+    }
+    msgs
+}
+
+#[cfg(test)]
+mod page_before_tests {
+    use super::*;
+
+    #[test]
+    fn it_matches_converting_the_whole_chat() {
+        let mut interner = compact::NpubInterner::new();
+        let mut held = compact::CompactMessageVec::new();
+        let mut seed: u64 = 7;
+        for n in 0..400u64 {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+            // Few distinct timestamps, so same-`at` runs are long and everywhere.
+            let msg = Message { id: format!("{:064x}", seed), at: (n / 9) * 1000 + (seed % 3), ..Default::default() };
+            held.insert(compact::CompactMessage::from_message(&msg, &mut interner));
+        }
+        let mut all: Vec<Message> = held.iter().map(|m| m.to_message(&interner)).collect();
+        all.sort_by(|a, b| (a.at, a.id.as_str()).cmp(&(b.at, b.id.as_str())));
+        let reference = |before: Option<(u64, &str)>, limit: usize| {
+            let mut v: Vec<String> = all.iter()
+                .filter(|m| before.is_none_or(|(at, id)| (m.at, m.id.as_str()) < (at, id)))
+                .map(|m| m.id.clone())
+                .collect();
+            if v.len() > limit { v.drain(..v.len() - limit); }
+            v
+        };
+        let ids = |v: Vec<Message>| v.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        for limit in [1, 3, 10, 50, 1000] {
+            assert_eq!(ids(page_before(held.messages(), &interner, None, limit)), reference(None, limit));
+            for c in all.iter().step_by(13) {
+                for cursor in [(c.at, c.id.as_str()), (c.at, "0"), (c.at, "g"), (c.at + 1, "0")] {
+                    assert_eq!(ids(page_before(held.messages(), &interner, Some(cursor), limit)), reference(Some(cursor), limit), "cursor {cursor:?} limit {limit}");
+                }
+            }
+        }
     }
 }
 

@@ -146,7 +146,7 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
                     let msg_for_save = {
                         let mut state = STATE.lock().await;
                         state.update_message_in_chat(&chat_id, &msg_id, |msg| {
-                            msg.preview_metadata = Some(Box::new(metadata));
+                            msg.set_preview_metadata(Some(metadata));
                         })
                     };
 

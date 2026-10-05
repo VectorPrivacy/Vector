@@ -244,7 +244,7 @@ impl MessageFlags {
 // TinyVec - 8-byte thin pointer for small collections
 // ============================================================================
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -252,19 +252,17 @@ use std::ptr::NonNull;
 ///
 /// Memory layout:
 /// - Stack: single pointer (8 bytes) - null for empty
-/// - Heap: `[len: u8][items: T...]` - only allocated when non-empty
+/// - Heap: `[len: u32][items: T...]` - exact-sized, only allocated when non-empty
 ///
 /// Compared to standard types:
-/// - `Vec<T>`: 24 bytes (ptr + len + cap)
+/// - `Vec<T>`: 24 bytes (ptr + len + cap), plus growth slack
 /// - `Box<[T]>`: 16 bytes (fat pointer)
 /// - `TinyVec<T>`: 8 bytes (thin pointer)
 ///
-/// Limitations:
-/// - Max 255 items (u8 length)
-/// - Immutable after creation (no push/pop - recreate to modify)
-/// - Perfect for attachments/reactions which rarely change
+/// No spare capacity: a push reallocates in place where the allocator can, which suits
+/// collections that are mostly empty or tiny and grow one item at a time.
 pub struct TinyVec<T> {
-    /// Null = empty, otherwise points to: [len: u8][items: T...]
+    /// Null = empty, otherwise points to: [len: u32][items: T...]
     ptr: Option<NonNull<u8>>,
     _marker: PhantomData<T>,
 }
@@ -281,41 +279,30 @@ impl<T> TinyVec<T> {
 
     /// Create from a Vec, consuming it
     pub fn from_vec(vec: Vec<T>) -> Self {
+        let mut out = Self::new();
         if vec.is_empty() {
-            return Self::new();
+            return out;
         }
-
-        let len = vec.len().min(255) as u8;
-
-        // Calculate layout: 1 byte for length + items
-        let (layout, items_offset) = Self::layout_for(len as usize);
-
+        let len = vec.len();
+        let (layout, items_offset) = Self::layout_for(len);
         unsafe {
-            // Allocate
             let ptr = alloc(layout);
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
             }
-
-            // Write length
-            *ptr = len;
-
-            // Move items (no clone!)
+            *(ptr as *mut u32) = len as u32;
             let items_ptr = ptr.add(items_offset) as *mut T;
-            for (i, item) in vec.into_iter().take(len as usize).enumerate() {
+            for (i, item) in vec.into_iter().enumerate() {
                 std::ptr::write(items_ptr.add(i), item);
             }
-
-            Self {
-                ptr: NonNull::new(ptr),
-                _marker: PhantomData,
-            }
+            out.ptr = NonNull::new(ptr);
         }
+        out
     }
 
     /// Calculate layout for allocation
     fn layout_for(len: usize) -> (Layout, usize) {
-        let header_layout = Layout::new::<u8>();
+        let header_layout = Layout::new::<u32>();
         let items_layout = Layout::array::<T>(len).unwrap();
         header_layout.extend(items_layout).unwrap()
     }
@@ -325,7 +312,7 @@ impl<T> TinyVec<T> {
     pub fn len(&self) -> usize {
         match self.ptr {
             None => 0,
-            Some(ptr) => unsafe { *ptr.as_ptr() as usize },
+            Some(ptr) => unsafe { *(ptr.as_ptr() as *const u32) as usize },
         }
     }
 
@@ -337,37 +324,27 @@ impl<T> TinyVec<T> {
     /// Get items offset within allocation
     #[inline]
     fn items_offset() -> usize {
-        let header_layout = Layout::new::<u8>();
-        let items_layout = Layout::new::<T>();
-        header_layout.extend(items_layout).map(|(_, offset)| offset).unwrap_or(1)
+        Self::layout_for(1).1
+    }
+
+    #[inline]
+    fn items_ptr(&self) -> *mut T {
+        match self.ptr {
+            None => NonNull::dangling().as_ptr(),
+            Some(ptr) => unsafe { ptr.as_ptr().add(Self::items_offset()) as *mut T },
+        }
     }
 
     /// Get a slice of the items
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        match self.ptr {
-            None => &[],
-            Some(ptr) => unsafe {
-                let base = ptr.as_ptr();
-                let len = *base as usize;
-                let items_ptr = base.add(Self::items_offset()) as *const T;
-                std::slice::from_raw_parts(items_ptr, len)
-            },
-        }
+        unsafe { std::slice::from_raw_parts(self.items_ptr(), self.len()) }
     }
 
     /// Get a mutable slice of the items
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        match self.ptr {
-            None => &mut [],
-            Some(ptr) => unsafe {
-                let base = ptr.as_ptr();
-                let len = *base as usize;
-                let items_ptr = base.add(Self::items_offset()) as *mut T;
-                std::slice::from_raw_parts_mut(items_ptr, len)
-            },
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.items_ptr(), self.len()) }
     }
 
     /// Iterate over items
@@ -420,25 +397,69 @@ impl<T> TinyVec<T> {
         self.as_mut_slice().get_mut(index)
     }
 
-    /// Push an item (rebuilds the entire allocation - use sparingly!)
-    pub fn push(&mut self, item: T)
-    where
-        T: Clone,
-    {
-        let mut vec = self.to_vec();
-        vec.push(item);
-        *self = Self::from_vec(vec);
+    /// Append an item, growing the allocation by exactly one slot (moved, never cloned).
+    pub fn push(&mut self, item: T) {
+        let len = self.len();
+        assert!(len < u32::MAX as usize, "TinyVec length overflow");
+        let (new_layout, items_offset) = Self::layout_for(len + 1);
+        unsafe {
+            let ptr = match self.ptr {
+                None => alloc(new_layout),
+                Some(old) => realloc(old.as_ptr(), Self::layout_for(len).0, new_layout.size()),
+            };
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(new_layout);
+            }
+            std::ptr::write((ptr.add(items_offset) as *mut T).add(len), item);
+            *(ptr as *mut u32) = (len + 1) as u32;
+            self.ptr = NonNull::new(ptr);
+        }
     }
 
-    /// Retain items matching a predicate (rebuilds the allocation)
-    pub fn retain<F>(&mut self, f: F)
+    /// Keep the items matching a predicate, compacting in place and shrinking to fit.
+    pub fn retain<F>(&mut self, mut f: F)
     where
-        T: Clone,
         F: FnMut(&T) -> bool,
     {
-        let mut vec = self.to_vec();
-        vec.retain(f);
-        *self = Self::from_vec(vec);
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        let items = self.items_ptr();
+        // Detached while items move: a panicking predicate leaks the block, never double-drops.
+        let base = self.ptr.take().unwrap().as_ptr();
+        let mut kept = 0;
+        unsafe {
+            for i in 0..len {
+                if f(&*items.add(i)) {
+                    if i != kept {
+                        std::ptr::copy_nonoverlapping(items.add(i), items.add(kept), 1);
+                    }
+                    kept += 1;
+                } else {
+                    std::ptr::drop_in_place(items.add(i));
+                }
+            }
+            if kept == 0 {
+                dealloc(base, Self::layout_for(len).0);
+                return;
+            }
+            let ptr = if kept == len {
+                base
+            } else {
+                realloc(base, Self::layout_for(len).0, Self::layout_for(kept).0.size())
+            };
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(Self::layout_for(kept).0);
+            }
+            *(ptr as *mut u32) = kept as u32;
+            self.ptr = NonNull::new(ptr);
+        }
+    }
+
+    /// Bytes this holds on the heap (header and items; nothing the items own).
+    pub fn heap_bytes(&self) -> usize {
+        if self.is_empty() { 0 } else { Self::layout_for(self.len()).0.size() }
     }
 
     /// Check if any item matches a predicate
@@ -447,6 +468,12 @@ impl<T> TinyVec<T> {
         F: FnMut(&T) -> bool,
     {
         self.as_slice().iter().any(f)
+    }
+}
+
+impl<T> FromIterator<T> for TinyVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from_vec(iter.into_iter().collect())
     }
 }
 
@@ -507,18 +534,9 @@ impl<T> Drop for TinyVec<T> {
     fn drop(&mut self) {
         if let Some(ptr) = self.ptr {
             unsafe {
-                let base = ptr.as_ptr();
-                let len = *base as usize;
-                let items_ptr = base.add(Self::items_offset()) as *mut T;
-
-                // Drop each item
-                for i in 0..len {
-                    std::ptr::drop_in_place(items_ptr.add(i));
-                }
-
-                // Deallocate
-                let (layout, _) = Self::layout_for(len);
-                dealloc(base, layout);
+                let len = self.len();
+                std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(self.items_ptr(), len));
+                dealloc(ptr.as_ptr(), Self::layout_for(len).0);
             }
         }
     }
@@ -532,24 +550,16 @@ unsafe impl<T: Sync> Sync for TinyVec<T> {}
 // Compact Reaction
 // ============================================================================
 
-/// Memory-efficient reaction with binary IDs and interned author.
-///
-/// Compared to the regular `Reaction` struct (~292 bytes with heap):
-/// - IDs use `[u8; 32]` instead of hex String (saves ~56 bytes each)
-/// - Author uses u16 index into interner (saves ~86 bytes)
-/// - Emoji uses Box<str> (saves 8 bytes, supports custom emoji like `:cat_heart_eyes:`)
-/// - Total: ~82 bytes vs ~292 bytes (72% savings!)
-#[derive(Clone, Debug)]
+/// Memory-efficient reaction: binary id, interned author, interned (emoji, url) pair.
+/// 40 bytes and `Copy`, so adding or removing one never allocates per reaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactReaction {
     /// Reaction event ID as binary
     pub id: [u8; 32],
+    /// The (emoji, NIP-30 url) pair, interned via [`NpubInterner::intern_emoji`]
+    pub emoji_idx: u32,
     /// Author npub index (interned via NpubInterner)
     pub author_idx: u16,
-    /// Emoji string (supports standard emoji and custom like `:cat_heart_eyes:`)
-    pub emoji: Box<str>,
-    /// NIP-30 custom-emoji URL when the reaction is `:shortcode:` form.
-    /// Boxed so the cold path (stock unicode reactions) stays 8 bytes.
-    pub emoji_url: Option<Box<str>>,
 }
 
 impl CompactReaction {
@@ -559,39 +569,39 @@ impl CompactReaction {
         bytes_to_hex_32(&self.id)
     }
 
-    /// Convert from regular Reaction, interning author
+    /// The emoji, resolved through the interner it was interned with.
+    #[inline]
+    pub fn emoji<'a>(&self, interner: &'a NpubInterner) -> &'a str {
+        interner.emoji(self.emoji_idx).0
+    }
+
+    /// Convert from regular Reaction, interning author and emoji
     pub fn from_reaction(reaction: &Reaction, interner: &mut NpubInterner) -> Self {
         Self {
             id: hex_to_bytes_32(&reaction.id),
+            emoji_idx: interner.intern_emoji(&reaction.emoji, reaction.emoji_url.as_deref()),
             author_idx: interner.intern(&reaction.author_id),
-            emoji: reaction.emoji.clone().into_boxed_str(),
-            emoji_url: reaction.emoji_url.as_deref().map(|s| s.into()),
         }
     }
 
-    /// Convert from regular Reaction (owned), interning author
+    /// Convert from regular Reaction (owned), interning author and emoji
     pub fn from_reaction_owned(reaction: Reaction, interner: &mut NpubInterner) -> Self {
-        Self {
-            id: hex_to_bytes_32(&reaction.id),
-            author_idx: interner.intern(&reaction.author_id),
-            emoji: reaction.emoji.into_boxed_str(),
-            emoji_url: reaction.emoji_url.map(|s| s.into_boxed_str()),
-        }
+        Self::from_reaction(&reaction, interner)
     }
 
     /// Convert back to regular Reaction, resolving author from interner.
-    /// `parent_id` is the reacted-to message's binary event id: a CompactReaction
-    /// is always nested inside that message, so its id IS the reference (the field
-    /// used to be stored redundantly on every reaction).
-    pub fn to_reaction(&self, parent_id: &[u8; 32], interner: &NpubInterner) -> Reaction {
+    /// `parent_hex` is the reacted-to message's id: a CompactReaction is always nested
+    /// inside that message, so its id IS the reference.
+    pub fn to_reaction(&self, parent_hex: &str, interner: &NpubInterner) -> Reaction {
+        let (emoji, emoji_url) = interner.emoji(self.emoji_idx);
         Reaction {
             id: self.id_hex(),
-            reference_id: bytes_to_hex_32(parent_id),
+            reference_id: parent_hex.to_string(),
             author_id: interner.resolve(self.author_idx)
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
-            emoji: self.emoji.to_string(),
-            emoji_url: self.emoji_url.as_deref().map(|s| s.to_string()),
+            emoji: emoji.to_string(),
+            emoji_url: emoji_url.map(|s| s.to_string()),
         }
     }
 }
@@ -833,6 +843,10 @@ pub struct NpubInterner {
     npubs: Vec<String>,
     /// Indices into npubs, sorted alphabetically for binary search
     sorted: Vec<u16>,
+    /// Reaction (emoji, NIP-30 url) pairs in insertion order; a few hundred per session.
+    emojis: Vec<(Box<str>, Option<Box<str>>)>,
+    /// Indices into emojis, sorted by pair for binary search
+    emojis_sorted: Vec<u32>,
 }
 
 /// Sentinel value for "no npub" (avoids Option overhead)
@@ -840,10 +854,7 @@ pub const NO_NPUB: u16 = u16::MAX;
 
 impl NpubInterner {
     pub fn new() -> Self {
-        Self {
-            npubs: Vec::new(),
-            sorted: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Pre-allocate capacity for expected number of unique npubs
@@ -851,7 +862,32 @@ impl NpubInterner {
         Self {
             npubs: Vec::with_capacity(capacity),
             sorted: Vec::with_capacity(capacity),
+            ..Self::default()
         }
+    }
+
+    /// Intern a reaction's (emoji, url) pair, returning its stable index.
+    pub fn intern_emoji(&mut self, emoji: &str, url: Option<&str>) -> u32 {
+        let key = (emoji, url);
+        let found = self.emojis_sorted.binary_search_by(|&i| {
+            let (e, u) = &self.emojis[i as usize];
+            (&**e, u.as_deref()).cmp(&key)
+        });
+        match found {
+            Ok(pos) => self.emojis_sorted[pos],
+            Err(pos) => {
+                let idx = self.emojis.len() as u32;
+                self.emojis.push((emoji.into(), url.map(Into::into)));
+                self.emojis_sorted.insert(pos, idx);
+                idx
+            }
+        }
+    }
+
+    /// Resolve an interned (emoji, url) pair; an unknown index reads as no emoji.
+    #[inline]
+    pub fn emoji(&self, idx: u32) -> (&str, Option<&str>) {
+        self.emojis.get(idx as usize).map_or(("", None), |(e, u)| (&**e, u.as_deref()))
     }
 
     /// Intern an npub string, returning its stable index.
@@ -925,6 +961,9 @@ impl NpubInterner {
             + self.npubs.capacity() * std::mem::size_of::<String>()
             + self.npubs.iter().map(|s| s.capacity()).sum::<usize>()
             + self.sorted.capacity() * std::mem::size_of::<u16>()
+            + self.emojis.capacity() * std::mem::size_of::<(Box<str>, Option<Box<str>>)>()
+            + self.emojis.iter().map(|(e, u)| e.len() + u.as_ref().map_or(0, |u| u.len())).sum::<usize>()
+            + self.emojis_sorted.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -932,75 +971,116 @@ impl NpubInterner {
 // Compact Message
 // ============================================================================
 
-/// Memory-efficient message with binary IDs and interned npubs.
-///
-/// Compared to the regular `Message` struct:
-/// - IDs use `[u8; 32]` instead of hex String (saves ~56 bytes each)
-/// - npubs use u16 index into interner (saves ~85 bytes each)
-/// - Booleans packed into MessageFlags (saves ~24 bytes + 2 for replied_to_has_attachment)
-/// - Boxed optional IDs (replied_to, wrapper_id) save ~40 bytes when None
-/// - Compact timestamp (u32 seconds since 2020) saves 4 bytes
-/// - TinyVec for attachments/reactions (8 bytes vs 24 = saves 32 bytes)
-/// - Box<str> for content (8 bytes vs 24 = saves 16 bytes)
-/// - Total savings: ~350+ bytes per message
+/// Memory-efficient message: binary ids, interned npubs and emoji, packed flags, and the
+/// fields most messages never carry (a reply, edits, a link preview, custom emoji, bot
+/// targets) behind two optional boxes. 96 bytes inline.
 #[derive(Clone, Debug)]
 pub struct CompactMessage {
     /// Message ID as binary (64 hex chars -> 32 bytes)
     pub id: [u8; 32],
     /// Timestamp in milliseconds (full precision for sub-second ordering)
     pub at: u64,
-    /// NIP-40 expiry as unix SECONDS (0 = permanent). u32 holds it until 2106
-    /// and costs 4 bytes inline — self-destruct messages are rare and short-
-    /// lived, so a boxed Option would only add heap churn on the purge path.
-    pub expiration_secs: u32,
-    /// Packed boolean flags (mine, pending, failed, replied_to_has_attachment)
-    pub flags: MessageFlags,
-    /// Index into NpubInterner for sender's npub (NO_NPUB if none)
-    pub npub_idx: u16,
-    /// Replied-to message ID (boxed - None for ~70% of messages saves 24 bytes)
-    pub replied_to: Option<Box<[u8; 32]>>,
-    /// Index into NpubInterner for replied-to author (NO_NPUB if none)
-    pub replied_to_npub_idx: u16,
-    /// Wrapper event ID for gift-wrapped messages (boxed - saves 25 bytes when None)
-    pub wrapper_id: Option<Box<[u8; 32]>>,
-
-    // Variable-length fields - optimized for memory
     /// Message content (Box<str> = 16 bytes vs String's 24 bytes)
     pub content: Box<str>,
-    /// Content of replied-to message
-    pub replied_to_content: Option<Box<str>>,
-    /// The replied-to message's emoji tags (Boxed: rare, keeps the struct lean)
-    pub replied_to_emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
-    /// File attachments (CompactAttachment = ~120 bytes vs Attachment's ~320 bytes)
+    /// File attachments
     pub attachments: TinyVec<CompactAttachment>,
-    /// Emoji reactions (CompactReaction = ~82 bytes vs Reaction's ~292 bytes)
+    /// Emoji reactions
     pub reactions: TinyVec<CompactReaction>,
-    /// Edit history - boxed since <1% of messages are edited (saves 16 bytes inline)
-    #[allow(clippy::box_collection)]
-    pub edit_history: Option<Box<Vec<EditEntry>>>,
-    /// Link preview metadata - boxed since ~216 bytes but rare (saves ~208 bytes)
+    /// What this message replies to, when it does
+    pub reply: Option<Box<CompactReply>>,
+    /// Edit history, link preview, custom emoji and bot targets, when any are present
+    pub extras: Option<Box<MessageExtras>>,
+    /// NIP-40 expiry as unix SECONDS (0 = permanent). Inline: the self-destruct sweep
+    /// scans it across every message.
+    pub expiration_secs: u32,
+    /// Index into NpubInterner for sender's npub (NO_NPUB if none)
+    pub npub_idx: u16,
+    /// Packed boolean flags (mine, pending, failed, replied_to_has_attachment)
+    pub flags: MessageFlags,
+}
+
+/// The replied-to message, as quoted on this one.
+#[derive(Clone, Debug)]
+pub struct CompactReply {
+    pub id: [u8; 32],
+    /// Index into NpubInterner for the replied-to author (NO_NPUB if none)
+    pub npub_idx: u16,
+    pub content: Option<Box<str>>,
+    /// The quote's NIP-30 emoji, interned (see [`NpubInterner::intern_emoji`])
+    pub emoji_tags: TinyVec<u32>,
+}
+
+/// The rarely-set parts of a message, boxed together so a plain message pays 8 bytes.
+#[derive(Clone, Debug, Default)]
+pub struct MessageExtras {
+    pub edit_history: Vec<EditEntry>,
     pub preview_metadata: Option<Box<SiteMetadata>>,
-    /// NIP-30 emoji tags travelling with this rumor — boxed because the
-    /// vast majority of messages have none, so the cold path stays cheap.
-    #[allow(clippy::box_collection)]
-    pub emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
-    /// Bot routing targets as interned npub handles — boxed because only
-    /// command invocations carry any.
-    #[allow(clippy::box_collection)]
-    pub addressed_bots: Option<Box<Vec<u16>>>,
+    /// NIP-30 emoji tags travelling with this rumor, interned
+    pub emoji_tags: TinyVec<u32>,
+    /// Bot routing targets as interned npub handles
+    pub addressed_bots: TinyVec<u16>,
+}
+
+impl MessageExtras {
+    fn is_empty(&self) -> bool {
+        self.edit_history.is_empty()
+            && self.preview_metadata.is_none()
+            && self.emoji_tags.is_empty()
+            && self.addressed_bots.is_empty()
+    }
+}
+
+fn intern_emoji_tags(tags: &[crate::types::EmojiTag], interner: &mut NpubInterner) -> TinyVec<u32> {
+    tags.iter().map(|t| interner.intern_emoji(&t.shortcode, Some(&t.url))).collect()
+}
+
+fn resolve_emoji_tags(tags: &TinyVec<u32>, interner: &NpubInterner) -> Vec<crate::types::EmojiTag> {
+    tags.iter()
+        .map(|&i| {
+            let (shortcode, url) = interner.emoji(i);
+            crate::types::EmojiTag { shortcode: shortcode.to_string(), url: url.unwrap_or_default().to_string() }
+        })
+        .collect()
 }
 
 impl CompactMessage {
     /// Check if this message has a replied-to reference
     #[inline]
     pub fn has_reply(&self) -> bool {
-        self.replied_to.is_some()
+        self.reply.is_some()
     }
 
     /// Check if this message has been edited
     #[inline]
     pub fn is_edited(&self) -> bool {
-        self.edit_history.is_some()
+        self.extras.as_ref().is_some_and(|x| !x.edit_history.is_empty())
+    }
+
+    /// The edit history, oldest first; empty when never edited.
+    #[inline]
+    pub fn edit_history(&self) -> &[EditEntry] {
+        self.extras.as_ref().map_or(&[], |x| &x.edit_history)
+    }
+
+    #[inline]
+    pub fn preview_metadata(&self) -> Option<&SiteMetadata> {
+        self.extras.as_ref().and_then(|x| x.preview_metadata.as_deref())
+    }
+
+    pub fn set_preview_metadata(&mut self, metadata: Option<SiteMetadata>) {
+        self.extras_mut().preview_metadata = metadata.map(Box::new);
+        self.drop_empty_extras();
+    }
+
+    /// The extras box, created on first use.
+    fn extras_mut(&mut self) -> &mut MessageExtras {
+        self.extras.get_or_insert_with(Default::default)
+    }
+
+    fn drop_empty_extras(&mut self) {
+        if self.extras.as_ref().is_some_and(|x| x.is_empty()) {
+            self.extras = None;
+        }
     }
 
     /// Get the message ID as a string (hex for event IDs, "pending-..." for pending)
@@ -1012,16 +1092,10 @@ impl CompactMessage {
     /// Get the replied-to ID as a hex string, or empty if none
     #[inline]
     pub fn replied_to_hex(&self) -> String {
-        match &self.replied_to {
-            Some(id) => bytes_to_hex_32(id),
+        match &self.reply {
+            Some(r) => bytes_to_hex_32(&r.id),
             None => String::new(),
         }
-    }
-
-    /// Get wrapper ID as hex string if present
-    #[inline]
-    pub fn wrapper_id_hex(&self) -> Option<String> {
-        self.wrapper_id.as_ref().map(|id| bytes_to_hex_32(id))
     }
 
     /// Get timestamp as milliseconds (for compatibility with frontend)
@@ -1035,37 +1109,25 @@ impl CompactMessage {
     /// `emoji_tags` are the NIP-30 custom-emoji tags resolved from the new
     /// content; they're adopted only when this edit is the newest revision so
     /// an out-of-order older edit can't clobber the live content's emoji.
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>) {
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>, interner: &mut NpubInterner) {
+        let original = EditEntry { content: self.content.to_string(), edited_at: self.timestamp_ms() };
+        let extras = self.extras_mut();
         // Initialize edit history with original content if not present
-        if self.edit_history.is_none() {
-            self.edit_history = Some(Box::new(vec![EditEntry {
-                content: self.content.to_string(),
-                edited_at: self.timestamp_ms(), // Convert compact to ms
-            }]));
+        if extras.edit_history.is_empty() {
+            extras.edit_history.push(original);
         }
-
-        let mut is_latest = true;
-        if let Some(ref mut history) = self.edit_history {
-            // Deduplicate: skip if we already have this edit
-            if history.iter().any(|e| e.edited_at == edited_at) {
-                return;
-            }
-
-            // Add new edit to history
-            history.push(EditEntry {
-                content: new_content.clone(),
-                edited_at,
-            });
-
-            // Sort by timestamp
-            history.sort_by_key(|e| e.edited_at);
-            is_latest = history.last().map(|e| e.edited_at == edited_at).unwrap_or(true);
+        // Deduplicate: skip if we already have this edit
+        if extras.edit_history.iter().any(|e| e.edited_at == edited_at) {
+            return;
         }
+        extras.edit_history.push(EditEntry { content: new_content.clone(), edited_at });
+        extras.edit_history.sort_by_key(|e| e.edited_at);
+        let is_latest = extras.edit_history.last().is_none_or(|e| e.edited_at == edited_at);
 
         // Only the newest revision drives the visible content + emoji.
         if is_latest {
             self.content = new_content.into_boxed_str();
-            self.emoji_tags = if emoji_tags.is_empty() { None } else { Some(Box::new(emoji_tags)) };
+            self.extras_mut().emoji_tags = intern_emoji_tags(&emoji_tags, interner);
         }
     }
 
@@ -1076,13 +1138,9 @@ impl CompactMessage {
     }
 
     /// Add a reaction to this message
-    /// Note: Since TinyVec is immutable, this rebuilds the entire reactions list
     /// (see [`MAX_REACTION_GROUPS`] for the distinct-emoji ceiling)
     pub fn add_reaction(&mut self, reaction: Reaction, interner: &mut NpubInterner) -> bool {
-        // Convert to binary ID for comparison
         let reaction_id = hex_to_bytes_32(&reaction.id);
-
-        // Check if already exists
         if self.reactions.iter().any(|r| r.id == reaction_id) {
             return false;
         }
@@ -1091,26 +1149,38 @@ impl CompactMessage {
         // (author, emoji), so a second event from the same author carrying the
         // same emoji is the reaction we already hold, not another one.
         let author_idx = interner.intern(&reaction.author_id);
-        if self.reactions.iter().any(|r| r.author_idx == author_idx && *r.emoji == *reaction.emoji) {
+        let emoji = reaction.emoji.as_str();
+        if self.reactions.iter().any(|r| r.author_idx == author_idx && r.emoji(interner) == emoji) {
             return false;
         }
 
         // Distinct-emoji ceiling: joining an existing group is always fine,
         // but a reaction opening a group past the cap is refused — the same
         // bound the UI draws, enforced against hostile inbound too.
-        if !self.reactions.iter().any(|r| *r.emoji == *reaction.emoji) {
-            let groups: std::collections::HashSet<&str> =
-                self.reactions.iter().map(|r| &*r.emoji).collect();
-            if groups.len() >= MAX_REACTION_GROUPS {
+        if !self.reactions.iter().any(|r| r.emoji(interner) == emoji) {
+            let mut groups: [&str; MAX_REACTION_GROUPS] = [""; MAX_REACTION_GROUPS];
+            let mut n = 0;
+            for r in self.reactions.iter() {
+                let e = r.emoji(interner);
+                if !groups[..n].contains(&e) {
+                    if n == MAX_REACTION_GROUPS {
+                        return false;
+                    }
+                    groups[n] = e;
+                    n += 1;
+                }
+            }
+            if n >= MAX_REACTION_GROUPS {
                 return false;
             }
         }
 
-        // Convert to compact and rebuild
-        let compact = CompactReaction::from_reaction_owned(reaction, interner);
-        let mut reactions = self.reactions.to_vec();
-        reactions.push(compact);
-        self.reactions = TinyVec::from_vec(reactions);
+        let compact = CompactReaction {
+            id: reaction_id,
+            emoji_idx: interner.intern_emoji(emoji, reaction.emoji_url.as_deref()),
+            author_idx,
+        };
+        self.reactions.push(compact);
         true
     }
 
@@ -1120,9 +1190,7 @@ impl CompactMessage {
         if !self.reactions.iter().any(|r| r.id == target) {
             return false;
         }
-        let mut reactions = self.reactions.to_vec();
-        reactions.retain(|r| r.id != target);
-        self.reactions = TinyVec::from_vec(reactions);
+        self.reactions.retain(|r| r.id != target);
         true
     }
 
@@ -1275,17 +1343,38 @@ impl CompactMessageVec {
         if id_str.is_empty() {
             return false;
         }
-        let id = encode_message_id(id_str);
-        // Find position in id_index
-        let idx_pos = match self.id_index.binary_search_by(|(idx_id, _)| idx_id.cmp(&id)) {
+        self.remove_by_id(&encode_message_id(id_str))
+    }
+
+    /// Remove a message by binary ID. Returns true if removed.
+    pub fn remove_by_id(&mut self, id: &[u8; 32]) -> bool {
+        let idx_pos = match self.id_index.binary_search_by(|(idx_id, _)| idx_id.cmp(id)) {
             Ok(pos) => pos,
             Err(_) => return false,
         };
-        let msg_pos = self.id_index[idx_pos].1 as usize;
-        // Remove from messages vec
-        self.messages.remove(msg_pos);
-        // Rebuild index since positions shifted
-        self.rebuild_index();
+        let (_, msg_pos) = self.id_index.remove(idx_pos);
+        self.messages.remove(msg_pos as usize);
+        // Positions past the hole shift down by one; the id order is untouched.
+        for (_, pos) in &mut self.id_index {
+            if *pos > msg_pos {
+                *pos -= 1;
+            }
+        }
+        true
+    }
+
+    /// Give a message a new id in place (a pending send taking its event id), moving only
+    /// its own index entry. Returns false if `old` isn't held or `new` already is.
+    pub fn rekey(&mut self, old: &[u8; 32], new: [u8; 32]) -> bool {
+        if old == &new {
+            return self.contains_id(old);
+        }
+        let Ok(old_pos) = self.id_index.binary_search_by(|(id, _)| id.cmp(old)) else { return false };
+        let Err(new_pos) = self.id_index.binary_search_by(|(id, _)| id.cmp(&new)) else { return false };
+        let (_, msg_pos) = self.id_index.remove(old_pos);
+        let new_pos = if new_pos > old_pos { new_pos - 1 } else { new_pos };
+        self.id_index.insert(new_pos, (new, msg_pos));
+        self.messages[msg_pos as usize].id = new;
         true
     }
 
@@ -1302,7 +1391,8 @@ impl CompactMessageVec {
     ///
     /// Returns true if the message was added, false if duplicate ID.
     ///
-    /// **Performance**: O(log n) for append (common case), O(n) for out-of-order insert.
+    /// **Performance**: append costs a binary search plus one index shift (ids are random, so
+    /// the shift averages half the index); an out-of-order insert is O(n).
     pub fn insert(&mut self, msg: CompactMessage) -> bool {
         // Check for duplicate ID - O(log n)
         if self.contains_id(&msg.id) {
@@ -1317,8 +1407,6 @@ impl CompactMessageVec {
             let msg_pos = self.messages.len() as u32;
             self.messages.push(msg);
 
-            // Insert into id_index (maintain sorted order by ID) - O(log n) search + O(n) shift
-            // But the shift is typically small since IDs are random/sequential
             let idx_pos = self.id_index
                 .binary_search_by(|(id, _)| id.cmp(&msg_id))
                 .unwrap_err();
@@ -1488,10 +1576,9 @@ impl CompactMessageVec {
         added
     }
 
-    /// Total memory used (approximate)
+    /// Heap held by the two vectors, at capacity (not what the messages own)
     pub fn memory_usage(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.messages.capacity() * std::mem::size_of::<CompactMessage>()
+        self.messages.capacity() * std::mem::size_of::<CompactMessage>()
             + self.id_index.capacity() * std::mem::size_of::<([u8; 32], u32)>()
             // Note: doesn't include heap allocations inside CompactMessage
     }
@@ -1549,114 +1636,66 @@ use crate::types::Message;
 impl CompactMessage {
     /// Convert from a regular Message (borrowed), interning npubs
     pub fn from_message(msg: &Message, interner: &mut NpubInterner) -> Self {
-        Self {
-            id: encode_message_id(&msg.id),
-            at: timestamp_to_compact(msg.at),
-            flags: MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment),
-            npub_idx: interner.intern_opt(msg.npub.as_deref()),
-            // Box replied_to only when present (saves 24 bytes when None)
-            replied_to: if msg.replied_to.is_empty() {
-                None
-            } else {
-                Some(Box::new(hex_to_bytes_32(&msg.replied_to)))
+        Self::from_message_owned(
+            Message {
+                attachments: Vec::new(),
+                reactions: Vec::new(),
+                ..msg.clone()
             },
-            replied_to_npub_idx: interner.intern_opt(msg.replied_to_npub.as_deref()),
-            // Box wrapper_id (saves 25 bytes when None)
-            wrapper_id: msg.wrapper_event_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
-            expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
-            // Box<str> for content (saves 8 bytes per field)
-            content: msg.content.clone().into_boxed_str(),
-            replied_to_content: msg.replied_to_content.as_ref().map(|s| s.clone().into_boxed_str()),
-            replied_to_emoji_tags: msg.replied_to_emoji_tags.as_ref()
-                .filter(|t| !t.is_empty())
-                .map(|t| Box::new(t.clone())),
-            // Convert attachments to compact format
-            attachments: TinyVec::from_vec(
-                msg.attachments.iter()
-                    .map(CompactAttachment::from_attachment)
-                    .collect()
-            ),
-            // Convert reactions to compact format
-            reactions: TinyVec::from_vec(
-                msg.reactions.iter()
-                    .map(|r| CompactReaction::from_reaction(r, interner))
-                    .collect()
-            ),
-            // Box rare fields to save inline space
-            edit_history: msg.edit_history.clone().map(Box::new),
-            preview_metadata: msg.preview_metadata.clone().map(Box::new),
-            emoji_tags: if msg.emoji_tags.is_empty() {
-                None
-            } else {
-                Some(Box::new(msg.emoji_tags.clone()))
-            },
-            addressed_bots: if msg.addressed_bots.is_empty() {
-                None
-            } else {
-                Some(Box::new(msg.addressed_bots.iter().map(|n| interner.intern(n)).collect()))
-            },
-        }
+            interner,
+        )
+        .with_parts(
+            msg.attachments.iter().map(CompactAttachment::from_attachment).collect(),
+            msg.reactions.iter().map(|r| CompactReaction::from_reaction(r, interner)).collect(),
+        )
     }
 
-    /// Convert from a regular Message (owned) - ZERO-COPY for strings!
-    ///
-    /// Takes ownership of the Message and moves strings directly.
-    /// Use this when you don't need the original Message anymore.
+    fn with_parts(mut self, attachments: TinyVec<CompactAttachment>, reactions: TinyVec<CompactReaction>) -> Self {
+        self.attachments = attachments;
+        self.reactions = reactions;
+        self
+    }
+
+    /// Convert from a regular Message (owned), moving its strings rather than copying them.
     pub fn from_message_owned(msg: Message, interner: &mut NpubInterner) -> Self {
+        let reply = (!msg.replied_to.is_empty()).then(|| {
+            Box::new(CompactReply {
+                id: hex_to_bytes_32(&msg.replied_to),
+                npub_idx: interner.intern_opt(msg.replied_to_npub.as_deref()),
+                content: msg.replied_to_content.map(String::into_boxed_str),
+                emoji_tags: msg.replied_to_emoji_tags.as_deref().map_or_else(TinyVec::new, |t| intern_emoji_tags(t, interner)),
+            })
+        });
+        let extras = MessageExtras {
+            edit_history: msg.edit_history.unwrap_or_default(),
+            preview_metadata: msg.preview_metadata.map(Box::new),
+            emoji_tags: intern_emoji_tags(&msg.emoji_tags, interner),
+            addressed_bots: msg.addressed_bots.iter().map(|n| interner.intern(n)).collect(),
+        };
         Self {
             id: encode_message_id(&msg.id),
             at: timestamp_to_compact(msg.at),
-            flags: MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment),
-            npub_idx: interner.intern_opt(msg.npub.as_deref()),
-            // Box replied_to only when present (saves 24 bytes when None)
-            replied_to: if msg.replied_to.is_empty() {
-                None
-            } else {
-                Some(Box::new(hex_to_bytes_32(&msg.replied_to)))
-            },
-            replied_to_npub_idx: interner.intern_opt(msg.replied_to_npub.as_deref()),
-            // Box wrapper_id (saves 25 bytes when None)
-            wrapper_id: msg.wrapper_event_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
-            expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
-            // Zero-copy: into_boxed_str() reuses the String's buffer!
             content: msg.content.into_boxed_str(),
-            replied_to_content: msg.replied_to_content.map(|s| s.into_boxed_str()),
-            replied_to_emoji_tags: msg.replied_to_emoji_tags
-                .filter(|t| !t.is_empty())
-                .map(Box::new),
-            // Convert attachments to compact format (zero-copy where possible)
-            attachments: TinyVec::from_vec(
-                msg.attachments.into_iter()
-                    .map(CompactAttachment::from_attachment_owned)
-                    .collect()
-            ),
-            // Convert reactions to compact format (zero-copy for emoji string)
-            reactions: TinyVec::from_vec(
-                msg.reactions.into_iter()
-                    .map(|r| CompactReaction::from_reaction_owned(r, interner))
-                    .collect()
-            ),
-            // Box rare fields to save inline space
-            edit_history: msg.edit_history.map(Box::new),
-            preview_metadata: msg.preview_metadata.map(Box::new),
-            emoji_tags: if msg.emoji_tags.is_empty() {
-                None
-            } else {
-                Some(Box::new(msg.emoji_tags))
-            },
-            addressed_bots: if msg.addressed_bots.is_empty() {
-                None
-            } else {
-                Some(Box::new(msg.addressed_bots.iter().map(|n| interner.intern(n)).collect()))
-            },
+            attachments: msg.attachments.into_iter().map(CompactAttachment::from_attachment_owned).collect(),
+            reactions: msg.reactions.into_iter().map(|r| CompactReaction::from_reaction_owned(r, interner)).collect(),
+            reply,
+            extras: (!extras.is_empty()).then(|| Box::new(extras)),
+            expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
+            npub_idx: interner.intern_opt(msg.npub.as_deref()),
+            flags: MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment),
         }
     }
 
-    /// Convert back to a regular Message, resolving npubs from interner
+    /// Convert back to a regular Message, resolving npubs and emoji from the interner
     pub fn to_message(&self, interner: &NpubInterner) -> Message {
+        let id = self.id_hex();
+        let reactions = self.reactions.iter().map(|r| r.to_reaction(&id, interner)).collect();
+        let reply = self.reply.as_deref();
+        let extras = self.extras.as_deref();
         Message {
-            id: self.id_hex(),
-            at: self.timestamp_ms(), // Convert compact back to ms
+            id,
+            reactions,
+            at: self.timestamp_ms(),
             expiration: if self.expiration_secs == 0 { None } else { Some(self.expiration_secs as u64) },
             mine: self.flags.is_mine(),
             pending: self.flags.is_pending(),
@@ -1664,31 +1703,23 @@ impl CompactMessage {
             edited: self.is_edited(),
             npub: interner.resolve(self.npub_idx).map(|s| s.to_string()),
             replied_to: self.replied_to_hex(),
-            replied_to_content: self.replied_to_content.as_ref().map(|s| s.to_string()),
-            replied_to_emoji_tags: self.replied_to_emoji_tags.as_ref().map(|t| (**t).clone()),
-            replied_to_npub: interner.resolve(self.replied_to_npub_idx).map(|s| s.to_string()),
+            replied_to_content: reply.and_then(|r| r.content.as_deref()).map(str::to_string),
+            replied_to_emoji_tags: reply.filter(|r| !r.emoji_tags.is_empty()).map(|r| resolve_emoji_tags(&r.emoji_tags, interner)),
+            replied_to_npub: reply.and_then(|r| interner.resolve(r.npub_idx)).map(|s| s.to_string()),
             replied_to_has_attachment: self.flags.replied_to_has_attachment(),
             // Re-resolved per get_message_views / populate_reply_context; the compact
             // form keeps only the bool, so this stays None on the RAM path.
             replied_to_attachment_extension: None,
-            wrapper_event_id: self.wrapper_id_hex(),
+            // Never held in memory: every first save carries the original, and a re-save
+            // keeps the stored link (`save_event` COALESCEs it).
+            wrapper_event_id: None,
             content: self.content.to_string(),
-            // Convert compact attachments back to regular Attachment
-            attachments: self.attachments.iter()
-                .map(|a| a.to_attachment())
-                .collect(),
-            // Convert compact reactions back to regular Reaction
-            reactions: self.reactions.iter()
-                .map(|r| r.to_reaction(&self.id, interner))
-                .collect(),
-            // Unbox rare fields
-            edit_history: self.edit_history.as_ref().map(|b| (**b).clone()),
-            preview_metadata: self.preview_metadata.as_ref().map(|b| (**b).clone()),
-            emoji_tags: self.emoji_tags.as_ref().map(|b| (**b).clone()).unwrap_or_default(),
-            addressed_bots: self
-                .addressed_bots
-                .as_ref()
-                .map(|b| b.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
+            attachments: self.attachments.iter().map(|a| a.to_attachment()).collect(),
+            edit_history: extras.filter(|x| !x.edit_history.is_empty()).map(|x| x.edit_history.clone()),
+            preview_metadata: extras.and_then(|x| x.preview_metadata.as_deref().cloned()),
+            emoji_tags: extras.map(|x| resolve_emoji_tags(&x.emoji_tags, interner)).unwrap_or_default(),
+            addressed_bots: extras
+                .map(|x| x.addressed_bots.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
                 .unwrap_or_default(),
         }
     }
@@ -1772,18 +1803,11 @@ mod tests {
             expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: interner.intern("npub1test"),
-            replied_to: None,
-            replied_to_npub_idx: NO_NPUB,
-            wrapper_id: None,
             content: "First message".to_string().into_boxed_str(),
-            replied_to_content: None,
-            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
-            edit_history: None,
-            preview_metadata: None,  // Boxed, but None = 8 bytes
-            emoji_tags: None,
-            addressed_bots: None,
+            reply: None,
+            extras: None,
         };
 
         let msg2 = CompactMessage {
@@ -1792,18 +1816,11 @@ mod tests {
             expiration_secs: 0,
             flags: MessageFlags::MINE,
             npub_idx: interner.intern("npub1me"),
-            replied_to: None,
-            replied_to_npub_idx: NO_NPUB,
-            wrapper_id: None,
             content: "Second message".to_string().into_boxed_str(),
-            replied_to_content: None,
-            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
-            edit_history: None,
-            preview_metadata: None,  // Boxed, but None = 8 bytes
-            emoji_tags: None,
-            addressed_bots: None,
+            reply: None,
+            extras: None,
         };
 
         assert!(vec.insert(msg1));
@@ -1830,18 +1847,11 @@ mod tests {
             expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: NO_NPUB,
-            replied_to: None,
-            replied_to_npub_idx: NO_NPUB,
-            wrapper_id: None,
             content: "Test".to_string().into_boxed_str(),
-            replied_to_content: None,
-            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
-            edit_history: None,
-            preview_metadata: None,  // Boxed
-            emoji_tags: None,
-            addressed_bots: None,
+            reply: None,
+            extras: None,
         };
 
         assert!(vec.insert(msg.clone()));
@@ -1975,12 +1985,9 @@ mod tests {
 
         // ===== COMPACT MEMORY USAGE =====
         println!("--- MEMORY COMPARISON ---");
-        let compact_heap_estimate: usize = compact_vec.iter().map(|m| {
-            m.content.len()  // Box<str> has no capacity, just len
-                + m.replied_to_content.as_ref().map(|s| s.len()).unwrap_or(0)
-                + m.attachments.len() * std::mem::size_of::<Attachment>() + if m.attachments.is_empty() { 0 } else { 1 }
-                + m.reactions.len() * std::mem::size_of::<Reaction>() + if m.reactions.is_empty() { 0 } else { 1 }
-        }).sum();
+        let compact_heap_estimate: usize = compact_vec.iter()
+            .map(|m| crate::stats::DeepSize::deep_size(m) - std::mem::size_of::<CompactMessage>())
+            .sum();
         let compact_struct_mem = compact_vec.len() * std::mem::size_of::<CompactMessage>();
         let compact_index_mem = compact_vec.len() * std::mem::size_of::<([u8; 32], u32)>();
         let interner_mem = interner.memory_usage();
@@ -2793,18 +2800,11 @@ mod tests {
             expiration_secs: 0,
             flags: MessageFlags::NONE,
             npub_idx: NO_NPUB,
-            replied_to: None,
-            replied_to_npub_idx: NO_NPUB,
-            wrapper_id: None,
             content: "test".into(),
-            replied_to_content: None,
-            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
-            edit_history: None,
-            preview_metadata: None,
-            emoji_tags: None,
-            addressed_bots: None,
+            reply: None,
+            extras: None,
         }
     }
 
@@ -3263,6 +3263,66 @@ mod tests {
         assert_eq!(compact.reactions.len(), MAX_REACTION_GROUPS + 1);
     }
 
+    /// The hot structs' footprint, pinned so a new field can't quietly grow every message.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn compact_layouts_hold_their_size() {
+        assert_eq!(std::mem::size_of::<CompactMessage>(), 96);
+        assert_eq!(std::mem::size_of::<CompactReaction>(), 40);
+        assert_eq!(std::mem::size_of::<TinyVec<CompactReaction>>(), 8);
+    }
+
+    #[test]
+    fn targeted_rekey_and_remove_match_a_full_rebuild() {
+        let mut interner = NpubInterner::new();
+        let id = |n: u64| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&n.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
+            b
+        };
+        let mut v = CompactMessageVec::new();
+        for n in 0..200u64 {
+            let msg = Message { id: bytes_to_hex_32(&id(n)), at: n * 10, ..Default::default() };
+            v.insert(CompactMessage::from_message(&msg, &mut interner));
+        }
+        let check = |v: &CompactMessageVec| {
+            let mut rebuilt = v.clone();
+            rebuilt.rebuild_index();
+            assert_eq!(v.id_index, rebuilt.id_index);
+        };
+        for n in (0..200u64).step_by(7) {
+            assert!(v.rekey(&id(n), id(n + 10_000)));
+            check(&v);
+        }
+        assert!(!v.rekey(&id(1), id(2)), "a held id is never overwritten");
+        for n in (3..200u64).step_by(11).filter(|n| n % 7 != 0) {
+            assert!(v.remove_by_id(&id(n)));
+            check(&v);
+        }
+        assert!(v.find_by_id(&id(10_007)).is_some_and(|m| m.at == 70));
+    }
+
+    #[test]
+    fn a_group_grows_past_255_reactions() {
+        let mut interner = NpubInterner::new();
+        let mut compact = CompactMessage::from_message(&Message::default(), &mut interner);
+        let react = |i: usize| Reaction {
+            id: format!("{:064x}", i + 1),
+            reference_id: "a".repeat(64),
+            author_id: format!("npub1joiner{i}"),
+            emoji: "👍".to_string(),
+            emoji_url: None,
+        };
+        for i in 0..300 {
+            assert!(compact.add_reaction(react(i), &mut interner), "reaction {i} lands");
+        }
+        assert_eq!(compact.reactions.len(), 300);
+        let loaded = Message { reactions: (0..300).map(react).collect(), ..Default::default() };
+        assert_eq!(CompactMessage::from_message(&loaded, &mut interner).reactions.len(), 300, "history loads whole");
+        compact.remove_reaction(&format!("{:064x}", 1));
+        assert_eq!(compact.reactions.len(), 299);
+    }
+
     #[test]
     fn compact_message_from_message_roundtrip_all_fields() {
         let msg = make_full_message();
@@ -3280,7 +3340,7 @@ mod tests {
         assert_eq!(restored.replied_to_content, msg.replied_to_content, "replied_to_content mismatch");
         assert_eq!(restored.replied_to_npub, msg.replied_to_npub, "replied_to_npub mismatch");
         assert_eq!(restored.replied_to_has_attachment, msg.replied_to_has_attachment, "replied_to_has_attachment mismatch");
-        assert_eq!(restored.wrapper_event_id, msg.wrapper_event_id, "wrapper_event_id mismatch");
+        assert_eq!(restored.wrapper_event_id, None, "the wrapper link lives in the DB, not in memory");
         assert_eq!(restored.edited, msg.edited, "edited mismatch");
         assert_eq!(restored.edit_history, msg.edit_history, "edit_history mismatch");
         assert_eq!(restored.preview_metadata, msg.preview_metadata, "preview_metadata mismatch");
@@ -3741,7 +3801,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
+        let restored = compact.to_reaction(&reaction.reference_id, &interner);
 
         assert_eq!(restored.id, reaction.id, "id mismatch");
         assert_eq!(restored.reference_id, reaction.reference_id, "reference_id mismatch");
@@ -3779,7 +3839,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
+        let restored = compact.to_reaction(&reaction.reference_id, &interner);
         assert_eq!(restored.emoji, "\u{1f431}\u{200d}\u{1f4bb}", "complex unicode emoji should roundtrip");
     }
 
@@ -3794,7 +3854,7 @@ mod tests {
         };
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction(&reaction, &mut interner);
-        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction.reference_id), &interner);
+        let restored = compact.to_reaction(&reaction.reference_id, &interner);
         assert_eq!(restored.emoji, ":cat_heart_eyes:", "custom emoji shortcode should roundtrip");
     }
 
@@ -3810,7 +3870,7 @@ mod tests {
         let reaction_clone = reaction.clone();
         let mut interner = NpubInterner::new();
         let compact = CompactReaction::from_reaction_owned(reaction, &mut interner);
-        let restored = compact.to_reaction(&hex_to_bytes_32(&reaction_clone.reference_id), &interner);
+        let restored = compact.to_reaction(&reaction_clone.reference_id, &interner);
 
         assert_eq!(restored.id, reaction_clone.id);
         assert_eq!(restored.author_id, reaction_clone.author_id);

@@ -136,7 +136,7 @@ impl Chat {
     // ========================================================================
 
     pub fn add_message(&mut self, message: Message, interner: &mut NpubInterner) -> bool {
-        let compact = CompactMessage::from_message(&message, interner);
+        let compact = CompactMessage::from_message_owned(message, interner);
         self.messages.insert(compact)
     }
 

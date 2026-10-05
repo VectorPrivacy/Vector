@@ -431,7 +431,7 @@ async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
             continue;
         }
         let resident = STATE.lock().await.update_message_in_chat(&chat_id, &msg_id, |m| {
-            m.preview_metadata = Some(Box::new(metadata.clone()));
+            m.set_preview_metadata(Some(metadata.clone()));
         });
         let msg = resident.unwrap_or_else(|| Message { preview_metadata: Some(metadata), ..message.clone() });
         vector_core::emit_event("message_update", &json!({ "old_id": msg_id, "message": msg, "chat_id": chat_id }));

@@ -199,7 +199,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 .iter()
                 .map(|(shortcode, url)| crate::types::EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
                 .collect();
-            let (_c, message) = state.update_message(&target_id, |m| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone()))?;
+            let (_c, message) = state.update_message_with(&target_id, |m, i| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), i))?;
             // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching
             // v1 — emoji tags included, or the reload fold re-strips what the live fold kept.
             let edit_event = crate::stored_event::StoredEventBuilder::new()
