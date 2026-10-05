@@ -1171,7 +1171,8 @@ async fn commit_dm_message(
     // page already drop it, and painting it live was the one way it still reached the
     // screen. Gated at emission rather than at persist so an unban restores their
     // history — the row is still there, the filter simply stops matching.
-    let hidden_author = msg
+    // A DM's contact is an npub, never a (hex) channel id: skip the community lookup.
+    let hidden_author = added && !contact.starts_with("npub1") && msg
         .npub
         .as_deref()
         .and_then(|author| {
@@ -1237,14 +1238,14 @@ async fn commit_reaction(
 
     if let Some((chat_id, mut msg)) = msg_for_emit {
         crate::traits::emit_message_update(&chat_id, &reaction.reference_id, &mut msg).await;
-        let _ = crate::db::events::save_message(&chat_id, &msg).await;
         handler.on_reaction_received(&chat_id, &msg);
     }
 
-    // Always save reaction event with wrapper for dedup
+    // The kind-7 row is the reaction's only storage: the parent row never carries it.
     if let Ok(chat_id) = crate::db::id_cache::get_chat_id_by_identifier(contact) {
+        let user_id = crate::db::id_cache::get_or_create_user_id(&reaction.author_id).ok().flatten();
         let _ = crate::db::events::save_reaction_event(
-            &reaction, chat_id, None, is_mine, Some(wrapper_event_id.to_string())
+            &reaction, chat_id, user_id, is_mine, Some(wrapper_event_id.to_string())
         ).await;
     }
 

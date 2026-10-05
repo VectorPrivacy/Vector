@@ -357,9 +357,8 @@ pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
         ChatPersist::Removed(id) => {
             let _ = crate::db::events::delete_event(id).await;
         }
-        ChatPersist::ReactionRemoved { reaction_id, message } => {
+        ChatPersist::ReactionRemoved { reaction_id, .. } => {
             let _ = crate::db::events::delete_event(reaction_id).await;
-            let _ = crate::db::events::save_message(channel_id, message).await;
         }
     }
 }
