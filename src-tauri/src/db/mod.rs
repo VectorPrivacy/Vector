@@ -56,9 +56,6 @@ pub use vector_core::db::wrappers::{
     save_processed_wrapper, load_processed_wrappers, load_processed_wrappers_since, load_negentropy_items,
     load_negentropy_items_since,
 };
-pub async fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
-    vector_core::db::wrappers::load_recent_wrapper_ids(days)
-}
 // Attachment database functions (remain in src-tauri)
 pub use attachments::{
     get_chat_messages_paginated,

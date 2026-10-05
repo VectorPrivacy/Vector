@@ -794,7 +794,6 @@ pub async fn fetch_messages<R: Runtime>(
                             }
                         }
                     }
-                    let event_wrappers = db::load_recent_wrapper_ids(30).await.unwrap_or_default();
                     let processed_wrappers = if full_load {
                         db::load_processed_wrappers().unwrap_or_default()
                     } else {
@@ -807,11 +806,8 @@ pub async fn fetch_messages<R: Runtime>(
                     // left to dump it.
                     if !STATE.lock().await.is_syncing { return; }
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
-                    let total = event_wrappers.len() + processed_wrappers.len();
-                    cache.load(event_wrappers);
-                    for w in processed_wrappers {
-                        cache.insert(w);
-                    }
+                    let total = processed_wrappers.len();
+                    cache.load(processed_wrappers);
                     println!(
                         "[Sync] wrapper_id cache loaded: {} entries{} ({:?})",
                         total,

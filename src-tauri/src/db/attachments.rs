@@ -28,7 +28,7 @@ pub async fn get_chat_messages_paginated(
     get_message_views(chat_int_id, limit, offset).await
 }
 
-// Moved to vector-core: message_exists_in_db, wrapper_event_exists, update_wrapper_event_id, load_recent_wrapper_ids, save/load/update wrappers, load_negentropy_items, get_chat_message_count
+// Moved to vector-core: message_exists_in_db, wrapper_event_exists, update_wrapper_event_id, save/load/update wrappers, load_negentropy_items, get_chat_message_count
 
 /// Get messages around a specific message ID
 /// Returns messages from (target - context_before) to the most recent

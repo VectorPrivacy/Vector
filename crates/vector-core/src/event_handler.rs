@@ -493,13 +493,8 @@ async fn dedup_skip(event: &Event) -> Option<PreparedEvent> {
         }
     }
 
-    if let Ok(true) = crate::db::events::wrapper_event_exists(&event.id.to_hex()) {
-        return skip();
-    }
-
-    // The persistent ledger too, not just the events table: a DELETED message has no
-    // events row, so without this a wrap re-served after a restart (relays ignore
-    // NIP-09 freely) re-processes cleanly and resurrects the message.
+    // The ledger, not the events table: it holds every DM wrap (migration 96 backfilled the
+    // pre-ledger rows), including a DELETED message's, which no longer has an events row.
     if crate::db::wrappers::processed_wrapper_exists(&wrapper_event_id_bytes) {
         return skip();
     }
@@ -1529,5 +1524,51 @@ mod signals_only_tests {
         sync.on_dm_received("npub1a", &Message { at: 5_000, ..Default::default() }, true);
         sync.on_file_received("npub1a", &Message { at: 6_000, ..Default::default() }, true);
         assert_eq!(inner.messages.load(Ordering::Relaxed), 2, "since: live");
+    }
+}
+
+#[cfg(test)]
+mod wrapper_dedup_tests {
+    use super::*;
+
+    fn wrap() -> Event {
+        EventBuilder::new(Kind::GiftWrap, "").finalize(&Keys::generate()).unwrap()
+    }
+
+    /// A wrap held only on a pre-ledger events row: unseen until migration 96 ledgers it,
+    /// then skipped by the ledger lookup before any unwrap.
+    #[tokio::test]
+    async fn a_pre_ledger_dm_wrap_is_skipped_once_backfilled() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        std::fs::create_dir_all(crate::db::shared_test_data_dir().join(&account)).unwrap();
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        WRAPPER_ID_CACHE.lock().await.clear();
+
+        let legacy = wrap();
+        let peer = Keys::generate().public_key().to_bech32().unwrap();
+        let id = legacy.id.to_bytes();
+        let msg = crate::types::Message {
+            id: "f".repeat(64),
+            content: "legacy".into(),
+            at: 1_700_000_000_000,
+            npub: Some(peer.clone()),
+            wrapper_event_id: Some(crate::simd::hex::bytes_to_hex_32(&id)),
+            ..Default::default()
+        };
+        crate::db::events::save_message(&peer, &msg).await.unwrap();
+        assert!(dedup_skip(&legacy).await.is_none(), "the events column alone no longer dedups");
+
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            assert_eq!(crate::db::schema::backfill_dm_wrapper_ledger(&conn).unwrap(), 1);
+        }
+        assert!(matches!(dedup_skip(&legacy).await, Some(PreparedEvent::DedupSkip { .. })));
+        assert!(dedup_skip(&wrap()).await.is_none(), "an unseen wrap still processes");
+        crate::db::close_database();
     }
 }

@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 95;
+pub const HIGHEST_MIGRATION_ID: u32 = 96;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1408,12 +1408,154 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // The downgrade guard refuses such a build cleanly instead.
     run_atomic_migration(conn, 95, "Per-account key derivation salt", |_tx| Ok(()))?;
 
+    // DM wraps recorded only on their events row (written before the ledger) join the ledger, so
+    // the ledger alone answers gift-wrap dedup. Timestamp 0 is the ledger's "unknown": the next
+    // reconcile that re-serves the wrap backfills it, as for pre-timestamp rows.
+    run_atomic_migration(conn, 96, "Ledger DM wrappers held only on events rows", |tx| {
+        backfill_dm_wrapper_ledger(tx).map(|_| ())
+    })?;
+
     Ok(())
+}
+
+/// Copies every DM events-row wrapper id into `processed_wrappers` (transport 0); returns how
+/// many ledger rows it added. Community rows are left alone: Concord dedups messages by the
+/// events column by design.
+pub(crate) fn backfill_dm_wrapper_ledger(conn: &rusqlite::Connection) -> Result<usize, String> {
+    let mut read = conn
+        .prepare(
+            "SELECT e.wrapper_event_id FROM events e LEFT JOIN chats c ON c.id = e.chat_id \
+             WHERE e.wrapper_event_id IS NOT NULL AND length(e.wrapper_event_id) = 64 \
+             AND c.chat_type IS NOT 2",
+        )
+        .map_err(|e| format!("prepare wrapper backfill read: {e}"))?;
+    let mut write = conn
+        .prepare(
+            "INSERT OR IGNORE INTO processed_wrappers (wrapper_id, wrapper_created_at, transport) \
+             VALUES (?1, 0, 0)",
+        )
+        .map_err(|e| format!("prepare wrapper backfill write: {e}"))?;
+    let mut rows = read.query([]).map_err(|e| format!("read wrapper backfill: {e}"))?;
+    let mut added = 0;
+    while let Some(row) = rows.next().map_err(|e| format!("read wrapper backfill row: {e}"))? {
+        let Ok(hex) = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)) else {
+            continue;
+        };
+        let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(hex) else {
+            continue;
+        };
+        added += write
+            .execute(rusqlite::params![&id[..]])
+            .map_err(|e| format!("write wrapper backfill: {e}"))?;
+    }
+    Ok(added)
 }
 
 #[cfg(test)]
 mod tests {
     use super::HIGHEST_MIGRATION_ID;
+
+    fn migrated() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::SQL_SCHEMA).unwrap();
+        super::run_migrations(&mut conn).unwrap();
+        conn
+    }
+
+    fn hex(b: u8) -> String {
+        format!("{b:02x}").repeat(32)
+    }
+
+    fn event(conn: &rusqlite::Connection, id: &str, chat: i64, wrapper: Option<&str>) {
+        conn.execute(
+            "INSERT INTO events (id, kind, chat_id, content, created_at, received_at, wrapper_event_id) \
+             VALUES (?1, 14, ?2, '', 1, 1, ?3)",
+            rusqlite::params![id, chat, wrapper],
+        )
+        .unwrap();
+    }
+
+    fn ledger(conn: &rusqlite::Connection) -> Vec<(Vec<u8>, i64, i64)> {
+        conn.prepare("SELECT wrapper_id, wrapper_created_at, transport FROM processed_wrappers ORDER BY wrapper_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Every shape of events row the backfill can meet, run through the real migration runner.
+    #[test]
+    fn the_wrapper_backfill_ledgers_exactly_the_dm_wrappers() {
+        let mut conn = migrated();
+        conn.execute_batch(
+            "INSERT INTO chats (id, chat_identifier, chat_type, participants, created_at) VALUES
+                (1, 'npub1dm', 0, '[]', 0), (2, 'channel', 2, '[]', 0);",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        event(&conn, "m1", 1, Some(&hex(0x11)));                    // legacy DM: ledgered
+        event(&conn, "m2", 1, Some(&hex(0xAB).to_uppercase()));     // uppercase hex: ledgered
+        event(&conn, "m3", 1, Some(&hex(0x22)));                    // already ledgered: untouched
+        event(&conn, "m4", 2, Some(&hex(0x33)));                    // community: Concord's, skipped
+        event(&conn, "m5", 99, Some(&hex(0x44)));                   // orphan chat: treated as DM
+        event(&conn, "m6", 1, Some("zz".repeat(32).as_str()));      // not hex: skipped
+        event(&conn, "m7", 1, Some("abc"));                         // wrong length: skipped
+        event(&conn, "m8", 1, Some(""));                            // empty: skipped
+        event(&conn, "m9", 1, None);                                // no wrapper: skipped
+        event(&conn, "m10", 1, Some(&hex(0x11)));                   // duplicate wrapper: one row
+        conn.execute(
+            "INSERT INTO processed_wrappers (wrapper_id, wrapper_created_at, transport) VALUES (?1, 777, 0)",
+            [&[0x22u8; 32][..]],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM schema_migrations WHERE id = 96", []).unwrap();
+
+        super::run_migrations(&mut conn).unwrap();
+
+        assert_eq!(
+            ledger(&conn),
+            vec![
+                (vec![0x11; 32], 0, 0),
+                (vec![0x22; 32], 777, 0),
+                (vec![0x44; 32], 0, 0),
+                (vec![0xAB; 32], 0, 0),
+            ],
+        );
+        assert!(super::migration_applied(&conn, 96));
+
+        // Applied once: a later run never re-reads events.
+        event(&conn, "m11", 1, Some(&hex(0x55)));
+        super::run_migrations(&mut conn).unwrap();
+        assert_eq!(ledger(&conn).len(), 4);
+    }
+
+    #[test]
+    fn the_wrapper_backfill_is_a_no_op_on_a_fresh_database() {
+        let conn = migrated();
+        assert!(super::migration_applied(&conn, 96));
+        assert!(ledger(&conn).is_empty());
+        assert_eq!(super::backfill_dm_wrapper_ledger(&conn).unwrap(), 0);
+    }
+
+    /// The backfill and the ledger's own writer agree on the id encoding, so the dedup lookup
+    /// that replaces the events-column check finds a backfilled wrap.
+    #[test]
+    fn a_backfilled_wrapper_is_found_by_the_dedup_lookup() {
+        let conn = migrated();
+        conn.execute_batch(
+            "INSERT INTO chats (id, chat_identifier, chat_type, participants, created_at) VALUES (1, 'npub1dm', 0, '[]', 0);",
+        )
+        .unwrap();
+        let id = [0x5Au8; 32];
+        event(&conn, "m1", 1, Some(&crate::simd::hex::bytes_to_hex_32(&id)));
+        assert_eq!(super::backfill_dm_wrapper_ledger(&conn).unwrap(), 1);
+        let found: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM processed_wrappers WHERE wrapper_id = ?1)", [&id[..]], |r| r.get(0))
+            .unwrap();
+        assert!(found);
+        assert_eq!(super::backfill_dm_wrapper_ledger(&conn).unwrap(), 0, "idempotent");
+    }
 
     /// Parses this very file so the constant cannot drift from `run_migrations`.
     /// Without it, adding a migration and forgetting the bump would silently

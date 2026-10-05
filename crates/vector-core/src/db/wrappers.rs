@@ -94,51 +94,6 @@ pub fn load_processed_wrappers_since(since_secs: u64) -> Result<Vec<[u8; 32]>, S
     Ok(rows.flatten().collect())
 }
 
-/// Load recent wrapper IDs from events table (last N days) as raw bytes.
-pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
-    let conn = match super::get_db_connection_guard_static() {
-        Ok(c) => c,
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let cutoff_secs = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH).unwrap()
-        .as_secs()
-        .saturating_sub(days * 24 * 60 * 60);
-
-    // DM cache only: exclude Community chats (chat_type 2). Concord stamps its OUTER id on
-    // `events.wrapper_event_id` too (atomic message dedup), so without this join those ids would warm
-    // the DM gift-wrap cache — harmless (they'd never match a gift-wrap lookup) but wasteful. Concord
-    // dedup uses the synchronous `processed_wrapper_exists` ledger, not this cache.
-    let mut stmt = conn.prepare(
-        "SELECT e.wrapper_event_id FROM events e \
-         JOIN chats c ON e.chat_id = c.id \
-         WHERE e.wrapper_event_id IS NOT NULL AND e.wrapper_event_id != '' \
-         AND e.created_at >= ?1 AND c.chat_type != 2"
-    ).map_err(|e| format!("Failed to prepare wrapper_id query: {}", e))?;
-
-    // Decoded straight off the borrowed column text. Collecting owned `String`s
-    // first would allocate once per row and hold the whole hex set resident
-    // alongside the decoded one, for no gain — each id is read exactly once.
-    let mut rows = stmt
-        .query(rusqlite::params![cutoff_secs as i64])
-        .map_err(|e| format!("Failed to query wrapper_ids: {}", e))?;
-
-    let mut result: Vec<[u8; 32]> = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("Failed to read wrapper_id row: {}", e))?
-    {
-        let Ok(hex) = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)) else {
-            continue;
-        };
-        if hex.len() == 64 {
-            result.push(crate::simd::hex::hex_to_bytes_32(hex));
-        }
-    }
-    Ok(result)
-}
-
 /// Load all processed wrappers as (EventId, Timestamp) pairs for negentropy (NIP-77).
 pub fn load_negentropy_items() -> Result<Vec<(EventId, Timestamp)>, String> {
     load_negentropy_items_inner(None)
