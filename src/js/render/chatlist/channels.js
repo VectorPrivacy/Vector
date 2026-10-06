@@ -346,6 +346,7 @@ async function openCommunityMenu(chat, ev, at) {
             });
         }
     }
+    items.push(...copyIdItems('Community', cf.community_id));
     items.push({ divider: true });
     // Owner or member, the same entry point decides which flow it is — and both
     // ask before doing anything.
@@ -376,6 +377,7 @@ async function openChannelMenu(communityId, channel, x, y) {
         items.push({ divider: true });
     }
     items.push(...await notifyMenuItems(channel.id, communityId));
+    items.push(...copyIdItems('Channel', channel.id));
     // The primary channel anchors the community's row and history; the backend refuses to tombstone it.
     const fPrimary = arrChats.some(c => c.id === channel.id && c.metadata?.custom_fields?.primary_channel === channel.id);
     if (communityCanAddChannels(communityId) && !fPrimary) {

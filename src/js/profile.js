@@ -83,7 +83,7 @@ function registerProfileScreen() {
                 if (!npub) return false;
                 try {
                     await navigator.clipboard.writeText(npub);
-                    showToast('Copied Profile Link');
+                    showToast('Copied npub');
                     return true;
                 } catch {
                     showToast('Failed to Copy');

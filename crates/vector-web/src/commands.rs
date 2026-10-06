@@ -191,6 +191,15 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Banners);
             Ok(json!(list.ids))
         }
+        "get_synced_settings" => Ok(json!({ "advanced": vector_core::synced_prefs::load_settings().advanced })),
+        "set_advanced_mode" => {
+            let on = a.bool("on").ok_or("missing argument `on`")?;
+            let settings = vector_core::synced_prefs::set_advanced(on)?;
+            let view = json!({ "advanced": settings.advanced });
+            vector_core::traits::emit_event_json("synced_settings_updated", view.clone());
+            crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Settings);
+            Ok(view)
+        }
         "get_paused_downloads" => Ok(json!({})),
         "get_unread_counts" => to_value(db::events::unread_counts().await?),
         "update_unread_counter" => Ok(json!(messaging::unread_total().await)),

@@ -6,6 +6,7 @@
     // later (updates, network, voice) render once their handler bag exists.
     import { tick } from 'svelte';
     import { settingsScreen, settingsHandlers, torState } from '../lib/settings.svelte.js';
+    import { advancedState } from '../lib/advanced.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
@@ -27,12 +28,13 @@
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
     //    setAutoDownloadLimit(bytes), clearStorage(), setBackgroundService(on), batteryWarningTap(),
-    //    security: {...}, copyLogs(), logout()
+    //    security: {...}, setAdvancedMode(on), copyLogs(), logout()
 
     const sc = settingsScreen();
     const hs = settingsHandlers();
     const tor = torState();
     const shell = shellState();
+    const adv = advancedState();
 
     const LIMITS = [
         [1048576, '1 MB'], [5242880, '5 MB'], [10485760, '10 MB'],
@@ -113,6 +115,7 @@
         {
             id: 'danger', label: 'Dangerzone', icon: 'warning', danger: true,
             anchors: [
+                { id: 'advanced', label: 'Advanced', icon: 'file-code', keys: 'advanced mode developer bot ids copy id identifier' },
                 { id: 'logs', label: 'Logs', icon: 'copy', keys: 'copy logs crash debug' },
                 { id: 'logout', label: 'Logout', icon: 'warning', keys: 'logout log out sign out' },
             ],
@@ -249,6 +252,18 @@
     </div>
 {/snippet}
 
+{#snippet advancedBody()}
+    <div class="form-group">
+        <label class="toggle-container">
+            <span><InfoIcon onclick={() => h.help('advancedMode')} />Advanced Mode</span>
+            <!-- After the save, the box shows what stuck: a refused change leaves the store as it was. -->
+            <input type="checkbox" checked={adv.on}
+                   onchange={async (e) => { const box = e.currentTarget; await h.setAdvancedMode(box.checked); box.checked = adv.on; }}>
+            <span class="neon-toggle"></span>
+        </label>
+    </div>
+{/snippet}
+
 {#snippet logsRow()}
     <div class="danger-option">
         <div class="left-group">
@@ -300,6 +315,7 @@
     {:else if id === 'tor'}{@render torBody()}
     {:else if id === 'blocked'}<BlockedUsers h={h.blocked} />
     {:else if id === 'security'}<SecurityCard h={h.security} />
+    {:else if id === 'advanced'}{@render advancedBody()}
     {:else if id === 'updates'}{#if hs.updates}<Updates h={hs.updates} />{/if}
     {:else if id === 'logs'}{@render logsRow()}
     {:else if id === 'logout'}{@render logoutRow()}
@@ -434,6 +450,7 @@
         <h2 class="danger-title" style="margin-bottom: 0; margin-top: 0;">Dangerzone</h2>
         <p class="danger-subtitle">Irreversible Actions</p>
         <div class="danger-buttons">
+            {@render advancedBody()}
             {@render logsRow()}
             {@render logoutRow()}
         </div>

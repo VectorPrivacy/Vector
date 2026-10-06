@@ -100,6 +100,23 @@ function hideContextMenu() {
     popBack('context-menu');
 }
 
+/**
+ * Advanced Mode's Copy ID entry, or nothing while the mode is off. `id` is what a bot
+ * sees: a community or channel id, a message's rumor id, a user's npub.
+ */
+function copyIdItems(what, id) {
+    if (!id || !VectorSvelte.advancedState().on) return [];
+    return [{
+        label: `Copy ${what} ID`,
+        icon: 'channel-hash',
+        onClick: () => {
+            navigator.clipboard.writeText(id)
+                .then(() => showToast(`Copied ${what} ID`))
+                .catch(() => showToast('Failed to Copy'));
+        },
+    }];
+}
+
 function showContextMenu({ x, y, items }) {
     if (!Array.isArray(items) || items.length === 0) return;
     _ctxMenuNav++;

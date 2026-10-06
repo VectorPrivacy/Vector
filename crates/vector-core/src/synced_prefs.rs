@@ -1,5 +1,5 @@
 //! Account preferences that follow you between your own devices: the block
-//! list, the mute list, and nicknames.
+//! list, the mute list, nicknames, and the general settings document.
 //!
 //! Each is a private, parameterized-replaceable kind 30078 with its own d tag,
 //! NIP-44 self-encrypted, riding the SAME self-sync subscription as the
@@ -29,6 +29,7 @@ pub const NICKNAMES_D_TAG: &str = "vector/nicknames";
 pub const NOTIFY_D_TAG: &str = "vector/notify";
 pub const RAIL_D_TAG: &str = "vector/rail";
 pub const BANNERS_D_TAG: &str = "vector/banners";
+pub const SETTINGS_D_TAG: &str = "vector/settings";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
@@ -36,6 +37,7 @@ const NICKNAMES_LOCAL_KEY: &str = "synced_nicknames_local";
 const NOTIFY_LOCAL_KEY: &str = "synced_notify_local";
 const RAIL_LOCAL_KEY: &str = "synced_rail_local";
 const BANNERS_LOCAL_KEY: &str = "synced_banners_local";
+const SETTINGS_LOCAL_KEY: &str = "synced_settings_local";
 
 /// Set when a list has local edits the relays have not seen, cleared once they
 /// have. Persisted, so a quit during the rail's publish debounce is recoverable
@@ -120,6 +122,31 @@ impl NotifyMap {
     }
 }
 
+/// Account-wide switches that follow the user between devices.
+///
+/// Keys this build does not know are carried through untouched: the document is
+/// newest-wins as a whole, so an older device that dropped them on republish
+/// would erase settings a newer one added.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncedSettings {
+    #[serde(default = "one")]
+    pub v: u32,
+    /// Reveals identifiers and other developer-facing detail across the app.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advanced: bool,
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>,
+}
+
+impl SyncedSettings {
+    pub fn from_json(s: &str) -> Self {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{\"v\":1}".to_string())
+    }
+}
+
 fn one() -> u32 {
     1
 }
@@ -190,12 +217,14 @@ pub enum Pref {
     Rail,
     /// Communities whose banner the user hid.
     Banners,
+    /// The general settings document.
+    Settings,
 }
 
 /// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
 /// so a device holding both applies the richer one last and wins the overlap.
-pub const ALL_PREFS: [Pref; 6] =
-    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail, Pref::Banners];
+pub const ALL_PREFS: [Pref; 7] =
+    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail, Pref::Banners, Pref::Settings];
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -206,6 +235,7 @@ impl Pref {
             Pref::Notify => NOTIFY_D_TAG,
             Pref::Rail => RAIL_D_TAG,
             Pref::Banners => BANNERS_D_TAG,
+            Pref::Settings => SETTINGS_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -216,6 +246,7 @@ impl Pref {
             Pref::Notify => NOTIFY_LOCAL_KEY,
             Pref::Rail => RAIL_LOCAL_KEY,
             Pref::Banners => BANNERS_LOCAL_KEY,
+            Pref::Settings => SETTINGS_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -227,6 +258,7 @@ impl Pref {
             NOTIFY_D_TAG => Some(Pref::Notify),
             RAIL_D_TAG => Some(Pref::Rail),
             BANNERS_D_TAG => Some(Pref::Banners),
+            SETTINGS_D_TAG => Some(Pref::Settings),
             _ => None,
         }
     }
@@ -338,6 +370,23 @@ pub fn set_banner_hidden(community_id: &str, hidden: bool) -> Result<IdList, Str
     }
     save_local_raw(Pref::Banners, &list.to_json())?;
     Ok(list)
+}
+
+pub fn load_settings() -> SyncedSettings {
+    load_local_raw(Pref::Settings).map(|s| SyncedSettings::from_json(&s)).unwrap_or_default()
+}
+
+/// Turn Advanced Mode on or off, committed locally. The caller publishes.
+///
+/// Refused until the relay copy has been read, for the same reason as the banners.
+pub fn set_advanced(on: bool) -> Result<SyncedSettings, String> {
+    if !is_hydrated(Pref::Settings) {
+        return Err("Still syncing your settings, try again in a moment".to_string());
+    }
+    let mut settings = load_settings();
+    settings.advanced = on;
+    save_local_raw(Pref::Settings, &settings.to_json())?;
+    Ok(settings)
 }
 
 pub fn load_rail() -> crate::rail_layout::RailLayout {
@@ -546,6 +595,18 @@ mod tests {
         // Removing frees a slot again.
         l.remove("id0");
         assert!(l.add("one-too-many").is_ok());
+    }
+
+    #[test]
+    fn settings_keep_keys_this_build_does_not_know() {
+        let mut s = SyncedSettings::from_json("{\"v\":1,\"advanced\":false,\"future\":{\"a\":1}}");
+        assert!(!s.advanced);
+        s.advanced = true;
+        let back = SyncedSettings::from_json(&s.to_json());
+        assert!(back.advanced);
+        assert_eq!(back.other.get("future"), Some(&serde_json::json!({ "a": 1 })), "a newer device's key survives our republish");
+        assert!(SyncedSettings::from_json("not json") == SyncedSettings::default());
+        assert!(!SyncedSettings::default().to_json().contains("advanced"), "off is the absent default");
     }
 
     #[test]

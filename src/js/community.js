@@ -887,7 +887,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,
-                    memberRolesView, memberRolesOffered, memberRoleItems,
+                    memberRolesView, memberRolesOffered, memberRoleItems, copyIdItems,
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);

@@ -816,6 +816,8 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         }
     }
 
+    items.push(...copyIdItems('Message', targetId));
+
     // Delete / Hide: same backend probe the desktop toolbar uses.
     let deleteItem = null;
     try {

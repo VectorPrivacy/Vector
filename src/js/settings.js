@@ -1182,6 +1182,23 @@ async function setPrivacySetting(key, on) {
     }
 }
 
+/** The account's synced settings, from the local mirror; edits elsewhere stream in after. */
+async function loadSyncedSettings() {
+    const settings = await invoke('get_synced_settings').catch(() => null);
+    VectorSvelte.setAdvancedMode(!!settings?.advanced);
+}
+
+/** Shown at once, put back if the backend refuses (it waits for the relay copy first). */
+async function saveAdvancedMode(on) {
+    VectorSvelte.setAdvancedMode(on);
+    try {
+        VectorSvelte.setAdvancedMode((await invoke('set_advanced_mode', { on })).advanced);
+    } catch (e) {
+        VectorSvelte.setAdvancedMode(!on);
+        showToast(String(e));
+    }
+}
+
 /** Copy the pre-fetched logs (clipboard writes must run inside the click). */
 function copyLogs() {
     if (!window._cachedLogs) {
@@ -1918,6 +1935,7 @@ const SETTINGS_HELP = {
     changePin: () => fSecurityType === 'password'
         ? ['Change Password', 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.']
         : ['Change PIN', 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.'],
+    advancedMode: ['Advanced Mode', 'Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices.'],
     crashLog: ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
     logout: ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
     // Rendered against the Tor preference: with Tor on, every preview fetch is forced
@@ -2058,6 +2076,7 @@ const SETTINGS_HELPERS = {
         transfer: () => openTransfer(true),
         help: showSettingsHelp,
     },
+    setAdvancedMode: saveAdvancedMode,
     copyLogs,
     logout: logoutAccount,
 };

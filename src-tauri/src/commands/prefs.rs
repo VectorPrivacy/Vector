@@ -8,7 +8,7 @@
 
 use nostr_sdk::prelude::Event;
 use vector_core::notify;
-use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref};
+use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref, SyncedSettings};
 
 /// Publish a projection of the current local state for `pref`. Runs behind the
 /// caller's return: these are triggered by user actions whose UI has already
@@ -48,6 +48,7 @@ pub fn publish_projection(pref: Pref) {
                 return;
             }
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
+            Pref::Settings => synced_prefs::load_settings().to_json(),
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
                 let state = vector_core::state::STATE.lock().await;
@@ -79,6 +80,7 @@ pub async fn hydrate_prefs() {
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
             Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
             Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
+            Pref::Settings => emit_settings(&SyncedSettings::from_json(&json)),
         }
     }
 }
@@ -94,6 +96,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
         Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
+        Pref::Settings => emit_settings(&SyncedSettings::from_json(&json)),
     }
 }
 
@@ -231,4 +234,29 @@ fn emit_hidden_banners(list: &IdList) {
     vector_core::traits::emit_event_json("hidden_banners_updated", serde_json::json!({ "ids": list.ids }));
 }
 
-// Handlers: get_hidden_banners, set_banner_hidden
+/// The synced settings, for the first paint.
+#[tauri::command]
+pub async fn get_synced_settings() -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move { Ok(settings_view(&synced_prefs::load_settings())) }).await
+}
+
+#[tauri::command]
+pub async fn set_advanced_mode(on: bool) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let settings = synced_prefs::set_advanced(on)?;
+        emit_settings(&settings);
+        publish_projection(Pref::Settings);
+        Ok(settings_view(&settings))
+    })
+    .await
+}
+
+fn settings_view(settings: &SyncedSettings) -> serde_json::Value {
+    serde_json::json!({ "advanced": settings.advanced })
+}
+
+fn emit_settings(settings: &SyncedSettings) {
+    vector_core::traits::emit_event_json("synced_settings_updated", settings_view(settings));
+}
+
+// Handlers: get_hidden_banners, set_banner_hidden, get_synced_settings, set_advanced_mode

@@ -202,6 +202,8 @@
     "allow-rail-dissolve-folder",
     "allow-get-hidden-banners",
     "allow-set-banner-hidden",
+    "allow-get-synced-settings",
+    "allow-set-advanced-mode",
     "allow-list-emoji-packs",
     "allow-get-pack-share-naddr",
     "allow-refresh-emoji-packs",

@@ -1037,6 +1037,8 @@ pub fn run() {
             commands::rail::rail_dissolve_folder,
             commands::prefs::get_hidden_banners,
             commands::prefs::set_banner_hidden,
+            commands::prefs::get_synced_settings,
+            commands::prefs::set_advanced_mode,
             commands::community::sync_communities_boot,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,

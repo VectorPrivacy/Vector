@@ -225,6 +225,7 @@ async function login(skipAnimations = false) {
             await ensurePinnedLoaded();
             loadRailLayout();
             loadHiddenBanners();
+            loadSyncedSettings();
             // Before the first chat paints, so a paused file offers Resume, not Download.
             loadPausedDownloads();
 

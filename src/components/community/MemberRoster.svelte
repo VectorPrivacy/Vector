@@ -10,6 +10,7 @@
     import MemberRow from '../people/MemberRow.svelte';
     import { untrack } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
+    import { advancedState } from '../lib/advanced.svelte.js';
 
     let {
         communityId,
@@ -26,6 +27,8 @@
         h,                         // the app's bag, registered with the roster screen (js/community.js)
         onChange = () => {},       // ({ members, admins, banned }) after a member-driven change
     } = $props();
+
+    const adv = advancedState();
 
     // svelte-ignore state_referenced_locally
     let memberList = $state.raw(members);
@@ -327,8 +330,12 @@
                 items.unshift({ label: 'Roles', submenu: () => h.memberRoleItems(ctx) }, ...(items.length ? [{ divider: true }] : []));
             }
         }
+        const copy = h.copyIdItems('User', vm.npub);
+        if (copy.length) items.unshift(...copy, ...(items.length ? [{ divider: true }] : []));
         return items;
     }
+
+    const hasMenu = (vm) => vm.canModerate || vm.canRole || adv.on;
 
     async function showRowMenu(vm, x, y) {
         const items = await rowItems(vm);
@@ -338,7 +345,7 @@
     // Gated at press time: a row's standing changes with the role graph while it stays mounted.
     function rowMenu(node, vm) {
         let cur = vm;
-        h.attachLongPressContextMenu(node, (x, y) => { if (cur.canModerate || cur.canRole) showRowMenu(cur, x, y); });
+        h.attachLongPressContextMenu(node, (x, y) => { if (hasMenu(cur)) showRowMenu(cur, x, y); });
         return { update: (v) => { cur = v; } };
     }
 

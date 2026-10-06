@@ -48,6 +48,10 @@ async fn apply(pref: Pref, json: &str) {
             "hidden_banners_updated",
             json!({ "ids": IdList::from_json(json).ids }),
         ),
+        Pref::Settings => vector_core::traits::emit_event_json(
+            "synced_settings_updated",
+            json!({ "advanced": synced_prefs::SyncedSettings::from_json(json).advanced }),
+        ),
     }
 }
 
@@ -133,6 +137,7 @@ async fn subscribe() {
         synced_prefs::NOTIFY_D_TAG.to_string(),
         synced_prefs::RAIL_D_TAG.to_string(),
         synced_prefs::BANNERS_D_TAG.to_string(),
+        synced_prefs::SETTINGS_D_TAG.to_string(),
     ]);
     let v2_list = Filter::new().author(me).kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
     let emoji = Filter::new().author(me).kind(Kind::Custom(10030));

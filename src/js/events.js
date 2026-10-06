@@ -54,6 +54,7 @@ async function setupRustListeners() {
     // The rail's arrangement changed: an edit here, or one from another device.
     _on('rail_layout_updated', (evt) => VectorSvelte.setRailLayout(evt.payload));
     _on('hidden_banners_updated', (evt) => VectorSvelte.setHiddenBanners(evt.payload?.ids));
+    _on('synced_settings_updated', (evt) => VectorSvelte.setAdvancedMode(!!evt.payload?.advanced));
 
     _on('pinned_chats_updated', (evt) => {
         arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];

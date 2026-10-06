@@ -46,7 +46,7 @@ Concordia — a multi-purpose Concord bot (type / in a modern client for the pic
   /caps              — my capabilities here (roles engine)
   /roles             — the community roster
   /info              — community id, protocol version, owner, channel count
-  /whoami            — my npub + this channel id
+  /whoami            — my npub + this community and channel id
   /reconnect         — bounce my relay sockets (reconnect drill)
   (legacy !commands still work; non-command messages are ignored)";
 
@@ -238,7 +238,7 @@ async fn main() -> vector_sdk::Result<()> {
     bot.command("info", "Community protocol + ownership summary").run(|ctx| async move {
         diagnostics(&ctx.bot, &ctx.msg, "!info").await;
     });
-    bot.command("whoami", "My npub and this channel id").run(|ctx| async move {
+    bot.command("whoami", "My npub and this community and channel id").run(|ctx| async move {
         diagnostics(&ctx.bot, &ctx.msg, "!whoami").await;
     });
     bot.command("reconnect", "Bounce my relay sockets (reconnect drill)").run(|ctx| async move {
@@ -416,7 +416,7 @@ async fn diagnostics(bot: &VectorBot, msg: &vector_sdk::IncomingMessage, which: 
     };
     let cid = community.id().to_string();
     let out = match which {
-        "!whoami" => format!("me: {}  ·  this channel/community: {}", bot.npub(), cid),
+        "!whoami" => format!("me: {}  ·  community: {}  ·  channel: {}", bot.npub(), cid, msg.chat_id),
         "!caps" => community.capabilities().map(|v| v.to_string()).unwrap_or_else(|e| format!("caps error: {e}")),
         "!roles" => community.roles().map(|v| v.to_string()).unwrap_or_else(|e| format!("roles error: {e}")),
         _ /* !channels / !info */ => {
