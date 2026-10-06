@@ -4158,39 +4158,7 @@ impl VectorCore {
                     crate::db::attachments::verify_message_attachments(m, Some(channel_id)).await;
                 }
             }
-            let mut pending: Vec<&crate::types::Message> = Vec::new();
-            for outcome in &outcomes {
-                if !session.is_live() {
-                    pending.clear();
-                    break;
-                }
-                match outcome {
-                    ChatPersist::New(m) => pending.push(m),
-                    ChatPersist::Updated { message, edit_event } => match edit_event {
-                        Some(ev) => {
-                            let mut ev = (**ev).clone();
-                            // get-or-CREATE: a lookup-only id would leave a fresh channel's edit at
-                            // chat_id 0 (orphaned, dropped on the reload fold).
-                            if let Ok(cid) = crate::db::id_cache::get_or_create_chat_id(channel_id) {
-                                ev.chat_id = cid;
-                            }
-                            let _ = crate::db::events::save_event(&ev).await;
-                        }
-                        None => pending.push(message),
-                    },
-                    ChatPersist::Removed(target_id) => {
-                        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-                        let _ = crate::db::events::delete_event(target_id).await;
-                    }
-                    ChatPersist::ReactionRemoved { reaction_id, message } => {
-                        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-                        let _ = crate::db::events::delete_event(reaction_id).await;
-                        pending.push(message);
-                    }
-                }
-            }
-            crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-            drop(pending);
+            crate::community::v2::inbound::persist_chat_page(channel_id, &outcomes, &session).await;
             // Resolve each reply's quote before the emit: the renderer has no other source
             // for a parent outside its window and never retries. Placed AFTER the persists
             // so a parent carried by this same page resolves too. One query per page.

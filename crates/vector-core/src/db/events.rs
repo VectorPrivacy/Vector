@@ -20,6 +20,12 @@ fn seal_event_fields(event: &StoredEvent, sealer: &mut crate::crypto::AtRestSeal
     Ok((content, preview))
 }
 
+// A stored message's text and tags are its original, written once: edits are their own rows, so a
+// re-save from memory (which holds the latest edit, or whatever a failed open left) never replaces them.
+const _: () = assert!(
+    event_kind::CHAT_MESSAGE == 9 && event_kind::PRIVATE_DIRECT_MESSAGE == 14 && event_kind::FILE_ATTACHMENT == 15
+);
+
 /// Upsert the event row onto the given connection or transaction (so it can commit atomically with
 /// its attachment rows), sealing its content with the caller's sealer, inside its at-rest ticket.
 ///
@@ -43,7 +49,9 @@ fn insert_event_row(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind, chat_id = excluded.chat_id, user_id = excluded.user_id,
-            content = excluded.content, tags = excluded.tags, reference_id = excluded.reference_id,
+            content = CASE WHEN events.kind IN (9, 14, 15) THEN events.content ELSE excluded.content END,
+            tags = CASE WHEN events.kind IN (9, 14, 15) THEN events.tags ELSE excluded.tags END,
+            reference_id = excluded.reference_id,
             created_at = excluded.created_at, received_at = excluded.received_at,
             mine = excluded.mine, pending = excluded.pending, failed = excluded.failed,
             wrapper_event_id = COALESCE(excluded.wrapper_event_id, events.wrapper_event_id),
@@ -193,7 +201,17 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
         tx.commit().map_err(|e| format!("save_message commit: {e}"))?;
     }
 
-    // Save reactions as separate kind=7 events
+    save_reactions_in(chat_int_id, message).await
+}
+
+/// Store the message's reactions this database does not hold yet, leaving the message's own row
+/// alone: rewriting it from memory would put its latest edit over the original text.
+pub async fn save_new_reactions(chat_id: &str, message: &Message) -> Result<(), String> {
+    let chat_int_id = super::id_cache::get_or_create_chat_id(chat_id)?;
+    save_reactions_in(chat_int_id, message).await
+}
+
+async fn save_reactions_in(chat_int_id: i64, message: &Message) -> Result<(), String> {
     for reaction in &message.reactions {
         if !event_exists(&reaction.id)? {
             let user_id = super::id_cache::get_or_create_user_id(&reaction.author_id)?;
@@ -203,7 +221,6 @@ pub async fn save_message(chat_id: &str, message: &Message) -> Result<(), String
             save_reaction_event(reaction, chat_int_id, user_id, is_mine, None).await?;
         }
     }
-
     Ok(())
 }
 
@@ -1527,7 +1544,11 @@ pub async fn get_message_by_id(message_id: &str) -> Result<Option<(String, Messa
             .optional()
             .map_err(|e| format!("query get_message_by_id: {e}"))?
     };
-    let Some((event, chat_identifier)) = found else { return Ok(None) };
+    let Some((mut event, chat_identifier)) = found else { return Ok(None) };
+    if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
+        event.content = crate::crypto::open_batch(|at_rest| at_rest.open(event.content))
+            .unwrap_or_else(|_| "[Decryption failed]".to_string());
+    }
     Ok(compose_message_views(vec![event]).await?.pop().map(|m| (chat_identifier, m)))
 }
 
@@ -2765,6 +2786,93 @@ mod tests {
         assert_eq!(m.content, "edited :wave:", "latest revision is the displayed content");
         assert_eq!(m.emoji_tags.len(), 1, "the edit's own emoji folds onto the message");
         assert_eq!(m.emoji_tags[0].shortcode, "wave");
+    }
+
+    /// Local Encryption on for one test, off again however it ends.
+    struct SealedVault;
+    impl SealedVault {
+        fn on(key: [u8; 32]) -> Self {
+            crate::state::ENCRYPTION_KEY.set(key, &[]);
+            crate::state::set_encryption_enabled(true);
+            SealedVault
+        }
+    }
+    impl Drop for SealedVault {
+        fn drop(&mut self) {
+            crate::state::ENCRYPTION_KEY.clear(&[]);
+            crate::state::set_encryption_enabled(false);
+        }
+    }
+
+    fn raw_row(id: &str) -> (String, String) {
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        conn.query_row("SELECT content, tags FROM events WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    }
+
+    /// Every later touch of a stored message re-saves the copy held in memory, which carries
+    /// the latest edit (or whatever a failed open left): a reaction, a link preview, the send
+    /// confirming, a re-delivery. None may replace the original as it was written.
+    #[tokio::test]
+    async fn touching_a_stored_message_never_rewrites_its_original_under_local_encryption() {
+        let (_tmp, _guard) = init_test_db();
+        let _vault = SealedVault::on([0x3c; 32]);
+        let chat = "channel_touch";
+        let emoji = |s: &str| vec![crate::types::EmojiTag { shortcode: s.into(), url: format!("u/{s}") }];
+        save_message(chat, &Message {
+            id: "touch1".into(), content: "original :wave:".into(), at: 5_000_000, pending: true,
+            npub: Some("npub1author".into()), emoji_tags: emoji("wave"), ..Default::default()
+        }).await.unwrap();
+        let cid = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        save_edit_event("touch_edit", "touch1", "edited :cat:", &emoji("cat"), cid, None, "npub1author").await.unwrap();
+        let written = raw_row("touch1");
+        assert_eq!(crate::crypto::maybe_decrypt_text(&written.0), "original :wave:");
+
+        let (_, mut live) = get_message_by_id("touch1").await.unwrap().unwrap();
+        assert_eq!(live.content, "edited :cat:", "memory holds the latest edit");
+        live.reactions.push(Reaction {
+            id: "touch_react".into(), reference_id: "touch1".into(), author_id: "npub1reactor".into(),
+            emoji: "🔥".into(), emoji_url: None,
+        });
+        save_message(chat, &live).await.unwrap();
+        live.preview_metadata = Some(crate::types::SiteMetadata {
+            domain: "example.com".into(), og_title: Some("Example".into()), og_description: None, og_image: None,
+            og_url: None, og_type: None, title: None, description: None, favicon: None,
+        });
+        save_message(chat, &live).await.unwrap();
+        live.pending = false;
+        save_message(chat, &live).await.unwrap();
+        live.content = "[Decryption failed]".into();
+        save_message(chat, &live).await.unwrap();
+        save_messages_batch(chat, &[&live]).await.unwrap();
+
+        assert_eq!(raw_row("touch1"), written, "the original's sealed text and tags are untouched");
+        let (_, back) = get_message_by_id("touch1").await.unwrap().unwrap();
+        assert_eq!(back.content, "edited :cat:");
+        assert_eq!(back.edit_history.as_ref().unwrap()[0].content, "original :wave:", "history still starts at the original");
+        assert_eq!(back.reactions.len(), 1, "the reaction landed");
+        assert_eq!(back.preview_metadata.as_ref().map(|p| p.domain.as_str()), Some("example.com"), "the preview landed");
+        assert!(!back.pending, "the status moved");
+    }
+
+    /// A file message re-saved when its download completes: the download lands, the row stays.
+    #[tokio::test]
+    async fn a_download_resave_keeps_the_row_under_local_encryption() {
+        let (_tmp, _guard) = init_test_db();
+        let _vault = SealedVault::on([0x3d; 32]);
+        let att = |downloaded: bool, path: &str| Attachment {
+            id: "filehash".into(), url: "https://x/f".into(), name: "f.png".into(), extension: "png".into(),
+            size: 1, downloaded, path: path.into(), ..Default::default()
+        };
+        let msg = |caption: &str, a: Attachment| Message {
+            id: "file1".into(), content: caption.into(), at: 1_000_000, npub: Some("npub1s".into()),
+            attachments: vec![a], ..Default::default()
+        };
+        save_message("npub1file", &msg("look at this", att(false, ""))).await.unwrap();
+        let written = raw_row("file1");
+        save_message("npub1file", &msg("[Decryption failed]", att(true, "/tmp/f.png"))).await.unwrap();
+        assert_eq!(raw_row("file1"), written);
+        let (_, back) = get_message_by_id("file1").await.unwrap().unwrap();
+        assert!(back.attachments[0].downloaded && back.attachments[0].path == "/tmp/f.png");
     }
 
     // The bulk-sync persist path: one transaction must land events + attachments + reactions
