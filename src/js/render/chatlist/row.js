@@ -60,9 +60,9 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             },
         });
     }
-    items.push(...(isGroup
-        ? copyIdItems('Community', chat.metadata?.custom_fields?.community_id)
-        : copyIdItems('User', chat.id)));
+    const rowCommunity = isGroup ? chat.metadata?.custom_fields?.community_id : null;
+    if (rowCommunity) items.push(...copyLinkItems('Community', { community: rowCommunity }));
+    items.push(...(isGroup ? copyIdItems('Community', rowCommunity) : copyIdItems('User', chat.id)));
     if (!isGroup) {
         items.push({ divider: true });
         items.push({

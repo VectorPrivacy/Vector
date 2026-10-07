@@ -18993,6 +18993,44 @@ hr {
   text-decoration: none;
 }
 
+/* Vector links: a pill named from this device's own chats, never from the link's text. */
+.mention.go-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.go-link .go-link-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.go-link .go-link-community { max-width: 14em; opacity: 0.8; }
+.go-link .go-link-sep { opacity: 0.5; }
+.go-link .go-link-avatar {
+  flex: 0 0 auto;
+  width: 1.15em;
+  height: 1.15em;
+  margin-right: 1px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.go-link .go-link-icon {
+  position: static;
+  flex: 0 0 auto;
+  width: 0.95em;
+  height: 0.95em;
+  margin: 0;
+  background-color: currentColor;
+}
+.mention.go-link.is-unknown {
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 400;
+}
+.mention.go-link.is-gone .go-link-room { text-decoration: line-through; }
+
 /* --- Slash Command Selector --- */
 .command-selector {
   position: fixed;

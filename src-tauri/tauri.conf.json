@@ -103,7 +103,7 @@
         "schemes": ["vector"]
       },
       "mobile": [
-        { "host": "vectorapp.io", "pathPrefix": ["/profile", "/invite", "/emojis"] },
+        { "host": "vectorapp.io", "pathPrefix": ["/profile", "/invite", "/emojis", "/go"] },
         { "scheme": ["vector"] }
       ]
     }

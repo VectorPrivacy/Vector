@@ -1552,6 +1552,41 @@ pub async fn get_message_by_id(message_id: &str) -> Result<Option<(String, Messa
     Ok(compose_message_views(vec![event]).await?.pop().map(|m| (chat_identifier, m)))
 }
 
+/// Where a message is on this device: the chat it was said in, or whether it was deleted here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MessageLocation {
+    pub chat: Option<String>,
+    pub deleted: bool,
+}
+
+/// Locate a message without opening its content. A banned author's message reads as absent,
+/// as it does on screen.
+pub fn locate_message(message_id: &str) -> Result<MessageLocation, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let found = conn
+        .query_row(
+            "SELECT c.chat_identifier, e.chat_id, e.npub FROM events e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.id = ?1 AND e.kind IN (9, 14, 15)",
+            rusqlite::params![message_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("query locate_message: {e}"))?;
+    let chat = found.and_then(|(chat, chat_id, npub)| {
+        let banned = npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()).is_some_and(|author| {
+            community_of_chat(&conn, chat_id).is_some_and(|c| super::community::banned_set(&c).contains(&author.to_bytes()))
+        });
+        (!banned).then_some(chat)
+    });
+    let deleted = chat.is_none()
+        && conn
+            .query_row("SELECT 1 FROM deleted_messages WHERE event_id = ?1", rusqlite::params![message_id], |_| Ok(()))
+            .optional()
+            .map_err(|e| format!("query locate_message tombstone: {e}"))?
+            .is_some();
+    Ok(MessageLocation { chat, deleted })
+}
+
 pub async fn get_messages_around(
     chat_id: i64,
     anchor_id: &str,
@@ -2146,6 +2181,22 @@ mod tests {
     /// A citation outlives its message: deletes, moderation hides, expiry, or
     /// history this device never synced. Absence is an answer, not a fault — a
     /// resolver that errored would turn every one of those into a failure.
+    #[tokio::test]
+    async fn a_message_locates_its_chat_and_nothing_else_does() {
+        let (_tmp, _guard) = init_test_db();
+        save_message("npub1locate", &Message { id: "locate_me".into(), content: "hi".into(), at: 1_000_000, ..Default::default() })
+            .await.unwrap();
+        let here = |chat: &str| MessageLocation { chat: Some(chat.into()), deleted: false };
+        assert_eq!(locate_message("locate_me").unwrap(), here("npub1locate"));
+        assert_eq!(locate_message("never_stored").unwrap(), MessageLocation::default());
+        let cid = crate::db::id_cache::get_chat_id_by_identifier("npub1locate").unwrap();
+        save_edit_event("an_edit", "locate_me", "hello", &[], cid, None, "npub1x").await.unwrap();
+        assert_eq!(locate_message("an_edit").unwrap(), MessageLocation::default(), "an edit is not a message to jump to");
+        delete_event("locate_me").await.unwrap();
+        add_message_tombstone("locate_me").unwrap();
+        assert_eq!(locate_message("locate_me").unwrap(), MessageLocation { chat: None, deleted: true });
+    }
+
     #[tokio::test]
     async fn a_missing_message_resolves_to_none_rather_than_erroring() {
         let (_tmp, _guard) = init_test_db();

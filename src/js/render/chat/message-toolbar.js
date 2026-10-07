@@ -816,6 +816,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         }
     }
 
+    items.push(...copyLinkItems('Message', goLinkForMessage(strOpenChat, targetId)));
     items.push(...copyIdItems('Message', targetId));
 
     // Delete / Hide: same backend probe the desktop toolbar uses.

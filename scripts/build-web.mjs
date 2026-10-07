@@ -43,6 +43,8 @@ const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).ver
 const workerPath = join(OUT, 'web', 'worker.js');
 writeFileSync(workerPath, readFileSync(workerPath, 'utf8').replace("const VERSION = 'web';", `const VERSION = ${JSON.stringify(VERSION)};`));
 cpSync(join(ROOT, 'web', 'pkg'), join(OUT, 'web', 'pkg'), { recursive: true });
+// The probe vectorapp.io/go frames to learn whether this browser uses Vector Web.
+for (const f of ['go-probe.html', 'go-probe.js']) cpSync(join(ROOT, 'web', f), join(OUT, f));
 // Root scope, so it can answer `/vfs/…` for the whole page.
 cpSync(join(ROOT, 'web', 'sw.js'), join(OUT, 'sw.js'));
 // Mini app origins are served from here; see serve.mjs.

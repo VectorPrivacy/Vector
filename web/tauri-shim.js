@@ -174,6 +174,37 @@
         };
     });
 
+    // A Vector link opened into this tab (`/#go/<payload>`, from vectorapp.io/go): taken once,
+    // then wiped from the address bar and history, so a reload never replays it and the ids
+    // never linger. A link arriving while the app runs (hash edit, or a launch handed to
+    // this window) goes through the same pending slot the desktop's deep links use.
+    let pendingGo = null;
+    function takeGoLink(url) {
+        const m = /#go\/([^#?\s]+)$/.exec(url);
+        if (!m) return false;
+        pendingGo = { action_type: 'go', target: m[1] };
+        if (/#go\//.test(location.hash)) history.replaceState(history.state, '', location.pathname + location.search);
+        return true;
+    }
+    takeGoLink(location.href);
+    // The flag vectorapp.io/go's probe reads: this browser has signed in to Vector Web.
+    listen('init_finished', () => {
+        try { localStorage.setItem('vector-web', '1'); } catch { /* private mode: the page offers both */ }
+    });
+    local.set('get_pending_deep_link', () => {
+        const action = pendingGo;
+        pendingGo = null;
+        return action;
+    });
+    addEventListener('hashchange', () => {
+        if (takeGoLink(location.href)) dispatchEvent('deep_link_action', pendingGo);
+    });
+    if ('launchQueue' in window) {
+        window.launchQueue.setConsumer((params) => {
+            if (params.targetURL && takeGoLink(params.targetURL)) dispatchEvent('deep_link_action', pendingGo);
+        });
+    }
+
     // Raw-body IPC (Tauri's `invoke(cmd, bytes, { headers })`) keeps the bytes binary.
     function invoke(cmd, args = {}, options = {}) {
         if (local.has(cmd)) {

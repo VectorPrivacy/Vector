@@ -23,6 +23,12 @@ function visibleChannels(channels) {
         .map(c => ({ id: c.channel_id, name: c.name, private: !!c.private, readable: true }));
 }
 
+function lockedChannels(channels) {
+    return (channels || [])
+        .filter(c => c.private && c.readable === false)
+        .map(c => ({ id: c.channel_id, name: c.name }));
+}
+
 /**
  * Leave a channel that is no longer visible, for the community's primary: a revoke
  * landing while it is on screen must not leave the user reading a room they are out of.
@@ -40,6 +46,8 @@ function leaveHiddenChannel(communityId) {
 
 /** communityId → [{ id, name }], as last read from the community documents. */
 const communityChannelsCache = new Map();
+/** Per community, the private channels it lists that we hold no key for: named, never opened. */
+const communityLockedChannels = new Map();
 /** communityIds whose channel list is expanded in the chat list. */
 const expandedCommunities = new Set();
 /** Guards the shared load so a render pass can't stampede the backend. */
@@ -57,6 +65,7 @@ function loadCommunityChannels() {
         .then(list => {
             for (const community of list || []) {
                 communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
+                communityLockedChannels.set(community.community_id, lockedChannels(community.channels));
             }
             for (const community of list || []) {
                 communityChanged(community.community_id);
@@ -71,6 +80,7 @@ function loadCommunityChannels() {
 function setCommunityChannels(communityId, channels) {
     if (!communityId || !Array.isArray(channels)) return;
     communityChannelsCache.set(communityId, visibleChannels(channels));
+    communityLockedChannels.set(communityId, lockedChannels(channels));
     leaveHiddenChannel(communityId);
 }
 
@@ -346,6 +356,7 @@ async function openCommunityMenu(chat, ev, at) {
             });
         }
     }
+    if (cf.community_id) items.push(...copyLinkItems('Community', { community: cf.community_id }));
     items.push(...copyIdItems('Community', cf.community_id));
     items.push({ divider: true });
     // Owner or member, the same entry point decides which flow it is — and both
@@ -377,6 +388,7 @@ async function openChannelMenu(communityId, channel, x, y) {
         items.push({ divider: true });
     }
     items.push(...await notifyMenuItems(channel.id, communityId));
+    items.push(...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
     items.push(...copyIdItems('Channel', channel.id));
     // The primary channel anchors the community's row and history; the backend refuses to tombstone it.
     const fPrimary = arrChats.some(c => c.id === channel.id && c.metadata?.custom_fields?.primary_channel === channel.id);

@@ -546,6 +546,7 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     // Bare and nostr:-prefixed npubs (and vectorapp.io profile links) render
     // as mention pills, same treatment as bios.
     renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true });
+    renderGoLinks(span);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before
     // the parent pass runs twemoji so a `:smile:` from a pack doesn't get

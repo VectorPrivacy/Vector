@@ -142,6 +142,8 @@ function parseContactInput(text) {
     if (!t) return null;
     // Community invites outrank npubs — an invite link can contain both
     if (isCommunityInviteUrl(t)) return { kind: 'invite', url: t };
+    const go = t.match(GO_LINK_RE)?.[0];
+    if (go) return { kind: 'go', payload: go.replace(/^.*#(?:go\/)?/, '') };
     // A v2 invite (naddr + key fragment) inside an unrecognised wrapper:
     // extract it and rebuild the bare form the join flow already parses
     const naddr = t.match(/(naddr1[a-z0-9]{20,})[^#\s]*#([A-Za-z0-9_-]{20,})/i);
@@ -152,7 +154,7 @@ function parseContactInput(text) {
     return null;
 }
 
-/** Route a decoded QR payload: profile npubs and Community invites. */
+/** Route a decoded QR payload: profile npubs, Community invites and Vector links. */
 async function handleScannedQr(text) {
     if (qrScanTaker) {
         if (qrScanTaker(text)) closeQrScanner();
@@ -174,6 +176,8 @@ async function handleScannedQr(text) {
         await dismissNewChatForScan();
         if (parsed.kind === 'invite') {
             executeDeepLinkAction({ action_type: 'community_invite', target: parsed.url });
+        } else if (parsed.kind === 'go') {
+            executeDeepLinkAction({ action_type: 'go', target: parsed.payload });
         } else {
             executeDeepLinkAction({ action_type: 'profile', target: parsed.npub });
         }

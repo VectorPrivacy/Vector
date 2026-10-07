@@ -1548,6 +1548,10 @@ async function executeDeepLinkAction(payload) {
         // Invite link (vector://invite#… or vectorapp.io/invite#…) — `target` is the full URL;
         // the join flow re-parses its fragment, previews, and accepts on confirm.
         await previewAndJoinCommunityLink(target);
+    } else if (action_type === 'go') {
+        // A Vector link (vectorapp.io/go#…): `target` is its payload.
+        const link = parseGoPayload(target);
+        if (link) await openGoLink(link);
     }
 }
 

@@ -78,6 +78,7 @@
     "allow-react-to-message",
     "allow-edit-message",
     "allow-fetch-msg-metadata",
+    "allow-locate-message",
     "allow-fetch-messages",
     "allow-is-scanning",
     "allow-get-chat-messages-paginated",

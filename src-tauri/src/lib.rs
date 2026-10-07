@@ -697,6 +697,7 @@ pub fn run() {
             message::react_to_message,
             message::edit_message,
             message::fetch_msg_metadata,
+            message::locate_message,
             // Sync commands (commands/sync.rs)
             commands::sync::fetch_messages,
             commands::sync::is_scanning,

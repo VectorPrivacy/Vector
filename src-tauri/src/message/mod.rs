@@ -90,6 +90,12 @@ pub async fn react_to_message(
     }
 }
 
+/// Where a message is in this device's own database: what a Vector link opens.
+#[tauri::command]
+pub async fn locate_message(message_id: String) -> Result<vector_core::db::events::MessageLocation, String> {
+    vector_core::db::scoped(async move { vector_core::db::events::locate_message(&message_id) }).await
+}
+
 #[tauri::command]
 pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     // Find the message we're extracting metadata from
@@ -127,6 +133,7 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         // would stack a duplicate website-style card under it.
         if url.starts_with("https://vectorapp.io/invite")
             || url.starts_with("https://www.vectorapp.io/invite")
+            || vector_core::golink::is_go_url(&url)
         {
             continue;
         }

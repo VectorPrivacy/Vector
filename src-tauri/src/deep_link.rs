@@ -6,6 +6,7 @@
 //! - `vector://emojis/pack/<naddr>` - Opens the Pack Details modal
 //! - `https://vectorapp.io/profile/<npub>` - Web URL for mobile app links
 //! - `https://vectorapp.io/emojis/pack/<naddr>` - Web URL for pack share links
+//! - `https://vectorapp.io/go#<payload>` / `vector://go#<payload>` - A community, channel or message
 
 use serde::Serialize;
 use std::sync::Mutex;
@@ -39,6 +40,10 @@ pub struct DeepLinkAction {
 pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
     // Normalize the URL for parsing
     let url_str = url_str.trim();
+
+    if let Some(link) = vector_core::golink::GoLink::parse_url(url_str) {
+        return Some(DeepLinkAction { action_type: "go".to_string(), target: link.payload() });
+    }
 
     // Community invites carry secrets in the URL FRAGMENT (#…), which the path parsers below
     // strip. Catch them first and pass the whole URL through — the join flow re-parses it.
@@ -181,10 +186,12 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
         last.clone_from(&urls);
     }
     for url in urls {
-        println!("[DeepLink] Received URL: {}", url);
-        
+        // The fragment carries invite secrets and go-link ids: never into a log.
+        let locator = url.split('#').next().unwrap_or("");
+        println!("[DeepLink] Received URL: {}", locator);
+
         if let Some(action) = parse_deep_link(&url) {
-            println!("[DeepLink] Parsed action: {:?}", action);
+            println!("[DeepLink] Parsed action: {}", action.action_type);
             
             // Store the action for later retrieval (in case frontend isn't ready yet)
             if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
@@ -197,7 +204,7 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
                 println!("[DeepLink] Failed to emit event: {:?}", e);
             }
         } else {
-            println!("[DeepLink] Failed to parse URL: {}", url);
+            println!("[DeepLink] Failed to parse URL: {}", locator);
         }
     }
 }
@@ -304,5 +311,16 @@ mod tests {
         let action = parse_deep_link(&format!("vector://profile/{npub}")).unwrap();
         assert_eq!(action.action_type, "profile");
         assert_eq!(action.target, npub);
+    }
+
+    #[test]
+    fn a_vector_link_opens_from_the_web_address_and_the_app_scheme() {
+        let payload = format!("c/{}/{}", "a".repeat(64), "b".repeat(64));
+        for url in [format!("https://vectorapp.io/go#{payload}"), format!("vector://go#{payload}")] {
+            let action = parse_deep_link(&url).unwrap();
+            assert_eq!((action.action_type.as_str(), action.target.as_str()), ("go", payload.as_str()));
+        }
+        assert!(parse_deep_link("https://vectorapp.io/go#c/not-an-id").is_none());
+        assert!(parse_deep_link("https://vectorapp.io/go").is_none());
     }
 }

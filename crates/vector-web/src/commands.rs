@@ -191,6 +191,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Banners);
             Ok(json!(list.ids))
         }
+        "locate_message" => to_value(db::events::locate_message(&a.str("messageId")?)?),
         "get_synced_settings" => Ok(json!({ "advanced": vector_core::synced_prefs::load_settings().advanced })),
         "set_advanced_mode" => {
             let on = a.bool("on").ok_or("missing argument `on`")?;

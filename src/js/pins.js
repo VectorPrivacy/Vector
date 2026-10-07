@@ -358,6 +358,7 @@ function pinsRenderExpandedContent(text, pin) {
     text.innerHTML = parseMarkdown(source);
     linkifyUrls(text);
     renderMentions(text, false, { allowBare: true });
+    renderGoLinks(text);
     const emojiTags = pinsEmojiTags(pin);
     if (emojiTags.length) renderCustomEmojiShortcodes(text, emojiTags);
     twemojify(text);

@@ -1887,11 +1887,12 @@ window.onresize = adjustSize;
 async function wireChatUi() {
     VectorSvelte.setScreen('chatNew', { h: {
         back: closeChat,
-        // Same parser as the QR scanner: invites join, npubs DM, and any URL wrapper
-        // around either is ignored. No extractable npub falls through raw; openChat rejects.
+        // Same parser as the QR scanner: invites join, npubs DM, Vector links open, and any
+        // URL wrapper around them is ignored. No extractable npub falls through raw; openChat rejects.
         start: (text) => {
             const parsed = parseContactInput(text);
             if (parsed?.kind === 'invite') { previewAndJoinCommunityLink(parsed.url); return; }
+            if (parsed?.kind === 'go') { closeChat().then(() => executeDeepLinkAction({ action_type: 'go', target: parsed.payload })); return; }
             openChat(parsed?.npub || text);
         },
         scan: () => openQrScanner(),

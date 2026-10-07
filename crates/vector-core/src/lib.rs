@@ -89,6 +89,7 @@ pub mod inbox_relays;
 pub mod emoji_packs;
 pub mod emoji_usage;
 pub mod nostr_embed;
+pub mod golink;
 pub mod badges;
 pub mod bot_interface;
 pub mod webxdc;

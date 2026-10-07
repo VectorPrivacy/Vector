@@ -414,7 +414,7 @@ async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     let Some((_, message)) = VectorCore.get_message(&msg_id).await else { return false };
     let urls = extract_https_urls(&vector_core::net::strip_md_link_claims(&message.content));
     for url in urls.into_iter().take(3) {
-        if INVITE_PREFIXES.iter().any(|p| url.starts_with(p)) {
+        if INVITE_PREFIXES.iter().any(|p| url.starts_with(p)) || vector_core::golink::is_go_url(&url) {
             continue;
         }
         // A link to a Nostr post, article or video gets its own card from relays.
