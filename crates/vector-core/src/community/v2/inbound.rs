@@ -144,7 +144,8 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
             // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
             // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
-            if crate::db::events::event_exists(&msg.id).unwrap_or(false) {
+            // A deleted one has no row left to find, so its tombstone answers instead.
+            if crate::db::events::event_exists(&msg.id).unwrap_or(false) || crate::state::was_message_deleted(&msg.id) {
                 return None;
             }
             state.ensure_community_chat(channel_id);
@@ -340,13 +341,21 @@ pub async fn persist_chat(channel_id: &str, outcome: &ChatPersist) {
             let _ = crate::db::events::save_new_reactions(channel_id, message).await;
         }
         ChatPersist::Updated { edit_event: Some(ev), .. } => save_edit_event(channel_id, ev).await,
-        ChatPersist::Removed(id) => {
-            let _ = crate::db::events::delete_event(id).await;
-        }
+        ChatPersist::Removed(id) => remove_message(id).await,
         ChatPersist::ReactionRemoved { reaction_id, .. } => {
             let _ = crate::db::events::delete_event(reaction_id).await;
         }
     }
+}
+
+/// Drop a deleted message, tombstone first: a relay re-serving the original after a restart
+/// would otherwise ingest it again, and a moderator's delete would quietly undo itself.
+async fn remove_message(id: &str) {
+    crate::state::note_message_deleted(id);
+    if let Err(e) = crate::db::events::add_message_tombstone(id) {
+        crate::log_warn!("[v2 delete] tombstone write failed: {e}");
+    }
+    let _ = crate::db::events::delete_event(id).await;
 }
 
 /// [`persist_chat`] for a catch-up page, in wire order: new messages batch into one
@@ -362,9 +371,13 @@ pub async fn persist_chat_page(channel_id: &str, outcomes: &[ChatPersist], sessi
             ChatPersist::New(m) => pending.push(m),
             ChatPersist::Updated { message, edit_event: None } => reacted.push(message),
             ChatPersist::Updated { edit_event: Some(ev), .. } => save_edit_event(channel_id, ev).await,
-            ChatPersist::Removed(id) | ChatPersist::ReactionRemoved { reaction_id: id, .. } => {
+            ChatPersist::Removed(id) => {
                 flush_page(channel_id, &mut pending, &mut reacted, session).await;
-                let _ = crate::db::events::delete_event(id).await;
+                remove_message(id).await;
+            }
+            ChatPersist::ReactionRemoved { reaction_id, .. } => {
+                flush_page(channel_id, &mut pending, &mut reacted, session).await;
+                let _ = crate::db::events::delete_event(reaction_id).await;
             }
         }
     }
@@ -962,6 +975,38 @@ mod tests {
         assert_eq!(back.content, "rewritten");
         assert_eq!(back.edit_history.as_ref().unwrap()[0].content, "hello");
         assert_eq!(back.reactions.iter().map(|r| r.emoji.as_str()).collect::<Vec<_>>(), vec!["🔥"], "the revoked one is gone");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_message_stays_deleted_when_a_relay_serves_it_again() {
+        use nostr_sdk::prelude::{Timestamp, UnsignedEvent};
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Gone", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let member = Keys::generate();
+        let ingest = |rumor: UnsignedEvent, at: u64| {
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at), false).unwrap();
+            chat::open_chat_event(&wrap, &group, &general, epoch).unwrap()
+        };
+        let msg = chat::build_message_rumor(member.public_key(), &general, epoch, "regret", None, &[], vec![], 5_000);
+        let msg_id = msg.id.unwrap().to_hex();
+        let original = ingest(msg, 5);
+        assert!(matches!(persist_chat_event(&original, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
+        let delete = chat::build_delete_rumor(member.public_key(), &general, epoch, &msg_id, super::super::kind::MESSAGE, 6_000, None);
+        assert!(matches!(persist_chat_event(&ingest(delete, 6), &cid, &me.public_key()).await, Some(ChatPersist::Removed(_))));
+
+        // A restart forgets this session's set; the durable tombstone is what remains.
+        crate::state::clear_message_tombstones();
+        crate::state::seed_message_tombstones(crate::db::events::load_message_tombstones().unwrap());
+        assert!(persist_chat_event(&original, &cid, &me.public_key()).await.is_none(), "the original, served again, stays gone");
+        let page = [apply_chat_to_state(&mut *crate::state::STATE.lock().await, &original, &cid, &me.public_key())];
+        assert!(page[0].is_none(), "and a catch-up page refuses it too");
+        let at = crate::db::events::locate_message(&msg_id).unwrap();
+        assert_eq!((at.chat, at.deleted), (None, true), "a link to it reads as deleted");
     }
 
     #[tokio::test]
