@@ -339,17 +339,22 @@
     <div class="lg-tor-card" role="dialog" aria-modal="true" aria-labelledby="lg-tor-title" use:popIn={t.infoTick}>
         <button type="button" class="lg-tor-close" aria-label="Close" onclick={() => h.tor.info(false)}>&#x2715;</button>
         <img class="lg-tor-logo" src="./icons/tor-logo.svg" alt="Tor" width="119" height="72">
-        <h3 id="lg-tor-title">Tor Network &amp; Protocol</h3>
-        <p class="lg-tor-lead">For enhanced security, you can enable Tor before you create an account or login, but once you have logged in you can go to Settings &gt; Privacy &gt; Tor and customize further.</p>
-        <div class="lg-tor-path">Settings &gt; Privacy &gt; Tor</div>
+        <h3 id="lg-tor-title">Tor Network</h3>
+        <p class="lg-tor-lead">Route Vector’s connection through Tor so relays and servers never see your real IP address.</p>
         <ul class="lg-tor-points">
-            <li>IP Obfuscation</li>
-            <li>Censorship Resistance</li>
-            <li>ISP Shielding</li>
-            <li>Decentralized Relays</li>
+            <li><b>IP Obfuscation</b>: relays see Tor, not you</li>
+            <li><b>Location Privacy</b>: your country stays hidden</li>
+            <li><b>ISP Shielding</b>: your provider can’t see which relays you use</li>
+            <li><b>Censorship Resistance</b>: reach relays blocked on your network</li>
         </ul>
-        <p class="lg-tor-about">Tor is a free overlay network that enables anonymous communication. It's built on free and open-source software, run by over seven thousand volunteer-operated relays worldwide alongside millions of users who route their internet traffic along random paths through those relays. This technique is known as onion routing.</p>
-        <p class="lg-tor-disclaimer">Vector Privacy does not endorse or have any affiliation with Tor. Tor is a third-party privacy protocol that is decentralized and runs standalone. Use at your own risk.</p>
-        <button type="button" class="lg-tor-learn" onclick={() => h.openLink('torAttribution')}>Learn more about Tor</button>
+        <p class="lg-tor-note"><b>Expect slower connections.</b> Your traffic takes a longer path through volunteer relays worldwide so messages and media take more time to send and load, noticeably slower than a VPN.</p>
+        <p class="lg-tor-path">You can change this any time in <span>Settings &gt; Privacy &gt; Tor</span>.</p>
+        <p class="lg-tor-disclaimer">Tor is independent software maintained by the Tor Project, not operated by Vector.</p>
+        <button type="button" class="lg-tor-learn" onclick={() => h.openLink('torAttribution')}>
+            Learn more about Tor
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
+            </svg>
+        </button>
     </div>
 </div>
