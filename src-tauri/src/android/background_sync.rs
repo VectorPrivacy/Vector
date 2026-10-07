@@ -1209,6 +1209,47 @@ pub fn cancel_notification_jni(chat_id: &str) {
     }
 }
 
+/// Withdraw every message notification and the history Kotlin replays into the next
+/// one, so going live leaves no real name in the shade.
+pub fn cancel_all_message_notifications_jni() {
+    let Some(vm) = BG_JAVA_VM.get() else {
+        logcat("cancel_all_message_notifications_jni: JavaVM not stored");
+        return;
+    };
+    let Some(context_ref) = BG_APP_CONTEXT.get() else {
+        logcat("cancel_all_message_notifications_jni: App context not stored");
+        return;
+    };
+    let mut env = match vm.attach_current_thread() {
+        Ok(env) => env,
+        Err(e) => { logcat(&format!("cancel_all_message_notifications_jni: attach failed: {:?}", e)); return; }
+    };
+    let context = context_ref.as_obj();
+
+    let result: Result<(), String> = (|| {
+        let class_loader = env.call_method(context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| format!("getClassLoader: {:?}", e))?
+            .l().map_err(|e| format!("ClassLoader cast: {:?}", e))?;
+        let class_name = env.new_string("io.vectorapp.VectorNotificationService")
+            .map_err(|e| format!("class name: {:?}", e))?;
+        let service_class = env.call_method(&class_loader, "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)])
+            .map_err(|e| format!("loadClass: {:?}", e))?
+            .l().map_err(|e| format!("class cast: {:?}", e))?;
+        let service_jclass = jni::objects::JClass::from(service_class);
+        env.call_static_method(&service_jclass, "cancelAllMessageNotifications",
+            "(Landroid/content/Context;)V",
+            &[context.into()])
+            .map_err(|e| format!("cancelAllMessageNotifications: {:?}", e))?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        logcat(&format!("Failed to cancel message notifications: {}", e));
+    }
+}
+
 /// Called from NotificationActionReceiver when the user taps "Mark as Read".
 /// Marks the chat as read in STATE + DB (headless, no TAURI_APP needed).
 #[no_mangle]

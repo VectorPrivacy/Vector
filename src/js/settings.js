@@ -1182,11 +1182,80 @@ async function setPrivacySetting(key, on) {
     }
 }
 
-/** The account's synced settings, from the local mirror; edits elsewhere stream in after. */
+/** The account's synced settings, from the local mirror; edits elsewhere stream in after.
+ *  A failed read leaves Streamer Mode as the device mirror booted it. */
 async function loadSyncedSettings() {
     const settings = await invoke('get_synced_settings').catch(() => null);
-    VectorSvelte.setAdvancedMode(!!settings?.advanced);
+    if (!settings) return;
+    // Live on this device and just switched accounts: the stream is still running, so this account goes live too.
+    if (VectorSvelte.streamerState().on && !settings.streamer?.on) {
+        const live = await invoke('set_streamer_mode', { on: true }).catch(() => null);
+        applySyncedSettings(live || { ...settings, streamer: { ...settings.streamer, on: true } });
+        return;
+    }
+    applySyncedSettings(settings);
 }
+
+/** One settings view, { advanced, streamer: { on, seed, notif, hide_wallpapers } }, from a read, a save or another device. */
+function applySyncedSettings(view) {
+    VectorSvelte.setAdvancedMode(!!view?.advanced);
+    const seq = VectorSvelte.streamerState().seq;
+    VectorSvelte.setStreamer(view?.streamer);
+    if (VectorSvelte.streamerState().seq !== seq) streamerChanged();
+}
+
+/**
+ * StreamerHelpers: the Streamer Mode card and its rows. Mode and notifications are synced
+ * settings; consent is a field of our own kind-0, so other people's apps can read it.
+ * @typedef {Object} StreamerHelpers
+ * @property {(key: string) => void} help
+ * @property {(on: boolean) => Promise<void>} setMode         the store then shows what the backend kept
+ * @property {(level: string) => Promise<void>} setNotif      none | hide_content | hide_sender | hide_all
+ * @property {(hide: boolean) => Promise<void>} setWallpapers
+ * @property {() => string} myNpub
+ * @property {() => boolean} consent                          whether we allow streams to show us
+ * @property {(on: boolean) => Promise<boolean>} setConsent   the value now in effect
+ */
+const STREAMER_HANDLERS = {
+    help: (key) => showSettingsHelp(key),
+    setMode: async (on) => {
+        try {
+            applySyncedSettings(await invoke('set_streamer_mode', { on }));
+        } catch (e) {
+            showToast(String(e));
+        }
+    },
+    setNotif: async (level) => {
+        try {
+            applySyncedSettings(await invoke('set_streamer_notif', { level }));
+        } catch (e) {
+            showToast(String(e));
+        }
+    },
+    setWallpapers: async (hide) => {
+        try {
+            applySyncedSettings(await invoke('set_streamer_wallpapers', { hide }));
+        } catch (e) {
+            showToast(String(e));
+        }
+    },
+    myNpub: () => strPubkey,
+    consent: () => !!getProfile(strPubkey)?.stream_consent,
+    setConsent: async (on) => {
+        const mine = getProfile(strPubkey);
+        try {
+            const now = !!await invoke('set_stream_consent', { on });
+            if (mine) {
+                mine.stream_consent = now;
+                VectorSvelte.touchProfile(mine.id);
+            }
+            return now;
+        } catch (e) {
+            showToast(String(e));
+            return !!mine?.stream_consent;
+        }
+    },
+};
 
 /** Shown at once, put back if the backend refuses (it waits for the relay copy first). */
 async function saveAdvancedMode(on) {
@@ -1935,6 +2004,10 @@ const SETTINGS_HELP = {
     changePin: () => fSecurityType === 'password'
         ? ['Change Password', 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.']
         : ['Change PIN', 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.'],
+    streamerMode: ['Streamer Mode', 'Hides the names, pictures and keys of anyone who has not allowed streams, so you can share your screen.'],
+    streamConsent: ['Show me on streams', 'Lets people using Streamer Mode show your name and picture on their streams.'],
+    streamerWallpapers: ['Hide chat wallpapers', 'Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to.'],
+    streamerNotif: ['While streaming, also hide', 'Hides more of each notification while Streamer Mode is on, on top of Notification Content Privacy.'],
     advancedMode: ['Advanced Mode', 'Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices.'],
     crashLog: ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
     logout: ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
@@ -2020,9 +2093,12 @@ const SETTINGS_HELPERS = {
         bridgesInput: onTorBridgesInput,
         applyBridges: applyTorBridges,
     },
+    streamer: STREAMER_HANDLERS,
     blocked: {
         load: () => invoke('get_blocked_users'),
         getProfile: (npub) => getProfile(npub),
+        getName: (x) => getName(x),
+        streamHidden: (x) => streamHidden(x),
         getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
         confirmUnblock: (p) => popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(p))}?`),
         unblock: async (npub) => {

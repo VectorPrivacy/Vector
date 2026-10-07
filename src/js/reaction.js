@@ -100,6 +100,7 @@ function registerReactionPopups() {
                 return null;
             },
             getProfile,
+            getName,
             getProfileAvatarSrc,
             twemojify,
             bindCachedImg: (img, url, onUnavailable) => bindCachedEmojiImg(img, url, 'emoji', onUnavailable),

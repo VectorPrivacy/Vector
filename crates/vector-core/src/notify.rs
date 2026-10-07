@@ -499,8 +499,57 @@ pub enum ContentPrivacy {
 }
 
 impl ContentPrivacy {
+    /// What a notification may reveal right now: the account's setting, joined with
+    /// the streaming overlay while Streamer Mode is on.
     pub fn load() -> Self {
+        Self::effective(Self::load_base(), &crate::synced_prefs::load_settings().streamer)
+    }
+
+    /// The account's own setting, without the streaming overlay.
+    pub fn load_base() -> Self {
         Self::parse(crate::db::get_sql_setting("notif_content_privacy".to_string()).ok().flatten().as_deref())
+    }
+
+    /// Joined before applying: applying two levels in turn does not hide what their union does.
+    pub fn effective(base: Self, streamer: &crate::synced_prefs::StreamerSettings) -> Self {
+        if streamer.on {
+            base.join(Self::parse(Some(&streamer.notif)))
+        } else {
+            base
+        }
+    }
+
+    /// Hides whatever either one hides.
+    pub fn join(self, other: Self) -> Self {
+        Self::from_bits(self.bits() | other.bits())
+    }
+
+    fn bits(self) -> u8 {
+        match self {
+            Self::Full => 0b00,
+            Self::HideContent => 0b01,
+            Self::HideSender => 0b10,
+            Self::HideAll => 0b11,
+        }
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        match bits & 0b11 {
+            0b00 => Self::Full,
+            0b01 => Self::HideContent,
+            0b10 => Self::HideSender,
+            _ => Self::HideAll,
+        }
+    }
+
+    /// The stored spelling, which the web service worker also reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::HideContent => "hide_content",
+            Self::HideSender => "hide_sender",
+            Self::HideAll => "hide_all",
+        }
     }
 
     fn parse(value: Option<&str>) -> Self {
@@ -510,6 +559,152 @@ impl ContentPrivacy {
             Some("hide_all") => Self::HideAll,
             _ => Self::Full,
         }
+    }
+}
+
+/// Stands in for every name Streamer Mode hides. Fixed length, so it says nothing about the name.
+pub const STREAM_MASK: &str = "•••••";
+
+/// Who Streamer Mode hides. Read once per notification, outside any state lock.
+#[derive(Debug, Clone, Default)]
+pub struct StreamGate {
+    on: bool,
+    me: Option<String>,
+}
+
+impl StreamGate {
+    pub fn load() -> Self {
+        if !crate::synced_prefs::load_settings().streamer.on {
+            return Self::default();
+        }
+        // The background service on Android binds an account without an identity.
+        let me = crate::state::my_public_key()
+            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+            .or_else(|| crate::db::get_current_account().ok());
+        Self { on: true, me }
+    }
+
+    pub fn new(on: bool, me: Option<String>) -> Self {
+        Self { on, me }
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.on
+    }
+
+    /// Everyone but the active account is hidden unless they opted in. Someone not
+    /// fetched yet cannot have, so they are hidden too.
+    pub fn hides(&self, npub: &str, profile: Option<&crate::profile::Profile>) -> bool {
+        if !self.on || self.me.as_deref() == Some(npub) {
+            return false;
+        }
+        !profile.is_some_and(|p| p.flags.is_mine() || p.flags.is_stream_consent())
+    }
+}
+
+/// The name and avatar a notification shows for someone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+/// Nickname, then name, then display name, else `fallback`; masked with no avatar
+/// when the gate hides them. Every platform's notification names a sender through this.
+pub fn sender(state: &crate::state::ChatState, gate: &StreamGate, npub: &str, fallback: &str) -> Sender {
+    let profile = state.get_profile(npub);
+    if gate.hides(npub, profile) {
+        return Sender { name: STREAM_MASK.to_string(), avatar: None };
+    }
+    let Some(p) = profile else {
+        return Sender { name: fallback.to_string(), avatar: None };
+    };
+    Sender {
+        name: display_name(p).unwrap_or(fallback).to_string(),
+        avatar: (!p.avatar_cached.is_empty()).then(|| p.avatar_cached.to_string()),
+    }
+}
+
+fn display_name(p: &crate::profile::Profile) -> Option<&str> {
+    [p.nickname(), &p.name, &p.display_name].into_iter().find(|n| !n.is_empty())
+}
+
+/// `content` with each mention (`@npub1…`, `nostr:npub1…`, a bare npub, or the same
+/// forms of an nprofile) read as `@name`. An unknown npub stays as written, except while streaming, where it and
+/// anyone hidden read as `@•••••`.
+pub fn resolve_mentions(content: &str, state: &crate::state::ChatState, gate: &StreamGate) -> String {
+    scan_mentions(content, |npub| {
+        let profile = state.get_profile(npub);
+        if gate.hides(npub, profile) {
+            return Some(STREAM_MASK.to_string());
+        }
+        profile.and_then(display_name).map(str::to_string)
+    })
+}
+
+/// The scanner behind [`resolve_mentions`]. `lookup` names a bare npub, or `None`
+/// to leave its token as written. An nprofile is looked up by the npub it encodes.
+///
+/// Anchors on byte offsets only inside the entity, which is always ASCII, so the
+/// text around it (emoji included) is copied whole.
+pub fn scan_mentions<F: Fn(&str) -> Option<String>>(content: &str, lookup: F) -> String {
+    const NPUB_LEN: usize = 63;
+    const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut cursor = 0;
+
+    let mut i = 0;
+    while i + NPUB_LEN <= len {
+        if bytes[i..].starts_with(b"nprofile1") {
+            let end = i + 9 + bytes[i + 9..].iter().take_while(|b| BECH32.contains(&b.to_ascii_lowercase())).count();
+            let npub = <nostr_sdk::prelude::Nip19Profile as nostr_sdk::prelude::FromBech32>::from_bech32(&content[i..end])
+                .ok()
+                .and_then(|p| nostr_sdk::prelude::ToBech32::to_bech32(&p.public_key).ok());
+            if let Some(name) = npub.as_deref().and_then(&lookup) {
+                let mstart = mention_start(bytes, i);
+                result.push_str(&content[cursor..mstart]);
+                result.push('@');
+                result.push_str(&name);
+                cursor = end;
+            }
+            i = end;
+            continue;
+        }
+        let is_npub = &bytes[i..i + 5] == b"npub1"
+            && bytes[i + 5..i + NPUB_LEN]
+                .iter()
+                .all(|b| BECH32.contains(&b.to_ascii_lowercase()));
+        if is_npub {
+            let npub_end = i + NPUB_LEN;
+            if let Some(name) = lookup(&content[i..npub_end]) {
+                let mstart = mention_start(bytes, i);
+                result.push_str(&content[cursor..mstart]);
+                result.push('@');
+                result.push_str(&name);
+                cursor = npub_end;
+            }
+            i = npub_end;
+            continue;
+        }
+        i += 1;
+    }
+
+    result.push_str(&content[cursor..]);
+    result
+}
+
+/// Where the mention token at `i` starts: its `@` or `nostr:` prefix is swallowed, so the
+/// whole token collapses to one @name.
+fn mention_start(bytes: &[u8], i: usize) -> usize {
+    if i >= 1 && bytes[i - 1] == b'@' {
+        i - 1
+    } else if i >= 6 && &bytes[i - 6..i] == b"nostr:" {
+        i - 6
+    } else {
+        i
     }
 }
 
@@ -631,6 +826,187 @@ mod tests {
                 assert_eq!(once, twice, "{privacy:?}");
             }
         }
+    }
+
+    const ALL_PRIVACY: [ContentPrivacy; 4] =
+        [ContentPrivacy::Full, ContentPrivacy::HideContent, ContentPrivacy::HideSender, ContentPrivacy::HideAll];
+
+    #[test]
+    fn privacy_joins_as_a_two_bit_union() {
+        for x in ALL_PRIVACY {
+            assert_eq!(ContentPrivacy::Full.join(x), x, "Full adds nothing to {x:?}");
+            assert_eq!(x.join(ContentPrivacy::Full), x);
+            assert_eq!(x.join(x), x, "joining {x:?} with itself is idempotent");
+            assert_eq!(x.join(ContentPrivacy::HideAll), ContentPrivacy::HideAll);
+            for y in ALL_PRIVACY {
+                assert_eq!(x.join(y), y.join(x), "{x:?} with {y:?} commutes");
+            }
+        }
+        assert_eq!(ContentPrivacy::HideContent.join(ContentPrivacy::HideSender), ContentPrivacy::HideAll);
+    }
+
+    #[test]
+    fn joining_first_hides_more_than_applying_twice() {
+        let mut twice = channel();
+        twice.apply(ContentPrivacy::HideSender);
+        twice.apply(ContentPrivacy::HideContent);
+        let mut joined = channel();
+        joined.apply(ContentPrivacy::HideSender.join(ContentPrivacy::HideContent));
+        assert_ne!(twice, joined, "applying in turn leaves the community showing");
+        assert_eq!(joined.group, None);
+    }
+
+    #[test]
+    fn privacy_spelling_round_trips() {
+        for x in ALL_PRIVACY {
+            assert_eq!(ContentPrivacy::parse(Some(x.as_str())), x);
+        }
+        assert_eq!(ContentPrivacy::parse(Some("none")), ContentPrivacy::Full, "the overlay's off spelling");
+    }
+
+    fn streaming(on: bool, notif: &str) -> crate::synced_prefs::StreamerSettings {
+        crate::synced_prefs::StreamerSettings { on, notif: notif.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_overlay_counts_only_while_live() {
+        let base = ContentPrivacy::HideContent;
+        assert_eq!(ContentPrivacy::effective(base, &streaming(false, "hide_sender")), base);
+        assert_eq!(ContentPrivacy::effective(base, &streaming(true, "hide_sender")), ContentPrivacy::HideAll);
+        assert_eq!(ContentPrivacy::effective(base, &streaming(true, "none")), base);
+        assert_eq!(
+            ContentPrivacy::effective(ContentPrivacy::Full, &streaming(true, "hide_content")),
+            ContentPrivacy::HideContent
+        );
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        use nostr_sdk::prelude::ToBech32;
+        let tmp = tempfile::tempdir().unwrap();
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    #[test]
+    fn load_reads_the_setting_and_the_overlay() {
+        let (_tmp, _guard) = init_test_db();
+        use crate::synced_prefs::{save_local_raw, Pref, SyncedSettings};
+        crate::db::set_sql_setting("notif_content_privacy".into(), "hide_content".into()).unwrap();
+        let mut settings = SyncedSettings::default();
+        settings.streamer = streaming(true, "hide_sender");
+        save_local_raw(Pref::Settings, &settings.to_json()).unwrap();
+        assert_eq!(ContentPrivacy::load_base(), ContentPrivacy::HideContent);
+        assert_eq!(ContentPrivacy::load(), ContentPrivacy::HideAll);
+
+        settings.streamer.on = false;
+        save_local_raw(Pref::Settings, &settings.to_json()).unwrap();
+        assert_eq!(ContentPrivacy::load(), ContentPrivacy::HideContent, "off, the overlay is ignored");
+    }
+
+    const ME: &str = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    const FAN: &str = "npub1pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp";
+    const SHY: &str = "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    const STRANGER: &str = "npub1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr";
+
+    fn people() -> crate::state::ChatState {
+        let mut state = crate::state::ChatState::new();
+        let person = |name: &str, consent: bool| {
+            let mut p = crate::profile::Profile::new();
+            p.name = name.into();
+            p.avatar_cached = format!("/{name}.png").into();
+            p.flags.set_stream_consent(consent);
+            p
+        };
+        state.insert_or_replace_profile(ME, person("Me", false));
+        let mut fan = person("Fan", true);
+        fan.extras_mut().nickname = "Bestie".into();
+        state.insert_or_replace_profile(FAN, fan);
+        state.insert_or_replace_profile(SHY, person("Shy", false));
+        state
+    }
+
+    #[test]
+    fn streaming_masks_everyone_but_me_and_those_who_opted_in() {
+        let state = people();
+        let live = StreamGate::new(true, Some(ME.into()));
+        let shown = |npub| sender(&state, &live, npub, "New Message");
+
+        assert_eq!(shown(ME), Sender { name: "Me".into(), avatar: Some("/Me.png".into()) });
+        assert_eq!(shown(FAN), Sender { name: "Bestie".into(), avatar: Some("/Fan.png".into()) }, "opted in reads as normal, nickname too");
+        for hidden in [SHY, STRANGER] {
+            assert_eq!(shown(hidden), Sender { name: STREAM_MASK.into(), avatar: None }, "{hidden}");
+        }
+        assert_eq!(STREAM_MASK.chars().count(), 5);
+
+        let off = StreamGate::default();
+        assert_eq!(sender(&state, &off, SHY, "New Message").name, "Shy");
+        assert_eq!(sender(&state, &off, STRANGER, "New Message"), Sender { name: "New Message".into(), avatar: None });
+    }
+
+    #[test]
+    fn my_own_profile_shows_even_without_an_identity() {
+        let mut state = people();
+        state.get_profile_mut(SHY).unwrap().flags.set_mine(true);
+        let live = StreamGate::new(true, None);
+        assert_eq!(sender(&state, &live, SHY, "x").name, "Shy");
+        assert_eq!(sender(&state, &live, ME, "x").name, STREAM_MASK, "another local account is hidden");
+    }
+
+    #[test]
+    fn mentions_are_masked_while_live_and_named_otherwise() {
+        let state = people();
+        let text = format!("@{SHY} meet nostr:{FAN} and {STRANGER}, from @{ME}");
+        let live = StreamGate::new(true, Some(ME.into()));
+        assert_eq!(resolve_mentions(&text, &state, &live), "@••••• meet @Bestie and @•••••, from @Me");
+
+        let off = StreamGate::default();
+        assert_eq!(
+            resolve_mentions(&text, &state, &off),
+            format!("@Shy meet @Bestie and {STRANGER}, from @Me"),
+            "an unknown npub stays as written when not live"
+        );
+    }
+
+    #[test]
+    fn an_nprofile_mention_reads_as_the_npub_it_encodes() {
+        use nostr_sdk::prelude::{Keys, Nip19Profile, RelayUrl, ToBech32};
+        let mut state = people();
+        let pk = Keys::generate().public_key();
+        let npub = pk.to_bech32().unwrap();
+        let mut p = crate::profile::Profile::new();
+        p.name = "Hidden".into();
+        state.insert_or_replace_profile(&npub, p);
+        let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
+        let nprofile = Nip19Profile::new(pk, [relay]).to_bech32().unwrap();
+
+        let live = StreamGate::new(true, Some(ME.into()));
+        assert_eq!(resolve_mentions(&format!("ask nostr:{nprofile} now"), &state, &live), "ask @••••• now");
+        assert_eq!(resolve_mentions(&format!("ask @{nprofile}"), &state, &StreamGate::default()), "ask @Hidden");
+        let stranger = Nip19Profile::new(Keys::generate().public_key(), []).to_bech32().unwrap();
+        assert_eq!(resolve_mentions(&format!("hi {stranger}"), &state, &live), "hi @•••••", "unknown is hidden too");
+        assert_eq!(scan_mentions("nprofile1qqqq broken", |_| Some("x".into())), "nprofile1qqqq broken");
+    }
+
+    #[test]
+    fn mention_scanner_reads_every_form() {
+        let npub = format!("npub1{}", "q".repeat(58));
+        let unknown = format!("npub1{}", "p".repeat(58));
+        let known: &str = &npub;
+        let lookup = |n: &str| (n == known).then(|| "Alice".to_string());
+
+        assert_eq!(scan_mentions(&format!("hey @{npub}!"), lookup), "hey @Alice!");
+        assert_eq!(scan_mentions(&format!("hey nostr:{npub}!"), lookup), "hey @Alice!");
+        assert_eq!(scan_mentions(&format!("hey {npub}!"), lookup), "hey @Alice!");
+        assert_eq!(scan_mentions(&format!("hi nostr:{unknown}"), lookup), format!("hi nostr:{unknown}"));
+        assert_eq!(scan_mentions(&format!("{npub} and nostr:{npub} done"), lookup), "@Alice and @Alice done");
+        assert_eq!(scan_mentions("just a normal line 🎉", lookup), "just a normal line 🎉");
     }
 
     #[test]

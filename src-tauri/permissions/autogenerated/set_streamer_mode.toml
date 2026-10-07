@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-streamer-mode"
+description = "Enables the set_streamer_mode command without any pre-configured scope."
+commands.allow = ["set_streamer_mode"]
+
+[[permission]]
+identifier = "deny-set-streamer-mode"
+description = "Denies the set_streamer_mode command without any pre-configured scope."
+commands.deny = ["set_streamer_mode"]

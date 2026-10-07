@@ -13,6 +13,8 @@ function registerMiniProfile() {
     VectorSvelte.setScreen('miniProfile', {
         h: {
             getProfile,
+            getName,
+            streamHidden,
             getProfileAvatarSrc,
             getProfileBannerSrc,
             isMobile: () => !!platformFeatures?.is_mobile,

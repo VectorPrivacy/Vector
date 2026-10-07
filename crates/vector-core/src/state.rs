@@ -1388,6 +1388,7 @@ mod tests {
             is_blocked: false,
             avatar_cached: String::new(),
             banner_cached: String::new(),
+            stream_consent: false,
         }
     }
 

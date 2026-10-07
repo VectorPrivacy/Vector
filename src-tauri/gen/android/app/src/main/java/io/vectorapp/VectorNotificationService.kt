@@ -197,7 +197,7 @@ class VectorNotificationService : Service() {
 
             manager.notify(notificationId, notification)
 
-            android.util.Log.d("VectorNotificationService", "Posted notification #$notificationId: $title (group: $isGroup, chat: ${chatId.take(20)})")
+            android.util.Log.d("VectorNotificationService", "Posted notification #$notificationId (group: $isGroup, chat: ${chatId.take(20)})")
         }
 
         /**
@@ -229,6 +229,18 @@ class VectorNotificationService : Service() {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(chatId.hashCode())
             android.util.Log.d("VectorNotificationService", "Cancelled notification for chat ${chatId.take(20)}")
+        }
+
+        /** Withdraw every message notification and its replay history. The service's own row stays. */
+        @JvmStatic
+        fun cancelAllMessageNotifications(context: Context) {
+            chatMessageHistory.clear()
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            for (shown in manager.activeNotifications) {
+                if (shown.notification.channelId == MESSAGES_CHANNEL_ID) {
+                    manager.cancel(shown.tag, shown.id)
+                }
+            }
         }
 
         private fun loadBitmap(path: String): Bitmap? {

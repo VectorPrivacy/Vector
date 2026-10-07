@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 96;
+pub const HIGHEST_MIGRATION_ID: u32 = 97;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1413,6 +1413,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     // reconcile that re-serves the wrap backfills it, as for pre-timestamp rows.
     run_atomic_migration(conn, 96, "Ledger DM wrappers held only on events rows", |tx| {
         backfill_dm_wrapper_ledger(tx).map(|_| ())
+    })?;
+
+    // Zero for every cached row, so a profile fetched before the flag existed stays hidden on
+    // stream until its next fetch says otherwise.
+    run_atomic_migration(conn, 97, "Profile stream consent", |tx| {
+        tx.execute("ALTER TABLE profiles ADD COLUMN stream_consent INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|e| format!("add profiles.stream_consent: {e}"))?;
+        Ok(())
     })?;
 
     Ok(())

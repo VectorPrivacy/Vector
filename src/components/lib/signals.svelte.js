@@ -9,6 +9,7 @@
 // without touching any row's derivation.
 
 import { SvelteMap } from 'svelte/reactivity';
+import { streamerSeq } from './streamer.svelte.js';
 
 // One reactive map per entity kind. SvelteMap creates each key's source the way the
 // runtime expects: a plain `$state` minted inside the derived that first reads it is
@@ -43,9 +44,10 @@ export function touchChat(id) {
     bump(chats, id);
 }
 
-/** Read/write for a profile: DM rows show its name and avatar. */
+/** Read/write for a profile: DM rows show its name and avatar. Streamer Mode changes
+ *  how every profile renders, so its counter is part of each one's version. */
 export function profileVersion(npub) {
-    return read(profiles, npub);
+    return read(profiles, npub) + streamerSeq();
 }
 export function touchProfile(npub) {
     bump(profiles, npub);

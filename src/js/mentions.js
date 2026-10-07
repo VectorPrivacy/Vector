@@ -6,6 +6,8 @@
  *   const ctrl = initMentionSelector(textarea, candidatesFn);
  *   // ctrl.getMentions()   → [{name, npub}]
  *   // ctrl.clearMentions() → reset tracked mentions
+ *   // ctrl.relabel(fn)     → rename tracked mentions to fn(npub), returns [[old, new]]
+ *   // ctrl.refresh()       → rebuild an open list from fresh candidates
  *   // ctrl.destroy()       → remove DOM + listeners
  */
 
@@ -55,8 +57,9 @@ function initMentionSelector(textarea, candidatesFn) {
         // from the candidate pool holds within each tier.
         const tier = (c) => {
             const n = c.name.toLowerCase();
-            if (!q || n.startsWith(q)) return 0;
-            if (n.includes(q)) return 1;
+            const s = (c.search || '').toLowerCase();
+            if (!q || n.startsWith(q) || s.startsWith(q)) return 0;
+            if (n.includes(q) || s.includes(q)) return 1;
             if (c.npub.toLowerCase().includes(q)) return 2;
             return 3;
         };
@@ -77,8 +80,8 @@ function initMentionSelector(textarea, candidatesFn) {
         // Place caret after inserted text
         const newPos = atStart + insert.length;
         textarea.selectionStart = textarea.selectionEnd = newPos;
-        // Track mention
-        if (!mentions.find(m => m.npub === item.npub)) {
+        // Track mention: one person can go by several labels (Streamer Mode codes)
+        if (!mentions.find(m => m.npub === item.npub && m.name === item.name)) {
             mentions.push({ name: item.name, npub: item.npub });
         }
         hide();
@@ -158,8 +161,26 @@ function initMentionSelector(textarea, candidatesFn) {
     // --- Public API ---
     return {
         isOpen() { return isVisible(); },
+        /** Rebuild an open list from fresh candidates (the names on screen changed). */
+        refresh() {
+            if (!open) return;
+            cachedCandidates = null;
+            renderItems(getFiltered());
+        },
         getMentions() { return mentions.slice(); },
         clearMentions() { mentions = []; },
+        /** Rename every tracked mention to `labelFor(npub)`; returns the [old, new] pairs that moved. */
+        relabel(labelFor) {
+            const moved = [];
+            const next = [];
+            for (const m of mentions) {
+                const name = labelFor(m.npub) || m.name;
+                if (name !== m.name) moved.push([m.name, name]);
+                if (!next.find(n => n.npub === m.npub && n.name === name)) next.push({ name, npub: m.npub });
+            }
+            mentions = next;
+            return moved;
+        },
         destroy() {
             textarea.removeEventListener('input', onInput);
             textarea.removeEventListener('keydown', onKeyDown);

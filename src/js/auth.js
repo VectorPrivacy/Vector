@@ -225,7 +225,8 @@ async function login(skipAnimations = false) {
             await ensurePinnedLoaded();
             loadRailLayout();
             loadHiddenBanners();
-            loadSyncedSettings();
+            // Awaited: Streamer Mode decides which names the first paint may show.
+            await loadSyncedSettings();
             // Before the first chat paints, so a paused file offers Resume, not Download.
             loadPausedDownloads();
 

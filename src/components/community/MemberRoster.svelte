@@ -104,6 +104,7 @@
         return profile ? profile.nickname || profile.name || profile.display_name || '' : '';
     }
     function displayOf(npub, profile) {
+        if (h.streamHidden(npub)) return h.getName(profile || npub);
         return nameOf(profile) || npub.slice(0, 10) + '...' + npub.slice(-6);
     }
 
@@ -174,14 +175,17 @@
             if (scope && !scope.has(m.npub)) continue;
             const profile = profileFor(m.npub);
             const display = displayOf(m.npub, profile);
-            if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
+            // The search matches real names: what is typed is already on screen.
+            if (f && !(display + ' ' + nameOf(profile) + ' ' + m.npub).toLowerCase().includes(f)) continue;
             const isOwner = m.npub === ownerNpub;
             const isAdmin = adminSet.has(m.npub);
+            const veiled = h.streamHidden(m.npub);
             vms.push({
                 npub: m.npub,
                 profile,
                 display,
-                hasName: !!nameOf(profile),
+                veiled,
+                hasName: !veiled && !!nameOf(profile),
                 src: profile ? h.getProfileAvatarSrc(profile) || null : null,
                 isOwner,
                 isAdmin,
@@ -391,6 +395,7 @@
                         display={vm.display}
                         hasName={vm.hasName}
                         withStatus
+                        veiled={vm.veiled}
                         rank={vm.rank}
                         rankLabel={vm.rankLabel}
                         {hoverBg}

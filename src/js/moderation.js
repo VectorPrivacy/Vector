@@ -19,6 +19,7 @@ VectorSvelte.setScreen('modConsole', {
     h: {
         ago: modAgo,
         displayName: modDisplayName,
+        searchName: (npub) => searchName(npub),
         avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
         showTab: (which) => modShowTab(which),
         close: () => closeModerationPanel(),
@@ -47,6 +48,7 @@ function modShortNpub(npub) {
 }
 
 function modDisplayName(npub) {
+    if (streamHidden(npub)) return STREAM_DOTS;
     const p = arrProfiles.find(p => p.id === npub);
     const name = p ? (p.nickname || p.name || p.display_name || '') : '';
     return name || modShortNpub(npub);

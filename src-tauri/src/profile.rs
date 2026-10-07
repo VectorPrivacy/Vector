@@ -189,6 +189,17 @@ pub async fn update_profile(name: String, avatar: String, banner: String, about:
     ).await
 }
 
+/// Publish whether the current user consents to being shown on other people's streams.
+/// Returns the value now in effect.
+#[tauri::command]
+pub async fn set_stream_consent(on: bool) -> Result<bool, String> {
+    vector_core::db::scoped_result(vector_core::profile::sync::set_stream_consent(
+        on,
+        &crate::profile_sync::TauriProfileSyncHandler,
+    ))
+    .await
+}
+
 /// Update the current user's status and broadcast to relays.
 /// Delegates to vector-core (no handler needed — status is ephemeral).
 #[tauri::command]

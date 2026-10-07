@@ -253,15 +253,11 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
     if !should_notify { return; }
 
     let is_file = !msg.attachments.is_empty();
+    let gate = vector_core::notify::StreamGate::load();
     let (sender_name, community_name, avatar, content) = {
         let state = crate::STATE.lock().await;
-        let (sender, av) = state.get_profile(sender_npub).map(|p| {
-            let name = if !p.nickname().is_empty() { p.nickname().to_string() }
-                else if !p.name.is_empty() { p.name.to_string() }
-                else { "Someone".to_string() };
-            let cached = if !p.avatar_cached.is_empty() { Some(p.avatar_cached.to_string()) } else { None };
-            (name, cached)
-        }).unwrap_or_else(|| ("Someone".to_string(), None));
+        let vector_core::notify::Sender { name: sender, avatar: av } =
+            vector_core::notify::sender(&state, &gate, sender_npub, "Someone");
         let community_name = state.get_chat(chat_id)
             .and_then(|c| c.metadata.get_name().map(|n| n.to_string()))
             .unwrap_or_else(|| "Community".to_string());
@@ -270,7 +266,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
             "Sent a ".to_string() + &crate::util::get_file_type_description(&ext)
         } else {
             crate::services::strip_content_for_preview(
-                &crate::services::resolve_mention_display_names(&msg.content, &state)
+                &vector_core::notify::resolve_mentions(&msg.content, &state, &gate)
             )
         };
         (sender, community_name, av, content)

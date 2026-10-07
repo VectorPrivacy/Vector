@@ -134,11 +134,19 @@
     let signedIn = false;
     window.__TAURI__.event.listen('init_finished', () => {
         signedIn = true;
+        backend('get_synced_settings').then((v) => { live = !!v?.streamer?.on; if (live) closeAll(); }, () => {});
         sync().catch((e) => console.warn('[Push] sync failed:', e));
         openFromHash();
         setTimeout(clearRead, 3000);
     });
     window.__TAURI__.event.listen('push_contacts_changed', () => refresh());
+    // Going live takes down what is already shown: it names people the stream must not see.
+    let live = false;
+    window.__TAURI__.event.listen('synced_settings_updated', ({ payload }) => {
+        const on = !!payload?.streamer?.on;
+        if (on && !live) closeAll();
+        live = on;
+    });
     // Names change while open; the worker reads them only after the app is gone.
     addEventListener('pagehide', () => { if (signedIn) refresh(); });
     document.addEventListener('visibilitychange', () => {
@@ -178,6 +186,16 @@
             young = true;
         }
         if (young && retry) setTimeout(() => clearRead(false), 31000);
+    }
+
+    // iOS refuses to close one in its first 30 seconds, so once more after that.
+    async function closeAll(retry = true) {
+        const reg = await navigator.serviceWorker?.ready.catch(() => null);
+        const shown = await reg?.getNotifications().catch(() => []) || [];
+        for (const n of shown) {
+            try { n.close(); } catch {}
+        }
+        if (shown.length && retry) setTimeout(() => closeAll(false), 31000);
     }
 
     // A tapped notification names the chat: in the hash when it opened the app, in a

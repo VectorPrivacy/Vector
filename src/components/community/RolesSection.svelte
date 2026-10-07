@@ -9,7 +9,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import MemberRow from '../people/MemberRow.svelte';
 
-    // h: setRoleHolders(roleId, add, remove), name(npub), profile(npub), avatarSrc(npub), ui
+    // h: setRoleHolders(roleId, add, remove), name(npub), veiled(npub), searchName(npub), profile(npub), avatarSrc(npub), ui
     let { h } = $props();
 
     const st = csState();
@@ -135,7 +135,8 @@
     const memberRow = (npub) => {
         profileVersion(npub);
         const name = h.name(npub);
-        return { npub, name, profile: h.profile(npub), src: h.avatarSrc(npub) };
+        const veiled = h.veiled(npub);
+        return { npub, name, veiled, find: veiled ? h.searchName(npub) : name, profile: h.profile(npub), src: h.avatarSrc(npub) };
     };
     const shortNpub = (npub) => `${npub.slice(0, 12)}…${npub.slice(-6)}`;
     const ownerName = $derived.by(() => {
@@ -144,7 +145,7 @@
         profileVersion(o);
         return h.name(o) || shortNpub(o);
     });
-    const matches = (r, q) => !q || `${r.name} ${r.npub}`.toLowerCase().includes(q);
+    const matches = (r, q) => !q || `${r.find} ${r.npub}`.toLowerCase().includes(q);
     const holders = $derived.by(() => {
         const q = memberQuery.trim().toLowerCase();
         return (current?.holders || []).map(memberRow).filter((r) => matches(r, q));
@@ -302,8 +303,8 @@
                 {#if adding}
                     {#each candidates as row (row.npub)}
                         <MemberRow npub={row.npub} profile={row.profile} src={row.src}
-                                   display={row.name || shortNpub(row.npub)} hasName={!!row.name}
-                                   keyHint={row.name ? shortNpub(row.npub) : ''}
+                                   display={row.name || shortNpub(row.npub)} hasName={!row.veiled && !!row.name}
+                                   keyHint={row.name && !row.veiled ? shortNpub(row.npub) : ''}
                                    onactivate={() => togglePick(row.npub)} ui={h.ui}>
                             {#snippet trailing()}<div class="member-pick-indicator" class:selected={pick.has(row.npub)}></div>{/snippet}
                         </MemberRow>
@@ -319,8 +320,8 @@
                 {:else}
                     {#each holders as row (row.npub)}
                         <MemberRow npub={row.npub} profile={row.profile} src={row.src}
-                                   display={row.name || shortNpub(row.npub)} hasName={!!row.name}
-                                   keyHint={row.name ? shortNpub(row.npub) : ''} ui={h.ui}>
+                                   display={row.name || shortNpub(row.npub)} hasName={!row.veiled && !!row.name}
+                                   keyHint={row.name && !row.veiled ? shortNpub(row.npub) : ''} ui={h.ui}>
                             {#snippet trailing()}
                                 {#if editable}
                                     <button class="cs-role-remove" title="Remove from role" disabled={st.roles.busy}

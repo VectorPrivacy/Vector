@@ -26,6 +26,10 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 let s = |k| a.opt_str(k).unwrap_or_default();
                 Ok(json!(profile_sync::update_profile(s("name"), s("avatar"), s("banner"), s("about"), &WebProfileSyncHandler).await))
             }
+            "set_stream_consent" => match a.bool("on") {
+                Some(on) => db::scoped_result(profile_sync::set_stream_consent(on, &WebProfileSyncHandler)).await.map(|v| json!(v)),
+                None => Err("missing argument `on`".to_string()),
+            },
             "update_status" => Ok(json!(profile_sync::update_status(a.opt_str("status").unwrap_or_default()).await)),
             "upload_avatar" => upload_avatar(a).await,
             "set_nickname" => set_nickname(a).await,

@@ -4,7 +4,7 @@
     import { shellPanes, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import { chatPaneHandlers } from '../lib/chatpane.svelte.js';
     import { pinsState } from '../lib/pins.svelte.js';
-    import { wallpaperState } from '../lib/wallpaper.svelte.js';
+    import { wallpaperState, wallpaperShown } from '../lib/wallpaper.svelte.js';
     import ChatHeader from '../chat/ChatHeader.svelte';
     import PinsDrawer from '../chat/PinsDrawer.svelte';
     import WallpaperLayer from '../chat/WallpaperLayer.svelte';
@@ -19,7 +19,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} use:bindChat use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
-     data-wallpaper={wp.image ? 'true' : undefined} data-wallpaper-previewing={wp.previewing ? 'true' : undefined}>
+     data-wallpaper={wallpaperShown() ? 'true' : undefined} data-wallpaper-previewing={wp.previewing ? 'true' : undefined}>
     <WallpaperLayer />
     <ChatHeader />
     <PinsDrawer />

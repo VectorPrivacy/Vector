@@ -9729,6 +9729,28 @@ select {
   box-shadow: none !important;
 }
 
+/* Streamer Mode wears the Tor card's layout: a camera that lights while live. */
+.streamer-glyph .icon {
+  width: 52%;
+  height: 52%;
+  background-color: rgba(255,255,255,0.35);
+  transition: background-color 0.3s ease;
+}
+.streamer-card.is-live {
+  border-color: color-mix(in srgb, var(--icon-color-primary) 35%, transparent);
+}
+.streamer-card.is-live .streamer-glyph .icon {
+  background-color: var(--icon-color-primary);
+}
+.vselect.streamer-select { width: 180px; flex: 0 1 180px; min-width: 0; }
+.streamer-caption {
+  margin: 6px 0 16px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255,255,255,0.5);
+  text-align: left;
+}
+
 
 /* The circuit, once connected: a faint label with New beside it, the hops below. */
 .tor-circuit { margin-top: 14px; }

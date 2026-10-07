@@ -36,29 +36,19 @@ async fn refresh_unread(chat_id: &str, marked: bool) {
 
 /// Ask the page for a system notification; it shows one only while unfocused.
 async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_label: Option<String>) {
-    let (rings, name, icon) = {
+    let gate = vector_core::notify::StreamGate::load();
+    let (rings, sender, content) = {
         let state = STATE.lock().await;
         let rings = state
             .get_chat(chat_id)
             .is_none_or(|c| vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All);
-        let profile = author.and_then(|a| state.get_profile(a));
-        let name = profile
-            .map(|p| {
-                if !p.nickname().is_empty() {
-                    p.nickname().to_string()
-                } else if !p.display_name.is_empty() {
-                    p.display_name.to_string()
-                } else {
-                    p.name.to_string()
-                }
-            })
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| "New Message".into());
-        (rings, name, profile.map(|p| p.avatar_cached.to_string()).filter(|a| a.starts_with('/')))
+        let sender = vector_core::notify::sender(&state, &gate, author.unwrap_or_default(), "New Message");
+        (rings, sender, vector_core::notify::resolve_mentions(content, &state, &gate))
     };
     if !rings {
         return;
     }
+    let vector_core::notify::Sender { name, avatar } = sender;
     let mut shown = vector_core::notify::Preview {
         title: match &community_label {
             Some(label) => format!("{name} · {label}"),
@@ -66,7 +56,7 @@ async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_la
         },
         body: if content.is_empty() { "New message".to_string() } else { content.chars().take(200).collect() },
         sender: Some(name),
-        avatar: icon,
+        avatar: avatar.filter(|a| a.starts_with('/')),
         group: community_label,
         group_avatar: None,
     };

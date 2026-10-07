@@ -112,14 +112,12 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
                 })
             };
             if rings {
-                let display_info = {
+                let gate = vector_core::notify::StreamGate::load();
+                let (name, body, avatar) = {
                     let state = STATE.lock().await;
-                    get_dm_notification_info(&state, &chat_id, &content)
+                    get_dm_notification_info(&state, &gate, &chat_id, &content)
                 };
-                if let Some((name, body, avatar)) = display_info {
-                    let notification = NotificationData::direct_message(name, body, avatar, chat_id.clone());
-                    show_notification_generic(notification);
-                }
+                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()));
             }
             // Update badge
             if let Some(handle) = TAURI_APP.get() {
@@ -159,14 +157,12 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
                 })
             };
             if rings {
-                let display_info = {
+                let gate = vector_core::notify::StreamGate::load();
+                let (name, body, avatar) = {
                     let state = STATE.lock().await;
-                    get_file_notification_info(&state, &chat_id, &extension)
+                    get_file_notification_info(&state, &gate, &chat_id, &extension)
                 };
-                if let Some((name, body, avatar)) = display_info {
-                    let notification = NotificationData::direct_message(name, body, avatar, chat_id.clone());
-                    show_notification_generic(notification);
-                }
+                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()));
             }
             // Update badge
             if let Some(handle) = TAURI_APP.get() {
@@ -321,62 +317,29 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     }
 }
 
-/// Extract display info for a DM text notification.
+/// Name, preview and avatar for a DM text notification.
 fn get_dm_notification_info(
     state: &crate::state::ChatState,
+    gate: &vector_core::notify::StreamGate,
     contact: &str,
     content: &str,
-) -> Option<(String, String, Option<String>)> {
-    let (name, avatar) = match state.get_profile(contact) {
-        Some(profile) => {
-            let name = if !profile.nickname().is_empty() {
-                profile.nickname().to_string()
-            } else if !profile.name.is_empty() {
-                profile.name.to_string()
-            } else {
-                String::from("New Message")
-            };
-            let avatar = if !profile.avatar_cached.is_empty() {
-                Some(profile.avatar_cached.to_string())
-            } else {
-                None
-            };
-            (name, avatar)
-        }
-        None => (String::from("New Message"), None),
-    };
-    let resolved = crate::services::strip_content_for_preview(
-        &crate::services::resolve_mention_display_names(content, state),
+) -> (String, String, Option<String>) {
+    let sender = vector_core::notify::sender(state, gate, contact, "New Message");
+    let body = crate::services::strip_content_for_preview(
+        &vector_core::notify::resolve_mentions(content, state, gate),
     );
-    Some((name, resolved, avatar))
+    (sender.name, body, sender.avatar)
 }
 
-/// Extract display info for a file attachment notification.
+/// Name, preview and avatar for a DM attachment notification.
 fn get_file_notification_info(
     state: &crate::state::ChatState,
+    gate: &vector_core::notify::StreamGate,
     contact: &str,
     extension: &str,
-) -> Option<(String, String, Option<String>)> {
-    let (name, avatar) = match state.get_profile(contact) {
-        Some(profile) => {
-            let name = if !profile.nickname().is_empty() {
-                profile.nickname().to_string()
-            } else if !profile.name.is_empty() {
-                profile.name.to_string()
-            } else {
-                String::from("New Message")
-            };
-            let avatar = if !profile.avatar_cached.is_empty() {
-                Some(profile.avatar_cached.to_string())
-            } else {
-                None
-            };
-            (name, avatar)
-        }
-        None => (String::from("New Message"), None),
-    };
-    let body = "Sent a ".to_string() + &get_file_type_description(extension);
-    Some((name, body, avatar))
+) -> (String, String, Option<String>) {
+    let sender = vector_core::notify::sender(state, gate, contact, "New Message");
+    (sender.name, "Sent a ".to_string() + &get_file_type_description(extension), sender.avatar)
 }
 
 // ============================================================================

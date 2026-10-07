@@ -65,6 +65,8 @@ function registerCreateGroupScreen() {
                 dmNpubs: await fetchDmContacts(),
                 chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
                 avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
+                getName: (x) => getName(x),
+                streamHidden: (x) => streamHidden(x),
                 twemojify: (el) => twemojify(el),
                 showTooltip: (text, el) => showGlobalTooltip(text, el),
                 hideTooltip: () => hideGlobalTooltip(),

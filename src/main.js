@@ -15,12 +15,102 @@ const SystemEventType = {
     PinsModified: 5,
 };
 
+/** What Streamer Mode shows for a hidden person's name. */
+const STREAM_DOTS = VectorSvelte.streamDots;
+
+/** Whether Streamer Mode hides this person: anyone but the active account who has not
+ *  allowed streams, including a profile not fetched yet. Non-npub ids (channels) never. */
+function streamHidden(profileOrId) {
+    if (!VectorSvelte.streamerState().on) return false;
+    const isId = typeof profileOrId === 'string';
+    const id = isId ? profileOrId : profileOrId?.id;
+    if (!id || !id.startsWith('npub1') || id === strPubkey) return false;
+    const p = isId ? getProfile(id) : profileOrId;
+    return !p?.mine && !p?.stream_consent;
+}
+
 /** The one true display-name resolver. Accepts a profile object or an npub/id string.
  *  Order: local nickname → Nostr name → Nostr display_name → shortened npub. */
 function getName(profileOrId) {
+    if (streamHidden(profileOrId)) return STREAM_DOTS;
     const p = typeof profileOrId === 'string' ? getProfile(profileOrId) : profileOrId;
     const id = typeof profileOrId === 'string' ? profileOrId : p?.id;
     return p?.nickname || p?.name || p?.display_name || (id ? id.substring(0, 12) + '…' : 'Someone');
+}
+
+/** The real name for a search filter to match, '' when there is none. Never displayed:
+ *  what the user types to find someone is already on their screen. */
+function searchName(profileOrId) {
+    const p = typeof profileOrId === 'string' ? getProfile(profileOrId) : profileOrId;
+    return p?.nickname || p?.name || p?.display_name || '';
+}
+
+/** A URL or text with every hidden person's npub or nprofile replaced by dots. */
+function streamMaskNpubs(text, prefix = '') {
+    if (!text || !VectorSvelte.streamerState().on) return text;
+    return text.replace(/(?:@|nostr:)?(npub1[a-z0-9]{58}|nprofile1[a-z0-9]+)/gi, (full, id) => {
+        const npub = /^nprofile1/i.test(id) ? nprofileNpub(id) : id.toLowerCase();
+        return !npub || streamHidden(npub) ? prefix + STREAM_DOTS : full;
+    });
+}
+
+/** Mask hidden people's npubs and nprofiles in an element's text, a link's text included. */
+function streamMaskText(element) {
+    if (!VectorSvelte.streamerState().on) return;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.parentElement?.closest('.mention')) continue;
+        const masked = streamMaskNpubs(node.textContent);
+        if (masked !== node.textContent) node.textContent = masked;
+    }
+}
+
+const BECH32_CHARS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+function bech32Polymod(values) {
+    const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    let chk = 1;
+    for (const v of values) {
+        const top = chk >>> 25;
+        chk = ((chk & 0x1ffffff) << 5) ^ v;
+        for (let i = 0; i < 5; i++) if ((top >>> i) & 1) chk ^= GEN[i];
+    }
+    return chk;
+}
+
+function bech32HrpExpand(hrp) {
+    return [...[...hrp].map(c => c.charCodeAt(0) >> 5), 0, ...[...hrp].map(c => c.charCodeAt(0) & 31)];
+}
+
+/** Regroup `from`-bit words into `to`-bit ones; null when the padding is not zero. */
+function bech32Regroup(words, from, to, pad) {
+    let acc = 0, bits = 0;
+    const out = [];
+    for (const v of words) {
+        acc = ((acc << from) | v) & 0xffffff;
+        bits += from;
+        while (bits >= to) { bits -= to; out.push((acc >> bits) & ((1 << to) - 1)); }
+    }
+    if (pad && bits) out.push((acc << (to - bits)) & ((1 << to) - 1));
+    else if (!pad && ((acc << (to - bits)) & ((1 << to) - 1))) return null;
+    return out;
+}
+
+/** The npub an nprofile names, or '' when it doesn't decode. */
+function nprofileNpub(nprofile) {
+    const s = nprofile.toLowerCase();
+    const words = [...s.slice(9)].map(c => BECH32_CHARS.indexOf(c));
+    if (!s.startsWith('nprofile1') || words.length < 7 || words.includes(-1)) return '';
+    if (bech32Polymod([...bech32HrpExpand('nprofile'), ...words]) !== 1) return '';
+    const bytes = bech32Regroup(words.slice(0, -6), 5, 8, false);
+    for (let i = 0; bytes && i + 2 <= bytes.length; i += 2 + bytes[i + 1]) {
+        if (bytes[i] !== 0 || bytes[i + 1] !== 32 || i + 34 > bytes.length) continue;
+        const data = bech32Regroup(bytes.slice(i + 2, i + 34), 8, 5, true);
+        const mod = bech32Polymod([...bech32HrpExpand('npub'), ...data, 0, 0, 0, 0, 0, 0]) ^ 1;
+        const check = [0, 1, 2, 3, 4, 5].map(k => (mod >>> (5 * (5 - k))) & 31);
+        return 'npub1' + [...data, ...check].map(v => BECH32_CHARS[v]).join('');
+    }
+    return '';
 }
 
 /** Resolve a system-event actor's display name from cached profiles; npub-prefix fallback. */
@@ -835,22 +925,7 @@ let fSyncing = false;
 function refreshRenderedName(npub) {
     if (!npub) return;
     profileChanged(npub);
-
-    const cProfile = getProfile(npub);
-    const strName = getName(cProfile || npub);
-    const sel = (cls) => `${cls}[data-npub="${npub}"]`;
-    for (const el of document.querySelectorAll(
-        [sel('.dmsg-author'), sel('.dmsg-command-author'), sel('.dmsg-command-bot')].join(', ')
-    )) {
-        el.textContent = strName;
-        twemojify(el);
-    }
-    // System-event lines phrase the name their own way ("X has joined"), so
-    // they take the same treatment through their own formatter.
-    for (const el of document.querySelectorAll(sel('.system-event-name'))) {
-        el.textContent = systemEventName(npub);
-        twemojify(el);
-    }
+    paintRenderedNames(npub);
 
     // The open chat's header names the DM's peer; a group's header is the
     // group's own name and must not be relabelled.
@@ -860,6 +935,65 @@ function refreshRenderedName(npub) {
             setChatHeader(cOpen);
         }
     }
+}
+
+/** Patch the names baked into the DOM for `npub`, or for everyone when null. */
+function paintRenderedNames(npub) {
+    const sel = (cls) => npub ? `${cls}[data-npub="${npub}"]` : `${cls}[data-npub]`;
+    for (const el of document.querySelectorAll(
+        [sel('.dmsg-author'), sel('.dmsg-command-author'), sel('.dmsg-command-bot')].join(', ')
+    )) {
+        el.textContent = getName(el.dataset.npub);
+        twemojify(el);
+    }
+    // System-event lines phrase the name their own way ("X has joined"), so
+    // they take the same treatment through their own formatter.
+    for (const el of document.querySelectorAll(sel('.system-event-name'))) {
+        el.textContent = systemEventName(el.dataset.npub);
+        twemojify(el);
+    }
+}
+
+/**
+ * Streamer Mode turned on or off, or reshuffled its tints. Svelte views re-derive by
+ * themselves (getName and profileVersion read the store); this repaints what was
+ * painted by hand or snapshotted, and closes what would keep showing the old names.
+ */
+function streamerChanged() {
+    paintRenderedNames(null);
+    for (const el of document.querySelectorAll('.mention[data-npub]')) {
+        el.textContent = '@' + getName(el.dataset.npub);
+    }
+    for (const chat of arrChats) {
+        for (const m of chat.messages || []) {
+            if (m.system_event?.member_npub) m.content = systemEventContent(m.system_event.event_type, m.system_event.member_npub);
+        }
+    }
+    for (const buffer of _systemEventBuffer.values()) {
+        for (const m of buffer) {
+            if (m.system_event?.member_npub) m.content = systemEventContent(m.system_event.event_type, m.system_event.member_npub);
+        }
+    }
+    for (const chat of arrChats) VectorSvelte.touchChat(chat.id);
+    communitiesChanged();
+
+    if (strCurrentReplyReference) _dmsgSelectReply(strCurrentReplyReference, { focus: false });
+    commandCtrl?.relabel();
+    mentionCtrl?.refresh();
+    relabelComposerMentions();
+    domChatMessageInput.refresh?.();
+    if (pinsDrawerOpen) pinsRenderDrawer();
+    if (VectorSvelte.paneShown('createGroup')) VectorSvelte.ccProfilesChanged();
+    if (activeInviteModalRerender) activeInviteModalRerender();
+
+    hideMiniProfile();
+    hideReactionHoverTip();
+    hideReactionDetails();
+    hideContextMenu();
+    hideEditHistory();
+    hideGlobalTooltip();
+    if (VectorSvelte.qrOverlay.state().active) closeQrOverlay();
+    if (VectorSvelte.pivxSend.state().open) closePivxSendDialog();
 }
 
 function blockedBySync() {
@@ -1087,6 +1221,7 @@ function getProfile(npub) {
  *  unless `full`, which the profile page's hero needs. */
 function getProfileAvatarSrc(profile, full = false) {
     if (!profile) return null;
+    if (streamHidden(profile)) return VectorSvelte.streamTint(profile.id);
     if (profile.avatar_cached) {
         return convertFileSrc(full ? profile.avatar_cached : avatarThumbPath(profile.avatar_cached));
     }
@@ -1106,7 +1241,7 @@ function avatarThumbPath(path) {
  * @returns {string|null} - The banner src to use, or null if none available
  */
 function getProfileBannerSrc(profile) {
-    if (!profile) return null;
+    if (!profile || streamHidden(profile)) return null;
     if (profile.banner_cached) {
         return convertFileSrc(profile.banner_cached);
     }
@@ -1267,6 +1402,7 @@ function resolveMentionText(text) {
     if (!text) return text;
     // Same shapes renderMentions pills: @-, nostr:-prefixed, or bare npubs.
     return text.replace(/(?<![\w/=?&#%.-])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g, (full, npub) => {
+        if (streamHidden(npub)) return '@' + STREAM_DOTS;
         const profile = getProfile(npub);
         if (profile) {
             return '@' + getName(npub);
@@ -1896,6 +2032,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // rather than correcting itself an IPC hop later.
                 arrPinnedChats = hotReloadState.pinned || [];
                 _pinnedLoaded = true;
+                // Before the first paint: Streamer Mode decides which names may show.
+                await loadSyncedSettings();
 
                 // Setup Rust listeners
                 await setupRustListeners();
@@ -2217,7 +2355,8 @@ async function confirmAndOpenUrl(url) {
         return openUrl(full);
     }
     // Tail-truncate only, so the security-relevant scheme + host stay visible.
-    const shown = full.length > 220 ? `${full.slice(0, 220)}…` : full;
+    const masked = streamMaskNpubs(full);
+    const shown = masked.length > 220 ? `${masked.slice(0, 220)}…` : masked;
     const confirmed = await popupConfirm(
         'Opening Link',
         `This hyperlink redirects to:<br><code class="link-confirm-url">${escapeHtml(shown)}</code>Are you sure you want to continue?`,
@@ -2269,7 +2408,7 @@ document.addEventListener('mouseover', (e) => {
     if (anchorShowsItsDestination(anchor)) return;
     // Tail-truncate only, so the security-relevant scheme + host stay visible;
     // the tooltip wraps up to a few lines.
-    const url = anchor.href;
+    const url = streamMaskNpubs(anchor.href);
     showGlobalTooltip(url.length > 140 ? `${url.slice(0, 140)}…` : url, anchor);
 });
 document.addEventListener('mouseout', (e) => {

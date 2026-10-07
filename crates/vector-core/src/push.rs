@@ -220,22 +220,12 @@ pub async fn worker_contacts() -> serde_json::Value {
         let _g = lock().lock_owned().await;
         load(ISSUED_KEY)
     };
+    let gate = crate::notify::StreamGate::load();
     let state = STATE.lock().await;
     let mut out = serde_json::Map::new();
     for (npub, i) in issued {
-        let name = state
-            .get_profile(&npub)
-            .map(|p| {
-                if !p.nickname().is_empty() {
-                    p.nickname().to_string()
-                } else if !p.display_name.is_empty() {
-                    p.display_name.to_string()
-                } else {
-                    p.name.to_string()
-                }
-            })
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| format!("{}…", &npub[..npub.len().min(12)]));
+        let fallback = format!("{}…", &npub[..npub.len().min(12)]);
+        let name = crate::notify::sender(&state, &gate, &npub, &fallback).name;
         out.insert(i.h, serde_json::json!({ "npub": npub, "name": name, "mk": i.mk }));
     }
     serde_json::Value::Object(out)

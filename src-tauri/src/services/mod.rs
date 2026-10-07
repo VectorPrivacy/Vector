@@ -14,4 +14,4 @@ pub mod notification_service;
 pub(crate) use event_handler::handle_event;
 pub(crate) use event_handler::tauri_commit_prepared_event_with;
 pub(crate) use subscription_handler::start_subscriptions;
-pub(crate) use notification_service::{NotificationData, show_notification_generic, resolve_mention_display_names, strip_content_for_preview};
+pub(crate) use notification_service::{NotificationData, show_notification_generic, strip_content_for_preview};

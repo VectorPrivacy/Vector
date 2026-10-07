@@ -5,7 +5,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: displayName(npub), avatarSrc(npub), ago(secs)
+    let { h } = $props();   // h: displayName(npub), searchName(npub), avatarSrc(npub), ago(secs)
 
     const st = modState();
     const intel = $derived(modIntel());
@@ -18,7 +18,7 @@
         return intel.report.members.filter(x => {
             if (st.filter === 'cut' && keep.has(x.npub)) return false;
             if (st.filter === 'keep' && !keep.has(x.npub)) return false;
-            if (q) { profileVersion(x.npub); if (!(h.displayName(x.npub) + ' ' + x.npub).toLowerCase().includes(q)) return false; }
+            if (q) { profileVersion(x.npub); if (!(h.displayName(x.npub) + ' ' + h.searchName(x.npub) + ' ' + x.npub).toLowerCase().includes(q)) return false; }
             return true;
         });
     });

@@ -8,7 +8,7 @@
     import { miniProfile, settleMiniProfile, bindMiniProfileEl } from '../lib/miniprofile.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView, onAddRole, onRemoveRole
+    let { h } = $props();   // h: getProfile, getName, streamHidden, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView, onAddRole, onRemoveRole
 
     // Relays stay silent for an identity with no metadata; after this long, call it Anon.
     const ANON_FALLBACK_MS = 6000;
@@ -19,21 +19,23 @@
         profileVersion(m.npub);
         const p = h.getProfile(m.npub);
         const npub = m.npub;
-        const displayName = p?.nickname || p?.name || p?.display_name || '';
+        // Streamer Mode: the name as dots and nothing that could identify them.
+        const veiled = h.streamHidden(npub);
+        const displayName = veiled ? h.getName(npub) : p?.nickname || p?.name || p?.display_name || '';
         return {
             npub, p,
             bannerSrc: h.getProfileBannerSrc(p),
-            avatarSrc: h.getProfileAvatarSrc(p),
-            status: (p?.status?.title || '').toString().trim(),
-            emojiTags: p?.status?.emoji_tags || [],
+            avatarSrc: h.getProfileAvatarSrc(p || { id: npub }),
+            status: veiled ? '' : (p?.status?.title || '').toString().trim(),
+            emojiTags: veiled ? [] : p?.status?.emoji_tags || [],
             displayName,
             // A profile with no name, or a fetch that settled empty: Nostr identities are
             // valid without metadata, so call them what they are.
             nameText: displayName || ((p || m.settled) ? 'Anon' : 'Loading…'),
             loading: !displayName && !p && !m.settled,
             bot: !!p?.bot,
-            fingerprint: npub.length > 16 ? `${npub.slice(0, 12)}…${npub.slice(-4)}` : npub,
-            about: (p?.about || '').trim(),
+            fingerprint: veiled ? '' : npub.length > 16 ? `${npub.slice(0, 12)}…${npub.slice(-4)}` : npub,
+            about: veiled ? '' : (p?.about || '').trim(),
             // Their standing in the community it was opened within, once read.
             roles: m.roles && (m.roles.owner || m.roles.roles.length || m.roles.addable) ? m.roles : null,
             roleBusy: m.roleBusy,

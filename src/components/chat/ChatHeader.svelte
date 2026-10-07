@@ -46,7 +46,7 @@
         if (notes) subtext = 'Encrypted Notes to Self';
         else if (typing) { subtext = typing; gradient = true; }
         else if (group) subtext = H.memberSubtext(communityId);
-        else { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
+        else if (!H.streamHidden(profile || id)) { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
         return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, gradient, menu: !!chat && H.menuCount(chat) > 0 };
     });
 

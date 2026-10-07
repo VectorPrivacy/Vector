@@ -96,7 +96,9 @@ async function describe(data) {
     const state = await pushState();
     const contact = state?.contacts?.[data?.h];
     if (!contact || !(await verified(data, contact))) return null;
-    const text = String(data.x || '').slice(0, 1000);
+    let text = String(data.x || '').slice(0, 1000);
+    // Streaming: nobody here can be checked for consent, so every mention is hidden.
+    if (state.streamer) text = text.replace(/(?:@|nostr:)?(?:npub1|nprofile1)[02-9ac-hj-np-z]+/gi, '@•••••');
     const name = contact.name || 'New message';
     const shown = {
         full: { title: name, body: text },

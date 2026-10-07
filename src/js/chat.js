@@ -934,7 +934,10 @@ function showEditHistory(messageId, targetElement) {
     // CURRENT revision's tags, so older revisions (which may use a different
     // `:shortcode:`) are filled from the equipped packs — same source the
     // picker/autocomplete resolve against.
-    VectorSvelte.setEditHistory(messageId, msg.edit_history, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
+    const entries = VectorSvelte.streamerState().on
+        ? msg.edit_history.map(e => ({ ...e, content: streamMaskNpubs(e.content, '@') }))
+        : msg.edit_history;
+    VectorSvelte.setEditHistory(messageId, entries, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
 
     // The popup places itself against the bubble, above or below depending on room.
     const msgBubble = targetElement.closest('.dmsg');
@@ -1573,6 +1576,7 @@ VectorSvelte.setChatHeaderHandlers({
         getChat: (id) => arrChats.find(c => c.id === id),
         getProfile: (npub) => getProfile(npub),
         getName: (x) => getName(x),
+        streamHidden: (x) => streamHidden(x),
         getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
         twemojify: (el) => twemojify(el),
         renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),

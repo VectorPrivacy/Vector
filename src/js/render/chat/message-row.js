@@ -227,7 +227,7 @@ const _dmsgContentHelpers = {
 /**
  * MediaHelpers: Attachments and its leaves (Image, Video, Thumbhash, FileBox, UploadOverlay);
  * `audio` is AudioPlayer's own bag.
- * @typedef {Pick<RowLookups, 'getProfile'|'getProfileAvatarSrc'|'showTooltip'|'hideTooltip'|'formatBytes'|'openChat'|'backendCachedImg'|'onThumbLoad'> & {
+ * @typedef {Pick<RowLookups, 'getProfile'|'getName'|'getProfileAvatarSrc'|'showTooltip'|'hideTooltip'|'formatBytes'|'openChat'|'backendCachedImg'|'onThumbLoad'> & {
  *   isImage: (ext: string) => boolean, isAudio: (ext: string) => boolean, isVideo: (ext: string) => boolean,
  *   isDownloading: (att: object) => boolean,
  *   willAutoDownload: (att: object, ctx: object) => boolean,
@@ -251,7 +251,7 @@ const _dmsgContentHelpers = {
  * }} MediaHelpers
  */
 const _dmsgMediaHelpers = {
-    ..._dmsgPick(_dmsgLookups, ['getProfile', 'getProfileAvatarSrc', 'showTooltip', 'hideTooltip', 'formatBytes', 'openChat', 'backendCachedImg', 'onThumbLoad']),
+    ..._dmsgPick(_dmsgLookups, ['getProfile', 'getName', 'getProfileAvatarSrc', 'showTooltip', 'hideTooltip', 'formatBytes', 'openChat', 'backendCachedImg', 'onThumbLoad']),
     isImage: (ext) => ['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(ext),
     isAudio: (ext) => ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(ext),
     isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
@@ -450,11 +450,7 @@ function _dmsgReplyView(msg, sender) {
     else profile = (chat && !chatIsGroup(chat) ? getProfile(chat.id) : null) || sender;
     const npub = mine ? strPubkey : (msg.replied_to_npub || cMsg?.npub || profile?.id || '');
 
-    let name = profile?.nickname || profile?.name || profile?.display_name;
-    if (!name) {
-        const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || profile?.id || '';
-        name = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
-    }
+    const name = profile || npub ? getName(profile || npub) : 'Unknown';
 
     const content = hasBackendContext ? msg.replied_to_content : cMsg?.content;
     const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
@@ -638,6 +634,8 @@ function _dmsgLinkPreviewData(msg) {
         && /https?:\/\/(?:www\.)?vectorapp\.io\/invite(?:\/|$|#|\?)/i.test(url);
     const meta = msg.preview_metadata;
     if (meta && (isPackShareUrl(meta.og_url) || isInviteShareUrl(meta.og_url))) return null;
+    // Streamer Mode: a card for a hidden person's profile page would show their name and picture.
+    if (meta && ((msg.content || '').match(/https?:\/\/\S+/g) || []).some(u => streamMaskNpubs(u) !== u)) return null;
     // A link the Nostr card covers: a card fetched before those existed must not sit beside it.
     if (meta && !/https:\/\//i.test(withoutNostrEmbedUrls(msg.content || ''))) return null;
 
@@ -722,7 +720,8 @@ function _dmsgCanAddReactionGroup(msg, uniqueCount) {
  * own, so none of that may rebuild the text and the cards.
  */
 function _dmsgContentSig(msg) {
-    const parts = [msg.content, msg.replied_to, !!msg.edited];
+    // Streamer Mode relabels the mention and go-link pills built into the body.
+    const parts = [msg.content, msg.replied_to, !!msg.edited, VectorSvelte.streamerState().seq];
     // An edit's authoritative update can carry new emoji tags under unchanged text.
     if (msg.emoji_tags?.length) parts.push(...msg.emoji_tags.map(t => t.shortcode + '=' + t.url));
     // Link-preview metadata arrives async via message_update.

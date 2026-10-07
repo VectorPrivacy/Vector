@@ -263,6 +263,31 @@ impl ProfileSyncHandler for NoOpProfileSyncHandler {}
 // load_profile — core relay fetch + STATE update
 // ============================================================================
 
+/// The newest kind-0 the relays hold for `pubkey`, or `None` when they hold none.
+async fn fetch_newest_metadata(client: &Client, pubkey: PublicKey) -> Result<Option<Metadata>, String> {
+    // `Client::fetch_metadata` is gone: fetch the newest kind-0 and parse it.
+    client
+        .fetch_events(Filter::new().author(pubkey).kind(Kind::Metadata).limit(1))
+        .timeout(crate::relay_request_timeout(Duration::from_secs(15)))
+        .await
+        .map(|events| {
+            events
+                .into_iter()
+                .max_by_key(|e| e.created_at)
+                .and_then(|e| Metadata::from_json(&e.content).ok())
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Our newest kind-0, `Ok(None)` when the relays hold none, `Err` when none of them answered.
+/// For read-modify-writes, which must not mistake a dead relay set for an empty profile.
+async fn fetch_own_metadata(client: &Client, pubkey: PublicKey) -> Result<Option<Metadata>, String> {
+    let filter = Filter::new().author(pubkey).kind(Kind::Metadata).limit(1);
+    let timeout = crate::relay_request_timeout(Duration::from_secs(15));
+    let events = crate::fetch_answered(client, filter, timeout).await?;
+    Ok(crate::newest_replaceable(events).and_then(|e| Metadata::from_json(&e.content).ok()))
+}
+
 /// Fetch a profile's metadata and status from relays, update STATE, and
 /// notify via EventEmitter + handler callback.
 ///
@@ -339,24 +364,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         Err(_) => (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags),
     };
 
-    // Fetch metadata from relays
-    // `Client::fetch_metadata` is gone: fetch the newest kind-0 and parse it.
-    let fetch_result = client
-        .fetch_events(
-            Filter::new()
-                .author(profile_pubkey)
-                .kind(Kind::Metadata)
-                .limit(1),
-        )
-        .timeout(crate::relay_request_timeout(Duration::from_secs(15)))
-        .await
-        .map(|events| {
-            events
-                .into_iter()
-                .max_by_key(|e| e.created_at)
-                .and_then(|e| Metadata::from_json(&e.content).ok())
-        });
-
+    let fetch_result = fetch_newest_metadata(&client, profile_pubkey).await;
 
     match fetch_result {
         Ok(meta) => {
@@ -475,128 +483,193 @@ async fn update_profile_inner(
         None => return false,
     };
 
-    let my_public_key = match my_public_key() {
-        Some(pk) => pk,
-        None => return false,
+    let npub = match my_public_key().map(|pk| pk.to_bech32()) {
+        Some(Ok(n)) => n,
+        _ => return false,
     };
 
-    // Build metadata from current profile, then drop the lock before network I/O
-    let meta = {
-        let state = STATE.lock().await;
-        let npub = match my_public_key.to_bech32() {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        // Start from the existing profile if we have one, else a blank profile so a first-time
-        // update (e.g. a freshly-created bot that has never published a kind-0) still works.
-        let profile = state.get_profile(&npub).cloned().unwrap_or_default();
-
-        // Merge: use new value if provided, else carry existing
-        let mut meta = Metadata::new().name(if name.is_empty() {
-            &*profile.name
-        } else {
-            name.as_str()
-        });
-
-        // Avatar
-        let avatar_url_str: &str = if avatar.is_empty() {
-            &profile.avatar
-        } else {
-            avatar.as_str()
-        };
-        if !avatar_url_str.is_empty() {
-            if let Ok(url) = Url::parse(avatar_url_str) {
-                meta = meta.picture(url);
+    let local = STATE.lock().await.get_profile(&npub).cloned();
+    let meta = match local {
+        Some(profile) => own_metadata(&profile, &name, &avatar, &banner, &about, is_bot),
+        // An SDK or agent login holds no profile of its own: edit the relay copy, or the publish
+        // would drop every field it carries, stream consent included.
+        None => {
+            let pk = match my_public_key() {
+                Some(pk) => pk,
+                None => return false,
+            };
+            match fetch_own_metadata(&client, pk).await {
+                Ok(Some(remote)) => edit_metadata(remote, &name, &avatar, &banner, &about, is_bot),
+                // Never published (a freshly-created bot): start blank.
+                Ok(None) => own_metadata(&Profile::default(), &name, &avatar, &banner, &about, is_bot),
+                Err(e) => {
+                    crate::log_warn!("[update_profile] couldn't read the current profile: {e}");
+                    return false;
+                }
             }
         }
-
-        // Banner
-        let banner_url_str: &str = if banner.is_empty() {
-            &profile.banner
-        } else {
-            banner.as_str()
-        };
-        if !banner_url_str.is_empty() {
-            if let Ok(url) = Url::parse(banner_url_str) {
-                meta = meta.banner(url);
-            }
-        }
-
-        // Carry forward display_name
-        if !profile.display_name.is_empty() {
-            meta = meta.display_name(&*profile.display_name);
-        }
-
-        // About
-        meta = meta.about(if about.is_empty() {
-            &*profile.about
-        } else {
-            about.as_str()
-        });
-
-        // Carry forward remaining fields
-        if !profile.website().is_empty() {
-            if let Ok(url) = Url::parse(profile.website()) {
-                meta = meta.website(url);
-            }
-        }
-        if !profile.nip05().is_empty() {
-            meta = meta.nip05(profile.nip05());
-        }
-        if !profile.lud06().is_empty() {
-            meta = meta.lud06(profile.lud06());
-        }
-        if !profile.lud16().is_empty() {
-            meta = meta.lud16(profile.lud16());
-        }
-
-        meta
-    }; // STATE lock dropped before network I/O
-
-    // SDK-built bots carry `bot: true` so clients can badge them; human clients never set it.
-    let meta = if is_bot { meta.custom_field("bot", true) } else { meta };
-
-    // Build and sign Kind 0 metadata event
-    let metadata_json = serde_json::to_string(&meta).unwrap();
-    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
-        .tag(Tag::custom("client", vec!["vector"]));
-
-    let Ok(event) = crate::sign_builder(metadata_event).await else {
-        return false;
     };
 
-    // Broadcast — first-ACK so UI updates as soon as the fastest relay responds
-    match crate::inbox_relays::send_event_pool_first_ok(&client, &event).await {
-        Ok(_) => {
-            let npub = match my_public_key.to_bech32() {
-                Ok(n) => n,
-                Err(_) => return false,
-            };
-            let save_data = {
-                let mut state = STATE.lock().await;
-                // Apply the published metadata to our own profile, creating the entry if this
-                // identity had none yet (a freshly-created account is interned here on first set).
-                let mut profile = state.get_profile(&npub).cloned().unwrap_or_default();
-                profile.from_metadata(meta);
-                let (avatar_url, banner_url) = (profile.avatar.to_string(), profile.banner.to_string());
-                state.insert_or_replace_profile(&npub, profile);
-                let slim = match state.interner.lookup(&npub).and_then(|id| state.serialize_profile(id)) {
-                    Some(s) => s,
-                    None => return false,
-                };
-                (slim, avatar_url, banner_url)
-            };
-
-            let (slim, avatar_url, banner_url) = save_data;
-            emit_event("profile_update", &slim);
-            handler.on_profile_fetched(&slim, &avatar_url, &banner_url);
-            true
-        }
+    match publish_own_metadata(&client, &npub, meta, handler).await {
+        Ok(()) => true,
         Err(e) => {
-            crate::log_warn!("[update_profile] relay broadcast failed: {e}");
+            crate::log_warn!("[update_profile] {e}");
             false
         }
     }
+}
+
+/// Our kind-0 rebuilt from `profile`, with each non-empty argument replacing its field.
+///
+/// Carries stream consent forward, so editing a name or avatar never revokes it.
+pub(crate) fn own_metadata(
+    profile: &Profile, name: &str, avatar: &str, banner: &str, about: &str, is_bot: bool,
+) -> Metadata {
+    let pick = |new: &str, old: &str| if new.is_empty() { old.to_string() } else { new.to_string() };
+
+    let mut meta = Metadata::new().name(pick(name, &profile.name));
+
+    let avatar_url = pick(avatar, &profile.avatar);
+    if let Ok(url) = Url::parse(&avatar_url) {
+        meta = meta.picture(url);
+    }
+    let banner_url = pick(banner, &profile.banner);
+    if let Ok(url) = Url::parse(&banner_url) {
+        meta = meta.banner(url);
+    }
+
+    if !profile.display_name.is_empty() {
+        meta = meta.display_name(&*profile.display_name);
+    }
+    meta = meta.about(pick(about, &profile.about));
+
+    if let Ok(url) = Url::parse(profile.website()) {
+        meta = meta.website(url);
+    }
+    if !profile.nip05().is_empty() {
+        meta = meta.nip05(profile.nip05());
+    }
+    if !profile.lud06().is_empty() {
+        meta = meta.lud06(profile.lud06());
+    }
+    if !profile.lud16().is_empty() {
+        meta = meta.lud16(profile.lud16());
+    }
+
+    // SDK-built bots carry `bot: true` so clients can badge them; human clients never set it.
+    if is_bot {
+        meta = meta.custom_field("bot", true);
+    }
+    crate::profile::with_stream_consent(meta, profile.flags.is_stream_consent())
+}
+
+/// `meta` with each non-empty argument replacing its field; every other key stands.
+fn edit_metadata(mut meta: Metadata, name: &str, avatar: &str, banner: &str, about: &str, is_bot: bool) -> Metadata {
+    if !name.is_empty() {
+        meta.name = Some(name.to_string());
+    }
+    if let Ok(url) = Url::parse(avatar) {
+        meta.picture = Some(url.to_string());
+    }
+    if let Ok(url) = Url::parse(banner) {
+        meta.banner = Some(url.to_string());
+    }
+    if !about.is_empty() {
+        meta.about = Some(about.to_string());
+    }
+    if is_bot {
+        meta.custom.insert("bot".to_string(), serde_json::Value::Bool(true));
+    }
+    meta
+}
+
+/// Sign and broadcast our kind-0, then fold it into STATE, the UI and the DB.
+async fn publish_own_metadata(
+    client: &Client, npub: &str, meta: Metadata, handler: &dyn ProfileSyncHandler,
+) -> Result<(), String> {
+    let metadata_json = serde_json::to_string(&meta).map_err(|e| e.to_string())?;
+    let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
+        .tag(Tag::custom("client", vec!["vector"]));
+    let event = crate::sign_builder(metadata_event).await?;
+
+    // First-ACK so the UI updates as soon as the fastest relay responds.
+    crate::inbox_relays::send_event_pool_first_ok(client, &event)
+        .await
+        .map_err(|e| format!("relay broadcast failed: {e}"))?;
+
+    apply_own_metadata(npub, meta, handler).await
+}
+
+async fn apply_own_metadata(npub: &str, meta: Metadata, handler: &dyn ProfileSyncHandler) -> Result<(), String> {
+    let (slim, avatar_url, banner_url) = {
+        let mut state = STATE.lock().await;
+        // Creates the entry if this identity had none yet (a fresh account is interned here).
+        let mut profile = state.get_profile(npub).cloned().unwrap_or_default();
+        profile.from_metadata(meta);
+        profile.flags.set_mine(true);
+        let urls = (profile.avatar.to_string(), profile.banner.to_string());
+        state.insert_or_replace_profile(npub, profile);
+        let slim = state
+            .interner
+            .lookup(npub)
+            .and_then(|id| state.serialize_profile(id))
+            .ok_or("own profile missing after insert")?;
+        (slim, urls.0, urls.1)
+    };
+    emit_event("profile_update", &slim);
+    handler.on_profile_fetched(&slim, &avatar_url, &banner_url);
+    Ok(())
+}
+
+/// What a consent change does, decided from the relay copy (`None` = the relays hold none).
+#[derive(Debug, PartialEq)]
+pub(crate) enum ConsentPlan {
+    /// The relays already say it: adopt their copy, publish nothing.
+    Unchanged(Metadata),
+    Publish(Metadata),
+}
+
+/// A read-modify-write of the relay copy, so every field another client wrote survives. With no
+/// relay copy, the local profile is carried, and refused when there is none to carry: a fresh
+/// device must never publish a blank profile over the real one.
+pub(crate) fn consent_plan(fetched: Option<Metadata>, local: &Profile, on: bool) -> Result<ConsentPlan, String> {
+    match fetched {
+        Some(remote) if crate::profile::metadata_stream_consent(&remote) == on => Ok(ConsentPlan::Unchanged(remote)),
+        Some(remote) => Ok(ConsentPlan::Publish(crate::profile::with_stream_consent(remote, on))),
+        None => {
+            if local.name.is_empty() && local.display_name.is_empty()
+                && local.about.is_empty() && local.avatar.is_empty()
+            {
+                return Err("Couldn't find your profile on your relays".to_string());
+            }
+            let meta = own_metadata(local, "", "", "", "", local.flags.is_bot());
+            Ok(ConsentPlan::Publish(crate::profile::with_stream_consent(meta, on)))
+        }
+    }
+}
+
+/// Publish our kind-0 with stream consent set to `on`; returns the value now in effect.
+///
+/// Refused when no relay answers the read, so a fresh device never clobbers the real profile.
+pub async fn set_stream_consent(on: bool, handler: &dyn ProfileSyncHandler) -> Result<bool, String> {
+    let client = nostr_client().ok_or("Not connected")?;
+    let my_public_key = my_public_key().ok_or("No active account")?;
+    let npub = my_public_key.to_bech32().map_err(|e| e.to_string())?;
+
+    let fetched = fetch_own_metadata(&client, my_public_key)
+        .await
+        .map_err(|_| "Couldn't read your profile from your relays".to_string())?;
+    let local = STATE.lock().await.get_profile(&npub).cloned().unwrap_or_default();
+    let plan = consent_plan(fetched, &local, on)?;
+
+    if !crate::db::session_is_live() {
+        return Err("account changed during the operation".to_string());
+    }
+    match plan {
+        ConsentPlan::Unchanged(remote) => apply_own_metadata(&npub, remote, handler).await?,
+        ConsentPlan::Publish(meta) => publish_own_metadata(&client, &npub, meta, handler).await?,
+    }
+    Ok(on)
 }
 
 // ============================================================================
@@ -1135,6 +1208,94 @@ mod tests {
         queue.mark_done("npub1eve");
         assert!(!queue.processing.contains("npub1eve"));
         assert!(queue.last_fetched.contains_key("npub1eve"));
+    }
+
+    fn consenting_profile() -> Profile {
+        let mut p = Profile::new();
+        p.from_metadata(
+            Metadata::from_json(r#"{"name":"old","about":"bio","picture":"https://x/a.png","lud16":"a@b.c","stream_consent":true}"#).unwrap(),
+        );
+        p
+    }
+
+    #[test]
+    fn an_own_profile_edit_carries_stream_consent_forward() {
+        let p = consenting_profile();
+        assert!(p.flags.is_stream_consent());
+
+        let meta = own_metadata(&p, "new", "", "", "", false);
+        assert!(crate::profile::metadata_stream_consent(&meta), "a rename keeps consent");
+        assert_eq!(meta.name.as_deref(), Some("new"));
+        assert_eq!(meta.about.as_deref(), Some("bio"));
+        assert_eq!(meta.picture.as_deref(), Some("https://x/a.png"));
+        assert_eq!(meta.lud16.as_deref(), Some("a@b.c"));
+        assert!(!meta.custom.contains_key("bot"));
+
+        let mut republished = p.clone();
+        assert!(!republished.from_metadata(own_metadata(&p, "", "", "", "", false)), "a no-op edit changes nothing");
+        assert!(republished.flags.is_stream_consent());
+    }
+
+    #[test]
+    fn an_own_profile_without_consent_publishes_no_key() {
+        let mut p = consenting_profile();
+        p.flags.set_stream_consent(false);
+        let meta = own_metadata(&p, "", "", "", "about", true);
+        assert!(!meta.custom.contains_key(crate::profile::STREAM_CONSENT_KEY));
+        assert_eq!(meta.custom.get("bot"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn a_fresh_device_with_no_relay_copy_never_publishes_a_blank_profile() {
+        assert!(consent_plan(None, &Profile::default(), true).is_err());
+        // With a profile of its own to carry, it publishes that.
+        let mut p = consenting_profile();
+        p.flags.set_stream_consent(false);
+        let Ok(ConsentPlan::Publish(meta)) = consent_plan(None, &p, true) else { panic!("publishes the local copy") };
+        assert!(crate::profile::metadata_stream_consent(&meta));
+        assert_eq!(meta.name.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_consent_change_keeps_every_key_the_relay_copy_holds() {
+        let remote = Metadata::from_json(r#"{"name":"r","pronouns":"they","bot":true}"#).unwrap();
+        let Ok(ConsentPlan::Publish(meta)) = consent_plan(Some(remote), &Profile::default(), true) else {
+            panic!("a change is published")
+        };
+        assert!(crate::profile::metadata_stream_consent(&meta));
+        assert_eq!(meta.custom.get("pronouns"), Some(&serde_json::json!("they")));
+        assert_eq!(meta.custom.get("bot"), Some(&serde_json::json!(true)));
+        assert_eq!(meta.name.as_deref(), Some("r"), "the relay copy wins over the local one");
+
+        let withdrawn = consent_plan(Some(meta), &consenting_profile(), false).unwrap();
+        let ConsentPlan::Publish(off) = withdrawn else { panic!("withdrawing is published") };
+        assert!(!off.custom.contains_key(crate::profile::STREAM_CONSENT_KEY), "off is the absent key");
+        assert_eq!(off.custom.get("pronouns"), Some(&serde_json::json!("they")));
+    }
+
+    #[test]
+    fn a_relay_copy_that_already_says_it_publishes_nothing() {
+        let remote = Metadata::from_json(r#"{"name":"r","stream_consent":true}"#).unwrap();
+        assert!(matches!(consent_plan(Some(remote.clone()), &Profile::default(), true), Ok(ConsentPlan::Unchanged(_))));
+        let bare = Metadata::from_json(r#"{"name":"r"}"#).unwrap();
+        assert!(matches!(consent_plan(Some(bare), &consenting_profile(), false), Ok(ConsentPlan::Unchanged(_))));
+    }
+
+    #[test]
+    fn an_sdk_edit_of_the_relay_copy_keeps_its_other_fields() {
+        let remote = Metadata::from_json(
+            r#"{"name":"old","display_name":"Old","nip05":"a@b.c","lud16":"z@b.c","stream_consent":true,"pronouns":"they"}"#,
+        )
+        .unwrap();
+        let meta = edit_metadata(remote, "new", "https://x/a.png", "", "", true);
+        assert_eq!(meta.name.as_deref(), Some("new"));
+        assert_eq!(meta.picture.as_deref(), Some("https://x/a.png"));
+        assert_eq!(meta.display_name.as_deref(), Some("Old"));
+        assert_eq!(meta.nip05.as_deref(), Some("a@b.c"));
+        assert_eq!(meta.lud16.as_deref(), Some("z@b.c"));
+        assert!(crate::profile::metadata_stream_consent(&meta), "consent is not revoked by an edit");
+        assert_eq!(meta.custom.get("pronouns"), Some(&serde_json::json!("they")));
+        assert_eq!(meta.custom.get("bot"), Some(&serde_json::json!(true)));
     }
 
     #[test]

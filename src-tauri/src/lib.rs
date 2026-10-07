@@ -647,6 +647,7 @@ pub fn run() {
             db::settings::remove_setting,
             profile::load_profile,
             profile::update_profile,
+            profile::set_stream_consent,
             profile::update_status,
             profile::upload_avatar,
             chat::mark_as_read,
@@ -1040,6 +1041,9 @@ pub fn run() {
             commands::prefs::set_banner_hidden,
             commands::prefs::get_synced_settings,
             commands::prefs::set_advanced_mode,
+            commands::prefs::set_streamer_mode,
+            commands::prefs::set_streamer_notif,
+            commands::prefs::set_streamer_wallpapers,
             commands::community::sync_communities_boot,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,

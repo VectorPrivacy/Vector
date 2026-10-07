@@ -3,7 +3,8 @@
     // (a logo, a swatch) and the list matches the rest of the UI. Arrow keys move the
     // highlight while it is open, Enter or Space picks, Escape or a click outside closes.
     // options: [{ value, label, disabled? }]; lead(option) draws what sits before a label.
-    let { options, value, onchange, lead = null, id = undefined, class: cls = '', disabled = false } = $props();
+    // label: the accessible name, when no <label> points at the button.
+    let { options, value, onchange, lead = null, id = undefined, label = undefined, class: cls = '', disabled = false } = $props();
 
     let open = $state(false);
     let up = $state(false);
@@ -52,7 +53,7 @@
 <svelte:window onmousedown={(e) => { if (open && root && !root.contains(e.target)) open = false; }} />
 
 <div class="vselect {cls}" class:open class:up class:disabled bind:this={root}>
-    <button type="button" class="vselect-btn" {id} {disabled} aria-haspopup="listbox" aria-expanded={open}
+    <button type="button" class="vselect-btn" {id} {disabled} aria-label={label && `${label}, ${current?.label ?? ''}`} aria-haspopup="listbox" aria-expanded={open}
             onclick={toggle} onkeydown={onkey}>
         {#if lead}<span class="vselect-lead">{@render lead(current)}</span>{/if}
         <span class="vselect-label cutoff">{current?.label ?? ''}</span>

@@ -30,7 +30,7 @@
         return (msg?.reactions || []).filter(r => r.emoji === details.emoji).map(r => {
             profileVersion(r.author_id);
             const p = h.getProfile(r.author_id);
-            return { id: r.author_id, src: h.getProfileAvatarSrc(p), name: p?.name || p?.display_name || r.author_id.slice(0, 12) + '...' };
+            return { id: r.author_id, src: h.getProfileAvatarSrc(p), name: h.getName(p || r.author_id) };
         });
     });
     // A custom emoji is named by its shortcode, which the chip and the tip no longer show.

@@ -16,24 +16,47 @@ use nostr_sdk::prelude::Metadata;
 use crate::compact::NO_NPUB;
 
 // ============================================================================
-// ProfileFlags — 3 bools packed into 1 byte
+// ProfileFlags — 4 bools packed into 1 byte
 // ============================================================================
+
+/// Kind-0 content key by which a user consents to being shown on someone's stream.
+pub const STREAM_CONSENT_KEY: &str = "stream_consent";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfileFlags(u8);
 
 impl ProfileFlags {
-    const MINE:    u8 = 0b001;
-    const BLOCKED: u8 = 0b010;
-    const BOT:     u8 = 0b100;
+    const MINE:           u8 = 0b0001;
+    const BLOCKED:        u8 = 0b0010;
+    const BOT:            u8 = 0b0100;
+    const STREAM_CONSENT: u8 = 0b1000;
 
     #[inline] pub fn is_mine(self) -> bool    { self.0 & Self::MINE != 0 }
     #[inline] pub fn is_blocked(self) -> bool  { self.0 & Self::BLOCKED != 0 }
     #[inline] pub fn is_bot(self) -> bool      { self.0 & Self::BOT != 0 }
+    #[inline] pub fn is_stream_consent(self) -> bool { self.0 & Self::STREAM_CONSENT != 0 }
 
     #[inline] pub fn set_mine(&mut self, v: bool)    { if v { self.0 |= Self::MINE } else { self.0 &= !Self::MINE } }
     #[inline] pub fn set_blocked(&mut self, v: bool)  { if v { self.0 |= Self::BLOCKED } else { self.0 &= !Self::BLOCKED } }
     #[inline] pub fn set_bot(&mut self, v: bool)      { if v { self.0 |= Self::BOT } else { self.0 &= !Self::BOT } }
+    #[inline] pub fn set_stream_consent(&mut self, v: bool) { if v { self.0 |= Self::STREAM_CONSENT } else { self.0 &= !Self::STREAM_CONSENT } }
+}
+
+/// Whether a kind-0's content opts in to streams: `true` or the string `"true"`.
+pub fn metadata_stream_consent(meta: &Metadata) -> bool {
+    meta.custom.get(STREAM_CONSENT_KEY).is_some_and(|v| match v.as_bool() {
+        Some(b) => b,
+        None => v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true")),
+    })
+}
+
+/// `meta` with the consent key set when `on`, and absent otherwise.
+pub fn with_stream_consent(mut meta: Metadata, on: bool) -> Metadata {
+    meta.custom.remove(STREAM_CONSENT_KEY);
+    if on {
+        meta.custom.insert(STREAM_CONSENT_KEY.to_string(), serde_json::Value::Bool(true));
+    }
+    meta
 }
 
 // ============================================================================
@@ -123,6 +146,8 @@ impl Profile {
     /// Merge Nostr Metadata into this Profile. Returns `true` if any fields changed.
     pub fn from_metadata(&mut self, meta: Metadata) -> bool {
         let mut changed = false;
+        // Absence revokes: every caller passes a whole kind-0, so a missing key is an opt-out.
+        let consent = metadata_stream_consent(&meta);
 
         if let Some(name) = meta.name {
             if *self.name != *name { self.name = name.into_boxed_str(); changed = true; }
@@ -169,6 +194,10 @@ impl Profile {
                 changed = true;
             }
         }
+        if self.flags.is_stream_consent() != consent {
+            self.flags.set_stream_consent(consent);
+            changed = true;
+        }
 
         changed
     }
@@ -202,6 +231,8 @@ pub struct SlimProfile {
     pub is_blocked: bool,
     pub avatar_cached: String,
     pub banner_cached: String,
+    #[serde(default)]
+    pub stream_consent: bool,
 }
 
 impl SlimProfile {
@@ -231,6 +262,7 @@ impl SlimProfile {
             is_blocked: profile.flags.is_blocked(),
             avatar_cached: profile.avatar_cached.to_string(),
             banner_cached: profile.banner_cached.to_string(),
+            stream_consent: profile.flags.is_stream_consent(),
         }
     }
 
@@ -266,6 +298,7 @@ impl SlimProfile {
                 f.set_mine(self.mine);
                 f.set_bot(self.bot);
                 f.set_blocked(self.is_blocked);
+                f.set_stream_consent(self.stream_consent);
                 f
             },
             avatar_cached: self.avatar_cached.clone().into_boxed_str(),
@@ -324,5 +357,90 @@ mod size_tests {
 impl Default for Status {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod stream_consent_tests {
+    use super::*;
+
+    fn kind0(json: &str) -> Metadata {
+        Metadata::from_json(json).unwrap()
+    }
+
+    #[test]
+    fn a_kind0_opts_in_with_a_bool_or_a_true_string() {
+        for json in [r#"{"name":"a","stream_consent":true}"#, r#"{"name":"a","stream_consent":"true"}"#, r#"{"stream_consent":"TRUE"}"#] {
+            let mut p = Profile::new();
+            assert!(p.from_metadata(kind0(json)), "{json} changes the profile");
+            assert!(p.flags.is_stream_consent(), "{json} opts in");
+        }
+        for json in [r#"{"name":"a","stream_consent":false}"#, r#"{"stream_consent":"yes"}"#, r#"{"stream_consent":1}"#, r#"{"name":"a"}"#] {
+            let mut p = Profile::new();
+            p.from_metadata(kind0(json));
+            assert!(!p.flags.is_stream_consent(), "{json} does not opt in");
+        }
+    }
+
+    #[test]
+    fn a_newer_kind0_without_the_key_revokes_consent() {
+        let mut p = Profile::new();
+        p.flags.set_bot(true);
+        p.from_metadata(kind0(r#"{"name":"a","stream_consent":true}"#));
+        assert!(p.flags.is_stream_consent());
+
+        assert!(p.from_metadata(kind0(r#"{"name":"a"}"#)), "dropping the key is a change");
+        assert!(!p.flags.is_stream_consent(), "absence means no consent");
+        assert!(p.flags.is_bot(), "the other flags are untouched");
+
+        assert!(!p.from_metadata(kind0(r#"{"name":"a"}"#)), "an unchanged kind-0 is no change");
+    }
+
+    #[test]
+    fn the_consent_bit_is_independent_of_the_others() {
+        let mut f = ProfileFlags::default();
+        f.set_mine(true);
+        f.set_blocked(true);
+        f.set_bot(true);
+        assert!(!f.is_stream_consent());
+        f.set_stream_consent(true);
+        assert!(f.is_mine() && f.is_blocked() && f.is_bot() && f.is_stream_consent());
+        f.set_stream_consent(false);
+        assert!(f.is_mine() && f.is_blocked() && f.is_bot() && !f.is_stream_consent());
+    }
+
+    #[test]
+    fn with_stream_consent_sets_or_omits_the_key_and_keeps_the_rest() {
+        let meta = kind0(r#"{"name":"a","pronouns":"they","stream_consent":"true"}"#);
+        let on = with_stream_consent(meta.clone(), true);
+        assert_eq!(on.custom.get(STREAM_CONSENT_KEY), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(on.custom.get("pronouns").and_then(|v| v.as_str()), Some("they"));
+
+        let off = with_stream_consent(meta, false);
+        let json = off.as_json();
+        assert!(!json.contains(STREAM_CONSENT_KEY), "off publishes no key at all: {json}");
+        assert!(json.contains("pronouns") && off.name.as_deref() == Some("a"));
+    }
+
+    #[test]
+    fn slim_profile_round_trips_consent() {
+        let mut interner = crate::compact::NpubInterner::new();
+        let mut p = Profile::new();
+        p.id = interner.intern("npub1consent");
+        p.flags.set_stream_consent(true);
+
+        let slim = SlimProfile::from_profile(&p, &interner);
+        assert!(slim.stream_consent);
+        assert!(slim.to_profile().flags.is_stream_consent());
+
+        let wire = serde_json::to_value(&slim).unwrap();
+        assert_eq!(wire["stream_consent"], serde_json::Value::Bool(true));
+        let back: SlimProfile = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(back, slim);
+
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("stream_consent");
+        let old: SlimProfile = serde_json::from_value(legacy).unwrap();
+        assert!(!old.stream_consent, "a payload without the field reads as no consent");
     }
 }

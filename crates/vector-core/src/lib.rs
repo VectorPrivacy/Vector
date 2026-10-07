@@ -336,6 +336,59 @@ pub async fn sign_and_send(
         .map_err(|e| e.to_string())
 }
 
+/// Read `filter` from the user's read relays, or `Err` unless at least one relay reached EOSE.
+///
+/// The SDK's fetch reports a timeout, a disconnect and a refusal as an empty success, so it
+/// cannot tell "you hold none" from "nobody answered". A read-modify-write needs the difference.
+pub async fn fetch_answered(
+    client: &nostr_sdk::prelude::Client,
+    filter: nostr_sdk::prelude::Filter,
+    timeout: std::time::Duration,
+) -> std::result::Result<Vec<nostr_sdk::prelude::Event>, String> {
+    use community::transport::{fetch_relay_eose_filters, EoseFail};
+    use nostr_sdk::prelude::RelayStatus;
+    let relays = client.relays().with_capabilities(nostr_sdk::prelude::RelayCapabilities::READ).await;
+    // Reconnects are ours, so a terminated relay would only burn the whole timeout.
+    let live: Vec<_> = relays
+        .iter()
+        .filter(|(_, r)| !matches!(r.status(), RelayStatus::Terminated | RelayStatus::Shutdown | RelayStatus::Banned))
+        .map(|(url, _)| url)
+        .collect();
+    if live.is_empty() {
+        return Err("no relays to read from".to_string());
+    }
+    let reads = live.into_iter().map(|url| {
+        let url = url.to_string();
+        let filter = filter.clone();
+        async move {
+            match fetch_relay_eose_filters(client, &url, vec![filter.clone()], timeout).await {
+                // A CLOSED is usually auth-required; the authenticator answers it, so ask once more.
+                Err(EoseFail::Closed) => {
+                    crate::rt::time::sleep(std::time::Duration::from_millis(800)).await;
+                    fetch_relay_eose_filters(client, &url, vec![filter], timeout).await
+                }
+                other => other,
+            }
+        }
+    });
+    let mut answered = false;
+    let mut seen = std::collections::HashSet::new();
+    let mut events = Vec::new();
+    for read in futures_util::future::join_all(reads).await.into_iter().flatten() {
+        answered = true;
+        events.extend(read.into_iter().filter(|e| seen.insert(e.id)));
+    }
+    if !answered {
+        return Err("none of your relays answered".to_string());
+    }
+    Ok(events)
+}
+
+/// The newest of a replaceable event's copies: highest `created_at`, then lowest id, as relays keep.
+pub fn newest_replaceable(events: Vec<nostr_sdk::prelude::Event>) -> Option<nostr_sdk::prelude::Event> {
+    events.into_iter().min_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)))
+}
+
 /// Seal, wrap and publish a rumor to `receiver`.
 ///
 /// Stands in for 0.44's `Client::gift_wrap` / `gift_wrap_to`, which went away
@@ -1231,6 +1284,14 @@ impl VectorCore {
             name.to_string(), avatar.to_string(), banner.to_string(), about.to_string(),
             &NoOpProfileSyncHandler,
         ).await
+    }
+
+    /// Publish whether the current user consents to being shown on other people's streams.
+    /// Returns the value now in effect.
+    pub async fn set_stream_consent(&self, on: bool) -> Result<bool> {
+        db::scoped_result(profile::sync::set_stream_consent(on, &NoOpProfileSyncHandler))
+            .await
+            .map_err(VectorError::Other)
     }
 
     /// Update the current user's status and broadcast to relays.

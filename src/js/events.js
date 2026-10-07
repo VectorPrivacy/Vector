@@ -54,7 +54,7 @@ async function setupRustListeners() {
     // The rail's arrangement changed: an edit here, or one from another device.
     _on('rail_layout_updated', (evt) => VectorSvelte.setRailLayout(evt.payload));
     _on('hidden_banners_updated', (evt) => VectorSvelte.setHiddenBanners(evt.payload?.ids));
-    _on('synced_settings_updated', (evt) => VectorSvelte.setAdvancedMode(!!evt.payload?.advanced));
+    _on('synced_settings_updated', (evt) => applySyncedSettings(evt.payload));
 
     _on('pinned_chats_updated', (evt) => {
         arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
@@ -549,7 +549,7 @@ async function setupRustListeners() {
         // and member-list retro-resolve).
         if (renamed) {
             const id = evt.payload.id;
-            const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
+            const newName = getName(evt.payload);
             // Rows and reply quotes derive from the profile signal; mention chips are
             // built by the text pipeline and patched here.
             document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(el => {

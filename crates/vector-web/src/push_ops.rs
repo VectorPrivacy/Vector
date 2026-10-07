@@ -68,13 +68,13 @@ async fn recent_contacts() -> Vec<String> {
 }
 
 /// What the service worker reads from Cache Storage: who each handle is, and how much of a
-/// notification the user lets show.
+/// notification the user lets show, Streamer Mode included.
 async fn worker_state() -> Value {
-    let privacy = db::settings::get_sql_setting("notif_content_privacy".into()).ok().flatten().unwrap_or_else(|| "full".into());
     json!({
         "v": 1,
         "enabled": push::device().is_some(),
-        "privacy": privacy,
+        "privacy": vector_core::notify::ContentPrivacy::load().as_str(),
+        "streamer": vector_core::synced_prefs::load_settings().streamer.on,
         "contacts": push::worker_contacts().await,
     })
 }

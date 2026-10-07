@@ -549,6 +549,7 @@ async function uninstallFromDetails(app) {
 
 /** The publisher as the profile list knows them, or null for a bare npub. */
 function publisherProfile(npub) {
+    if (streamHidden(npub)) return { name: STREAM_DOTS, avatar: getProfileAvatarSrc(getProfile(npub) || { id: npub }), veiled: true };
     try {
         const profile = getProfile(npub);
         if (!profile) return null;

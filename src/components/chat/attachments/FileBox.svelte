@@ -75,7 +75,7 @@
         return npubs.map((npub) => {
             profileVersion(npub);
             const p = h.getProfile(npub);
-            return { npub, src: h.getProfileAvatarSrc(p) || 'icons/user-placeholder.svg', name: p?.nickname || p?.name || p?.display_name || '' };
+            return { npub, src: h.getProfileAvatarSrc(p) || 'icons/user-placeholder.svg', name: p?.nickname || p?.name || p?.display_name ? h.getName(p) : '' };
         });
     });
 

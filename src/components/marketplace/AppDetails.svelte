@@ -124,7 +124,7 @@
             </div>
             <div class="app-details-publisher-info">
                 <p class="app-details-publisher-name">{publisher?.name || app.publisher.substring(0, 12) + '...'}</p>
-                <span class="app-details-publisher-npub">{npubShort}</span>
+                {#if !publisher?.veiled}<span class="app-details-publisher-npub">{npubShort}</span>{/if}
             </div>
             <div class="app-details-publisher-arrow-container">
                 <span class="icon icon-chevron-double-left app-details-publisher-arrow"></span>

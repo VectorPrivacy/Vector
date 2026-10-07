@@ -884,7 +884,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 h: {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
                     attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
-                    twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
+                    getName, streamHidden, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,
                     memberRolesView, memberRolesOffered, memberRoleItems, copyIdItems,
@@ -1190,6 +1190,8 @@ async function openCommunityInvitePanel(chat) {
         dmNpubs: await fetchDmContacts(),
         chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
         avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
+        getName: (x) => getName(x),
+        streamHidden: (x) => streamHidden(x),
         twemojify: (el) => twemojify(el),
         showTooltip: (text, el) => showGlobalTooltip(text, el),
         hideTooltip: () => hideGlobalTooltip(),

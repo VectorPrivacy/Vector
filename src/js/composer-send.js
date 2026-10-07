@@ -387,22 +387,29 @@ function getMentionCandidates(includeSelf = false) {
             .filter(npub => npub && (includeSelf || npub !== strPubkey) && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
+                // Streamer Mode labels each hidden person uniquely, since the label is what
+                // a draft carries until send maps it back to the npub.
+                const hidden = streamHidden(npub);
                 return {
                     npub,
                     // Marked, because a moderator picking a subject from a list
                     // of names should not have to recognise their own.
-                    name: npub === strPubkey ? getName(npub) + ' (you)' : getName(npub),
-                    avatarSrc: p ? getProfileAvatarSrc(p) : null,
+                    name: hidden ? STREAM_DOTS + ' #' + VectorSvelte.streamCode(npub)
+                        : npub === strPubkey ? getName(npub) + ' (you)' : getName(npub),
+                    // The real name, for matching only: what is typed is already on screen.
+                    search: hidden ? searchName(p) : '',
+                    hidden,
+                    avatarSrc: getProfileAvatarSrc(p || (hidden ? { id: npub } : null)),
                     lastActive: lastActive[npub] || 0
                 };
             })
             .sort((a, b) => b.lastActive - a.lastActive);
-        // Disambiguate duplicate display names with a short npub suffix
+        // Disambiguate duplicate display names: a hidden person by a longer code, never the npub
         const nameCount = {};
         for (const c of candidates) nameCount[c.name] = (nameCount[c.name] || 0) + 1;
         for (const c of candidates) {
             if (nameCount[c.name] > 1) {
-                c.name = c.name + ' (~' + c.npub.slice(5, 9) + ')';
+                c.name = c.hidden ? STREAM_DOTS + ' #' + VectorSvelte.streamCode(c.npub, 8) : c.name + ' (~' + c.npub.slice(5, 9) + ')';
             }
         }
         // @everyone: lowest-priority option (bottom of the list), placeholder avatar — the original
@@ -422,6 +429,41 @@ function getMentionCandidates(includeSelf = false) {
 let mentionCtrl = null;
 let emojiShortcodeCtrl = null;
 let recorder = null;
+
+/** The label a picked @mention carries: a hidden person's code, or the name on screen. */
+function mentionLabel(npub, codeLen) {
+    if (streamHidden(npub)) return STREAM_DOTS + ' #' + VectorSvelte.streamCode(npub, codeLen);
+    const name = getName(npub);
+    return codeLen > 3 ? name + ' (~' + npub.slice(5, 9) + ')' : name;
+}
+
+/**
+ * Streamer Mode moved: a tracked @mention in the composer and in every stashed draft takes
+ * the label its person goes by now, so a name picked before going live stops showing.
+ */
+function relabelComposerMentions() {
+    if (!mentionCtrl) return;
+    const labels = new Map(mentionCtrl.getMentions().map(m => [m.npub, mentionLabel(m.npub, 3)]));
+    // Two people on one label would send as one.
+    const count = {};
+    for (const l of labels.values()) count[l] = (count[l] || 0) + 1;
+    for (const [npub, l] of labels) if (count[l] > 1) labels.set(npub, mentionLabel(npub, 8));
+    const moved = mentionCtrl.relabel(npub => labels.get(npub));
+    if (!moved.length) return;
+    // One pass, longest first, so a new label is never renamed again.
+    const pairs = moved.sort((a, b) => b[0].length - a[0].length);
+    const re = new RegExp('(?<=^|\\s)@(?:' + pairs.map(([from]) => '(' + cmpNamePattern(from) + ')').join('|') + ')(?=\\s|[.,!?;:]|$)', 'g');
+    const rename = (text) => text.replace(re, (...m) => '@' + pairs[m.slice(1, pairs.length + 1).findIndex(g => g !== undefined)][1]);
+    const live = domChatMessageInput.value;
+    if (live && rename(live) !== live) {
+        domChatMessageInput.value = rename(live);
+        autoResizeChatInput();
+    }
+    for (const [id, draft] of chatDrafts) {
+        const text = rename(draft.text || '');
+        if (text !== draft.text) chatDrafts.set(id, { ...draft, text });
+    }
+}
 
 /** Build the selectors over the editor and hand the composer its mention source. */
 function initComposerControllers() {

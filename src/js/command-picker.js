@@ -18,6 +18,7 @@
  *     botProfile(npub)  → {name, avatarSrc}
  *   }
  *   ctrl.isOpen()                        → list/loading panel consuming keys?
+ *   ctrl.relabel()                       → repaint names (a profile or Streamer Mode changed)
  *   ctrl.routeForSend(text)              → null | {error} | {bot, name}
  *   ctrl.onCommandsUpdated(chatId, snap) → live swap-in from the backend event
  */
@@ -229,18 +230,23 @@ function initCommandSelector(textarea, io) {
         return { recent, matches };
     }
 
+    /** A bot's name and face as the app resolves them. */
+    function botView(npub) {
+        const profile = io.botProfile(npub) || {};
+        return { name: profile.name || getName(npub), avatarSrc: profile.avatarSrc || null };
+    }
+
     function commandRow(cmd, flatIndex, showBot) {
         // Recents mix bots, so each row wears its owner's face — two bots'
         // /roll entries are distinct commands that would otherwise look
         // like duplicates.
-        const profile = showBot ? (io.botProfile(cmd.bot) || {}) : null;
         return {
             key: cmd.bot + ':' + cmd.name,
             index: flatIndex,
             name: cmd.name,
             args: cmd.args.map(a => ({ label: argSignature(a), optional: !a.required })),
             description: cmd.description || '',
-            bot: profile ? { name: profile.name || cmd.bot.slice(0, 12) + '…', avatarSrc: profile.avatarSrc || null } : null,
+            bot: showBot ? botView(cmd.bot) : null,
         };
     }
 
@@ -302,8 +308,8 @@ function initCommandSelector(textarea, io) {
             byBot.get(cmd.bot).push(cmd);
         }
         for (const [bot, cmds] of byBot) {
-            const profile = io.botProfile(bot) || {};
-            section(bot, profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds, false, refreshing);
+            const view = botView(bot);
+            section(bot, view.name, view.avatarSrc, cmds, false, refreshing);
         }
         flatRows = flat;
         if (activeIndex >= flat.length) activeIndex = 0;
@@ -395,10 +401,9 @@ function initCommandSelector(textarea, io) {
         textarea.value = '';
         const parts = cmd.args.map(a => ({ arg: a, el: null, autoSize: () => {} }));
         composing = { cmd, chatId: io.chatId(), parts };
-        const profile = io.botProfile(cmd.bot) || {};
         VectorSvelte.setCommand({
             name: cmd.name,
-            bot: { name: profile.name || cmd.bot.slice(0, 12) + '…', avatarSrc: profile.avatarSrc || null },
+            bot: botView(cmd.bot),
             args: cmd.args.map((a, i) => ({
                 name: a.name,
                 type: a.type,
@@ -627,7 +632,7 @@ function initCommandSelector(textarea, io) {
     function openUserMenu(el, idx) {
         const q = (el.value || '').toLowerCase();
         const options = (io.mentionCandidates ? io.mentionCandidates() : [])
-            .filter(c => c.name.toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
+            .filter(c => c.name.toLowerCase().includes(q) || (c.search || '').toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
             .slice(0, 6)
             // Same placeholder fallback the @mention selector uses, so
             // avatarless members still get a face in the row.
@@ -911,6 +916,22 @@ function initCommandSelector(textarea, io) {
 
     return {
         isOpen() { return isVisible() && (mode === 'list' || mode === 'loading'); },
+        /** Repaint the names this shows: the open list, the strip's bot, and a member menu
+         *  (closed, so its next open reads fresh candidates). */
+        relabel() {
+            if (isVisible() && mode === 'list') render();
+            if (choiceOpenFor) closeChoiceMenu();
+            if (!composing) return;
+            VectorSvelte.setCommandBot(botView(composing.cmd.bot));
+            // A picked member shows a name; it follows the label the @mention pool gives now.
+            const labels = new Map((io.mentionCandidates ? io.mentionCandidates() : []).map(c => [c.npub, c.name]));
+            for (const p of composing.parts) {
+                const npub = p.arg.type === 'user' && p.el?.dataset.npub;
+                if (!npub) continue;
+                p.el.value = labels.get(npub) || getName(npub);
+                p.autoSize();
+            }
+        },
         /** Whether `chatId` (default: the open chat) has any known bots. Also
          *  warms the snapshot, so a later caller (e.g. the attachment menu) sees
          *  it even on the first look at a chat. */

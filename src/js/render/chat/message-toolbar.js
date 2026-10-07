@@ -494,8 +494,7 @@ function _dmsgSelectReply(targetMsgId, { focus = true } = {}) {
     if (cMsg?.mine) cProfile = getProfile(strPubkey);
     else if (cMsg?.npub) cProfile = getProfile(cMsg.npub);
     else cProfile = getProfile(strOpenChat);
-    const name = cProfile?.nickname || cProfile?.name || cProfile?.display_name
-        || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
+    const name = cProfile ? getName(cProfile) : 'Unknown';
     let snippet = null;
     if (cMsg?.content) snippet = { html: buildReplyPreviewHtml(cMsg.content), emojiTags: cMsg.emoji_tags || [] };
     else if (cMsg?.attachments?.length) {

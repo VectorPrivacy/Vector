@@ -192,14 +192,24 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(json!(list.ids))
         }
         "locate_message" => to_value(db::events::locate_message(&a.str("messageId")?)?),
-        "get_synced_settings" => Ok(json!({ "advanced": vector_core::synced_prefs::load_settings().advanced })),
+        "get_synced_settings" => Ok(vector_core::synced_prefs::load_settings().view()),
         "set_advanced_mode" => {
             let on = a.bool("on").ok_or("missing argument `on`")?;
             let settings = vector_core::synced_prefs::set_advanced(on)?;
-            let view = json!({ "advanced": settings.advanced });
-            vector_core::traits::emit_event_json("synced_settings_updated", view.clone());
+            vector_core::traits::emit_event_json("synced_settings_updated", settings.view());
             crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Settings);
-            Ok(view)
+            Ok(settings.view())
+        }
+        "set_streamer_mode" | "set_streamer_notif" | "set_streamer_wallpapers" => {
+            let before = vector_core::synced_prefs::load_settings().streamer;
+            let settings = match cmd {
+                "set_streamer_mode" => vector_core::synced_prefs::set_streamer_on(a.bool("on").ok_or("missing argument `on`")?)?,
+                "set_streamer_notif" => vector_core::synced_prefs::set_streamer_notif(&a.str("level")?)?,
+                _ => vector_core::synced_prefs::set_streamer_wallpapers(a.bool("hide").ok_or("missing argument `hide`")?)?,
+            };
+            crate::selfsync::settings_changed(&before, &settings);
+            crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Settings);
+            Ok(settings.view())
         }
         "get_paused_downloads" => Ok(json!({})),
         "get_unread_counts" => to_value(db::events::unread_counts().await?),

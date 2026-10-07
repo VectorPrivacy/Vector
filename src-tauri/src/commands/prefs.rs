@@ -22,6 +22,15 @@ pub fn publish_projection(pref: Pref) {
             eprintln!("[SyncedPrefs] {} not reconciled yet — not publishing over it", pref.d_tag());
             return;
         }
+        if pref == Pref::Settings {
+            let was_live = synced_prefs::load_settings().streamer.on;
+            match synced_prefs::publish_settings(&client, true).await {
+                Ok(Some(json)) => settings_changed(was_live, &SyncedSettings::from_json(&json)),
+                Ok(None) => {}
+                Err(e) => eprintln!("[SyncedPrefs] publishing {} failed: {e}", pref.d_tag()),
+            }
+            return;
+        }
         let json = match pref {
             Pref::Blocks => {
                 let mut l = IdList::default();
@@ -48,7 +57,7 @@ pub fn publish_projection(pref: Pref) {
                 return;
             }
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
-            Pref::Settings => synced_prefs::load_settings().to_json(),
+            Pref::Settings => return,
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
                 let state = vector_core::state::STATE.lock().await;
@@ -72,6 +81,7 @@ pub fn publish_projection(pref: Pref) {
 /// user; this does not.
 pub async fn hydrate_prefs() {
     let Some(client) = vector_core::state::nostr_client() else { return };
+    let was_live = synced_prefs::load_settings().streamer.on;
     for (pref, json) in synced_prefs::hydrate_all(&client).await {
         match pref {
             Pref::Blocks => apply_blocks(IdList::from_json(&json)).await,
@@ -80,7 +90,7 @@ pub async fn hydrate_prefs() {
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
             Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
             Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
-            Pref::Settings => emit_settings(&SyncedSettings::from_json(&json)),
+            Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),
         }
     }
 }
@@ -88,6 +98,7 @@ pub async fn hydrate_prefs() {
 /// A sibling device changed one of the lists: mirror it onto local state.
 pub async fn ingest_prefs_update(event: Event) {
     let Some(my_pk) = vector_core::my_public_key() else { return };
+    let was_live = synced_prefs::load_settings().streamer.on;
     let Some((pref, json)) = synced_prefs::ingest_remote(&my_pk, &event).await else { return };
     match pref {
         Pref::Blocks => apply_blocks(IdList::from_json(&json)).await,
@@ -96,7 +107,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
         Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
-        Pref::Settings => emit_settings(&SyncedSettings::from_json(&json)),
+        Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),
     }
 }
 
@@ -237,7 +248,7 @@ fn emit_hidden_banners(list: &IdList) {
 /// The synced settings, for the first paint.
 #[tauri::command]
 pub async fn get_synced_settings() -> Result<serde_json::Value, String> {
-    vector_core::db::scoped(async move { Ok(settings_view(&synced_prefs::load_settings())) }).await
+    vector_core::db::scoped(async move { Ok(synced_prefs::load_settings().view()) }).await
 }
 
 #[tauri::command]
@@ -246,17 +257,62 @@ pub async fn set_advanced_mode(on: bool) -> Result<serde_json::Value, String> {
         let settings = synced_prefs::set_advanced(on)?;
         emit_settings(&settings);
         publish_projection(Pref::Settings);
-        Ok(settings_view(&settings))
+        Ok(settings.view())
     })
     .await
 }
 
-fn settings_view(settings: &SyncedSettings) -> serde_json::Value {
-    serde_json::json!({ "advanced": settings.advanced })
+/// Takes effect at once, synced or not: before hydration the relay copy adopts it later.
+#[tauri::command]
+pub async fn set_streamer_mode(on: bool) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped_result(async move {
+        let was_live = synced_prefs::load_settings().streamer.on;
+        let settings = synced_prefs::set_streamer_on(on)?;
+        settings_changed(was_live, &settings);
+        publish_projection(Pref::Settings);
+        Ok(settings.view())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_streamer_notif(level: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped_result(async move {
+        let settings = synced_prefs::set_streamer_notif(&level)?;
+        emit_settings(&settings);
+        publish_projection(Pref::Settings);
+        Ok(settings.view())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_streamer_wallpapers(hide: bool) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped_result(async move {
+        let settings = synced_prefs::set_streamer_wallpapers(hide)?;
+        emit_settings(&settings);
+        publish_projection(Pref::Settings);
+        Ok(settings.view())
+    })
+    .await
+}
+
+fn settings_changed(was_live: bool, settings: &SyncedSettings) {
+    emit_settings(settings);
+    if settings.streamer.on && !was_live {
+        clear_shown_notifications();
+    }
+}
+
+/// Only Android can withdraw a notification it has already shown.
+fn clear_shown_notifications() {
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::cancel_all_message_notifications_jni();
 }
 
 fn emit_settings(settings: &SyncedSettings) {
-    vector_core::traits::emit_event_json("synced_settings_updated", settings_view(settings));
+    vector_core::traits::emit_event_json("synced_settings_updated", settings.view());
 }
 
-// Handlers: get_hidden_banners, set_banner_hidden, get_synced_settings, set_advanced_mode
+// Handlers: get_hidden_banners, set_banner_hidden, get_synced_settings, set_advanced_mode,
+// set_streamer_mode, set_streamer_notif, set_streamer_wallpapers

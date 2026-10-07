@@ -32,6 +32,7 @@ const STRICTNESS_EXPLAINER = [
 ].join('<br><br>');
 
 function polName(npub) {
+    if (streamHidden(npub)) return STREAM_DOTS;
     // The same resolution the member list uses: a preview that says
     // "npub13l8…" cannot let an admin recognise the people a rule would catch.
     try {

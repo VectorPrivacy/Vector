@@ -32,7 +32,7 @@ function registerProfileScreen() {
     // The shareable vectorapp.io URL; the caller paints its own copied tick.
     const copyProfileLink = async () => {
         const npub = openId();
-        if (!npub) return false;
+        if (!npub || streamHidden(npub)) return false;
         try {
             await navigator.clipboard.writeText(`https://vectorapp.io/profile/${npub}`);
             showToast('Profile Link Copied');
@@ -46,6 +46,7 @@ function registerProfileScreen() {
         h: {
             getProfile,
             getName,
+            streamHidden,
             getProfileAvatarSrc,
             getProfileBannerSrc,
             twemojify,
@@ -75,12 +76,12 @@ function registerProfileScreen() {
             toggleSwitcherEdit: () => profileSwitcher.toggleEditMode(),
             showQr: () => {
                 const npub = openId();
-                if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
+                if (npub && !streamHidden(npub)) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
             },
             copyProfileLink,
             copyNpub: async () => {
                 const npub = openId();
-                if (!npub) return false;
+                if (!npub || streamHidden(npub)) return false;
                 try {
                     await navigator.clipboard.writeText(npub);
                     showToast('Copied npub');

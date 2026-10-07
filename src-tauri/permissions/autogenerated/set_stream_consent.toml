@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-stream-consent"
+description = "Enables the set_stream_consent command without any pre-configured scope."
+commands.allow = ["set_stream_consent"]
+
+[[permission]]
+identifier = "deny-set-stream-consent"
+description = "Denies the set_stream_consent command without any pre-configured scope."
+commands.deny = ["set_stream_consent"]

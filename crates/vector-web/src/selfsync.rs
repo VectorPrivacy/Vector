@@ -9,7 +9,7 @@ use nostr_sdk::prelude::*;
 use serde_json::json;
 use vector_core::community::transport::LiveTransport;
 use vector_core::stored_event::event_kind::APPLICATION_SPECIFIC;
-use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref};
+use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref, StreamerSettings, SyncedSettings};
 use vector_core::{db, notify, STATE};
 
 use crate::sync::WebProfileSyncHandler;
@@ -25,12 +25,14 @@ pub async fn start() {
 
 async fn hydrate() {
     let Some(client) = vector_core::state::nostr_client() else { return };
+    let before = synced_prefs::load_settings().streamer;
     for (pref, json) in synced_prefs::hydrate_all(&client).await {
-        apply(pref, &json).await;
+        apply(pref, &json, &before).await;
     }
 }
 
-async fn apply(pref: Pref, json: &str) {
+/// `before` is Streamer Mode as it stood before this copy landed.
+async fn apply(pref: Pref, json: &str, before: &StreamerSettings) {
     match pref {
         Pref::Blocks => apply_blocks(IdList::from_json(json)).await,
         Pref::Mutes => apply_mutes(IdList::from_json(json)).await,
@@ -48,10 +50,16 @@ async fn apply(pref: Pref, json: &str) {
             "hidden_banners_updated",
             json!({ "ids": IdList::from_json(json).ids }),
         ),
-        Pref::Settings => vector_core::traits::emit_event_json(
-            "synced_settings_updated",
-            json!({ "advanced": synced_prefs::SyncedSettings::from_json(json).advanced }),
-        ),
+        Pref::Settings => settings_changed(before, &SyncedSettings::from_json(json)),
+    }
+}
+
+/// Repaint the page, and rewrite the push worker's snapshot when Streamer Mode moved:
+/// it names senders and sets privacy while the app is closed.
+pub(crate) fn settings_changed(before: &StreamerSettings, settings: &SyncedSettings) {
+    vector_core::traits::emit_event_json("synced_settings_updated", settings.view());
+    if before.on != settings.streamer.on || before.notif != settings.streamer.notif {
+        vector_core::emit_event("push_contacts_changed", &json!({}));
     }
 }
 
@@ -178,8 +186,9 @@ async fn handle(event: Event) {
                     vector_core::traits::emit_event_json("pinned_chats_updated", json!(list.chats));
                 }
             } else if Pref::from_d_tag(&d).is_some() {
+                let before = synced_prefs::load_settings().streamer;
                 if let Some((pref, json)) = synced_prefs::ingest_remote(&me, &event).await {
-                    apply(pref, &json).await;
+                    apply(pref, &json, &before).await;
                 }
             }
         }

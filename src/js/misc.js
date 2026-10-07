@@ -1591,4 +1591,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
             node.parentNode.replaceChild(frag, node);
         }
     }
+
+    // Streamer Mode: an npub inside a link, or an nprofile, names someone too.
+    streamMaskText(element);
 }

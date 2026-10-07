@@ -78,6 +78,10 @@ export function setCommand({ name, bot, args, attach }) {
     command.invalid = -1;
     command.attach = attach;
 }
+/** The strip's bot changed how it reads (a profile or Streamer Mode); the args stay. */
+export function setCommandBot(bot) {
+    command.bot = bot || null;
+}
 /** Leave the composer. Name and bot stay for the strip's collapse animation. */
 export function clearCommand() {
     command.active = false;

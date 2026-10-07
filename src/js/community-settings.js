@@ -12,7 +12,10 @@ VectorSvelte.setScreen('communitySettings', {
         unban: () => csUnbanSelected(),
         setRoleHolders: (roleId, add, remove) => csSetRoleHolders(roleId, add, remove),
         // Empty when they have no name of their own, so the row shows the key once.
-        name: (npub) => { const p = getProfile(npub); return p && (p.nickname || p.name || p.display_name) ? getName(p) : ''; },
+        name: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
+        // Streamer Mode: neither the name nor the key, while a search still finds them by name.
+        veiled: (npub) => streamHidden(npub),
+        searchName: (npub) => searchName(npub),
         avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
         profile: (npub) => getProfile(npub) || null,
         ui: { twemojify, showTooltip: showGlobalTooltip, hideTooltip: hideGlobalTooltip },

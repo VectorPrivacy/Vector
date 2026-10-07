@@ -11,6 +11,7 @@
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
     import TorCard from './TorCard.svelte';
+    import StreamerCard from './StreamerCard.svelte';
     import TorOptions from './TorOptions.svelte';
     import BlockedUsers from './BlockedUsers.svelte';
     import Display from './Display.svelte';
@@ -25,7 +26,7 @@
     import Select from '../ui/Select.svelte';
 
     let { h } = $props();
-    // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), tor: {...}, blocked: {...},
+    // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
     //    setAutoDownloadLimit(bytes), clearStorage(), setBackgroundService(on), batteryWarningTap(),
     //    security: {...}, setAdvancedMode(on), copyLogs(), logout()
@@ -96,6 +97,7 @@
             id: 'privacy', label: 'Privacy', icon: 'eye-off',
             anchors: [
                 { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews url tracking typing indicators proxy media' },
+                { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
                 ...(sc.platform.tor ? [{ id: 'tor', label: 'Tor', icon: 'shield-filled', keys: 'tor onion bridges bridge obfs4 circuit circuits censorship anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
             ],
@@ -312,6 +314,7 @@
     {:else if id === 'servers'}{#if hs.network}<NetworkList h={hs.network} part="servers" />{/if}
     {:else if id === 'storage'}{@render storageBody()}
     {:else if id === 'privacy'}{@render privacyBody()}
+    {:else if id === 'streamer'}<StreamerCard h={h.streamer} />
     {:else if id === 'tor'}{@render torBody()}
     {:else if id === 'blocked'}<BlockedUsers h={h.blocked} />
     {:else if id === 'security'}<SecurityCard h={h.security} />
@@ -368,6 +371,8 @@
         <h2>Privacy</h2>
 
         {@render privacyBody()}
+
+        <StreamerCard h={h.streamer} />
 
         {#if sc.platform.tor}
             {@render torBody()}

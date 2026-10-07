@@ -15,7 +15,7 @@
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
 
-    // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), profile(npub),
+    // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
     //    avatarSrc(npub), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
@@ -129,8 +129,9 @@
         for (const npub of st.bans) {
             profileVersion(npub);
             const name = h.name(npub);
-            if (q && !`${name} ${npub}`.toLowerCase().includes(q)) continue;
-            rows.push({ npub, name, profile: h.profile(npub), src: h.avatarSrc(npub) });
+            const veiled = h.veiled(npub);
+            if (q && !`${veiled ? h.searchName(npub) : name} ${npub}`.toLowerCase().includes(q)) continue;
+            rows.push({ npub, name, veiled, profile: h.profile(npub), src: h.avatarSrc(npub) });
         }
         return rows;
     });
@@ -285,8 +286,8 @@
                                         profile={row.profile}
                                         src={row.src}
                                         display={row.name || shortNpub(row.npub)}
-                                        hasName={!!row.name}
-                                        keyHint={row.name ? shortNpub(row.npub) : ''}
+                                        hasName={!row.veiled && !!row.name}
+                                        keyHint={row.name && !row.veiled ? shortNpub(row.npub) : ''}
                                         onactivate={() => csSelectBans([row.npub])}
                                         ui={h.ui}
                                     >

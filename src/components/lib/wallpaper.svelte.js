@@ -2,6 +2,7 @@
 // preview is staged (slider bar up, Cancel/Save over the header), the sliders' values,
 // and the edit bar's label and lock. chat.js decides; the components render.
 import { flushSync } from 'svelte';
+import { streamerState } from './streamer.svelte.js';
 
 const w = $state({
     image: '',            // CSS url(...) for the layer, '' for none
@@ -17,6 +18,12 @@ const w = $state({
 let editTimer = null;
 
 export function wallpaperState() { return w; }
+
+/** The image the pane paints: none while streaming with wallpapers hidden, except the user's own staged pick. */
+export function wallpaperShown() {
+    const st = streamerState();
+    return st.on && st.hideWallpapers && !w.previewing ? '' : w.image;
+}
 export function setWallpaperLayer(image, filter) { w.image = image || ''; w.filter = filter || ''; flushSync(); }
 export function setWallpaperSliders(blur, dim) { w.blur = blur; w.dim = dim; }
 export function setWallpaperBusy(on) { w.busy = !!on; }

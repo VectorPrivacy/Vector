@@ -19,6 +19,8 @@
         dmNpubs = null,
         chatTsById = new Map(),
         avatarSrc = () => null,      // (profile) => url | null
+        getName = () => '',          // (profile | npub) => the app's display name
+        streamHidden = () => false,  // (npub) => Streamer Mode hides this person
         twemojify = () => {},
         showTooltip = () => {},      // (text, anchorEl) => the app's global tooltip
         hideTooltip = () => {},
@@ -92,6 +94,7 @@
         return p ? p.nickname || p.name || p.display_name || '' : '';
     }
     function displayName(p, npub) {
+        if (streamHidden(npub)) return getName(p || npub);
         return nameOf(p) || npub.slice(0, 10) + '...' + npub.slice(-6);
     }
 
@@ -101,7 +104,7 @@
         const f = filter.trim().toLowerCase();
         const sel = selection;
         const out = [];
-        const push = (npub, profile) => out.push({ npub, profile, display: displayName(profile, npub), hasName: !!nameOf(profile), src: avatarSrc(profile) });
+        const push = (npub, profile) => out.push({ npub, profile, display: displayName(profile, npub), hasName: !streamHidden(npub) && !!nameOf(profile), src: avatarSrc(profile || { id: npub }) });
         for (const npub of strangers) {
             if (bannedSet.has(npub) || memberSet.has(npub) || !sel.has(npub)) continue;
             push(npub, profileFor(npub));

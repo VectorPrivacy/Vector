@@ -1043,10 +1043,20 @@ pub(crate) fn publish_projection(pref: Pref) {
         if !synced_prefs::is_hydrated(pref) {
             return;
         }
+        if pref == Pref::Settings {
+            let before = synced_prefs::load_settings().streamer;
+            match synced_prefs::publish_settings(&client, true).await {
+                Ok(Some(json)) => {
+                    crate::selfsync::settings_changed(&before, &synced_prefs::SyncedSettings::from_json(&json))
+                }
+                Ok(None) => {}
+                Err(e) => vector_core::log_warn!("[SyncedPrefs] publishing {} failed: {e}", pref.d_tag()),
+            }
+            return;
+        }
         let json = match pref {
             Pref::Notify => notify::to_wire().to_json(),
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
-            Pref::Settings => synced_prefs::load_settings().to_json(),
             Pref::Mutes => {
                 let mut list = IdList::default();
                 let state = STATE.lock().await;

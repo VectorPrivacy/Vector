@@ -9,7 +9,7 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
     let mut stmt = conn.prepare(
         "SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, \
          about, website, nip05, status_content, status_url, bot, avatar_cached, \
-         banner_cached, is_blocked, status_emoji_tags FROM profiles"
+         banner_cached, is_blocked, status_emoji_tags, stream_consent FROM profiles"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
@@ -47,6 +47,7 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
                 if !p.is_empty() && !cached_file_present(&p) { String::new() } else { p }
             },
             is_blocked: row.get::<_, i32>(16).unwrap_or(0) != 0,
+            stream_consent: row.get::<_, i32>(18)? != 0,
         })
     })
     .map_err(|e| format!("Failed to query profiles: {}", e))?
@@ -71,8 +72,8 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
     conn.execute(
         "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, \
          about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached, is_blocked, \
-         status_emoji_tags) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
+         status_emoji_tags, stream_consent) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
          ON CONFLICT(npub) DO UPDATE SET \
             name = excluded.name, display_name = excluded.display_name, \
             nickname = excluded.nickname, lud06 = excluded.lud06, lud16 = excluded.lud16, \
@@ -81,7 +82,7 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
             status_content = excluded.status_content, status_url = excluded.status_url, \
             bot = excluded.bot, avatar_cached = excluded.avatar_cached, \
             banner_cached = excluded.banner_cached, is_blocked = excluded.is_blocked, \
-            status_emoji_tags = excluded.status_emoji_tags",
+            status_emoji_tags = excluded.status_emoji_tags, stream_consent = excluded.stream_consent",
         rusqlite::params![
             profile.id,
             profile.name,
@@ -101,6 +102,7 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
             profile.banner_cached,
             profile.is_blocked as i32,
             status_emoji_tags,
+            profile.stream_consent as i32,
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
@@ -118,5 +120,51 @@ fn cached_file_present(path: &str) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
         std::path::Path::new(path).exists()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        use nostr_sdk::prelude::ToBech32;
+        let tmp = tempfile::tempdir().unwrap();
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn stored(npub: &str) -> SlimProfile {
+        get_all_profiles().unwrap().into_iter().find(|p| p.id == npub).unwrap()
+    }
+
+    #[test]
+    fn stream_consent_survives_the_database() {
+        let (_tmp, _guard) = init_test_db();
+        let npub = "npub1streamconsent";
+        let mut slim = SlimProfile { id: npub.into(), name: "a".into(), stream_consent: true, ..Default::default() };
+        set_profile(&slim).unwrap();
+        assert!(stored(npub).stream_consent);
+
+        slim.stream_consent = false;
+        set_profile(&slim).unwrap();
+        assert!(!stored(npub).stream_consent, "the upsert clears it too");
+    }
+
+    #[test]
+    fn a_row_written_without_the_column_reads_as_no_consent() {
+        let (_tmp, _guard) = init_test_db();
+        crate::db::get_write_connection_guard_static()
+            .unwrap()
+            .execute("INSERT INTO profiles (npub, name) VALUES ('npub1legacyrow', 'old')", [])
+            .unwrap();
+        assert!(!stored("npub1legacyrow").stream_consent);
     }
 }
