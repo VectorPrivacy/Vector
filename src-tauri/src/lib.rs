@@ -692,7 +692,7 @@ pub fn run() {
             message::read_image_preview,
             message::render_svg,
             message::allow_video_preview,
-            message::zip_directory,
+            message::zip_paths,
             message::cleanup_zip,
             message::react_to_message,
             message::edit_message,

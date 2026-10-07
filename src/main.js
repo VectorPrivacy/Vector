@@ -2157,14 +2157,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                     // Reset reply selection while passing a copy of the reference to the backend
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
-                    // Check if dropped path is a directory or file
-                    const droppedPath = event.payload.paths[0];
-                    const isDir = await invoke('is_directory', { path: droppedPath });
-                    if (isDir) {
-                        await openFolderZipPreview(droppedPath, strOpenChat, strReplyRef);
-                    } else {
-                        await openFilePreview(droppedPath, strOpenChat, strReplyRef);
-                    }
+                    await openPathsPreview(event.payload.paths, strOpenChat, strReplyRef);
                 } else {
                     // TODO: remove hover effects
                 }

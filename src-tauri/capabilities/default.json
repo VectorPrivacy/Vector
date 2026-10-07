@@ -390,7 +390,7 @@
     "allow-read-image-preview",
     "allow-render-svg",
     "allow-allow-video-preview",
-    "allow-zip-directory",
+    "allow-zip-paths",
     "allow-cleanup-zip",
     "allow-audio-probe",
     "allow-audio-load",

@@ -816,14 +816,14 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
 pub(crate) static PENDING_ZIP_PATH: LazyLock<std::sync::Mutex<Option<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(None));
 
-/// Generation counter for zip_directory — each new zip increments this.
+/// Generation counter for zip_paths — each new zip increments this.
 /// An in-progress zip aborts if its generation no longer matches the current one.
 static ZIP_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Result returned by zip_directory
+/// Result returned by zip_paths
 #[derive(serde::Serialize)]
-pub struct ZipDirectoryResult {
+pub struct ZipResult {
     pub zip_path: String,
     pub zip_name: String,
     pub compressed_size: u64,
@@ -961,87 +961,143 @@ pub fn allow_video_preview(app: tauri::AppHandle, path: String) -> Result<(), St
     app.asset_protocol_scope().allow_file(&path).map_err(|e| e.to_string())
 }
 
-/// Zip a directory and return metadata about the result
+/// Zip a dropped or pasted selection for sending as one attachment. A single folder zips its
+/// contents under the folder's name; several items (files, folders, or both) sit side by side
+/// at the archive's root.
 #[tauri::command]
-pub async fn zip_directory(dir_path: String) -> Result<ZipDirectoryResult, String> {
+pub async fn zip_paths(paths: Vec<String>) -> Result<ZipResult, String> {
     // Claim a new generation — any previous zip will see a mismatch and abort
     let my_generation = ZIP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
     // Run all sync I/O on a blocking thread to avoid tying up the async runtime
     tokio::task::spawn_blocking(move || {
-        zip_directory_blocking(&dir_path, my_generation)
+        zip_paths_blocking(&paths, my_generation)
     }).await.map_err(|e| format!("Zip task failed: {}", e))?
 }
 
-fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirectoryResult, String> {
+/// One archive entry: where its bytes come from and its path inside the zip.
+struct ZipItem {
+    source: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+const ZIP_MAX_DEPTH: u32 = 128;
+
+fn walk_zip_dir(
+    current: &std::path::Path,
+    prefix: &str,
+    items: &mut Vec<ZipItem>,
+    total_size: &mut u64,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > ZIP_MAX_DEPTH {
+        return Err("Directory nesting too deep (>128 levels)".to_string());
+    }
+
+    let read_dir = std::fs::read_dir(current)
+        .map_err(|e| format!("Failed to read directory {}: {}", current.display(), e))?;
+
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+
+        // Skip symlinks silently (security — prevents traversal and cycles)
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+
+        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        if meta.is_dir() {
+            items.push(ZipItem { source: path.clone(), name: name.clone(), is_dir: true, size: 0 });
+            walk_zip_dir(&path, &format!("{name}/"), items, total_size, depth + 1)?;
+        } else if meta.is_file() {
+            *total_size += meta.len();
+            items.push(ZipItem { source: path, name, is_dir: false, size: meta.len() });
+        }
+    }
+    Ok(())
+}
+
+/// `name`, or `name-1`, `name-2`… before the extension when the root already holds it. Case-blind,
+/// since the archive mostly lands on case-insensitive filesystems.
+fn unique_root_name(name: &str, is_dir: bool, taken: &mut std::collections::HashSet<String>) -> String {
+    if taken.insert(name.to_lowercase()) {
+        return name.to_string();
+    }
+    let path = std::path::Path::new(name);
+    let (stem, ext) = match (is_dir, path.file_stem(), path.extension()) {
+        (false, Some(stem), Some(ext)) => (stem.to_string_lossy().into_owned(), Some(ext.to_string_lossy().into_owned())),
+        _ => (name.to_string(), None),
+    };
+    (1u32..)
+        .map(|n| match &ext {
+            Some(ext) => format!("{stem}-{n}.{ext}"),
+            None => format!("{stem}-{n}"),
+        })
+        .find(|candidate| taken.insert(candidate.to_lowercase()))
+        .expect("an unused suffix exists")
+}
+
+/// The archive's name and its entries, folders before their contents.
+fn collect_zip_items(paths: &[String]) -> Result<(String, Vec<ZipItem>, u64), String> {
+    let mut items = Vec::new();
+    let mut total_size = 0u64;
+
+    if let [only] = paths {
+        let dir = std::path::Path::new(only);
+        if dir.is_dir() {
+            let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("folder").to_string();
+            walk_zip_dir(dir, "", &mut items, &mut total_size, 0)?;
+            if items.is_empty() {
+                return Err("Directory is empty".to_string());
+            }
+            return Ok((dir_name, items, total_size));
+        }
+    }
+
+    let mut taken = std::collections::HashSet::new();
+    for raw in paths {
+        let picked = std::path::Path::new(raw);
+        let Some(file_name) = picked.file_name() else { continue };
+        // The user chose these roots, so an alias is followed to what it names; the walk below
+        // still skips symlinks inside folders.
+        let Ok(source) = std::fs::canonicalize(picked) else { continue };
+        let Ok(meta) = std::fs::metadata(&source) else { continue };
+        if !meta.is_dir() && !meta.is_file() {
+            continue;
+        }
+        let name = unique_root_name(&file_name.to_string_lossy(), meta.is_dir(), &mut taken);
+        if meta.is_dir() {
+            items.push(ZipItem { source: source.clone(), name: name.clone(), is_dir: true, size: 0 });
+            walk_zip_dir(&source, &format!("{name}/"), &mut items, &mut total_size, 1)?;
+        } else {
+            total_size += meta.len();
+            items.push(ZipItem { source, name, is_dir: false, size: meta.len() });
+        }
+    }
+    if items.is_empty() {
+        return Err("Nothing to zip".to_string());
+    }
+    Ok(("Archive".to_string(), items, total_size))
+}
+
+fn zip_paths_blocking(paths: &[String], my_generation: u64) -> Result<ZipResult, String> {
     use std::io::{BufWriter, Write};
     use zip::write::SimpleFileOptions;
     use tauri::Emitter;
     use zip::CompressionMethod;
 
-    let dir = std::path::Path::new(dir_path);
-    if !dir.is_dir() {
-        return Err("Path is not a directory".to_string());
-    }
-
-    let dir_name = dir.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("folder")
-        .to_string();
-
-    // Walk phase: collect all entries, sum total size
-    // Entries: (path, is_dir, file_size)
-    let mut entries: Vec<(std::path::PathBuf, bool, u64)> = Vec::new();
-    let mut total_size: u64 = 0;
-    const MAX_DEPTH: u32 = 128;
-
-    fn walk_dir(
-        current: &std::path::Path,
-        entries: &mut Vec<(std::path::PathBuf, bool, u64)>,
-        total_size: &mut u64,
-        depth: u32,
-    ) -> Result<(), String> {
-        if depth > MAX_DEPTH {
-            return Err("Directory nesting too deep (>128 levels)".to_string());
-        }
-
-        let read_dir = std::fs::read_dir(current)
-            .map_err(|e| format!("Failed to read directory {}: {}", current.display(), e))?;
-
-        for entry in read_dir {
-            let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-            let path = entry.path();
-
-            // Skip symlinks silently (security — prevents traversal and cycles)
-            let meta = match std::fs::symlink_metadata(&path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-
-            if meta.is_dir() {
-                entries.push((path.clone(), true, 0));
-                walk_dir(&path, entries, total_size, depth + 1)?;
-            } else if meta.is_file() {
-                let size = meta.len();
-                *total_size += size;
-                entries.push((path, false, size));
-            }
-        }
-        Ok(())
-    }
-
-    walk_dir(dir, &mut entries, &mut total_size, 0)?;
-
-    if entries.is_empty() {
-        return Err("Directory is empty".to_string());
-    }
+    let (archive_name, items, total_size) = collect_zip_items(paths)?;
 
     // Zip phase — byte-based progress for smooth updates
     // Use generation in filename to avoid collisions with previous cleanup_zip calls
-    let zip_name = format!("{}.zip", dir_name);
+    let zip_name = format!("{}.zip", archive_name);
     let temp_dir = std::env::temp_dir();
     let zip_path = temp_dir.join(format!("vector_zip_{}_{}", my_generation, &zip_name));
 
@@ -1067,12 +1123,11 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
     // Chunk size for intra-file progress (512KB)
     const CHUNK_SIZE: usize = 512 * 1024;
 
-    for (path, is_dir, walked_size) in &entries {
-        let rel_path = path.strip_prefix(dir)
-            .map_err(|_| "Failed to compute relative path".to_string())?;
-        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    for item in &items {
+        let path = &item.source;
+        let rel_str = item.name.replace('\\', "/");
 
-        if *is_dir {
+        if item.is_dir {
             dir_count += 1;
             let dir_path_str = format!("{}/", rel_str);
             zip_writer.add_directory(&dir_path_str, options)
@@ -1094,7 +1149,7 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
             }
 
             file_count += 1;
-            let file_size = *walked_size;
+            let file_size = item.size;
 
             // Re-verify not a symlink at zip time (TOCTOU mitigation)
             match std::fs::symlink_metadata(path) {
@@ -1189,7 +1244,7 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
     // Store path for cleanup
     *PENDING_ZIP_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(zip_path_str.clone());
 
-    Ok(ZipDirectoryResult {
+    Ok(ZipResult {
         zip_path: zip_path_str,
         zip_name,
         compressed_size,
@@ -1203,7 +1258,7 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
 /// Cancel an in-progress zip and/or clean up the pending zip file
 #[tauri::command]
 pub fn cleanup_zip() -> Result<(), String> {
-    // Bump generation to invalidate any running zip_directory
+    // Bump generation to invalidate any running zip_paths
     ZIP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Also clean up the file if compression already finished
     let path = PENDING_ZIP_PATH.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -1405,5 +1460,89 @@ mod preview_tests {
         assert_eq!(prune_dir(&dir), 1);
         assert!(!stale.exists());
         assert!(fresh.exists());
+    }
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vector-zip-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn zip(paths: &[&std::path::Path]) -> (ZipResult, Vec<(String, Vec<u8>)>) {
+        use std::io::Read;
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let generation = ZIP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let result = zip_paths_blocking(&paths, generation).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&result.zip_path).unwrap()).unwrap();
+        let mut entries: Vec<(String, Vec<u8>)> = (0..archive.len())
+            .map(|i| {
+                let mut entry = archive.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                (entry.name().to_string(), bytes)
+            })
+            .collect();
+        entries.sort();
+        std::fs::remove_file(&result.zip_path).unwrap();
+        (result, entries)
+    }
+
+    fn names(entries: &[(String, Vec<u8>)]) -> Vec<&str> {
+        entries.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    // One test: every zip claims the shared generation, so parallel zips would cancel each other.
+    #[test]
+    fn a_selection_zips_side_by_side_and_a_lone_folder_zips_its_contents() {
+        let root = scratch("selection");
+        let photos = root.join("Photos");
+        std::fs::create_dir_all(photos.join("raw")).unwrap();
+        std::fs::write(photos.join("cat.jpg"), b"meow").unwrap();
+        std::fs::write(photos.join("raw/cat.dng"), b"raw meow").unwrap();
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join("notes.txt"), b"first").unwrap();
+        std::fs::write(other.join("Notes.txt"), b"second").unwrap();
+        std::fs::write(root.join("empty.bin"), b"").unwrap();
+
+        // A lone folder: its contents at the root, the archive named after it.
+        let (result, entries) = zip(&[&photos]);
+        assert_eq!(result.zip_name, "Photos.zip");
+        assert_eq!(names(&entries), ["cat.jpg", "raw/", "raw/cat.dng"]);
+        assert_eq!((result.file_count, result.dir_count), (2, 1));
+
+        // A selection: each item at the root under its own name, a clash suffixed case-blind.
+        let (result, entries) = zip(&[&root.join("notes.txt"), &other.join("Notes.txt"), &photos, &root.join("empty.bin")]);
+        assert_eq!(result.zip_name, "Archive.zip");
+        assert_eq!(
+            names(&entries),
+            ["Notes-1.txt", "Photos/", "Photos/cat.jpg", "Photos/raw/", "Photos/raw/cat.dng", "empty.bin", "notes.txt"]
+        );
+        assert_eq!(entries.iter().find(|(n, _)| n == "Notes-1.txt").unwrap().1, b"second");
+        assert_eq!(entries.iter().find(|(n, _)| n == "notes.txt").unwrap().1, b"first");
+        assert_eq!((result.file_count, result.dir_count), (5, 2));
+        assert_eq!(result.uncompressed_size, 4 + 8 + 5 + 6);
+
+        // A picked alias is followed; one inside a picked folder is not.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("notes.txt"), root.join("link.txt")).unwrap();
+            std::os::unix::fs::symlink(root.join("notes.txt"), photos.join("inner-link.txt")).unwrap();
+            let (_, entries) = zip(&[&root.join("link.txt"), &photos]);
+            assert_eq!(names(&entries), ["Photos/", "Photos/cat.jpg", "Photos/raw/", "Photos/raw/cat.dng", "link.txt"]);
+            assert_eq!(entries.iter().find(|(n, _)| n == "link.txt").unwrap().1, b"first");
+        }
+
+        // Nothing readable is an error, never an empty archive.
+        let generation = ZIP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        assert!(zip_paths_blocking(&[root.join("missing").to_string_lossy().into_owned()], generation).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

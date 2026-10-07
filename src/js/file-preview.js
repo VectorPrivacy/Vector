@@ -789,12 +789,27 @@ function initFileTreeToggles() {
 }
 
 /**
- * Open folder zip preview: compresses a directory and shows a preview
- * @param {string} dirPath - Path to the directory
+ * Preview what was dropped or pasted: one file as itself, a folder or several items as one zip.
+ * Only the desktop zips; elsewhere the first item stands alone.
+ * @param {string[]} paths - The dropped or pasted paths
  * @param {string} receiver - Receiver pubkey or group ID
  * @param {string} replyRef - Reply reference (optional)
  */
-async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
+async function openPathsPreview(paths, receiver, replyRef = '') {
+    const zips = platformFeatures.os !== 'android' && platformFeatures.os !== 'web';
+    if (paths.length > 1 && zips) return openZipPreview(paths, receiver, replyRef);
+    const isDir = await invoke('is_directory', { path: paths[0] }).catch(() => false);
+    if (isDir) return openZipPreview([paths[0]], receiver, replyRef);
+    return openFilePreview(paths[0], receiver, replyRef);
+}
+
+/**
+ * Open zip preview: compresses a folder, or a selection of files and folders, and shows a preview
+ * @param {string[]} paths - One folder, or several files and folders
+ * @param {string} receiver - Receiver pubkey or group ID
+ * @param {string} replyRef - Reply reference (optional)
+ */
+async function openZipPreview(paths, receiver, replyRef = '') {
     releasePendingVideo();
 
     // Clean up any previous zip state (e.g., drag-drop while overlay is already open)
@@ -818,12 +833,15 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
     // Track generation so stale results don't land on a newer preview
     const myGeneration = ++filePreviewGeneration;
 
-    const folderName = dirPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'folder';
+    // Matches the backend's archive name: a lone folder's own, else the macOS default.
+    const archiveName = paths.length === 1
+        ? paths[0].replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'folder'
+        : 'Archive';
 
     // Show the overlay immediately with the progress spinner; the send waits for the zip.
     VectorSvelte.fpOpen({
-        stem: folderName,
-        edited: true,   // the attachment takes the folder's name, not the temp file's
+        stem: archiveName,
+        edited: true,   // the attachment takes the archive's name, not the temp file's
         ext: 'zip',
         size: 'Compressing...',
         sendDisabled: true,
@@ -839,7 +857,7 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
     });
 
     try {
-        const result = await invoke('zip_directory', { dirPath });
+        const result = await invoke('zip_paths', { paths });
         // If a newer preview was opened while we were compressing, discard this result
         if (filePreviewGeneration !== myGeneration) return;
         if (pendingZipUnlisten) { pendingZipUnlisten(); pendingZipUnlisten = null; }
@@ -881,9 +899,9 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
         // "Cancelled" is expected when user hits Cancel during compression — no error popup
         const errStr = String(e);
         if (!errStr.includes('Cancelled')) {
-            console.error('Failed to zip directory:', e);
+            console.error('Failed to zip:', e);
             VectorSvelte.fpClose();
-            popupConfirm('Folder Compression Failed', escapeHtml(errStr), true, '', 'vector_warning.svg');
+            popupConfirm('Compression Failed', escapeHtml(errStr), true, '', 'vector_warning.svg');
         }
 
         // Reset state

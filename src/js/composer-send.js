@@ -30,7 +30,7 @@ async function attachmentPickFolder() {
     if (folderPath) {
         const strReplyRef = strCurrentReplyReference;
         cancelReply();
-        await openFolderZipPreview(folderPath, strOpenChat, strReplyRef);
+        await openZipPreview([folderPath], strOpenChat, strReplyRef);
     }
 }
 
@@ -74,22 +74,16 @@ async function handleComposerPaste(evt) {
 
             // Native file paste: Finder/Explorer "Copy file" puts file references on
             // the OS clipboard that the WebView never exposes to JS, so ask the
-            // backend. A real file routes through the same path as a drag-drop
+            // backend. Files route through the same path as a drag-drop
             // (preview → send). Falls through to the image-bytes path below when the
             // clipboard holds raw image data (e.g. a screenshot).
             try {
                 const filePaths = await invoke('read_clipboard_files');
                 if (Array.isArray(filePaths) && filePaths.length) {
                     restoreInput();
-                    const droppedPath = filePaths[0]; // mirror drag-drop: first item
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
-                    const isDir = await invoke('is_directory', { path: droppedPath }).catch(() => false);
-                    if (isDir) {
-                        await openFolderZipPreview(droppedPath, strOpenChat, strReplyRef);
-                    } else {
-                        await openFilePreview(droppedPath, strOpenChat, strReplyRef);
-                    }
+                    await openPathsPreview(filePaths, strOpenChat, strReplyRef);
                     return;
                 }
             } catch (e) {

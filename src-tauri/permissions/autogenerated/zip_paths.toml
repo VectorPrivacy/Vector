@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-zip-paths"
+description = "Enables the zip_paths command without any pre-configured scope."
+commands.allow = ["zip_paths"]
+
+[[permission]]
+identifier = "deny-zip-paths"
+description = "Denies the zip_paths command without any pre-configured scope."
+commands.deny = ["zip_paths"]
