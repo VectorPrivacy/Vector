@@ -212,6 +212,24 @@ A swap installs a new `Session` and drops the old one. There is no teardown list
 - A raw `handle.emit(...)` inside a spawned task
 - New tables or settings keys created without `account_dir(npub)` scoping
 
+### Network transport: every connection goes through `vector_core::transport`
+
+Clearnet, Tor and I2P are kinds on one layer (`crates/vector-core/src/transport/`). It decides each
+TCP egress: direct (Clearnet only), the loopback bridge into the chosen kind, or a refusal in
+process with no socket and no DNS. **Fail closed:** a preference not loaded yet, or a chosen kind that
+is starting, failed or missing from the build, refuses. Nothing falls back to direct, and one kind
+never carries another's traffic.
+
+- Relays: build nostr clients through `apply_transport(builder, lane)` (`nostr_client_builder()` does);
+  a stock client that takes only a proxy address gets `transport_relay_options()`. Never a bare `Client::default()`.
+- HTTP: `net::HttpClient` and `Req::send` only (clippy forbids raw reqwest sends and body reads); a
+  retry loop calls `net::wait_after(&e)`. Timeouts go through `transport::budget(op, clearnet_value)`.
+- Lanes: `Lane::Account` for anything that identifies as the npub, `Lane::Shared` for anything a stranger can name.
+- Anything that dials outside the layer (iroh calls, Mini App realtime) calls `transport::realtime::check()` first.
+- A new kind is a `Kind` variant, a cargo feature, a `Transport` + `TransportFactory`, and one arm
+  each in `transport/kinds.rs`; it must `host::notify` every ready flip. Bridge, budgets, routing UI,
+  pre-login and status views are shared.
+
 ### Adding new Tauri commands
 
 Every new `#[tauri::command]` requires THREE things:
