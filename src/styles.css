@@ -4073,11 +4073,15 @@ body.mobile [contenteditable] * {
   overflow-anchor: none;
 }
 
+#chat { --typing-strip: 28px; }
+
 .chat-messages > *:last-child {
   /* The last child should have extra margin from the bottom — covers
      both `.dmsg` divs and `.msg-inline-timestamp` paragraphs (system
-     events, date dividers, unread marker). */
-  margin-bottom: 20px;
+     events, date dividers, unread marker). It clears the typing strip,
+     so a typer appearing over a pinned conversation covers nothing.
+     A margin, not padding: WebKit drops a scroller's bottom padding. */
+  margin-bottom: calc(5px + var(--typing-strip));
 }
 
 /* CONTRACT for any OVERLAY added as a direct child of `.chat-messages`
@@ -8843,6 +8847,71 @@ audio {
   pointer-events: none;
 }
 
+/* Who is typing (chat/TypingIndicator.svelte): over the conversation's bottom edge, on a
+   shadow that fades whatever scrolls behind it (the list's #030303 in every theme; over
+   a wallpaper it reads as a shadow). A pinned conversation clears it by its last row's
+   margin, so the shadow scales with the history below (--typing-fade, ChatPane.svelte)
+   and stops at the scrollbar (--typing-bar). The 30px of lead-in is the fade's soft start. */
+.typing-strip {
+  position: absolute;
+  top: calc(-1 * (var(--typing-strip) + 30px));
+  z-index: 101;
+  left: 0;
+  right: 0;
+  height: calc(var(--typing-strip) + 30px);
+  box-sizing: border-box;
+  /* Sits the line evenly between the last message (its 4px margin + row padding
+     above) and the composer's rim below. */
+  padding: 32px 16px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.typing-strip::before {
+  content: '';
+  position: absolute;
+  inset: 0 var(--typing-bar, 0px) 0 0;
+  z-index: -1;
+  background: linear-gradient(to bottom, rgba(3, 3, 3, 0) 0%, rgba(3, 3, 3, 0.5) 30%, rgba(3, 3, 3, 0.85) 55%, #030303 100%);
+  opacity: var(--typing-fade, 0);   /* set per scroll event; a transition would lag a fast scroll */
+}
+.typing-faces { display: flex; flex-shrink: 0; }
+.typing-face {
+  display: flex;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #030303;
+}
+.typing-face + .typing-face { margin-left: -6px; }
+.typing-face img,
+.typing-face .placeholder-avatar { min-width: 18px !important; min-height: 18px !important; max-width: 18px !important; max-height: 18px !important; }
+.typing-dots { display: flex; align-items: center; height: 18px; gap: 3px; flex-shrink: 0; }   /* the text's line box */
+.typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.7);   /* the strip's grey; the wave dims it further */
+  animation: typing-wave 1.2s ease-in-out infinite;
+}
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-wave {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-1.5px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots i { animation: typing-fade 1.2s ease-in-out infinite; }
+  @keyframes typing-fade { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+}
+.typing-text { min-width: 0; }
+.typing-text b { color: #fff; font-weight: 600; }
+.typing-text .emoji { width: 14px; height: 14px; vertical-align: -2px; }
+
 .corner-float {
   bottom: calc(100% + 16px);
   right: 20px;
@@ -8853,6 +8922,10 @@ audio {
   transition-property: transform;
   transition-duration: 0.4s;
   transition-timing-function: cubic-bezier(0.95, 0.05, 0.795, 0.035);
+}
+/* The scroll-return button floats over the conversation, not the typing strip. */
+#chat-box > .corner-float {
+  bottom: calc(100% + 16px + var(--typing-strip));
 }
 
 .corner-float.visible {
@@ -12488,7 +12561,7 @@ body.mobile:not(.ws) .navbar-btn::before {
   text-align: center;
   box-sizing: border-box;
   display: none;
-  box-shadow: 0 0 0 2px #0a0a0a;
+  box-shadow: 0 0 0 2px #030303;
 }
 
 .scroll-return-badge.visible {
@@ -21804,7 +21877,7 @@ textarea.command-part-input {
  * so it scrolls naturally with the messages — no per-frame JS reposition). */
 #dmsg-toolbar {
   position: absolute;
-  z-index: 50;
+  z-index: 102;   /* above the bottom fade (100) and the typing strip (101) */
   display: flex;
   gap: 2px;
   padding: 4px;

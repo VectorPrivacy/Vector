@@ -1,5 +1,5 @@
 <script>
-    // The open chat's header as ONE reconciler: the peer's profile landing, a typer, a
+    // The open chat's header as ONE reconciler: the peer's profile landing, a
     // member count or a renamed channel repaints it with no retro-resolve code. The
     // helpers arrive from chat.js after the shell mounts, so they are read lazily.
     import { openChatId, chatVersion, profileVersion, communityVersion, listVersion, invitesVersion } from '../lib/signals.svelte.js';
@@ -40,14 +40,11 @@
             avatarSrc = H.getProfileAvatarSrc(profile) || null;
             if (profile) click = () => H.openProfile(profile);
         }
-        // Subtext: a typer outranks everything but Notes.
-        const typing = chat ? H.typingText(chat) : '';
-        let subtext = '', tags = [], gradient = false;
+        let subtext = '', tags = [];
         if (notes) subtext = 'Encrypted Notes to Self';
-        else if (typing) { subtext = typing; gradient = true; }
         else if (group) subtext = H.memberSubtext(communityId);
         else if (!H.streamHidden(profile || id)) { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
-        return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, gradient, menu: !!chat && H.menuCount(chat) > 0 };
+        return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, menu: !!chat && H.menuCount(chat) > 0 };
     });
 
     function nameInto(node, [text, twemoji]) {
@@ -56,10 +53,10 @@
         return { update: render };
     }
 
-    // ── subtext: status, typing, member count ──
+    // ── subtext: status or member count ──
     // Shown text swaps in place; going empty collapses the line (the 300ms wait
     // matches the CSS transition) and a chat switch resets it without the fade.
-    let status = $state({ text: '', tags: [], gradient: false, hidden: true });
+    let status = $state({ text: '', tags: [], hidden: true });
     let shownId = null;
     let hideTimer = null;
     $effect(() => {
@@ -68,26 +65,26 @@
         if (id !== shownId) {
             shownId = id;
             if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-            status = { text: '', tags: [], gradient: false, hidden: true };
+            status = { text: '', tags: [], hidden: true };
         }
         if (!v) return;
         if (v.subtext) {
             if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-            status = { text: v.subtext, tags: v.tags, gradient: v.gradient, hidden: false };
+            status = { text: v.subtext, tags: v.tags, hidden: false };
         } else if (status.text && !status.hidden) {
             status.hidden = true;
             hideTimer = setTimeout(() => {
-                status = { text: '', tags: [], gradient: false, hidden: true };
+                status = { text: '', tags: [], hidden: true };
                 hideTimer = null;
             }, 300);
         }
     });
-    function statusInto(node, [text, tags, gradient]) {
-        const render = ([t, tg, g]) => {
+    function statusInto(node, [text, tags]) {
+        const render = ([t, tg]) => {
             node.textContent = t;
-            if (t && !g) { h().twemojify(node); h().renderCustomEmojiShortcodes(node, tg); }
+            if (t) { h().twemojify(node); h().renderCustomEmojiShortcodes(node, tg); }
         };
-        render([text, tags, gradient]);
+        render([text, tags]);
         return { update: render };
     }
 
@@ -130,8 +127,8 @@
             <h3 id="chat-contact" class="cutoff" class:btn={!!vm?.click} class:chat-contact={status.hidden} class:chat-contact-with-status={!status.hidden}
                 use:nameInto={[vm ? vm.name : '', !!vm?.twemoji]} onclick={() => vm?.click?.()}></h3>
         </div>
-        <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden} class:typing-indicator-text={status.gradient}
-              use:statusInto={[status.text, status.tags, status.gradient]}></span>
+        <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden}
+              use:statusInto={[status.text, status.tags]}></span>
     </div>
     <!-- The right-hand actions sit in one row, so a hidden pin toggle leaves no gap. -->
     <div class="chat-header-actions">

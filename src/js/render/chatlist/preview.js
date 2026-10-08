@@ -13,17 +13,17 @@
  * @param {Chat} chat - The chat object
  * @returns {string|null} - The typing text, or null if no one is typing
  */
+/** Who is typing in a chat, minus anyone blocked (a group can carry them). */
+function visibleTypers(chat) {
+    const typers = chat.active_typers || [];
+    return chatIsGroup(chat) ? typers.filter(npub => !getProfile(npub)?.is_blocked) : typers;
+}
+
 function generateTypingText(chat) {
-    let activeTypers = chat.active_typers || [];
+    const activeTypers = visibleTypers(chat);
     if (activeTypers.length === 0) return null;
 
     const isGroup = chatIsGroup(chat);
-
-    // Filter out blocked users from typing indicators in group chats
-    if (isGroup) {
-        activeTypers = activeTypers.filter(npub => !getProfile(npub)?.is_blocked);
-        if (activeTypers.length === 0) return null;
-    }
 
     // DMs just show "Typing..." since we already know who it is
     if (!isGroup) return 'Typing...';

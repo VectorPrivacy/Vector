@@ -1,10 +1,11 @@
 <script>
-    // The composer box: the scroll-return button, the reply and command strips, and the
+    // The composer box: the scroll-return button, who is typing, the reply and command strips, and the
     // input row around the editor. The editor (composer.js) is an imperative leaf built
     // into #chat-input-host by main.js; everything else derives from lib/composer.
     import { composerMode, composerDraft, composerLock, composerCommand, composerStatus, composerChrome, composerHandlers, composerEls, bindComposerEl } from '../lib/composer.svelte.js';
     import CommandStrip from './CommandStrip.svelte';
     import VoiceRecorderUI from './VoiceRecorderUI.svelte';
+    import TypingIndicator from '../chat/TypingIndicator.svelte';
     import { recorderState } from '../lib/voicerecorder.svelte.js';
 
     const mode = composerMode();
@@ -181,6 +182,7 @@
         <span class="scroll-return-badge" class:visible={!!chrome.scrollBadge}>{chrome.scrollBadge}</span>
     </button>
     <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>
+    <TypingIndicator />
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="chat-reply-bar" onclick={(e) => { if (e.target.closest('#chat-reply-bar-cancel')) return; h()?.jumpToReply(); }}>
         <span id="chat-reply-bar-label">Replying to <span id="chat-reply-bar-name" use:nameInto={mode.name}></span></span>

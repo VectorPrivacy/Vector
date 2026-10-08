@@ -15,6 +15,30 @@
     const bindChat = bindShellEl('chat');
     const pins = pinsState();
     const wp = wallpaperState();
+
+    // The typing strip's shadow tracks the scroll left below, as the list rail's fade does:
+    // none while pinned, full once a fade's height of history sits under it. Its width
+    // stops at the scrollbar, which never fades.
+    const TYPING_FADE = 15;
+    function typingFade(node) {
+        const pane = node.parentElement;
+        let fade = -1, bar = -1;
+        const sync = () => {
+            const below = node.scrollHeight - node.clientHeight - node.scrollTop;
+            const f = Math.round(Math.max(0, Math.min(1, below / TYPING_FADE)) * 100) / 100;
+            const b = node.offsetWidth - node.clientWidth;
+            if (f !== fade) { fade = f; pane.style.setProperty('--typing-fade', String(f)); }
+            if (b !== bar) { bar = b; pane.style.setProperty('--typing-bar', b + 'px'); }
+        };
+        const later = () => requestAnimationFrame(sync);
+        node.addEventListener('scroll', sync, { passive: true });
+        const ro = new ResizeObserver(sync);
+        ro.observe(node);
+        const mo = new MutationObserver(later);
+        mo.observe(node, { childList: true, subtree: true });
+        sync();
+        return { destroy() { node.removeEventListener('scroll', sync); ro.disconnect(); mo.disconnect(); } };
+    }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -24,7 +48,7 @@
     <ChatHeader />
     <PinsDrawer />
     <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
-    <div id="chat-messages" class="chat-messages"></div>
+    <div id="chat-messages" class="chat-messages" use:typingFade></div>
     <WallpaperPreviewBar />
     <ComposerBox />
 </div>
