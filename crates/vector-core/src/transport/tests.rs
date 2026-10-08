@@ -2166,6 +2166,8 @@ async fn live_subs_reach_a_relay_that_connects_after_them() {
     cycle::cycle_all(cycle::CycleScope::Kick).await;
     cycle::untrack(tracked);
     settle("connected", || r.status() == RelayStatus::Connected).await;
+    // Connected comes before the queued REQ lands; the relay only fans out to subs it holds.
+    settle("the REQ reached the relay", || relay.reqs.lock().unwrap().contains(&id)).await;
     assert!(delivered(&client, &relay).await, "the sub made before the connect is live");
 
     relay.forget.notify_waiters();
