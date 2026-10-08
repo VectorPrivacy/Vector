@@ -49,10 +49,11 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
 
 /// The exact `reqwest` these clients are built from.
 ///
-/// Re-exported because [`build_http_client`] hands back a `reqwest::Client`: a
-/// consumer that names its own `reqwest` version gets a different type with the
-/// same name, and the error says nothing useful about why.
+/// Re-exported because call sites name its types (headers, bodies, methods): a consumer that
+/// names its own `reqwest` version gets a different type with the same name.
 pub use reqwest;
+
+pub use crate::transport::Lane;
 
 /// How long a transfer may go without moving a byte before it is given up on.
 ///
@@ -68,36 +69,11 @@ pub use reqwest;
 /// can say why, instead of meeting a socket the proxy already closed.
 pub const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Build an HTTP client with the given total timeout.
-///
-/// Honors the Tor failsafe: when the user has Tor enabled, every connection
-/// goes through Tor — period. If Tor is enabled but not currently running
-/// (bootstrap in flight, mid-restart, service crashed), the returned client
-/// is wired to a blackhole SOCKS proxy so requests fail at the TCP layer
-/// without any chance of leaking clearnet traffic. Direct connections are
-/// only ever issued when the user has explicitly disabled Tor.
-///
-/// Callers should use this rather than `reqwest::Client::builder()` directly
-/// so the failsafe automatically covers their traffic. The `disallowed_methods`
-/// clippy lint enforces this everywhere except this one canonical call site.
-#[allow(clippy::disallowed_methods)]
-pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    build_http_client_with_options(Some(timeout), None, true)
+/// [`TRANSFER_STALL`] for the transport in use.
+pub fn transfer_stall() -> std::time::Duration {
+    crate::transport::budget(crate::transport::Op::TransferStall, TRANSFER_STALL)
 }
 
-/// Like `build_http_client`, with the total timeout optional and
-/// redirect-following switchable.
-///
-/// `timeout` is a deadline on the whole request; `None` for large transfers,
-/// which are bounded by progress instead (see [`TRANSFER_STALL`]).
-///
-/// `read_timeout` resets on every byte of the response *body*. Before the
-/// headers arrive it is a single deadline from the start of the request that
-/// nothing resets — including bytes of a request body going out — so it must
-/// stay `None` on an upload whose body may take longer than it.
-///
-/// Blossom PUT uses `follow_redirects = false`: a 3xx mid-upload would
-/// re-issue as GET and drop the body, so the 3xx surfaces as the real status.
 /// What every request calls itself. Set once by the app with its own
 /// version; until then, this crate's. Magnitude serves link previews to
 /// Vector only, and judges that by this header, so it has to be present on
@@ -119,81 +95,178 @@ pub fn user_agent() -> String {
         .unwrap_or_else(|| format!("Vector/{}", env!("CARGO_PKG_VERSION")))
 }
 
-/// Clients by their options, so a fetch reuses the connections of every
-/// fetch before it with the same options instead of opening its own.
+/// An HTTP budget (a request total, a read) for the transport in use: a circuit to a fresh
+/// host alone can take 45 s. Clearnet passes through.
+pub fn tor_http_timeout(clearnet: std::time::Duration) -> std::time::Duration {
+    crate::transport::budget(crate::transport::Op::HttpTotal, clearnet)
+}
+
+// ============================================================================
+// HttpClient: egress decided per request
+// ============================================================================
+//
+// A client is a descriptor (owner, lane, options), never a connection pool: `Req::send` asks
+// the transport where this request may go, then runs it on the pooled reqwest client for that
+// decision. A client taken before a network switch can therefore never send on the old egress,
+// and a body in flight aborts when the network changes.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ClientOptions {
+    timeout: Option<std::time::Duration>,
+    read_timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
+    /// Never direct: a fetch decided while an anonymity network was chosen, that the user must
+    /// never make from this device's own address.
+    no_direct: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct HttpClient {
+    owner: u64,
+    lane: Lane,
+    opts: ClientOptions,
+}
+
+/// A client with the given total timeout, for content anyone can name.
 ///
-/// A `reqwest::Client` is a handle on a connection pool; one built per
-/// request has an empty pool and pays a TCP and a TLS handshake for every
-/// file, which through an edge 33 ms away cost more than the file itself
-/// (measured: ~260 ms per already-cached clip, against ~70 ms on a kept
-/// connection). Twenty call sites built their own; now they share by
-/// options. With HTTP/2 negotiated to the edges, hundreds of small fetches
-/// share one connection. Emptied by [`rebuild_shared_http_client`] when Tor
-/// flips, since a client carries the proxy it was built with.
-static CLIENTS_BY_OPTIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<ClientOptions, reqwest::Client>>> =
-    OnceLock::new();
+/// Every fetch goes through the transport's decision for its own host: direct only while the
+/// account is on Clearnet, through the bridge on an anonymity network, and refused in process
+/// while that network is not up. Clippy forbids building a reqwest client anywhere else.
+pub fn build_http_client(timeout: std::time::Duration) -> Result<HttpClient, String> {
+    build_http_client_for(Lane::Shared, Some(timeout), None, true)
+}
 
-/// `(timeout, read_timeout, follow_redirects)`.
-type ClientOptions = (Option<std::time::Duration>, Option<std::time::Duration>, bool);
-
+/// Like `build_http_client`, with the total timeout optional and
+/// redirect-following switchable.
+///
+/// `timeout` is a deadline on the whole request; `None` for large transfers,
+/// which are bounded by progress instead (see [`TRANSFER_STALL`]).
+///
+/// `read_timeout` resets on every byte of the response *body*. Before the
+/// headers arrive it is a single deadline from the start of the request that
+/// nothing resets — including bytes of a request body going out — so it must
+/// stay `None` on an upload whose body may take longer than it.
+///
+/// Blossom PUT uses `follow_redirects = false`: a 3xx mid-upload would
+/// re-issue as GET and drop the body, so the 3xx surfaces as the real status.
 pub fn build_http_client_with_options(
     timeout: Option<std::time::Duration>,
     read_timeout: Option<std::time::Duration>,
     follow_redirects: bool,
-) -> Result<reqwest::Client, String> {
-    let key = (timeout, read_timeout, follow_redirects);
-    let cell = CLIENTS_BY_OPTIONS.get_or_init(Default::default);
-    if let Ok(map) = cell.lock() {
-        if let Some(c) = map.get(&key) {
-            return Ok(c.clone());
-        }
-    }
-    let client = build_http_client_uncached(timeout, read_timeout, follow_redirects)?;
-    if let Ok(mut map) = cell.lock() {
-        map.entry(key).or_insert_with(|| client.clone());
-    }
-    Ok(client)
+) -> Result<HttpClient, String> {
+    build_http_client_for(Lane::Shared, timeout, read_timeout, follow_redirects)
 }
 
-/// Forget every pooled client: the next request builds one against the
-/// current Tor state.
-fn forget_pooled_clients() {
-    if let Some(cell) = CLIENTS_BY_OPTIONS.get() {
-        if let Ok(mut map) = cell.lock() {
-            map.clear();
-        }
+/// A client for `lane`: `Account` for requests that identify as the user (signed uploads).
+pub fn build_http_client_for(
+    lane: Lane,
+    timeout: Option<std::time::Duration>,
+    read_timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
+) -> Result<HttpClient, String> {
+    Ok(HttpClient {
+        owner: crate::db::current_session_id(),
+        lane,
+        opts: ClientOptions { timeout, read_timeout, follow_redirects, no_direct: false },
+    })
+}
+
+const DEFAULT_SHARED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A 30 s client for frequent small fetches (image cache, wallet polling).
+pub fn shared_http_client() -> std::sync::Arc<HttpClient> {
+    std::sync::Arc::new(HttpClient {
+        owner: crate::db::current_session_id(),
+        lane: Lane::Shared,
+        opts: ClientOptions { timeout: Some(DEFAULT_SHARED_TIMEOUT), read_timeout: None, follow_redirects: true, no_direct: false },
+    })
+}
+
+/// The pool key: one reqwest client per decision, so no pooled connection outlives its epoch.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PoolKey {
+    epoch: u64,
+    owner: u64,
+    lane: Lane,
+    opts: ClientOptions,
+    direct: bool,
+}
+
+type Pools = std::collections::HashMap<PoolKey, reqwest::Client>;
+
+static POOLS: std::sync::Mutex<Option<Pools>> = std::sync::Mutex::new(None);
+
+/// Drop every pooled client: the next request builds one for the current egress.
+pub fn forget_clients() {
+    if let Ok(mut g) = POOLS.lock() {
+        *g = None;
     }
 }
 
-/// The browser's fetch owns pooling, TLS, redirects and timeouts; a page cannot
-/// pick its user agent or route through a proxy.
-/// Floor for an HTTP budget (a request total, a read, a stall watchdog) while Tor is the
-/// chosen transport: a circuit to a fresh host alone can take 45 s. Clearnet passes through.
-pub fn tor_http_timeout(clearnet: std::time::Duration) -> std::time::Duration {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    if !matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled) {
-        return clearnet.max(std::time::Duration::from_secs(90));
-    }
-    clearnet
+/// Kept for callers that rebuilt the shared client on a Tor flip; clients are per request now.
+pub fn rebuild_shared_http_client() -> Result<(), String> {
+    forget_clients();
+    Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
+/// Only builds requests: `Req::send` executes on the client the current egress gives.
 #[allow(clippy::disallowed_methods)]
-fn build_http_client_uncached(
-    _timeout: Option<std::time::Duration>,
-    _read_timeout: Option<std::time::Duration>,
-    _follow_redirects: bool,
-) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
+fn template() -> &'static reqwest::Client {
+    static T: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    T.get_or_init(|| reqwest::Client::builder().build().expect("a plain reqwest client always builds"))
+}
+
+impl HttpClient {
+    pub fn request<U: reqwest::IntoUrl>(&self, method: reqwest::Method, url: U) -> Req {
+        Req { rb: template().request(method, url), client: self.clone() }
+    }
+
+    pub fn get<U: reqwest::IntoUrl>(&self, url: U) -> Req {
+        self.request(reqwest::Method::GET, url)
+    }
+
+    pub fn post<U: reqwest::IntoUrl>(&self, url: U) -> Req {
+        self.request(reqwest::Method::POST, url)
+    }
+
+    pub fn put<U: reqwest::IntoUrl>(&self, url: U) -> Req {
+        self.request(reqwest::Method::PUT, url)
+    }
+
+    pub fn head<U: reqwest::IntoUrl>(&self, url: U) -> Req {
+        self.request(reqwest::Method::HEAD, url)
+    }
+
+    pub fn delete<U: reqwest::IntoUrl>(&self, url: U) -> Req {
+        self.request(reqwest::Method::DELETE, url)
+    }
+
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    /// The session this client was built under.
+    pub fn owner(&self) -> u64 {
+        self.owner
+    }
+
+    /// The same client speaking for `lane`: a request carrying the user's signed authorization
+    /// identifies them, so it rides the Account lane.
+    pub fn with_lane(&self, lane: Lane) -> HttpClient {
+        HttpClient { lane, ..self.clone() }
+    }
+
+    /// The same client, refusing to go direct: for a fetch that was only allowed because the
+    /// account was on an anonymity network, so a switch to Clearnet meanwhile fails it.
+    pub fn without_direct(&self) -> HttpClient {
+        HttpClient { opts: ClientOptions { no_direct: true, ..self.opts }, ..self.clone() }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::disallowed_methods)]
-fn build_http_client_uncached(
-    timeout: Option<std::time::Duration>,
-    read_timeout: Option<std::time::Duration>,
-    follow_redirects: bool,
-) -> Result<reqwest::Client, String> {
+fn build_pooled(opts: ClientOptions, proxy: Option<String>) -> Result<reqwest::Client, String> {
+    use crate::transport::{budget, Op};
     let mut builder = reqwest::Client::builder()
         // Kept connections: idle ones stay a while so a burst of small
         // fetches to one host (an edge, a Blossom server) rides one or a
@@ -203,29 +276,32 @@ fn build_http_client_uncached(
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .http2_keep_alive_interval(std::time::Duration::from_secs(30))
         .http2_keep_alive_while_idle(true)
-        // Every request names the client, on every platform, because this
-        // is the one place a client is built. reqwest sends no agent at all
-        // otherwise, and Magnitude's preview endpoint refuses a caller that
-        // does not say it is Vector.
+        // Magnitude's preview endpoint refuses a caller that does not say it is Vector.
         .user_agent(user_agent())
         // Bounded connect: a black-holed host (SYN swallowed, never refused) must
         // fail in seconds instead of silently consuming the whole request budget.
-        .connect_timeout(std::time::Duration::from_secs(15));
-    if let Some(t) = timeout {
-        builder = builder.timeout(t);
+        .connect_timeout(budget(Op::HttpConnect, std::time::Duration::from_secs(15)));
+    if let Some(t) = opts.timeout {
+        builder = builder.timeout(budget(Op::HttpTotal, t));
     }
-    if let Some(rt) = read_timeout {
-        builder = builder.read_timeout(rt);
+    if let Some(rt) = opts.read_timeout {
+        builder = builder.read_timeout(budget(Op::HttpRead, rt));
     }
-    if !follow_redirects {
+    if !opts.follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     } else {
-        // Validate EVERY redirect hop, not just the initial URL: a public
-        // host answering `302 Location: http://169.254.169.254/…` would
-        // otherwise walk the request straight past the SSRF check.
+        // Validate EVERY redirect hop, not just the initial URL: a public host answering
+        // `302 Location: http://169.254.169.254/…` would otherwise walk past the SSRF check,
+        // and one naming another network's host must not reach a resolver.
         builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
+            }
+            if let Some(dest) = attempt.url().host_str().and_then(crate::transport::Dest::parse) {
+                let kind = crate::transport::preference().unwrap_or(crate::transport::Kind::Clearnet);
+                if let Some(r) = crate::transport::route::pre_route(kind, &dest) {
+                    return attempt.error(r.text());
+                }
             }
             match validate_url_not_private(attempt.url().as_str()) {
                 Ok(()) => attempt.follow(),
@@ -233,87 +309,359 @@ fn build_http_client_uncached(
             }
         }));
     }
+    if let Some(url) = proxy {
+        let proxy = reqwest::Proxy::all(url).map_err(|_| "Vector couldn't open its local proxy.".to_string())?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
 
-    #[cfg(feature = "tor")]
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::disallowed_methods)]
+fn build_pooled(_opts: ClientOptions, _proxy: Option<String>) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
+}
+
+/// The pooled client for this decision, built and cached unless the epoch moved meanwhile.
+fn pooled(desc: &HttpClient, epoch: u64, egress: &crate::transport::Egress) -> Result<reqwest::Client, HttpError> {
+    let key = PoolKey {
+        epoch,
+        owner: desc.owner,
+        lane: desc.lane,
+        opts: desc.opts,
+        direct: matches!(egress, crate::transport::Egress::Direct),
+    };
+    if let Some(c) = POOLS.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&key).cloned())) {
+        return Ok(c);
+    }
+    let proxy = match egress {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::transport::Egress::Proxy(t) => Some(crate::transport::bridge::proxy_url(t).map_err(HttpError::Refused)?),
+        _ => None,
+    };
+    let client = build_pooled(desc.opts, proxy).map_err(|e| HttpError::Refused(crate::transport::ConnectError::Bridge(e)))?;
+    if crate::transport::epoch() == epoch {
+        if let Ok(mut g) = POOLS.lock() {
+            g.get_or_insert_with(Default::default).entry(key).or_insert_with(|| client.clone());
+        }
+    }
+    Ok(client)
+}
+
+/// A request being built. Forwards the builder methods call sites use.
+pub struct Req {
+    rb: reqwest::RequestBuilder,
+    client: HttpClient,
+}
+
+impl Req {
+    pub fn header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        reqwest::header::HeaderName: TryFrom<K>,
+        <reqwest::header::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        reqwest::header::HeaderValue: TryFrom<V>,
+        <reqwest::header::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
-        match crate::tor::transport_state() {
-            crate::tor::TorTransportState::Active(addr) => {
-                // Use the addr from the variant directly — re-querying via
-                // proxy_url() races against TorService::stop() and can panic.
-                let url = format!("socks5h://{addr}");
-                let proxy = reqwest::Proxy::all(&url)
-                    .map_err(|e| format!("Tor proxy URL ({url}) invalid: {e}"))?;
-                builder = builder.proxy(proxy);
-                // Circuit builds to a fresh host legitimately take tens of seconds, and a
-                // caller's total shorter than that would cut every fresh host off mid-connect.
-                builder = builder.connect_timeout(std::time::Duration::from_secs(45));
-                if let Some(t) = timeout {
-                    builder = builder.timeout(tor_http_timeout(t));
-                }
-                if let Some(rt) = read_timeout {
-                    builder = builder.read_timeout(tor_http_timeout(rt));
-                }
+        self.rb = self.rb.header(key, value);
+        self
+    }
+
+    pub fn headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.rb = self.rb.headers(headers);
+        self
+    }
+
+    pub fn body<T: Into<reqwest::Body>>(mut self, body: T) -> Self {
+        self.rb = self.rb.body(body);
+        self
+    }
+
+    pub fn json<T: serde::Serialize + ?Sized>(mut self, json: &T) -> Self {
+        self.rb = self.rb.json(json);
+        self
+    }
+
+    pub fn query<T: serde::Serialize + ?Sized>(mut self, query: &T) -> Self {
+        self.rb = self.rb.query(query);
+        self
+    }
+
+    pub fn bearer_auth<T: std::fmt::Display>(mut self, token: T) -> Self {
+        self.rb = self.rb.bearer_auth(token);
+        self
+    }
+
+    pub fn basic_auth<U: std::fmt::Display, P: std::fmt::Display>(mut self, user: U, password: Option<P>) -> Self {
+        self.rb = self.rb.basic_auth(user, password);
+        self
+    }
+
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.rb = self.rb.timeout(timeout);
+        self
+    }
+
+    /// The browser's own cache stays out of it (Vector Web).
+    #[cfg(target_arch = "wasm32")]
+    pub fn fetch_cache_no_store(mut self) -> Self {
+        self.rb = self.rb.fetch_cache_no_store();
+        self
+    }
+
+    /// Ask the transport where this request may go, then run it there. A refusal opens no
+    /// socket and resolves nothing; a network change while it runs abandons it.
+    #[allow(clippy::disallowed_methods)]
+    pub async fn send(self) -> Result<Resp, HttpError> {
+        let (_, req) = self.rb.build_split();
+        let req = req.map_err(HttpError::from_reqwest)?;
+        let host = req.url().host_str().unwrap_or_default().to_string();
+        let port = req.url().port_or_known_default().unwrap_or(443);
+        let desc = self.client;
+        let (mut epoch, mut client) = (0, None);
+        // A decision raced by a switch is taken again, at most three times; past that the
+        // request runs on the last one and fails closed against its stale epoch.
+        for _ in 0..3 {
+            epoch = crate::transport::epoch();
+            let egress = crate::transport::egress(desc.owner, desc.lane, &host, port);
+            if let crate::transport::Egress::Refuse(e) = egress {
+                return Err(HttpError::Refused(e));
             }
-            crate::tor::TorTransportState::RequiredButInactive => {
-                // Tor failsafe: route to a blackhole so connections fail safe
-                // instead of leaking direct.
-                let url = format!("socks5h://{}", crate::tor::blackhole_proxy_addr());
-                let proxy = reqwest::Proxy::all(&url)
-                    .map_err(|e| format!("blackhole proxy invalid: {e}"))?;
-                builder = builder.proxy(proxy);
+            if desc.opts.no_direct && egress == crate::transport::Egress::Direct {
+                return Err(HttpError::Refused(crate::transport::ConnectError::Stale));
             }
-            crate::tor::TorTransportState::Disabled => {
-                // No proxy — user has Tor off.
+            client = Some(pooled(&desc, epoch, &egress)?);
+            if crate::transport::epoch() == epoch {
+                break;
             }
+        }
+        let client = client.expect("the loop ran");
+        // The change is polled first: a switch that lands before the first poll must stop the
+        // request before it resolves or dials anything.
+        let changed = crate::transport::changed(epoch);
+        let run = client.execute(req);
+        futures_util::pin_mut!(changed, run);
+        match futures_util::future::select(changed, run).await {
+            futures_util::future::Either::Left(_) => Err(HttpError::NetworkChanged),
+            futures_util::future::Either::Right((Ok(inner), _)) => Ok(Resp { inner, epoch, owner: desc.owner }),
+            futures_util::future::Either::Right((Err(e), _)) => Err(HttpError::from_reqwest_for(e, &host)),
+        }
+    }
+}
+
+/// A response body as a stream; `Send` natively, where the browser's isn't.
+#[cfg(not(target_arch = "wasm32"))]
+pub type BodyStream = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, HttpError>> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub type BodyStream = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, HttpError>>>>;
+
+/// A response whose body reads stop when the network it came over changes.
+pub struct Resp {
+    inner: reqwest::Response,
+    epoch: u64,
+    owner: u64,
+}
+
+impl Resp {
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.inner.status()
+    }
+
+    pub fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.inner.headers()
+    }
+
+    pub fn content_length(&self) -> Option<u64> {
+        self.inner.content_length()
+    }
+
+    pub fn url(&self) -> &reqwest::Url {
+        self.inner.url()
+    }
+
+    pub fn error_for_status(self) -> Result<Resp, HttpError> {
+        let (epoch, owner) = (self.epoch, self.owner);
+        self.inner.error_for_status().map(|inner| Resp { inner, epoch, owner }).map_err(HttpError::from_reqwest)
+    }
+
+    fn still_current(&self) -> bool {
+        crate::transport::epoch() == self.epoch && crate::db::live_session_id() == self.owner
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::disallowed_methods)]
+    pub async fn chunk(&mut self) -> Result<Option<bytes::Bytes>, HttpError> {
+        if !self.still_current() {
+            return Err(HttpError::NetworkChanged);
+        }
+        let changed = crate::transport::changed(self.epoch);
+        let read = self.inner.chunk();
+        futures_util::pin_mut!(read, changed);
+        match futures_util::future::select(read, changed).await {
+            futures_util::future::Either::Left((r, _)) => r.map_err(HttpError::from_reqwest),
+            futures_util::future::Either::Right(_) => Err(HttpError::NetworkChanged),
         }
     }
 
-    builder
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+    #[allow(clippy::disallowed_methods)]
+    pub fn bytes_stream(self) -> BodyStream {
+        use futures_util::StreamExt;
+        let (epoch, owner) = (self.epoch, self.owner);
+        let inner = Box::pin(self.inner.bytes_stream());
+        Box::pin(futures_util::stream::unfold((inner, false), move |(mut inner, done)| async move {
+            if done {
+                return None;
+            }
+            if crate::transport::epoch() != epoch || crate::db::live_session_id() != owner {
+                return Some((Err(HttpError::NetworkChanged), (inner, true)));
+            }
+            let changed = crate::transport::changed(epoch);
+            futures_util::pin_mut!(changed);
+            match futures_util::future::select(inner.next(), changed).await {
+                futures_util::future::Either::Left((Some(item), _)) => Some((item.map_err(HttpError::from_reqwest), (inner, false))),
+                futures_util::future::Either::Left((None, _)) => None,
+                futures_util::future::Either::Right(_) => Some((Err(HttpError::NetworkChanged), (inner, true))),
+            }
+        }))
+    }
+
+    async fn whole<T, F: std::future::Future<Output = Result<T, reqwest::Error>>>(epoch: u64, read: F) -> Result<T, HttpError> {
+        let changed = crate::transport::changed(epoch);
+        futures_util::pin_mut!(read, changed);
+        match futures_util::future::select(read, changed).await {
+            futures_util::future::Either::Left((r, _)) => r.map_err(HttpError::from_reqwest),
+            futures_util::future::Either::Right(_) => Err(HttpError::NetworkChanged),
+        }
+    }
+
+    pub async fn bytes(self) -> Result<bytes::Bytes, HttpError> {
+        if !self.still_current() {
+            return Err(HttpError::NetworkChanged);
+        }
+        Self::whole(self.epoch, self.inner.bytes()).await
+    }
+
+    pub async fn text(self) -> Result<String, HttpError> {
+        if !self.still_current() {
+            return Err(HttpError::NetworkChanged);
+        }
+        Self::whole(self.epoch, self.inner.text()).await
+    }
+
+    pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, HttpError> {
+        if !self.still_current() {
+            return Err(HttpError::NetworkChanged);
+        }
+        Self::whole(self.epoch, self.inner.json::<T>()).await
+    }
 }
 
-// ============================================================================
-// Shared HTTP client — proxy-aware + rebuildable on Tor toggle
-// ============================================================================
-//
-// Some call sites (image-cache fetches, PIVX wallet polling) make frequent
-// requests and benefit from a shared `reqwest::Client` to reuse connection
-// pools / TLS sessions. A bare `LazyLock<Client>` doesn't work for us because
-// a Tor toggle should affect future requests immediately — but the static is
-// frozen at first init. Instead, we hold an `Arc<Client>` behind a `RwLock`
-// and rebuild it via `rebuild_shared_http_client()` whenever the Tor state
-// changes. In-flight requests finish on the old Arc; new requests pick up
-// the new one.
-
-use std::sync::{Arc, OnceLock, RwLock};
-
-static SHARED_HTTP_CLIENT: OnceLock<RwLock<Arc<reqwest::Client>>> = OnceLock::new();
-
-const DEFAULT_SHARED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-fn shared_cell() -> &'static RwLock<Arc<reqwest::Client>> {
-    SHARED_HTTP_CLIENT.get_or_init(|| {
-        let client = build_http_client(DEFAULT_SHARED_TIMEOUT)
-            .expect("initial shared HTTP client build cannot fail");
-        RwLock::new(Arc::new(client))
-    })
+#[derive(Debug)]
+pub enum HttpError {
+    /// The transport refused before any socket opened.
+    Refused(crate::transport::ConnectError),
+    /// The network this request was on changed under it.
+    NetworkChanged,
+    Http { err: reqwest::Error, text: String },
 }
 
-/// Get a shared HTTP client. Cheap clone (Arc), proxy-aware, picks up Tor
-/// toggles on the next call after `rebuild_shared_http_client()` runs.
-pub fn shared_http_client() -> Arc<reqwest::Client> {
-    shared_cell().read().unwrap().clone()
+impl HttpError {
+    fn from_reqwest(err: reqwest::Error) -> Self {
+        HttpError::Http { text: err.to_string(), err }
+    }
+
+    /// reqwest's text, unless the transport recorded why it refused this host just now.
+    fn from_reqwest_for(err: reqwest::Error, host: &str) -> Self {
+        let recorded = crate::transport::host::active().and_then(|a| {
+            let (at, e) = a.last_failure(host)?;
+            let fresh = at.elapsed() < std::time::Duration::from_secs(30);
+            // Under Tor an arti failure keeps reqwest's own text, as it always read.
+            let keep_reqwest = a.kind == crate::transport::Kind::Tor && matches!(e, crate::transport::ConnectError::Unreachable(_));
+            (fresh && !keep_reqwest).then(|| e.text())
+        });
+        HttpError::Http { text: recorded.unwrap_or_else(|| err.to_string()), err }
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, HttpError::Http { err, .. } if err.is_timeout())
+    }
+
+    pub fn is_connect(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            matches!(self, HttpError::Http { err, .. } if err.is_connect())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    pub fn is_request(&self) -> bool {
+        matches!(self, HttpError::Http { err, .. } if err.is_request())
+    }
+
+    pub fn status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            HttpError::Http { err, .. } => err.status(),
+            _ => None,
+        }
+    }
+
+    /// The network will come back: a switch, or the chosen kind still connecting. A policy
+    /// refusal won't.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            HttpError::NetworkChanged => true,
+            HttpError::Refused(e) => e.is_transient(),
+            HttpError::Http { .. } => false,
+        }
+    }
+
+    /// A refusal by the transport's rules (I2P-Only, another network's name), which no retry fixes.
+    pub fn is_policy_refusal(&self) -> bool {
+        matches!(self, HttpError::Refused(crate::transport::ConnectError::Refused(_)))
+    }
 }
 
-/// Rebuild the shared client. Call this when Tor state flips so the next
-/// request goes through the freshly-configured proxy. In-flight requests on
-/// the old client continue to completion on the previous Arc.
-pub fn rebuild_shared_http_client() -> Result<(), String> {
-    forget_pooled_clients();
-    let new = Arc::new(build_http_client(DEFAULT_SHARED_TIMEOUT)?);
-    *shared_cell().write().unwrap() = new;
-    Ok(())
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpError::Refused(e) => f.write_str(&e.text()),
+            HttpError::NetworkChanged => f.write_str("The network changed."),
+            HttpError::Http { text, .. } => f.write_str(text),
+        }
+    }
+}
+
+impl std::error::Error for HttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HttpError::Http { err, .. } => Some(err),
+            _ => None,
+        }
+    }
+}
+
+/// Upload bodies: ends the stream with an error when the epoch or live session changes.
+pub fn guard_body<S, E>(
+    body: S,
+    epoch: u64,
+    owner: u64,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    crate::transport::guard::guard_body(body, epoch, owner)
+}
+
+/// Hold a transfer that hit a network change until the network is back, then let it resume.
+/// Policy refusals and other failures return at once with their text.
+pub async fn wait_after(e: &HttpError) -> Result<(), String> {
+    if !e.is_transient() {
+        return Err(e.to_string());
+    }
+    crate::transport::wait_ready(crate::transport::budget(crate::transport::Op::Startup, std::time::Duration::ZERO)).await
 }
 
 /// Find the byte index where a bracket/paren group opened at `start` closes,
@@ -771,12 +1119,11 @@ pub async fn egress(url: &str) -> Egress {
 
 /// A request for `url` on `client`, already pointed at the right place and
 /// carrying the proxy authorization when there is one.
-pub async fn proxied_request(client: &reqwest::Client, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+pub async fn proxied_request(client: &HttpClient, method: reqwest::Method, url: &str) -> Req {
     let e = egress(url).await;
-    let req = client.request(method, &e.url);
     match e.auth {
-        Some(v) => req.header(reqwest::header::AUTHORIZATION, v),
-        None => req,
+        Some(v) => client.with_lane(Lane::Account).request(method, &e.url).header(reqwest::header::AUTHORIZATION, v),
+        None => client.request(method, &e.url),
     }
 }
 
@@ -789,7 +1136,8 @@ pub async fn proxied_request(client: &reqwest::Client, method: reqwest::Method, 
 pub async fn remote_status(url: &str, timeout: std::time::Duration) -> Option<u16> {
     let e = egress(url).await;
     let client = build_http_client(timeout).ok()?;
-    let with = |req: reqwest::RequestBuilder| match &e.auth {
+    let client = if e.auth.is_some() { client.with_lane(Lane::Account) } else { client };
+    let with = |req: Req| match &e.auth {
         Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
         None => req,
     };

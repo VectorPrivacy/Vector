@@ -43,11 +43,8 @@ pub(crate) static DOWNLOADS_IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = Lazy
 /// Maximum entries in DOWNLOADS_IN_PROGRESS before forced cleanup
 const MAX_IN_PROGRESS_ENTRIES: usize = 100;
 
-/// HTTP client accessor — proxy-aware (Tor) and rebuildable on toggle.
-/// `vector_core::net::shared_http_client` returns an `Arc<Client>` that's
-/// cheap to clone; the underlying client is swapped wholesale when Tor
-/// flips so the next call goes through the freshly-configured proxy.
-fn http_client() -> std::sync::Arc<reqwest::Client> {
+/// A client descriptor: each request takes the egress of the network in use when it is sent.
+fn http_client() -> std::sync::Arc<vector_core::net::HttpClient> {
     vector_core::net::shared_http_client()
 }
 

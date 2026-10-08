@@ -369,6 +369,7 @@ pub fn set_nostr_client_if_absent(client: Client) -> bool {
 #[inline]
 pub fn set_my_public_key(pk: PublicKey) {
     *active_identity().write().unwrap() = Some(pk);
+    crate::transport::prelogin::note_identity(&pk);
 }
 
 /// Atomically take the current Nostr client out of global state.
@@ -509,6 +510,8 @@ mod session_globals_tests {
     /// touching `MY_PUBLIC_KEY`/`PENDING_INVITE` lives here.
     #[test]
     fn session_helpers_round_trip_and_clear() {
+        // It swaps the live session, which every transport test reads.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Defensive cleanup: a previous test panic could have left global
         // state behind. Start every run from a known-empty baseline so the
         // assertions below aren't fooled by leftover values.

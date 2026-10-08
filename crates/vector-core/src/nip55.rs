@@ -648,7 +648,10 @@ mod tests {
     // `atomic_state_round_trips_and_drains` / `watched_signer_session_gate...`
     // in signer.rs.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn global_state_session_gate_and_missing_backend() {
+        // It swaps the live session, which every transport test reads.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
 
         // Defensive reset (a prior panic could have left state dirty).
         set_nip55_state(Nip55State::Idle);

@@ -572,8 +572,9 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
     let model_size = model_def.size;
     println!("Downloading {} model ({}, ~{}MB), please wait...", model_name, model_filename, model_size);
     
-    // Tor-aware build — model download routes through Tor when enabled.
-    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(3600))
+    // Bounded by progress, not a deadline: a 1 GB model over an anonymity network takes hours,
+    // and a network switch resumes it from the bytes on disk.
+    let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     
     // Use the model's configured URL (FUTO CDN for ACFT models, HuggingFace for stock models)
@@ -629,9 +630,14 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
     
     // Get content length
     let total_size = response.content_length().unwrap_or(0);
+    let mut response = response;
 
-    let mut file = std::fs::File::create(&model_path)?;
+    // Bytes land beside the model and take its name only once whole: an existing model file is
+    // read as complete.
+    let part_path = model_path.with_extension("part");
+    let mut file = std::fs::File::create(&part_path)?;
     let mut downloaded: u64 = 0;
+    let mut network_waits = 0u8;
 
     // Reset cancellation flag before starting
     DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
@@ -642,52 +648,72 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
 
     // Stream chunks and write to file
     println!("Starting to download chunks...");
-    let mut stream = response.bytes_stream();
-    while let Some(chunk_result) = stream.next().await {
-        // Check for cancellation
-        if DOWNLOAD_CANCELLED.load(Ordering::SeqCst) {
-            DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
-            drop(file);
-            let _ = std::fs::remove_file(&model_path);
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Interrupted, "Download cancelled")));
-        }
-
-        match chunk_result {
-            Ok(chunk) => {
-                std::io::Write::write_all(&mut file, &chunk)?;
-                downloaded += chunk.len() as u64;
-
-                // Emit progress on every percentage change
-                if let Some(percent) = (downloaded * 100).checked_div(total_size) {
-                    if percent != last_percent {
-                        last_percent = percent;
-                        let elapsed = start_time.elapsed().as_secs_f64();
-                        let speed_bps = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
-
-                        let _ = handle.emit("whisper_download_progress", serde_json::json!({
-                            "progress": percent,
-                            "downloaded_bytes": downloaded,
-                            "total_bytes": total_size,
-                            "speed_bps": speed_bps as u64
-                        }));
-
-                        print!("\rDownloading: {}% ({:.1}/{:.1} MB)",
-                               percent,
-                               downloaded as f64 / (1024.0 * 1024.0),
-                               total_size as f64 / (1024.0 * 1024.0));
-                        io::stdout().flush()?;
-                    }
-                }
-            },
-            Err(e) => {
-                println!("\nError downloading chunk: {}", e);
+    'resume: loop {
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            // Check for cancellation
+            if DOWNLOAD_CANCELLED.load(Ordering::SeqCst) {
+                DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
                 drop(file);
-                let _ = std::fs::remove_file(&model_path);
-                return Err(Box::new(std::io::Error::other(format!("Failed to download chunk: {}", e))));
+                let _ = std::fs::remove_file(&part_path);
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted, "Download cancelled")));
+            }
+
+            match chunk_result {
+                Ok(chunk) => {
+                    std::io::Write::write_all(&mut file, &chunk)?;
+                    downloaded += chunk.len() as u64;
+
+                    // Emit progress on every percentage change
+                    if let Some(percent) = (downloaded * 100).checked_div(total_size) {
+                        if percent != last_percent {
+                            last_percent = percent;
+                            let elapsed = start_time.elapsed().as_secs_f64();
+                            let speed_bps = if elapsed > 0.0 { downloaded as f64 / elapsed } else { 0.0 };
+
+                            let _ = handle.emit("whisper_download_progress", serde_json::json!({
+                                "progress": percent,
+                                "downloaded_bytes": downloaded,
+                                "total_bytes": total_size,
+                                "speed_bps": speed_bps as u64
+                            }));
+
+                            print!("\rDownloading: {}% ({:.1}/{:.1} MB)",
+                                   percent,
+                                   downloaded as f64 / (1024.0 * 1024.0),
+                                   total_size as f64 / (1024.0 * 1024.0));
+                            io::stdout().flush()?;
+                        }
+                    }
+                },
+                Err(e) => {
+                    println!("\nError downloading chunk: {}", e);
+                    // A network switch: wait for the new network, then ask for the rest.
+                    if e.is_transient() && network_waits < 8 && vector_core::net::wait_after(&e).await.is_ok() {
+                        network_waits += 1;
+                        let resumed = client
+                            .get(&urls[0])
+                            .header(reqwest::header::RANGE, format!("bytes={downloaded}-"))
+                            .send()
+                            .await;
+                        if let Ok(r) = resumed {
+                            if r.status().as_u16() == 206 {
+                                response = r;
+                                continue 'resume;
+                            }
+                        }
+                    }
+                    drop(file);
+                    let _ = std::fs::remove_file(&part_path);
+                    return Err(Box::new(std::io::Error::other(format!("Failed to download chunk: {}", e))));
+                }
             }
         }
+        break;
     }
+    drop(file);
+    std::fs::rename(&part_path, &model_path)?;
 
     println!("\nModel downloaded to: {}", model_path.display());
 

@@ -93,6 +93,8 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 # HTTP
 url = "2.5.7"
+# Header bounds on the per-request client's builder (`net::Req`); the version reqwest itself uses.
+http = "1"
 
 # Image metadata
 fast-thumbhash = "0.2"
@@ -126,9 +128,19 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.49.0", features = ["net", "rt-multi-thread"] }
+# The transport's relay socket (`transport::ws`): the same SOCKS client, TCP connect and
+# WebSocket upgrade nostr-sdk's default transport uses (all already in the tree through it),
+# so the Direct path stays byte-identical. TLS features unify with async-wsocket's ring roots.
+tokio-socks = "0.5"
+tokio-happy-eyeballs = "0.1"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake", "stream", "rustls-tls-webpki-roots"] }
+async-wsocket = { version = "0.17", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "socks", "http2"] }
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+# I2P twin checks: a TLS handshake for the server's own name over an I2P stream.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 # Platform
 libc = "0.2"
 
@@ -152,10 +164,13 @@ calls = ["dep:iroh"]
 # Mini App (WebXDC) realtime sessions, for every client: join a game's Iroh gossip
 # topic, find its players over Nostr, read `.xdc` manifests. See `xdc`.
 xdc = ["dep:iroh", "dep:iroh-gossip", "dep:noq-proto", "dep:zip", "dep:toml"]
-# Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
-# bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
-# `tor::proxy_url()` returning `Some(socks5h://127.0.0.1:<port>)` when active.
+# Embedded Tor (Arti), one kind on the transport meta-glue (`transport`): every relay and HTTP
+# connection reaches it through the process bridge.
 tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-proto", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
+# I2P over a router the user already runs, through its SAMv3 bridge (`i2p`). Our own SAM client,
+# so the only new code is the twin check's TLS: both crates are already in the tree, and with
+# default features off aws-lc never enters it.
+i2p = ["dep:tokio-rustls", "dep:webpki-roots"]
 
 [dev-dependencies]
 # Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.

@@ -360,6 +360,12 @@ pub fn forget_warmed_relay(url: &str) {
     WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.remove(url);
 }
 
+/// A network switch: every warm socket and breaker verdict belonged to the old route.
+pub fn on_transport_switch() {
+    WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+    RELAY_BREAKER.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+}
+
 /// Per-relay failure tracker behind the fetch circuit breaker. Generation-keyed
 /// like [`WARMED_RELAYS`] (an account swap invalidates every entry). A trip is
 /// driven ONLY by consecutive failures at the relay's FULL timeout budget:
@@ -589,18 +595,11 @@ fn plane_pool_insert(generation: u64, key: String, client: Client) -> Vec<Client
     evicted
 }
 
-/// Whether Full-drain timeout demotion may apply. Under Tor EVERY relay is
-/// legitimately slow — a first congested pass must not cascade into pool-wide
-/// starvation, so demotion is disabled entirely.
+/// Whether Full-drain timeout demotion may apply. Over an anonymity network EVERY relay is
+/// legitimately slow — a first congested pass must not cascade into pool-wide starvation, so
+/// demotion applies on Clearnet only.
 fn demotion_allowed() -> bool {
-    #[cfg(feature = "tor")]
-    {
-        matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled)
-    }
-    #[cfg(not(feature = "tor"))]
-    {
-        true
-    }
+    crate::transport::preference() == Some(crate::transport::Kind::Clearnet)
 }
 
 /// Dial every held community's relay set on the shared warm client, ahead of
@@ -822,37 +821,33 @@ impl UnionPlan {
     }
 }
 
-/// Max time a community network op holds while Tor is enabled-but-not-yet-
-/// bootstrapped. Generous enough for a circuit to land on a normal connection,
-/// bounded so a Tor that never comes up can't hang the op forever.
-#[cfg(feature = "tor")]
-const TOR_READY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Poll `is_blocked` until it clears or `max_wait` elapses.
-///
-/// When Tor is enabled but its SOCKS proxy isn't up yet, `transport_state()` is
-/// `RequiredButInactive` and every relay is routed to the blackhole proxy, so a
-/// send fails at the TCP layer INSTANTLY — surfacing as a misleading "no relay
-/// accepted the event" with zero network wait. Holding here turns that into
-/// either success (once the circuit lands) or an honest "Tor is still
-/// connecting" error. Generic over the predicate so it is testable without a
-/// live Tor.
-#[allow(dead_code)]
-async fn wait_until_tor_ready<F: Fn() -> bool>(
-    is_blocked: F,
-    max_wait: std::time::Duration,
-) -> Result<(), String> {
-    if !is_blocked() {
-        return Ok(());
-    }
-    let deadline = web_time::Instant::now() + max_wait;
-    while is_blocked() {
-        if web_time::Instant::now() >= deadline {
-            return Err("Tor is still connecting. Wait a moment and try again.".to_string());
+/// Hold a community network op while the chosen network is still connecting, bounded by its
+/// ready-wait budget: a refused send would otherwise read as "no relay accepted the event".
+async fn wait_transport_ready() -> Result<(), String> {
+    let budget = crate::transport::budget(crate::transport::Op::ReadyWait, std::time::Duration::ZERO);
+    crate::transport::wait_ready(budget).await.map_err(|why| {
+        // A block only the user can lift says so; waiting longer would not help.
+        if crate::transport::status::waits_for_user() {
+            return why;
         }
-        crate::rt::time::sleep(std::time::Duration::from_millis(250)).await;
+        let label = crate::transport::preference().map_or("Vector", crate::transport::Kind::label);
+        format!("{label} is still connecting. Wait a moment and try again.")
+    })
+}
+
+/// Targets the account's network can never reach (another network's names, I2P-Only) leave the
+/// set, like a dead socket: they were never part of the reachable denominator. An all-refused
+/// set fails with the reason.
+fn drop_refused(targets: Vec<String>) -> Result<Vec<String>, String> {
+    if targets.is_empty() {
+        return Ok(targets);
     }
-    Ok(())
+    let reachable: Vec<String> = targets.iter().filter(|r| crate::transport::refuses(r).is_none()).cloned().collect();
+    if reachable.is_empty() {
+        let label = crate::transport::preference().map_or("this network", crate::transport::Kind::label);
+        return Err(format!("None of this community's relays are reachable on {label}."));
+    }
+    Ok(reachable)
 }
 
 /// Shed pooled Community relays from `candidates` that no JOINED community still needs. Used by both
@@ -937,16 +932,9 @@ impl LiveTransport {
         if relays.is_empty() {
             return Err("community has no relays configured".to_string());
         }
-        // Tor gate — runs BEFORE the warmed-cache fast path so a relay warmed
-        // before Tor was toggled on still waits. While Tor is enabled but not yet
-        // bootstrapped, every relay points at the blackhole proxy and a send
-        // fails instantly; hold for the circuit, then fail honestly if it never
-        // comes up (see `wait_until_tor_ready`).
-        #[cfg(feature = "tor")]
-        wait_until_tor_ready(
-            || matches!(crate::tor::transport_state(), crate::tor::TorTransportState::RequiredButInactive),
-            TOR_READY_WAIT,
-        ).await?;
+        // Before the warmed-cache fast path, so a relay warmed before a switch still waits:
+        // while the chosen network is connecting every relay connect is refused at once.
+        wait_transport_ready().await?;
         let client = crate::state::nostr_client().ok_or_else(|| "nostr client not initialized".to_string())?;
 
         // Fast path: every one of these relays was already warmed this session → the pool holds and
@@ -1036,6 +1024,7 @@ impl LiveTransport {
                 targets.push(r.clone());
             }
         }
+        let mut targets = drop_refused(targets)?;
         // Even a Full drain skips a DEAD socket: with pool auto-reconnect off, a
         // Terminated relay cannot answer this call no matter how long we wait, so
         // its timeout buys byte-identical evidence to skipping it — and paid per
@@ -1220,6 +1209,7 @@ impl Transport for LiveTransport {
         let timeout = self.timeout;
         let mut targets: Vec<String> = Vec::new();
         for r in relays { if !targets.contains(r) { targets.push(r.clone()); } }
+        targets = drop_refused(targets)?;
         // A dead socket can't ACK and won't be revived mid-send — don't spawn at it.
         targets = drop_unrevivable_targets(&client, targets).await;
         // Fan out one send per relay and RETURN on the first ACK — never wait for the slowest relay (a
@@ -1257,15 +1247,12 @@ impl Transport for LiveTransport {
         if relays.is_empty() {
             return Ok(PlaneFetch { events: Vec::new(), answered: 0, attempted: 0 });
         }
-        #[cfg(feature = "tor")]
-        wait_until_tor_ready(
-            || matches!(crate::tor::transport_state(), crate::tor::TorTransportState::RequiredButInactive),
-            TOR_READY_WAIT,
-        ).await?;
+        wait_transport_ready().await?;
         // Skip relays the shared breaker already knows are dead — don't even pay
         // their connect handshake + warmup + timeout (the v1 sweep / DM negentropy
         // trip them early, so by the time a v2 backfill runs they're usually
         // marked). Keep all if that would leave none — a slow fetch beats no fetch.
+        let relays = drop_refused(relays.to_vec())?;
         let mut targets: Vec<String> = relays.iter().filter(|r| !breaker_tripped(r)).cloned().collect();
         if targets.is_empty() {
             targets = relays.to_vec();
@@ -1286,10 +1273,11 @@ impl Transport for LiveTransport {
             // Authenticates as the PLANE key, not the user — hence its own
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
-            let client = crate::apply_tor_proxy(
+            let client = crate::apply_transport(
                 nostr_sdk::prelude::Client::builder().authenticator(
                     nostr_sdk::prelude::SignerAuthenticator::new(plane.clone()),
                 ),
+                crate::transport::Lane::Shared,
             )
             .build();
             // Community relay options (GOSSIP|PING + Tor-aware ConnectionMode): a
@@ -1378,6 +1366,7 @@ impl Transport for LiveTransport {
         if pending.is_empty() {
             return Err("no relays to broadcast to".to_string());
         }
+        let mut pending = drop_refused(pending)?;
 
         // Phase 1 — CONFIRM: RACE the relays and return the instant ANY one ACKs — never wait for the
         // slowest. `send_event_to(all)` blocks on the slowest relay (a distant/ratelimited one dominates the
@@ -1812,36 +1801,122 @@ mod tests {
         assert_eq!(out, targets);
     }
 
-    // ── Tor gate (community publish over a not-yet-bootstrapped Tor) ──────────
-    // Hermetic: drives `wait_until_tor_ready` with an injected predicate, so no
-    // live Tor is needed and the result is deterministic.
+    // ── Ready gate (community publish while the chosen network still connects) ──
+    // The live gate, `wait_transport_ready`, over the real transport state: a network installed
+    // by hand stands in for Tor, so no live Tor is needed.
+
+    /// A network that is up or not as the test says, and dials nothing.
+    struct Gate(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl crate::transport::Transport for Gate {
+        fn kind(&self) -> crate::transport::Kind {
+            crate::transport::Kind::Tor
+        }
+        fn route(&self, dest: &crate::transport::Dest, port: u16, ctx: &crate::transport::RouteCtx) -> crate::transport::Route {
+            crate::transport::route::route_tor(dest, port, ctx)
+        }
+        async fn dial(
+            &self,
+            _: &crate::transport::Route,
+            _: crate::transport::Lane,
+        ) -> Result<(crate::transport::BoxedStream, crate::transport::Dialed), crate::transport::ConnectError> {
+            Err(crate::transport::ConnectError::Unreachable("gate".into()))
+        }
+        fn ready(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn kind_status(&self) -> crate::transport::status::KindStatus {
+            crate::transport::status::KindStatus::ready(serde_json::Value::Null)
+        }
+        async fn new_identity(&self) {}
+        async fn shutdown(&self) {}
+        fn into_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+            self
+        }
+    }
+
+    /// Holds the process-wide network for one test and puts Clearnet back however it ends.
+    struct GateScene(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl GateScene {
+        fn new() -> Self {
+            let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            drop(crate::transport::host::uninstall());
+            GateScene(guard)
+        }
+    }
+
+    impl Drop for GateScene {
+        fn drop(&mut self) {
+            drop(crate::transport::host::uninstall());
+            crate::transport::budget::clear_overrides_for_test();
+            crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
+        }
+    }
 
     #[tokio::test]
-    async fn tor_gate_passes_immediately_when_not_blocked() {
+    #[allow(clippy::await_holding_lock)]
+    async fn ready_gate_passes_at_once_when_nothing_holds_traffic() {
+        let _s = GateScene::new();
+        crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
         let start = web_time::Instant::now();
-        let res = wait_until_tor_ready(|| false, std::time::Duration::from_secs(30)).await;
-        assert!(res.is_ok());
-        assert!(start.elapsed() < std::time::Duration::from_secs(1), "must not wait when Tor is ready");
+        assert!(wait_transport_ready().await.is_ok());
+        crate::transport::set_preference(Some(crate::transport::Kind::Tor));
+        let gate = std::sync::Arc::new(Gate(std::sync::atomic::AtomicBool::new(true)));
+        crate::transport::host::activate(gate, crate::db::live_session_id(), false).unwrap();
+        assert!(wait_transport_ready().await.is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_millis(500), "must not wait while ready");
     }
 
     #[tokio::test]
-    async fn tor_gate_errors_honestly_after_timeout_when_perpetually_blocked() {
-        // The bug: without this gate the send failed INSTANTLY with a misleading
-        // "no relay accepted". Now it waits the window, then names the real cause.
-        let res = wait_until_tor_ready(|| true, std::time::Duration::from_millis(300)).await;
-        let err = res.expect_err("should error when Tor never activates");
-        assert!(err.to_lowercase().contains("tor"), "error must name Tor, got: {err}");
+    #[allow(clippy::await_holding_lock)]
+    async fn ready_gate_errors_honestly_after_its_window() {
+        // Without the gate a send failed at once with a misleading "no relay accepted"; with
+        // it, it waits the window and then names the cause.
+        let _s = GateScene::new();
+        crate::transport::budget::override_for_test(crate::transport::Op::ReadyWait, Some(std::time::Duration::from_millis(300)));
+        crate::transport::set_preference(Some(crate::transport::Kind::Tor));
+        let gate = std::sync::Arc::new(Gate(std::sync::atomic::AtomicBool::new(false)));
+        crate::transport::host::activate(gate, crate::db::live_session_id(), false).unwrap();
+        let start = web_time::Instant::now();
+        let err = wait_transport_ready().await.expect_err("Tor never comes up");
+        assert_eq!(err, "Tor is still connecting. Wait a moment and try again.");
+        let took = start.elapsed();
+        assert!(took >= std::time::Duration::from_millis(300) && took < std::time::Duration::from_millis(1500), "{took:?}");
+
+        // A network this build lacks never comes: no wait, and its own words.
+        if !crate::transport::Kind::Tor.compiled() {
+            drop(crate::transport::host::uninstall());
+            let start = web_time::Instant::now();
+            assert_eq!(wait_transport_ready().await.unwrap_err(), "This build doesn't include Tor.");
+            assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        }
     }
 
-    #[tokio::test]
-    async fn tor_gate_passes_once_circuit_comes_up_mid_wait() {
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        // Blocked for the first 3 polls, then Tor becomes ready.
-        let res = wait_until_tor_ready(
-            || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3,
-            std::time::Duration::from_secs(5),
-        ).await;
-        assert!(res.is_ok(), "should succeed once Tor activates within the window");
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn ready_gate_passes_once_the_network_comes_up_mid_wait() {
+        let _s = GateScene::new();
+        crate::transport::budget::override_for_test(crate::transport::Op::ReadyWait, Some(std::time::Duration::from_secs(10)));
+        crate::transport::set_preference(Some(crate::transport::Kind::Tor));
+        let gate = std::sync::Arc::new(Gate(std::sync::atomic::AtomicBool::new(false)));
+        let inst = crate::transport::host::activate(gate.clone(), crate::db::live_session_id(), false).unwrap();
+        let id = inst.id();
+        let up = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            gate.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::transport::host::notify(crate::transport::host::TransportEvent::Ready {
+                kind: crate::transport::Kind::Tor,
+                instance: id,
+                owner: crate::db::live_session_id(),
+                recovered: false,
+            });
+        });
+        let start = web_time::Instant::now();
+        assert!(wait_transport_ready().await.is_ok(), "passes once the network is up");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "woken by the change, not the window");
+        up.await.unwrap();
     }
 
     fn evt(kind: u16, z: &str) -> Event {

@@ -48,9 +48,8 @@ const PROMO_KEY_ITERATIONS: u32 = 12_500_000;
 /// Balance cache TTL (60 seconds)
 const BALANCE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// HTTP client accessor for Blockbook API calls — proxy-aware (Tor) and
-/// rebuildable on toggle via `vector_core::net::rebuild_shared_http_client`.
-fn pivx_http_client() -> std::sync::Arc<reqwest::Client> {
+/// Blockbook's client: a descriptor, so each request takes the egress of the network in use.
+fn pivx_http_client() -> std::sync::Arc<vector_core::net::HttpClient> {
     vector_core::net::shared_http_client()
 }
 

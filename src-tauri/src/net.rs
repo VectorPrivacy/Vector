@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 
 use futures_util::StreamExt;
-use reqwest::{self, Client};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
@@ -136,11 +135,19 @@ impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
     }
 }
 
-/// Attach a proxied request's signed authorization, when there is one.
-fn with_auth(req: reqwest::RequestBuilder, auth: Option<&reqwest::header::HeaderValue>) -> reqwest::RequestBuilder {
+/// A GET for `url`, carrying a proxied request's signed authorization when there is one. Signed,
+/// it identifies the user, so it rides the Account lane.
+fn get_with_auth(
+    client: &vector_core::net::HttpClient,
+    url: &str,
+    auth: Option<&reqwest::header::HeaderValue>,
+) -> vector_core::net::Req {
     match auth {
-        Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
-        None => req,
+        Some(v) => client
+            .with_lane(vector_core::net::Lane::Account)
+            .get(url)
+            .header(reqwest::header::AUTHORIZATION, v.clone()),
+        None => client.get(url),
     }
 }
 
@@ -206,7 +213,7 @@ pub async fn download_to_file(
 
     validate_url_not_private(content_url)?;
     let vector_core::net::Egress { url: fetch_url, auth } = vector_core::net::egress(content_url).await;
-    let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::TRANSFER_STALL), true)
+    let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true)
         .map_err(|_| "Failed to create HTTP client")?;
     if let Some(dir) = part.parent() {
         std::fs::create_dir_all(dir).map_err(|_| "Failed to prepare the download")?;
@@ -218,19 +225,31 @@ pub async fn download_to_file(
         return Ok(at.offset);
     }
     // Two passes at most: a server that answers the range with the wrong bytes is
-    // asked once more for the whole file.
-    for _ in 0..2 {
+    // asked once more for the whole file. A network switch resumes from the checkpoint once the
+    // new network is ready, spending no pass.
+    let mut passes = 0;
+    let mut network_waits = 0u8;
+    while passes < 2 {
+        passes += 1;
         if reporter.cancelled() {
             return Err(TRANSFER_CANCELLED);
         }
-        let mut request = with_auth(client.get(&fetch_url), auth.as_ref());
+        let mut request = get_with_auth(&client, &fetch_url, auth.as_ref());
         if at.offset > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={}-", at.offset));
         }
-        let res = request.send().await.map_err(|e| {
-            vector_core::log_warn!("[AttachmentDownload] request failed for {}: {}", fetch_url, e);
-            "Failed to download"
-        })?;
+        let res = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                vector_core::log_warn!("[AttachmentDownload] request failed for {}: {}", fetch_url, e);
+                if e.is_transient() && network_waits < 8 && vector_core::net::wait_after(&e).await.is_ok() {
+                    network_waits += 1;
+                    passes -= 1;
+                    continue;
+                }
+                return Err("Failed to download");
+            }
+        };
 
         let status = res.status().as_u16();
         let (start, total) = match status {
@@ -317,12 +336,18 @@ pub async fn download_to_file(
         }
 
         let mut stream = res.bytes_stream();
+        let mut resume = false;
         while let Some(item) = stream.next().await {
             let chunk = match item {
                 Ok(c) => c,
                 Err(e) => {
                     vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", fetch_url, e);
                     let _ = settle(&mut file, part, Checkpoint { offset: written, total }).await;
+                    if e.is_transient() && network_waits < 8 && vector_core::net::wait_after(&e).await.is_ok() {
+                        network_waits += 1;
+                        resume = true;
+                        break;
+                    }
                     return Err("Error downloading chunk");
                 }
             };
@@ -339,6 +364,11 @@ pub async fn download_to_file(
                 let _ = settle(&mut file, part, Checkpoint { offset: written, total }).await;
                 return Err(e);
             }
+        }
+        if resume {
+            at = Checkpoint { offset: written, total };
+            passes -= 1;
+            continue;
         }
         settle(&mut file, part, Checkpoint { offset: written, total: total.or(Some(written)) }).await?;
         if total.is_some_and(|t| written < t) {
@@ -383,32 +413,56 @@ pub async fn download_with_reporter(
     // finishes and only a body that stops moving is abandoned.
     let client = vector_core::net::build_http_client_with_options(
         timeout,
-        Some(vector_core::net::TRANSFER_STALL),
+        Some(vector_core::net::transfer_stall()),
         true,
     )
     .map_err(|_| "Failed to create HTTP client")?;
 
-    // One GET: its Content-Length sizes the progress, so no probe round trips go first.
-    download_with_streaming(&client, &fetch_url, reporter, authorization.as_ref()).await
+    // One GET: its Content-Length sizes the progress, so no probe round trips go first. A
+    // network switch starts it again once the new network is ready.
+    let mut network_waits = 0u8;
+    loop {
+        match download_with_streaming(&client, &fetch_url, reporter, authorization.as_ref()).await {
+            Err(Interrupted::Network(e)) if network_waits < 8 && vector_core::net::wait_after(&e).await.is_ok() => {
+                network_waits += 1;
+            }
+            Err(Interrupted::Network(_)) => return Err("Failed to download"),
+            Err(Interrupted::Failed(e)) => return Err(e),
+            Ok(bytes) => return Ok(bytes),
+        }
+    }
+}
+
+/// Why a streamed download stopped.
+enum Interrupted {
+    /// The network changed under it, or is still connecting.
+    Network(vector_core::net::HttpError),
+    Failed(&'static str),
+}
+
+impl From<&'static str> for Interrupted {
+    fn from(e: &'static str) -> Self {
+        Interrupted::Failed(e)
+    }
 }
 
 /// Downloads using a streaming approach with progress reporting
 async fn download_with_streaming(
-    client: &Client,
+    client: &vector_core::net::HttpClient,
     url: &str,
     reporter: &impl ProgressReporter,
     auth: Option<&reqwest::header::HeaderValue>,
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<Vec<u8>, Interrupted> {
     if reporter.cancelled() {
-        return Err(TRANSFER_CANCELLED);
+        return Err(TRANSFER_CANCELLED.into());
     }
-    let res = with_auth(client.get(url), auth)
-        .send()
-        .await
-        .map_err(|e| {
+    let res = match get_with_auth(client, url, auth).send().await {
+        Ok(r) => r,
+        Err(e) => {
             vector_core::log_warn!("[AttachmentDownload] request failed for {}: {}", url, e);
-            "Failed to download"
-        })?;
+            return Err(if e.is_transient() { Interrupted::Network(e) } else { Interrupted::Failed("Failed to download") });
+        }
+    };
 
     // A non-2xx (commonly 404 for a blob deleted/expired on the media server)
     // still returns Ok from send() and would otherwise stream the error page,
@@ -417,12 +471,12 @@ async fn download_with_streaming(
         // A 404/expired blob is a normal outcome (favicons, missing previews, GC'd
         // media) — debug, not a warning, so the default log isn't flooded.
         vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
-        return Err("Media server returned an error status");
+        return Err("Media server returned an error status".into());
     }
 
     let total_size = res.content_length().filter(|&n| n > 0);
     if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
-        return Err("File exceeds the maximum download size");
+        return Err("File exceeds the maximum download size".into());
     }
     let started = std::time::Instant::now();
 
@@ -438,17 +492,20 @@ async fn download_with_streaming(
 
     while let Some(item) = stream.next().await {
         if reporter.cancelled() {
-            return Err(TRANSFER_CANCELLED);
+            return Err(TRANSFER_CANCELLED.into());
         }
-        let chunk = item.map_err(|e| {
-            vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", url, e);
-            "Error downloading chunk"
-        })?;
+        let chunk = match item {
+            Ok(c) => c,
+            Err(e) => {
+                vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", url, e);
+                return Err(if e.is_transient() { Interrupted::Network(e) } else { Interrupted::Failed("Error downloading chunk") });
+            }
+        };
 
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
         if downloaded > MAX_DOWNLOAD_BYTES {
-            return Err("File exceeds the maximum download size");
+            return Err("File exceeds the maximum download size".into());
         }
 
         // Report progress
@@ -485,13 +542,13 @@ async fn download_with_streaming(
 
 
 /// Fetch metadata specifically for Twitter/X posts using their oEmbed API
-async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
+async fn fetch_twitter_metadata(url: &str, direct: bool) -> Result<SiteMetadata, String> {
     validate_url_not_private(url).map_err(|e| e.to_string())?;
     // Use Twitter's oEmbed API for reliable metadata extraction
     let encoded_url = url.replace("&", "%26").replace("?", "%3F").replace("=", "%3D");
     let oembed_url = format!("https://publish.twitter.com/oembed?url={}", encoded_url);
     
-    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(10))?;
+    let client = preview_client(std::time::Duration::from_secs(10), direct)?;
 
     let response = client
         .get(&oembed_url)
@@ -539,10 +596,26 @@ async fn fetch_twitter_metadata(url: &str) -> Result<SiteMetadata, String> {
 }
 
 pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
+    fetch_site_metadata_with(url, true).await
+}
+
+/// [`fetch_site_metadata`] that never goes direct, for a page fetched only because the account
+/// was on an anonymity network when it asked.
+pub async fn fetch_site_metadata_off_clearnet(url: &str) -> Result<SiteMetadata, String> {
+    fetch_site_metadata_with(url, false).await
+}
+
+/// A preview client: never direct when `direct` is false.
+fn preview_client(timeout: std::time::Duration, direct: bool) -> Result<vector_core::net::HttpClient, String> {
+    let client = vector_core::net::build_http_client(timeout)?;
+    Ok(if direct { client } else { client.without_direct() })
+}
+
+async fn fetch_site_metadata_with(url: &str, direct: bool) -> Result<SiteMetadata, String> {
     validate_url_not_private(url).map_err(|e| e.to_string())?;
     // Check if this is a Twitter/X URL and use specialized handler
     if url.contains("twitter.com") || url.contains("x.com") {
-        return fetch_twitter_metadata(url).await;
+        return fetch_twitter_metadata(url, direct).await;
     }
     
     // Extract and normalize domain (zero-alloc scan, no Vec<&str>)
@@ -572,7 +645,7 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
     let mut html_chunk = Vec::new();
 
     // Tor-aware: when Tor is on, this routes through the SOCKS proxy.
-    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(15))?;
+    let client = preview_client(std::time::Duration::from_secs(15), direct)?;
     let mut response = client
         .get(url)
         .header("Range", "bytes=0-32768")

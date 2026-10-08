@@ -316,10 +316,12 @@ async fn fetch_event(r: &EmbedRef) -> Option<Event> {
         }
     }
 
-    // Hints and the author's outbox are chosen by whoever sent the reference: off Tor with the
-    // privacy proxy on, dialing them would hand that sender this device's address.
+    // Hints and the author's outbox are chosen by whoever sent the reference: on Clearnet with
+    // the privacy proxy on, dialing them would hand that sender this device's address.
     let mut relays: Vec<RelayUrl> = Vec::new();
-    if may_dial_strangers() {
+    let decided = crate::transport::preference();
+    let strangers = may_dial_strangers();
+    if strangers {
         relays.extend(r.hints().iter().filter(|u| dialable(u)).take(4).cloned());
         if let (Some(client), Some(author)) = (&client, r.author()) {
             let outbox = crate::emoji_packs::fetch_author_write_relays(client, author).await;
@@ -338,8 +340,19 @@ async fn fetch_event(r: &EmbedRef) -> Option<Event> {
     relays.truncate(MAX_REMOTE_RELAYS);
 
     let _lane = REMOTE_LANE.acquire().await.ok();
+    // The wait for a lane can be long: a switch meanwhile leaves only the public relays, and
+    // strangers' relays allowed only off Clearnet are never dialed direct, however late it lands.
+    let mut off_clearnet_only = strangers && crate::proxy::enabled();
+    if strangers && (crate::transport::preference() != decided || !may_dial_strangers()) {
+        relays.retain(|u| PUBLIC_RELAYS.contains(&u.as_str().trim_end_matches('/')));
+        off_clearnet_only = false;
+    }
     // No authenticator: a relay that asks who is reading learns nothing about the user.
-    let scratch = crate::apply_tor_proxy(ClientBuilder::new()).build();
+    let scratch = if off_clearnet_only {
+        crate::transport::ws::apply_transport_without_direct(ClientBuilder::new(), crate::transport::Lane::Shared).build()
+    } else {
+        crate::apply_transport(ClientBuilder::new(), crate::transport::Lane::Shared).build()
+    };
     for url in &relays {
         let _ = scratch.add_managed_relay(url.as_str()).await;
     }
@@ -410,19 +423,25 @@ fn reposted_inline(ev: &Event, target: Option<&EmbedRef>) -> Option<Event> {
 /// Scratch clients open at once; each dials up to MAX_REMOTE_RELAYS sockets.
 static REMOTE_LANE: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(4));
 
-/// Whether relays named by a stranger may be dialed: through Tor, or when the user has
-/// chosen to connect directly anyway (the privacy proxy off).
-fn may_dial_strangers() -> bool {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    if !matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled) {
-        return true;
+/// Whether relays named by a stranger may be dialed: over an anonymity network, or when the
+/// user has chosen to connect directly anyway (the privacy proxy off).
+pub(crate) fn may_dial_strangers() -> bool {
+    match crate::transport::preference() {
+        Some(crate::transport::Kind::Clearnet) => !crate::proxy::enabled(),
+        Some(_) => true,
+        // Not loaded yet: nothing says the address is hidden.
+        None => false,
     }
-    !crate::proxy::enabled()
 }
 
-/// A stranger's relay is dialed only over TLS and only on the public internet.
+/// A stranger's relay is dialed only over TLS and only on the public internet; an `.i2p`
+/// relay also over plain `ws://` while the account is on I2P, where the network itself is
+/// end to end.
 fn dialable(url: &RelayUrl) -> bool {
     let s = url.as_str();
+    if s.starts_with("ws://") && crate::transport::preference() == Some(crate::transport::Kind::I2p) {
+        return url.domain().is_some_and(|d| d.ends_with(".i2p"));
+    }
     s.starts_with("wss://") && crate::net::validate_url_not_private(&s.replacen("wss://", "https://", 1)).is_ok()
 }
 

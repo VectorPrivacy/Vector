@@ -17,10 +17,15 @@
 //! chose, which already carry the user's key.
 //!
 //! When the setting is on and no configured server offers previews, there is
-//! no preview: falling back to fetching the page here would be the leak with
-//! a new name. Pictures do fall back to a direct load when no server offers
-//! the proxy, because an avatar that never appears is not a privacy feature
-//! anyone chose; the setting's own help text says so.
+//! no preview on Clearnet: falling back to fetching the page here would be the
+//! leak with a new name. Off Clearnet the page is fetched through the network
+//! in use, which already hides this device's address. Pictures do fall back to
+//! a direct load when no server offers the proxy, because an avatar that never
+//! appears is not a privacy feature anyone chose; the setting's own help text
+//! says so.
+//!
+//! Names native to one network (`.i2p`, `.onion`) are never wrapped: a
+//! clearnet proxy can't reach them, and the transport routes or refuses them.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -160,11 +165,17 @@ fn is_own_host(host: &str) -> bool {
     OWN_DOMAINS.iter().any(|d| h == *d || h.ends_with(&format!(".{d}")))
 }
 
+/// A host only one network can reach (`.i2p`, `.onion`).
+pub fn is_network_native(host: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    crate::transport::Kind::ALL.iter().any(|k| k.native_suffixes().iter().any(|s| h.ends_with(s)))
+}
+
 /// Everything over http(s) that is not ours goes through the proxy: a
 /// picture, an avatar, an emoji, and an attachment on somebody's Blossom
 /// server, which otherwise learns the recipient's address on every
-/// download. Only our own domains load directly, and a URL that is already
-/// a proxy or preview request is never wrapped again.
+/// download. Only our own domains and network-native names skip it, and a
+/// URL that is already a proxy or preview request is never wrapped again.
 pub fn wants_proxy(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else { return false };
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -173,7 +184,7 @@ pub fn wants_proxy(url: &str) -> bool {
     if parsed.path() == "/proxy" || parsed.path() == "/unfurl" {
         return false;
     }
-    !parsed.host_str().map(is_own_host).unwrap_or(true)
+    !parsed.host_str().map(|h| is_own_host(h) || is_network_native(h)).unwrap_or(true)
 }
 
 /// A signed `Authorization` for a proxied request, so the proxy charges the
@@ -215,6 +226,11 @@ mod tests {
         assert!(!wants_proxy("data:image/png;base64,AAAA"));
         assert!(!wants_proxy("asset://localhost/x.png"));
         assert!(!wants_proxy("https://magnitude.example/proxy?url=x"));
+        let b32 = "nostrajmjieip3dqgeefsgpydy3bbshe3o32z65dwkssl7qxkn5a.b32.i2p";
+        assert!(!wants_proxy(&format!("http://{b32}/a.png")), "a clearnet proxy can't reach I2P");
+        assert!(!wants_proxy("http://forum.i2p./x"), "nor an I2P name");
+        assert!(!wants_proxy("https://abc.onion/a.png"), "nor an onion");
+        assert!(wants_proxy("https://i2p.example.com/a.png"), "a clearnet host named after it is clearnet");
         assert_eq!(proxy_server_of("https://us.magnitude.jskitty.com/proxy?url=x").as_deref(), Some("https://us.magnitude.jskitty.com"));
         assert!(proxy_server_of("https://cdn.example.net/a.jpg").is_none());
     }

@@ -520,7 +520,12 @@ async fn run(
     owner: Option<Arc<crate::db::Session>>,
 ) {
     let keys = Keys::generate();
-    let client = crate::apply_tor_proxy(ClientBuilder::new().authenticator(ThrowawayAuth(keys.clone()))).build();
+    let client = crate::apply_transport(
+        ClientBuilder::new().authenticator(ThrowawayAuth(keys.clone())),
+        crate::transport::Lane::Shared,
+    )
+    .build();
+    crate::transport::cycle::track(&client);
     for url in crate::state::TRUSTED_RELAYS {
         let _ = crate::ClientRelayExt::add_managed_relay(&client, *url).await;
     }

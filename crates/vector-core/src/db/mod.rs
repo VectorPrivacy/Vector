@@ -649,7 +649,7 @@ struct SessionStop {
 
 impl Session {
     pub(crate) fn empty() -> Arc<Self> {
-        Arc::new(Session {
+        let s = Arc::new(Session {
             id: next_session_id(),
             db_path: None,
             read_pool: Mutex::new(Vec::new()),
@@ -657,13 +657,15 @@ impl Session {
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
             stopped: SessionStop::default(),
-        })
+        });
+        crate::transport::prefs::attach(&s);
+        s
     }
 
     /// A session bound to one account's database file, with a fresh in-memory
     /// state — the caller loads it from that database.
     fn bound(db_path: PathBuf) -> Arc<Self> {
-        Arc::new(Session {
+        let s = Arc::new(Session {
             id: next_session_id(),
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
@@ -671,7 +673,9 @@ impl Session {
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
             stopped: SessionStop::default(),
-        })
+        });
+        crate::transport::prefs::attach(&s);
+        s
     }
 
     /// The same account's session, pointed at its database, keeping everything
@@ -735,6 +739,11 @@ impl Session {
     /// account is this" use it in place of the old generation counter.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The database this session opens, once it is bound to one.
+    pub fn db_path(&self) -> Option<PathBuf> {
+        self.db_path.clone()
     }
 
     /// Whether this account has been switched away from.
@@ -948,6 +957,16 @@ pub fn current_session_id() -> u64 {
     current_session().id
 }
 
+/// The session on screen, ignoring the task binding: what unbound network code acts for.
+pub fn live_session() -> Arc<Session> {
+    CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// [`live_session`]'s id.
+pub fn live_session_id() -> u64 {
+    CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id
+}
+
 /// Whether the work running here belongs to the account currently on screen.
 ///
 /// There is exactly one UI, showing one account. A task bound to a previous
@@ -982,15 +1001,22 @@ fn replace_session() {
 
 /// Install `next` and tell the outgoing account's work to stop.
 fn install(next: Arc<Session>) {
-    // Sealed writes check the live account under a ticket; waiting them out here means none
-    // straddles the switch.
-    let _switch = crate::crypto::gate::switching();
-    crate::crypto::forget_previous_key();
-    let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
-    if current.id != next.id {
-        current.stop();
-    }
-    *current = next;
+    let (prev, next_id) = {
+        // Sealed writes check the live account under a ticket; waiting them out here means none
+        // straddles the switch.
+        let _switch = crate::crypto::gate::switching();
+        crate::crypto::forget_previous_key();
+        let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
+        if current.id != next.id {
+            current.stop();
+        }
+        let prev = current.id;
+        let next_id = next.id;
+        *current = next;
+        (prev, next_id)
+    };
+    // After the write lock: the epoch bump reads the live id.
+    crate::transport::on_session_installed(prev, next_id);
 }
 
 /// RAII guard for READ connections — auto-returns to its OWN session's pool.
@@ -1133,6 +1159,12 @@ fn create_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
         }
     }
     Err(last_err)
+}
+
+/// A fresh connection to `path`, for reads that must not go through a session's pool.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn connect_at(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    create_connection(&path.to_path_buf())
 }
 
 /// Set by a web build whose storage never syncs to disk itself (IndexedDB
@@ -1393,41 +1425,9 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     let write_conn = create_connection(&db_path)?;
     *session.write_conn.lock().unwrap_or_else(|e| e.into_inner()) = Some(write_conn);
 
-    // Hydrate Tor's hot-path settings cache directly from `db_path`,
-    // NOT via `get_sql_setting()` — the global helper resolves through
-    // the read pool + `get_current_account()`, neither of which yet
-    // reflects this account (switch_account calls init_database BEFORE
-    // set_current_account).
-    #[cfg(feature = "tor")]
-    {
-        let enabled = create_connection(&db_path)
-            .ok()
-            .and_then(|c| {
-                c.query_row(
-                    "SELECT value FROM settings WHERE key = 'tor_enabled'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .map(|v| v == "1" || v == "true")
-            .unwrap_or(false);
-        // Tor chosen on the welcome screen rides every account opened before one commits; the
-        // commit stamps it (`tor::commit_prelogin_carry`), so an abandoned staging keeps nothing.
-        let enabled = crate::tor::effective_tor_pref(enabled);
-        crate::tor::set_tor_enabled_pref(enabled);
-        // Multi-circuit unless this account chose a single shared circuit.
-        let single = create_connection(&db_path)
-            .ok()
-            .and_then(|c| {
-                c.query_row("SELECT value FROM settings WHERE key = 'tor_multi_circuit'", [], |row| {
-                    row.get::<_, String>(0)
-                })
-                .ok()
-            })
-            .is_some_and(|v| v == "0" || v == "false");
-        crate::tor::set_multi_circuit(!single);
-    }
+    // Straight from `db_path` into `session`: switch_account opens the database before it
+    // marks the account current, and the task may be bound to the previous session.
+    crate::transport::prefs::hydrate(&session, &db_path);
 
     // Read the notification preferences now: every badge recount resolves every
     // chat against them, so a lazy first read would land a SQLite round trip on

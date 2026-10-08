@@ -34,6 +34,10 @@ impl SendCallback for CliSendCallback {
     fn on_failed(&self, _chat_id: &str, _old_id: &str, _msg: &Message) {
         eprintln!("  [FAILED]");
     }
+
+    fn on_refused(&self, _chat_id: &str, _old_id: &str, reason: &str) {
+        eprintln!("  [refused] {reason}");
+    }
 }
 
 // ============================================================================
@@ -42,6 +46,8 @@ impl SendCallback for CliSendCallback {
 
 #[tokio::main]
 async fn main() {
+    // No connection before an account's stored network is loaded.
+    vector_core::transport::strict_boot();
     let data_dir = dirs_or_default();
     std::fs::create_dir_all(&data_dir).ok();
 

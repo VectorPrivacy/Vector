@@ -276,8 +276,11 @@ pub fn active_signer() -> Result<ActiveSigner, String> {
     }
     match signer_kind() {
         SignerKind::Bunker => {
-            let inner = bunker_signer()
-                .ok_or("bunker account has no live signer (not yet connected)")?;
+            let inner = match bunker_signer() {
+                Some(b) => b,
+                None if bunker_suspended() => return Err("Your signer isn't connected yet.".into()),
+                None => return Err("bunker account has no live signer (not yet connected)".into()),
+            };
             Ok(ActiveSigner::Bunker(WatchedBunkerSigner::new(inner)))
         }
         SignerKind::Nip55 => {
@@ -595,7 +598,7 @@ pub fn build_nostrconnect_session(
         uri_string.push_str("&perms=");
         uri_string.push_str(&perms);
     }
-    let mut nc = NostrConnect::new(uri, client_keys, timeout, Some(crate::tor_relay_options()))
+    let mut nc = NostrConnect::new(uri, client_keys, timeout, Some(crate::transport_relay_options()))
         .map_err(|e| format!("Bunker init failed: {}", e))?;
     nc.auth_url_handler(VectorAuthUrlHandler);
     Ok((nc, uri_string))
@@ -614,7 +617,7 @@ pub fn build_bunker_signer(
 ) -> Result<NostrConnect, String> {
     let uri = NostrConnectUri::parse(bunker_url)
         .map_err(|e| format!("Invalid bunker URL: {}", e))?;
-    NostrConnect::new(uri, client_keys, timeout, Some(crate::tor_relay_options()))
+    NostrConnect::new(uri, client_keys, timeout, Some(crate::transport_relay_options()))
         .map_err(|e| format!("Bunker init failed: {}", e))
 }
 
@@ -876,31 +879,230 @@ pub async fn attempt_bunker_login(
         }
     };
     nc.auth_url_handler(VectorAuthUrlHandler);
+    let pairing = track_pairing(&nc);
 
     match prewarm_bunker(&nc).await {
-        Ok(remote_pk) => {
-            // If a prior NostrConnect is already installed (retry-after-blip
-            // path), take it out and shut it down on a background task so
-            // its relay pool drains cleanly. Without this, repeated calls
-            // leak Arc'd RelayPool handles fighting for connection slots.
-            //
-            if let Some(old) = take_bunker_signer() {
-                // spawn-detached: drains the replaced signer's relay pool; it holds no
-                // account state and must finish even if the account swaps meanwhile.
-                crate::rt::spawn(async move { let _ = old.shutdown().await; });
+        Ok(remote_pk) => match pairing.install(nc) {
+            Ok(old) => {
+                // A prior NostrConnect (retry-after-blip path) drains in the background:
+                // repeated calls would otherwise leak relay pools fighting for slots.
+                if let Some(old) = old {
+                    // spawn-detached: drains the replaced signer's relay pool; it holds no
+                    // account state and must finish even if the account swaps meanwhile.
+                    crate::rt::spawn(async move { let _ = old.shutdown().await; });
+                }
+                set_bunker_state(BunkerConnectionState::Online);
+                Ok(remote_pk)
             }
-            set_bunker_signer(nc);
-            set_bunker_state(BunkerConnectionState::Online);
-            Ok(remote_pk)
-        }
+            Err(PairingAborted) => {
+                set_bunker_state(BunkerConnectionState::Offline);
+                Err(NETWORK_CHANGED.into())
+            }
+        },
         Err(e) => {
             // The just-built `nc`'s Drop will release its half-opened relay
             // connections asynchronously; we don't need a shutdown call here
             // because we never installed it as the active signer.
             set_bunker_state(BunkerConnectionState::Offline);
-            Err(e)
+            Err(if pairing.aborted() { NETWORK_CHANGED.into() } else { e })
         }
     }
+}
+
+// ============================================================================
+// Network switches
+// ============================================================================
+
+/// A bunker closed for a network switch: what rebuilds it once the new network is ready.
+struct Suspended {
+    uri: NostrConnectUri,
+    keys: Keys,
+    user: Option<PublicKey>,
+}
+
+static SUSPENDED: std::sync::Mutex<Option<Suspended>> = std::sync::Mutex::new(None);
+
+/// What a pairing that a network switch cut off reports.
+pub const NETWORK_CHANGED: &str = "The network changed. Try again.";
+
+// A NIP-46 client between its build and its install sits in no slot, yet its stock sockets
+// answer to no network switch: every one is registered here until it is installed or dropped.
+struct Pairing {
+    id: u64,
+    nc: NostrConnect,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+static PAIRINGS: std::sync::Mutex<Vec<Pairing>> = std::sync::Mutex::new(Vec::new());
+static PAIRING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A network switch cut the pairing off before it could be installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairingAborted;
+
+/// Held while a NIP-46 client pairs outside the signer slot. A network switch shuts the client
+/// down and marks the pairing aborted; dropping the guard forgets it.
+#[must_use = "the pairing is forgotten when the guard drops"]
+pub struct PairingGuard {
+    id: u64,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PairingGuard {
+    /// A network switch cut this pairing off: its sockets are closed and it must not be used.
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::Acquire)
+    }
+
+    /// Install the paired client, returning the signer it replaces. Atomic against a switch: the
+    /// switch either finds it in the slot or has already aborted (and shut down) the pairing.
+    pub fn install(self, nc: NostrConnect) -> Result<Option<NostrConnect>, PairingAborted> {
+        let mut pairings = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
+        if self.aborted() {
+            return Err(PairingAborted);
+        }
+        pairings.retain(|p| p.id != self.id);
+        let old = take_bunker_signer();
+        set_bunker_signer(nc);
+        // A freshly paired signer supersedes one a switch suspended.
+        *SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(old)
+    }
+}
+
+impl Drop for PairingGuard {
+    fn drop(&mut self) {
+        PAIRINGS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p.id != self.id);
+    }
+}
+
+/// Register a NIP-46 client that is not in the signer slot yet.
+pub fn track_pairing(nc: &NostrConnect) -> PairingGuard {
+    let id = PAIRING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    PAIRINGS.lock().unwrap_or_else(|e| e.into_inner()).push(Pairing { id, nc: nc.clone(), aborted: aborted.clone() });
+    PairingGuard { id, aborted }
+}
+
+fn abort_pairings() -> Vec<NostrConnect> {
+    PAIRINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .map(|p| {
+            p.aborted.store(true, Ordering::Release);
+            p.nc
+        })
+        .collect()
+}
+
+/// What a suspended signer rebuilds from, secret stripped: the stored (or staged) URL first, since
+/// asking a client that never bootstrapped for its URI would bootstrap it.
+async fn rebuild_uri(nc: &NostrConnect) -> Option<NostrConnectUri> {
+    use futures_util::FutureExt;
+    let stored = match crate::db::get_bunker_url().await {
+        Ok(Some(url)) => Some(url),
+        _ => crate::state::pending_bunker_setup().map(|(url, _)| url),
+    };
+    if let Some(NostrConnectUri::Bunker { remote_signer_public_key, relays, .. }) =
+        stored.and_then(|url| NostrConnectUri::parse(&url).ok())
+    {
+        return Some(NostrConnectUri::Bunker { remote_signer_public_key, relays, secret: None });
+    }
+    match nc.bunker_uri().now_or_never() {
+        Some(Ok(uri)) => Some(uri),
+        _ => None,
+    }
+}
+
+/// NIP-46 clients are stock nostr-sdk clients no switch can close: shut down every pairing in
+/// flight and the installed signer (keeping what rebuilds it), unless it never opened a socket.
+pub async fn suspend_bunker() {
+    use futures_util::FutureExt;
+    for nc in abort_pairings() {
+        nc.shutdown().await;
+    }
+    let Some(nc) = bunker_signer() else { return };
+    if nc.status().now_or_never().is_some_and(|relays| relays.is_empty()) {
+        return;
+    }
+    let Some(nc) = take_bunker_signer() else { return };
+    match rebuild_uri(&nc).await {
+        Some(uri) => {
+            let user = crate::state::my_public_key();
+            *SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Suspended { uri, keys: nc.local_keys().clone(), user });
+            set_bunker_state(BunkerConnectionState::Connecting);
+        }
+        // A signer pairing still waiting for its approval: nothing to rebuild, it starts over.
+        None => set_bunker_state(BunkerConnectionState::Offline),
+    }
+    nc.shutdown().await;
+}
+
+static RESUMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`RESUMING`] however a resume ends, a cancelled task included.
+struct Resuming;
+
+impl Drop for Resuming {
+    fn drop(&mut self) {
+        RESUMING.store(false, Ordering::Release);
+    }
+}
+
+/// Rebuild a suspended bunker on the network now in use, bootstrapped before it takes the slot so
+/// a signing call's clone never connects to the signer again. A no-op unless one was suspended.
+pub async fn resume_bunker() {
+    if bunker_signer().is_some() || RESUMING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let resuming = Resuming;
+    let Some((uri, keys, user)) = SUSPENDED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|s| (s.uri.clone(), s.keys.clone(), s.user))
+    else {
+        return;
+    };
+    let mut nc = match NostrConnect::new(uri, keys, Duration::from_secs(60), Some(crate::transport_relay_options())) {
+        Ok(nc) => nc,
+        Err(e) => {
+            crate::log_warn!("[Transport] could not rebuild the signer connection: {e}");
+            set_bunker_state(BunkerConnectionState::Offline);
+            return;
+        }
+    };
+    nc.auth_url_handler(VectorAuthUrlHandler);
+    if let Some(pk) = user {
+        let _ = nc.non_secure_set_user_public_key(pk);
+    }
+    let pairing = track_pairing(&nc);
+    // Bound: the signer it installs is this account's, and a swap drains SUSPENDED meanwhile.
+    crate::db::spawn_bound(async move {
+        let _resuming = resuming;
+        let bootstrapped = nc.bunker_uri().await.is_ok();
+        if pairing.aborted() || !crate::db::session_is_live() || !bunker_suspended() {
+            nc.shutdown().await;
+            return;
+        }
+        // An unreachable signer still gets its client: each signing call then retries the
+        // connection itself, as before the switch.
+        if pairing.install(nc).is_ok() {
+            set_bunker_state(if bootstrapped { BunkerConnectionState::Online } else { BunkerConnectionState::Offline });
+        }
+    });
+}
+
+/// Whether a bunker is suspended until the network is ready.
+pub fn bunker_suspended() -> bool {
+    SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// A signer pairing is still waiting for its approval, in the slot or outside it.
+pub fn pairing_pending() -> bool {
+    (bunker_signer().is_some() && bunker_state() == BunkerConnectionState::Connecting)
+        || !PAIRINGS.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
 }
 
 // ============================================================================
@@ -920,6 +1122,7 @@ pub fn drain_bunker_state() -> Option<NostrConnect> {
     // stuck across swaps.
     set_signer_kind(SignerKind::Local);
     set_bunker_state(BunkerConnectionState::Idle);
+    *SUSPENDED.lock().unwrap_or_else(|e| e.into_inner()) = None;
     take_bunker_signer()
 }
 
@@ -1139,6 +1342,8 @@ mod tests {
     // `atomic_state_round_trips_and_drains` above.
     #[test]
     fn watched_signer_session_gate_and_state_transitions() {
+        // It swaps the live session, which every transport test reads.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
 
         // Build a real NostrConnect so we can wrap it. We never call any of
         // its async methods (those would require a relay) — only the inner

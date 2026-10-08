@@ -98,6 +98,9 @@ pub mod webxdc_permissions;
 pub mod xdc;
 #[cfg(feature = "tor")]
 pub mod tor;
+#[cfg(all(feature = "i2p", not(target_arch = "wasm32")))]
+pub mod i2p;
+pub mod transport;
 pub mod svg;
 
 /// NIP-42 authenticator.
@@ -133,21 +136,18 @@ impl nostr_sdk::prelude::Authenticator for VectorAuthenticator {
     }
 }
 
-/// A `ClientBuilder` carrying Vector's client-wide policy: NIP-42 auth plus the
-/// embedded-Tor SOCKS proxy.
+/// A `ClientBuilder` carrying Vector's client-wide policy: NIP-42 auth plus the transport.
 ///
-/// Callers should start from this rather than `ClientBuilder::new()` so both come
-/// along automatically.
-///
-/// The proxy is a closure, not a fixed address: nostr resolves it per connection
-/// attempt, so it reads the *current* Tor state. That covers relays added later
-/// in the session, which previously needed the transport re-applied per
-/// `add_relay`.
+/// Callers should start from this rather than `ClientBuilder::new()` so both come along. The
+/// transport decides per connection attempt, so relays added later follow the network in use.
 pub fn nostr_client_builder() -> nostr_sdk::prelude::ClientBuilder {
-    apply_tor_proxy(
+    transport::ws::apply_transport(
         nostr_sdk::prelude::ClientBuilder::new().authenticator(VectorAuthenticator),
+        transport::Lane::Account,
     )
 }
+
+pub use transport::ws::{apply_transport, transport_relay_options};
 
 /// Register a relay with the pool's own auto-reconnect disabled.
 ///
@@ -195,83 +195,55 @@ impl ClientRelayExt for nostr_sdk::prelude::Client {
 /// subscriptions, so a future subscription is covered without touching this. Only
 /// ids the pool already associates with `relay` are re-sent, so a relay-targeted
 /// subscription is never widened onto a relay it deliberately excluded. Same-id
-/// REQs are idempotent.
+/// REQs are idempotent. Sent as raw REQs: the pool refuses to subscribe an id it
+/// already holds.
 pub async fn resubscribe_relay_after_reconnect(
     client: &nostr_sdk::prelude::Client,
     relay: &nostr_sdk::prelude::RelayUrl,
 ) {
+    use std::borrow::Cow;
+    let Ok(Some(handle)) = client.relay(relay).await else { return };
+    let (mut sent, mut failed) = (0usize, 0usize);
     for (id, per_relay) in client.subscriptions().await {
         let Some(filters) = per_relay.get(relay) else { continue };
         if filters.is_empty() {
             continue;
         }
-        let _ = client
-            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), filters.clone()))
-            .with_id(id)
-            .await;
+        let req = nostr_sdk::prelude::ClientMessage::Req {
+            subscription_id: Cow::Borrowed(&id),
+            filters: filters.iter().map(Cow::Borrowed).collect(),
+        };
+        match handle.send_msg(req).await {
+            Ok(()) => sent += 1,
+            Err(_) => failed += 1,
+        }
     }
+    println!("[subs] {relay}: re-sent {sent} live sub(s), {failed} refused");
 }
 
-/// Minimum a relay connect attempt gets while Tor is on.
+/// A relay connect budget for the transport in use: the caller's clearnet value, raised to the
+/// chosen kind's floor.
 ///
-/// Circuit construction dominates the handshake and routinely runs tens of
-/// seconds, especially on the first connection after the toggle.
-#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-const TOR_RELAY_CONNECT_FLOOR: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Adjust a relay connect budget for the transport actually in use.
-///
-/// Clearnet TCP+TLS settles in well under a second, so the tight per-call budgets
-/// are right there and each caller's intent is preserved. Under Tor those same
-/// budgets expire mid-circuit, and because the health-check and reconcile loops
-/// treat a timeout as "unhealthy" they call `disconnect()` — which terminates the
-/// connection task — then retry, so a relay churns `pending → terminated` forever
-/// and never connects. Raising the floor lets the circuit finish.
+/// Clearnet TCP+TLS settles in well under a second, so the tight per-call budgets are right
+/// there. Under an anonymity network those budgets expire mid-circuit, and because the
+/// health-check and reconcile loops treat a timeout as "unhealthy" they disconnect and retry,
+/// so a relay would churn and never connect.
 pub fn relay_connect_timeout(clearnet: std::time::Duration) -> std::time::Duration {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    {
-        if !matches!(tor::transport_state(), tor::TorTransportState::Disabled) {
-            return clearnet.max(TOR_RELAY_CONNECT_FLOOR);
-        }
-    }
-    clearnet
+    transport::budget(transport::Op::RelayConnect, clearnet)
 }
 
-/// Floor for a relay round-trip (request → response) while Tor is active.
-#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-const TOR_RELAY_REQUEST_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Adjust a relay request budget for the transport actually in use.
-///
-/// Companion to [`relay_connect_timeout`] for round trips rather than connections.
-/// A relay that answers a probe in 200ms direct can take many seconds through three
-/// hops, so a clearnet-sized budget reads a healthy relay as dead.
+/// A relay round-trip budget for the transport in use. A relay that answers a probe in 200ms
+/// direct can take many seconds through three hops.
 pub fn relay_request_timeout(clearnet: std::time::Duration) -> std::time::Duration {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    {
-        if !matches!(tor::transport_state(), tor::TorTransportState::Disabled) {
-            return clearnet.max(TOR_RELAY_REQUEST_FLOOR);
-        }
-    }
-    clearnet
+    transport::budget(transport::Op::RelayRequest, clearnet)
 }
 
-/// Apply the Tor proxy policy to any `ClientBuilder`.
-///
-/// Separate from [`nostr_client_builder`] because a client that authenticates as
-/// something other than the user (the Concord stream-auth plane key) still needs
-/// the same transport: without it the plane fetch connects direct and ties the
-/// user's IP to community membership.
+/// The transport for any `ClientBuilder`, as the user's own lane.
+#[deprecated(note = "use vector_core::apply_transport(builder, lane)")]
 pub fn apply_tor_proxy(
     builder: nostr_sdk::prelude::ClientBuilder,
 ) -> nostr_sdk::prelude::ClientBuilder {
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    let builder = builder.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
-    // The pool's own attempts need the Tor floor too, not just our explicit `try_connect`
-    // calls (0.45 default is 15s, under a circuit build).
-    builder
-        .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)))
-        .database(events_tracker::LazyEventsTracker::default())
+    apply_transport(builder, transport::Lane::Account)
 }
 
 /// A publish waiting on the transport's budget for its OK and NIP-42 challenge: the SDK's
@@ -283,30 +255,10 @@ pub fn transport_aware<'c, 'e, 'u>(
     send.ok_timeout(wait).authentication_timeout(wait)
 }
 
-/// Relay options carrying the Tor proxy policy, for clients the SDK builds itself (NIP-46),
-/// whose default options would otherwise connect direct.
+/// Relay options carrying the transport, for clients the SDK builds itself (NIP-46).
+#[deprecated(note = "use vector_core::transport_relay_options()")]
 pub fn tor_relay_options() -> nostr_sdk::prelude::RelayOptions {
-    let opts = nostr_sdk::prelude::RelayOptions::default()
-        .connect_timeout(relay_connect_timeout(std::time::Duration::from_secs(15)));
-    #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-    let opts = opts.proxy(nostr_sdk::prelude::Proxy::custom(|_url| tor_proxy_target()));
-    opts
-}
-
-/// Resolve the proxy every connection attempt must use, for the transport in use.
-///
-/// Named rather than inlined into the `Proxy::custom` closure so the failsafe is
-/// testable: returning `None` here means "connect direct", so the only leak-safe
-/// answer while Tor is the chosen transport but not yet up is the blackhole.
-#[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-fn tor_proxy_target() -> Option<std::net::SocketAddr> {
-    match tor::transport_state() {
-        tor::TorTransportState::Active(addr) => Some(addr),
-        // Tor failsafe: route to a blackhole so a relay socket can't come up
-        // direct while Tor is mid-bootstrap.
-        tor::TorTransportState::RequiredButInactive => Some(tor::blackhole_proxy_addr()),
-        tor::TorTransportState::Disabled => None,
-    }
+    transport_relay_options()
 }
 
 /// Sign an `EventBuilder` with the session signer.
@@ -794,11 +746,14 @@ impl VectorCore {
         // Bounded by progress, not by a deadline: any rate finishes, a stall fails over.
         let client = crate::net::build_http_client_with_options(
             None,
-            Some(crate::net::TRANSFER_STALL),
+            Some(crate::net::transfer_stall()),
             true,
         )
         .map_err(DownloadError::Unreachable)?;
         let mut last_err = String::from("download failed");
+        // Waits for the network to come back after a switch; bounded so a flapping network can't
+        // hold the download forever.
+        let mut network_waits = 0u8;
         // Whether every source answered: only then is a failure the message's own.
         let mut all_answered = true;
         let mut candidates: Vec<String> = vec![attachment.url.clone()];
@@ -836,9 +791,25 @@ impl VectorCore {
                 last_err = e.to_string();
                 next_source!();
             }
+            macro_rules! network_changed {
+                ($e:expr) => {{
+                    if $e.is_transient() && network_waits < 8 {
+                        network_waits += 1;
+                        match crate::net::wait_after(&$e).await {
+                            Ok(()) => {
+                                i -= 1;
+                                continue 'sources;
+                            }
+                            // Every other source sits behind the same network: none would fare better.
+                            Err(text) => return Err(DownloadError::Unreachable(text)),
+                        }
+                    }
+                }};
+            }
             let resp = match crate::net::proxied_request(&client, reqwest::Method::GET, &url).await.send().await {
                 Ok(r) => r,
                 Err(e) => {
+                    network_changed!(e);
                     last_err = format!("download: {e}");
                     all_answered = false;
                     next_source!();
@@ -864,6 +835,7 @@ impl VectorCore {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
+                        network_changed!(e);
                         last_err = format!("read body: {e}");
                         all_answered = false;
                         next_source!();
@@ -5843,58 +5815,61 @@ mod page_before_tests {
 mod transport_policy_tests {
     use std::time::Duration;
 
-    /// ONE test covering proxy + budgets: the Tor preference is a process-global
-    /// atomic, so separate `#[test]` fns would race under the parallel runner.
+    use crate::transport::{egress, Egress, Kind, Lane};
+
+    fn live() -> u64 {
+        crate::db::live_session_id()
+    }
+
+    /// ONE test covering proxy + budgets: the preference lives on the live session, shared by
+    /// every test, so it holds the database guard and restores Clearnet.
     #[test]
     fn tor_transport_policy() {
+        let _serial = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let short = Duration::from_secs(5);
         let long = Duration::from_secs(300);
 
         // Tor off: connections may go direct, and every caller's clearnet budget
         // passes through untouched so the common path is never slowed down.
+        crate::transport::set_preference(Some(Kind::Clearnet));
         crate::tor::set_tor_enabled_pref(false);
-        assert_eq!(super::tor_proxy_target(), None);
+        assert_eq!(egress(live(), Lane::Account, "relay.example.com", 443), Egress::Direct);
         assert_eq!(super::relay_connect_timeout(short), short);
         assert_eq!(super::relay_request_timeout(short), short);
 
-        // `RequiredButInactive` (Tor chosen, proxy not up yet) must raise the floor
-        // just like `Active`: that window is when connects are slowest, and treating
-        // it as clearnet is what tore relays down mid-handshake.
+        // `RequiredButInactive` (Tor chosen, not up yet) must raise the floor just like
+        // `Active`: that window is when connects are slowest.
         crate::tor::set_tor_enabled_pref(true);
         assert!(matches!(
             crate::tor::transport_state(),
             crate::tor::TorTransportState::RequiredButInactive
         ));
-        // THE leak invariant: `None` here means "connect direct". While Tor is the
-        // chosen transport it must never be None — least of all during bootstrap,
-        // which is exactly when a naive implementation falls through to direct.
-        // Silent failure with an IP disclosure as the cost, so it gets a permanent
-        // guard rather than a one-off manual check.
-        assert_eq!(
-            super::tor_proxy_target(),
-            Some(crate::tor::blackhole_proxy_addr()),
-            "Tor enabled but inactive must blackhole, never connect direct"
+        // THE leak invariant: while Tor is the chosen transport nothing is direct, least of
+        // all during bootstrap, which is exactly when a naive implementation falls through.
+        assert!(
+            matches!(egress(live(), Lane::Account, "relay.example.com", 443), Egress::Refuse(_)),
+            "Tor enabled but inactive must never connect direct"
         );
-        assert_eq!(super::relay_connect_timeout(short), super::TOR_RELAY_CONNECT_FLOOR);
-        assert_eq!(super::relay_request_timeout(short), super::TOR_RELAY_REQUEST_FLOOR);
+        assert_eq!(super::relay_connect_timeout(short), Duration::from_secs(60));
+        assert_eq!(super::relay_request_timeout(short), Duration::from_secs(30));
 
         // Tor chosen on the welcome screen: an account whose own preference is off still opens
         // on Tor until it commits, so a staged sign-in can never connect direct.
+        crate::tor::set_tor_enabled_pref(false);
         crate::tor::arm_prelogin_carry(true);
         assert!(crate::tor::effective_tor_pref(false), "an armed carry raises an off preference");
         crate::tor::set_tor_enabled_pref(crate::tor::effective_tor_pref(false));
-        assert_eq!(
-            super::tor_proxy_target(),
-            Some(crate::tor::blackhole_proxy_addr()),
-            "an armed carry must blackhole until Tor is up, never connect direct"
+        assert!(
+            matches!(egress(live(), Lane::Account, "relay.example.com", 443), Egress::Refuse(_)),
+            "an armed carry must refuse until Tor is up, never connect direct"
         );
         crate::tor::arm_prelogin_carry(false);
         assert!(!crate::tor::effective_tor_pref(false), "a disarmed carry leaves the preference alone");
         assert!(crate::tor::effective_tor_pref(true));
 
         // The NIP-46 client the SDK builds for a remote signer gets the same policy.
-        let opts = super::tor_relay_options();
-        assert!(format!("{opts:?}").contains("proxy: Some"), "remote-signer relays must carry the Tor proxy");
+        let opts = super::transport_relay_options();
+        assert!(format!("{opts:?}").contains("proxy: Some"), "remote-signer relays must carry the transport");
 
         // The floor only ever raises. A caller asking for longer than the floor has
         // a reason to, and shortening it would abort operations that used to finish.
@@ -5903,6 +5878,7 @@ mod transport_policy_tests {
             assert_eq!(super::relay_connect_timeout(long), long, "connect, tor={tor}");
             assert_eq!(super::relay_request_timeout(long), long, "request, tor={tor}");
         }
+        crate::transport::set_preference(Some(Kind::Clearnet));
     }
 }
 

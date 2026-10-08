@@ -1,26 +1,13 @@
-//! Tor (Arti) integration for Vector.
+//! Tor (Arti) integration for Vector: one transport kind on the shared meta-glue.
 //!
-//! Bootstraps an embedded Arti `TorClient` and runs a localhost SOCKS5 listener
-//! on an OS-assigned ephemeral port. Consumers (reqwest HTTP clients, the
-//! nostr-sdk relay pool) point at `tor::proxy_url()` to route their TCP
-//! traffic through Tor — no protocol-specific glue needed.
+//! `TorService::bootstrap` brings Arti up; the shell installs the instance in the transport
+//! host, and every proxied connection reaches it through the process bridge (`connect.rs`).
+//! Hostnames always reach Arti unresolved, so DNS goes through Tor too.
 //!
 //! Iroh / QUIC stays direct: Tor is a TCP-only transport.
 //!
-//! # Lifecycle
-//!
-//! 1. `TorService::start(state_dir, cache_dir).await` — bootstraps Arti, opens
-//!    the SOCKS listener, installs a global handle.
-//! 2. `tor::proxy_url()` — `Some("socks5h://127.0.0.1:<port>")` while active,
-//!    `None` when not.
-//! 3. `TorService::stop()` — drops the listener, clears the global. Active
-//!    connections die with the `TorClient` Arc reaching zero refs.
-//!
-//! # Why `socks5h`?
-//!
-//! `socks5h://` tells the client to send hostnames *to the SOCKS server* for
-//! resolution, instead of doing local DNS first. We want all DNS through Tor
-//! too, otherwise the user's nameserver sees every domain they visit.
+//! The free functions below the service (`transport_state`, the preference and pre-login
+//! helpers) are the published API, kept as thin shims of `crate::transport`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,16 +18,11 @@ use futures_util::StreamExt;
 use arti_client::{TorClient, TorClientConfig};
 use arti_client::config::CfgPath;
 use tor_rtcompat::PreferredRuntime;
-use tokio::sync::oneshot;
 
-mod socks;
+use crate::transport::{Kind, TransportState};
 
-/// Global slot for the active Tor service. `None` when Tor is disabled.
-static TOR_SERVICE: OnceLock<Mutex<Option<Arc<TorService>>>> = OnceLock::new();
-
-fn tor_slot() -> &'static Mutex<Option<Arc<TorService>>> {
-    TOR_SERVICE.get_or_init(|| Mutex::new(None))
-}
+mod connect;
+pub use connect::{TorFactory, TorStartConfig};
 
 /// Set true for the duration of a `TorService::start()` call. Lets `is_active`
 /// callers distinguish "bootstrap in progress" (the service hasn't been put
@@ -100,40 +82,30 @@ pub enum TorStatus {
     Failed(String),
 }
 
-/// An active Tor service: a bootstrapped Arti client + a localhost SOCKS5
-/// listener that bridges incoming connections into the Tor network.
+/// A bootstrapped Arti client. The transport host owns the installed one.
 pub struct TorService {
-    /// Arti's high-level client — owns circuits, the directory cache, etc.
-    /// Explicitly `Arc` since arti 2.4.0; clones are refcount handles exactly
-    /// as the old implicit-Arc semantics were, so teardown reasoning holds.
+    /// Explicitly `Arc` since arti 2.4.0; clones are refcount handles, so the state-dir lock
+    /// releases when the last one drops.
     client: Arc<TorClient<PreferredRuntime>>,
-    /// Where the SOCKS5 listener is bound. `127.0.0.1:<ephemeral>`.
-    socks_addr: SocketAddr,
-    /// Drop signal for the SOCKS accept loop. `take()`-d on stop.
-    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
-    /// JoinHandle of the SOCKS accept loop. `take()`-d on stop_and_join() so
-    /// callers awaiting it know the listener has fully exited and the file
-    /// handles for `<account>/tor/state` and tor/cache can release before a
-    /// caller (e.g. logout) wipes those directories.
-    socks_join: Mutex<Option<crate::rt::JoinHandle<()>>>,
-    /// Latest bootstrap state.
     status: Mutex<TorStatus>,
 }
 
 impl TorService {
-    /// Bootstrap Arti and start the SOCKS5 listener. Awaits full bootstrap
-    /// before returning. `state_dir` and `cache_dir` are persisted across
-    /// runs — caching the consensus directory dramatically speeds subsequent
-    /// boots (~2s vs the 10–15s first-boot consensus fetch).
+    /// The arti client itself, for a test that weighs the bridge against arti on one client.
+    #[doc(hidden)]
+    pub fn arti(&self) -> Arc<TorClient<PreferredRuntime>> {
+        self.client.clone()
+    }
+
+    /// Bootstrap Arti without installing it. Awaits full bootstrap. `state_dir` and `cache_dir`
+    /// persist across runs, so later boots skip the consensus fetch (~2s against 10-15s).
     ///
-    /// `bridges`: optional vanilla-bridge lines like `"1.2.3.4:443 FINGER..."`.
-    /// Each line is parsed individually; invalid lines are logged and skipped.
-    /// If at least one valid bridge is supplied, Arti will use bridges
-    /// instead of public guards. Pass an empty slice for normal direct Tor.
+    /// `bridges`: optional bridge lines like `"1.2.3.4:443 FINGER..."`. Invalid lines are logged
+    /// and skipped; with at least one valid line Arti uses bridges instead of public guards.
     ///
-    /// Records any failure into [`TOR_LAST_ERROR`] so the toggle UI can show
-    /// "failed" instead of looping on "Starting…"; clears it on a fresh attempt.
-    pub async fn start(
+    /// Records any failure into [`TOR_LAST_ERROR`] so the UI can show "failed" instead of
+    /// looping on "Starting…"; clears it on a fresh attempt.
+    pub async fn bootstrap(
         state_dir: PathBuf,
         cache_dir: PathBuf,
         bridges: &[String],
@@ -146,6 +118,18 @@ impl TorService {
                 Err(e)
             }
         }
+    }
+
+    /// Bootstrap and install for the calling session (the SDK path). The app's own lifecycle
+    /// bootstraps and installs separately.
+    pub async fn start(
+        state_dir: PathBuf,
+        cache_dir: PathBuf,
+        bridges: &[String],
+    ) -> Result<Arc<Self>, String> {
+        let svc = Self::bootstrap(state_dir, cache_dir, bridges).await?;
+        crate::transport::host::activate(svc.clone(), crate::db::current_session_id(), false)?;
+        Ok(svc)
     }
 
     async fn start_inner(
@@ -263,7 +247,9 @@ impl TorService {
             let mut events = bootstrap_events;
             while let Some(status) = events.next().await {
                 let pct = (status.as_frac() * 100.0).clamp(0.0, 100.0) as u8;
-                TOR_BOOTSTRAP_PROGRESS.store(pct, Ordering::Release);
+                if TOR_BOOTSTRAP_PROGRESS.swap(pct, Ordering::AcqRel) != pct {
+                    crate::transport::host::notify(crate::transport::host::TransportEvent::Changed);
+                }
                 // With bridges, the suspiciously-fast "complete" usually means
                 // arti accepted cached non-bridge consensus and never actually
                 // verified the bridge. Surface progress detail so the user
@@ -291,35 +277,8 @@ impl TorService {
             log_info!("[Tor] bridges configured: if connections still fail, the bridge may be unreachable or its fingerprint may be missing the ed25519 ID. Get fresh bridges at bridges.torproject.org/bridges/en?transport=vanilla");
         }
 
-        // Bind the SOCKS listener on localhost only — port 0 lets the kernel pick.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| format!("SOCKS bind: {e}"))?;
-        let socks_addr = listener
-            .local_addr()
-            .map_err(|e| format!("SOCKS local_addr: {e}"))?;
-        log_info!("[Tor] SOCKS5 listener on {}", socks_addr);
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_for_socks = client.clone();
-        // spawn-detached: the SOCKS listener runs for the daemon's life, serving whoever is live.
-        let socks_join = crate::rt::spawn(async move {
-            socks::run(listener, client_for_socks, shutdown_rx).await;
-            log_info!("[Tor] SOCKS5 listener stopped");
-        });
-
         *status.lock().unwrap_or_else(|e| e.into_inner()) = TorStatus::Connected;
-
-        let service = Arc::new(TorService {
-            client,
-            socks_addr,
-            shutdown_tx: Mutex::new(Some(shutdown_tx)),
-            socks_join: Mutex::new(Some(socks_join)),
-            status,
-        });
-
-        *tor_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&service));
-        Ok(service)
+        Ok(Arc::new(TorService { client, status }))
     }
 
     /// Reconfigure the running TorClient with a new bridge list. Reuses the
@@ -445,47 +404,38 @@ impl TorService {
         Ok(())
     }
 
-    /// Stop the SOCKS listener and unregister from the global slot.
-    /// In-flight Tor connections drop when the last `TorClient` ref goes away.
-    /// Returns immediately; the accept-loop task and per-stream tasks finish
-    /// asynchronously. For callers that need the underlying file handles
-    /// released before continuing (e.g. logout's rm_dir_all on Windows), use
-    /// `stop_and_join()` instead.
+    fn installed(&self) -> bool {
+        current().is_some_and(|c| std::ptr::eq(Arc::as_ptr(&c), self))
+    }
+
+    /// Uninstall this service if it is the installed one; its connections are cut at once.
     pub fn stop(&self) {
-        if let Some(tx) = self.shutdown_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = tx.send(());
+        if self.installed() {
+            if let Some(a) = crate::transport::host::uninstall() {
+                // spawn-detached: finishes the uninstalled instance's own shutdown.
+                drop(crate::transport::spawn_on(async move { a.transport().shutdown().await }));
+            }
+            log_info!("[Tor] stopped");
         }
-        *tor_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
-        log_info!("[Tor] stopped");
     }
 
-    /// Stop the SOCKS listener and await the accept-loop task's exit before
-    /// returning. The accept loop in `socks::run` aborts all in-flight
-    /// per-stream tasks and joins them before exiting, so by the time the
-    /// awaited JoinHandle resolves, every TorClient Arc held by SOCKS has
-    /// been dropped and the state-dir lock is free for a subsequent start.
+    /// [`Self::stop`], returning only once the bridge holds none of its streams, so the state-dir
+    /// lock is free for a subsequent start.
     pub async fn stop_and_join(&self) {
-        if let Some(tx) = self.shutdown_tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = tx.send(());
+        if self.installed() {
+            crate::transport::host::deactivate(true).await;
+            log_info!("[Tor] stopped (joined)");
         }
-        let join = self.socks_join.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(j) = join {
-            let _ = j.await;
-        }
-        *tor_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
-        log_info!("[Tor] stopped (joined)");
     }
 
-    /// SOCKS5 proxy URL suitable for `reqwest::Proxy::all`. `socks5h` so DNS
-    /// resolution happens at the proxy (i.e. through Tor), not locally.
+    /// For display only: the bridge address. A connect there needs credentials.
     pub fn proxy_url(&self) -> String {
-        format!("socks5h://{}", self.socks_addr)
+        proxy_url().unwrap_or_default()
     }
 
-    /// Raw SOCKS5 listener address — used by clients that take a `SocketAddr`
-    /// directly instead of a URL (e.g. `nostr_sdk::prelude::ClientOptions::proxy`).
+    /// The bridge address. A connect there needs credentials.
     pub fn socks_addr(&self) -> SocketAddr {
-        self.socks_addr
+        crate::transport::bridge::addr().unwrap_or(crate::transport::bridge::NOWHERE)
     }
 
     /// Latest bootstrap / running state.
@@ -494,27 +444,48 @@ impl TorService {
     }
 }
 
-/// Returns the active Tor service if Tor is currently enabled.
+/// The installed Tor service, if Tor is the active kind.
 pub fn current() -> Option<Arc<TorService>> {
-    tor_slot().lock().unwrap_or_else(|e| e.into_inner()).clone()
+    crate::transport::host::active_as::<TorService>()
 }
 
-/// Convenience: SOCKS5 proxy URL when Tor is on, `None` when off. This is the
-/// hook every HTTP client builder consults.
+/// For display only (`socks5h://127.0.0.1:<port>`, no credentials) while Tor is installed.
 pub fn proxy_url() -> Option<String> {
-    current().map(|s| s.proxy_url())
+    current().and_then(|_| crate::transport::bridge::display_url())
 }
 
-/// Convenience: SOCKS5 listener address when Tor is on, `None` when off.
-/// Used by code paths that take a `SocketAddr` directly (nostr-sdk's
-/// `ClientOptions::proxy`).
+/// The bridge address while Tor is installed. A connect there without credentials is refused.
 pub fn socks_addr() -> Option<SocketAddr> {
-    current().map(|s| s.socks_addr())
+    current().and_then(|_| crate::transport::bridge::addr().ok())
 }
 
-/// Convenience: is the embedded Tor service currently running?
+/// Is Tor the installed kind?
 pub fn is_active() -> bool {
     current().is_some()
+}
+
+/// What the transport status reports for Tor while no instance is installed.
+pub(crate) fn uninstalled_status() -> crate::transport::status::KindStatus {
+    use crate::transport::status::{KindStatus, Phase, Reason};
+    let booting = is_bootstrapping();
+    let error = if booting { None } else { last_bootstrap_error() };
+    let (phase, status) = match (&error, booting) {
+        (Some(_), _) => (Phase::Failed, "failed"),
+        (None, true) => (Phase::Starting, "bootstrapping"),
+        (None, false) => (Phase::Starting, "starting"),
+    };
+    KindStatus {
+        phase,
+        progress: booting.then(bootstrap_progress),
+        reason: error.map(|e| Reason::new("tor_failed", e)),
+        retry_in: None,
+        steps: Vec::new(),
+        detail: serde_json::json!({
+            "status": status,
+            "bootstrap_progress": bootstrap_progress(),
+            "multi_circuit": multi_circuit(),
+        }),
+    }
 }
 
 /// What transport new TCP connections should use.
@@ -530,10 +501,6 @@ pub enum TorTransportState {
     /// Tor is disabled. Direct connections allowed.
     Disabled,
 }
-
-/// Hot-path cache of the `tor_enabled` user preference. Loaded from SQLite on
-/// account init and updated on toggle.
-static TOR_ENABLED_PREF: AtomicBool = AtomicBool::new(false);
 
 /// Socket addresses of currently-active configured bridges. Populated by
 /// `TorService::start` from the parsed bridge config; consumed by
@@ -632,72 +599,57 @@ pub fn obfs4proxy_missing_error() -> String {
     )
 }
 
-/// Armed by the welcome screen's Tor toggle: every account opened while it is armed runs on
-/// Tor, so the pre-login service hands over without a direct window.
-static PRELOGIN_CARRY: AtomicBool = AtomicBool::new(false);
-
-/// Arm (Tor chosen on the welcome screen) or disarm the carry.
+/// Arm (Tor chosen on the welcome screen) or disarm the carry. Disarming never touches
+/// another kind's carry.
 pub fn arm_prelogin_carry(armed: bool) {
-    PRELOGIN_CARRY.store(armed, Ordering::Release);
+    use crate::transport::prelogin;
+    if armed {
+        prelogin::arm(prelogin::PreloginChoice::new(Kind::Tor));
+    } else if prelogin_carry_armed() {
+        prelogin::disarm();
+    }
 }
 
 /// Is the welcome screen's Tor choice waiting for an account to commit?
 pub fn prelogin_carry_armed() -> bool {
-    PRELOGIN_CARRY.load(Ordering::Acquire)
+    crate::transport::prelogin::armed().is_some_and(|c| c.kind == Kind::Tor)
 }
 
-/// An account's stored preference, raised to Tor while the carry is armed.
+/// An account's stored Tor preference, raised while the welcome screen's choice is armed. The
+/// same rule hydration uses.
 pub fn effective_tor_pref(stored: bool) -> bool {
-    stored || prelogin_carry_armed()
+    use crate::transport::prefs::StoredKind;
+    let stored = if stored { StoredKind::Kind(Kind::Tor) } else { StoredKind::Absent };
+    crate::transport::prelogin::effective(&stored) == Some(Kind::Tor)
 }
 
-/// The account on screen just committed (setup finished or unlocked): it keeps the welcome
-/// screen's Tor choice. Writes through the live session's database, then disarms.
+/// The account on screen committed: it keeps the welcome screen's choice.
 pub fn commit_prelogin_carry() {
-    if !prelogin_carry_armed() {
-        return;
-    }
-    match crate::db::settings::set_sql_setting("tor_enabled".to_string(), "1".to_string()) {
-        Ok(()) => {
-            set_tor_enabled_pref(true);
-            arm_prelogin_carry(false);
-        }
-        Err(e) => log_warn!("[Tor] could not save the inherited preference: {e}"),
-    }
+    crate::transport::prelogin::commit();
 }
-
-/// Bumped whenever an in-flight pre-login start stops being wanted (toggled off, abandoned,
-/// session reset), so a bootstrap that lands afterwards shuts itself down.
-static PRELOGIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn prelogin_generation() -> u64 {
-    PRELOGIN_GEN.load(Ordering::Acquire)
+    crate::transport::prelogin::generation()
 }
 
 pub fn cancel_prelogin_start() {
-    PRELOGIN_GEN.fetch_add(1, Ordering::AcqRel);
+    crate::transport::prelogin::cancel_start();
 }
 
-const PRELOGIN_MARKER: &str = "tor_prelogin";
-
-/// The welcome screen's Tor choice, install-wide: a marker file beside `active_account`.
+/// Whether the install remembers Tor as the welcome screen's choice.
 pub fn prelogin_preference() -> bool {
-    crate::db::get_app_data_dir().is_ok_and(|d| d.join(PRELOGIN_MARKER).is_file())
+    matches!(crate::transport::prelogin::marker(), Ok(Some(c)) if c.kind == Kind::Tor)
 }
 
-/// Remember (or forget) the welcome screen's Tor choice for this install.
+/// Remember Tor for this install, or forget it (only when Tor is what is remembered).
 pub fn set_prelogin_preference(enabled: bool) -> Result<(), String> {
-    let dir = crate::db::get_app_data_dir()?;
-    let path = dir.join(PRELOGIN_MARKER);
+    use crate::transport::prelogin;
     if enabled {
-        // A fresh install has no data dir until its first account.
-        std::fs::create_dir_all(dir).map_err(|e| format!("create data dir: {e}"))?;
-        std::fs::write(&path, b"1").map_err(|e| format!("write Tor marker: {e}"))
+        prelogin::set_marker(Some(&prelogin::PreloginChoice::new(Kind::Tor)))
+    } else if prelogin_preference() {
+        prelogin::set_marker(None)
     } else {
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("remove Tor marker: {e}")),
-            _ => Ok(()),
-        }
+        Ok(())
     }
 }
 
@@ -758,42 +710,41 @@ fn seed_cache(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<b
     Ok(true)
 }
 
-fn tor_enabled_pref() -> bool {
-    TOR_ENABLED_PREF.load(Ordering::Acquire)
-}
-
-/// Update the cache. Call after writing the `tor_enabled` SQLite setting.
+/// `true` chooses Tor for the live session; `false` returns to Clearnet only when Tor was the
+/// choice, so it never turns another kind off.
 pub fn set_tor_enabled_pref(enabled: bool) {
-    TOR_ENABLED_PREF.store(enabled, Ordering::Release);
-}
-
-/// Hydrate the cache from the per-account DB. Idempotent.
-pub fn init_tor_enabled_pref_from_db() {
-    let enabled = matches!(
-        crate::db::settings::get_sql_setting("tor_enabled".to_string()),
-        Ok(Some(ref v)) if v == "1" || v == "true"
-    );
-    set_tor_enabled_pref(effective_tor_pref(enabled));
-}
-
-/// Compute the transport state every TCP-bearing client (HTTP, nostr) should
-/// honor. The failsafe — `RequiredButInactive` — exists because the user's
-/// preference is an absolute guarantee: if Tor is enabled, NO traffic ever
-/// goes direct, even during the bootstrap window or a Tor service crash.
-pub fn transport_state() -> TorTransportState {
-    match (tor_enabled_pref(), socks_addr()) {
-        (true, Some(addr)) => TorTransportState::Active(addr),
-        (true, None) => TorTransportState::RequiredButInactive,
-        (false, _) => TorTransportState::Disabled,
+    if enabled {
+        crate::transport::set_preference(Some(Kind::Tor));
+    } else if crate::transport::preference() == Some(Kind::Tor) {
+        crate::transport::set_preference(Some(Kind::Clearnet));
     }
 }
 
-/// Sentinel SocketAddr to use as a "blackhole" proxy when Tor is required
-/// but not active — connection attempts to it fail at the TCP layer
-/// instantly, with no possibility of clearnet leak.
+/// Reload the live session's network settings from its database.
+pub fn init_tor_enabled_pref_from_db() {
+    let session = crate::db::live_session();
+    if let Some(path) = session.db_path() {
+        crate::transport::prefs::hydrate(&session, &path);
+    }
+}
+
+/// The transport every TCP client honours, seen as Tor. Fail safe for outside callers:
+/// anything but an active Tor or a chosen Clearnet is `RequiredButInactive`.
+pub fn transport_state() -> TorTransportState {
+    match crate::transport::state() {
+        TransportState::Active { kind: Kind::Tor } => match crate::transport::bridge::addr() {
+            Ok(addr) => TorTransportState::Active(addr),
+            Err(_) => TorTransportState::RequiredButInactive,
+        },
+        TransportState::Clearnet => TorTransportState::Disabled,
+        _ => TorTransportState::RequiredButInactive,
+    }
+}
+
+/// Where a refused connection may point: nothing can listen on port 0.
+#[deprecated(note = "egress is refused in process now; see vector_core::transport::egress")]
 pub fn blackhole_proxy_addr() -> SocketAddr {
-    // 127.0.0.1 port 1: reserved/no-listener on every sane OS.
-    SocketAddr::from(([127, 0, 0, 1], 1))
+    crate::transport::bridge::NOWHERE
 }
 
 /// The current isolation token applied to every SOCKS connection through

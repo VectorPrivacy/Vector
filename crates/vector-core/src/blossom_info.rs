@@ -323,7 +323,8 @@ where
         .join(".well-known/blossom")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
     let auth = build_info_auth_header(signer, &base).await?;
-    let client = crate::net::build_http_client(Duration::from_secs(8))?;
+    // The user's lane: the request carries their signed authorization.
+    let client = crate::net::build_http_client_for(crate::net::Lane::Account, Some(Duration::from_secs(8)), None, true)?;
     let asked_at = Instant::now();
     let resp = match client
         .get(doc_url)
@@ -334,7 +335,11 @@ where
     {
         Ok(r) => r,
         Err(e) => {
-            crate::blossom_stats::record_failure(server_url, crate::blossom_stats::FAIL_OFFLINE);
+            // Only an attempt that left this device says anything about the server: a network
+            // that refused it, or changed under it, does not.
+            if !matches!(e, crate::net::HttpError::Refused(_) | crate::net::HttpError::NetworkChanged) {
+                crate::blossom_stats::record_failure(server_url, crate::blossom_stats::FAIL_OFFLINE);
+            }
             return Err(format!("Info request failed: {}", e));
         }
     };

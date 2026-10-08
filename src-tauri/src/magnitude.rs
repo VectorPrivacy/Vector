@@ -13,10 +13,13 @@
 //! privacy setting, on by default.
 //!
 //! When the setting is on and no configured server offers previews, there is
-//! no preview: falling back to fetching the page here would be the leak with
-//! a new name. Pictures do fall back to a direct load when no server offers
-//! the proxy, because an avatar that never appears is not a privacy feature
-//! anyone chose; the setting's own help text says so.
+//! no preview on Clearnet: falling back to fetching the page here would be the
+//! leak with a new name. Off Clearnet the network in use already hides this
+//! device's address, so the page is fetched through it (a network that isn't
+//! up refuses the fetch; nothing goes direct). Pictures do fall back to a
+//! direct load when no server offers the proxy, because an avatar that never
+//! appears is not a privacy feature anyone chose; the setting's own help text
+//! says so.
 
 use std::time::Duration;
 
@@ -26,13 +29,23 @@ pub use vector_core::proxy::{enabled, forget_picks, proxy_url, server_offering, 
 /// A page's metadata, as the message stores it: via Magnitude when the
 /// setting is on, or fetched here when it is off.
 pub async fn site_metadata(url: &str) -> Result<SiteMetadata, String> {
-    if !enabled() {
+    // A network-native page goes through the transport: reached inside its network, refused
+    // before DNS anywhere else. Magnitude could only fail on it, after learning of it.
+    let native = url::Url::parse(url).ok().and_then(|u| u.host_str().map(vector_core::proxy::is_network_native)).unwrap_or(false);
+    if !enabled() || native {
         return crate::net::fetch_site_metadata(url).await;
     }
-    let Some(server) = server_offering(UNFURL_EXT).await else {
-        return Err("no configured server offers link previews; not fetching the page from this device".into());
-    };
-    unfurl_via(&server, url).await
+    match server_offering(UNFURL_EXT).await {
+        Some(server) => unfurl_via(&server, url).await,
+        // Allowed only because the address is hidden: a switch to Clearnet meanwhile fails it.
+        None if off_clearnet() => crate::net::fetch_site_metadata_off_clearnet(url).await,
+        None => Err("no configured server offers link previews; not fetching the page from this device".into()),
+    }
+}
+
+/// The account chose a network that hides this device's address (whether or not it is up yet).
+fn off_clearnet() -> bool {
+    vector_core::transport::preference().is_some_and(|k| k != vector_core::transport::Kind::Clearnet)
 }
 
 async fn unfurl_via(server: &str, url: &str) -> Result<SiteMetadata, String> {

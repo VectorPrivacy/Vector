@@ -30,6 +30,8 @@ pub struct CustomBlossomServer {
 
 /// Validate + canonicalize a server URL: trim, strip trailing slash,
 /// auto-prefix `https://` on bare domains, enforce http(s) + non-empty host.
+/// A bare `.i2p` host gets `http://`: I2P already encrypts end to end, and eepsites rarely
+/// serve TLS.
 pub fn validate_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -38,7 +40,9 @@ pub fn validate_url(url: &str) -> Result<String, String> {
     let with_scheme = if trimmed.contains("://") {
         trimmed.to_string()
     } else {
-        format!("https://{}", trimmed)
+        let host = trimmed.split(['/', ':', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+        let scheme = if host.ends_with(".i2p") { "http" } else { "https" };
+        format!("{scheme}://{trimmed}")
     };
     let parsed = ::url::Url::parse(&with_scheme)
         .map_err(|e| format!("Invalid URL: {}", e))?;
@@ -488,6 +492,11 @@ mod tests {
     fn validate_url_auto_prefixes_bare_domain_with_https() {
         assert_eq!(validate_url("blossom.band").unwrap(), "https://blossom.band");
         assert_eq!(validate_url("  blossom.primal.net/ ").unwrap(), "https://blossom.primal.net");
+        let b32 = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst.b32.i2p";
+        assert_eq!(validate_url(b32).unwrap(), format!("http://{b32}"), "an eepsite rarely speaks TLS");
+        assert_eq!(validate_url("files.i2p:8080/").unwrap(), "http://files.i2p:8080");
+        assert_eq!(validate_url(&format!("https://{b32}")).unwrap(), format!("https://{b32}"), "a typed scheme is kept");
+        assert_eq!(validate_url("i2p.example.com").unwrap(), "https://i2p.example.com");
     }
 
     #[test]

@@ -27,10 +27,16 @@ pub const PROTECTED_SETTINGS: &[&str] = &[
     "pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key", "kdf",
     "encryption_enabled", "security_type", "signer_type", "migration_state", "community_at_rest_encrypted",
     "credential_failures", "credential_retry_at",
+    crate::transport::prefs::KEY_TRANSPORT, crate::transport::prefs::KEY_LEGACY_TOR,
+    crate::transport::prefs::KEY_I2P_CONFIG, crate::transport::prefs::KEY_ALIASES,
 ];
 
-/// Rows the generic settings commands never hand out: sealed secrets and their checks.
-pub const SECRET_SETTINGS: &[&str] = &["pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key"];
+/// Rows the generic settings commands never hand out: sealed secrets and their checks. The I2P
+/// config can hold a SAM password.
+pub const SECRET_SETTINGS: &[&str] = &[
+    "pkey", "seed", "bunker_url", "nip55_pin_check", "biometric_wrapped_key",
+    crate::transport::prefs::KEY_I2P_CONFIG,
+];
 
 /// Set a SQL setting key-value pair.
 pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {

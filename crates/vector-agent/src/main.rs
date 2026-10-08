@@ -30,6 +30,8 @@ fn claim_stdout() -> std::io::Result<tokio::fs::File> {
 
 #[tokio::main]
 async fn main() {
+    // No connection before an account's stored network is loaded.
+    vector_core::transport::strict_boot();
     #[cfg(unix)]
     let mcp_out = claim_stdout().unwrap_or_else(|e| {
         eprintln!("Failed to take stdout for MCP: {}", e);

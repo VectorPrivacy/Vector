@@ -35,7 +35,7 @@ pub fn unbound_spawns(crate_root: &Path, src_root: &Path) -> Vec<String> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let Ok(src) = std::fs::read_to_string(&path) else { continue };
-            for (line, n) in unbound_lines(&src) {
+            for (line, n) in unbound_lines_in(&rel, &src) {
                 let _ = line;
                 offenders.push(format!("{rel}:{n}"));
             }
@@ -50,6 +50,12 @@ pub fn has_unbound_spawn(src: &str) -> bool {
     unbound_lines(src).next().is_some()
 }
 
+/// [`has_unbound_spawn`] for a file at `rel` (relative to its crate root), with the stricter
+/// rule for the transport directories.
+pub fn has_unbound_spawn_at(rel: &str, src: &str) -> bool {
+    unbound_lines_in(rel, src).next().is_some()
+}
+
 /// The unbound spawn lines in one file's shipping code, as `(line, 1-based no)`.
 ///
 /// Tests spawn freely — only shipping code is bound — so everything from the
@@ -59,9 +65,27 @@ pub fn has_unbound_spawn(src: &str) -> bool {
 // Assembled at compile time so this file never contains the text it searches for.
 const NEEDLE: &str = concat!("tokio::", "spawn(");
 const RT_NEEDLE: &str = concat!("rt::", "spawn(");
+const ON_NEEDLE: &str = concat!("spawn_", "on(");
+const METHOD_NEEDLE: &str = concat!(".", "spawn(");
+
+/// Directories whose tasks run on the transport runtime: there any `.spawn(` (a `JoinSet`, a
+/// runtime handle) starts a task too, so it needs the marker as well.
+const TRANSPORT_DIRS: &[&str] = &["src/transport/", "src/i2p/"];
 
 fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
-    let all: Vec<&str> = src.lines().collect();
+    unbound_lines_in("", src)
+}
+
+/// [`unbound_lines`] for the file at `rel`. A file that opens with `#![cfg(test)]` is a test
+/// module in its own right and spawns freely.
+fn unbound_lines_in<'a>(rel: &str, src: &'a str) -> impl Iterator<Item = (&'a str, usize)> {
+    let strict = TRANSPORT_DIRS.iter().any(|d| rel.contains(d));
+    let test_file = src
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("//"))
+        .is_some_and(|l| l == "#![cfg(test)]");
+    let all: Vec<&str> = if test_file { Vec::new() } else { src.lines().collect() };
     let cut = all
         .windows(2)
         .position(|w| {
@@ -74,7 +98,10 @@ fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
         .iter()
         .enumerate()
         .filter(|(i, line)| {
-            (line.contains(NEEDLE) || line.contains(RT_NEEDLE))
+            (line.contains(NEEDLE)
+                || line.contains(RT_NEEDLE)
+                || line.contains(ON_NEEDLE)
+                || (strict && line.contains(METHOD_NEEDLE)))
                 && !line.trim_start().starts_with("//")
                 && !line.contains("spawn-detached:")
                 && !lines[..*i].iter().rev().take(4).any(|p| p.contains("spawn-detached:"))
@@ -216,6 +243,22 @@ mod tests {
     #[test]
     fn test_code_spawns_freely() {
         assert!(!has_unbound_spawn("#[cfg(test)]\nmod t { fn f() { tokio::spawn(async {}); } }"));
+        assert!(!has_unbound_spawn("//! Tests.\n#![cfg(test)]\nfn f() { tokio::spawn(async {}); }"));
+    }
+
+    #[test]
+    fn spawn_audit_sees_spawn_on() {
+        let on = format!("fn f() {{ crate::transport::{}async {{}}); }}", concat!("spawn_", "on("));
+        assert!(has_unbound_spawn(&on), "an unannotated transport spawn is caught everywhere");
+        let marked = format!("// spawn-detached: process bridge.\n{on}");
+        assert!(!has_unbound_spawn(&marked));
+
+        let method = format!("fn f(set: &mut JoinSet<()>) {{ set{}async {{}}); }}", concat!(".", "spawn("));
+        assert!(has_unbound_spawn_at("src/transport/bridge.rs", &method), "a JoinSet spawn under transport/ is caught");
+        assert!(has_unbound_spawn_at("src/i2p/keeper.rs", &method));
+        assert!(!has_unbound_spawn_at("src/community/service.rs", &method), "other directories keep the old rule");
+        let marked = format!("// spawn-detached: the keeper.\n{method}");
+        assert!(!has_unbound_spawn_at("src/transport/bridge.rs", &marked));
     }
 
     #[test]

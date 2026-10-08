@@ -98,6 +98,12 @@ impl From<reqwest::Error> for VectorError {
     }
 }
 
+impl From<crate::net::HttpError> for VectorError {
+    fn from(err: crate::net::HttpError) -> Self {
+        VectorError::Network(err.to_string())
+    }
+}
+
 /// Convenience alias used throughout vector-core (matches src-tauri's `Result<T, String>` pattern).
 pub type Result<T> = std::result::Result<T, VectorError>;
 

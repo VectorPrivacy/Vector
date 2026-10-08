@@ -249,6 +249,8 @@ pub enum UploadFailure {
     Integrity(String),
     /// Something before or after the wire: signing, URL, parsing.
     Other(String),
+    /// The network changed under the upload, or is still connecting.
+    Network(String),
 }
 
 impl UploadFailure {
@@ -289,7 +291,7 @@ impl UploadFailure {
             }
             UploadFailure::Transport(_) => format!("{} could not be reached.", host),
             UploadFailure::Integrity(_) => format!("{} altered the file instead of storing it.", host),
-            UploadFailure::Other(m) => m.clone(),
+            UploadFailure::Other(m) | UploadFailure::Network(m) => m.clone(),
         }
     }
 }
@@ -304,7 +306,7 @@ impl std::fmt::Display for UploadFailure {
                 Some(c) => write!(f, "Upload failed with status {} [{}]: {}", r.status, c, r.message),
                 None => write!(f, "Upload failed with status {}: {}", r.status, r.message),
             },
-            UploadFailure::Transport(m) | UploadFailure::Integrity(m) | UploadFailure::Other(m) => {
+            UploadFailure::Transport(m) | UploadFailure::Integrity(m) | UploadFailure::Other(m) | UploadFailure::Network(m) => {
                 write!(f, "{}", m)
             }
         }
@@ -332,14 +334,40 @@ pub fn summarise_failures(failures: &[(String, UploadFailure)]) -> String {
         [] => "No media server is configured. Add one in Settings → Network.".to_string(),
         [(host, e)] => e.describe(host),
         many => {
+            if let Some(shared) = shared_reason(many) {
+                return shared;
+            }
             let mut out = String::from("No media server accepted the file:");
             for (host, e) in many {
                 out.push_str("\n• ");
-                out.push_str(&e.describe(host));
+                let line = e.describe(host);
+                // A reason that doesn't name its server (the network's own) gets the name.
+                if line.contains(host.as_str()) {
+                    out.push_str(&line);
+                } else {
+                    out.push_str(&format!("{host}: {line}"));
+                }
             }
             out
         }
     }
+}
+
+/// One reason every server failed with alike (the network refusing them all), as one line.
+fn shared_reason(failures: &[(String, UploadFailure)]) -> Option<String> {
+    let text = |e: &UploadFailure| match e {
+        UploadFailure::Other(m) | UploadFailure::Network(m) => Some(m.clone()),
+        _ => None,
+    };
+    let first = text(&failures.first()?.1)?;
+    if !failures.iter().all(|(_, e)| text(e).as_deref() == Some(first.as_str())) {
+        return None;
+    }
+    Some(if first == crate::transport::Refusal::ExitOff.text() {
+        "I2P-Only is on, so your media servers are off.".to_string()
+    } else {
+        first
+    })
 }
 
 #[cfg(test)]
@@ -481,6 +509,21 @@ mod tests {
         assert_eq!(
             summarise_failures(&[("a.example".into(), a), ("b.example".into(), b)]),
             "No media server accepted the file:\n• a.example could not be reached.\n• b.example doesn't accept this kind of file.",
+        );
+    }
+
+    #[test]
+    fn a_reason_every_server_shares_is_one_line() {
+        let off = || UploadFailure::Other(crate::transport::Refusal::ExitOff.text());
+        let many = [("a.example".to_string(), off()), ("b.example".to_string(), off()), ("c.example".to_string(), off())];
+        assert_eq!(summarise_failures(&many), "I2P-Only is on, so your media servers are off.");
+        let changed = || UploadFailure::Network("The network changed.".into());
+        assert_eq!(summarise_failures(&[("a.example".into(), changed()), ("b.example".into(), changed())]), "The network changed.");
+        let mixed = [("a.example".to_string(), off()), ("b.example".to_string(), UploadFailure::Transport("x".into()))];
+        assert_eq!(
+            summarise_failures(&mixed),
+            "No media server accepted the file:\n• a.example: I2P-Only is on, so this server is off.\n• b.example could not be reached.",
+            "a reason that names no server gets its host",
         );
     }
 

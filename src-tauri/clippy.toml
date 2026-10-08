@@ -14,4 +14,8 @@ disallowed-methods = [
     { path = "reqwest::blocking::Client::builder", allow-invalid = true, reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
     { path = "reqwest::blocking::ClientBuilder::new", allow-invalid = true, reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
     { path = "reqwest::blocking::get", allow-invalid = true, reason = "Use vector_core::net::build_http_client so the Tor failsafe applies." },
+    { path = "reqwest::RequestBuilder::send", reason = "transport failsafe: use net::HttpClient" },
+    { path = "reqwest::Client::execute", reason = "transport failsafe: use net::HttpClient" },
+    { path = "reqwest::Response::chunk", reason = "transport failsafe: use net::HttpClient" },
+    { path = "reqwest::Response::bytes_stream", reason = "transport failsafe: use net::HttpClient" },
 ]

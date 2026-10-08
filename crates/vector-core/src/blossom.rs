@@ -211,17 +211,24 @@ fn callback_failure(e: String) -> UploadFailure {
 /// completion; one that stops for `stall_limit` is abandoned, as is one whose
 /// server goes silent after receiving everything.
 async fn send_upload(
-    request: reqwest::RequestBuilder,
+    client: &crate::net::HttpClient,
+    request: crate::net::Req,
     server_url: &Url,
     body: &UploadBody,
     stall_limit: std::time::Duration,
     cancel_flag: Option<&Arc<AtomicBool>>,
     progress_callback: Option<&ProgressCallback>,
-) -> Result<reqwest::Response, UploadFailure> {
+) -> Result<crate::net::Resp, UploadFailure> {
     let total_size = body.len();
     let bytes_sent = Arc::new(Mutex::new(0u64));
     #[cfg(not(target_arch = "wasm32"))]
-    let request_body = Body::wrap_stream(body.stream(Arc::clone(&bytes_sent)));
+    let request_body = Body::wrap_stream(crate::net::guard_body(
+        body.stream(Arc::clone(&bytes_sent)),
+        crate::transport::epoch(),
+        client.owner(),
+    ));
+    #[cfg(target_arch = "wasm32")]
+    let _ = client;
     // fetch cannot stream a request body, so the web sends it whole.
     #[cfg(target_arch = "wasm32")]
     let request_body = match body {
@@ -246,7 +253,7 @@ async fn send_upload(
     let response = loop {
         tokio::select! {
             response = &mut request_future => {
-                break response.map_err(|e| UploadFailure::Transport(format!("Upload request failed: {}", e)))?;
+                break response.map_err(upload_failure)?;
             },
             _ = poll_interval.tick() => {
                 if let Some(flag) = cancel_flag {
@@ -294,6 +301,23 @@ async fn send_upload(
         }
     }
     Ok(response)
+}
+
+/// How many network changes one upload waits out, as the download paths do.
+const MAX_NETWORK_WAITS: u32 = 8;
+
+/// An HTTP failure as an upload failure: a network switch or a network still connecting waits
+/// and resumes, a transport policy refusal is final for this server.
+fn upload_failure(e: crate::net::HttpError) -> UploadFailure {
+    if e.is_transient() {
+        UploadFailure::Network(e.to_string())
+    } else if matches!(e, crate::net::HttpError::Refused(_)) {
+        // Refused before any byte left: a policy, a replaced session, or a block only the user
+        // can lift. No retry here changes it.
+        UploadFailure::Other(e.to_string())
+    } else {
+        UploadFailure::Transport(format!("Upload request failed: {}", e))
+    }
 }
 
 /// Builds the Blossom authorization header
@@ -369,7 +393,10 @@ where
     let mut last_error = None;
     let mut next_delay = retry_spacing;
 
-    for attempt in 0..=retry_count {
+    let mut attempt = 0;
+    // A network that keeps flapping must not hold the upload forever.
+    let mut network_waits = 0u32;
+    while attempt <= retry_count {
         if attempt > 0 {
             crate::rt::time::sleep(next_delay).await;
             next_delay = retry_spacing;
@@ -392,6 +419,20 @@ where
         ).await {
             Ok(url) => return Ok(url),
             Err(UploadFailure::Cancelled) => return Err(UploadFailure::Cancelled),
+            // The network changed or is still connecting: hold for it, then resume without
+            // spending an attempt.
+            Err(UploadFailure::Network(e)) => {
+                if network_waits >= MAX_NETWORK_WAITS || !crate::db::session_is_live() {
+                    return Err(UploadFailure::Network(e));
+                }
+                network_waits += 1;
+                let budget = crate::transport::budget(crate::transport::Op::Startup, std::time::Duration::ZERO);
+                if let Err(t) = crate::transport::wait_ready(budget).await {
+                    return Err(UploadFailure::Network(t));
+                }
+                crate::log_info!("[Blossom] {} resumes after a network change: {}", server_url, e);
+                continue;
+            }
             Err(e) => {
                 crate::log_warn!(
                     "[Blossom] Attempt {}/{} to {} failed: {}",
@@ -408,7 +449,7 @@ where
                     UploadFailure::Transport(_) => {
                         !(e.is_mid_stream_drop() && body.len() > 8 * 1024 * 1024)
                     }
-                    UploadFailure::Integrity(_) | UploadFailure::Other(_) | UploadFailure::Cancelled => false,
+                    UploadFailure::Integrity(_) | UploadFailure::Other(_) | UploadFailure::Cancelled | UploadFailure::Network(_) => false,
                 };
                 if !again {
                     if let Some(r) = e.refusal() {
@@ -432,6 +473,7 @@ where
                 last_error = Some(e);
             }
         }
+        attempt += 1;
     }
 
     // All attempts failed, return the last error
@@ -461,7 +503,7 @@ enum Preflight {
 /// A 2xx with `X-Already-Stored: true` and `X-Blob-URL` means the server has
 /// these bytes already and the caller can stop here with the link.
 async fn preflight(
-    client: &reqwest::Client,
+    client: &crate::net::HttpClient,
     upload_url: &Url,
     server_url: &Url,
     auth_header: &HeaderValue,
@@ -491,7 +533,7 @@ async fn preflight(
     }
     let asked_at = web_time::Instant::now();
     let resp = match crate::rt::time::timeout(
-        std::time::Duration::from_secs(5),
+        crate::transport::budget(crate::transport::Op::BestEffort, std::time::Duration::from_secs(5)),
         client.head(upload_url.clone()).headers(head_headers).send(),
     ).await {
         Ok(Ok(resp)) => {
@@ -503,7 +545,7 @@ async fn preflight(
             return Ok(Preflight::Proceed);
         }
         Err(_) => {
-            crate::log_debug!("[Blossom Preflight] {} HEAD timed out (5s), falling through to PUT", server_url);
+            crate::log_debug!("[Blossom Preflight] {} HEAD timed out, falling through to PUT", server_url);
             return Ok(Preflight::Proceed);
         }
     };
@@ -569,7 +611,7 @@ async fn preflight(
 
 /// Read a rejected PUT into a refusal. The body feeds the classifier; the
 /// headers carry the code when the server has one.
-async fn refusal_from(response: reqwest::Response) -> Refusal {
+async fn refusal_from(response: crate::net::Resp) -> Refusal {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
@@ -602,7 +644,8 @@ where
 
     // No deadlines: the upload is bounded by progress in `send_upload`.
     // Redirects disabled: a 3xx mid-PUT would re-issue as GET and drop the body.
-    let client = crate::net::build_http_client_with_options(None, None, false)
+    // The user's lane: the request carries their signed authorization.
+    let client = crate::net::build_http_client_for(crate::net::Lane::Account, None, None, false)
         .map_err(UploadFailure::Other)?;
 
     if preflight_first {
@@ -630,10 +673,11 @@ where
 
     let started = web_time::Instant::now();
     let response = send_upload(
+        &client,
         client.put(upload_url.clone()).headers(headers),
         server_url,
         &body,
-        crate::net::TRANSFER_STALL,
+        crate::net::transfer_stall(),
         cancel_flag.as_ref(),
         Some(progress_callback),
     ).await?;
@@ -693,7 +737,7 @@ where
     let auth_header = build_auth_header(&signer, hash).await.map_err(UploadFailure::Other)?;
 
     // Redirects disabled so a 3xx mid-PUT doesn't re-issue as GET.
-    let client = crate::net::build_http_client_with_options(None, None, false)
+    let client = crate::net::build_http_client_for(crate::net::Lane::Account, None, None, false)
         .map_err(UploadFailure::Other)?;
 
     if let Preflight::AlreadyStored(url) =
@@ -714,10 +758,11 @@ where
 
     let started = web_time::Instant::now();
     let response = send_upload(
+        &client,
         client.put(upload_url).headers(headers),
         server_url,
         &UploadBody::Memory(file_data),
-        stall_timeout.unwrap_or(crate::net::TRANSFER_STALL),
+        stall_timeout.unwrap_or_else(crate::net::transfer_stall),
         None,
         None,
     ).await?;
@@ -775,7 +820,7 @@ async fn uploaded_blob_serves(url: &str) -> bool {
 /// The status a just-uploaded blob answers with. Asked directly, it rides the
 /// upload's pooled connection instead of opening a fresh one to the same host.
 async fn uploaded_blob_status(url: &str) -> Option<u16> {
-    let timeout = std::time::Duration::from_secs(10);
+    let timeout = crate::transport::budget(crate::transport::Op::BestEffort, std::time::Duration::from_secs(10));
     if crate::net::egress(url).await.proxied() {
         return crate::net::remote_status(url, timeout).await;
     }
@@ -887,8 +932,8 @@ pub struct AcceptedUpload {
 pub async fn warm_upload_connection(server_urls: Vec<String>, mime_type: &str, is_encrypted: bool, size_bytes: u64) {
     let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_type, is_encrypted, size_bytes);
     let Some(url) = ranked.first().and_then(|u| Url::parse(u).ok()) else { return };
-    // The same options as `upload_attempt`, so the upload draws from this pool.
-    let Ok(client) = crate::net::build_http_client_with_options(None, None, false) else { return };
+    // The same lane and options as `upload_attempt`, so the upload draws from this pool.
+    let Ok(client) = crate::net::build_http_client_for(crate::net::Lane::Account, None, None, false) else { return };
     let _ = crate::rt::time::timeout(std::time::Duration::from_secs(10), client.head(url).send()).await;
 }
 
@@ -1039,8 +1084,14 @@ where
                     // an explicit size refusal sets min_rejected_size.
                     _ => {}
                 }
+                // The network itself never came back: every other server would wait it out the
+                // same way, to fail with the same words.
+                let network_down = matches!(e, UploadFailure::Network(_));
                 failures.push((host, e));
                 let _ = progress_callback(Some(0), Some(0));
+                if network_down {
+                    break;
+                }
             }
         }
     }
@@ -1102,7 +1153,7 @@ where
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, auth_header);
 
-    let client = crate::net::build_http_client(std::time::Duration::from_secs(30))?;
+    let client = crate::net::build_http_client_for(crate::net::Lane::Account, Some(std::time::Duration::from_secs(30)), None, true)?;
 
     let response = client
         .delete(url)
@@ -1240,7 +1291,7 @@ where
         .join("mirror")
         .map_err(|e| format!("Invalid mirror URL: {}", e))?;
 
-    let client = crate::net::build_http_client(std::time::Duration::from_secs(30))?;
+    let client = crate::net::build_http_client_for(crate::net::Lane::Account, Some(std::time::Duration::from_secs(30)), None, true)?;
     let response = client
         .put(mirror_url)
         .header(AUTHORIZATION, auth_header)
@@ -1342,6 +1393,7 @@ where
     if targets.is_empty() {
         return Vec::new();
     }
+    let budget = crate::transport::budget(crate::transport::Op::BestEffort, budget);
 
     let futures = targets.into_iter().map(|target| {
         let signer = signer.clone();
@@ -1572,6 +1624,24 @@ mod parse_status_tests {
     #[test]
     fn returns_none_when_absent() {
         assert_eq!(parse_status_from_error("network error: timeout"), None);
+    }
+}
+
+#[cfg(test)]
+mod network_failure_tests {
+    use super::upload_failure;
+    use crate::blossom_error::UploadFailure;
+    use crate::net::HttpError;
+    use crate::transport::{ConnectError, Refusal};
+
+    /// Only a network that comes back is waited for: a replaced account never does, and a policy
+    /// refusal is that server's final answer.
+    #[test]
+    fn only_a_returning_network_is_waited_for() {
+        assert!(matches!(upload_failure(HttpError::NetworkChanged), UploadFailure::Network(_)));
+        assert!(matches!(upload_failure(HttpError::Refused(ConnectError::NotReady(None))), UploadFailure::Network(_)));
+        assert!(matches!(upload_failure(HttpError::Refused(ConnectError::Stale)), UploadFailure::Other(_)));
+        assert!(matches!(upload_failure(HttpError::Refused(ConnectError::Refused(Refusal::ExitOff))), UploadFailure::Other(_)));
     }
 }
 
