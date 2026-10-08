@@ -1440,19 +1440,23 @@ function findLatestContactMessage(messages, maxAt = Infinity) {
 }
 
 function markAsRead(chat, message, explicit = false) {
-    // A chat the user just marked unread stays unread until they open it or
-    // explicitly mark it read — otherwise the ambient sweeps (focus, repaint,
-    // scroll) undo the action instantly, which reads as a flicker.
+    // A chat the user just marked unread stays unread until they open it again or
+    // explicitly mark it read — even while it is the open chat, or the ambient
+    // sweeps (focus, repaint, scroll, close) undo the action instantly.
     if (chat && isChatUnreadLatched(chat.id)) {
-        if (explicit || chat.id === strOpenChat) {
+        if (explicit) {
             clearChatUnreadLatch(chat.id);
         } else {
             return;
         }
     }
+    // A "Mark as Unread" from a chosen message outlives ambient catch-ups (a startup sync replays
+    // our old sends): only an explicit read ends it, and it goes through even onto the same marker.
+    if (chat?.unread_from && !explicit) return;
     // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
-    if (chat && message.id !== chat.last_read) {
+    if (chat && (message.id !== chat.last_read || chat.unread_from)) {
         chat.last_read = message.id;
+        chat.unread_from = '';
         // Optimistic clear so the badge drops instantly on read; the debounced DB refresh below
         // is authoritative (corrects the rare case where a newer non-mine message remains unread).
         chat.unread = 0;
@@ -1503,18 +1507,48 @@ async function markChatUnread(chat) {
     // Keep the cached marker in lock-step with the DB (empty string = never-read) so a follow-up
     // Mark as Read isn't skipped by markAsRead's "already at last_read" guard.
     chat.last_read = lastRead;
+    chat.unread_from = '';   // the backend's retreat replaces a per-message mark
     chat.unread = Math.max(1, chat.unread || 0);
     // Latch the deliberate retreat: the closed chat still gets auto-marked by
     // list repaints / window-focus sweeps, which would instantly undo it. The
     // latch clears the moment the user actually opens the chat.
     setChatUnreadLatch(chat.id);
+    syncBackendActiveChat();   // an open chat held unread must not auto-read arrivals either
+    chatChanged(chat);
+    refreshUnreadCounts();
+}
+
+/** Mark a chat unread from `msg` on: that message and every later one from others count, even past
+ *  our own replies, until the chat is opened again. Held while it is the open chat, so neither
+ *  reading on nor closing it marks it read; the backend stops auto-marking arrivals too. */
+async function markUnreadFrom(chat, msg) {
+    // Hold first, so an arrival mid-call can't auto-read straight through the mark.
+    setChatUnreadLatch(chat.id);
+    syncBackendActiveChat();
+    let count = null;
+    try {
+        count = await invoke('mark_unread_from', { chatId: chat.id, messageId: msg.id });
+    } catch (_e) {
+        clearChatUnreadLatch(chat.id);
+        syncBackendActiveChat();
+        return;
+    }
+    chat.unread_from = msg.id;
+    chat.unread = typeof count === 'number' ? count : Math.max(1, chat.unread || 0);
+    if (chat.id === strOpenChat) {
+        const node = document.getElementById(msg.id);
+        if (node) {
+            clearUnreadDivider();
+            insertUnreadDivider(node);
+        }
+    }
     chatChanged(chat);
     refreshUnreadCounts();
 }
 
 /** Chats the user explicitly marked unread. While latched, the ambient
- *  auto-mark-read paths (focus regain, scroll-to-bottom, list repaint) leave
- *  the chat alone — only OPENING it counts as reading. */
+ *  auto-mark-read paths (focus regain, scroll-to-bottom, list repaint, close)
+ *  leave the chat alone — only OPENING it, sending in it or an explicit read count. */
 const setChatsMarkedUnread = new Set();
 function setChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.add(chatId); }
 function clearChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.delete(chatId); }

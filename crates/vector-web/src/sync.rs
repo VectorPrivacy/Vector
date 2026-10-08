@@ -42,7 +42,15 @@ async fn hydrate_and_announce() {
                         }
                     }
                 }
-                if state.chats.iter().any(|c| c.id == chat_id) {
+                if let Some(existing) = state.chats.iter_mut().find(|c| c.id == chat_id) {
+                    // Made before its row loaded: take the stored read markers, or its next save
+                    // would overwrite them.
+                    if existing.last_read == [0u8; 32] {
+                        existing.last_read = chat.last_read;
+                    }
+                    if existing.unread_from == [0u8; 32] {
+                        existing.unread_from = chat.unread_from;
+                    }
                     continue;
                 }
                 for message in last_messages.remove(&chat_id).unwrap_or_default() {

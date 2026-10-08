@@ -46,6 +46,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
             to_value(meta)?
         }
         "mark_as_unread" => db::scoped(mark_as_unread(a.str("chatId")?)).await.map_or(Value::Null, Value::String),
+        "mark_unread_from" => json!(db::scoped(mark_unread_from(a.str("chatId")?, a.str("messageId")?)).await?),
         "set_self_destruct_timer" => {
             let (chat_id, secs) = (a.str("chatId")?, a.de::<Option<u64>>("secs")?);
             db::scoped(async move { vector_core::self_destruct::set_chat_duration_secs(&chat_id, secs) }).await?;
@@ -318,7 +319,7 @@ async fn mark_as_unread(chat_id: String) -> Option<String> {
     let slim = {
         let mut state = STATE.lock().await;
         let idx = state.chats.iter().position(|c| c.id == chat_id)?;
-        state.chats[idx].last_read = last_read;
+        state.chats[idx].mark_read_at(last_read);
         db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
     };
     let _ = db::chats::save_slim_chat(&slim);
@@ -328,6 +329,19 @@ async fn mark_as_unread(chat_id: String) -> Option<String> {
     }
     reconcile_unread(&chat_id).await;
     Some(last_read_hex)
+}
+
+/// Unread from `message_id` on, past our own replies, until the chat is read again; the new count.
+async fn mark_unread_from(chat_id: String, message_id: String) -> Result<u32, String> {
+    let slim = {
+        let mut state = STATE.lock().await;
+        let idx = state.chats.iter().position(|c| c.id == chat_id).ok_or("Chat not found")?;
+        state.chats[idx].unread_from = vector_core::compact::encode_message_id(&message_id);
+        db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+    };
+    db::chats::save_slim_chat(&slim)?;
+    reconcile_unread(&chat_id).await;
+    db::events::unread_count_for_chat(&chat_id).await
 }
 
 /// `context_before` messages older than the target, the target, and everything newer; newest first.

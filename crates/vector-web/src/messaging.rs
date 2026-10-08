@@ -161,7 +161,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         let Some(idx) = state.chats.iter().position(|c| c.id == chat_id) else { return false };
         let changed = match &message_id {
             Some(id) => {
-                state.chats[idx].last_read = vector_core::compact::encode_message_id(id);
+                state.chats[idx].mark_read_at(vector_core::compact::encode_message_id(id));
                 true
             }
             None => state.chats[idx].set_as_read(),

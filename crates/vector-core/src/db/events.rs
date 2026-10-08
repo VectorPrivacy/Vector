@@ -592,6 +592,11 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
     // If this row is a chat's read marker, retreat it to the newest surviving event before it FIRST.
     // A deleted marker would leave `last_read` dangling and collapse the unread anchor (badge stuck
     // at 99+). The UPDATE fires only when this chat's marker is exactly the row being deleted.
+    // An empty id would match every chat whose marker is unset.
+    if event_id.is_empty() {
+        conn.execute("DELETE FROM events WHERE id = ''", []).map_err(|e| format!("Failed to delete event: {e}"))?;
+        return Ok(());
+    }
     if let Ok(Some((chat_row, at))) = conn.query_row(
         "SELECT chat_id, created_at FROM events WHERE id = ?1",
         rusqlite::params![event_id],
@@ -604,6 +609,16 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
              WHERE id = ?1 AND last_read = ?2",
             rusqlite::params![chat_row, event_id, at],
         ).map_err(|e| format!("read-marker retreat: {e}"))?;
+        // A "Mark as Unread" from this row moves on to the next message, or ends with none left.
+        conn.execute(
+            "UPDATE chats SET unread_from = COALESCE(( \
+                 SELECT id FROM events WHERE chat_id = ?1 AND id != ?2 AND created_at >= ?3 \
+                   AND kind IN (?4, ?5, ?6) \
+                 ORDER BY created_at ASC, id ASC LIMIT 1), '') \
+             WHERE id = ?1 AND unread_from = ?2",
+            rusqlite::params![chat_row, event_id, at,
+                event_kind::CHAT_MESSAGE as i32, event_kind::PRIVATE_DIRECT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32],
+        ).map_err(|e| format!("unread-from advance: {e}"))?;
     }
     conn.execute(
         "DELETE FROM events WHERE id = ?1",
@@ -1886,8 +1901,13 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let bans = all_ban_pairs_json(&conn);
-    // Anchor: newest own message, or the chat's `last_read` event of any kind. A max per kind reads
+    // Anchor: newest own message, or the chat's `last_read` event of any kind. An unset marker is
+    // '' and must not match a stray empty-id event row. A max per kind reads
     // the end of idx_events_unread rather than the whole chat; MATERIALIZED runs each CTE once.
+    // A "Mark as Unread" from a chosen message (`unread_from`) replaces the anchor: everything from
+    // that message's second on counts (its whole second, like the anchor), own replies after it
+    // notwithstanding. Seconds are integers, so `>= anchor + 1` is the `> anchor` cutoff in a form
+    // the index can range-seek either way.
     let mut stmt = conn
         .prepare_cached(
             "WITH anchors AS MATERIALIZED ( \
@@ -1895,15 +1915,16 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                     COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?1), 0), \
                     COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?2), 0), \
                     COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?3), 0), \
-                    COALESCE((SELECT created_at FROM events WHERE id = c.last_read AND chat_id = c.id), 0) \
-                ) AS anchor_ts \
+                    COALESCE((SELECT created_at FROM events WHERE c.last_read != '' AND id = c.last_read AND chat_id = c.id), 0) \
+                ) AS anchor_ts, \
+                (SELECT created_at FROM events WHERE c.unread_from != '' AND id = c.unread_from AND chat_id = c.id) AS from_ts \
                 FROM chats c \
              ), \
              counts AS MATERIALIZED ( \
                 SELECT a.chat_identifier AS chat_identifier, ( \
                     SELECT COUNT(*) FROM events e \
                     WHERE e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
-                      AND e.created_at > a.anchor_ts \
+                      AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
                       AND (e.npub IS NULL OR e.npub NOT IN ( \
                             SELECT chat_identifier FROM chats WHERE muted = 1 \
                             UNION \
@@ -1947,16 +1968,17 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
     let count: i64 = conn
         .prepare_cached(
             "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
+             LEFT JOIN events f ON c.unread_from != '' AND f.id = c.unread_from AND f.chat_id = c.id \
              WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
                AND (e.npub IS NULL OR e.npub NOT IN ( \
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
                AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5))) \
-               AND e.created_at > COALESCE(( \
+               AND e.created_at >= COALESCE(f.created_at, COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
-                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR e2.id = c.last_read)), 0)",
+                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR (c.last_read != '' AND e2.id = c.last_read))), 0) + 1)",
         )
         .and_then(|mut stmt| {
             stmt.query_row(
@@ -2358,6 +2380,103 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // "Mark as Unread" from a chosen message counts from it on, past our own replies, in both the
+    // map and the single-chat query, and the ordinary floor returns once it is cleared.
+    #[tokio::test]
+    async fn unread_from_counts_past_own_replies() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1unreadfrom";
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        let agree = || async {
+            let map = unread_counts().await.unwrap().get(chat).copied().unwrap_or(0);
+            let one = unread_count_for_chat(chat).await.unwrap();
+            assert_eq!(map, one, "single-chat query diverged from the map");
+            one
+        };
+        let set_from = |id: &str| {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET unread_from = ?1 WHERE chat_identifier = ?2", rusqlite::params![id, chat]).unwrap();
+        };
+
+        save_message(chat, &mk("a", 1000, false)).await.unwrap();
+        save_message(chat, &mk("b", 1001, false)).await.unwrap();
+        save_message(chat, &mk("mine1", 1002, true)).await.unwrap();
+        save_message(chat, &mk("c", 1003, false)).await.unwrap();
+        save_message(chat, &mk("mine2", 1004, true)).await.unwrap();
+        assert_eq!(agree().await, 0, "our newest reply reads everything before it");
+
+        set_from("b");
+        assert_eq!(agree().await, 2, "b and c count; our replies don't, nor stop the count");
+        set_from("a");
+        assert_eq!(agree().await, 3, "from the first message: a, b, c");
+        set_from("mine1");
+        assert_eq!(agree().await, 1, "from our own message: only c after it");
+        set_from("gone");
+        assert_eq!(agree().await, 0, "a marker whose message is gone falls back to the floor");
+        set_from("");
+        assert_eq!(agree().await, 0, "cleared: the own-message floor is back");
+    }
+
+    // A stray event row with an empty id must not stand in for an unset marker ('' in both).
+    #[tokio::test]
+    async fn empty_markers_ignore_an_empty_id_event() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1emptyidrow";
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        save_message(chat, &mk("old", 1000, false)).await.unwrap();
+        save_message(chat, &mk("new", 3000, false)).await.unwrap();
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            let chat_row: i64 = conn.query_row("SELECT id FROM chats WHERE chat_identifier = ?1", rusqlite::params![chat], |r| r.get(0)).unwrap();
+            conn.execute("INSERT INTO events (id, kind, chat_id, content, tags, created_at, received_at, mine) VALUES ('', 30078, ?1, '', '[]', 2000, 2000, 0)",
+                rusqlite::params![chat_row]).unwrap();
+            conn.execute("UPDATE chats SET last_read = 'new', unread_from = '' WHERE id = ?1", rusqlite::params![chat_row]).unwrap();
+        }
+        let map = unread_counts().await.unwrap().get(chat).copied().unwrap_or(0);
+        assert_eq!(map, 0, "read to 'new'; the empty-id row is not an unread_from marker");
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 0);
+    }
+
+    // The mark persists, moves on when its message is deleted, and a read save clears it.
+    #[tokio::test]
+    async fn unread_from_persists_moves_on_delete_and_clears() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1unreadfromlife";
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        for (id, secs, mine) in [("a", 1000, false), ("b", 1001, false), ("mine1", 1002, true), ("c", 1003, false)] {
+            save_message(chat, &mk(id, secs, mine)).await.unwrap();
+        }
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET unread_from = 'b' WHERE chat_identifier = ?1", rusqlite::params![chat]).unwrap();
+        }
+        let stored = || crate::db::chats::get_all_chats().unwrap().into_iter().find(|c| c.id == chat).unwrap();
+        assert_eq!(stored().unread_from, "b", "the mark round-trips through the chats row");
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 2, "b and c");
+
+        delete_event("b").await.unwrap();
+        assert_eq!(stored().unread_from, "mine1", "deleting the chosen message hands the mark to the next one");
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 1, "only c after it");
+
+        let mut slim = stored();
+        slim.unread_from = String::new();
+        crate::db::chats::save_slim_chat(&slim).unwrap();
+        assert_eq!(stored().unread_from, "", "a read's save clears it");
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 1, "back to the own-message floor: c");
     }
 
     // Muting a person (their DM row) or blocking them silences their messages in EVERY chat's

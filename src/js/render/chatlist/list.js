@@ -510,39 +510,43 @@ function countUnreadMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;
 
     // Walk backwards from the end to count unread messages
-    // Stop when we hit: 1) our own message, or 2) the last_read message
+    // Stop when we hit: 1) our own message, or 2) the last_read message.
+    // A "Mark as Unread" from a chosen message (unread_from) counts back to it instead, past our
+    // own replies.
+    const from = chat.unread_from || '';
     let unreadCount = 0;
 
     for (let i = chat.messages.length - 1; i >= 0; i--) {
         const msg = chat.messages[i];
+        const reached = !!from && msg.id === from;
 
         // System events (wallpaper changes, member joined/left, etc.) are
         // state notifications, not conversation — skip them entirely so they
         // can't drive the unread badge or block the walk-back from hitting a
         // real read marker.
         if (msg.system_event) {
+            if (reached) break;
             continue;
         }
 
         // If we hit our own message, stop - we clearly read everything before it
         if (msg.mine) {
+            if (from && !reached) continue;
             break;
         }
 
         // If we hit the last_read message, stop - everything at and before this is read
-        if (chat.last_read && msg.id === chat.last_read) {
+        if (!from && chat.last_read && msg.id === chat.last_read) {
             break;
         }
 
         // Skip messages from blocked or muted users in group chats
-        if (chatIsGroup(chat) && msg.npub) {
-            const authorProfile = getProfile(msg.npub);
-            if (authorProfile?.is_blocked) continue;
-            if (senderIsMuted(msg.npub)) continue;
-        }
+        const hidden = chatIsGroup(chat) && msg.npub
+            && (getProfile(msg.npub)?.is_blocked || senderIsMuted(msg.npub));
 
         // Count this message as unread
-        unreadCount++;
+        if (!hidden) unreadCount++;
+        if (reached) break;
     }
 
     return unreadCount;
@@ -628,12 +632,15 @@ function countPingMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;
     const isGroup = chatIsGroup(chat);
     const admins = chat.metadata?.admins;
+    const from = chat.unread_from || '';
     let pings = 0;
     for (let i = chat.messages.length - 1; i >= 0; i--) {
         const msg = chat.messages[i];
+        // Past the chosen message of a "Mark as Unread" nothing is unread.
+        if (from && i < chat.messages.length - 1 && chat.messages[i + 1].id === from) break;
         if (msg.system_event) continue; // not a conversation message
-        if (msg.mine) break;
-        if (chat.last_read && msg.id === chat.last_read) break;
+        if (msg.mine) { if (from) continue; break; }
+        if (!from && chat.last_read && msg.id === chat.last_read) break;
         if (isGroup && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;

@@ -12,6 +12,8 @@ pub struct SlimChatDB {
     pub chat_type: ChatType,
     pub participants: Vec<String>,
     pub last_read: String,
+    #[serde(default)]
+    pub unread_from: String,
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
@@ -45,6 +47,11 @@ impl SlimChatDB {
             } else {
                 decode_message_id(chat.last_read())
             },
+            unread_from: if chat.unread_from == [0u8; 32] {
+                String::new()
+            } else {
+                decode_message_id(&chat.unread_from)
+            },
             created_at: chat.created_at(),
             metadata: chat.metadata().clone(),
             muted: chat.muted(),
@@ -74,6 +81,11 @@ impl SlimChatDB {
         } else {
             encode_message_id(&self.last_read)
         };
+        chat.unread_from = if self.unread_from.is_empty() {
+            [0u8; 32]
+        } else {
+            encode_message_id(&self.unread_from)
+        };
         chat.created_at = self.created_at;
         chat.metadata = self.metadata.clone();
         chat.muted = self.muted;
@@ -95,7 +107,7 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
     let mut stmt = conn.prepare(
         "SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, \
                 wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, \
-                wallpaper_url, wallpaper_uploader \
+                wallpaper_url, wallpaper_uploader, unread_from \
          FROM chats WHERE chat_type != 1 ORDER BY created_at DESC"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
@@ -114,6 +126,7 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
             chat_type,
             participants,
             last_read: row.get(3)?,
+            unread_from: row.get(13)?,
             created_at: row.get::<_, i64>(4)? as u64,
             metadata,
             muted: row.get::<_, i32>(6)? != 0,
@@ -164,15 +177,16 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
         // empty marker would wipe the stored read position — resurrecting every message
         // since as phantom unread. Marker clears go through the dedicated
         // `UPDATE chats SET last_read` paths, not this upsert.
-        "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, wallpaper_url, wallpaper_uploader) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+        "INSERT INTO chats (chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, wallpaper_url, wallpaper_uploader, unread_from) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
          ON CONFLICT(chat_identifier) DO UPDATE SET \
             chat_type = excluded.chat_type, participants = excluded.participants, \
             last_read = CASE WHEN excluded.last_read = '' THEN chats.last_read ELSE excluded.last_read END, \
             metadata = excluded.metadata, muted = excluded.muted, \
             wallpaper_path = excluded.wallpaper_path, wallpaper_ts = excluded.wallpaper_ts, \
             wallpaper_blur = excluded.wallpaper_blur, wallpaper_dim = excluded.wallpaper_dim, \
-            wallpaper_url = excluded.wallpaper_url, wallpaper_uploader = excluded.wallpaper_uploader",
+            wallpaper_url = excluded.wallpaper_url, wallpaper_uploader = excluded.wallpaper_uploader, \
+            unread_from = excluded.unread_from",
         rusqlite::params![
             slim_chat.id,
             chat_type_int,
@@ -187,6 +201,7 @@ pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
             slim_chat.wallpaper_dim as i32,
             slim_chat.wallpaper_url,
             slim_chat.wallpaper_uploader,
+            slim_chat.unread_from,
         ],
     ).map_err(|e| format!("Failed to upsert chat: {}", e))?;
 
@@ -257,6 +272,7 @@ mod tests {
             chat_type: crate::ChatType::DirectMessage,
             participants: vec![],
             last_read: "aa".repeat(32),
+            unread_from: String::new(),
             created_at: 1000,
             metadata: crate::chat::ChatMetadata::default(),
             muted: false,
@@ -323,6 +339,7 @@ mod tests {
             chat_type: crate::ChatType::DirectMessage,
             participants: vec![],
             last_read: String::new(),
+            unread_from: String::new(),
             created_at: 1000,
             metadata: crate::chat::ChatMetadata::default(),
             muted: false,

@@ -178,9 +178,21 @@ async function readClipboardImageBytes() {
     }
 }
 
+/** Sending in a chat reads it: end a "Mark as Unread" and its hold. */
+function releaseUnreadHold() {
+    const chat = strOpenChat ? getChat(strOpenChat) : null;
+    if (!chat) return;
+    const held = isChatUnreadLatched(chat.id);
+    if (!held && !chat.unread_from) return;
+    clearChatUnreadLatch(chat.id);
+    if (chat.unread_from) markChatCaughtUp(chat, true);
+    if (held) syncBackendActiveChat();
+}
+
 // Unified message sending function
 async function sendMessage(messageText) {
     if (!messageText || !messageText.trim()) return;
+    releaseUnreadHold();
 
     // Clean tracking parameters from any URLs in the message for privacy (if enabled)
     let cleanedText = messageText.trim();
@@ -589,6 +601,7 @@ async function handleComposerInput(e) {
 
 /** The send button: a structured command, a voice preview, or the text draft. */
 async function handleSendClick() {
+        releaseUnreadHold();
         // Structured command composer open: the button submits the parts.
         if (commandCtrl && commandCtrl.isComposing()) {
             commandCtrl.submitComposer();

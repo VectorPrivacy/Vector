@@ -160,9 +160,10 @@ async function setupRustListeners() {
             ch._sysEvRequested = false;
             ensureCommunityPreviewActivity(ch);
         }
-        // Only the visible channel needs repainting; the rest reload when opened.
+        // Only the visible channel needs repainting; the rest reload when opened. A repaint is not
+        // a read: a "Mark as Unread" there survives it.
         const open = channels.find(c => c.id === strOpenChat);
-        if (open) await openChat(open.id);
+        if (open) await openChat(open.id, { reread: false });
     }
 
     _on('community_migrated', async (evt) => {
@@ -859,7 +860,8 @@ async function setupRustListeners() {
             // the tail (the user saw it) — never on a data-only/frozen path.
             if (!newMessage.mine && rendered && tailAppend && chatPinnedToBottom && isWindowActive()) {
                 markAsRead(chat, newMessage);
-                clearUnreadDivider();
+                // A chat held unread keeps its divider.
+                if (!isChatUnreadLatched(chat.id) && !chat.unread_from) clearUnreadDivider();
             }
             // Own-send catches up to the latest non-mine message AT OR BEFORE this send
             // (never past it — see findLatestContactMessage).
@@ -1007,6 +1009,9 @@ async function setupRustListeners() {
         // Remove from in-memory messages
         const msgIdx = cChat.messages.findIndex(m => m.id === id);
         if (msgIdx !== -1) cChat.messages.splice(msgIdx, 1);
+        // A "Mark as Unread" from it moves on to the next message, or ends with none left
+        // (the backend does the same).
+        if (cChat.unread_from === id) cChat.unread_from = (msgIdx !== -1 && cChat.messages[msgIdx]?.id) || '';
 
         // Remove from event cache
         if (eventCache.has(chat_id)) {
@@ -1107,6 +1112,9 @@ async function setupRustListeners() {
         const cChat = getChat(chat_id);
         if (cChat && last_read) {
             cChat.last_read = last_read;
+            // The backend read ends any "Mark as Unread" here too (it cleared unread_from).
+            cChat.unread_from = '';
+            clearChatUnreadLatch(chat_id);
             // Re-derive the unread badge from the DB (the read just advanced, possibly to a
             // non-latest message on another device).
             scheduleUnreadRefresh();

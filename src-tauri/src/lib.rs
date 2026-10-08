@@ -652,6 +652,7 @@ pub fn run() {
             profile::upload_avatar,
             chat::mark_as_read,
             chat::mark_as_unread,
+            chat::mark_unread_from,
             chat::toggle_chat_mute,
             commands::notify::get_notify_prefs,
             commands::notify::set_notify_level,

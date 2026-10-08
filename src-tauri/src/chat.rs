@@ -53,7 +53,7 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
 
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             if let Some(msg_id) = &message_id {
-                chat.last_read = encode_message_id(msg_id);
+                chat.mark_read_at(encode_message_id(msg_id));
                 result = true;
                 chat_id_for_save = Some(chat.id.clone());
             } else {
@@ -120,7 +120,7 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
                 Some(i) => i,
                 None => return None,
             };
-            state.chats[idx].last_read = last_read;
+            state.chats[idx].mark_read_at(last_read);
             crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
         };
         let _ = crate::db::chats::save_slim_chat(slim).await;
@@ -141,6 +141,27 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
             let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
         }
         Some(last_read_hex)
+    })
+    .await
+}
+
+/// Mark a chat unread from `message_id` on: that message and every later one from others count,
+/// even past our own replies, until the chat is read again. Returns the chat's new unread count.
+#[tauri::command]
+pub async fn mark_unread_from(chat_id: String, message_id: String) -> Result<u32, String> {
+    vector_core::db::scoped(async move {
+        let slim = {
+            let mut state = crate::STATE.lock().await;
+            let idx = state.chats.iter().position(|c| c.id == chat_id).ok_or("Chat not found")?;
+            state.chats[idx].unread_from = encode_message_id(&message_id);
+            crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+        };
+        crate::db::chats::save_slim_chat(slim).await?;
+        crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
+        if let Some(handle) = crate::TAURI_APP.get() {
+            let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+        }
+        vector_core::db::events::unread_count_for_chat(&chat_id).await
     })
     .await
 }

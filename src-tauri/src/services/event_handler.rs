@@ -36,7 +36,9 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     let slim = {
         let mut state = STATE.lock().await;
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat.last_read = vector_core::compact::encode_message_id(msg_id);
+            // A per-message "Mark as Unread" ends only by the user's own read, never a background one.
+            if chat.unread_from != [0u8; 32] { return false; }
+            chat.mark_read_at(vector_core::compact::encode_message_id(msg_id));
             state.get_chat(chat_id).map(|c| {
                 vector_core::db::chats::SlimChatDB::from_chat(c, &state.interner)
             })

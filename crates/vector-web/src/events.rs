@@ -13,7 +13,9 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     let slim = {
         let mut state = STATE.lock().await;
         let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) else { return false };
-        chat.last_read = vector_core::compact::encode_message_id(msg_id);
+        // A per-message "Mark as Unread" ends only by the user's own read, never a background one.
+        if chat.unread_from != [0u8; 32] { return false; }
+        chat.mark_read_at(vector_core::compact::encode_message_id(msg_id));
         state.get_chat(chat_id).map(|c| db::chats::SlimChatDB::from_chat(c, &state.interner))
     };
     let Some(slim) = slim else { return false };
@@ -76,7 +78,14 @@ impl InboundEventHandler for WebEventHandler {
         let (chat_id, msg) = (chat_id.to_string(), msg.clone());
         db::spawn_bound(async move {
             if msg.mine {
-                crate::messaging::mark_as_read(chat_id, None).await;
+                // Answered from another device: read here too, and tell the page (as desktop does).
+                if crate::messaging::mark_as_read(chat_id.clone(), None).await {
+                    let last_read = STATE.lock().await.get_chat(&chat_id)
+                        .map(|c| vector_core::compact::decode_message_id(&c.last_read));
+                    if let Some(last_read) = last_read {
+                        vector_core::emit_event("chat_mark_read", &json!({ "chat_id": chat_id, "last_read": last_read }));
+                    }
+                }
                 return;
             }
             let marked = auto_mark_if_active(&chat_id, &msg.id).await;

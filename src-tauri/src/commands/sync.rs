@@ -611,6 +611,14 @@ pub async fn fetch_messages<R: Runtime>(
                             let existing_idx = preexisting.get(&chat_id).copied();
 
                             if let Some(idx) = existing_idx {
+                                // A chat made before its row loaded has no read markers yet; left
+                                // empty, its next save would overwrite the stored ones.
+                                if state.chats[idx].last_read == [0u8; 32] {
+                                    state.chats[idx].last_read = chat.last_read;
+                                }
+                                if state.chats[idx].unread_from == [0u8; 32] {
+                                    state.chats[idx].unread_from = chat.unread_from;
+                                }
                                 // Merge DB-loaded messages into the existing chat
                                 if let Some(messages) = messages_to_add {
                                     #[cfg(debug_assertions)]

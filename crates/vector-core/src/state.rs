@@ -1176,7 +1176,15 @@ impl ChatState {
                 let removed_at = compact.at;
                 let chat_id = chat.id.clone();
                 let was_marker = chat.last_read == removed_id;
+                let was_unread_from = chat.unread_from == removed_id;
                 chat.messages.remove_by_hex_id(message_id);
+                // A "Mark as Unread" from it moves on to the next message, or ends with none left.
+                if was_unread_from {
+                    chat.unread_from = chat.messages.iter()
+                        .find(|m| m.at >= removed_at)
+                        .map(|m| m.id)
+                        .unwrap_or([0u8; 32]);
+                }
                 // A deleted read marker leaves `last_read` dangling and collapses the unread anchor
                 // (badge stuck at 99+); retreat it to the newest surviving contact message before the
                 // deleted one, or clear it. Mirrors the DB retreat in `db::events::delete_event`.
@@ -1284,7 +1292,20 @@ impl ChatState {
                 continue;
             }
             let mut unread_count = 0u32;
+            // A "Mark as Unread" from a chosen message counts back to it, past own replies.
+            let from = (chat.unread_from != [0u8; 32]).then_some(chat.unread_from);
             for msg in chat.iter_compact().rev() {
+                if let Some(from) = from {
+                    let reached = msg.id == from;
+                    if !msg.flags.is_mine() && !(is_group && msg.npub_idx != NO_NPUB
+                        && (muted_senders.contains(&msg.npub_idx)
+                            || self.get_profile_by_id(msg.npub_idx).is_some_and(|p| p.flags.is_blocked())))
+                    {
+                        unread_count += 1;
+                    }
+                    if reached { break; }
+                    continue;
+                }
                 if msg.flags.is_mine() { break; }
                 if chat.last_read != [0u8; 32] && msg.id == chat.last_read { break; }
                 if is_group && msg.npub_idx != NO_NPUB {
@@ -2144,6 +2165,31 @@ mod tests {
             state.count_unread_messages(), 2,
             "only messages after last 'mine' should count as unread"
         );
+    }
+
+    #[test]
+    fn count_unread_from_counts_past_own_messages() {
+        let mut state = ChatState::new();
+        state.create_dm_chat("npub1peer");
+        for m in [
+            make_message(1, "them 1", 1700000001000, false),
+            make_message(2, "them 2", 1700000002000, false),
+            make_message(3, "me", 1700000003000, true),
+            make_message(4, "them 3", 1700000004000, false),
+            make_message(5, "me", 1700000005000, true),
+        ] {
+            state.add_message_to_chat("npub1peer", &m);
+        }
+        assert_eq!(state.count_unread_messages(), 0, "our newest reply reads everything");
+
+        let chat = state.chats.iter_mut().find(|c| c.id == "npub1peer").unwrap();
+        chat.unread_from = crate::compact::encode_message_id(&make_hex_id(2));
+        assert_eq!(state.count_unread_messages(), 2, "them 2 and them 3, past our replies");
+
+        let chat = state.chats.iter_mut().find(|c| c.id == "npub1peer").unwrap();
+        assert!(chat.set_as_read());
+        assert_eq!(chat.unread_from, [0u8; 32], "a read clears the mark");
+        assert_eq!(state.count_unread_messages(), 0);
     }
 
     #[test]

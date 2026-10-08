@@ -31,6 +31,7 @@
     "allow-get-blocked-users",
     "allow-mark-as-read",
     "allow-mark-as-unread",
+    "allow-mark-unread-from",
     "allow-toggle-chat-mute",
     "allow-get-notify-prefs",
     "allow-set-notify-level",

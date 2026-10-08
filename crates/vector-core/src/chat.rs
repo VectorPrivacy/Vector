@@ -20,6 +20,9 @@ pub struct Chat {
     pub participants: Vec<u16>,
     pub messages: CompactMessageVec,
     pub last_read: [u8; 32],
+    /// "Mark as Unread" from a chosen message: while set, that message and every later message
+    /// from others count as unread; our own messages after it don't end the count. A read clears it.
+    pub unread_from: [u8; 32],
     pub created_at: u64,
     pub metadata: ChatMetadata,
     pub muted: bool,
@@ -57,6 +60,7 @@ impl Chat {
             participants,
             messages: CompactMessageVec::new(),
             last_read: [0u8; 32],
+            unread_from: [0u8; 32],
             created_at: web_time::SystemTime::now()
                 .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
@@ -148,11 +152,17 @@ impl Chat {
     pub fn set_as_read(&mut self) -> bool {
         for msg in self.messages.iter().rev() {
             if !msg.flags.is_mine() {
-                self.last_read = msg.id;
+                self.mark_read_at(msg.id);
                 return true;
             }
         }
         false
+    }
+
+    /// Advance the read marker; reading ends a "Mark as Unread" from a chosen message.
+    pub fn mark_read_at(&mut self, id: [u8; 32]) {
+        self.last_read = id;
+        self.unread_from = [0u8; 32];
     }
 
     pub fn internal_add_message(&mut self, message: Message, interner: &mut NpubInterner) -> bool {
@@ -182,6 +192,7 @@ impl Chat {
             participants: self.resolve_participants(interner),
             messages: self.get_all_messages(interner),
             last_read: if self.last_read == [0u8; 32] { String::new() } else { decode_message_id(&self.last_read) },
+            unread_from: if self.unread_from == [0u8; 32] { String::new() } else { decode_message_id(&self.unread_from) },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: resolved.muted,
@@ -205,6 +216,7 @@ impl Chat {
             participants: self.resolve_participants(interner),
             messages: self.get_last_messages(n, interner),
             last_read: if self.last_read == [0u8; 32] { String::new() } else { decode_message_id(&self.last_read) },
+            unread_from: if self.unread_from == [0u8; 32] { String::new() } else { decode_message_id(&self.unread_from) },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
             muted: resolved.muted,
@@ -308,6 +320,9 @@ pub struct SerializableChat {
     pub participants: Vec<String>,
     pub messages: Vec<Message>,
     pub last_read: String,
+    /// Hex id of the message a "Mark as Unread" counts from; empty when not set.
+    #[serde(default)]
+    pub unread_from: String,
     pub created_at: u64,
     pub metadata: ChatMetadata,
     /// Effective mute, after the community's own mute and any timer. The row
@@ -347,6 +362,7 @@ impl SerializableChat {
         let handles: Vec<u16> = self.participants.iter().map(|p| interner.intern(p)).collect();
         let mut chat = Chat::new(self.id, self.chat_type, handles);
         chat.last_read = if self.last_read.is_empty() { [0u8; 32] } else { encode_message_id(&self.last_read) };
+        chat.unread_from = if self.unread_from.is_empty() { [0u8; 32] } else { encode_message_id(&self.unread_from) };
         chat.created_at = self.created_at;
         chat.metadata = self.metadata;
         chat.muted = self.muted;

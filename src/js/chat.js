@@ -1025,7 +1025,7 @@ function chatOnScreen(id) {
     return !!id && strOpenChat === id && VectorSvelte.paneShown('chat') && !VectorSvelte.paneShown('settings');
 }
 
-async function openChat(contact) {
+async function openChat(contact, { reread = true } = {}) {
     // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
     // but unfreeze the window on any chat open in case a path slipped through.
     _unreadJumpResolving = false;
@@ -1112,12 +1112,14 @@ async function openChat(contact) {
     // the stale value to find the boundary, but we still want to advance
     // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
+    const unreadFromOnOpen = chat?.unread_from || '';   // a "Mark as Unread" from a chosen message
     const unreadOnOpen = chat?.unread || 0;   // snapshot before the open-time markAsRead zeroes it
-    // Opening IS reading — release any explicit mark-unread latch.
-    clearChatUnreadLatch(chat?.id);
-    if (chat?.messages?.length) {
+    // Opening IS reading — release any explicit mark-unread latch. A repaint of the open chat
+    // (reread: false) is not a fresh look and leaves both alone.
+    if (reread) clearChatUnreadLatch(chat?.id);
+    if (reread && chat?.messages?.length) {
         const latestNonMine = findLatestContactMessage(chat.messages);
-        if (latestNonMine) markAsRead(chat, latestNonMine);
+        if (latestNonMine) markAsRead(chat, latestNonMine, true);
     }
 
     // Apply the chat's wallpaper to the layer before any messages render,
@@ -1245,6 +1247,15 @@ async function openChat(contact) {
     if (chat) {
         chat.messages = initialMessages;
     }
+    // The open-time read above saw only what RAM held before this load: a channel's preview
+    // can trail its newest message, which left it unread until a later open. Read again against
+    // the loaded page. A "Mark as Unread" ends here too, on our own newest message if nothing
+    // newer is theirs (at boot RAM may hold just that one).
+    if (reread) {
+        const newest = findLatestContactMessage(initialMessages)
+            || (chat?.unread_from ? [...initialMessages].reverse().find(m => !m.system_event) : null);
+        if (newest) markAsRead(chat, newest, true);
+    }
 
     // Initialize procedural scroll state with actual counts
     initProceduralScrollWithCache(contact, initialMessages.length, totalMessages);
@@ -1273,10 +1284,15 @@ async function openChat(contact) {
     refreshChatEmptyState(); // empty community → show the "start of channel" marker
 
     // Drop a "New" divider above the first non-mine message after
-    // `last_read`. Only fires when last_read matches a loaded message —
-    // stale markers (id drift, deleted msg) would otherwise stick the
-    // divider above the latest contact on every reopen.
-    if (initialMessages.length > 0 && lastReadOnOpen) {
+    // `last_read` (or above the chosen message of a "Mark as Unread"). Only fires
+    // when the marker matches a loaded message — stale markers (id drift, deleted
+    // msg) would otherwise stick the divider above the latest contact on every reopen.
+    const fromNode = unreadFromOnOpen && initialMessages.some(m => m.id === unreadFromOnOpen)
+        ? document.getElementById(unreadFromOnOpen) : null;
+    if (fromNode) {
+        insertUnreadDivider(fromNode);
+        compensateChatScrollForResize();
+    } else if (initialMessages.length > 0 && lastReadOnOpen && !unreadFromOnOpen) {
         const idx = initialMessages.findIndex(m => m.id === lastReadOnOpen);
         if (idx >= 0) {
             let firstUnread = null;
@@ -1302,7 +1318,9 @@ async function openChat(contact) {
     // unread is already on screen (handled by the divider, or trivially visible) and a jump button
     // would point at nothing. This also stops a stray pill for an own trailing message.
     const lastReadIdx = lastReadOnOpen ? initialMessages.findIndex(m => m.id === lastReadOnOpen) : -1;
-    if (unreadOnOpen > 0 && lastReadOnOpen && lastReadIdx < 0 && initialMessages.length > 0) {
+    if (unreadFromOnOpen && !fromNode && unreadOnOpen > 0 && initialMessages.length > 0) {
+        showUnreadJumpPill(unreadOnOpen, unreadFromOnOpen);
+    } else if (!unreadFromOnOpen && unreadOnOpen > 0 && lastReadOnOpen && lastReadIdx < 0 && initialMessages.length > 0) {
         showUnreadJumpPill(unreadOnOpen, lastReadOnOpen);
     } else {
         hideUnreadJumpPill();
@@ -1720,7 +1738,8 @@ function isWindowActive() { return windowFocused && documentVisible; }
  *  task can race ahead and tick the dock badge before markAsRead lands. */
 let _lastReportedActiveChat = '__init__';
 function syncBackendActiveChat() {
-    const id = (strOpenChat && chatPinnedToBottom && isWindowActive()) ? strOpenChat : null;
+    // A chat held unread by the user is not being read, open or not.
+    const id = (strOpenChat && chatPinnedToBottom && isWindowActive() && !isChatUnreadLatched(strOpenChat)) ? strOpenChat : null;
     if (id === _lastReportedActiveChat) return;
     _lastReportedActiveChat = id;
     invoke('set_active_chat', { chatId: id }).catch(() => { /* best-effort */ });

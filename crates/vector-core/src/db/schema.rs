@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 97;
+pub const HIGHEST_MIGRATION_ID: u32 = 98;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1420,6 +1420,13 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 97, "Profile stream consent", |tx| {
         tx.execute("ALTER TABLE profiles ADD COLUMN stream_consent INTEGER NOT NULL DEFAULT 0", [])
             .map_err(|e| format!("add profiles.stream_consent: {e}"))?;
+        Ok(())
+    })?;
+
+    // "Mark as Unread" from a chosen message: counts from that message, past own replies.
+    run_atomic_migration(conn, 98, "Chat unread_from marker", |tx| {
+        tx.execute("ALTER TABLE chats ADD COLUMN unread_from TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("add chats.unread_from: {e}"))?;
         Ok(())
     })?;
 

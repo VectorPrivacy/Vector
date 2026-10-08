@@ -829,6 +829,16 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         }
     }
 
+    // Mark as Unread from here: offered when a message from someone else sits at or after it.
+    {
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        const msgs = chat?.messages || [];
+        const at = msgs.findIndex(m => m.id === targetId);
+        if (at >= 0 && msgs.slice(at).some(m => !m.mine && !m.system_event)) {
+            items.push({ label: 'Mark as Unread', icon: 'eye-off', onClick: () => markUnreadFrom(chat, msgs[at]) });
+        }
+    }
+
     items.push(...copyLinkItems('Message', goLinkForMessage(strOpenChat, targetId)));
     items.push(...copyIdItems('Message', targetId));
 
