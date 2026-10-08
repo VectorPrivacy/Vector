@@ -4809,9 +4809,11 @@ impl VectorCore {
             // to "not v2" it reroutes onto the v1 list no v2 reader folds — an Ok
             // that banned no one.
             if let Some(crate::community::ConcordProtocol::V2) = crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
-                return crate::community::v2::service::set_members_banned(&transport, &cid, &pks, banned)
+                crate::community::v2::service::set_members_banned(&transport, &cid, &pks, banned)
                     .await
-                    .map_err(VectorError::Other);
+                    .map_err(VectorError::Other)?;
+                Self::announce_ban_change(community_id);
+                return Ok(());
             }
         }
         // v1: same latest-wins mutation over the held list.
@@ -4826,7 +4828,15 @@ impl VectorCore {
         // A ban removes them from the memberlist; the memoised verdict still counts
         // them as present and keeps flagging a raid nobody is running any more.
         Self::invalidate_raid_report(community_id);
+        Self::announce_ban_change(community_id);
         Ok(())
+    }
+
+    /// Our own ban never reaches the fold as a change (the publish already wrote the
+    /// list locally), so announce it: the UI re-reads its filtered history, which takes
+    /// their messages and their join/leave lines with it.
+    fn announce_ban_change(community_id: &str) {
+        emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
     }
 
     /// Re-vend the epoch chain to members a past rotation forgot.

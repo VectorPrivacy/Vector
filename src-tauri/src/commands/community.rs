@@ -656,6 +656,8 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
         // LIVE messages keep flowing until reopen/restart).
         crate::services::subscription_handler::refresh_community_subscription().await;
         reconcile_community_unread(community_id).await;
+        // Repaint from the filtered history: their join/leave lines go with their messages.
+        vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
         Ok(())
     })
     .await

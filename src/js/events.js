@@ -155,6 +155,10 @@ async function setupRustListeners() {
         for (const ch of channels) {
             eventCache.clearConversation(ch.id);
             ch.messages = [];
+            // The preview's cached join/leave line is re-read too, so a banned member's leaves with it.
+            ch.lastSystemEvent = null;
+            ch._sysEvRequested = false;
+            ensureCommunityPreviewActivity(ch);
         }
         // Only the visible channel needs repainting; the rest reload when opened.
         const open = channels.find(c => c.id === strOpenChat);
