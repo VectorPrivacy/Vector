@@ -24946,6 +24946,10 @@ body.profile-switcher-editing .profile-switcher-add {
   height: 16px !important;
   margin: 0 !important;
 }
+/* A card title's info icon trails it, so it needs the gap the rule above zeroes. */
+.st-page .tor-card-title .icon-info {
+  margin-left: 8px !important;
+}
 .st-page .theme-picker {
   width: 230px;
   margin: 0 0 0 auto;

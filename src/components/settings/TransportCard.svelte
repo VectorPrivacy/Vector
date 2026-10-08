@@ -130,8 +130,7 @@
         </div>
         <div class="tor-card-body">
             <div class="tor-card-title">
-                <InfoIcon side="lead" onclick={() => h.help(viewed === 'tor' || viewed === 'i2p' ? viewed : 'transport')} />
-                {#if view.kind === 'unknown'}Choose a Network{:else if viewed === 'tor'}Route traffic through Tor<sup class="tor-tm">™</sup>{:else}{TITLES[viewed] || `Route traffic through ${h.label(viewed)}`}{/if}
+                {#if view.kind === 'unknown'}Choose a Network{:else if viewed === 'tor'}Route traffic through Tor<sup class="tor-tm">™</sup>{:else}{TITLES[viewed] || `Route traffic through ${h.label(viewed)}`}{/if}<InfoIcon onclick={() => h.help(viewed === 'tor' || viewed === 'i2p' ? viewed : 'transport')} />
             </div>
             <div class="tor-card-status">{status}</div>
             <!-- Read out once per phase: the bootstrap's percentages would crowd out other speech. -->

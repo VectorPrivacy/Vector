@@ -57,8 +57,7 @@
     <div class="tor-glyph-wrap streamer-glyph"><span class="icon icon-video"></span></div>
     <div class="tor-card-body">
         <div class="tor-card-title">
-            <InfoIcon side="lead" onclick={() => h.help('streamerMode')} />
-            Streamer Mode
+            Streamer Mode<InfoIcon onclick={() => h.help('streamerMode')} />
         </div>
     </div>
     <label class="toggle-container tor-card-toggle">
