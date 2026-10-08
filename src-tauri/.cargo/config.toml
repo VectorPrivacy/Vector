@@ -1,0 +1,3 @@
+[env]
+# whisper-rs-sys applies these to its copy of whisper.cpp (scripts/whisper-web/build.sh does too).
+WHISPER_PATCHES = { value = "../scripts/whisper/patches", relative = true }

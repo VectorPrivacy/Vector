@@ -1,0 +1,108 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index a865c92f..e53e2ce7 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -884,6 +884,10 @@ struct whisper_state {
+ 
+     std::vector<ggml_backend_t> backends;
+ 
++    // the CPU backends' worker threads, kept across graphs instead of spawned for each one
++    ggml_threadpool_t threadpool   = nullptr;
++    int               threadpool_n = 0;
++
+     // - stores meta info about the intermediate tensors into the `meta` buffers
+     whisper_sched sched_conv;
+     whisper_sched sched_encode;
+@@ -2430,6 +2434,65 @@ static struct ggml_cgraph * whisper_build_graph_cross(
+ //   - n_threads:  number of threads to use
+ //   - mel_offset: offset in the mel spectrogram (i.e. audio offset)
+ //
++// Every graph without a threadpool spawns and joins its workers: once per decoded token.
++static void whisper_state_threadpool(struct whisper_state & state, int n_threads) {
++#ifdef __EMSCRIPTEN__
++    // pthreads there are a fixed pool of Web Workers that a busy worker cannot grow: threads kept
++    // here would leave none for the spectrogram's own, which then never start
++    GGML_UNUSED(state);
++    GGML_UNUSED(n_threads);
++    return;
++#endif
++    if (n_threads <= 1 || state.threadpool_n == n_threads) {
++        return;
++    }
++    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
++    ggml_backend_reg_t cpu_reg = cpu_dev ? ggml_backend_dev_backend_reg(cpu_dev) : nullptr;
++    if (!cpu_reg) {
++        return;
++    }
++    // Kept workers spin a while after each graph before they sleep: with a GPU doing the work,
++    // that is a core per thread burnt for the CPU's odd small split.
++    for (ggml_backend_t backend : state.backends) {
++        const auto type = ggml_backend_dev_type(ggml_backend_get_device(backend));
++        if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
++            return;
++        }
++    }
++    auto * fn_new  = (ggml_threadpool_t (*)(ggml_threadpool_params *)) ggml_backend_reg_get_proc_address(cpu_reg, "ggml_threadpool_new");
++    auto * fn_free = (void (*)(ggml_threadpool_t)) ggml_backend_reg_get_proc_address(cpu_reg, "ggml_threadpool_free");
++    auto * fn_set  = (void (*)(ggml_backend_t, ggml_threadpool_t)) ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_cpu_set_threadpool");
++    if (!fn_new || !fn_free || !fn_set) {
++        return;
++    }
++    ggml_threadpool_params params = ggml_threadpool_params_default(n_threads);
++    ggml_threadpool_t pool = fn_new(&params);
++    if (!pool) {
++        return;
++    }
++    for (ggml_backend_t backend : state.backends) {
++        if (ggml_backend_get_device(backend) == cpu_dev) {
++            fn_set(backend, pool);
++        }
++    }
++    if (state.threadpool) {
++        fn_free(state.threadpool);
++    }
++    state.threadpool   = pool;
++    state.threadpool_n = n_threads;
++}
++
++static void whisper_state_threadpool_free(struct whisper_state & state) {
++    if (!state.threadpool) {
++        return;
++    }
++    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
++    auto * fn_free = (void (*)(ggml_threadpool_t)) ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(cpu_dev), "ggml_threadpool_free");
++    fn_free(state.threadpool);
++    state.threadpool   = nullptr;
++    state.threadpool_n = 0;
++}
++
+ static bool whisper_encode_internal(
+         whisper_context & wctx,
+           whisper_state & wstate,
+@@ -2446,6 +2509,8 @@ static bool whisper_encode_internal(
+     }
+     wstate.enc_seek = -1;
+ 
++    whisper_state_threadpool(wstate, n_threads);
++
+     // conv
+     {
+         auto & sched = wstate.sched_conv.sched;
+@@ -2959,6 +3024,8 @@ static bool whisper_decode_internal(
+                    void * abort_callback_data) {
+     const int64_t t_start_us = ggml_time_us();
+ 
++    whisper_state_threadpool(wstate, n_threads);
++
+     const auto & model   = wctx.model;
+     const auto & hparams = model.hparams;
+ 
+@@ -4010,6 +4077,8 @@ void whisper_free_state(struct whisper_state * state) {
+             ggml_backend_free(backend);
+         }
+ 
++        whisper_state_threadpool_free(*state);
++
+         // [EXPERIMENTAL] Token-level timestamps with DTW
+         aheads_masks_free(state->aheads_masks);
+ 

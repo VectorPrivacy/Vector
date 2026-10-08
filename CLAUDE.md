@@ -317,7 +317,8 @@ Key crates: `nostr-sdk` 0.45, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.37, `iroh
 
 `[patch.crates-io]` in `src-tauri/Cargo.toml` pins two forks:
 - `nostr` — `SecretKey`'s Drop used `non_secure_erase`, which the compiler can optimise away; the fork zeroizes with volatile writes
-- `whisper-rs-sys` — Vector's build fixes
+- `whisper-rs-sys` — whisper.cpp 1.9.5 plus `scripts/whisper/patches` (shared with Vector Web, applied
+  through `WHISPER_PATCHES` in `src-tauri/.cargo/config.toml`); KleidiAI on Android arm64, x86-64-v3
 
 ## Platform Notes
 

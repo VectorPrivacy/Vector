@@ -1,0 +1,2 @@
+# git apply reads these byte for byte: no CRLF conversion on Windows checkouts
+*.patch -text

@@ -1,0 +1,132 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index e3b2f18e..f12b9183 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -901,6 +901,7 @@ struct whisper_state {
+     // helpers for GPU offloading
+     std::vector<float> inp_mel;
+     std::vector<float> inp_mask;
++    std::vector<ggml_fp16_t> inp_mask_pad; // the padding masks of flash attention
+ 
+     // decode output (2-dimensional array: [n_tokens][n_vocab])
+     std::vector<float> logits;
+@@ -2150,6 +2151,15 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+ 
+     const float KQscale = 1.0f/sqrtf(float(n_state_head));
+ 
++    // Flash attention reads K/V up to n_ctx_pad, past what this encode wrote: zeros in a new state,
++    // the previous clip's keys in a reused one. Masked out, attention covers this clip alone.
++    struct ggml_tensor * KQ_mask_pad = nullptr;
++    if (wctx.params.flash_attn && n_ctx_pad > n_ctx) {
++        KQ_mask_pad = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_ctx_pad, n_ctx);
++        ggml_set_name(KQ_mask_pad, "KQ_mask_pad");
++        ggml_set_input(KQ_mask_pad);
++    }
++
+     // ===================================================================
+     // NOTE: experimenting with partial evaluation of the encoder (ignore)
+     //static int iter = -1;
+@@ -2238,7 +2248,7 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+                             ggml_element_size(kv_pad.v)*n_state_head,
+                             0);
+ 
+-                cur = ggml_flash_attn_ext(ctx0, Q, K, V, nullptr, KQscale, 0.0f, 0.0f);
++                cur = ggml_flash_attn_ext(ctx0, Q, K, V, KQ_mask_pad, KQscale, 0.0f, 0.0f);
+ 
+                 cur = ggml_reshape_2d(ctx0, cur, n_state, n_ctx);
+             } else {
+@@ -2429,16 +2439,6 @@ static struct ggml_cgraph * whisper_build_graph_cross(
+     return gf;
+ }
+ 
+-// evaluate the encoder with the given state
+-//
+-// given audio recording (more specifically, its log mel spectrogram), runs forward pass of the encoder
+-// part of the transformer model and returns the encoded features
+-//
+-//   - wctx:      the model
+-//   - wstate:     the state of the encoder
+-//   - n_threads:  number of threads to use
+-//   - mel_offset: offset in the mel spectrogram (i.e. audio offset)
+-//
+ // Every graph without a threadpool spawns and joins its workers: once per decoded token.
+ static void whisper_state_threadpool(struct whisper_state & state, int n_threads) {
+ #ifdef __EMSCRIPTEN__
+@@ -2498,6 +2498,31 @@ static void whisper_state_threadpool_free(struct whisper_state & state) {
+     state.threadpool_n = 0;
+ }
+ 
++// Rows of 0 for the first n_valid keys and -inf for the padding after them.
++static void whisper_set_pad_mask(struct ggml_tensor * mask, int n_valid, std::vector<ggml_fp16_t> & buf) {
++    const int64_t n_kv = mask->ne[0];
++    buf.resize(ggml_nelements(mask));
++    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
++    const ggml_fp16_t ninf = ggml_fp32_to_fp16(-INFINITY);
++    for (int64_t j = 0; j < n_kv; ++j) {
++        buf[j] = j < n_valid ? zero : ninf;
++    }
++    for (int64_t r = 1; r < mask->ne[1]; ++r) {
++        memcpy(buf.data() + r*n_kv, buf.data(), n_kv*sizeof(ggml_fp16_t));
++    }
++    ggml_backend_tensor_set(mask, buf.data(), 0, ggml_nbytes(mask));
++}
++
++// evaluate the encoder with the given state
++//
++// given audio recording (more specifically, its log mel spectrogram), runs forward pass of the encoder
++// part of the transformer model and returns the encoded features
++//
++//   - wctx:      the model
++//   - wstate:     the state of the encoder
++//   - n_threads:  number of threads to use
++//   - mel_offset: offset in the mel spectrogram (i.e. audio offset)
++//
+ static bool whisper_encode_internal(
+         whisper_context & wctx,
+           whisper_state & wstate,
+@@ -2599,6 +2624,10 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        if (struct ggml_tensor * mask = ggml_graph_get_tensor(gf, "KQ_mask_pad")) {
++            whisper_set_pad_mask(mask, mask->ne[1], wstate.inp_mask_pad);
++        }
++
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
+@@ -2697,6 +2726,14 @@ static struct ggml_cgraph * whisper_build_graph_decoder(
+ 
+     struct ggml_tensor * KQ_mask_f16 = ggml_cast(ctx0, KQ_mask, GGML_TYPE_F16);
+ 
++    // the cross-attention reads the encoding padded to n_audio_ctx_pad: mask what lies past it
++    struct ggml_tensor * KQ_mask_cross = nullptr;
++    if (wctx.params.flash_attn && n_audio_ctx_pad > n_audio_ctx) {
++        KQ_mask_cross = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_audio_ctx_pad, n_tokens);
++        ggml_set_name(KQ_mask_cross, "KQ_mask_cross");
++        ggml_set_input(KQ_mask_cross);
++    }
++
+     // token encoding + position encoding
+     struct ggml_tensor * cur =
+         ggml_add(ctx0,
+@@ -2878,7 +2915,7 @@ static struct ggml_cgraph * whisper_build_graph_decoder(
+                             ggml_element_size(wstate.kv_cross.v)*n_state_head,
+                             ggml_element_size(wstate.kv_cross.v)*n_state*n_audio_ctx_pad*il);
+ 
+-                cur = ggml_flash_attn_ext(ctx0, Q, Kcross, Vcross, nullptr, KQscale, 0.0f, 0.0f);
++                cur = ggml_flash_attn_ext(ctx0, Q, Kcross, Vcross, KQ_mask_cross, KQscale, 0.0f, 0.0f);
+ 
+                 cur = ggml_reshape_2d(ctx0, cur, n_state, n_tokens);
+             } else {
+@@ -3133,6 +3170,10 @@ static bool whisper_decode_internal(
+             ggml_backend_tensor_set(KQ_mask, wstate.inp_mask.data(), 0, ggml_nelements(KQ_mask)*sizeof(float));
+         }
+ 
++        if (struct ggml_tensor * mask = ggml_graph_get_tensor(gf, "KQ_mask_cross")) {
++            whisper_set_pad_mask(mask, wstate.exp_n_audio_ctx > 0 ? wstate.exp_n_audio_ctx : hparams.n_audio_ctx, wstate.inp_mask_pad);
++        }
++
+         if (struct ggml_tensor * out_ids = ggml_graph_get_tensor(gf, "out_ids")) {
+             std::vector<int32_t> ids;
+             for (int i = 0; i < n_tokens; ++i) {

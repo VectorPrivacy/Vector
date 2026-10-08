@@ -1,0 +1,153 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 0ad2bcbd..e3b2f18e 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -3214,9 +3214,20 @@ struct whisper_global_cache {
+     // ref: https://github.com/openai/whisper/blob/main/whisper/audio.py#L147
+     float hann_window[WHISPER_N_FFT];
+ 
++    // the leaves of the 400-point FFT are 25-point DFTs: their twiddles by [n][k], k padded to 28
++    float dft25_cos[25*28];
++    float dft25_sin[25*28];
++
+     whisper_global_cache() {
+         fill_sin_cos_table();
+         fill_hann_window(sizeof(hann_window)/sizeof(hann_window[0]), true, hann_window);
++        for (int n = 0; n < 25; n++) {
++            for (int k = 0; k < 28; k++) {
++                const int idx = (k * n * (SIN_COS_N_COUNT / 25)) % SIN_COS_N_COUNT;
++                dft25_cos[n*28 + k] = k < 25 ? cos_vals[idx] : 0.0f;
++                dft25_sin[n*28 + k] = k < 25 ? sin_vals[idx] : 0.0f;
++            }
++        }
+     }
+ 
+     void fill_sin_cos_table() {
+@@ -3239,20 +3250,56 @@ struct whisper_global_cache {
+ } global_cache;
+ }
+ 
++#if defined(__GNUC__) || defined(__clang__)
++// The 25-point DFT four k at a time: each lane sums over n in the order the loop below does.
++static void dft25(const float * in, float * out) {
++    typedef float v4f __attribute__((vector_size(16), aligned(4)));
++    v4f re[7] = {}, im[7] = {};
++    for (int n = 0; n < 25; n++) {
++        const float x = in[n];
++        const float * c = global_cache.dft25_cos + n*28;
++        const float * s = global_cache.dft25_sin + n*28;
++        for (int v = 0; v < 7; v++) {
++            v4f cv, sv;
++            memcpy(&cv, c + 4*v, sizeof(cv));
++            memcpy(&sv, s + 4*v, sizeof(sv));
++            re[v] += x*cv;
++            im[v] -= x*sv;
++        }
++    }
++    for (int k = 0; k < 25; k++) {
++        out[k*2 + 0] = re[k/4][k%4];
++        out[k*2 + 1] = im[k/4][k%4];
++    }
++}
++#endif
++
+ // naive Discrete Fourier Transform
+ // input is real-valued
+ // output is complex-valued
+ static void dft(const float* in, int N, float* out) {
++#if defined(__GNUC__) || defined(__clang__)
++    if (N == 25 && SIN_COS_N_COUNT % 25 == 0) {
++        dft25(in, out);
++        return;
++    }
++#endif
+     const int sin_cos_step = SIN_COS_N_COUNT / N;
+ 
+     for (int k = 0; k < N; k++) {
+         float re = 0;
+         float im = 0;
+ 
++        // idx = (k * n * sin_cos_step) % SIN_COS_N_COUNT, advanced instead of divided for each n
++        const int idx_step = k * sin_cos_step;
++        int idx = 0;
+         for (int n = 0; n < N; n++) {
+-            int idx = (k * n * sin_cos_step) % (SIN_COS_N_COUNT); // t = 2*M_PI*k*n/N
+-            re += in[n]*global_cache.cos_vals[idx]; // cos(t)
++            re += in[n]*global_cache.cos_vals[idx]; // cos(t), t = 2*M_PI*k*n/N
+             im -= in[n]*global_cache.sin_vals[idx]; // sin(t)
++            idx += idx_step;
++            if (idx >= SIN_COS_N_COUNT) {
++                idx -= SIN_COS_N_COUNT;
++            }
+         }
+ 
+         out[k*2 + 0] = re;
+@@ -3310,7 +3357,7 @@ static void fft(float* in, int N, float* out) {
+ 
+ static void log_mel_spectrogram_worker_thread(int ith, const float * hann, const std::vector<float> & samples,
+                                               int n_samples, int frame_size, int frame_step, int n_threads,
+-                                              const whisper_filters & filters, whisper_mel & mel) {
++                                              const whisper_filters & filters, const std::vector<int> & bins, whisper_mel & mel) {
+     std::vector<float> fft_in(frame_size * 2, 0.0);
+     std::vector<float> fft_out(frame_size * 2 * 2 * 2);
+ 
+@@ -3343,12 +3390,14 @@ static void log_mel_spectrogram_worker_thread(int ith, const float * hann, const
+             fft_out[j] = (fft_out[2 * j + 0] * fft_out[2 * j + 0] + fft_out[2 * j + 1] * fft_out[2 * j + 1]);
+         }
+ 
+-        // mel spectrogram
++        // mel spectrogram: only the groups of 4 holding a filter's nonzero bins, the rest adding
++        // exactly 0 (each filter covers a handful of the 201)
+         for (int j = 0; j < mel.n_mel; j++) {
+             double sum = 0.0;
++            const int k_end = bins[2*j + 1];
+             // unroll loop (suggested by GH user @lunixbochs)
+-            int k = 0;
+-            for (k = 0; k < n_fft - 3; k += 4) {
++            int k = bins[2*j + 0] & ~3;
++            for (; k < n_fft - 3 && k < k_end; k += 4) {
+                 sum +=
+                         fft_out[k + 0] * filters.data[j * n_fft + k + 0] +
+                         fft_out[k + 1] * filters.data[j * n_fft + k + 1] +
+@@ -3356,7 +3405,7 @@ static void log_mel_spectrogram_worker_thread(int ith, const float * hann, const
+                         fft_out[k + 3] * filters.data[j * n_fft + k + 3];
+             }
+             // handle n_fft remainder
+-            for (; k < n_fft; k++) {
++            for (k = std::max(k, (n_fft - 3 + 3) & ~3); k < k_end; k++) {
+                 sum += fft_out[k] * filters.data[j * n_fft + k];
+             }
+             sum = log10(std::max(sum, 1e-10));
+@@ -3422,17 +3471,30 @@ static bool log_mel_spectrogram(
+     mel.n_len_org = 1 + (n_samples + stage_2_pad - frame_size) / frame_step;
+     mel.data.resize(mel.n_mel * mel.n_len);
+ 
++    // each filter's first and one-past-last nonzero bin
++    std::vector<int> bins(2 * filters.n_mel, 0);
++    for (int j = 0; j < filters.n_mel; j++) {
++        for (int k = 0; k < filters.n_fft; k++) {
++            if (filters.data[j * filters.n_fft + k] != 0.0f) {
++                if (bins[2*j + 1] == 0) {
++                    bins[2*j + 0] = k;
++                }
++                bins[2*j + 1] = k + 1;
++            }
++        }
++    }
++
+     {
+         std::vector<std::thread> workers(n_threads - 1);
+         for (int iw = 0; iw < n_threads - 1; ++iw) {
+             workers[iw] = std::thread(
+                     log_mel_spectrogram_worker_thread, iw + 1, hann, std::cref(samples_padded),
+                     n_samples + stage_2_pad, frame_size, frame_step, n_threads,
+-                    std::cref(filters), std::ref(mel));
++                    std::cref(filters), std::cref(bins), std::ref(mel));
+         }
+ 
+         // main thread
+-        log_mel_spectrogram_worker_thread(0, hann, samples_padded, n_samples + stage_2_pad, frame_size, frame_step, n_threads, filters, mel);
++        log_mel_spectrogram_worker_thread(0, hann, samples_padded, n_samples + stage_2_pad, frame_size, frame_step, n_threads, filters, bins, mel);
+ 
+         for (int iw = 0; iw < n_threads - 1; ++iw) {
+             workers[iw].join();

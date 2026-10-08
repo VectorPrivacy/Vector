@@ -39,7 +39,7 @@ target_link_options(test-backend-ops PRIVATE -sMODULARIZE=1 -sEXPORT_ES6=1 -sENV
     -sINVOKE_RUN=0 "-sEXPORTED_RUNTIME_METHODS=['callMain']")
 EOF
 
-emcmake cmake -S "$KT" -B "$KT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_DIR="$CACHE/src/ggml" \
+emcmake cmake -DEMSCRIPTEN_SYSTEM_PROCESSOR=wasm32 -S "$KT" -B "$KT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_DIR="$CACHE/src/ggml" \
     -DEMDAWNWEBGPU_DIR="$(ls -d "$CACHE"/emdawnwebgpu-* | head -1)" >/dev/null
 cmake --build "$KT/build" --target test-backend-ops -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)" >/dev/null
 cp "$KT/build/test-backend-ops.js" "$KT/build/test-backend-ops.wasm" "$KT/www/"

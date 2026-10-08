@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds Vector Web's Whisper from whisper.cpp at a pinned commit plus patches/:
+# Builds Vector Web's Whisper from whisper.cpp at a pinned commit plus ../whisper/patches (shared
+# with the native builds, which whisper-rs-sys patches through WHISPER_PATCHES):
 #   web/whisper/whisper-gpu.{js,wasm}  WebGPU, the model on the GPU (Asyncify, no threads)
 #   web/whisper/whisper-cpu.{js,wasm}  CPU on pthreads, for a cross-origin isolated page without WebGPU
 # The toolchain and sources land in $VW_CACHE (default ~/.cache/vector-web-whisper).
@@ -12,6 +13,7 @@ DAWN_SHA256=8dcae86c630d76b6794b271c6572becba36f4237d132bee121a56638c3d76575
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+PATCHES="$ROOT/scripts/whisper/patches"
 CACHE="${VW_CACHE:-$HOME/.cache/vector-web-whisper}"
 OUT="$ROOT/web/whisper"
 mkdir -p "$CACHE" "$OUT"
@@ -52,15 +54,21 @@ rm -rf "$SRC" && mkdir -p "$SRC"
 git -C "$CACHE/whisper.cpp" archive "$WHISPER_COMMIT" | tar -x -C "$SRC"
 # A repository of its own, so `git apply` never resolves paths against an enclosing one.
 git -C "$SRC" init -q
-for p in "$HERE"/patches/*.patch; do
+for p in "$PATCHES"/*.patch; do
     git -C "$SRC" apply --whitespace=nowarn "$p"
 done
 grep -q mul_mat_tile8 "$SRC/ggml/src/ggml-webgpu/ggml-webgpu.cpp" || { echo "[whisper-web] patches did not apply" >&2; exit 1; }
 
+# EMSCRIPTEN_SYSTEM_PROCESSOR: Emscripten reports x86 by default, which ggml-cpu takes for an
+# unknown CPU and builds its scalar fallback instead of the wasm SIMD kernels.
 build() { # <variant> <cmake args...>
     local name="$1"; shift
     local dir="$CACHE/build-$name"
-    emcmake cmake -S "$HERE" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release -DWHISPER_DIR="$SRC" "$@" >/dev/null
+    # A cache configured from another checkout of these scripts refuses this one.
+    if [ -f "$dir/CMakeCache.txt" ] && ! grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$HERE" "$dir/CMakeCache.txt"; then
+        rm -rf "$dir"
+    fi
+    emcmake cmake -DEMSCRIPTEN_SYSTEM_PROCESSOR=wasm32 -S "$HERE" -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release -DWHISPER_DIR="$SRC" "$@" >/dev/null
     cmake --build "$dir" --target vector_whisper -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)" >/dev/null
     sed -e "s/vector_whisper\.wasm/whisper-$name.wasm/g" -e "s/vector_whisper\.js/whisper-$name.js/g" "$dir/vector_whisper.js" > "$OUT/whisper-$name.js"
     cp "$dir/vector_whisper.wasm" "$OUT/whisper-$name.wasm"
@@ -75,6 +83,6 @@ build cpu -DVW_THREADS=ON
     echo "whisper.cpp $WHISPER_COMMIT"
     echo "emsdk $EMSDK_VERSION"
     echo "emdawnwebgpu $DAWN_TAG"
-    (cd "$HERE" && shasum -a 256 patches/*.patch vector_whisper.cpp CMakeLists.txt)
+    (cd "$ROOT/scripts" && shasum -a 256 whisper/patches/*.patch whisper-web/vector_whisper.cpp whisper-web/CMakeLists.txt)
     (cd "$OUT" && shasum -a 256 whisper-gpu.js whisper-gpu.wasm whisper-cpu.js whisper-cpu.wasm)
 } > "$OUT/BUILD.txt"

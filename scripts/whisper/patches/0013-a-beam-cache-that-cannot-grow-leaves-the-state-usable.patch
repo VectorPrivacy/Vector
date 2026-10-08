@@ -1,0 +1,32 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index f12b9183..0bd3ac78 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -7673,14 +7673,24 @@ int whisper_full_with_state(
+                     whisper_kv_cache_free(state->kv_self);
+ 
+                     // overallocate to workaround KV cache fragmentation issues
+-                    const int factor = n_decoders_cur > 1 ? n_decoders_cur + 2 : 1;
++                    const auto cache_size = [&](int n_dec) {
++                        return GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*(n_dec > 1 ? n_dec + 2 : 1);
++                    };
+ 
+                     if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
+                                 ctx->model.hparams.n_text_state,
+                                 ctx->model.hparams.n_text_layer,
+-                                GGML_PAD(ctx->model.hparams.n_text_ctx, 256)*factor)) {
++                                cache_size(n_decoders_cur))) {
+                         WHISPER_LOG_ERROR("%s: whisper_kv_cache_init() failed for self-attention cache\n", __func__);
+-                        whisper_free_state(state);
++                        // The state is the caller's, who frees it: give it back the cache it had, so
++                        // that a call with fewer decoders still works.
++                        if (!whisper_kv_cache_init(state->kv_self, state->backends[0], ctx->itype,
++                                    ctx->model.hparams.n_text_state,
++                                    ctx->model.hparams.n_text_layer,
++                                    cache_size(state->kv_self_n_dec))) {
++                            WHISPER_LOG_ERROR("%s: nor could the previous self-attention cache be restored\n", __func__);
++                            state->kv_self_n_dec = 0; // the next call allocates one afresh
++                        }
+                         return -7;
+                     }
+ 

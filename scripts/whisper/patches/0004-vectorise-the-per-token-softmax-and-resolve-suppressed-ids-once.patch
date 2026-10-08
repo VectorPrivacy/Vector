@@ -1,0 +1,297 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 3d6bee93..a865c92f 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -454,6 +454,9 @@ struct whisper_vocab {
+     id token_not        = 50362; // no timestamps
+     id token_beg        = 50363; // begin timestamps
+ 
++    // ids that suppress_nst masks, resolved once at load rather than looked up per token
++    std::vector<id> nst_ids;
++
+     bool is_multilingual() const {
+         return n_vocab >= 51865;
+     }
+@@ -463,6 +466,13 @@ struct whisper_vocab {
+     }
+ };
+ 
++static const std::vector<std::string> non_speech_tokens = {
++    "\"", "#", "(", ")", "*", "+", "/", ":", ";", "<", "=", ">", "@", "[", "\\", "]", "^",
++    "_", "`", "{", "|", "}", "~", "「", "」", "『", "』", "<<", ">>", "<<<", ">>>", "--",
++    "---", "-(", "-[", "('", "(\"", "((", "))", "(((", ")))", "[[", "]]", "{{", "}}", "♪♪",
++    "♪♪♪","♩", "♪", "♫", "♬", "♭", "♮", "♯"
++};
++
+ struct whisper_segment {
+     int64_t t0;
+     int64_t t1;
+@@ -1688,6 +1698,23 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+         }
+ 
+         WHISPER_LOG_INFO("%s: n_langs       = %d\n", __func__, vocab.num_languages());
++
++        // ref: https://github.com/openai/whisper/blob/7858aa9c08d98f75575035ecd6481f462d66ca27/whisper/tokenizer.py#L224-L253
++        for (const std::string & token : non_speech_tokens) {
++            for (const std::string & t : { token, " " + token }) {
++                const auto it = vocab.token_to_id.find(t);
++                if (it != vocab.token_to_id.end()) {
++                    vocab.nst_ids.push_back(it->second);
++                }
++            }
++        }
++        // hyphens and single quotes stay allowed between words, but not at the start of one
++        for (const char * t : { " -", " '" }) {
++            const auto it = vocab.token_to_id.find(t);
++            if (it != vocab.token_to_id.end()) {
++                vocab.nst_ids.push_back(it->second);
++            }
++        }
+     }
+ 
+     const ggml_type wtype = wctx.wtype;
+@@ -6305,32 +6332,142 @@ static int whisper_wrap_segment(struct whisper_context & ctx, struct whisper_sta
+     return res;
+ }
+ 
+-static const std::vector<std::string> non_speech_tokens = {
+-    "\"", "#", "(", ")", "*", "+", "/", ":", ";", "<", "=", ">", "@", "[", "\\", "]", "^",
+-    "_", "`", "{", "|", "}", "~", "「", "」", "『", "』", "<<", ">>", "<<<", ">>>", "--",
+-    "---", "-(", "-[", "('", "(\"", "((", "))", "(((", ")))", "[[", "]]", "{{", "}}", "♪♪",
+-    "♪♪♪","♩", "♪", "♫", "♬", "♭", "♮", "♯"
+-};
++// The vocabulary-wide passes run once per decoded token and per decoder, so they are vectorised:
++// e^x for x <= 0 (all softmax needs) by the reduction and polynomial of ggml_v_expf, within 2 ulp.
++#if defined(__GNUC__) || defined(__clang__)
++#define WHISPER_VEC_LOGITS 1
++typedef float    whisper_v4f __attribute__((vector_size(16), aligned(4)));
++typedef int32_t  whisper_v4i __attribute__((vector_size(16), aligned(4)));
++typedef uint32_t whisper_v4u __attribute__((vector_size(16), aligned(4)));
++
++static inline whisper_v4f whisper_v4f_set(float x) {
++    return whisper_v4f{ x, x, x, x };
++}
++
++static inline whisper_v4f whisper_v4f_select(whisper_v4i m, whisper_v4f a, whisper_v4f b) {
++    return (whisper_v4f) ((m & (whisper_v4i) a) | (~m & (whisper_v4i) b));
++}
++
++static inline whisper_v4f whisper_v4f_exp_neg(whisper_v4f x) {
++    // written so that NaN lands here too, weighing nothing, as the scalar loops skip it
++    const whisper_v4i ninf = ~(x >= whisper_v4f_set(-87.0f));
++    x = whisper_v4f_select(ninf, whisper_v4f_set(-87.0f), x);
++    const whisper_v4f r = whisper_v4f_set(0x1.8p23f);
++    const whisper_v4f z = x*whisper_v4f_set(0x1.715476p+0f) + r;
++    const whisper_v4f n = z - r;
++    const whisper_v4f b = x - n*whisper_v4f_set(0x1.62e4p-1f) - n*whisper_v4f_set(0x1.7f7d1cp-20f);
++    const whisper_v4f k = (whisper_v4f) (((whisper_v4u) z << 23) + (whisper_v4u) whisper_v4f_set(1.0f));
++    const whisper_v4f u = b*b;
++    const whisper_v4f j = whisper_v4f_set(0x1.ffffecp-1f)*b +
++        (whisper_v4f_set(0x1.fffdb6p-2f) + whisper_v4f_set(0x1.555e66p-3f)*b +
++         (whisper_v4f_set(0x1.573e2ep-5f) + whisper_v4f_set(0x1.0e4020p-7f)*b)*u)*u;
++    // e^-87 is 1.6e-38, nothing beside the e^0 = 1 every sum here holds; a masked (-inf) logit is 0
++    return whisper_v4f_select(ninf, whisper_v4f_set(0.0f), k + k*j);
++}
++
++static inline whisper_v4f whisper_v4f_load(const float * p) {
++    whisper_v4f v;
++    memcpy(&v, p, sizeof(v));
++    return v;
++}
++
++static inline void whisper_v4f_store(float * p, whisper_v4f v) {
++    memcpy(p, &v, sizeof(v));
++}
++#endif
++
++static float whisper_max(const float * x, int n) {
++    float m = -INFINITY;
++    int i = 0;
++#ifdef WHISPER_VEC_LOGITS
++    if (n >= 4) {
++        whisper_v4f vm = whisper_v4f_set(-INFINITY);
++        for (; i + 4 <= n; i += 4) {
++            const whisper_v4f v = whisper_v4f_load(x + i);
++            vm = whisper_v4f_select(v > vm, v, vm);
++        }
++        m = std::max(std::max(vm[0], vm[1]), std::max(vm[2], vm[3]));
++    }
++#endif
++    for (; i < n; ++i) {
++        m = std::max(m, x[i]);
++    }
++    return m;
++}
++
++// y[i] = e^(x[i] - m) for x[i] <= m, returning their sum: blocks summed in float, the blocks in
++// double, since one running float total drops the vocabulary's long tail of tiny terms
++static float whisper_exp_sum(const float * x, float m, float * y, int n) {
++    double sum = 0.0;
++    int i = 0;
++#ifdef WHISPER_VEC_LOGITS
++    const whisper_v4f vm = whisper_v4f_set(m);
++    while (i + 4 <= n) {
++        whisper_v4f vs = whisper_v4f_set(0.0f);
++        for (const int end = std::min(n, i + 256); i + 4 <= end; i += 4) {
++            const whisper_v4f e = whisper_v4f_exp_neg(whisper_v4f_load(x + i) - vm);
++            if (y) {
++                whisper_v4f_store(y + i, e);
++            }
++            vs += e;
++        }
++        sum += (vs[0] + vs[1]) + (vs[2] + vs[3]);
++    }
++#endif
++    for (; i < n; ++i) {
++        const float e = x[i] > -INFINITY ? expf(x[i] - m) : 0.0f;
++        if (y) {
++            y[i] = e;
++        }
++        sum += e;
++    }
++    return (float) sum;
++}
++
++// the first index of the largest element
++static int whisper_argmax(const float * x, int n) {
++    int best = 0;
++    float vbest = n > 0 ? x[0] : 0.0f;
++    int i = 0;
++#ifdef WHISPER_VEC_LOGITS
++    if (n >= 4) {
++        whisper_v4f vm = whisper_v4f_load(x);
++        whisper_v4i vi = whisper_v4i{ 0, 1, 2, 3 };
++        whisper_v4i cur = vi;
++        for (i = 4; i + 4 <= n; i += 4) {
++            cur += 4;
++            const whisper_v4f v = whisper_v4f_load(x + i);
++            const whisper_v4i gt = v > vm;
++            vm = whisper_v4f_select(gt, v, vm);
++            vi = (gt & cur) | (~gt & vi);
++        }
++        best = vi[0]; vbest = vm[0];
++        for (int l = 1; l < 4; ++l) {
++            if (vm[l] > vbest || (vm[l] == vbest && vi[l] < best)) {
++                best = vi[l]; vbest = vm[l];
++            }
++        }
++    }
++#endif
++    for (; i < n; ++i) {
++        if (x[i] > vbest) {
++            best = i; vbest = x[i];
++        }
++    }
++    return best;
++}
+ 
+ static void whisper_compute_logprobs(
+                 const std::vector<float> & logits,
+                               const int    n_logits,
+                       std::vector<float> & logprobs) {
+-    const float logit_max = *std::max_element(logits.begin(), logits.end());
+-    float logsumexp = 0.0f;
+-    for (int i = 0; i < n_logits; ++i) {
+-        if (logits[i] > -INFINITY) {
+-            logsumexp += expf(logits[i] - logit_max);
+-        }
+-    }
+-    logsumexp = logf(logsumexp) + logit_max;
++    const float logit_max = whisper_max(logits.data(), n_logits);
++    const float logsumexp = logit_max > -INFINITY ?
++        logf(whisper_exp_sum(logits.data(), logit_max, nullptr, n_logits)) + logit_max : -INFINITY;
+ 
++    // a masked (-inf) or NaN logit gets -inf
+     for (int i = 0; i < n_logits; ++i) {
+-        if (logits[i] > -INFINITY) {
+-            logprobs[i] = logits[i] - logsumexp;
+-        } else {
+-            logprobs[i] = -INFINITY;
+-        }
++        logprobs[i] = logsumexp > -INFINITY && logits[i] > -INFINITY ? logits[i] - logsumexp : -INFINITY;
+     }
+ }
+ 
+@@ -6339,13 +6476,9 @@ static void whisper_compute_probs(
+                   const int    n_logits,
+     const std::vector<float> & logprobs,
+           std::vector<float> & probs)     {
+-    for (int i = 0; i < n_logits; ++i) {
+-        if (logits[i] == -INFINITY) {
+-            probs[i] = 0.0f;
+-        } else {
+-            probs[i] = expf(logprobs[i]);
+-        }
+-    }
++    GGML_UNUSED(logits);
++    // e^-inf is 0, so masked logits get no probability
++    whisper_exp_sum(logprobs.data(), 0.0f, probs.data(), n_logits);
+ }
+ 
+ // process the logits for the selected decoder
+@@ -6454,21 +6587,8 @@ static void whisper_process_logits(
+         // suppress non-speech tokens
+         // ref: https://github.com/openai/whisper/blob/7858aa9c08d98f75575035ecd6481f462d66ca27/whisper/tokenizer.py#L224-L253
+         if (params.suppress_nst) {
+-            for (const std::string & token : non_speech_tokens) {
+-                const std::string suppress_tokens[] = {token, " " + token};
+-                for (const std::string & suppress_token : suppress_tokens) {
+-                    if (vocab.token_to_id.find(suppress_token) != vocab.token_to_id.end()) {
+-                        logits[vocab.token_to_id.at(suppress_token)] = -INFINITY;
+-                    }
+-                }
+-            }
+-
+-            // allow hyphens "-" and single quotes "'" between words, but not at the beginning of a word
+-            if (vocab.token_to_id.find(" -") != vocab.token_to_id.end()) {
+-                logits[vocab.token_to_id.at(" -")] = -INFINITY;
+-            }
+-            if (vocab.token_to_id.find(" '") != vocab.token_to_id.end()) {
+-                logits[vocab.token_to_id.at(" '")] = -INFINITY;
++            for (const whisper_vocab::id id : vocab.nst_ids) {
++                logits[id] = -INFINITY;
+             }
+         }
+ 
+@@ -6523,19 +6643,15 @@ static void whisper_process_logits(
+             // logsumexp over timestamps
+             float timestamp_logprob = -INFINITY;
+             {
+-                float logsumexp = 0.0f;
+-                const float logprob_max = *std::max_element(logprobs.begin() + vocab.token_beg, logprobs.end());
+-                for (int i = vocab.token_beg; i < n_logits; ++i) {
+-                    if (logprobs[i] > -INFINITY) {
+-                        logsumexp += expf(logprobs[i] - logprob_max);
+-                    }
+-                }
++                const float logprob_max = whisper_max(logprobs.data() + vocab.token_beg, n_logits - vocab.token_beg);
++                const float logsumexp = logprob_max > -INFINITY ?
++                    whisper_exp_sum(logprobs.data() + vocab.token_beg, logprob_max, nullptr, n_logits - vocab.token_beg) : 0.0f;
+                 if (logsumexp > 0.0f) {
+                     timestamp_logprob = logf(logsumexp) + logprob_max;
+                 }
+             }
+ 
+-            const float max_text_token_logprob = *std::max_element(logprobs.begin(), logprobs.begin() + vocab.token_beg);
++            const float max_text_token_logprob = whisper_max(logprobs.data(), vocab.token_beg);
+ 
+             //WHISPER_LOG_INFO("timestamp_logprob=%f max_text_token_logprob=%f\n", timestamp_logprob, max_text_token_logprob);
+ 
+@@ -6678,12 +6794,11 @@ static whisper_token_data whisper_sample_token(
+     }
+ 
+     if (best) {
+-        for (int i = 0; i < n_logits; ++i) {
+-            if (result.p < probs[i]) {
+-                result.id   = i;
+-                result.p    = probs[i];
+-                result.plog = logprobs[i];
+-            }
++        const int id = whisper_argmax(probs.data(), n_logits);
++        if (result.p < probs[id]) {
++            result.id   = id;
++            result.p    = probs[id];
++            result.plog = logprobs[id];
+         }
+     } else {
+         std::discrete_distribution<> dist(probs.begin(), probs.end());

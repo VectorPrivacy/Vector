@@ -1,0 +1,39 @@
+diff --git a/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp b/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
+index 1384ca92..737758bc 100644
+--- a/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
++++ b/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
+@@ -349,14 +349,20 @@ static void init_kleidiai_context(void) {
+             // Use one SME thread as the conservative default; add platform SMCU detection to raise it.
+             sme_cores = sme_cap_detected ? (int)detected_smcus : 1;
+ 
+-            if (!sme_env_set && !sme_cap_detected) {
++            if (sme_env_set && !sme_cap_detected) {
+                 GGML_LOG_INFO("kleidiai: SME detected; SMCU count unavailable, using conservative SME thread cap=1\n");
+             }
+         }
+ 
++        // SME is opt-in: its chain packs every weight twice (SME, and NEON for the threads past the
++        // SME cap), doubling the model's memory for a gain of a few percent.
++        if (!sme_env_set) {
++            sme_cores = 0;
++        }
++
+         // Runtime-detect SME support and available SMCUs first. The detected SMCU
+         // count is used as the SME thread cap, and GGML_KLEIDIAI_SME can debug-override that:
+-        //   - unset: use runtime detection.
++        //   - unset: SME-family kernels stay off (see above).
+         //   - 0:     disable SME-family kernels.
+         //   - N > 0: use N as the SME thread cap, if an SME-family kernel is selectable.
+         if (sme_env_set) {
+@@ -1819,7 +1825,10 @@ namespace ggml::cpu::kleidiai {
+ class extra_buffer_type : ggml::cpu::extra_buffer_type {
+     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
+         std::array<ggml_kleidiai_kernels *, GGML_KLEIDIAI_MAX_KERNEL_SLOTS> kernel_chain;
+-        const int slot_total = kleidiai_collect_kernel_chain(op, kernel_chain);
++        // a row lookup reads the weight in the layout its type's kernels packed it to
++        const int slot_total = op->op != GGML_OP_GET_ROWS ? kleidiai_collect_kernel_chain(op, kernel_chain) :
++                               op->src[0]->type == GGML_TYPE_Q8_0 ? kleidiai_collect_q8_chain(kernel_chain) :
++                               op->src[0]->type == GGML_TYPE_Q4_0 ? kleidiai_collect_q4_chain(kernel_chain) : 0;
+         const bool src0_is_kleidiai =
+             op->src[0]->buffer &&
+             (ggml_n_dims(op->src[0]) == 2) &&

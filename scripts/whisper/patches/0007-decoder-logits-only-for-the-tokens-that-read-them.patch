@@ -1,0 +1,88 @@
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index e53e2ce7..e587f8dc 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -2624,6 +2624,18 @@ static bool whisper_encode_internal(
+     return !(abort_callback && abort_callback(abort_callback_data));
+ }
+ 
++// The tokens of a batch whose logits are read; reserving, up to one per decoder.
++static int whisper_batch_n_outputs(const whisper_batch & batch, bool worst_case) {
++    if (worst_case) {
++        return std::min(batch.n_tokens, WHISPER_MAX_DECODERS);
++    }
++    int n = 0;
++    for (int i = 0; i < batch.n_tokens; ++i) {
++        n += batch.logits[i] != 0;
++    }
++    return n > 0 ? n : batch.n_tokens;
++}
++
+ static struct ggml_cgraph * whisper_build_graph_decoder(
+          whisper_context & wctx,
+          whisper_state   & wstate,
+@@ -2969,6 +2981,17 @@ static struct ggml_cgraph * whisper_build_graph_decoder(
+ 
+     cur = inpL;
+ 
++    // logits only for the tokens that read them (a prompt's last, a step's one per decoder): the
++    // vocabulary projection of a whole 448-token prompt reserves 93 MB
++    const int n_outputs = whisper_batch_n_outputs(batch, worst_case);
++    if (n_outputs < n_tokens) {
++        struct ggml_tensor * out_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_outputs);
++        ggml_set_name(out_ids, "out_ids");
++        ggml_set_input(out_ids);
++
++        cur = ggml_get_rows(ctx0, cur, out_ids);
++    }
++
+     // norm
+     {
+         cur = ggml_norm(ctx0, cur, hparams.eps);
+@@ -2980,11 +3003,6 @@ static struct ggml_cgraph * whisper_build_graph_decoder(
+                 model.d_ln_b);
+     }
+ 
+-    // compute logits only for the last token
+-    // comment this line to compute logits for all n_tokens
+-    // might be useful in the future
+-    //cur = ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], (cur->ne[1] - 1)*cur->nb[1]);
+-
+     struct ggml_tensor * logits = ggml_mul_mat(ctx0, model.d_te, cur);
+ 
+     // [EXPERIMENTAL] Token-level timestamps with DTW
+@@ -3110,6 +3128,16 @@ static bool whisper_decode_internal(
+             ggml_backend_tensor_set(KQ_mask, wstate.inp_mask.data(), 0, ggml_nelements(KQ_mask)*sizeof(float));
+         }
+ 
++        if (struct ggml_tensor * out_ids = ggml_graph_get_tensor(gf, "out_ids")) {
++            std::vector<int32_t> ids;
++            for (int i = 0; i < n_tokens; ++i) {
++                if (batch.logits[i] != 0) {
++                    ids.push_back(i);
++                }
++            }
++            ggml_backend_tensor_set(out_ids, ids.data(), 0, ids.size()*sizeof(int32_t));
++        }
++
+         logits = ggml_graph_node(gf, -1);
+ 
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+@@ -3117,12 +3145,15 @@ static bool whisper_decode_internal(
+         }
+     }
+ 
++    // row j of the logits is the j-th token that asked for them, unless all did
++    const bool all_outputs = logits->ne[1] == n_tokens;
+     logits_out.resize(n_tokens*n_vocab);
+-    for (int i = 0; i < n_tokens; i++) {
++    for (int i = 0, j = 0; i < n_tokens; i++) {
+         if (batch.logits[i] == 0) {
+             continue;
+         }
+-        ggml_backend_tensor_get(logits, logits_out.data() + (n_vocab*i), sizeof(float)*(n_vocab*i), sizeof(float)*n_vocab);
++        const int row = all_outputs ? i : j++;
++        ggml_backend_tensor_get(logits, logits_out.data() + (n_vocab*i), sizeof(float)*(n_vocab*row), sizeof(float)*n_vocab);
+     }
+ 
+     if (batch.n_tokens > 1) {

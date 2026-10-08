@@ -347,7 +347,10 @@ tao = { git = "https://github.com/tauri-apps/tao", rev = "07f3742b1833b64be27b1e
 tauri-codegen = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "774a89a19d91" }
 # Same rev for tauri-utils (unchanged there) so the workspace holds one copy of it.
 tauri-utils = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "774a89a19d91" }
-whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", branch = "master" }
+# whisper-rs-sys: whisper.cpp 1.9.5 applying ../scripts/whisper/patches (WHISPER_PATCHES in
+# .cargo/config.toml), KleidiAI on Android arm64, x86-64-v3 releases. Pinned by rev.
+# Fork: https://github.com/VectorPrivacy/whisper-rs/tree/whisper-1.9.5
+whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "2d0a0d6e865ef3a08310d3d6cf05abab93d35055" }
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
 # zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).

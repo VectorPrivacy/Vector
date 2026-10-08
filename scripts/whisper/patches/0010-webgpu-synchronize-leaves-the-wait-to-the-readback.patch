@@ -1,0 +1,18 @@
+diff --git a/ggml/src/ggml-webgpu/ggml-webgpu.cpp b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+index 65e8d2f2..dedef7e8 100644
+--- a/ggml/src/ggml-webgpu/ggml-webgpu.cpp
++++ b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+@@ -3743,9 +3743,11 @@ static void ggml_backend_webgpu_set_tensor_async(ggml_backend_t backend,
+     }
+ }
+ 
++// Nothing to wait for: every read of GPU memory maps a buffer, which waits for the work queued
++// before it, and every write is queued in order. A wait here is a second round trip per graph
++// (in a browser, an Asyncify unwind for every decoded token).
+ static void ggml_backend_webgpu_synchronize(ggml_backend_t backend) {
+-    ggml_backend_webgpu_context * backend_ctx = (ggml_backend_webgpu_context *) backend->context;
+-    ggml_backend_webgpu_wait_queue(backend_ctx->webgpu_ctx->global_ctx);
++    GGML_UNUSED(backend);
+ }
+ 
+ static ggml_backend_i ggml_backend_webgpu_i = {

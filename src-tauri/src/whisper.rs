@@ -15,6 +15,10 @@ static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 struct CachedWhisperCtx {
     model_path: String,
     ctx: WhisperContext,
+    /// Desktop keeps the state as well: building one reserves four GPU graphs (~20 ms on Metal).
+    /// Not after a beam retry, which grows its KV cache sevenfold; and Android builds one per
+    /// transcription, so an idle phone holds no compute buffers.
+    state: Option<whisper_rs::WhisperState>,
 }
 
 static WHISPER_CTX_CACHE: Mutex<Option<CachedWhisperCtx>> = Mutex::new(None);
@@ -109,6 +113,55 @@ pub const MODELS: [WhisperModel; 5] = [
     WhisperModel { name: "large-v3", display_name: "Highest Quality - Slowest", filename: "ggml-large-v3-q5_0.bin", url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin", acft: false, size: 1080, ram_required: 2400, supports_translate: true },
 ];
 
+/// Threads for whisper.cpp. Phones skip their efficiency cluster: ggml splits most work evenly,
+/// so every op waits on the slowest core.
+fn whisper_threads() -> i32 {
+    let all = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
+    #[cfg(target_os = "android")]
+    {
+        // cpu_capacity is the kernel's own performance rating; cpufreq where it is missing
+        let read = |file: &str| -> Option<Vec<u64>> {
+            (0..all)
+                .map(|cpu| std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/{file}")).ok()?.trim().parse().ok())
+                .collect()
+        };
+        if let Some(n) = read("cpu_capacity").and_then(|c| performance_cores(&c, 0.6))
+            .or_else(|| read("cpufreq/cpuinfo_max_freq").and_then(|f| performance_cores(&f, 0.8)))
+        {
+            return n as i32;
+        }
+    }
+    all
+}
+
+/// The cores rated above the slowest, when the slowest are below `ratio` of the fastest; None
+/// for a phone with no efficiency cores.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn performance_cores(ratings: &[u64], ratio: f64) -> Option<usize> {
+    let fastest = *ratings.iter().max()?;
+    let slowest = *ratings.iter().min()?;
+    if (slowest as f64) >= fastest as f64 * ratio {
+        return None;
+    }
+    Some(ratings.iter().filter(|&&r| r > slowest).count())
+}
+
+/// ggml-cpu is built for x86-64-v3 (see whisper-rs-sys): a CPU without those instructions gets an
+/// error here rather than an illegal-instruction crash.
+fn whisper_cpu_supported() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(all(target_arch = "x86_64", not(target_os = "macos")))]
+    {
+        let ok = std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c")
+            && std::arch::is_x86_feature_detected!("bmi2");
+        if !ok {
+            return Err("Voice transcription needs a processor with AVX2".into());
+        }
+    }
+    Ok(())
+}
+
 /// Detect repetition loops in transcription output.
 /// Two-layer check:
 ///   1. Word-level: repeated 3-word trigrams (catches "het verbanden van het verbanden van...")
@@ -162,6 +215,8 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     use std::time::Instant;
     let t_total = Instant::now();
 
+    whisper_cpu_supported()?;
+
     let model_def = MODELS.iter().find(|m| m.name == model_name);
     // Safety net: low-quality models (tiny/base) produce unreliable translations
     let translate = translate && model_def.is_some_and(|m| m.supports_translate);
@@ -183,6 +238,9 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     let cache_hit = matches!(cache_guard.as_ref(), Some(cached) if cached.model_path == model_path);
 
     if !cache_hit {
+        // Free the old model first: two resident at once can fail a GPU's allocation.
+        *cache_guard = None;
+
         // Different model or first run — create new context
         let mut ctx_params = WhisperContextParameters::default();
         ctx_params.flash_attn(true);
@@ -214,11 +272,12 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
         *cache_guard = Some(CachedWhisperCtx {
             model_path: model_path.clone(),
             ctx,
+            state: None,
         });
     }
     let t_ctx_init = t0.elapsed();
 
-    let cached = cache_guard.as_ref().unwrap();
+    let cached = cache_guard.as_mut().unwrap();
 
     // --- Phase 3: Parameter setup ---
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -239,9 +298,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
         params.set_single_segment(true);
     }
 
-    let n_threads = std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4);
+    let n_threads = whisper_threads();
     params.set_n_threads(n_threads);
 
     // ACFT models support dynamic audio_ctx: encoder processes only actual audio
@@ -254,9 +311,12 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
         params.set_suppress_blank(false);
     }
 
-    // --- Phase 4: State creation (from cached context) ---
+    // --- Phase 4: State (kept on desktop, else built from the cached context) ---
     let t0 = Instant::now();
-    let mut state = cached.ctx.create_state()?;
+    let mut state = match cached.state.take() {
+        Some(state) => state,
+        None => cached.ctx.create_state()?,
+    };
     let t_state_create = t0.elapsed();
 
     // Minimum confidence threshold — below this, retry with different strategy
@@ -392,14 +452,20 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
                 retry_params.set_suppress_blank(false);
             }
 
+            // The same state and samples: whisper.cpp keeps the spectrogram (and, up to 30 s, the
+            // encoding), so a retry mostly decodes again.
             let t_retry = Instant::now();
-            let mut retry_state = cached.ctx.create_state()?;
-            retry_state.full(retry_params, &audio)?;
+            let retry = state.full(retry_params, &audio);
             let retry_elapsed = t_retry.elapsed();
             t_inference += retry_elapsed;
             retries_used += 1;
+            if let Err(e) = retry {
+                // a beam search can fail to grow its cache; what the earlier pass found still stands
+                println!("[Whisper]   {} failed ({}), keeping the earlier result", strategy_name, e);
+                break;
+            }
 
-            let (new_sections, new_confidence, new_lang, new_language) = extract_results(&retry_state);
+            let (new_sections, new_confidence, new_lang, new_language) = extract_results(&state);
 
             // Keep the retry result if it improved confidence
             if new_confidence > overall_confidence {
@@ -414,6 +480,10 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
                 break;
             }
         }
+    }
+
+    if !cfg!(target_os = "android") && retries_used == 0 {
+        cached.state = Some(state);
     }
 
     // Release the cache lock — inference is done
@@ -718,4 +788,27 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
     println!("\nModel downloaded to: {}", model_path.display());
 
     Ok(model_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::performance_cores;
+
+    #[test]
+    fn efficiency_clusters_are_left_out() {
+        // capacity: Snapdragon 695, 2x A78 + 6x A55, whose clocks (2.2 / 1.7 GHz) are close
+        assert_eq!(performance_cores(&[1024, 1024, 439, 439, 439, 439, 439, 439], 0.6), Some(2));
+        // capacity: 1x X1 + 3x A78 + 4x A55
+        assert_eq!(performance_cores(&[1024, 870, 870, 870, 325, 325, 325, 325], 0.6), Some(4));
+        // frequency: 4x A76 at 2.4 GHz + 4x A55 at 1.8 GHz
+        assert_eq!(performance_cores(&[2400000, 2400000, 2400000, 2400000, 1800000, 1800000, 1800000, 1800000], 0.8), Some(4));
+    }
+
+    #[test]
+    fn all_big_or_uniform_keeps_every_core() {
+        // capacity: Snapdragon 8 Elite, 2x 4.32 GHz + 6x 3.53 GHz Oryon
+        assert_eq!(performance_cores(&[1024, 1024, 836, 836, 836, 836, 836, 836], 0.6), None);
+        assert_eq!(performance_cores(&[1024; 8], 0.6), None);
+        assert_eq!(performance_cores(&[], 0.6), None);
+    }
 }

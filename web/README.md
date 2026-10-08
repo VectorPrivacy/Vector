@@ -49,17 +49,22 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   as bytes; anything else decoded by the browser first), started on first use and stopped
   after three idle minutes; models download in a second worker, since the CPU builds hold
   their thread for a whole transcription. The worker runs whisper.cpp built twice by
-  `scripts/whisper-web/build.sh` (pinned whisper.cpp, emsdk and Dawn, plus the patches beside
-  it; `web/whisper/BUILD.txt` records the inputs): `whisper-gpu` keeps the model on the GPU
+  `scripts/whisper-web/build.sh` (pinned whisper.cpp, emsdk and Dawn, plus `scripts/whisper/patches`,
+  which the native builds apply too; `web/whisper/BUILD.txt` records the inputs): `whisper-gpu` keeps the model on the GPU
   through WebGPU, which needs `shader-f16`, and streams it there from OPFS in chunks;
   `whisper-cpu` runs on threads, for a cross-origin isolated page without WebGPU, with the
   model in wasm memory. A page that has neither uses the GPU build's single-threaded CPU
   path. The patches add vec4 mat-mat and mat-vec kernels for compilers without subgroups
   (Safari's, where ggml's own run several times slower) and cache bind groups, drop
-  exceptions and narrow Asyncify to the calls that wait on the GPU, and reuse the
-  language-detection encode: with an ACFT model, language is detected on the clip's own
-  length rather than a padded 30 s window, which agreed with the full window on 15 of 16
-  languages tried. `audio.js`, `results.js` and `download.js` are pure and tested by
+  exceptions and narrow Asyncify to the calls that wait on the GPU, wait on the GPU once per
+  decoded token rather than twice, and reuse the language-detection encode: with an ACFT
+  model, language is detected on the clip's own length rather than a padded 30 s window,
+  which agreed with the full window on 15 of 16 languages tried. The rest are shared with
+  desktop and Android: a vectorised softmax and spectrogram, logits only for the tokens that
+  read them, a retry over the same audio keeps its spectrogram and encoding, and flash
+  attention masks the padding past the clip (unmasked, a reused state attended to the previous
+  clip's audio). `scripts/whisper/test-native.sh` checks that a reused state transcribes exactly
+  as a fresh one. `audio.js`, `results.js` and `download.js` are pure and tested by
   `node --test scripts/test-web-whisper.mjs`; `scripts/whisper-web/test-kernels.sh` builds
   ggml's `test-backend-ops` against the patched ggml as a page, to run in the browsers
   themselves (Safari above all).
