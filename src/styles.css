@@ -3688,6 +3688,15 @@ body.mobile [contenteditable] * {
   }
 }
 
+/* The open chat's row keeps the hover brightness. */
+.chatlist-contact.ws-active .chatlist-contact-preview h4 {
+  color: rgba(255, 255, 255, 1);
+}
+
+.chatlist-contact.ws-active .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.85);
+}
+
 .chats {
   display: flex;
   justify-content: center;
