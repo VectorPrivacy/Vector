@@ -29,6 +29,21 @@ export function setTransportLocked(locked) { t.locked = !!locked; }
 export function setI2pConfig(config) { t.config = config || null; t.seq++; }
 export function setAliases(list) { t.aliases = Array.isArray(list) ? list : []; t.seq++; }
 export function setI2pStranded(on) { t.stranded = !!on; }
+
+// Settings' Tor / I2P explainer: open on a kind, close plays the card out before it unmounts.
+// The opener hands over how its links open.
+const info = $state({ kind: null, closing: false, tick: 0, openLink: null });
+let infoTimer = 0;
+export function netInfoState() { return info; }
+export function openNetInfo(kind, openLink) {
+    clearTimeout(infoTimer);
+    Object.assign(info, { kind, openLink, closing: false, tick: info.tick + 1 });
+}
+export function closeNetInfo() {
+    if (!info.kind || info.closing) return;
+    info.closing = true;
+    infoTimer = setTimeout(() => { info.kind = null; info.closing = false; }, 160);
+}
 export function setRoutes(list) {
     const next = { ...t.routes };
     for (const r of list || []) if (r?.url) next[r.url.toLowerCase()] = r;

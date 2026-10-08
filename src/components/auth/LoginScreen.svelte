@@ -9,7 +9,7 @@
     import PinInput from '../ui/PinInput.svelte';
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
-    import NetGlyph from '../ui/NetGlyph.svelte';
+    import NetInfo from './NetInfo.svelte';
 
     let { h } = $props();   // h: LoginHelpers (js/auth.js)
     const l = loginState();
@@ -381,6 +381,46 @@
     </div>
 {/if}
 
+{#snippet samRouter()}
+    <div class="lg-net-router">
+        <label class="lg-net-field">
+            <span>SAM port</span>
+            <input type="text" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" value={String(n.samPort)}
+                   use:focusOnTick={n.samFocusTick}
+                   oninput={(ev) => { ev.currentTarget.value = ev.currentTarget.value.replace(/\D/g, ''); h.net.clearSamError(); }}
+                   onchange={(ev) => h.net.setSamPort(ev.currentTarget.value)}>
+        </label>
+        {#if !samOpen && !(n.samUser && n.samPassword)}
+            <span class="lg-net-sam">
+                <button type="button" title="Only if your router asks for one." onclick={() => { samOpen = true; }}>Add SAM Password</button>
+            </span>
+        {/if}
+    </div>
+    {#if n.samUser && n.samPassword && !samOpen}
+        <p class="lg-net-sam">
+            <span>Signs in as {n.samUser}.</span>
+            <button type="button" onclick={() => h.net.setSamAuth('', '')}>Remove</button>
+        </p>
+    {:else if samOpen}
+        <div class="lg-net-sam-form">
+            <label class="lg-net-field">
+                <span>Username</span>
+                <input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" bind:value={samUser} oninput={() => h.net.clearSamError()}>
+            </label>
+            <label class="lg-net-field">
+                <span>Password</span>
+                <input type="password" autocomplete="off" bind:value={samPassword} oninput={() => h.net.clearSamError()}
+                       onkeydown={(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); saveSam(); } }}>
+            </label>
+            <p class="lg-net-sam">
+                <button type="button" onclick={() => { samOpen = false; samUser = ''; samPassword = ''; h.net.clearSamError(); }}>Cancel</button>
+                <button type="button" disabled={!samUser || !samPassword} onclick={saveSam}>Use</button>
+            </p>
+        </div>
+    {/if}
+    {#if n.samError}<p class="lg-net-sam-error" role="alert">{n.samError}</p>{/if}
+{/snippet}
+
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="lg-net-modal" class:active={!!n.info} class:closing={n.infoClosing}
      onclick={(ev) => { if (ev.target === ev.currentTarget) h.net.info(null); }}>
@@ -394,81 +434,6 @@
                 {/each}
             </div>
         {/if}
-        {#if n.info === 'i2p'}
-            <div class="lg-net-glyph tor-state-connected" aria-hidden="true"><NetGlyph kind="i2p" /></div>
-            <h3 id="lg-net-title">I2P Network</h3>
-            <p class="lg-net-lead">Route Vector through your own I2P router so relays and servers never see your IP address.</p>
-            <ul class="lg-net-points">
-                <li><b>Your Router</b>: Vector connects to the i2pd or Java I2P router you run, with SAM on</li>
-                <li><b>I2P Servers</b>: .i2p relays and servers are reached inside I2P</li>
-                <li><b>Clearnet Servers</b>: reached through an I2P outproxy, or not at all with I2P-Only</li>
-                <li><b>Outproxies</b>: an outproxy can see and link the clearnet servers you reach</li>
-            </ul>
-            <div class="lg-net-router">
-                <label class="lg-net-field">
-                    <span>SAM port</span>
-                    <input type="text" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" value={String(n.samPort)}
-                           use:focusOnTick={n.samFocusTick}
-                           oninput={(ev) => { ev.currentTarget.value = ev.currentTarget.value.replace(/\D/g, ''); h.net.clearSamError(); }}
-                           onchange={(ev) => h.net.setSamPort(ev.currentTarget.value)}>
-                </label>
-                {#if !samOpen && !(n.samUser && n.samPassword)}
-                    <span class="lg-net-sam">
-                        <button type="button" title="Only if your router asks for one." onclick={() => { samOpen = true; }}>Add SAM Password</button>
-                    </span>
-                {/if}
-            </div>
-            {#if n.samUser && n.samPassword && !samOpen}
-                <p class="lg-net-sam">
-                    <span>Signs in as {n.samUser}.</span>
-                    <button type="button" onclick={() => h.net.setSamAuth('', '')}>Remove</button>
-                </p>
-            {:else if samOpen}
-                <div class="lg-net-sam-form">
-                    <label class="lg-net-field">
-                        <span>Username</span>
-                        <input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" bind:value={samUser} oninput={() => h.net.clearSamError()}>
-                    </label>
-                    <label class="lg-net-field">
-                        <span>Password</span>
-                        <input type="password" autocomplete="off" bind:value={samPassword} oninput={() => h.net.clearSamError()}
-                               onkeydown={(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); saveSam(); } }}>
-                    </label>
-                    <p class="lg-net-sam">
-                        <button type="button" onclick={() => { samOpen = false; samUser = ''; samPassword = ''; h.net.clearSamError(); }}>Cancel</button>
-                        <button type="button" disabled={!samUser || !samPassword} onclick={saveSam}>Use</button>
-                    </p>
-                </div>
-            {/if}
-            {#if n.samError}<p class="lg-net-sam-error" role="alert">{n.samError}</p>{/if}
-            <p class="lg-net-note"><b>Expect slower connections.</b> Starting can take a few minutes, and media loads slowly through an outproxy.</p>
-            <p class="lg-net-path">You can change this any time in <span>Settings &gt; Privacy &gt; Routing</span>.</p>
-            <p class="lg-net-disclaimer">I2P is independent software run by its volunteers, not operated by Vector.</p>
-            <button type="button" class="lg-net-learn" onclick={() => h.openLink('i2p')}>
-                Learn more about I2P
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
-                </svg>
-            </button>
-        {:else}
-            <img class="lg-net-logo" src="./icons/tor-logo.svg" alt="Tor" width="119" height="72">
-            <h3 id="lg-net-title">Tor Network</h3>
-            <p class="lg-net-lead">Route Vector’s connection through Tor so relays and servers never see your real IP address.</p>
-            <ul class="lg-net-points">
-                <li><b>IP Obfuscation</b>: relays see Tor, not you</li>
-                <li><b>Location Privacy</b>: your country stays hidden</li>
-                <li><b>ISP Shielding</b>: your provider can’t see which relays you use</li>
-                <li><b>Censorship Resistance</b>: reach relays blocked on your network</li>
-            </ul>
-            <p class="lg-net-note"><b>Expect slower connections.</b> Your traffic takes a longer path through volunteer relays worldwide so messages and media take more time to send and load, noticeably slower than a VPN.</p>
-            <p class="lg-net-path">You can change this any time in <span>Settings &gt; Privacy &gt; Routing</span>.</p>
-            <p class="lg-net-disclaimer">Tor is independent software maintained by the Tor Project, not operated by Vector.</p>
-            <button type="button" class="lg-net-learn" onclick={() => h.openLink('torAttribution')}>
-                Learn more about Tor
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
-                </svg>
-            </button>
-        {/if}
+        <NetInfo kind={n.info} openLink={h.openLink} router={samRouter} />
     </div>
 </div>

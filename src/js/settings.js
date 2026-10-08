@@ -1880,18 +1880,9 @@ const SETTINGS_HELP = {
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
-    // Trademark notice + non-endorsement disclaimer included per the
-    // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
     transport: ['Routing', 'Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them.'],
-    tor: ['Route traffic through Tor',
-        'While Tor is in use, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
-        + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
-        + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
     torMultiCircuit: ['Multi-Circuit', 'Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.'],
     torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before switching to Tor.'],
-    i2p: ['Route traffic through I2P', 'While I2P is in use, Vector reaches relays and servers through the I2P router you run, so they never see your IP address.<br><br>'
-        + '<b>I2P servers</b> are reached inside I2P. <b>Clearnet servers</b> are reached through an outproxy, or not at all with I2P-Only.<br><br>'
-        + 'An outproxy can see and link the clearnet servers you reach. Expect slower connections.'],
     i2pRouter: ['I2P Router', 'Vector uses the I2P router already running on this device, through its SAM bridge.<br><br>In i2pd, set <b>[sam] enabled = true</b>. In Java I2P, start the <b>SAM application bridge</b>. On Android, turn on <b>SAM</b> in the i2pd app, where it starts off.<br><br>For a router on another machine, forward its SAM port to this one, for example over SSH.<br><br>Vector trusts whatever answers on this port. Other apps that can reach your router can use Vector\'s I2P address.'],
     i2pAuth: ['SAM Password', 'Only needed if your router asks for one.'],
     i2pIdentity: ['New Address', 'Vector gets fresh I2P addresses for this account and reconnects.<br><br>Your relays and other servers see different addresses, both shown under Connection. Servers see the new ones from then on.'],
@@ -1939,7 +1930,7 @@ const SETTINGS_HELP = {
 // vanilla bridges are essentially abandoned by The Tor Project.
 const SETTINGS_LINKS = {
     torAttribution: 'https://torproject.org',
-    i2p: 'https://geti2p.net',
+    i2p: 'https://i2p.net',
     website: 'https://vectorapp.io',
     bridges: 'https://bridges.torproject.org/bridges/en?transport=obfs4',
     donate: 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
@@ -1948,6 +1939,11 @@ const SETTINGS_LINKS = {
 };
 
 async function showSettingsHelp(key) {
+    // Tor and I2P explain themselves with the login screen's network card.
+    if (key === 'tor' || key === 'i2p') {
+        VectorSvelte.openNetInfo(key, (link) => openUrl(SETTINGS_LINKS[link]));
+        return;
+    }
     const entry = SETTINGS_HELP[key];
     const [title, body, icon] = typeof entry === 'function' ? await entry() : entry;
     popupConfirm(title, body, true, '', icon || '');

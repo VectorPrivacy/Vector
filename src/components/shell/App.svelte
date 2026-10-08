@@ -21,6 +21,7 @@
     import PickerRoot from '../picker/PickerRoot.svelte';
     import PickerTooltip from '../picker/PickerTooltip.svelte';
     import ImageViewer from '../ui/ImageViewer.svelte';
+    import NetInfoModal from '../settings/NetInfoModal.svelte';
     import Cropper from '../ui/Cropper.svelte';
     import Toast from '../ui/Toast.svelte';
     import BadgeCard from '../ui/BadgeCard.svelte';
@@ -135,6 +136,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 <ProfileSwitcher />
 <PickerTooltip />
 <ImageViewer />
+<NetInfoModal />
 <Toast />
 <BadgeCard />
 <ContextMenu />

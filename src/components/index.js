@@ -32,7 +32,7 @@ export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
 export { setLaunchDialogHandlers, launchDialog } from './lib/miniapps.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/network.svelte.js';
 // The network the account connects through: its state, I2P's settings, server addresses and routes.
-export { transportState, setTransportView, setTransportViewKind, setTransportLocked, setI2pConfig, setAliases, setRoutes, setI2pStranded } from './lib/transport.svelte.js';
+export { transportState, setTransportView, setTransportViewKind, setTransportLocked, setI2pConfig, setAliases, setRoutes, setI2pStranded, openNetInfo } from './lib/transport.svelte.js';
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
 export { keysModal } from './lib/keys.svelte.js';
