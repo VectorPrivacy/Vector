@@ -3442,7 +3442,7 @@ body.mobile [contenteditable] * {
 }
 
 .chatlist-contact.has-unread {
-    border: none;
+    border-color: transparent;
 }
 
 /* A row within reach of the viewport renders before it arrives (js/chatlist-window.js). */
@@ -3457,7 +3457,8 @@ body.mobile [contenteditable] * {
 .chatlist-contact-preview {
   margin-top: auto;
   margin-bottom: auto;
-  width: calc(100% - 120px);
+  flex: 1;
+  min-width: 0;
 }
 
 /* Inline emoji inside the chatlist preview row. Explicit width AND height
@@ -3520,18 +3521,15 @@ body.mobile [contenteditable] * {
  * through the row visually. Every count represents pings: full unread set
  * on unmuted chats, @mentions only on muted groups, nothing on muted DMs. */
 .chatlist-contact-count {
-    margin-top: auto;
-    margin-bottom: auto;
-    margin-left: auto;
-    margin-right: 12px;
-    padding: 2px 6px;
-    border-radius: 999px;
+    padding: 2.5px 5.5px;
+    border-radius: 100px;
     background: var(--primary-color);
     color: #000;
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 1.2;
-    min-width: 18px;
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 11px;
+    min-width: 16px;
     width: fit-content;
     text-align: center;
     flex-shrink: 0;
@@ -3605,22 +3603,46 @@ body.mobile [contenteditable] * {
 .chatlist-contact-header .chatlist-type-icon.icon-pin {
   background-color: var(--icon-color-primary, #59fcb3);
 }
-/* Inline time-ago (unread rows). Sits flush after the type icon, slightly
- * smaller than the name. Color set inline to the active theme accent. */
-.chatlist-contact-inline-time {
-  font-size: 12px;
+/* Top-right corner: the @ (a ping waits) then the count, the count nearest the corner. */
+.chatlist-contact-flags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.chatlist-contact-at {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--icon-color-primary, #59fcb3);
+}
+
+/* Second line: the preview, and the time-ago in the bottom-right corner under the count. */
+.chatlist-contact-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 10px;
+}
+.chatlist-contact-line > p {
+  flex: 1;
+  min-width: 0;
+}
+.chatlist-contact-time {
+  margin-left: auto;
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 11px;
   font-weight: 400;
   flex-shrink: 0;
   white-space: nowrap;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.chatlist-contact.has-unread .chatlist-contact-inline-time {
-    color: var(--primary-color);
+  color: #808080;
 }
 
 .chatlist-contact.has-unread .chatlist-contact-header h4 {
     color: #fff;
+    font-weight: 700;
 }
 
 .chatlist-contact-preview h4 {
@@ -3628,6 +3650,9 @@ body.mobile [contenteditable] * {
   padding-right: 15px;
   margin-top: auto;
   margin-bottom: -4px;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 18px;
   text-align: left;
   color: rgba(255, 255, 255, 0.75);
   transition: color 0.2s ease;
@@ -3638,9 +3663,15 @@ body.mobile [contenteditable] * {
   margin-left: 10px;
   text-align: left;
   font-family: 'Rubik';
-  font-weight: 100;
-  color: rgb(161, 161, 161);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 18px;
+  color: rgba(160, 160, 160, 0.5);
   transition: color 0.2s ease;
+}
+
+.chatlist-contact.has-unread .chatlist-contact-preview p {
+  color: #a0a0a0;
 }
 
 

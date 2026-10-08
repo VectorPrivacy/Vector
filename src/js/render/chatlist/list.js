@@ -92,6 +92,7 @@ function chatlistSnapshot() {
  * @property {(profileOrNpub: object|string) => string} getName
  * @property {(chat: object) => number} computeListRowBadgeCount
  * @property {(chat: object) => number} computeListRowUnreadCount
+ * @property {(chat: object) => boolean} listRowPingsMe   a group row holds an unread @mention of me or an @everyone
  * @property {(chat: object) => number} computeRowBadgeCount
  * @property {(chat: object) => number} computeRowUnreadCount
  * @property {(chat: object) => { text: string, isHtml: boolean, isTyping: boolean, needsTwemoji: boolean, emojiTags: object[]|null }} generateChatPreviewText   isHtml picks innerHTML over textContent: text is then contentToPreviewHtml's output
@@ -138,6 +139,7 @@ function chatlistHelpers() {
         getName,
         computeListRowBadgeCount,
         computeListRowUnreadCount,
+        listRowPingsMe,
         computeRowBadgeCount,
         computeRowUnreadCount,
         generateChatPreviewText,
@@ -617,6 +619,9 @@ function markCommunityCaughtUp(communityId) {
 
 function computeListRowBadgeCount(chat) { return foldCommunity(chat, computeRowBadgeCount); }
 function computeListRowUnreadCount(chat) { return foldCommunity(chat, computeRowUnreadCount); }
+function listRowPingsMe(chat) {
+    return foldCommunity(chat, (c) => chatIsGroup(c) && computeRowBadgeCount(c) > 0 ? countPingMessages(c) : 0) > 0;
+}
 function computeCommunityPingCount(chat) { return foldCommunity(chat, countPingMessages); }
 
 function countPingMessages(chat) {

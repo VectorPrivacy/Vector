@@ -2078,43 +2078,21 @@ body.ws #chat-list .chatlist-contact > div:first-child {
    (50/62, now 40/50): the avatar fills the row's left end and the 30px corner —
    which clamps to half the height — closes around it. Left at 62px the same curve
    was drawn around empty space. The two text lines need 38 of the 40. */
+/* Square, and run out over the pane's 8px gutter so the selection bar sits on the pane's edge:
+   `content-visibility` paint-contains the row, so the bar has to live inside it. */
 body.ws #chat-list .chatlist-contact {
+  position: relative;
   height: 40px;
-  padding: 4px;
+  padding: 4px 4px 4px 12px;
+  margin-left: -8px;
+  border-radius: 0;
 }
 
 body.ws .chatlist-contact-header h4 {
-  font-size: 15px;
   line-height: 20px;
 }
 
-body.ws .chatlist-contact-preview > p {
-  font-size: 13px;
-  line-height: 18px;
-}
 
-/* The 120px reservation for avatar + timestamp + badge was tuned against a
-   full-viewport list; in a 330px pane it ate the name — and it was spent whether or
-   not anything used it. The unread pill is the only thing that ever sits there, and
-   most rows are read, so the space was reserved for nothing on nearly every row.
-   Flexing takes it back and hands it over the moment a pill does appear: the pill is
-   a flex sibling, so the text gives up exactly its width and no more.
-
-   The padding is the row's rounded end, not decoration. At 25px the corner cuts
-   ~9px into where the two text lines sit — measured, against the 5px the row's own
-   padding left — which is the ellipsis clipping the border. The pill never needs it:
-   it sits on the vertical centre, where the curve intrudes nothing. */
-body.ws .chatlist-contact-preview {
-  width: auto;
-  flex: 1;
-  min-width: 0;
-  padding-right: 10px;
-  box-sizing: border-box;
-}
-
-body.ws .chatlist-contact-count {
-  flex-shrink: 0;
-}
 
 /* `margin: auto` on both sides floated the timestamp into the middle of the
    gap it was meant to sit at the end of. */
@@ -2164,11 +2142,29 @@ body.ws .new-chat-btn .icon {
   flex-shrink: 0;
 }
 
-/* The list stays on screen while a chat is open, so the open chat needs to
-   read as selected. */
-body.ws .chatlist-contact.ws-active {
-  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 9%, transparent);
-  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent);
+/* The open chat is marked by a bar on the pane's edge, as the emoji rail marks its
+   tab; the row itself stays unfilled, hovered or open. Declared on the base row so
+   the bar animates in rather than appearing. */
+body.ws #chat-list .chatlist-contact:hover {
+  background: none;
+}
+body.ws #chat-list .chatlist-contact::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--icon-color-primary, #59fcb3);
+  opacity: 0;
+  transform: scaleY(0.35);
+  pointer-events: none;
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+}
+body.ws #chat-list .chatlist-contact.ws-active::before {
+  opacity: 1;
+  transform: scaleY(1);
 }
 
 /* Mobile taps a row and leaves; a desktop pointer lives over the list. */

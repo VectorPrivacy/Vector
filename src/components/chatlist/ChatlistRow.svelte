@@ -39,6 +39,7 @@
             // nUnread is how much of that the level lets the badge say out loud.
             nMark: h.computeListRowUnreadCount(chat),
             nUnread: h.computeListRowBadgeCount(chat),
+            pinged: isGroup && h.listRowPingsMe(chat),
             last: chat.messages[chat.messages.length - 1] || null,
             name: isGroup
                 ? (chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`)
@@ -71,7 +72,7 @@
     }
 
     function countText(vm) {
-        if (vm.nUnread > 99) return '99+';
+        if (vm.nUnread >= 99) return '99';
         if (vm.chat.chat_type === 'Community' && vm.nUnread >= UNREAD_PLUS_THRESHOLD) return `${vm.nUnread}+`;
         return String(vm.nUnread);
     }
@@ -169,15 +170,20 @@
                     onmouseleave={() => h.hideGlobalTooltip()}
                 ></span>
             {/if}
-            {#if vm.last}
-                <span class="chatlist-contact-inline-time">{h.timeAgo(vm.last.at)}</span>
+            {#if vm.pinged || vm.nUnread}
+                <span class="chatlist-contact-flags">
+                    {#if vm.pinged}<span class="chatlist-contact-at">@</span>{/if}
+                    {#if vm.nUnread}<span class="chatlist-contact-count">{countText(vm)}</span>{/if}
+                </span>
             {/if}
         </div>
-        <p class="cutoff" class:typing-indicator-text={vm.preview.isTyping} use:previewInto={preview}></p>
+        <div class="chatlist-contact-line">
+            <p class="cutoff" class:typing-indicator-text={vm.preview.isTyping} use:previewInto={preview}></p>
+            {#if vm.last}
+                <span class="chatlist-contact-time">{h.timeAgo(vm.last.at)}</span>
+            {/if}
+        </div>
     </div>
-    {#if vm.nUnread}
-        <span class="chatlist-contact-count">{countText(vm)}</span>
-    {/if}
     {#if vm.isGroup && vm.communityId && h.communityHasChannelList(vm.communityId)}
         <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
         <div
