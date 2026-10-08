@@ -1675,7 +1675,11 @@ function adjustSize() {
         const nNewChatBtnHeight = els.newChat?.getBoundingClientRect().height || 0;
         const nNavbarHeight = els.navbar?.getBoundingClientRect().height || 0;
         // Measured against the viewport, not the pane: the window chrome sits above the pane.
-        if (els.chatList) els.chatList.style.maxHeight = (window.innerHeight - (els.chatList.getBoundingClientRect().top + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+        // The fixed list's laid-out top, not its box: the login slide-in translates the box.
+        if (els.chatList) {
+            const top = parseFloat(getComputedStyle(els.chatList).top) || els.chatList.getBoundingClientRect().top;
+            els.chatList.style.maxHeight = (window.innerHeight - (top + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+        }
     }
 
     // Re-calculate chat input size on window resize (text may reflow)
