@@ -1572,6 +1572,12 @@ pub(crate) async fn teardown_window(app: &AppHandle, label: &str, instance_id: u
     }
 }
 
+/// End every realtime session but keep the windows: a network switch the user chose to make
+/// without them.
+pub(crate) async fn end_realtime(app: &AppHandle) {
+    app.state::<MiniAppsState>().realtime.end_all_for_switch().await;
+}
+
 /// End every Mini App window's session and close the windows, for an account
 /// swap: run while the outgoing account's client can still announce departures.
 pub(crate) async fn end_for_account_swap(app: &AppHandle) {

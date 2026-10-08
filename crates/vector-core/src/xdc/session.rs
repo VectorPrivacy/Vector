@@ -205,28 +205,25 @@ fn live_session(topic: &[u8; 32]) -> Option<Arc<Shared>> {
     joined().map.lock().unwrap().get(topic).filter(|s| !s.is_closed()).cloned()
 }
 
+/// Whether the live account is in any realtime session.
+pub fn any_live() -> bool {
+    joined_of(&crate::db::live_session()).map.lock().unwrap().values().any(|s| !s.is_closed())
+}
+
 /// Whether this account is in the session on `topic` (base32), and not leaving it.
 pub fn is_joined(topic: &str) -> bool {
     wire::decode_topic(topic).map(|t| live_session(&t).is_some()).unwrap_or(false)
 }
 
-static OUTSIDE_TOR: AtomicBool = AtomicBool::new(false);
+/// Let sessions run outside the chosen network (Tor, I2P). Iroh connects directly, so session
+/// peers and the Iroh relay see this machine's IP; the app asks the user the same question.
+pub fn allow_outside_transport(allow: bool) {
+    crate::transport::realtime::allow_always(allow);
+}
 
-/// Let sessions run while Tor is on. Iroh connects outside Tor, so session
-/// peers and the Iroh relay see this machine's IP; the app asks the user the
-/// same question before a realtime game.
+/// [`allow_outside_transport`], under its original name.
 pub fn allow_outside_tor(allow: bool) {
-    OUTSIDE_TOR.store(allow, Ordering::Relaxed);
-}
-
-#[cfg(feature = "tor")]
-fn tor_blocks_realtime() -> bool {
-    !matches!(crate::tor::transport_state(), crate::tor::TorTransportState::Disabled) && !OUTSIDE_TOR.load(Ordering::Relaxed)
-}
-
-#[cfg(not(feature = "tor"))]
-fn tor_blocks_realtime() -> bool {
-    false
+    allow_outside_transport(allow);
 }
 
 /// Run `fut` as the account that joined, in its own task.
@@ -255,8 +252,9 @@ pub struct JoinOptions {
     /// ([`XdcSession::advertise`]) or never (an app with nobody to play with).
     /// A session that never advertised leaves without a departure signal.
     pub advertise: bool,
-    /// The user accepted that a session connects outside Tor. Otherwise the
-    /// process-wide [`allow_outside_tor`] decides.
+    /// The caller vouches that the user accepted a session outside the chosen network (Tor,
+    /// I2P). Otherwise the account's consent, or the process-wide
+    /// [`allow_outside_transport`], decides.
     pub outside_tor: bool,
 }
 
@@ -289,10 +287,8 @@ async fn join_inner(chat_id: String, topic: String, options: JoinOptions) -> Res
     }
     let topic_bytes = wire::decode_topic(&topic)?;
     let topic_b32 = wire::encode_topic(&topic_bytes);
-    if tor_blocks_realtime() && !options.outside_tor {
-        return Err("Tor is on, and a Mini App session connects outside it: its peers would see this machine's IP. \
-            Call vector_core::xdc::allow_outside_tor(true) to accept that."
-            .into());
+    if !options.outside_tor {
+        crate::transport::realtime::check()?;
     }
     // A task still bound to an account that has since swapped out must not start one.
     if !session.is_live() {
@@ -318,7 +314,7 @@ async fn join_inner(chat_id: String, topic: String, options: JoinOptions) -> Res
     }
     let mut unregistered = Unregistered { registry: registry.clone(), owner: session.id(), armed: true };
     // Leased until the topic is subscribed, so a retire can't close it in between.
-    let lease = mesh::lease().await?;
+    let lease = mesh::lease_vouched().await?;
     let mesh = lease.mesh().clone();
     let addr = wire::encode_node_addr(&mesh.node_addr())?;
     let (tx, rx) = mpsc::channel(QUEUE);
@@ -750,11 +746,24 @@ async fn leave(shared: Arc<Shared>, announce: bool) {
 /// signals go last, together, within `deadline`. Abandoned part-way, the
 /// account refuses new sessions until it next logs in.
 pub async fn leave_all(deadline: Duration) {
+    leave_every(deadline, true).await;
+}
+
+/// [`leave_all`] for a network switch: the account stays open, so later joins (with consent
+/// for the new network) still work. The mesh closes once nothing uses it.
+pub async fn leave_all_for_switch(deadline: Duration) {
+    leave_every(deadline, false).await;
+    mesh::retire_live_if_idle().await;
+}
+
+async fn leave_every(deadline: Duration, seal: bool) {
     let session = crate::db::current_session();
     let registry = joined_of(&session);
     let all: Vec<Arc<Shared>> = {
         let map = registry.map.lock().unwrap();
-        registry.sealed.store(true, Ordering::SeqCst);
+        if seal {
+            registry.sealed.store(true, Ordering::SeqCst);
+        }
         map.values().cloned().collect()
     };
     let mut leaving = Vec::new();
@@ -765,7 +774,9 @@ pub async fn leave_all(deadline: Duration) {
             None => already.push(shared),
         }
     }
-    mesh::retire(session.id());
+    if seal {
+        mesh::retire(session.id());
+    }
     let announcements = leaving.into_iter().map(|(shared, finish)| async move {
         crate::db::with_session(shared.session.clone(), announce_left(&shared)).await;
         drop(finish);
@@ -1061,6 +1072,25 @@ mod tests {
             registry.sealed.store(false, Ordering::SeqCst);
             // Refused before anything is bound: the later back-out says otherwise.
             assert_eq!(r.err().as_deref(), Some("the account is switching"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_network_switch_ends_every_session_but_keeps_later_joins_open() {
+        let _serial = mesh::SLOT_TESTS.lock().await;
+        crate::db::with_session(crate::db::current_session(), async {
+            let owner = crate::db::current_session().id();
+            let node = mesh::install_for_test(owner, Mesh::offline().await).await;
+            let topic = [45u8; 32];
+            let (shared, _rx) = shared_for("npub1chat", topic).await;
+            leave_all_for_switch(Duration::from_millis(200)).await;
+            assert!(shared.is_closed(), "the session ended");
+            assert!(!joined().sealed.load(Ordering::SeqCst), "a switch is not an account swap");
+            assert_eq!(mesh::slot_owner().await, None, "the idle node closed with its last session");
+            drop(node);
+            let r = join_inner("npub1chat".into(), wire::encode_topic(&[44u8; 32]), JoinOptions::default()).await;
+            assert_ne!(r.err().as_deref(), Some("the account is switching"));
         })
         .await;
     }

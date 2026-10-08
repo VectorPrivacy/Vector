@@ -41,8 +41,8 @@
 //! - [`XdcFrame::from`] says who sent a message. [`XdcFrame::verified_sender`]
 //!   is the one to act on when it matters (a move, a vote).
 //! - Players in a session can see each other's IP address, and the bot's. A
-//!   bot with Tor on stays out of sessions unless [`allow_outside_tor`] says
-//!   otherwise.
+//!   bot on Tor or I2P stays out of sessions unless
+//!   [`allow_outside_transport`] says otherwise.
 //! - Matching by app id reads the app's manifest, downloading the app once,
 //!   up to [`download_limit`] (32 MiB unless you [set it](set_download_limit)).
 //!   `"*"` matches every app without downloading any.
@@ -76,7 +76,7 @@ use std::time::Duration;
 
 use vector_core::types::Attachment;
 pub use vector_core::xdc::package::Manifest;
-pub use vector_core::xdc::{allow_outside_tor, XdcEvent, XdcFrame, XdcPeer};
+pub use vector_core::xdc::{allow_outside_tor, allow_outside_transport, XdcEvent, XdcFrame, XdcPeer};
 
 use crate::{Channel, Error, Result, VectorBot, VectorCore};
 
@@ -161,9 +161,18 @@ impl Xdc {
     /// [`set_quiet_timeout`](XdcSession::set_quiet_timeout).
     pub async fn join(&self) -> Result<XdcSession> {
         let topic = self.topic().ok_or_else(|| Error::Other("this app carries no realtime topic".into()))?;
-        let inner = vector_core::xdc::join(&self.chat_id, topic).await.map_err(Error::Other)?;
+        let inner = vector_core::xdc::join(&self.chat_id, topic).await.map_err(consent_error)?;
         Ok(XdcSession::new(self.clone(), inner, Timeouts::default()))
     }
+}
+
+/// A realtime refusal for want of consent, as the call that lifts it.
+fn consent_error(e: String) -> Error {
+    if e == vector_core::transport::realtime::CONSENT_REQUIRED {
+        let label = vector_core::transport::preference().map_or("the chosen network", |k| k.label());
+        return Error::Other(format!("Realtime connects outside {label}. Call xdc::allow_outside_transport(true) to allow it."));
+    }
+    Error::Other(e)
 }
 
 #[derive(Clone, Copy, Default)]

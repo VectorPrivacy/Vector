@@ -53,6 +53,12 @@ impl CallPlatform for Desktop {
 
     fn ended(&self) {
         play_ended_chime();
+        // spawn-detached: closes the live node only when nothing uses it; reads no account state.
+        tauri::async_runtime::spawn(async {
+            if vector_core::xdc::mesh::retire_live_off_clearnet().await {
+                log_info!("[CALLS] Node retired with the call");
+            }
+        });
     }
 
     fn share_audio_native(&self) -> bool {

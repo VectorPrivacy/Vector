@@ -276,8 +276,8 @@ impl RealtimeManager {
 
         let topic_b32 = encode_topic_id(&window.topic);
         let joined = match wait_for_platform().await {
-            // The app's own consent prompt gates launching a realtime app under Tor.
-            Ok(()) => vector_core::xdc::join_with(window.chat_id, &topic_b32, JoinOptions { hold_unnamed: false, advertise: false, outside_tor: true }).await,
+            // Core decides: the account's consent for the network in use, asked for by the app.
+            Ok(()) => vector_core::xdc::join_with(window.chat_id, &topic_b32, JoinOptions { hold_unnamed: false, advertise: false, outside_tor: false }).await,
             Err(e) => Err(e),
         };
         let session = match joined {
@@ -386,6 +386,16 @@ impl RealtimeManager {
     /// all as the outgoing account while its client still exists.
     pub async fn end_all(&self) {
         vector_core::xdc::session::leave_all(std::time::Duration::from_secs(4)).await;
+        self.finish_all().await;
+    }
+
+    /// End every window's session for a network switch: the account stays open to joins.
+    pub async fn end_all_for_switch(&self) {
+        vector_core::xdc::session::leave_all_for_switch(std::time::Duration::from_secs(4)).await;
+        self.finish_all().await;
+    }
+
+    async fn finish_all(&self) {
         let slots: Vec<(String, Slot)> = self.slots.lock().await.drain().collect();
         for (label, slot) in slots {
             self.finish(&label, slot).await;
@@ -513,16 +523,15 @@ fn emit_neighbors(topic: &str, peer_count: usize) {
     );
 }
 
-/// Android gives each Mini App session a fresh node: close the mesh once
-/// nothing uses it (no session, no join on its way, no call). Desktop keeps one
-/// node per account.
+/// Close the mesh once nothing uses it (no session, no join on its way, no call): on Android,
+/// which gives each Mini App session a fresh node, and on every platform while the account is on
+/// another network, where an idle node would keep connecting outside it. Desktop on Clearnet
+/// keeps one node per account.
 async fn retire_unused(mesh: &Arc<vector_core::xdc::mesh::Mesh>) {
-    #[cfg(target_os = "android")]
-    if vector_core::xdc::mesh::retire_if_idle(mesh).await {
+    let off_clearnet = vector_core::transport::preference() != Some(vector_core::transport::Kind::Clearnet);
+    if (cfg!(target_os = "android") || off_clearnet) && vector_core::xdc::mesh::retire_if_idle(mesh).await {
         log_info!("[WEBXDC] Node retired with its last Mini App session");
     }
-    #[cfg(not(target_os = "android"))]
-    let _ = mesh;
 }
 
 /// Hold any first use of the node until the platform can host it.

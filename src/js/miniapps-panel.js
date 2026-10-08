@@ -434,7 +434,7 @@ async function playMiniAppSolo() {
 
     try {
         // Open the Mini App directly using the cached file path (openMiniApp
-        // runs the Tor IP-exposure consent gate). The 'solo' chat keys the window
+        // runs the network consent gate). The 'solo' chat keys the window
         // per package; the message id only seeds a realtime topic.
         await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
     } catch (e) {
@@ -476,9 +476,9 @@ async function playMiniAppAndInvite() {
         return; // User cancelled
     }
 
-    // Tor IP-exposure consent BEFORE the file is sent to the chat — declining
-    // after the invite already landed would strand a dead lobby message.
-    if (!(await confirmMiniAppTorExposure(app.src_url))) {
+    // Network consent BEFORE the file is sent to the chat: declining after the invite already
+    // landed would strand a dead lobby message.
+    if (!(await confirmMiniAppNetwork(app.src_url))) {
         closeMiniAppLaunchDialog();
         return; // User declined launching multiplayer over clearnet
     }
@@ -703,7 +703,7 @@ async function playMiniAppSoloInternal(app) {
         }
 
         // Open the Mini App directly using the cached file path (openMiniApp
-        // runs the Tor IP-exposure consent gate).
+        // runs the network consent gate).
         await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);

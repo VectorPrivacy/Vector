@@ -28,47 +28,54 @@ async function loadMiniAppInfoFromCachedFile() {
     return await invoke('miniapp_load_info_from_cached_file');
 }
 
-// Once-per-session consent for launching realtime (Iroh) Mini Apps with Tor on
-let _miniAppTorConsentGiven = false;
+// The network and account a Mini App window was last allowed under (macOS and Windows).
+let _miniAppWindowsAllowed = '';
 
 /**
- * Informed consent before launching a realtime-capable Mini App while Tor is
- * enabled. Iroh multiplayer is QUIC/UDP and can't route through Tor — but it
- * runs relay-only, so the exposure is the user's IP to the iroh relay
- * infrastructure, never to other players. Asked once per session; non-realtime
- * apps never prompt (they open no network channel at all).
+ * Before a Mini App launches off Clearnet. On macOS and Windows its window has no network-level
+ * block, so it is asked about once per network and account. A realtime app needs the account's
+ * consent to connect outside the network, as a call does.
  * @param {string} filePath - Path to the .xdc about to launch
  * @returns {Promise<boolean>} true to proceed with the launch
  */
-async function confirmMiniAppTorExposure(filePath) {
+async function confirmMiniAppNetwork(filePath) {
     const { invoke } = window.__TAURI__.core;
-    let torEnabled;
+    let view = null;
     try {
-        torEnabled = !!(await invoke('tor_get_state'))?.enabled;
-    } catch (e) {
-        torEnabled = true; // unknown state → ask rather than silently expose
-    }
-    if (!torEnabled || _miniAppTorConsentGiven) return true;
+        view = await invoke('transport_get_state');
+    } catch (_) { /* ask below, as off Clearnet */ }
+    if (view && view.kind === 'clearnet') return true;
+    const label = view?.label || 'the network in use';
 
-    let usesRealtime;
-    try {
-        usesRealtime = !!(await loadMiniAppInfo(filePath))?.uses_realtime;
-    } catch (e) {
-        usesRealtime = true; // can't tell → ask rather than silently expose
-    }
-    if (!usesRealtime) return true;
+    const unblocked = platformFeatures.os === 'macos' || platformFeatures.os === 'windows';
+    const key = `${view?.kind}:${strPubkey}`;
+    const askWindow = unblocked && _miniAppWindowsAllowed !== key;
+    const windowLine = `On this device, a Mini App could reach the internet outside ${escapeHtml(label)}.`;
 
-    const ok = await popupConfirm(
-        'Multiplayer & Tor',
-        'Tor is enabled, but Mini App multiplayer can\'t route through Tor yet.' +
-        '<br><br>Launching this app connects directly to the <b>iroh.computer</b> relay network, ' +
-        'which exposes your IP address to those relays only — <b>other players can never see your IP</b>; ' +
-        'they only ever see the relay.' +
-        '<br><br>This choice is remembered until you close Vector.',
-        false, '', '', '', 'Continue'
-    );
-    if (ok) _miniAppTorConsentGiven = true;
-    return !!ok;
+    let usesRealtime = false;
+    if (!view?.realtime_allowed) {
+        try {
+            usesRealtime = !!(await loadMiniAppInfo(filePath))?.uses_realtime;
+        } catch (e) {
+            usesRealtime = true; // can't tell → ask rather than silently expose
+        }
+    }
+    // A multiplayer app asks once: its window and its connection leave the network alike.
+    if (usesRealtime) {
+        if (!(await askRealtimeConsent(askWindow ? windowLine : ''))) return false;
+        if (askWindow) _miniAppWindowsAllowed = key;
+        return true;
+    }
+    if (askWindow) {
+        const ok = await popupConfirm(
+            'Open this Mini App?',
+            `${windowLine}<br>Allowed until you close Vector, switch accounts or change networks.`,
+            false, '', '', '', 'Open',
+        );
+        if (!ok) return false;
+        _miniAppWindowsAllowed = key;
+    }
+    return true;
 }
 
 /**
@@ -82,8 +89,8 @@ async function confirmMiniAppTorExposure(filePath) {
  */
 async function openMiniApp(filePath, chatId = '', messageId = '', href = null, topicId = null) {
     const { invoke } = window.__TAURI__.core;
-    if (!(await confirmMiniAppTorExposure(filePath))) {
-        return false; // user declined the Tor IP-exposure prompt — nothing opened
+    if (!(await confirmMiniAppNetwork(filePath))) {
+        return false; // the user declined: nothing opened
     }
     messageId = miniAppLaunchIds.get(messageId) || messageId;
     await invoke('miniapp_open', { filePath, chatId, messageId, href, topicId });

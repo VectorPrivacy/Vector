@@ -103,7 +103,7 @@ function registerCallScreen() {
     VectorSvelte.setScreen('call', {
         // Lazy: the helpers live in scripts that load after this one evaluates.
         h: {
-            accept: () => invoke('call_accept').catch((e) => VectorSvelte.showToast(String(e))),
+            accept: () => acceptCall(),
             reject: () => invoke('call_reject').catch(() => {}),
             hangup: () => invoke('call_hangup').catch(() => {}),
             setMuted: (on) => invoke('call_set_muted', { muted: on }).catch(() => {}),
@@ -135,10 +135,27 @@ async function setVideoPrefs(kind, rung, fps) {
 }
 
 /** Ring a DM contact. The Chat header's call button lands here. */
-async function startCall(npub, video = false) {
+async function startCall(npub, video = false, asked = false) {
     try {
         await invoke('call_start', { npub, video });
     } catch (e) {
+        if (!asked && String(e) === 'realtime_consent_required') {
+            if (await askRealtimeConsent()) return startCall(npub, video, true);
+            return;
+        }
+        VectorSvelte.showToast(String(e));
+    }
+}
+
+/** Answer the ringing call; off Clearnet the account agrees first. */
+async function acceptCall(asked = false) {
+    try {
+        await invoke('call_accept');
+    } catch (e) {
+        if (!asked && String(e) === 'realtime_consent_required') {
+            if (await askRealtimeConsent()) return acceptCall(true);
+            return;
+        }
         VectorSvelte.showToast(String(e));
     }
 }

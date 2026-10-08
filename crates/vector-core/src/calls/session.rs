@@ -325,6 +325,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
     if PublicKey::from_bech32(&peer).is_err() {
         return Err("Not a valid npub".into());
     }
+    crate::transport::realtime::check()?;
     let platform = platform::get()?;
     let id = format!("{:032x}", rand::random::<u128>());
 
@@ -410,6 +411,7 @@ fn with_call_id_push_task(task: JoinHandle<()>) {
 }
 
 pub async fn accept() -> Result<(), String> {
+    crate::transport::realtime::check()?;
     let (id, peer) = with_call(|c| {
         if c.outgoing || c.phase != Phase::Ringing {
             return Err("No incoming call to accept".to_string());

@@ -16,7 +16,7 @@ pub mod session;
 pub mod signal;
 pub mod wire;
 
-pub use session::{allow_outside_tor, is_joined, join, join_with, JoinOptions, XdcEvent, XdcFrame, XdcPeer, XdcSender, XdcSession};
+pub use session::{allow_outside_tor, allow_outside_transport, is_joined, join, join_with, JoinOptions, XdcEvent, XdcFrame, XdcPeer, XdcSender, XdcSession};
 
 use crate::types::Attachment;
 

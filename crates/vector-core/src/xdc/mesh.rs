@@ -87,11 +87,18 @@ static MESH: tokio::sync::Mutex<Option<(u64, Arc<Mesh>)>> = tokio::sync::Mutex::
 /// The calling account's mesh, bound on first use with a fresh node key. A mesh
 /// bound for any other account is closed and replaced, never shared.
 pub async fn mesh() -> Result<Arc<Mesh>, String> {
+    crate::transport::realtime::check()?;
     acquire(false).await
 }
 
 /// [`mesh`], leased until dropped (see [`MeshLease`]).
 pub async fn lease() -> Result<MeshLease, String> {
+    crate::transport::realtime::check()?;
+    acquire(true).await.map(MeshLease)
+}
+
+/// [`lease`] for a caller that already holds the user's consent for this network.
+pub(crate) async fn lease_vouched() -> Result<MeshLease, String> {
     acquire(true).await.map(MeshLease)
 }
 
@@ -138,6 +145,25 @@ pub async fn retire_if_idle(expected: &Arc<Mesh>) -> bool {
         m.close_detached();
     }
     true
+}
+
+/// Close the live mesh if nothing uses it: a node left idle keeps its relay link, address
+/// probes and DNS going outside the chosen network.
+pub async fn retire_live_if_idle() -> bool {
+    let live = MESH.lock().await.as_ref().map(|(_, m)| m.clone());
+    match live {
+        Some(m) => retire_if_idle(&m).await,
+        None => false,
+    }
+}
+
+/// [`retire_live_if_idle`] unless the account is on Clearnet, where one node per account stays:
+/// for a call that just ended, whose node nothing else may be using.
+pub async fn retire_live_off_clearnet() -> bool {
+    if crate::transport::preference() == Some(crate::transport::Kind::Clearnet) {
+        return false;
+    }
+    retire_live_if_idle().await
 }
 
 #[cfg(feature = "calls")]
@@ -619,7 +645,31 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_call_off_clearnet_takes_its_idle_node_with_it() {
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = SLOT_TESTS.lock().await;
+        let before = crate::transport::preference();
+        let owner = crate::db::live_session_id();
+        let mesh = install_for_test(owner, Mesh::offline().await).await;
+        crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
+        assert!(!retire_live_off_clearnet().await, "Clearnet keeps the account's node");
+        assert_eq!(slot_owner().await, Some(owner));
+        crate::transport::set_preference(Some(crate::transport::Kind::Tor));
+        let (tx, _rx) = mpsc::channel(4);
+        mesh.subscribe([8u8; 32], Vec::new(), tx).await.unwrap();
+        assert!(!retire_live_off_clearnet().await, "a Mini App session still on it keeps it");
+        mesh.unsubscribe(&[8u8; 32]).await;
+        assert!(retire_live_off_clearnet().await, "off Clearnet the idle node goes");
+        assert_eq!(slot_owner().await, None);
+        crate::transport::set_preference(before);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn a_mesh_is_retired_only_once_nothing_uses_it() {
+        // The live session's network decides whether a lease may open a node at all.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let _serial = SLOT_TESTS.lock().await;
         crate::db::with_session(crate::db::current_session(), async {
             let owner = crate::db::current_session().id();
