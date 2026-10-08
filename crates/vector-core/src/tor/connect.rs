@@ -35,7 +35,7 @@ impl Transport for TorService {
             Route::Twin { via, port, .. } => (via.as_str(), *port),
             Route::Refuse(r) => return Err(ConnectError::Refused(*r)),
         };
-        let addr = (host, port).into_tor_addr().map_err(|e| ConnectError::Unreachable(format!("addr parse: {e}")))?;
+        let addr = (host, port).into_tor_addr().map_err(|_| ConnectError::Refused(crate::transport::Refusal::BadName))?;
         let mut prefs = StreamPrefs::new();
         prefs.set_isolation(super::isolation_for(host));
         if host.ends_with(".onion") {
@@ -45,7 +45,7 @@ impl Transport for TorService {
             Ok(s) => s,
             Err(e) => {
                 crate::log_debug!("[Tor] connect({}:{}) failed: {}", host, port, e);
-                return Err(ConnectError::Unreachable(format!("tor connect: {e}")));
+                return Err(ConnectError::Unreachable(failure_text(&e)));
             }
         };
         {
@@ -85,6 +85,29 @@ impl Transport for TorService {
     fn into_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
+}
+
+/// One plain sentence for a failed stream: arti's error is a chain of every layer it passed.
+fn failure_text(e: &arti_client::Error) -> String {
+    use arti_client::{ErrorKind as K, HasKind};
+    match e.kind() {
+        K::RemoteNetworkTimeout | K::ExitTimeout => "The Tor exit timed out reaching this server.",
+        K::TorNetworkTimeout => "Tor timed out building a path. Try again.",
+        K::RemoteConnectionRefused => "This server refused the connection from Tor.",
+        K::ExitPolicyRejected => "No Tor exit allows this port.",
+        K::RemoteHostNotFound | K::RemoteHostResolutionFailed => "The Tor exit couldn't find this server.",
+        K::RemoteNetworkFailed => "The Tor exit couldn't reach this server.",
+        K::RemoteStreamClosed | K::RemoteStreamReset | K::RemoteStreamError => "This server closed the connection.",
+        K::RelayTooBusy => "Tor relays are busy. Try again.",
+        K::OnionServiceNotFound => "This onion service can't be found.",
+        K::OnionServiceNotRunning => "This onion service isn't online right now.",
+        K::OnionServiceConnectionFailed => "Couldn't reach this onion service.",
+        K::OnionServiceProtocolViolation => "This onion service answered incorrectly.",
+        K::OnionServiceMissingClientAuth | K::OnionServiceWrongClientAuth => "This onion service needs a key Vector doesn't have.",
+        K::OnionServiceAddressInvalid => "That onion address isn't valid.",
+        _ => "Tor couldn't reach this server.",
+    }
+    .to_string()
 }
 
 pub struct TorFactory;
