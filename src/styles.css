@@ -14390,6 +14390,40 @@ button.popout-thumb {
   margin: 0;
 }
 
+/* Add Relay: one column at any width, the address then how it's used. */
+.add-relay-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 20px;
+}
+.add-relay-url { width: 100%; box-sizing: border-box; font-size: 16px; }   /* 16px: iOS zooms into anything smaller */
+.add-relay-modes {
+  display: flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.add-relay-modes button {
+  flex: 1;
+  padding: 8px 4px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: rgba(255, 255, 255, 0.6);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.add-relay-modes button.on {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.add-relay .relay-dialog-buttons { margin-top: 4px; }
+
 .relay-dialog-buttons {
   display: flex;
   gap: 10px;
