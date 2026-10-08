@@ -91,10 +91,6 @@ body.ws.ws-rail-collapsed #chrome-typeface {
   display: none;
 }
 
-#chrome-lockup:hover {
-  opacity: 1;
-}
-
 #chrome-mark {
   width: 12px;
   height: 20px;

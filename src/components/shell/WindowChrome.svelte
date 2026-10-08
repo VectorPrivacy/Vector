@@ -1,7 +1,7 @@
 <script>
-    // The 32px desktop title strip: the lockup (a door home to DMs), the update
-    // banner, help and the window controls. A press on the bare strip moves the window
-    // (js/chrome.js), so nothing here needs Tauri's own drag region.
+    // The 32px desktop title strip: the lockup, the update banner, help and the window
+    // controls. A press on the bare strip or the lockup moves the window (js/chrome.js),
+    // so nothing here needs Tauri's own drag region.
     import { chromeState } from '../lib/chrome.svelte.js';
     import { shellScreens } from '../lib/shell.svelte.js';
     import { updatesState } from '../lib/settings.svelte.js';
@@ -16,11 +16,10 @@
 
 {#if chrome.on}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<header id="window-chrome" class:login={login.shown} onmousedown={(e) => { if ((e.target === e.currentTarget || e.target.id === 'chrome-left') && e.button === 0) h?.dragStart(e.detail); }}>
+<header id="window-chrome" class:login={login.shown} onmousedown={(e) => { if ((e.target === e.currentTarget || e.target.closest('#chrome-left')) && e.button === 0) h?.dragStart(e.detail); }}>
     <!-- The left cell spans the rail while widescreen. -->
     <div id="chrome-left">
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div id="chrome-lockup" class="btn" class:login-hidden={login.shown} title="Direct Messages" onclick={() => h?.openDmHome()}>
+        <div id="chrome-lockup" class:login-hidden={login.shown}>
         <svg id="chrome-mark" viewBox="26.2 7 29.3 50.5" xmlns="http://www.w3.org/2000/svg" aria-label="Vector">
             <defs>
             <linearGradient id="ws-logo-grad" x1="40.88" y1="53.75" x2="40.88" y2="15.48" gradientUnits="userSpaceOnUse">

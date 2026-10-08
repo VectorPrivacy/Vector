@@ -12,7 +12,6 @@ const chromeOn = !/Android|iPhone|iPad/i.test(navigator.userAgent);
 /**
  * ChromeHelpers: what the strip's controls do.
  * @typedef {Object} ChromeHelpers
- * @property {() => void} openDmHome
  * @property {() => void} openUpdates
  * @property {() => void} openHelp
  * @property {() => void} minimize
@@ -64,7 +63,6 @@ function chromeInit() {
     if (!chromeOn) return;
     VectorSvelte.setScreen('chrome', {
         h: {
-            openDmHome: () => wsOpenDmHome(),
             openUpdates: () => { openSettings(); VectorSvelte.requestSettingsScroll('updates'); },
             openHelp: () => openUrl('https://docs.vectorapp.io'),
             minimize: () => chromeWindow().minimize(),
