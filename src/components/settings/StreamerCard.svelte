@@ -60,7 +60,6 @@
             <InfoIcon side="lead" onclick={() => h.help('streamerMode')} />
             Streamer Mode
         </div>
-        <div class="tor-card-status">{st.on ? "Hiding names and pictures of people who haven't allowed streams." : 'Off'}</div>
     </div>
     <label class="toggle-container tor-card-toggle">
         <input type="checkbox" aria-label="Streamer Mode" checked={st.on} disabled={busy} onchange={toggleMode}>
