@@ -1063,8 +1063,8 @@ async function sendPreviewedFile() {
             // Silently ignore cancelled uploads — the user intentionally aborted (the
             // pending bubble is already removed by cancel_upload).
             if (e && e.toString().includes('Upload cancelled')) return;
-            const { title, body } = humanizeUploadError(String(e));
-            popupConfirm(title, body, true, '', 'vector_warning.svg');
+            const { title, body, actions } = humanizeUploadError(String(e));
+            popupConfirm(title, body, true, '', 'vector_warning.svg', '', null, false, actions || null);
         }
         return;
     }
@@ -1116,8 +1116,8 @@ async function sendPreviewedFile() {
             return;
         }
         console.error('Failed to send file:', e);
-        const { title, body } = humanizeUploadError(String(e));
-        popupConfirm(title, body, true, '', 'vector_warning.svg');
+        const { title, body, actions } = humanizeUploadError(String(e));
+        popupConfirm(title, body, true, '', 'vector_warning.svg', '', null, false, actions || null);
         // Clean up temp zip on error too
         if (isZipSend) {
             invoke('cleanup_zip').catch(() => {});

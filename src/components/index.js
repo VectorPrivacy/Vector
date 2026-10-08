@@ -31,6 +31,8 @@ export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.sv
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
 export { setLaunchDialogHandlers, launchDialog } from './lib/miniapps.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/network.svelte.js';
+// The network the account connects through: its state, I2P's settings, server addresses and routes.
+export { transportState, setTransportView, setTransportViewKind, setTransportLocked, setI2pConfig, setAliases, setRoutes, setI2pStranded } from './lib/transport.svelte.js';
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
 export { keysModal } from './lib/keys.svelte.js';
@@ -48,7 +50,7 @@ export { setChatBadge, mergeShellHandlers, setScreen, revealPane, revealPending,
 export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
-export { loginState, loginTorState, patchLoginTor, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerQrOpen, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
+export { loginState, loginNetState, patchLoginNet, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginUp, loginShowBunker, loginHideBunker, bunkerQrOpen, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
 export { credentialState, openCredentialDialog, closeCredentialDialog, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
@@ -138,7 +140,7 @@ export {
     patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
 // Settings: every section's state and the handler registries the sections read.
-export { torState, setTorState, setTorLocked, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
+export { setTorMulti, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setNotifPush, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply,

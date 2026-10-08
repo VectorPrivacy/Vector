@@ -1,8 +1,9 @@
 <script>
-    // The Add Custom Relay form: a domain (wss:// is added by the opener) and a mode.
+    // The Add Custom Relay form: a domain (the opener adds wss://, or ws:// for an .i2p host) and a mode.
     import { addRelayDialog } from '../../lib/network.svelte.js';
     let { h } = $props();   // h: close(), confirm({ url, mode })
     const st = addRelayDialog.state();
+    const i2p = $derived(/\.i2p$/i.test(st.url.trim().replace(/^wss?:\/\//i, '').split(/[/:?#]/)[0]));
     function focus(node) { requestAnimationFrame(() => node.focus()); }
     function confirm() { h.confirm({ url: st.url, mode: st.mode }); }
 </script>
@@ -17,11 +18,11 @@
                 <button class="relay-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="relay-dialog-content">
-                <div class="relay-form-group">
+                <div class="relay-form-group" class:stacked={i2p}>
                     <label class="relay-form-label" for="add-relay-url">Relay URL</label>
                     <input type="text" id="add-relay-url" placeholder="relay.example.com" class="relay-form-input"
                            bind:value={st.url} use:focus onkeydown={(e) => { if (e.key === 'Enter') confirm(); }}>
-                    <p class="relay-form-hint">Enter the relay domain (wss:// is added automatically)</p>
+                    <p class="relay-form-hint" class:i2p-hint={i2p}>{i2p ? 'Only people using I2P can send to you on this relay.' : 'Enter the relay domain (wss:// is added automatically)'}</p>
                 </div>
                 <div class="relay-form-group">
                     <label class="relay-form-label" for="add-relay-mode">Mode</label>

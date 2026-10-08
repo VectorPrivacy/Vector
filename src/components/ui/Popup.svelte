@@ -28,7 +28,7 @@
         {/if}
     </div>
     <div class="popup-buttons">
-        <button id="popupConfirm" onclick={() => popupAnswer()?.confirm()}>{p.confirmText}</button><button class="cancel-btn" style:display={p.notice ? 'none' : ''} onclick={() => popupAnswer()?.cancel()}>Cancel</button>
+        <button id="popupConfirm" onclick={() => popupAnswer()?.confirm()}>{p.confirmText}</button><button class="cancel-btn" style:display={p.notice ? 'none' : ''} onclick={() => popupAnswer()?.cancel()}>{p.cancelText}</button>
     </div>
 </center>
 </div>

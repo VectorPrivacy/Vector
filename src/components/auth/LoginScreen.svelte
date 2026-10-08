@@ -4,22 +4,58 @@
     // the credits and links along the bottom, and the illustration behind it all. Painted
     // from lib/login.svelte.js; every control answers through `h` (js/auth.js).
     import { untrack } from 'svelte';
-    import { loginState, loginTorState, bunkerState, pickerState, encryptState, toggleLoginBg } from '../lib/login.svelte.js';
+    import { loginState, loginNetState, bunkerState, pickerState, encryptState, toggleLoginBg } from '../lib/login.svelte.js';
     import { popIn } from '../lib/popin.js';
     import PinInput from '../ui/PinInput.svelte';
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
+    import NetGlyph from '../ui/NetGlyph.svelte';
 
     let { h } = $props();   // h: LoginHelpers (js/auth.js)
     const l = loginState();
     const b = bunkerState();
     const p = pickerState();
     const e = encryptState();
-    const t = loginTorState();
+    const n = loginNetState();
 
-    // ── Tor ──
-    // Each arrival at Start re-reads the switch and lines the transport up with it.
-    $effect(() => { if (l.screen === 'start') untrack(() => h.tor.refresh()); });
+    // ── network ──
+    const LABELS = { clearnet: 'Clearnet', tor: 'Tor', i2p: 'I2P' };
+    // Each arrival at Start re-reads the choice and lines the transport up with it.
+    $effect(() => { if (l.screen === 'start') untrack(() => h.net.refresh()); });
+    // A signer pairing in progress holds the choice (the backend refuses a change meanwhile).
+    const pairing = $derived(b.busy || b.deadline > 0);
+    // The explainer has a tab per network that has one.
+    const tabs = $derived(n.kinds.filter((k) => k === 'tor' || k === 'i2p'));
+    // SAM credentials, typed here and handed over only with Use: they live in memory until the
+    // account that signs in saves them.
+    let samOpen = $state(false);
+    let samUser = $state('');
+    let samPassword = $state('');
+    function saveSam() {
+        if (h.net.setSamAuth(samUser, samPassword)) { samOpen = false; samUser = ''; samPassword = ''; }
+    }
+    // Add SAM Password on the failed line opens the form.
+    $effect(() => { if (n.samAuthTick) samOpen = true; });
+    // The last focus request served: the tab's body remounts on every visit, and only a new
+    // request (Change Port) may bring the keyboard up.
+    let focusServed = 0;
+    /** Focus the field each time `tick` moves (Change Port opens the tab on it). */
+    function focusOnTick(node, tick) {
+        const serve = (t) => { if (t > focusServed) { focusServed = t; node.focus(); } };
+        serve(tick);
+        return { update: serve };
+    }
+
+    /** Arrow keys move along a row of tabs or radios (roving focus), choosing as they go. */
+    function rovingKeys(ev, items, current, choose) {
+        const i = Math.max(0, items.indexOf(current));
+        const next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[ev.key];
+        if (next === undefined || !items.length) return;
+        ev.preventDefault();
+        const j = (next + items.length) % items.length;
+        choose(items[j]);
+        ev.currentTarget.querySelectorAll('button')[j]?.focus();
+    }
 
     // ── account picker ──
     let pill = $state(null);
@@ -81,31 +117,35 @@
 
 <svelte:window onkeydown={(ev) => {
     if (b.qrOpen && ev.key === 'Escape') { ev.preventDefault(); h.bunker.closeQr(); }
-    else if (t.info && ev.key === 'Escape') { ev.preventDefault(); h.tor.info(false); }
+    else if (n.info && ev.key === 'Escape') { ev.preventDefault(); h.net.info(null); }
 }} />
 
 {#snippet goBack()}
     {#if l.backBar}
-        <p class="lg-back" class:lg-held={t.busy}>{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
+        <p class="lg-back" class:lg-held={n.busy}>{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
     {/if}
 {/snippet}
 
-{#snippet torLine()}
+{#snippet netLine()}
     <!-- Start reserves the line's room so the screen never shifts when it appears. -->
-    <div class="lg-tor-slot" class:reserve={l.screen === 'start'}>{@render torStatus()}</div>
+    <div class="lg-net-slot" class:reserve={l.screen === 'start'}>{@render netStatus()}</div>
 {/snippet}
 
-{#snippet torStatus()}
-    {#if t.busy}
-        <p class="lg-tor-status" role="status">
-            <span class="lg-tor-spin" aria-hidden="true"></span>
-            <span class="lg-tor-accent">{t.on ? 'Tor connecting…' : 'Tor disconnecting…'}</span>
+{#snippet netStatus()}
+    {#if n.busy}
+        <p class="lg-net-status" role="status">
+            <span class="lg-net-spin" aria-hidden="true"></span>
+            <span class="lg-net-accent">{LABELS[n.kind] || n.kind} connecting…</span>
             <span>Do not close app.</span>
         </p>
-    {:else if t.failed}
-        <p class="lg-tor-status error" role="alert">
-            <span>{t.failed}</span>
-            <button type="button" onclick={() => h.tor.retry()}>Retry</button>
+    {:else if n.failed}
+        <p class="lg-net-status error" role="alert">
+            <span>{n.failed}</span>
+            {#if n.kind}<button type="button" onclick={() => h.net.retry()}>Retry</button>{/if}
+            <!-- Retrying the same port never helps a router that isn't there or turned Vector down. -->
+            {#if n.kind === 'i2p' && (n.failedCode === 'router_unreachable' || n.failedCode.startsWith('sam_'))}
+                <button type="button" onclick={() => h.net.changePort()}>{n.failedCode.startsWith('sam_auth') ? 'Add SAM Password' : 'Change Port'}</button>
+            {/if}
         </p>
     {/if}
 {/snippet}
@@ -126,7 +166,7 @@
     <header class="lg-head">
         <img class="lg-lockup" src="./icons/login/lockup.svg" alt="Vector">
         {#if p.shown}
-            <button type="button" id="login-account-picker" class="lg-account" class:open={p.open} disabled={t.busy} bind:this={pill} onclick={() => h.picker.toggle()}>
+            <button type="button" id="login-account-picker" class="lg-account" class:open={p.open} disabled={n.busy} bind:this={pill} onclick={() => h.picker.toggle()}>
                 <Avatar src={p.avatar} size={44} />
                 <span class="lg-account-name">{p.label}</span>
                 <img class="lg-account-chevron" src="./icons/login/chevron.svg" alt="" width="10" height="6">
@@ -138,21 +178,29 @@
     <main class="lg-stage" onclick={tapToType}>
         {#if l.screen === 'start'}
             <div id="login-start" class="lg-block">
-                <div class="lg-buttons" class:lg-held={t.hold}>
-                    <button type="button" class="lg-btn primary" disabled={t.hold} onclick={() => h.createAccount()}>Create Account</button>
-                    <button type="button" class="lg-btn accent" disabled={t.hold} onclick={() => h.openImport()}>Login</button>
+                <div class="lg-buttons" class:lg-held={n.hold}>
+                    <button type="button" class="lg-btn primary" disabled={n.hold} onclick={() => h.createAccount()}>Create Account</button>
+                    <button type="button" class="lg-btn accent" disabled={n.hold} onclick={() => h.openImport()}>Login</button>
                 </div>
-                {#if t.shown}
-                    <label class="lg-tor" class:lg-held={t.busy}>
-                        <span class="lg-tor-label">Enable Tor
-                            <span class="lg-tor-info" role="button" tabindex="0" aria-label="About Tor"
-                                  onclick={(ev) => { ev.preventDefault(); ev.stopPropagation(); h.tor.info(true); }}
-                                  onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); h.tor.info(true); } }}></span>
+                {#if n.shown}
+                    <div class="lg-net" class:lg-held={n.busy}>
+                        <span class="lg-net-label">Network
+                            {#if tabs.length}
+                                <span class="lg-net-info" role="button" tabindex="0" aria-label="About these networks"
+                                      onclick={(ev) => { ev.preventDefault(); ev.stopPropagation(); h.net.info(tabs.includes(n.kind) ? n.kind : tabs[0]); }}
+                                      onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); h.net.info(tabs.includes(n.kind) ? n.kind : tabs[0]); } }}></span>
+                            {/if}
                         </span>
-                        <input type="checkbox" checked={t.on} onchange={(ev) => { ev.currentTarget.checked = t.on; h.tor.toggle(); }}>
-                        <span class="neon-toggle"></span>
-                    </label>
-                    {@render torLine()}
+                        <div class="lg-net-pick" role="radiogroup" tabindex="-1" aria-label="Network"
+                             onkeydown={(ev) => { if (!pairing) rovingKeys(ev, n.kinds, n.kind, (k) => h.net.pick(k)); }}>
+                            {#each n.kinds as k, i (k)}
+                                <button type="button" role="radio" aria-checked={n.kind === k} class:on={n.kind === k} disabled={pairing}
+                                        tabindex={n.kind === k || (!n.kinds.includes(n.kind) && i === 0) ? 0 : -1}
+                                        onclick={() => h.net.pick(k)}>{LABELS[k] || k}</button>
+                            {/each}
+                        </div>
+                    </div>
+                    {@render netLine()}
                 {/if}
                 {#if l.privateNote}<p class="lg-private-note">{l.privateNote}</p>{/if}
                 {@render goBack()}
@@ -174,7 +222,7 @@
                 <button type="button" class="lg-transfer" onclick={() => h.transfer()}>
                     <span class="lg-transfer-glyph" aria-hidden="true"></span>Sign in with another device
                 </button>
-                {#if t.shown}{@render torLine()}{/if}
+                {#if n.shown}{@render netLine()}{/if}
                 {@render goBack()}
                 {#if l.nip55Shown}
                     <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
@@ -334,27 +382,93 @@
 {/if}
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="lg-tor-modal" class:active={t.info} class:closing={t.infoClosing}
-     onclick={(ev) => { if (ev.target === ev.currentTarget) h.tor.info(false); }}>
-    <div class="lg-tor-card" role="dialog" aria-modal="true" aria-labelledby="lg-tor-title" use:popIn={t.infoTick}>
-        <button type="button" class="lg-tor-close" aria-label="Close" onclick={() => h.tor.info(false)}>&#x2715;</button>
-        <img class="lg-tor-logo" src="./icons/tor-logo.svg" alt="Tor" width="119" height="72">
-        <h3 id="lg-tor-title">Tor Network</h3>
-        <p class="lg-tor-lead">Route Vector’s connection through Tor so relays and servers never see your real IP address.</p>
-        <ul class="lg-tor-points">
-            <li><b>IP Obfuscation</b>: relays see Tor, not you</li>
-            <li><b>Location Privacy</b>: your country stays hidden</li>
-            <li><b>ISP Shielding</b>: your provider can’t see which relays you use</li>
-            <li><b>Censorship Resistance</b>: reach relays blocked on your network</li>
-        </ul>
-        <p class="lg-tor-note"><b>Expect slower connections.</b> Your traffic takes a longer path through volunteer relays worldwide so messages and media take more time to send and load, noticeably slower than a VPN.</p>
-        <p class="lg-tor-path">You can change this any time in <span>Settings &gt; Privacy &gt; Tor</span>.</p>
-        <p class="lg-tor-disclaimer">Tor is independent software maintained by the Tor Project, not operated by Vector.</p>
-        <button type="button" class="lg-tor-learn" onclick={() => h.openLink('torAttribution')}>
-            Learn more about Tor
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
-            </svg>
-        </button>
+<div class="lg-net-modal" class:active={!!n.info} class:closing={n.infoClosing}
+     onclick={(ev) => { if (ev.target === ev.currentTarget) h.net.info(null); }}>
+    <div class="lg-net-card" class:is-i2p={n.info === 'i2p'} class:has-tabs={tabs.length > 1} role="dialog" aria-modal="true" aria-labelledby="lg-net-title" use:popIn={n.infoTick}>
+        <button type="button" class="lg-net-close" aria-label="Close" onclick={() => h.net.info(null)}>&#x2715;</button>
+        {#if tabs.length > 1}
+            <div class="lg-net-tabs" role="tablist" tabindex="-1" aria-label="Networks" onkeydown={(ev) => rovingKeys(ev, tabs, n.info, (k) => h.net.info(k))}>
+                {#each tabs as k (k)}
+                    <button type="button" role="tab" aria-selected={n.info === k} tabindex={n.info === k ? 0 : -1} class:on={n.info === k}
+                            onclick={() => h.net.info(k)}>{LABELS[k]}</button>
+                {/each}
+            </div>
+        {/if}
+        {#if n.info === 'i2p'}
+            <div class="lg-net-glyph tor-state-connected" aria-hidden="true"><NetGlyph kind="i2p" /></div>
+            <h3 id="lg-net-title">I2P Network</h3>
+            <p class="lg-net-lead">Route Vector through your own I2P router so relays and servers never see your IP address.</p>
+            <ul class="lg-net-points">
+                <li><b>Your Router</b>: Vector connects to the i2pd or Java I2P router you run, with SAM on</li>
+                <li><b>I2P Servers</b>: .i2p relays and servers are reached inside I2P</li>
+                <li><b>Clearnet Servers</b>: reached through an I2P outproxy, or not at all with I2P-Only</li>
+                <li><b>Outproxies</b>: an outproxy can see and link the clearnet servers you reach</li>
+            </ul>
+            <div class="lg-net-router">
+                <label class="lg-net-field">
+                    <span>SAM port</span>
+                    <input type="text" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" value={String(n.samPort)}
+                           use:focusOnTick={n.samFocusTick}
+                           oninput={(ev) => { ev.currentTarget.value = ev.currentTarget.value.replace(/\D/g, ''); h.net.clearSamError(); }}
+                           onchange={(ev) => h.net.setSamPort(ev.currentTarget.value)}>
+                </label>
+                {#if !samOpen && !(n.samUser && n.samPassword)}
+                    <span class="lg-net-sam">
+                        <button type="button" title="Only if your router asks for one." onclick={() => { samOpen = true; }}>Add SAM Password</button>
+                    </span>
+                {/if}
+            </div>
+            {#if n.samUser && n.samPassword && !samOpen}
+                <p class="lg-net-sam">
+                    <span>Signs in as {n.samUser}.</span>
+                    <button type="button" onclick={() => h.net.setSamAuth('', '')}>Remove</button>
+                </p>
+            {:else if samOpen}
+                <div class="lg-net-sam-form">
+                    <label class="lg-net-field">
+                        <span>Username</span>
+                        <input type="text" autocomplete="off" autocapitalize="none" spellcheck="false" bind:value={samUser} oninput={() => h.net.clearSamError()}>
+                    </label>
+                    <label class="lg-net-field">
+                        <span>Password</span>
+                        <input type="password" autocomplete="off" bind:value={samPassword} oninput={() => h.net.clearSamError()}
+                               onkeydown={(ev) => { if (ev.key === 'Enter') { ev.preventDefault(); saveSam(); } }}>
+                    </label>
+                    <p class="lg-net-sam">
+                        <button type="button" onclick={() => { samOpen = false; samUser = ''; samPassword = ''; h.net.clearSamError(); }}>Cancel</button>
+                        <button type="button" disabled={!samUser || !samPassword} onclick={saveSam}>Use</button>
+                    </p>
+                </div>
+            {/if}
+            {#if n.samError}<p class="lg-net-sam-error" role="alert">{n.samError}</p>{/if}
+            <p class="lg-net-note"><b>Expect slower connections.</b> Starting can take a few minutes, and media loads slowly through an outproxy.</p>
+            <p class="lg-net-path">You can change this any time in <span>Settings &gt; Privacy &gt; Routing</span>.</p>
+            <p class="lg-net-disclaimer">I2P is independent software run by its volunteers, not operated by Vector.</p>
+            <button type="button" class="lg-net-learn" onclick={() => h.openLink('i2p')}>
+                Learn more about I2P
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
+                </svg>
+            </button>
+        {:else}
+            <img class="lg-net-logo" src="./icons/tor-logo.svg" alt="Tor" width="119" height="72">
+            <h3 id="lg-net-title">Tor Network</h3>
+            <p class="lg-net-lead">Route Vector’s connection through Tor so relays and servers never see your real IP address.</p>
+            <ul class="lg-net-points">
+                <li><b>IP Obfuscation</b>: relays see Tor, not you</li>
+                <li><b>Location Privacy</b>: your country stays hidden</li>
+                <li><b>ISP Shielding</b>: your provider can’t see which relays you use</li>
+                <li><b>Censorship Resistance</b>: reach relays blocked on your network</li>
+            </ul>
+            <p class="lg-net-note"><b>Expect slower connections.</b> Your traffic takes a longer path through volunteer relays worldwide so messages and media take more time to send and load, noticeably slower than a VPN.</p>
+            <p class="lg-net-path">You can change this any time in <span>Settings &gt; Privacy &gt; Routing</span>.</p>
+            <p class="lg-net-disclaimer">Tor is independent software maintained by the Tor Project, not operated by Vector.</p>
+            <button type="button" class="lg-net-learn" onclick={() => h.openLink('torAttribution')}>
+                Learn more about Tor
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>
+                </svg>
+            </button>
+        {/if}
     </div>
 </div>

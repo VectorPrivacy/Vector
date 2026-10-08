@@ -1,18 +1,20 @@
 <script>
-    // Tor's settings under its card: bridges, which must be reachable before Tor is on
+    // Tor's settings under its card: bridges, which must be reachable before Tor is in use
     // (a network that blocks Tor only connects through them), then the active circuit
     // once there is one to show.
     import { torState, settingsScreen } from '../lib/settings.svelte.js';
+    import { transportState } from '../lib/transport.svelte.js';
     import TorCircuits from './TorCircuits.svelte';
     import InfoIcon from './InfoIcon.svelte';
 
     let { h } = $props();   // h: help(key), loadCircuits(), refreshCircuitCount(), newCircuit(), setBridgesEnabled(on), setMultiCircuit(on), bridgesInput(), applyBridges(), openLink(key)
 
     const tor = torState();
+    const net = transportState();
     const sc = settingsScreen();
     const b = $derived(sc.bridges);
-    const connected = $derived(!!tor.state?.running);
-    const multi = $derived(tor.state?.multi_circuit !== false);
+    const connected = $derived(net.view?.kind === 'tor' && !!net.view.ready);
+    const multi = $derived(tor.multi);
     const dirty = $derived(b.lines !== b.saved);
     const lineCount = $derived(b.lines.split(/\r?\n/).map(l => l.trim()).filter(Boolean).length);
     const status = $derived(b.status || (lineCount === 0 ? 'No bridges configured.' : `${lineCount} bridge${lineCount === 1 ? '' : 's'} configured`));
@@ -62,7 +64,7 @@
 <div class="form-group">
     <label class="toggle-container">
         <span><InfoIcon onclick={() => h.help('torMultiCircuit')} />Multi-Circuit</span>
-        <input type="checkbox" checked={multi} disabled={tor.locked} onchange={(e) => h.setMultiCircuit(e.currentTarget.checked)}>
+        <input type="checkbox" checked={multi} disabled={net.locked} onchange={(e) => h.setMultiCircuit(e.currentTarget.checked)}>
         <span class="neon-toggle"></span>
     </label>
 </div>

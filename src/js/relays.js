@@ -15,7 +15,9 @@ async function renderRelayList() {
                 addServer: async () => {
                     const url = await popupConfirm(
                         'Add Media Server',
-                        'Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.',
+                        'Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.'
+                            + (VectorSvelte.transportState().view?.supported?.includes('i2p')
+                                ? '<br><br>An <b>.i2p</b> server gets <b>http://</b>. Only people using I2P can load files from it.' : ''),
                         false,
                         'blossom.primal.net',
                     );
@@ -29,6 +31,9 @@ async function renderRelayList() {
                 },
                 openRelay: (relay) => openRelayInfoDialog(relay),
                 openServer: (server) => openBlossomServerInfoDialog(server),
+                routes: (urls) => refreshTransportRoutes(urls),
+                routeTag: (route) => transportRouteTag(route),
+                routeBadge: (route) => transportRouteBadge(route),
                 toggleRelay: async (relay, enabled) => {
                     try {
                         if (relay.is_default) {
@@ -56,6 +61,8 @@ async function renderRelayList() {
     try {
         const [relays, servers] = await Promise.all([invoke('get_relays'), invoke('get_blossom_servers_config')]);
         VectorSvelte.setNetwork({ relays, servers });
+        // A relay added, removed or switched may change whether I2P-Only leaves the account deaf.
+        checkI2pStranded();
     } catch (error) {
         console.error('Failed to fetch network info:', error);
     }
@@ -87,9 +94,11 @@ async function handleAddRelay({ url, mode }) {
         return;
     }
 
-    // Normalize URL: strip protocol if present and add wss://
+    // Plain ws:// only for .i2p hosts, where I2P encrypts end to end.
+    const typedTls = /^wss:\/\//i.test(url);
     url = url.replace(/^wss?:\/\//i, '');
-    url = 'wss://' + url;
+    const i2pHost = /^[^/:?#]+\.i2p(?=[/:?#]|$)/i.test(url);
+    url = (i2pHost && !typedTls ? 'ws://' : 'wss://') + url;
 
     try {
         await invoke('add_custom_relay', { url, mode });
@@ -121,7 +130,8 @@ async function refreshRelayInfoDialog() {
         console.error('Failed to refresh relay data:', err);
     }
 
-    // The circuit moves when Tor rebuilds it, so it refreshes with the rest.
+    // The route and circuit move with the network, so they refresh with the rest.
+    refreshTransportRoutes([url]);
     hostCircuit(url).then((circuit) => { if (currentRelayInfo?.url === url) dialog.patch({ circuit }); });
 
     // Refresh metrics
@@ -171,7 +181,7 @@ async function openRelayInfoDialog(relay) {
     currentRelayLogs = [];
     VectorSvelte.setRelayLogs([]);
     VectorSvelte.relayInfoDialog.patch({
-        url: relay.url.replace(/^wss?:\/\//, ''), status: relay.status || '',
+        url: relay.url.replace(/^wss?:\/\//, ''), href: relay.url, status: relay.status || '',
         isDefault: !!relay.is_default, enabled: relay.enabled !== false, mode: relay.mode || 'both',
         ping: '--', pingColor: '', lastCheck: '--', copied: false, circuit: null,
     });
@@ -226,7 +236,7 @@ let currentBlossomInfo = null;
 function openBlossomServerInfoDialog(server) {
     currentBlossomInfo = server;
     VectorSvelte.blossomInfoDialog.open({
-        url: server.url.replace(/^https?:\/\//, ''), enabled: !!server.enabled, isCustom: !!server.is_custom,
+        url: server.url.replace(/^https?:\/\//, ''), href: server.url, enabled: !!server.enabled, isCustom: !!server.is_custom,
         status: server.status || null, circuit: null,
     });
     // Reset synchronously so stale data doesn't flash mid-fetch.
@@ -234,6 +244,7 @@ function openBlossomServerInfoDialog(server) {
     VectorSvelte.setBlossomInfo('loading', null);
     VectorSvelte.setBlossomStats(null);
     const token = ++_blossomCapsToken;
+    refreshTransportRoutes([server.url]);
     renderBlossomCapabilities(server.url, token);
     renderBlossomInfo(server.url, token);
 }
@@ -284,7 +295,8 @@ async function renderBlossomInfo(url, token) {
     } catch (err) {
         console.warn('Failed to load blossom server stats:', err);
     }
-    // Last: the fetches above are what put this server on a circuit.
+    // Last: the fetches above are what put this server on a route and a circuit.
+    refreshTransportRoutes([url]);
     const circuit = await hostCircuit(url);
     if (token === _blossomCapsToken) VectorSvelte.blossomInfoDialog.patch({ circuit });
 }
@@ -398,8 +410,8 @@ async function handleRelayDisable() {
 function initRelayDialogs() {
     VectorSvelte.setScreen('network', { h: {
         addRelay: { close: closeAddRelayDialog, confirm: handleAddRelay },
-        relayInfo: { close: closeRelayInfoDialog, disable: handleRelayDisable, setMode: handleRelayModeChange, copy: copyRelayLogs },
-        blossom: { close: closeBlossomServerInfoDialog, action: handleBlossomAction, formatBytes },
+        relayInfo: { close: closeRelayInfoDialog, disable: handleRelayDisable, setMode: handleRelayModeChange, copy: copyRelayLogs, alias: TRANSPORT_ALIAS_HANDLERS, routeTag: (route) => transportRouteTag(route) },
+        blossom: { close: closeBlossomServerInfoDialog, action: handleBlossomAction, formatBytes, alias: TRANSPORT_ALIAS_HANDLERS },
     } });
 }
 

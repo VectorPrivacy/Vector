@@ -45,13 +45,21 @@ const enc = $state({
     pinTick: 0, pinFocus: true, focusTick: 0,
 });
 
-// The welcome screen's Tor switch. `busy` while it is switching; `hold` keeps the sign-in
-// buttons out of reach while Tor is chosen but not connected; `info` is the explainer.
-const tor = $state({ shown: false, on: false, busy: false, hold: false, failed: '', info: false, infoClosing: false, infoTick: 0 });
+// The welcome screen's network choice. `kind` is the pick ('' until one is made), from `kinds`,
+// the networks this build offers; `busy` while it connects; `hold` keeps the sign-in buttons out
+// of reach while the pick is not connected; `failedCode` is the reason code behind `failed`;
+// `info` is the explainer's open tab ('tor' | 'i2p'). `samPort` and the SAM credentials are what
+// an I2P pick carries (the credentials in memory only); `samError` says why an entry was refused,
+// `samFocusTick` replays focusing the port field and `samAuthTick` opening the password form.
+const net = $state({
+    shown: false, kinds: [], kind: '', busy: false, hold: false, failed: '', failedCode: '',
+    info: null, infoClosing: false, infoTick: 0, samPort: 7656,
+    samUser: '', samPassword: '', samError: '', samFocusTick: 0, samAuthTick: 0,
+});
 
 export function loginState() { return l; }
-export function loginTorState() { return tor; }
-export function patchLoginTor(patch) { Object.assign(tor, patch); }
+export function loginNetState() { return net; }
+export function patchLoginNet(patch) { Object.assign(net, patch); }
 export function bunkerState() { return b; }
 export function pickerState() { return picker; }
 export function encryptState() { return enc; }
@@ -73,6 +81,8 @@ export function toggleLoginBg() {
 }
 /** The main app is up: the form and every screen go. */
 export function loginHide() { l.shown = false; l.screen = 'none'; }
+/** Any sign-in screen is up, so the main app's own controls stay out of reach. */
+export function loginUp() { return l.shown || l.screen !== 'none' || l.bunker; }
 
 /** The bunker overlay replaces the screens, with a way back. */
 export function loginShowBunker(mode, fromImport = false) {

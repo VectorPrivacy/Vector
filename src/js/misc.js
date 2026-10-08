@@ -41,17 +41,34 @@ async function openDowngradeBlock(info) {
     VectorSvelte.showDowngradeBlock(current, required);
 }
 
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false, actions = null) {
+/** Answers the popup on screen as dismissed, without closing it: the next popup replaces it. */
+let _popupSupersede = null;
+
+/**
+ * `fDismissNull`: Escape and hardware back resolve `null` rather than `false`, for a confirm whose
+ * cancel button is a choice of its own (Keep / End) rather than a way out. An `actions` handler
+ * that returns `true` closes the popup as confirmed.
+ */
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false, actions = null, strCancelText = null, fDismissNull = false) {
+    // A popup opened over another replaces it: the first answers now, as dismissed, so its key
+    // listener can't confirm it later on a stray Enter.
+    _popupSupersede?.();
     // Resolve once: the component answers through the store, so no listener is left on a
     // shared button to double-fire on a later popup.
     return new Promise((resolve) => {
         const st = VectorSvelte.popupState();
         const confirmValue = () => (strInputPlaceholder ? st.value : true);
-        const finish = (value) => {
+        let done = false;
+        const finish = (value, close = true) => {
+            if (done) return;
+            done = true;
             document.removeEventListener('keydown', onKeyDown);
-            VectorSvelte.closePopupDialog();
+            if (_popupSupersede === supersede) _popupSupersede = null;
+            if (close) VectorSvelte.closePopupDialog();
             resolve(value);
         };
+        const supersede = () => finish(fNotice ? confirmValue() : fDismissNull ? null : false, false);
+        _popupSupersede = supersede;
         const onKeyDown = (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
@@ -60,7 +77,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 popBack('popup-confirm');
-                finish(fNotice ? confirmValue() : false);
+                finish(fNotice ? confirmValue() : fDismissNull ? null : false);
             }
         };
         VectorSvelte.openPopupDialog({
@@ -68,7 +85,10 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
             icon: strIcon, circular: fCircularIcon, titleClass: strTitleClass,
             // Caller-provided label wins; otherwise 'Okay' for notices, 'Confirm' for confirms.
             confirmText: strConfirmText || (fNotice ? 'Okay' : 'Confirm'),
-            actions,
+            cancelText: strCancelText || 'Cancel',
+            actions: actions && Object.fromEntries(Object.entries(actions).map(([k, fn]) => [k, () => {
+                if (fn() === true) { popBack('popup-confirm'); finish(confirmValue()); }
+            }])),
         }, {
             confirm: () => { popBack('popup-confirm'); finish(confirmValue()); },
             cancel: () => { popBack('popup-confirm'); finish(false); },
@@ -76,7 +96,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
         document.addEventListener('keydown', onKeyDown);
         // Hardware-back: notices accept-on-back (matches Escape), confirms cancel-on-back.
         // This fires as a RESULT of back, so it must not popBack again — just resolve.
-        pushBack('popup-confirm', () => finish(fNotice ? confirmValue() : false));
+        pushBack('popup-confirm', () => finish(fNotice ? confirmValue() : fDismissNull ? null : false));
     });
 }
 

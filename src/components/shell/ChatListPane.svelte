@@ -1,6 +1,6 @@
 <script>
-    // The list pane: bookmarks, the account row (profile.js fills it), the sync line,
-    // the two New buttons, the widescreen community head and the list island's host.
+    // The list pane: bookmarks, the account row (profile.js fills it), the sync line, the
+    // network's notice, the two New buttons, the widescreen community head and the list island's host.
     import { shellPanes, shellState, shellHandlers, shellScreens, shellReveals, reveal, bindShellEl, syncLineState } from '../lib/shell.svelte.js';
     import { accountState, accountHandlers } from '../lib/account.svelte.js';
     import AccountRow from './AccountRow.svelte';
@@ -8,6 +8,7 @@
     import CommunityHead from '../chatlist/CommunityHead.svelte';
     import CommunityBanner from '../chatlist/CommunityBanner.svelte';
     import { listHasRows } from '../lib/signals.svelte.js';
+    import NetworkNotice from './NetworkNotice.svelte';
     import { loginState } from '../lib/login.svelte.js';
     const panes = shellPanes();
     const login = loginState();
@@ -69,6 +70,7 @@
     <!-- A sync that starts under the login form waits for the list to be on screen. -->
     <div id="sync-line" class="sync-line" class:active={sync.active && !login.shown} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
          style:--sync-progress={sync.progress !== null ? sync.progress : null}></div>
+    <NetworkNotice />
     <div id="chat-new-actions" style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
         <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px;" style:display={shell.newChatButtons ? null : 'none'}
                 use:bindNewChat use:reveal={['newChat', reveals.newChat]} onclick={() => shellHandlers().openNewChat?.()}>

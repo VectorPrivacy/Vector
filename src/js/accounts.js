@@ -374,7 +374,7 @@ const addAccountFlow = {
         if (this.active) return;
         this.active = true;
         this.committed = false;
-        loginTor._addChoice = null;
+        loginNet._addChoice = null;
 
         // Cache who we'll need to restore to if the user backs out AFTER
         // committing. We grab it now while CURRENT_ACCOUNT is still set
@@ -414,16 +414,20 @@ const addAccountFlow = {
      * overlay. Tear down the current session so the new account's keys can
      * be installed without colliding with the lock-and-check guards.
      */
+    /** @returns {Promise<boolean>} false when another network was picked mid-connect: that pick decides, and the user goes on from it. */
     async commit() {
         if (!this.committed) {
             // Committed before the await: the session is torn down at once, so Back must
-            // take the reload path even while Tor is still connecting. A refusal comes
+            // take the reload path even while its network is still connecting. A refusal comes
             // before the teardown, so it leaves the flow uncommitted.
             this.committed = true;
-            try { await loginTor.commitAddAccount(); }
+            let current;
+            try { current = await loginNet.commitAddAccount(); }
             catch (e) { this.committed = false; throw e; }
+            if (!current) return false;
         }
-        loginTor.ready();
+        loginNet.ready();
+        return true;
     },
 
     /** Soft restore — only valid before commit. */

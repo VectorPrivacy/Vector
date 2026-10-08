@@ -9479,7 +9479,7 @@ select {
    Tor settings card — animated onion glyph
    ============================================================================
    The card is one row: large animated SVG on the left, label + status in the
-   middle, toggle on the right. State classes on `#settings-tor-card` drive
+   middle, a control on the right. State classes on the card drive
    color + animation transitions:
        .tor-state-disabled     → grey, static, low-opacity glyph
        .tor-state-bootstrapping → purple, rotating hops, drawing shells
@@ -9542,8 +9542,8 @@ select {
   transition: stroke 0.5s ease, fill 0.5s ease, opacity 0.5s ease;
 }
 
-/* Used by JS during the cross-dissolve swap (see settings.js
-   applyTorCardState): kills inner transitions for one frame so the new
+/* Held through the glyph's cross-dissolve swap (TransportCard.svelte): kills
+   inner transitions so the new
    state's stroke/fill values snap instantly behind the invisible glyph,
    instead of being mid-tween when the glyph fades back in. */
 .tor-no-transition .tor-ring,
@@ -9723,11 +9723,6 @@ select {
 .tor-card-toggle .neon-toggle {
   /* slim down so the toggle doesn't dominate the card */
   margin: 0;
-}
-
-/* The card is only the toggle; Tor's settings follow it as ordinary rows. */
-#settings-tor-card {
-  box-shadow: none !important;
 }
 
 /* Streamer Mode wears the Tor card's layout: a camera that lights while live. */
@@ -10166,6 +10161,931 @@ select {
   display: block;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+
+/* ============================================================================
+   Routing: the network picker, the card's colour per network, the I2P and
+   Clearnet glyphs, a network's connection steps, I2P's panel and the notice
+   over the chat list. Tor keeps its purple; I2P wears cyan; Clearnet is white.
+   ============================================================================ */
+
+/* The picker: a pill per network, a thumb that slides to the one on view, a dot on the one in use. */
+.net-picker {
+  position: relative;
+  display: flex;
+  margin: 0 0 12px;
+  padding: 3px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.net-picker::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: calc(3px + (100% - 6px) / var(--n, 3) * var(--i, 0));
+  width: calc((100% - 6px) / var(--n, 3));
+  border-radius: 9px;
+  background: rgba(255,255,255,0.08);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.07), 0 1px 6px rgba(0,0,0,0.35);
+  transition: left 0.28s cubic-bezier(0.3, 0.7, 0.2, 1);
+  pointer-events: none;
+}
+.net-pill,
+.net-pill:hover,
+.net-pill:focus {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 0;
+  padding: 0 8px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: rgba(255,255,255,0.5);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+.net-pill:hover { color: rgba(255,255,255,0.82); }
+.net-pill.active { color: #fff; }
+.net-pill.missing { opacity: 0.4; }
+.net-pill-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.net-pill-clearnet { --net-dot: var(--accent-color, #59fcb3); }
+.net-pill-tor { --net-dot: #c285ff; }
+.net-pill-i2p { --net-dot: #5fd4ea; }
+.net-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--net-dot, #b2b2b2);
+}
+.net-dot.ok { box-shadow: 0 0 7px var(--net-dot, #b2b2b2); }
+.net-dot.busy { animation: netDotPulse 1.2s ease-in-out infinite; }
+.net-dot.bad {
+  background: #ff7860;
+  box-shadow: 0 0 7px rgba(255,120,96,0.6);
+}
+.net-dot.warn {
+  background: #ffc107;
+  box-shadow: 0 0 7px rgba(255,193,7,0.5);
+}
+@keyframes netDotPulse { 50% { opacity: 0.3; } }
+
+/* The card: Tor's layout, coloured by the network it shows. No network card has an outer glow:
+   its settings follow as ordinary rows. The Use button stands where Tor's toggle did. */
+.net-card { box-shadow: none !important; }
+.net-card.net-tor { --net-rgb: 149, 48, 244; --net-soft: #d9b3ff; }
+.net-card.net-i2p { --net-rgb: 64, 200, 228; --net-soft: #b3ecf7; }
+.net-card.net-clearnet { --net-rgb: 255, 255, 255; --net-soft: rgba(255,255,255,0.88); }
+.net-card.net-i2p.tor-state-bootstrapping {
+  background: rgba(64,200,228,0.05);
+  border-color: rgba(64,200,228,0.18);
+}
+.net-card.net-i2p.tor-state-connected {
+  background: rgba(64,200,228,0.08);
+  border-color: rgba(64,200,228,0.28);
+}
+.net-card.net-clearnet.tor-state-connected {
+  background: rgba(255,255,255,0.045);
+  border-color: rgba(255,255,255,0.12);
+}
+.net-card.tor-state-connected .tor-card-status { color: var(--net-soft); }
+.net-glyph-wrap { transition: opacity 0.22s ease; }
+.net-card-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px 8px;
+  margin-top: 4px;
+  color: rgba(255,255,255,0.45);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.net-use,
+.net-use:hover,
+.net-use:focus {
+  flex-shrink: 0;
+  height: 32px;
+  margin: 0;
+  padding: 0 16px;
+  border: 1px solid rgba(var(--net-rgb, 255, 255, 255), 0.42);
+  border-radius: 999px;
+  background: rgba(var(--net-rgb, 255, 255, 255), 0.12);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--net-soft, #fff);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+.net-use:hover:not(:disabled) {
+  background: rgba(var(--net-rgb, 255, 255, 255), 0.22);
+  border-color: rgba(var(--net-rgb, 255, 255, 255), 0.7);
+  color: #fff;
+}
+.net-use:active:not(:disabled) { transform: scale(0.97); }
+.net-use:disabled { opacity: 0.4; cursor: default; }
+.net-use.is-busy:disabled { opacity: 0.7; cursor: progress; }
+.net-link,
+.net-link:hover,
+.net-link:focus {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: var(--accent-color, #59fcb3);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.net-link:hover:not(:disabled) { text-decoration: underline; }
+.net-link:disabled { opacity: 0.45; cursor: default; }
+
+/* ---- I2P glyph: three tunnels, each arc's gap at its own angle -------------- */
+.net-glyph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.i2p-track,
+.i2p-arc,
+.i2p-core,
+.i2p-halo {
+  transition: stroke 0.5s ease, fill 0.5s ease, opacity 0.5s ease, stroke-dasharray 0.6s ease;
+}
+.tor-no-transition .i2p-track,
+.tor-no-transition .i2p-arc,
+.tor-no-transition .i2p-core,
+.tor-no-transition .i2p-halo { transition: none !important; }
+.i2p-layer { transform-origin: 60px 60px; }
+.i2p-track {
+  fill: none;
+  stroke: rgba(255,255,255,0.05);
+  stroke-width: 1.6;
+}
+.i2p-arc {
+  fill: none;
+  stroke: rgba(255,255,255,0.2);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-dasharray: 70 30;
+}
+.i2p-core {
+  fill: rgba(255,255,255,0.4);
+  transform-origin: 60px 60px;
+}
+.i2p-halo {
+  fill: none;
+  stroke: rgba(64,200,228,0);
+  stroke-width: 2;
+  opacity: 0;
+  transform-origin: 60px 60px;
+}
+/* Starting: short comets race their tracks, the core pulses. */
+.tor-state-bootstrapping .i2p-track { stroke: rgba(95,212,234,0.14); }
+.tor-state-bootstrapping .i2p-arc { stroke: #5fd4ea; stroke-dasharray: 16 84; }
+.tor-state-bootstrapping .i2p-layer-1 { animation: torOrbit 1.4s linear infinite; }
+.tor-state-bootstrapping .i2p-layer-2 { animation: torOrbit 2.1s linear infinite reverse; }
+.tor-state-bootstrapping .i2p-layer-3 { animation: torOrbit 3s linear infinite; }
+.tor-state-bootstrapping .i2p-core {
+  fill: #5fd4ea;
+  animation: torCorePulse 1.4s ease-in-out infinite;
+}
+/* Connected: the arcs settle into layers that turn slowly, each its own way. */
+.tor-state-connected .i2p-track { stroke: rgba(95,212,234,0.12); }
+.tor-state-connected .i2p-arc { stroke: rgba(122,222,240,0.88); }
+.tor-state-connected .i2p-layer-1 { animation: torOrbit 9s linear infinite; }
+.tor-state-connected .i2p-layer-2 { animation: torOrbit 14s linear infinite reverse; }
+.tor-state-connected .i2p-layer-3 { animation: torOrbit 22s linear infinite; }
+.tor-state-connected .i2p-core { fill: #b3ecf7; }
+.tor-state-connected .i2p-halo {
+  stroke: rgba(64,200,228,0.42);
+  opacity: 1;
+  animation: torHaloBreathe 3.2s ease-in-out infinite;
+}
+.tor-state-connected .i2p-glyph { filter: drop-shadow(0 0 8px rgba(64,200,228,0.42)); }
+.tor-state-failed .i2p-arc { stroke: rgba(255,120,96,0.5); }
+.tor-state-failed .i2p-core { fill: #ff7860; }
+
+/* ---- Clearnet glyph: a plain globe, lit while in use ---------------------- */
+.globe-line {
+  fill: none;
+  stroke: rgba(255,255,255,0.2);
+  stroke-width: 1.6;
+  transition: stroke 0.5s ease;
+}
+.globe-halo {
+  fill: none;
+  stroke: rgba(255,255,255,0.14);
+  stroke-width: 2;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+.tor-no-transition .globe-line,
+.tor-no-transition .globe-halo { transition: none !important; }
+.tor-state-connected .globe-line { stroke: rgba(255,255,255,0.75); }
+.tor-state-connected .globe-halo { opacity: 1; }
+.tor-state-connected .globe-glyph { filter: drop-shadow(0 0 6px rgba(255,255,255,0.16)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .net-picker::before { transition: none; }
+  .net-dot.busy,
+  .i2p-layer,
+  .i2p-core,
+  .i2p-halo { animation: none !important; }
+}
+
+/* ---- A network's connection, step by step: Tor's circuit rail, one dot per step ---- */
+.net-steps-wrap { margin: 2px 0 12px; }
+.net-steps {
+  --net-rgb: 255, 255, 255;
+  --net-soft: #fff;
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+}
+.net-steps-i2p { --net-rgb: 64, 200, 228; --net-soft: #b3ecf7; }
+.net-steps::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 15px;
+  bottom: 15px;
+  width: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(to bottom, rgba(var(--net-rgb), 0.45), rgba(var(--net-rgb), 0.15));
+  pointer-events: none;
+}
+.net-step {
+  display: grid;
+  grid-template-columns: 18px 84px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  line-height: 18px;
+  text-align: left;
+}
+.net-step-mark {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  min-height: 18px;
+}
+.net-step-dot {
+  position: relative;
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.28);
+  background: #0a0a0a;
+  transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.net-step[data-state="ok"] .net-step-dot {
+  background: rgb(var(--net-rgb));
+  border-color: var(--net-soft);
+  box-shadow: 0 0 6px rgba(var(--net-rgb), 0.55);
+}
+.net-step[data-state="pending"] .net-step-dot {
+  border-color: rgb(var(--net-rgb));
+  animation: netStepPulse 1.3s ease-in-out infinite;
+}
+.net-step[data-state="fail"] .net-step-dot {
+  background: #ff7860;
+  border-color: #ff9a85;
+}
+.net-step[data-state="off"] .net-step-dot { border-style: dashed; }
+@keyframes netStepPulse {
+  50% { box-shadow: 0 0 0 4px rgba(var(--net-rgb), 0.16); }
+}
+.net-step-label {
+  overflow: hidden;
+  color: rgba(255,255,255,0.72);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.net-step-text {
+  overflow: hidden;
+  color: rgba(255,255,255,0.92);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.net-step[data-state="fail"] .net-step-text { color: #ff8c75; }
+.net-step[data-state="off"] .net-step-text,
+.net-step[data-state="unknown"] .net-step-text { color: rgba(255,255,255,0.5); }
+@media (prefers-reduced-motion: reduce) {
+  .net-step[data-state="pending"] .net-step-dot { animation: none; }
+}
+.net-step-address { align-items: start; }
+/* The line ends at the last dot: the address row is two lines tall. */
+.net-steps:has(> .net-step-address:last-child)::before { bottom: 35px; }
+.net-addresses {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.net-address,
+.net-address:hover,
+.net-address:focus {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  font: inherit;
+  line-height: 18px;
+  text-align: left;
+}
+.net-address-b32 {
+  color: rgba(255,255,255,0.92);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  transition: color 0.15s ease;
+}
+.net-address-who { color: rgba(255,255,255,0.45); font-size: 11.5px; font-weight: 400; }
+.net-address:hover .net-address-b32 { color: var(--net-soft); }
+.net-address:focus-visible { outline: 2px solid rgba(var(--net-rgb), 0.6); outline-offset: 2px; }
+
+/* ---- I2P's panel ---- */
+.i2p-addr {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.i2p-host,
+.i2p-colon {
+  color: rgba(255,255,255,0.4);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.i2p-colon { margin: 0 -2px; }
+.i2p-port {
+  width: 64px;
+  height: 32px;
+  margin: 0;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #0a0a0a;
+  color: #fff;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: center;
+}
+.i2p-port:focus,
+.i2p-field input:focus {
+  border-color: rgba(64,200,228,0.6);
+  box-shadow: 0 0 0 3px rgba(64,200,228,0.12);
+}
+.i2p-test.is-busy { cursor: progress; }
+.i2p-note {
+  margin: -4px 0 10px;
+  color: rgba(255,255,255,0.55);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: left;
+}
+.i2p-note.ok { color: #7adef0; }
+.i2p-note.error { color: #ff8c75; }
+.i2p-auth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0 0 14px;
+  font-size: 13px;
+  text-align: left;
+}
+.i2p-auth > .i2p-note { flex-basis: 100%; margin: 4px 0 0; }
+.i2p-muted { color: rgba(255,255,255,0.55); }
+.i2p-auth-add { display: inline-flex; align-items: center; }
+/* The paged settings zero every info icon's margin: the gap spaces it from its label instead. */
+.st-page .i2p-auth-add,
+.st-page .i2p-form-head { gap: 6px; }
+.i2p-form {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.025);
+  text-align: left;
+}
+.i2p-form-head {
+  display: flex;
+  align-items: center;
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+  font-weight: 600;
+}
+.i2p-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.i2p-field {
+  display: flex;
+  flex: 1 1 140px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.i2p-field-wide { flex: 2 1 200px; }
+.i2p-field-port { flex: 0 0 76px; }
+.i2p-field > span {
+  color: rgba(255,255,255,0.45);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.i2p-field input {
+  width: 100%;
+  height: 34px;
+  margin: 0;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #0a0a0a;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 400;
+}
+.i2p-field input.mono {
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.i2p-field input::placeholder { color: rgba(255,255,255,0.25); }
+.i2p-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.st-btn.net-primary {
+  border-color: rgba(64,200,228,0.45);
+  background-color: rgba(64,200,228,0.14);
+  color: #c9f2fa;
+}
+.st-btn.net-primary:hover:not(:disabled) { background-color: rgba(64,200,228,0.24); }
+.i2p-only-row { margin-top: 4px; }
+.i2p-only-line {
+  margin: -4px 0 12px;
+  padding: 9px 12px;
+  border-left: 2px solid rgba(64,200,228,0.55);
+  border-radius: 0 8px 8px 0;
+  background: rgba(64,200,228,0.06);
+  color: #b3ecf7;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+}
+/* I2P-Only with nothing inside I2P to talk to: the way out is in Network. */
+.i2p-only-line.warn {
+  border-left-color: rgba(255,193,7,0.6);
+  background: rgba(255,193,7,0.06);
+  color: #ffd27a;
+}
+/* The I2P panel's text buttons wear I2P's colour, as its notes and the welcome screen's do. */
+.i2p-auth .net-link,
+.i2p-ops .net-link,
+.i2p-only-line .net-link { color: #7adef0; }
+.i2p-only-line.warn .net-link { color: #ffd27a; }
+
+/* Outproxies, tried top to bottom: the rank says the order, the arrows change it. */
+.i2p-ops { margin: 0 0 4px; }
+.i2p-ops-head { margin-bottom: 6px; }
+.i2p-ops-head .net-link { font-size: 13px; }
+.i2p-op-list {
+  margin: 0 0 10px;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 12px;
+  transition: opacity 0.2s ease;
+}
+.i2p-op-list.busy { opacity: 0.6; pointer-events: none; }
+/* Name over address; the health beside both, or beside the address on a phone. */
+.i2p-op {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+  grid-template-areas:
+    "order rank name health remove toggle"
+    "order rank addr health remove toggle";
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  min-height: 52px;
+  padding: 6px 12px 6px 6px;
+  box-sizing: border-box;
+  background: rgba(255,255,255,0.02);
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.i2p-op-order { grid-area: order; }
+.i2p-op-rank { grid-area: rank; }
+.i2p-op-name { grid-area: name; align-self: end; }
+.i2p-op-addr { grid-area: addr; align-self: start; }
+.i2p-op-health { grid-area: health; }
+.i2p-op-remove { grid-area: remove; }
+.i2p-op .i2p-op-toggle { grid-area: toggle; }
+.i2p-op + .i2p-op { border-top: 1px solid rgba(255,255,255,0.06); }
+.i2p-op:hover { background: rgba(255,255,255,0.04); }
+.i2p-op.off .i2p-op-name,
+.i2p-op.off .i2p-op-addr,
+.i2p-op.off .i2p-op-rank,
+.i2p-op.off .i2p-op-health { opacity: 0.45; }
+.i2p-op-order {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.i2p-op-move,
+.i2p-op-move:hover,
+.i2p-op-move:focus,
+.i2p-op-remove,
+.i2p-op-remove:hover,
+.i2p-op-remove:focus {
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: rgba(255,255,255,0.45);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.i2p-op-move { width: 22px; height: 17px; }
+.i2p-op-remove { width: 24px; height: 24px; flex-shrink: 0; }
+.i2p-op-move:hover:not(:disabled),
+.i2p-op-remove:hover:not(:disabled) {
+  background-color: rgba(255,255,255,0.08);
+  color: #fff;
+}
+.i2p-op-remove:hover:not(:disabled) { color: #ff8c75; }
+.i2p-op-move:disabled { opacity: 0.18; cursor: default; }
+.i2p-op-move svg,
+.i2p-op-remove svg,
+.i2p-op-add svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.i2p-op-move svg { width: 10px; height: 7px; }
+.i2p-op-remove svg { width: 10px; height: 10px; }
+.i2p-op-rank {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(64,200,228,0.12);
+  color: #7adef0;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.i2p-op-name,
+.i2p-op-addr {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 1.25;
+}
+.i2p-op-name { color: #fff; font-size: 14px; font-weight: 500; }
+.i2p-op-addr {
+  color: rgba(255,255,255,0.42);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+.i2p-op-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: rgba(255,255,255,0.5);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.i2p-op-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.28);
+}
+.i2p-op-health.ok { color: #7adef0; }
+.i2p-op-health.ok .i2p-op-dot { background: #5fd4ea; box-shadow: 0 0 6px rgba(95,212,234,0.6); }
+.i2p-op-health.cooling { color: #ffc773; }
+.i2p-op-health.cooling .i2p-op-dot { background: #ffb84d; }
+.i2p-op-health.failing { color: #ff8c75; }
+.i2p-op-health.failing .i2p-op-dot { background: #ff7860; }
+.i2p-op-health.refusing { color: #ffc773; }
+.i2p-op-health.refusing .i2p-op-dot { background: #ffb84d; }
+/* Why an outproxy isn't working: the health's tooltip says it; a phone has none, so a line does. */
+.i2p-op-why {
+  display: none;
+  grid-column: 3 / -1;
+  grid-row: 3;
+  overflow: hidden;
+  color: rgba(255,255,255,0.42);
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Last known health while I2P is down: what it was, not what it is. */
+.i2p-op-health.stale { color: rgba(255,255,255,0.4); opacity: 0.6; }
+.i2p-op-health.stale .i2p-op-dot { background: rgba(255,255,255,0.3); box-shadow: none; }
+.i2p-op .toggle-container.i2p-op-toggle {
+  flex-shrink: 0;
+  min-height: 0;
+  margin: 0;
+}
+.i2p-op-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.i2p-op-add svg { width: 11px; height: 11px; }
+.i2p-op-form { margin-bottom: 10px; }
+.i2p-foot {
+  margin: 14px 0 4px;
+  color: rgba(255,255,255,0.4);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+}
+.st-page .i2p-foot { text-align: left; }
+.st-routing { margin-top: 6px; }
+/* The phone layout's Routing has no page of its own: the word the copy points to. */
+.st-routing-head {
+  margin: 22px 0 12px;
+  color: #b2b2b2;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+}
+@media (max-width: 520px) {
+  .i2p-host,
+  .i2p-colon { display: none; }
+  .i2p-op {
+    grid-template-areas:
+      "order rank name name remove toggle"
+      "order rank addr health remove toggle";
+  }
+  .i2p-op-health { align-self: start; }
+  .i2p-op-why { display: block; }
+}
+
+/* Read by a screen reader, never drawn. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus shows on the network controls; the global button rule removes it. */
+:is(.net-pill, .net-use, .net-link, .net-notice, .i2p-router .st-btn, .i2p-form .st-btn, .i2p-op-add,
+    .i2p-op-move, .i2p-op-remove, .lg-net-pick button, .lg-net-tabs button, .lg-net-sam button):focus-visible {
+  outline: 2px solid var(--icon-color-primary);
+  outline-offset: 2px;
+}
+
+/* ---- A server's route and I2P address, in the relay and media server dialogs ---- */
+.relay-route {
+  margin: 6px 0 0;
+  color: rgba(255,255,255,0.88);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.relay-route.direct { color: rgba(255,255,255,0.6); }
+.relay-route.via-tor { color: #d9b3ff; }
+.relay-route.via-i2p { color: #7adef0; }
+/* Held by the network setting, in the list's own calm tone; red is for a failure. */
+.relay-route.refused { color: #8fd8e8; }
+.relay-route.blocked { color: #ff8c75; }
+.relay-route.connecting { color: rgba(255,255,255,0.6); }
+.relay-route-error {
+  margin: 4px 0 0;
+  color: #ff8c75;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.alias-field h4 {
+  display: flex;
+  align-items: center;
+}
+.alias-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.alias-input {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px !important;
+}
+.alias-input::placeholder { color: rgba(255,255,255,0.25); }
+.alias-saved {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255,255,255,0.45);
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.alias-row .st-btn { height: auto; }
+.alias-line {
+  margin: 8px 0 0;
+  color: rgba(255,255,255,0.5);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.alias-line.ok { color: #7adef0; }
+.alias-line.error { color: #ff8c75; }
+.alias-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+/* One quiet line in a dialog most people open without ever using I2P. */
+.alias-collapsed {
+  display: flex;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.alias-collapsed .net-link,
+.alias-actions .net-link { color: #7adef0; }
+.relay-form-hint.i2p-hint { color: #7adef0; }
+/* A 60-character .b32.i2p host needs the whole row; its hint goes underneath. */
+.relay-form-group.stacked { flex-wrap: wrap; }
+.relay-form-group.stacked .relay-form-input { flex: 1 1 0; min-width: 0; }
+.relay-form-group.stacked .relay-form-hint { flex-basis: 100%; }
+
+/* The relay list's word for a row the network in use can't reach. Held by the network
+   setting, not turned off by the user: its own tone, never the Disabled grey. */
+.relay-status.refused {
+  background: rgba(64,200,228,0.08);
+  color: #8fd8e8;
+  border: 1px solid rgba(64,200,228,0.28);
+}
+/* Beside a reachable row: it rides its I2P address, or the one saved for it failed its check. */
+.relay-route-badge {
+  flex-shrink: 0;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.relay-route-badge.twin { color: #7adef0; background: rgba(64,200,228,0.12); border: 1px solid rgba(64,200,228,0.3); }
+.relay-route-badge.failed { color: rgba(255,255,255,0.45); border: 1px dashed rgba(255,255,255,0.2); }
+.relay-status.blocked {
+  background: rgba(255,120,96,0.12);
+  color: #ff8c75;
+  border: 1px solid rgba(255,120,96,0.32);
+}
+
+/* ---- The notice over the chat list while the network holds traffic back ---- */
+.net-notice,
+.net-notice:hover,
+.net-notice:focus {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: calc(100% - 30px);
+  margin: 0 15px 12px;
+  padding: 8px 12px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255,120,96,0.28);
+  border-radius: 10px;
+  background: rgba(255,120,96,0.07);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: #ffb3a3;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  animation: netNoticeIn 0.25s ease-out;
+}
+.net-notice:hover { background: rgba(255,120,96,0.12); }
+.net-notice-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff7860;
+  box-shadow: 0 0 6px rgba(255,120,96,0.6);
+  animation: netDotPulse 1.6s ease-in-out infinite;
+}
+.net-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.net-notice-go {
+  flex-shrink: 0;
+  width: 6px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.7;
+}
+.net-notice.warn,
+.net-notice.warn:hover,
+.net-notice.warn:focus {
+  border-color: rgba(255,193,7,0.28);
+  background: rgba(255,193,7,0.06);
+  color: #ffd98a;
+}
+.net-notice.warn:hover { background: rgba(255,193,7,0.1); }
+.net-notice.warn .net-notice-dot {
+  background: #ffc107;
+  box-shadow: 0 0 6px rgba(255,193,7,0.5);
+}
+@keyframes netNoticeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .net-notice,
+  .net-notice-dot { animation: none; }
 }
 
 /* Neon Green Gradient 3D Toggle */
@@ -13360,6 +14280,9 @@ button.popout-thumb {
     justify-content: space-between;
     gap: 8px;
 }
+/* The host gives way to the status pill, never the other way round. */
+.relay-info-header-row .pop-dialog-host { flex-shrink: 1; }
+.relay-info-header-row .relay-status { flex-shrink: 0; }
 
 #relay-info-done {
   border: 2px solid #474747;
@@ -20477,6 +21400,16 @@ textarea.command-part-input {
   pointer-events: auto;
 }
 .dmsg-failed-action:hover { opacity: 1; }
+/* Why a send failed: the row's own words, readable through the failed wash. */
+.dmsg-fail-reason {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--danger-color);
+  user-select: text;
+  -webkit-user-select: text;
+}
 
 /* Reactions row */
 .dmsg-reactions {
@@ -21726,28 +22659,64 @@ body.profile-switcher-editing .profile-switcher-add {
   mask: url("./icons/devices.svg") center / contain no-repeat;
 }
 
-/* The welcome screen's Tor switch. Held while Tor is switching or chosen but not up:
+/* The welcome screen's network choice. Held while the pick is connecting or not up:
    every connection is refused until it connects, so signing in would only fail later. */
 .lg-buttons,
 .lg-back,
-.lg-tor .neon-toggle { transition: opacity 0.2s ease; }
+.lg-net-pick { transition: opacity 0.2s ease; }
 .lg-buttons.lg-held,
 .lg-back.lg-held { pointer-events: none; }
 .lg-buttons.lg-held { opacity: 0.25; }
 .lg-back.lg-held { opacity: 0.4; }
-/* Dimmed, not locked: turning Tor off mid-connect is always allowed. */
-.lg-tor.lg-held .neon-toggle { opacity: 0.4; }
+/* Dimmed, not locked: leaving a network mid-connect is always allowed. */
+.lg-net.lg-held .lg-net-pick { opacity: 0.6; }
 .lg-btn:disabled { cursor: default; }
-.lg-tor {
+.lg-net {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   width: 250px;
   max-width: calc(100vw - 48px);
   margin-top: 24px;
-  cursor: pointer;
 }
-.lg-tor-label {
+.lg-net-pick {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #262626;
+  border-radius: 8px;
+  background: #0a0a0a;
+}
+.lg-net-pick button,
+.lg-net-pick button:hover,
+.lg-net-pick button:focus {
+  height: 26px;
+  margin: 0;
+  padding: 0 9px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: #b2b2b2;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.lg-net-pick button:hover:not(:disabled) { color: #fff; }
+.lg-net-pick button.on {
+  background: #171717;
+  box-shadow: inset 0 0 0 1px rgba(51, 219, 152, 0.45);
+  color: #59fcb3;
+}
+.lg-net-pick button:disabled { opacity: 0.5; cursor: default; }
+.lg-net-label {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -21755,7 +22724,7 @@ body.profile-switcher-editing .profile-switcher-add {
   font-size: 16px;
   line-height: 19px;
 }
-.lg-tor-info {
+.lg-net-info {
   width: 18px;
   height: 18px;
   background-color: #333;
@@ -21764,8 +22733,8 @@ body.profile-switcher-editing .profile-switcher-add {
   cursor: pointer;
   transition: background-color 0.15s ease;
 }
-.lg-tor-info:hover { background-color: #b2b2b2; }
-.lg-tor-status {
+.lg-net-info:hover { background-color: #b2b2b2; }
+.lg-net-status {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -21775,27 +22744,27 @@ body.profile-switcher-editing .profile-switcher-add {
   font-size: 10px;
   line-height: 12px;
 }
-.lg-tor-slot.reserve { min-height: 36px; }
-.lg-tor-accent { color: #59fcb3; }
-.lg-tor-spin {
+.lg-net-slot.reserve { min-height: 36px; }
+.lg-net-accent { color: #59fcb3; }
+.lg-net-spin {
   width: 10px;
   height: 10px;
   margin-right: 2px;
   background-color: #59fcb3;
   mask: url("./icons/refresh.svg") center / contain no-repeat;
   -webkit-mask: url("./icons/refresh.svg") center / contain no-repeat;
-  animation: lg-tor-spin 1s linear infinite;
+  animation: lg-net-spin 1s linear infinite;
 }
-@keyframes lg-tor-spin { to { transform: rotate(360deg); } }
+@keyframes lg-net-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .lg-tor-spin { animation: none; }
+  .lg-net-spin { animation: none; }
 }
-.lg-tor-status.error {
+.lg-net-status.error {
   max-width: 280px;
   color: var(--danger-color, #ff2ea9);
   text-align: center;
 }
-.lg-tor-status button {
+.lg-net-status button {
   flex-shrink: 0;
   padding: 0;
   border: none;
@@ -21805,9 +22774,9 @@ body.profile-switcher-editing .profile-switcher-add {
   font: inherit;
   cursor: pointer;
 }
-.lg-tor-status button:hover { text-decoration: underline; }
+.lg-net-status button:hover { text-decoration: underline; }
 
-.lg-tor-modal {
+.lg-net-modal {
   position: fixed;
   inset: 0;
   z-index: 9000;
@@ -21819,12 +22788,12 @@ body.profile-switcher-editing .profile-switcher-add {
   background-color: rgba(0, 0, 0, 0.72);
   pointer-events: auto;
 }
-.lg-tor-modal.active { display: flex; }
-.lg-tor-modal.closing {
+.lg-net-modal.active { display: flex; }
+.lg-net-modal.closing {
   animation: modal-overlay-fade-out 0.15s ease-out forwards;
   pointer-events: none;
 }
-.lg-tor-card {
+.lg-net-card {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -21844,11 +22813,11 @@ body.profile-switcher-editing .profile-switcher-add {
   -webkit-user-select: none;
   user-select: none;
 }
-.lg-tor-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
-.lg-tor-modal.closing .lg-tor-card { animation: modal-card-pop-out 0.15s ease-out forwards; }
-.lg-tor-close,
-.lg-tor-close:hover,
-.lg-tor-close:focus {
+.lg-net-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+.lg-net-modal.closing .lg-net-card { animation: modal-card-pop-out 0.15s ease-out forwards; }
+.lg-net-close,
+.lg-net-close:hover,
+.lg-net-close:focus {
   position: absolute;
   top: 14px;
   right: 16px;
@@ -21862,27 +22831,27 @@ body.profile-switcher-editing .profile-switcher-add {
   line-height: 1;
   cursor: pointer;
 }
-.lg-tor-close:hover { color: #fff; }
-.lg-tor-logo {
+.lg-net-close:hover { color: #fff; }
+.lg-net-logo {
   display: block;
   width: 119px;
   height: 72px;
   object-fit: contain;
 }
-.lg-tor-card h3 {
+.lg-net-card h3 {
   margin: 12px 0 0;
   font-size: 22px;
   font-weight: 700;
   line-height: 27px;
 }
-.lg-tor-lead {
+.lg-net-lead {
   max-width: 400px;
   margin: 12px 0 0;
   color: #be5aed;
   font-size: 15px;
   line-height: 20px;
 }
-.lg-tor-points {
+.lg-net-points {
   margin: 20px 0 0;
   padding: 0;
   list-style: none;
@@ -21891,18 +22860,18 @@ body.profile-switcher-editing .profile-switcher-add {
   line-height: 20px;
   text-align: left;
 }
-.lg-tor-points b { color: #fff; font-weight: 700; }
-.lg-tor-points li {
+.lg-net-points b { color: #fff; font-weight: 700; }
+.lg-net-points li {
   position: relative;
   padding-left: 16px;
 }
-.lg-tor-points li::before {
+.lg-net-points li::before {
   content: '•';
   position: absolute;
   left: 2px;
   color: #fff;
 }
-.lg-tor-note {
+.lg-net-note {
   width: 100%;
   margin: 22px 0 0;
   padding: 10px 14px;
@@ -21914,27 +22883,27 @@ body.profile-switcher-editing .profile-switcher-add {
   line-height: 17px;
   text-align: left;
 }
-.lg-tor-note b { color: #fff; font-weight: 500; }
-.lg-tor-path {
+.lg-net-note b { color: #fff; font-weight: 500; }
+.lg-net-path {
   margin: 14px 0 0;
   color: #b2b2b2;
   font-size: 12px;
   line-height: 15px;
 }
-.lg-tor-path span { white-space: nowrap; }
+.lg-net-path span { white-space: nowrap; }
 @media (max-width: 480px) {
-  .lg-tor-card { padding: 30px 20px 22px; }
+  .lg-net-card { padding: 30px 20px 22px; }
 }
-.lg-tor-disclaimer {
+.lg-net-disclaimer {
   margin: 26px 0 0;
   color: #5c5c5c;
   font-size: 11px;
   font-style: italic;
   line-height: 14px;
 }
-.lg-tor-learn,
-.lg-tor-learn:hover,
-.lg-tor-learn:focus {
+.lg-net-learn,
+.lg-net-learn:hover,
+.lg-net-learn:focus {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -21950,8 +22919,118 @@ body.profile-switcher-editing .profile-switcher-add {
   line-height: 15px;
   cursor: pointer;
 }
-.lg-tor-learn svg { width: 13px; height: 13px; }
-.lg-tor-learn:hover { text-decoration: underline; }
+.lg-net-learn svg { width: 13px; height: 13px; }
+.lg-net-learn:hover { text-decoration: underline; }
+/* The explainer's tabs, one per network; the I2P tab wears I2P's colour where Tor's wears purple. */
+.lg-net-tabs {
+  display: flex;
+  gap: 4px;
+  margin: -6px 0 20px;
+  padding: 3px;
+  border: 1px solid #262626;
+  border-radius: 9px;
+  background: #050505;
+}
+.lg-net-tabs button,
+.lg-net-tabs button:hover,
+.lg-net-tabs button:focus {
+  margin: 0;
+  padding: 5px 20px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  color: #8a8a8a;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.lg-net-tabs button:hover { color: #fff; }
+.lg-net-tabs button.on { background: #1c1c1c; color: #fff; }
+.lg-net-glyph {
+  width: 72px;
+  height: 72px;
+}
+/* With tabs, every tab shares one height and starts at the top, so switching never moves the tab
+   bar; the I2P tab is drawn tighter to fit a default window. */
+.lg-net-card.has-tabs {
+  justify-content: flex-start;
+  height: min(640px, 100%);
+}
+.lg-net-card.is-i2p .lg-net-glyph { width: 56px; height: 56px; }
+.lg-net-card.is-i2p .lg-net-points { margin-top: 14px; }
+.lg-net-card.is-i2p .lg-net-note { margin-top: 16px; }
+.lg-net-card.is-i2p .lg-net-disclaimer { margin-top: 18px; }
+.lg-net-router {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 16px;
+  margin-top: 14px;
+}
+.lg-net-router .lg-net-field,
+.lg-net-router .lg-net-sam { margin: 0; }
+.lg-net-card.is-i2p .lg-net-lead,
+.lg-net-card.is-i2p .lg-net-learn { color: #5fd4ea; }
+.lg-net-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 0;
+  color: #b2b2b2;
+  font-size: 13px;
+}
+.lg-net-field input {
+  width: 76px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #050505;
+  color: #fff;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: center;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.lg-net-field input:focus { border-color: rgba(95, 212, 234, 0.7); }
+/* SAM credentials, for a router that asks: an inline form under the port, kept in memory. */
+.lg-net-sam-form { display: flex; flex-direction: column; }
+.lg-net-sam-form .lg-net-field span { min-width: 72px; }
+.lg-net-sam-form .lg-net-field input { width: 160px; padding: 0 8px; text-align: left; font-family: inherit; }
+.lg-net-sam {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+  color: #b2b2b2;
+  font-size: 13px;
+}
+.lg-net-sam button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #5fd4ea;
+  font: inherit;
+  cursor: pointer;
+}
+.lg-net-sam button:hover:not(:disabled) { text-decoration: underline; }
+.lg-net-sam button:disabled { opacity: 0.4; cursor: default; }
+.lg-net-sam-error {
+  margin: 8px 0 0;
+  color: #ff8c75;
+  font-size: 12.5px;
+}
 .lg-status {
   max-width: 340px;
   margin: 12px 0 0;
@@ -23949,6 +25028,16 @@ body.profile-switcher-editing .profile-switcher-add {
 .st-page .relay-status.disconnected::before,
 .st-page .relay-status.terminated::before,
 .st-page .relay-status.banned::before {
+  mask-image: url('./icons/cancel.svg');
+  -webkit-mask-image: url('./icons/cancel.svg');
+}
+.st-page .relay-status.refused { color: #8fd8e8; }
+.st-page .relay-status.refused::before {
+  mask-image: url('./icons/shield-filled.svg');
+  -webkit-mask-image: url('./icons/shield-filled.svg');
+}
+.st-page .relay-status.blocked { color: var(--danger-color); }
+.st-page .relay-status.blocked::before {
   mask-image: url('./icons/cancel.svg');
   -webkit-mask-image: url('./icons/cancel.svg');
 }
@@ -26333,4 +27422,26 @@ body.profile-switcher-editing .profile-switcher-add {
   border: none;
   border-radius: 50%;
   background: #fff;
+}
+
+.relay-status .tag-short { display: none; }
+/* A phone row keeps room for the relay's name: a route badge becomes a dot (its words in the
+   tooltip), a long network tag its short form, and the name never shrinks below 40%. */
+@media (max-width: 520px) {
+  .relay-item-content { flex: 1 1 40%; min-width: 40%; }
+  .relay-item-actions { min-width: 0; }
+  .relay-route-badge {
+    width: 8px;
+    height: 8px;
+    margin-right: 2px;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 50%;
+    color: transparent;
+    font-size: 0;
+  }
+  .relay-route-badge.twin { background: #5fd4ea; }
+  .relay-status .tag-long { display: none; }
+  .relay-status .tag-short { display: inline; }
+  .relay-status { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
 }

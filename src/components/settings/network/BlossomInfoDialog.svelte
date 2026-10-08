@@ -7,8 +7,10 @@
     import BlossomCaps from './BlossomCaps.svelte';
     import BlossomAccount from './BlossomAccount.svelte';
     import BlossomPerformance from './BlossomPerformance.svelte';
-    import CircuitHops from '../CircuitHops.svelte';
-    let { h } = $props();   // h: close(), action(), formatBytes
+    import ConnectionBlock from './ConnectionBlock.svelte';
+    import AliasField from './AliasField.svelte';
+    import { shortI2pHost } from '../../lib/transport.svelte.js';
+    let { h } = $props();   // h: close(), action(), formatBytes, alias: { help, save, find, check }
     const st = blossomInfoDialog.state();
     const doc = blossomInfoState();
     const perf = blossomStatsState();
@@ -37,7 +39,7 @@
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="relay-dialog relay-info-dialog pop-dialog" use:popIn={st.tick}>
             <div class="relay-dialog-content blossom-dialog-content">
-                <div class="pop-dialog-host">{st.url}</div>
+                <div class="pop-dialog-host" title={st.href || st.url}>{shortI2pHost(st.url)}</div>
                 {#if notice}
                     <div class="blossom-notice blossom-notice-{notice.tone}">
                         <span class="relay-status relay-status-small {notice.tone}">{notice.label}</span>
@@ -87,12 +89,8 @@
                         <div class="blossom-cap-slot"><BlossomCaps {h} /></div>
                     </div>
                 {/if}
-                {#if st.circuit}
-                    <div class="relay-connection">
-                        <h4>Connection</h4>
-                        <ol class="tor-circuits"><CircuitHops hops={st.circuit} /></ol>
-                    </div>
-                {/if}
+                <ConnectionBlock url={st.href} circuit={st.circuit} />
+                <AliasField url={st.href} h={h.alias} />
                 <div class="relay-dialog-buttons">
                     <button class="btn danger-btn" onclick={h.action}>{actionLabel}</button>
                     <button class="btn cancel-btn" onclick={h.close}>Close</button>

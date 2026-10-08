@@ -3,7 +3,7 @@ const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
-const { openUrl, revealItemInDir } = window.__TAURI__.opener;
+const { openUrl: openUrlDirect, revealItemInDir } = window.__TAURI__.opener;
 
 // System event types (matches Rust SystemEventType enum)
 const SystemEventType = {
@@ -333,41 +333,29 @@ function buildRichComposer(host) {
 
 
 /**
- * Run an async function (typically `invoke('login_from_stored_key', ...)`)
- * while polling Tor's bootstrap state. If Tor is mid-bootstrap during the
- * call, the lockscreen title is overridden with "Bootstrapping Tor… NN%"
- * so the user isn't told the app is "decrypting" while it's actually
- * waiting on Arti's consensus fetch. Title is restored on completion.
+ * Run an async function (typically `invoke('login_from_stored_key', ...)`) while watching the
+ * account's network come up: the lockscreen title says so instead of "Decrypting…" while Tor
+ * bootstraps or I2P connects, and is restored once the call settles.
  */
-async function runWithTorBootstrapStatus(fn) {
+async function runWithTransportStatus(fn) {
     const enc = VectorSvelte.encryptState();
     const original = enc.title;
     let didOverride = false;
 
     const tick = async () => {
         try {
-            const state = await invoke('tor_get_state');
-            if (!state || !state.enabled) return;
-            const status = state.status || '';
-            if (state.running) {
-                // Bootstrap finished mid-call; restore the original title
-                // unless we're about to be replaced by the next phase anyway.
-                if (didOverride) {
-                    VectorSvelte.patchEncrypt({ title: original });
-                    didOverride = false;
-                }
-            } else if (status.startsWith('bootstrapping')) {
-                const pct = Number.isFinite(state.bootstrap_progress)
-                    ? state.bootstrap_progress
-                    : null;
-                VectorSvelte.patchEncrypt({ title: pct != null ? `Bootstrapping Tor… ${pct}%` : 'Bootstrapping Tor…' });
+            const line = transportWaitLine(await invoke('transport_get_state'));
+            if (line) {
+                VectorSvelte.patchEncrypt({ title: line });
                 didOverride = true;
+            } else if (didOverride) {
+                VectorSvelte.patchEncrypt({ title: original });
+                didOverride = false;
             }
-        } catch (_) { /* swallow — failsafe */ }
+        } catch (_) { /* the next tick retries */ }
     };
-    // First sample now so the title flips immediately when bootstrap is
-    // already in flight, then keep up at 1Hz which matches Arti's event
-    // cadence well enough.
+    // First sample now so the title flips at once when the network is already starting, then
+    // keep up at 1 Hz, which matches Arti's event cadence well enough.
     tick();
     const pollHandle = setInterval(tick, 1000);
 
@@ -377,6 +365,17 @@ async function runWithTorBootstrapStatus(fn) {
         clearInterval(pollHandle);
         if (didOverride) VectorSvelte.patchEncrypt({ title: original });
     }
+}
+
+/** The lockscreen's line while the account's network is still coming up, or '' once it is up. */
+function transportWaitLine(view) {
+    if (!view || view.ready) return '';
+    if (view.kind === 'tor') {
+        const d = view.detail || {};
+        if (d.status !== 'bootstrapping') return '';
+        return Number.isFinite(d.bootstrap_progress) ? `Bootstrapping Tor… ${d.bootstrap_progress}%` : 'Bootstrapping Tor…';
+    }
+    return view.kind === 'i2p' ? 'Connecting to I2P…' : '';
 }
 
 // Mirror the attachment panel's `.visible` class into the Android back stack
@@ -1622,6 +1621,27 @@ function humanizeUploadError(raw) {
             body: `<ul style="text-align: left; margin: 0; padding-left: 18px;">${items}</ul>` + settings,
         };
     }
+    // The network in use refused it: its reason is the message, and another file fares no better.
+    const network = [
+        [/^i2p-only is on/, 'I2P-Only is on'],
+        [/only reachable over/, 'Needs another network'],
+        [/network changed/, 'The network changed'],
+        [/this build doesn't include/, 'Network not in this build'],
+        [/still connecting|i2p router|sam username|sam bridge|speaks sam|sam is too old|i2p session|outproxy|tor timed out|local proxy|choose how vector connects/, 'Not connected yet'],
+    ];
+    for (const [re, title] of network) {
+        if (re.test(lower)) {
+            // The title already says it: the body keeps what follows ("Your media servers are off.").
+            const rest = lower.startsWith(title.toLowerCase() + ', so ') ? msg.slice(title.length + 5) : msg;
+            const text = rest.charAt(0).toUpperCase() + rest.slice(1);
+            return {
+                title,
+                body: escapeHtml(text) + '<br><br><button type="button" class="net-link" data-action="routing">Open Routing</button>',
+                // Closes the popup, then opens the network's settings.
+                actions: { routing: () => { queueMicrotask(openRoutingSettings); return true; } },
+            };
+        }
+    }
     const titles = [
         [/upload allowance/, 'Upload allowance used up'],
         [/storage on .+ is full|out of space/, 'Storage full'],
@@ -1940,12 +1960,26 @@ window.addEventListener("DOMContentLoaded", async () => {
             console.warn('[bunker_auth_url] rejected non-http(s) URL:', url);
             return;
         }
+        const target = parsed.toString();
+        // Off Clearnet, never opened on the signer's say-so: the browser loads it outside the
+        // account's network.
+        const label = await offClearnetLabel();
+        if (label) {
+            const ok = await popupConfirm(
+                'Approve in your signer',
+                `Your signer asked you to open this page. It opens in your browser, outside ${escapeHtml(label)}.<br><code class="link-confirm-url">${escapeHtml(target)}</code><button data-action="copy">Copy Link</button>`,
+                false, '', '', '', 'Open', false,
+                { copy: () => navigator.clipboard.writeText(target) },
+            );
+            if (ok) openUrlDirect(target).catch(() => {});
+            return;
+        }
         try {
-            await openUrl(parsed.toString());
+            await openUrlDirect(target);
         } catch (err) {
             popupConfirm(
                 'Approve in your signer',
-                `Open this URL to approve the request:<br><br>${escapeHtml(parsed.toString())}`,
+                `Open this URL to approve the request:<br><br>${escapeHtml(target)}`,
                 true,
             );
         }
@@ -2194,7 +2228,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // input UI inside `#login-encrypt` since we're not
                 // soliciting anything; the title is the whole UX.
                 VectorSvelte.loginScreen('encrypt');
-                // Set a neutral baseline title; `runWithTorBootstrapStatus`
+                // Set a neutral baseline title; `runWithTransportStatus`
                 // overrides it with "Bootstrapping Tor… NN%" when Arti is
                 // mid-consensus, and `init()` later overrides it again
                 // with "Decrypting Database…" / sync progress. For bunker
@@ -2212,7 +2246,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
                 try {
                     console.time('[Boot] login_from_stored_key');
-                    const npub = await runWithTorBootstrapStatus(() =>
+                    const npub = await runWithTransportStatus(() =>
                         invoke("login_from_stored_key", { password: null })
                     );
                     console.timeEnd('[Boot] login_from_stored_key');
@@ -2348,11 +2382,13 @@ async function confirmAndOpenUrl(url) {
     try { parsed = new URL(url); } catch (_) {}
     // Non-web schemes (mailto) keep the direct-open path.
     if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-        return openUrl(url);
+        return openUrlDirect(url);
     }
     const full = parsed.toString();
+    const label = await offClearnetLabel();
+    if (label) return confirmOutsideNetwork(full, label);
     if (!platformFeatures?.is_mobile) {
-        return openUrl(full);
+        return openUrlDirect(full);
     }
     // Tail-truncate only, so the security-relevant scheme + host stay visible.
     const masked = streamMaskNpubs(full);
@@ -2364,7 +2400,68 @@ async function confirmAndOpenUrl(url) {
         '',
         'vector_warning.svg'
     );
-    if (confirmed) openUrl(full);
+    if (confirmed) openUrlDirect(full);
+}
+
+/**
+ * The label of the account's network when it is not Clearnet, else null: on Clearnet, and before
+ * the network has loaded, nothing is asked.
+ * @returns {Promise<string|null>}
+ */
+async function offClearnetLabel() {
+    // Only a read that says Clearnet opens straight away: an unknown network, or none read, asks.
+    try {
+        const view = await window.__TAURI__.core.invoke('transport_get_state');
+        return view?.kind === 'clearnet' ? null : view?.label || 'the network in use';
+    } catch (_) {
+        return 'the network in use';
+    }
+}
+
+/** Off Clearnet, a web page opens in the system browser only once the user agrees. */
+async function confirmOutsideNetwork(full, label) {
+    const masked = streamMaskNpubs(full);
+    const shown = masked.length > 220 ? `${masked.slice(0, 220)}…` : masked;
+    const confirmed = await popupConfirm(
+        'Open in your browser?',
+        `It loads outside ${escapeHtml(label)}.<br><code class="link-confirm-url">${escapeHtml(shown)}</code><button data-action="copy">Copy Link</button>`,
+        false, '', 'vector_warning.svg', '', 'Open', false,
+        { copy: () => navigator.clipboard.writeText(full) },
+    );
+    if (confirmed) return openUrlDirect(full);
+}
+
+/**
+ * Every web page the app opens in the system browser: off Clearnet it asks first, since the
+ * browser loads it outside the account's network. Other schemes open as they are.
+ * @param {string} url
+ */
+async function openUrl(url) {
+    let parsed = null;
+    try { parsed = new URL(url); } catch (_) {}
+    if (parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+        const label = await offClearnetLabel();
+        if (label) return confirmOutsideNetwork(parsed.toString(), label);
+    }
+    return openUrlDirect(url);
+}
+
+/**
+ * Ask once for calls and multiplayer Mini Apps to connect outside the account's network.
+ * @returns {Promise<boolean>} true once the account allows it
+ */
+/** `extra`: one more line of HTML for what else the same answer allows (a Mini App's window). */
+async function askRealtimeConsent(extra = '') {
+    const label = await offClearnetLabel();
+    if (!label) return true;
+    const ok = await popupConfirm(
+        `Connect outside ${escapeHtml(label)}?`,
+        `Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>${extra ? `${extra}<br>` : ''}Allowed until you close Vector, switch accounts or change networks.`,
+        false, '', '', '', 'Connect',
+    );
+    if (!ok) return false;
+    await window.__TAURI__.core.invoke('transport_allow_realtime');
+    return true;
 }
 
 /**

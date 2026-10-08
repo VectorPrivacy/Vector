@@ -34,78 +34,21 @@ async function loadPausedDownloads() {
 /** @type {PlatformFeatures} */
 let platformFeatures = null;
 
-/**
- * Returns a URL suitable for media element `src` attributes.
- * On Android, uses the localhost media server (HTTP Range support for seeking/streaming).
- * On other platforms, uses the standard Tauri asset protocol.
- * @param {string} filePath - Absolute file path on disk
- * @returns {string} URL for use in media element src
- */
-/**
- * Format a TorState object (from the `tor_get_state` Tauri command) as a short
- * human-readable status line. Kept to a single line, even at the narrower
- * widths Vector uses on mobile; full detail (error messages etc.) lands in
- * console + the (i) popup.
- */
-function formatTorStatus(state) {
-    if (!state) return '';
-    if (!state.supported) return 'Not in this build.';
-    if (state.running) return 'Connected.';
-    if (state.status && state.status.startsWith('bootstrapping')) {
-        const pct = Number.isFinite(state.bootstrap_progress) ? state.bootstrap_progress : null;
-        return pct != null ? `Bootstrapping ${pct}%…` : 'Bootstrapping…';
-    }
-    if (state.status && state.status.startsWith('failed')) return 'Failed to start.';
-    if (state.enabled) return 'Starting…';
-    return 'Disabled.';
-}
-
-/**
- * Pick the right state class for the Tor card glyph based on a TorState.
- *   tor-state-connected     → fully bootstrapped, SOCKS listener accepting
- *   tor-state-bootstrapping → service starting (or user just toggled on,
- *                             waiting for await tor_set_enabled to return)
- *   tor-state-failed        → bootstrap returned an error
- *   tor-state-disabled      → service off / not requested
- */
-function torStateClass(state) {
-    if (!state || !state.supported) return 'tor-state-disabled';
-    if (state.running) return 'tor-state-connected';
-    if (state.status && state.status.startsWith('failed')) return 'tor-state-failed';
-    if (state.enabled || (state.status && state.status.startsWith('bootstrapping'))) {
-        return 'tor-state-bootstrapping';
-    }
-    return 'tor-state-disabled';
-}
-
-/** The card derives from the last TorState; `statusOverride` is a handler's own line. */
-function torApply(state, statusOverride = '') {
-    // A disconnect drops the cached circuit so the next connect re-fetches fresh.
-    if (!state || !state.running) _torCircuitsLoaded = false;
-    VectorSvelte.setTorState(state, statusOverride);
-}
-
-let _torPollHandle = null;
-
-/**
- * Is Tor currently in a transitional state (bootstrap in flight, or "starting"
- * between user click and the service spawning)? In these windows the toggle is
- * locked so the user can't spam it into a confused state — start/stop ops
- * aren't reentrancy-safe across rapid clicks.
- */
-function isTorTransitional(state) {
-    if (!state || !state.supported) return false;
-    const status = state.status || '';
-    if (status.startsWith('bootstrapping')) return true;
-    // enabled-but-not-running with no failure = the service is mid-spawn.
-    if (state.enabled && !state.running && !status.startsWith('failed')) return true;
-    return false;
-}
-
 /** Cached so revisiting Settings doesn't re-build a circuit unless the user
  *  explicitly hits New (or Tor reconnects, which clears this flag). */
 let _torCircuitsLoaded = false;
 let _torCircuitsLoading = false;
+
+/** Tor is down or not in use: the next connect builds and shows a fresh circuit. */
+function forgetTorCircuits() {
+    _torCircuitsLoaded = false;
+}
+
+/** Whether Tor is the network in use and connected. */
+function torRunning() {
+    const view = VectorSvelte.transportState().view;
+    return !!view && view.kind === 'tor' && !!view.ready;
+}
 
 /**
  * Fetch the current circuit's hops. First call (or after Refresh) actually builds
@@ -163,14 +106,14 @@ function _bridgesStatus(status, statusClass = '') {
 async function setTorBridgesEnabled(enabled) {
     const b = VectorSvelte.settingsScreen().bridges;
     // Off, Tor has nothing to reconnect: the choice is only saved for the next start.
-    const running = !!VectorSvelte.torState().state?.running;
+    const running = torRunning();
     VectorSvelte.setSettingsScreen({ bridges: { enabled } });
     refreshObfs4Banner(b.lines);
     // On with nothing typed yet: expand and wait for Apply, skipping a wasted reconfigure.
     if (enabled && !b.lines.trim()) { _bridgesStatus(running ? 'Add bridge lines, then Apply.' : 'Add bridge lines, then Save.'); return; }
 
     VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
-    VectorSvelte.setTorLocked(true);
+    VectorSvelte.setTransportLocked(true);
     if (running) _bridgesStatus(enabled ? 'Enabling bridges, reconnecting…' : 'Disabling bridges, reconnecting…');
     try {
         await invoke('tor_set_bridges', { enabled, lines: b.lines });
@@ -190,7 +133,7 @@ async function setTorBridgesEnabled(enabled) {
         _bridgesStatus(`Failed: ${err}`, 'is-error');
     } finally {
         VectorSvelte.setSettingsScreen({ bridges: { busy: false } });
-        VectorSvelte.setTorLocked(false);
+        VectorSvelte.setTransportLocked(false);
     }
 }
 
@@ -203,25 +146,25 @@ function onTorBridgesInput() {
 /** Persist the editor and restart Tor on the new bridges. The main toggle locks meanwhile. */
 async function applyTorBridges() {
     const b = VectorSvelte.settingsScreen().bridges;
-    const running = !!VectorSvelte.torState().state?.running;
+    const running = torRunning();
     VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
-    VectorSvelte.setTorLocked(true);
+    VectorSvelte.setTransportLocked(true);
     _bridgesStatus(running ? 'Applying & reconnecting…' : 'Saving…');
     try {
         const res = await invoke('tor_set_bridges', { enabled: b.enabled, lines: b.lines });
         VectorSvelte.setSettingsScreen({ bridges: { saved: b.lines } });
         if (!running) {
-            _bridgesStatus('Bridges saved. Tor will use them when you turn it on.', 'is-ok');
+            _bridgesStatus('Bridges saved. Tor will use them.', 'is-ok');
             return;
         }
         try { await loadTorCircuits(true, false); } catch (_) {}
-        _bridgesStatus(res && res.enabled ? 'Bridges applied. Tor reconnected.' : 'Bridges saved. Tor will use them when next enabled.', 'is-ok');
+        _bridgesStatus(res && res.enabled ? 'Bridges applied. Tor reconnected.' : 'Bridges saved. Tor will use them.', 'is-ok');
     } catch (err) {
         console.error('[Tor] tor_set_bridges failed:', err);
         _bridgesStatus(`Failed: ${err}`, 'is-error');
     } finally {
         VectorSvelte.setSettingsScreen({ bridges: { busy: false } });
-        VectorSvelte.setTorLocked(false);
+        VectorSvelte.setTransportLocked(false);
     }
 }
 
@@ -255,33 +198,12 @@ async function refreshObfs4Banner(text) {
 }
 
 /**
- * Poll `tor_get_state` every 1.5s and refresh the card until we hit a stable
- * state (running OR disabled-and-not-bootstrapping OR failed). Avoids the
- * "stuck on Starting Tor…" UX where the panel rendered before the
- * auto-start at login finished and never re-fetched. Idempotent — calling
- * twice keeps a single timer alive.
+ * Returns a URL suitable for media element `src` attributes.
+ * On Android, uses the localhost media server (HTTP Range support for seeking/streaming).
+ * On other platforms, uses the standard Tauri asset protocol.
+ * @param {string} filePath - Absolute file path on disk
+ * @returns {string} URL for use in media element src
  */
-function ensureTorStatePolling() {
-    if (_torPollHandle) return;
-    _torPollHandle = setInterval(async () => {
-        try {
-            const state = await invoke('tor_get_state');
-            torApply(state);
-            const stable = state.running
-                || (!state.enabled && !(state.status || '').startsWith('bootstrapping'))
-                || (state.status || '').startsWith('failed');
-            if (stable) {
-                clearInterval(_torPollHandle);
-                _torPollHandle = null;
-            }
-        } catch (e) {
-            console.warn('[Tor] poll failed:', e);
-            clearInterval(_torPollHandle);
-            _torPollHandle = null;
-        }
-    }, 1500);
-}
-
 function mediaUrl(filePath) {
     if (platformFeatures && platformFeatures.media_url) {
         return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
@@ -1135,41 +1057,22 @@ function loadBlockedUsersList() {
 
 /** Multi-Circuit: every live connection moves to the new mode at once. */
 async function setTorMultiCircuit(on) {
-    VectorSvelte.setTorLocked(true);
+    VectorSvelte.setTransportLocked(true);
     try {
-        torApply(await invoke('tor_set_multi_circuit', { enabled: on }));
-        await loadTorCircuits(true);
+        const state = await invoke('tor_set_multi_circuit', { enabled: on });
+        VectorSvelte.setTorMulti(state?.multi_circuit);
+        if (torRunning()) await loadTorCircuits(true);
     } catch (err) {
         console.error('[Tor] tor_set_multi_circuit failed:', err);
-        try { torApply(await invoke('tor_get_state')); } catch (_) {}
+        await loadTorMulti();
     } finally {
-        VectorSvelte.setTorLocked(false);
+        VectorSvelte.setTransportLocked(false);
     }
 }
 
-/** The Tor toggle: persist the preference and start or stop the embedded service. */
-async function setTorEnabled(desired) {
-    VectorSvelte.setTorLocked(true);
-    torApply(
-        { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled', bootstrap_progress: desired ? 0 : null },
-        desired ? 'Bootstrapping…' : 'Disabling…',
-    );
-    // tor_set_enabled returns only once bootstrap completes: poll for live progress meanwhile.
-    if (desired) ensureTorStatePolling();
-    try {
-        const state = await invoke('tor_set_enabled', { enabled: desired });
-        torApply(state);
-        if (state.enabled && !state.running) ensureTorStatePolling();
-    } catch (err) {
-        console.error('[Tor] tor_set_enabled failed:', err);
-        try {
-            const state = await invoke('tor_get_state');
-            torApply({ ...state, status: 'failed: ' + err }, `Failed: ${err}`);
-        } catch (_) { /* nothing else we can do */ }
-    } finally {
-        try { torApply(await invoke('tor_get_state')); } catch (_) {}
-        VectorSvelte.setTorLocked(false);
-    }
+/** Multi-Circuit's saved mode, which applies whenever Tor is in use. */
+async function loadTorMulti() {
+    try { VectorSvelte.setTorMulti((await invoke('tor_get_state'))?.multi_circuit); } catch (_) { /* keeps the default */ }
 }
 
 /** The Privacy toggles: keep the global the renderers read, then persist. */
@@ -1295,18 +1198,14 @@ async function initSettings() {
     // gate in message-row.js is correct before Settings is opened.
     await initAutoDownloadSettings();
 
-    // Tor: the backend knows whether the build carries it. A transient state
-    // (bootstrap mid-flight when Settings opened) polls until it settles.
-    try {
-        const state = await invoke('tor_get_state');
-        torApply(state);
-        // A build without Tor has nothing to show or toggle.
-        if (!state.supported) VectorSvelte.setSettingsScreen({ platform: { tor: false } });
-        if (state.enabled && !state.running) ensureTorStatePolling();
-    } catch (e) {
-        console.warn('[Tor] tor_get_state failed:', e);
+    // The network in use, and the settings of each network this build has. Signing in changes
+    // whose settings they are, so they are read again whatever the view says.
+    const net = await fetchTransportView();
+    await loadTransportConfig();
+    if (net?.supported?.includes('tor')) {
+        await loadTorMulti();
+        await loadTorBridges();
     }
-    await loadTorBridges();
 
     await initDisplaySettings();
 
@@ -1980,15 +1879,25 @@ function updateMigrationProgress(total, completed, phase) {
 const SETTINGS_HELP = {
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
-    proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>Off: everything loads directly from its source.'],
+    proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
     // Trademark notice + non-endorsement disclaimer included per the
     // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
+    transport: ['Routing', 'Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them.'],
     tor: ['Route traffic through Tor',
-        'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
+        'While Tor is in use, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
         + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
         + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
     torMultiCircuit: ['Multi-Circuit', 'Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.'],
-    torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before turning Tor on.'],
+    torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before switching to Tor.'],
+    i2p: ['Route traffic through I2P', 'While I2P is in use, Vector reaches relays and servers through the I2P router you run, so they never see your IP address.<br><br>'
+        + '<b>I2P servers</b> are reached inside I2P. <b>Clearnet servers</b> are reached through an outproxy, or not at all with I2P-Only.<br><br>'
+        + 'An outproxy can see and link the clearnet servers you reach. Expect slower connections.'],
+    i2pRouter: ['I2P Router', 'Vector uses the I2P router already running on this device, through its SAM bridge.<br><br>In i2pd, set <b>[sam] enabled = true</b>. In Java I2P, start the <b>SAM application bridge</b>. On Android, turn on <b>SAM</b> in the i2pd app, where it starts off.<br><br>For a router on another machine, forward its SAM port to this one, for example over SSH.<br><br>Vector trusts whatever answers on this port. Other apps that can reach your router can use Vector\'s I2P address.'],
+    i2pAuth: ['SAM Password', 'Only needed if your router asks for one.'],
+    i2pIdentity: ['New Address', 'Vector gets fresh I2P addresses for this account and reconnects.<br><br>Your relays and other servers see different addresses, both shown under Connection. Servers see the new ones from then on.'],
+    i2pOnly: ['I2P-Only', 'Vector reaches only I2P relays and servers, plus the I2P addresses you added.<br><br>Other relays and servers stay unreachable while this is on.'],
+    i2pOutproxy: ['Outproxies', 'Relays and servers outside I2P are reached through an outproxy, tried in this order.<br><br>An outproxy sees which servers you use, and everyone using it shares its IP address.<br><br>It can link everything you reach through it.'],
+    i2pAlias: ['I2P Address', 'A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
     gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
@@ -2011,14 +1920,17 @@ const SETTINGS_HELP = {
     advancedMode: ['Advanced Mode', 'Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices.'],
     crashLog: ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
     logout: ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
-    // Rendered against the Tor preference: with Tor on, every preview fetch is forced
-    // through Tor (or blackholes during bootstrap), so there is no clearnet leak path.
+    // Rendered against the network in use: off Clearnet, every preview fetch rides it or
+    // fails closed, so there is no clearnet leak path.
     webPreviews: async () => {
-        let torEnabled = false;
-        try { torEnabled = !!(await invoke('tor_get_state'))?.enabled; } catch (_) { /* default warning */ }
-        return ['Web Previews', torEnabled
-            ? 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>You have <b>Tor enabled</b>, so preview fetches route through the Tor network. Your IP address stays hidden from the linked sites.'
-            : 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address to the linked sites. <b>Use Tor</b> (Privacy, Route traffic through Tor) <b>or a VPN</b> if that\'s a concern.'];
+        let view = null;
+        try { view = await invoke('transport_get_state'); } catch (_) { /* default warning */ }
+        const label = view && view.kind !== 'clearnet' && view.kind !== 'unknown' ? escapeHtml(view.label || view.kind) : '';
+        const lead = 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>';
+        if (label) return ['Web Previews', `${lead}You have <b>${label}</b> on, so preview fetches route through it. Your IP address stays hidden from the linked sites.`];
+        const others = (view?.supported || []).filter((k) => k !== 'clearnet').map(transportLabel).join(' or ');
+        const hint = others ? `<b>Use ${others}</b> (Privacy, Routing) <b>or a VPN</b>` : '<b>Use a VPN</b>';
+        return ['Web Previews', `${lead}This may expose your IP address to the linked sites. ${hint} if that\'s a concern.`];
     },
 };
 
@@ -2026,6 +1938,7 @@ const SETTINGS_HELP = {
 // vanilla bridges are essentially abandoned by The Tor Project.
 const SETTINGS_LINKS = {
     torAttribution: 'https://torproject.org',
+    i2p: 'https://geti2p.net',
     website: 'https://vectorapp.io',
     bridges: 'https://bridges.torproject.org/bridges/en?transport=obfs4',
     donate: 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
@@ -2077,10 +1990,8 @@ const SETTINGS_HELPERS = {
         initStorageSection();
     },
     setPrivacy: setPrivacySetting,
+    transport: TRANSPORT_HANDLERS,
     tor: {
-        stateClass: torStateClass, formatStatus: formatTorStatus, isTransitional: isTorTransitional,
-        setTorEnabled,
-        injectGlyph: injectTorGlyph,
         help: showSettingsHelp,
         openLink: (key) => openUrl(SETTINGS_LINKS[key]),
         loadCircuits: () => loadTorCircuits(false),

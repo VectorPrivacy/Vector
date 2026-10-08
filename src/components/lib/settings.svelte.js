@@ -1,19 +1,12 @@
-// Settings-screen state. The Tor card derives from the last TorState the
-// backend reported (or an optimistic one the toggle handler set); the blocked-users
-// list re-fetches when its version moves.
+// Settings-screen state. Tor's own settings sit beside the network card (lib/transport.svelte.js
+// holds which network is in use); the blocked-users list re-fetches when its version moves.
 const tor = $state({
-    state: null,          // TorState from the backend, or the handler's optimistic one
-    statusOverride: '',   // handler-supplied status text ("Bootstrapping…", "Failed: …")
-    locked: false,        // an operation is in flight: the toggle stays disabled
+    multi: true,          // each host on its own circuit, or one shared circuit
     circuits: { phase: 'idle', hops: [], host: '', count: 0, hosts: 0, error: '' },   // idle | loading | ok | error
 });
 
 export function torState() { return tor; }
-export function setTorState(state, statusOverride = '') {
-    tor.state = state || null;
-    tor.statusOverride = statusOverride || '';
-}
-export function setTorLocked(locked) { tor.locked = !!locked; }
+export function setTorMulti(on) { tor.multi = on !== false; }
 export function setTorCircuits(circuits) { tor.circuits = circuits; }
 
 const blocked = $state({ seq: 0 });
@@ -137,7 +130,7 @@ const screen = $state({
     privacy: { webPreviews: true, stripTracking: true, sendTyping: true, proxyMedia: true },
     battery: { shown: false, enabled: false, warning: false },
     storage: { galleryShown: false, galleryHidden: false, autoDownload: true, limit: 10485760, clearing: false },
-    platform: { tor: true, voice: false, updates: true },
+    platform: { voice: false, updates: true },
     bridges: {
         enabled: false, lines: '', saved: '',   // `saved` is the persisted text: Apply gates on a diff
         status: '', statusClass: '',            // a handler's own line and its is-ok / is-error class

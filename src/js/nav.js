@@ -87,6 +87,8 @@ async function refreshRemoteSignerCard() {
 function openSettings() {
     pushBack('settings', () => openChatlist());
     navbarSelect('settings-btn');
+    // Routing opens on the network in use, not the one last looked at.
+    VectorSvelte.setTransportViewKind('');
     VectorSvelte.showPane('navbar', true);
     VectorSvelte.showPane('settings', true);
 

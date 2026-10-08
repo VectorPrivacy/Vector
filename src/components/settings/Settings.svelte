@@ -5,14 +5,16 @@
     // bodies. Toggle values live in the screen store; the sections whose owners register
     // later (updates, network, voice) render once their handler bag exists.
     import { tick } from 'svelte';
-    import { settingsScreen, settingsHandlers, torState } from '../lib/settings.svelte.js';
+    import { settingsScreen, settingsHandlers } from '../lib/settings.svelte.js';
+    import { transportState, viewedKind, routingOffered } from '../lib/transport.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
-    import TorCard from './TorCard.svelte';
+    import TransportCard from './TransportCard.svelte';
     import StreamerCard from './StreamerCard.svelte';
     import TorOptions from './TorOptions.svelte';
+    import I2pOptions from './I2pOptions.svelte';
     import BlockedUsers from './BlockedUsers.svelte';
     import Display from './Display.svelte';
     import Notifications from './Notifications.svelte';
@@ -26,14 +28,16 @@
     import Select from '../ui/Select.svelte';
 
     let { h } = $props();
-    // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, tor: {...}, blocked: {...},
+    // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
     //    setAutoDownloadLimit(bytes), clearStorage(), setBackgroundService(on), batteryWarningTap(),
     //    security: {...}, setAdvancedMode(on), copyLogs(), logout()
 
     const sc = settingsScreen();
     const hs = settingsHandlers();
-    const tor = torState();
+    const net = transportState();
+    // The panel under the network card: the viewed network's own settings, when this build has it.
+    const panel = $derived(net.view?.supported.includes(viewedKind()) ? viewedKind() : '');
     const shell = shellState();
     const adv = advancedState();
 
@@ -55,6 +59,8 @@
 
     let blockedOpen = $state(false);
     let updatesEl = $state(null);
+    let routingEl = $state(null);
+    let networkEl = $state(null);
 
     // ── widescreen: categories of anchored blocks ──
     // An anchor is one headed block; `keys` are what the nav search matches beyond its label.
@@ -98,7 +104,7 @@
             anchors: [
                 { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews url tracking typing indicators proxy media' },
                 { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
-                ...(sc.platform.tor ? [{ id: 'tor', label: 'Tor', icon: 'shield-filled', keys: 'tor onion bridges bridge obfs4 circuit circuits censorship anonymity' }] : []),
+                ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
             ],
         },
@@ -144,17 +150,21 @@
         anchors.jump(anchorId);
     }
 
-    // A requested scroll (an update is waiting) lands after the screen has been shown.
+    // A requested scroll (an update is waiting, the network needs attention) lands after the
+    // screen has been shown.
     $effect(() => {
         const { target, seq } = sc.scroll;
-        if (!seq || target !== 'updates') return;
+        if (!seq || !['updates', 'routing', 'relays'].includes(target)) return;
         if (shell.ws) {
-            goCategory('updates');
+            if (target === 'updates') goCategory('updates');
+            else if (target === 'relays') goAnchor('network', 'relays');
+            else goAnchor('privacy', 'routing');
             return;
         }
         const t = setTimeout(async () => {
             await tick();
-            updatesEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const el = { updates: updatesEl, routing: routingEl, relays: networkEl }[target];
+            el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 100);
         return () => clearTimeout(t);
     });
@@ -202,9 +212,11 @@
     </div>
 {/snippet}
 
-{#snippet torBody()}
-    <TorCard h={h.tor} />
-    <TorOptions h={h.tor} />
+{#snippet routingBody()}
+    <TransportCard h={h.transport} />
+    {#if panel === 'tor'}<TorOptions h={h.tor} />
+    {:else if panel === 'i2p'}<I2pOptions h={h.transport} />
+    {/if}
 {/snippet}
 
 {#snippet batteryBody()}
@@ -315,7 +327,7 @@
     {:else if id === 'storage'}{@render storageBody()}
     {:else if id === 'privacy'}{@render privacyBody()}
     {:else if id === 'streamer'}<StreamerCard h={h.streamer} />
-    {:else if id === 'tor'}{@render torBody()}
+    {:else if id === 'routing'}{@render routingBody()}
     {:else if id === 'blocked'}<BlockedUsers h={h.blocked} />
     {:else if id === 'security'}<SecurityCard h={h.security} />
     {:else if id === 'advanced'}{@render advancedBody()}
@@ -374,8 +386,11 @@
 
         <StreamerCard h={h.streamer} />
 
-        {#if sc.platform.tor}
-            {@render torBody()}
+        {#if routingOffered()}
+            <div class="st-routing" bind:this={routingEl}>
+                <h3 class="st-routing-head">Routing</h3>
+                {@render routingBody()}
+            </div>
         {/if}
 
         <div style="margin-top: 25px;">
@@ -421,7 +436,7 @@
         </div>
     {/if}
 
-    <div class="settings-section">
+    <div class="settings-section" bind:this={networkEl}>
         <hr class="divider settings-divider">
         <h2>Network</h2>
         <div id="network-list" class="network-list">

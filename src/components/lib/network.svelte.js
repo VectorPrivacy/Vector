@@ -4,8 +4,9 @@ import { fadeDialog, popOverlay } from './dialog-lifecycle.svelte.js';
 
 export const addRelayDialog = fadeDialog({ url: '', mode: 'both' });
 
+// `url` is the host as shown; `href` the full URL the route and I2P address are keyed by.
 export const relayInfoDialog = popOverlay({
-    url: '', status: '', isDefault: false, enabled: true, mode: 'both',
+    url: '', href: '', status: '', isDefault: false, enabled: true, mode: 'both',
     ping: '--', pingColor: '', lastCheck: '--', copied: false,
     // The Tor circuit this relay is on (hops), or null when it isn't riding one.
     circuit: null,
@@ -13,7 +14,7 @@ export const relayInfoDialog = popOverlay({
 
 // Pops like the QR overlay: the content is ready in the first frame, so the motion is
 // the only cue that something opened.
-export const blossomInfoDialog = popOverlay({ url: '', enabled: true, isCustom: false, status: null, circuit: null });
+export const blossomInfoDialog = popOverlay({ url: '', href: '', enabled: true, isCustom: false, status: null, circuit: null });
 
 
 const blossomCaps = $state({ status: 'loading', caps: [] });

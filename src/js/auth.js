@@ -71,7 +71,10 @@ async function startBunkerSession() {
         // is for already-committed accounts — no Add Profile commit step.
         const cmd = bunkerFormMode === 'reauth' ? 'reauthorize_bunker' : 'start_nostrconnect_session';
         if (bunkerFormMode !== 'reauth' && addAccountFlow.active) {
-            await addAccountFlow.commit();
+            if (!(await addAccountFlow.commit())) {
+                VectorSvelte.bunkerStatus('', '');
+                return;
+            }
         }
         // Recover from a missed `bunker_reauthorize_succeeded` — if the
         // frontend reloaded between the event firing and the listener
@@ -210,7 +213,7 @@ async function login(skipAnimations = false) {
 
 
         // Setup a Rust Listener for the backend's init finish
-        // (helper hoisted above this block — see runWithTorBootstrapStatus)
+        // (helper hoisted above this block: see runWithTransportStatus)
         const _initFinishedP = listen('init_finished', async (evt) => {
             console.timeEnd('[Boot] login() total');
             console.time('[Boot] init_finished handler');
@@ -558,7 +561,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 setBiometricBtnVisible(false);
                 loginPicker.hide();
             });
-            const npub = await runWithTorBootstrapStatus(() => invoke('biometric_login'));
+            const npub = await runWithTransportStatus(() => invoke('biometric_login'));
             // A typed credential already drove the login — don't start a second.
             if (loginDispatched) return;
             loginDispatched = true;
@@ -750,10 +753,9 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     });
                     try {
                         // Decrypt and login entirely in backend (key never crosses IPC).
-                        // The wrapper polls Tor's bootstrap state so the title flips
-                        // to "Bootstrapping Tor…" while Arti is fetching consensus,
-                        // instead of leaving "Decrypting…" up for 5-15s.
-                        const npub = await runWithTorBootstrapStatus(() =>
+                        // The wrapper watches the network come up so the title says so
+                        // instead of leaving "Decrypting…" up meanwhile.
+                        const npub = await runWithTransportStatus(() =>
                             invoke("login_from_stored_key", { password: currentPinString })
                         ).finally(unlistenUpgrade);
                         loginDispatched = true;
@@ -878,9 +880,8 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 });
                 try {
                     // Decrypt and login entirely in backend (key never crosses IPC).
-                    // Wrapper flips the title to "Bootstrapping Tor…" if Arti is
-                    // mid-bootstrap during the call.
-                    const npub = await runWithTorBootstrapStatus(() =>
+                    // The wrapper says when the network is still coming up.
+                    const npub = await runWithTransportStatus(() =>
                         invoke("login_from_stored_key", { password })
                     ).finally(unlistenUpgrade);
                     loginDispatched = true;
@@ -943,115 +944,252 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 // ============================================================================
 
 /**
- * The welcome screen's Tor switch. Before sign-in it drives the install-wide choice the next
+ * The welcome screen's network choice. Before sign-in it drives the install-wide choice the next
  * account inherits; while browsing Add Profile it only records the choice, which the commit
  * applies once the live account's session is gone.
  */
-const loginTor = {
-    // Add Profile's choice for the whole flow: the live account keeps its transport until the
+const loginNet = {
+    // Add Profile's choice for the whole flow: the live account keeps its network until the
     // commit, and the install's remembered choice is never rewritten by it.
     _addChoice: null,
-    // Only the latest flip may paint: an older call settling late would show a stale result.
+    // Only the latest pick may paint: an older call settling late would show a stale result.
     _seq: 0,
+    // A pick's command is running: its own outcome paints, not the views it passes through.
+    _inflight: false,
+    // The next I2P apply drops the SAM credentials given before (the user removed them).
+    _clearAuth: false,
 
-    /** Start appeared: show the switch where Tor is built in, and line the transport up with it. */
+    /** Start appeared: offer the networks this build has, and line the transport up with the pick. */
     async refresh() {
-        let s;
-        try { s = await invoke('tor_get_state'); } catch (_) { return; }
-        if (!s.supported) {
-            VectorSvelte.patchLoginTor({ shown: false, hold: false });
+        let v;
+        try { v = await invoke('transport_get_state'); } catch (_) { return; }
+        applyTransportView(v);
+        const kinds = v.supported || [];
+        // A remembered choice that is unreadable, or that this build lacks, picks nothing: never direct by default.
+        const unusable = !addAccountFlow.active && (v.prelogin === 'unknown' || !kinds.includes(v.prelogin));
+        if (kinds.length < 2 && !unusable) {
+            VectorSvelte.patchLoginNet({ shown: false, hold: false, busy: false, failed: '' });
             return;
         }
+        // The I2P router port remembered with the choice (or the account's own, in Add Profile).
+        await loadTransportConfig();
+        const samPort = VectorSvelte.transportState().config?.sam_port;
+        if (samPort) VectorSvelte.patchLoginNet({ samPort });
         if (addAccountFlow.active) {
-            if (this._addChoice === null) this._addChoice = !!s.enabled;
+            if (this._addChoice === null) this._addChoice = kinds.includes(v.kind) ? v.kind : 'clearnet';
             if (!addAccountFlow.committed) {
-                VectorSvelte.patchLoginTor({ shown: true, on: this._addChoice, busy: false, hold: false, failed: '' });
+                VectorSvelte.patchLoginNet({ shown: true, kinds, kind: this._addChoice, busy: false, hold: false, failed: '' });
                 return;
             }
-            VectorSvelte.patchLoginTor({ shown: true });
-            await this.apply(this._addChoice, this._addChoice === !!s.running);
+            VectorSvelte.patchLoginNet({ shown: true, kinds });
+            await this.apply(this._addChoice, this._there(v, this._addChoice));
             return;
         }
-        VectorSvelte.patchLoginTor({ shown: true, on: !!s.prelogin });
-        await this.apply(!!s.prelogin, s.prelogin === !!s.running);
+        if (unusable) {
+            const failed = v.prelogin === 'unknown' ? 'Choose how Vector connects.' : `This build doesn't include ${transportLabel(v.prelogin)}.`;
+            VectorSvelte.patchLoginNet({ shown: true, kinds, kind: '', busy: false, hold: true, failed, failedCode: '' });
+            return;
+        }
+        VectorSvelte.patchLoginNet({ shown: true, kinds, kind: v.prelogin });
+        await this.apply(v.prelogin, this._there(v, v.prelogin));
     },
 
-    /** Off is always allowed, even mid-connect: a censored network must not trap the user. */
-    async toggle() {
-        const t = VectorSvelte.loginTorState();
+    _there(v, kind) {
+        return !!v && v.kind === kind && (kind === 'clearnet' || !!v.ready);
+    },
+
+    /** A pill. Leaving a network is always allowed, even mid-connect: a censored network must not trap the user. */
+    async pick(kind) {
+        const n = VectorSvelte.loginNetState();
         if (addAccountFlow.active && !addAccountFlow.committed) {
-            this._addChoice = !t.on;
-            VectorSvelte.patchLoginTor({ on: this._addChoice });
+            this._addChoice = kind;
+            VectorSvelte.patchLoginNet({ kind, failed: '' });
             return;
         }
-        if (t.busy && !t.on) return;
-        await this.apply(!t.on);
+        if (kind === n.kind && !n.failed) return;
+        await this.apply(kind);
     },
 
     /** `quiet`: nothing visible changes (already there), so skip the transition. */
-    async apply(on, quiet = false) {
+    async apply(kind, quiet = false) {
         const seq = ++this._seq;
-        if (addAccountFlow.active) this._addChoice = on;
-        VectorSvelte.patchLoginTor({ on, failed: '', ...(quiet ? {} : { busy: true, hold: true }) });
+        if (addAccountFlow.active) this._addChoice = kind;
+        VectorSvelte.patchLoginNet({ kind, failed: '', ...(quiet ? {} : { busy: kind !== 'clearnet', hold: true }) });
+        this._inflight = true;
         let err = '';
+        const clear = this._clearAuth;
+        this._clearAuth = false;
         try {
-            await invoke('tor_set_prelogin', { enabled: on, remember: !addAccountFlow.active });
+            const opts = kind === 'i2p' ? this._i2pOpts(clear) : undefined;
+            await invoke('transport_set_prelogin', { kind, remember: !addAccountFlow.active, opts });
         } catch (e) {
             err = String(e);
         }
-        if (seq === this._seq) await this._settle(err);
+        if (seq !== this._seq) return;
+        this._inflight = false;
+        await this._settle(err);
     },
 
-    /** Add Profile's commit: the new account starts from this switch, not the previous account's. */
-    async commitAddAccount() {
-        if (!VectorSvelte.loginTorState().shown) await this.refresh();
-        const t = VectorSvelte.loginTorState();
-        const tor = t.shown ? t.on : null;
-        const seq = ++this._seq;
-        if (tor) VectorSvelte.patchLoginTor({ busy: true, hold: true, failed: '' });
-        try {
-            await invoke('enter_add_account_mode', { tor });
-        } finally {
-            if (tor && seq === this._seq) await this._settle('');
-        }
-    },
-
-    /** Sign-in waits for Tor when it is chosen: the transport refuses everything until then. */
-    ready() {
-        const t = VectorSvelte.loginTorState();
-        if (t.shown && t.on && t.hold) throw "Tor isn't connected yet. Try again, or turn Tor off.";
-    },
-
-    info(open) {
-        const t = VectorSvelte.loginTorState();
-        clearTimeout(this._closeTimer);
-        if (open) {
-            VectorSvelte.patchLoginTor({ info: true, infoClosing: false, infoTick: t.infoTick + 1 });
+    /** I2P keeps trying on its own, so Retry only skips its wait; anything else starts over. */
+    async retry() {
+        const n = VectorSvelte.loginNetState();
+        const v = VectorSvelte.transportState().view;
+        if (n.kind === 'i2p' && v?.kind === 'i2p' && !this._inflight) {
+            VectorSvelte.patchLoginNet({ busy: true, failed: '' });
+            try {
+                applyTransportView(await invoke('transport_retry', {}));
+            } catch (e) {
+                VectorSvelte.patchLoginNet({ busy: false, failed: String(e), failedCode: '' });
+            }
             return;
         }
-        if (!t.info || t.infoClosing) return;
-        VectorSvelte.patchLoginTor({ infoClosing: true });
-        this._closeTimer = setTimeout(() => VectorSvelte.patchLoginTor({ info: false, infoClosing: false }), 160);
+        if (n.kind) await this.apply(n.kind);
+    },
+
+    /**
+     * The I2P options a pick carries: the port, and SAM credentials when entered. Credentials go
+     * to the backend's memory only and are saved with the account that signs in.
+     * @param {boolean} [clear] send none explicitly, so the ones given before are dropped
+     */
+    _i2pOpts(clear = false) {
+        const n = VectorSvelte.loginNetState();
+        const opts = { sam_port: n.samPort };
+        if (clear) return { ...opts, sam_user: null, sam_password: null };
+        if (n.samUser && n.samPassword) return { ...opts, sam_user: n.samUser, sam_password: n.samPassword };
+        return opts;
+    },
+
+    /** Re-apply a running I2P pick after its options changed (Add Profile applies at its commit). */
+    _reapplyI2p(clear = false) {
+        const n = VectorSvelte.loginNetState();
+        if (n.kind !== 'i2p' || (addAccountFlow.active && !addAccountFlow.committed)) return;
+        if (clear) this._clearAuth = true;
+        this.apply('i2p');
+    },
+
+    /** The I2P router port the pick carries; a running I2P pick moves to it. */
+    setSamPort(value) {
+        const port = Number(value);
+        const n = VectorSvelte.loginNetState();
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            VectorSvelte.patchLoginNet({ samError: 'Enter a port from 1 to 65535.' });
+            return;
+        }
+        VectorSvelte.patchLoginNet({ samError: '' });
+        if (port === n.samPort) return;
+        VectorSvelte.patchLoginNet({ samPort: port });
+        this._reapplyI2p();
+    },
+
+    /** SAM credentials for a router that asks for them: both, or neither to remove them. */
+    setSamAuth(user, password) {
+        const u = (user || '').trim();
+        const p = password || '';
+        if (!!u !== !!p) {
+            VectorSvelte.patchLoginNet({ samError: 'Enter both a username and a password.' });
+            return false;
+        }
+        if (/[\s"=]/.test(u + p)) {
+            VectorSvelte.patchLoginNet({ samError: 'Use letters, numbers and symbols, without spaces or quotes.' });
+            return false;
+        }
+        const n = VectorSvelte.loginNetState();
+        const had = !!(n.samUser && n.samPassword);
+        VectorSvelte.patchLoginNet({ samUser: u, samPassword: p, samError: '' });
+        if (u || had) this._reapplyI2p(!u);
+        return true;
+    },
+
+    /** From the failed line: the I2P tab, with the port field (or the SAM password form) ready. */
+    changePort() {
+        this.info('i2p');
+        const n = VectorSvelte.loginNetState();
+        if (n.failedCode.startsWith('sam_auth')) VectorSvelte.patchLoginNet({ samAuthTick: n.samAuthTick + 1 });
+        else VectorSvelte.patchLoginNet({ samFocusTick: n.samFocusTick + 1 });
+    },
+
+    /**
+     * Add Profile's commit: the new account starts from this choice, not the previous account's.
+     * @returns {Promise<boolean>} false when another network was picked while this one connected
+     */
+    async commitAddAccount() {
+        if (!VectorSvelte.loginNetState().shown) await this.refresh();
+        const n = VectorSvelte.loginNetState();
+        const kind = n.shown && n.kind ? n.kind : null;
+        const remote = !!kind && kind !== 'clearnet';
+        const seq = ++this._seq;
+        if (remote) VectorSvelte.patchLoginNet({ busy: true, hold: true, failed: '' });
+        this._inflight = remote;
+        try {
+            const opts = kind === 'i2p' ? this._i2pOpts() : undefined;
+            await invoke('enter_add_account_mode', { kind, opts });
+        } finally {
+            if (seq === this._seq) {
+                this._inflight = false;
+                // I2P connects after its start returns: sign-in holds until it does, says why
+                // not, or another pick takes over.
+                if (kind === 'i2p') await waitForTransport('i2p', 180000);
+                if (remote && seq === this._seq) await this._settle('');
+            }
+        }
+        return seq === this._seq;
+    },
+
+    /** Sign-in waits for the chosen network: the transport refuses everything until it connects. */
+    ready() {
+        const n = VectorSvelte.loginNetState();
+        if (!n.shown || !n.hold || n.kind === 'clearnet') return;
+        if (!n.kind) throw n.failed || 'Choose how Vector connects.';
+        throw `${transportLabel(n.kind)} isn't connected yet. Try again, or pick another network.`;
+    },
+
+    /** The explainer: a tab opens it (or switches it), null closes it. */
+    info(tab) {
+        const n = VectorSvelte.loginNetState();
+        clearTimeout(this._closeTimer);
+        if (tab) {
+            VectorSvelte.patchLoginNet(n.info && !n.infoClosing ? { info: tab } : { info: tab, infoClosing: false, infoTick: n.infoTick + 1 });
+            return;
+        }
+        if (!n.info || n.infoClosing) return;
+        VectorSvelte.patchLoginNet({ infoClosing: true });
+        this._closeTimer = setTimeout(() => VectorSvelte.patchLoginNet({ info: null, infoClosing: false }), 160);
     },
 
     /** Show what the backend holds: the install's choice, or Add Profile's own. */
     async _settle(err) {
-        const s = await invoke('tor_get_state').catch(() => null);
-        const on = addAccountFlow.active || !s ? VectorSvelte.loginTorState().on : !!s.prelogin;
-        const up = !!s?.running;
-        const status = String(s?.status || '');
-        const reason = err || (status.startsWith('failed: ') ? status.slice(8) : '') || "Tor couldn't connect.";
-        VectorSvelte.patchLoginTor({ on, busy: false, hold: on && !up, failed: on && !up ? reason : '' });
+        this.paint(await fetchTransportView(), err);
+    },
+
+    /** The line under the pills, from a view: I2P keeps connecting after its command returns. */
+    paint(v, err = '') {
+        const n = VectorSvelte.loginNetState();
+        if (!n.shown || !n.kind || this._inflight || (addAccountFlow.active && !addAccountFlow.committed)) return;
+        if (n.kind === 'clearnet') {
+            VectorSvelte.patchLoginNet({ busy: false, hold: false, failed: err, failedCode: '' });
+            return;
+        }
+        const mine = !!v && v.kind === n.kind;
+        const up = mine && !!v.ready;
+        const starting = mine && v.phase === 'starting' && !err;
+        const reason = err || (mine && v.reason?.text) || `${transportLabel(n.kind)} couldn't connect.`;
+        const failedCode = up || starting || err ? '' : (mine && v.reason?.code) || '';
+        VectorSvelte.patchLoginNet({ busy: starting, hold: !up, failed: up || starting ? '' : reason, failedCode });
     },
 };
 
+/** Every transport view repaints the welcome screen's line while the login form is up. */
+function loginNetSync(view) {
+    if (VectorSvelte.loginState().shown) loginNet.paint(view);
+}
+
 async function createAccount() {
     try {
-        if (!addAccountFlow.active) loginTor.ready();
+        if (!addAccountFlow.active) loginNet.ready();
         // Add Profile commit point: tear down the existing session
         // before generating a new keypair, otherwise create_account's
         // lock-and-check guard would silently reuse the old client.
-        if (addAccountFlow.active) await addAccountFlow.commit();
+        if (addAccountFlow.active && !(await addAccountFlow.commit())) return;
 
         const { public: pubKey } = await invoke("create_account");
         strPubkey = pubKey;
@@ -1069,7 +1207,7 @@ async function createAccount() {
 }
 
 function openImportScreen() {
-    try { loginTor.ready(); } catch (e) { popupConfirm(e, '', true, '', 'vector_warning.svg'); return; }
+    try { loginNet.ready(); } catch (e) { popupConfirm(e, '', true, '', 'vector_warning.svg'); return; }
     VectorSvelte.loginScreen('import', true);
     // Hide the picker pill — once the user is entering an nsec / seed
     // phrase, the active-account-from-marker context no longer applies.
@@ -1081,7 +1219,7 @@ async function importKey() {
     try {
         // Add Profile commit point: tear down the existing session
         // before importing the new key.
-        if (addAccountFlow.active) await addAccountFlow.commit();
+        if (addAccountFlow.active && !(await addAccountFlow.commit())) return;
 
         const { public: pubKey, existing } = await invoke("login", { importKey: VectorSvelte.loginState().importKey.trim() });
         strPubkey = pubKey;
@@ -1105,7 +1243,7 @@ async function importKey() {
 /** Sign in with the account another device sent. Connecting runs on behind the security step, as
  *  for a signer login, so a slow relay can't hold the card open. */
 async function finishTransfer() {
-    if (addAccountFlow.active && !addAccountFlow.committed) await addAccountFlow.commit();
+    if (addAccountFlow.active && !addAccountFlow.committed && !(await addAccountFlow.commit())) return;
     const { public: pubKey, existing } = await invoke('transfer_finish');
     strPubkey = pubKey;
     if (existing) return;
@@ -1117,7 +1255,7 @@ async function finishTransfer() {
 async function loginWithNip55() {
     VectorSvelte.patchLogin({ nip55Busy: true });
     try {
-        if (addAccountFlow.active) await addAccountFlow.commit();
+        if (addAccountFlow.active && !(await addAccountFlow.commit())) return;
         // Blocks while Amber is foregrounded and the user approves; the
         // Activity-result bridge resolves this once they return.
         const { public: pubKey, existing } = await invoke('login_with_nip55');
@@ -1143,7 +1281,7 @@ async function loginWithNip55() {
 async function loginWithNip07() {
     VectorSvelte.patchLogin({ nip07Busy: true });
     try {
-        if (addAccountFlow.active) await addAccountFlow.commit();
+        if (addAccountFlow.active && !(await addAccountFlow.commit())) return;
         const { public: pubKey, existing } = await invoke('login_with_nip07');
         strPubkey = pubKey;
         if (existing) return;
@@ -1180,7 +1318,11 @@ async function connectBunkerUrl() {
     VectorSvelte.bunkerBusy(true);
     VectorSvelte.bunkerStatus('Connecting to signer…', 'connecting');
     try {
-        if (addAccountFlow.active) await addAccountFlow.commit();
+        if (addAccountFlow.active && !(await addAccountFlow.commit())) {
+            VectorSvelte.bunkerBusy(false);
+            VectorSvelte.bunkerStatus('', '');
+            return;
+        }
         const { public: pubKey, existing } = await invoke('connect_bunker', {
             bunkerUrl: url,
         });
@@ -1236,8 +1378,8 @@ async function loginBack() {
             return;
         }
         const target = addAccountFlow.backTarget();
-        // The account being returned to keeps its own Tor choice.
-        await invoke('tor_prelogin_abandon').catch(() => {});
+        // The account being returned to keeps its own network.
+        await invoke('transport_prelogin_abandon').catch(() => {});
         try {
             if (target) {
                 await invoke('set_active_account', { npub: target });
@@ -1307,7 +1449,8 @@ async function loginBack() {
  * @property {{ toggle: () => void, close: () => void, pick: (meta: object) => void, rowHelpers: () => object }} picker
  * @property {{ open: () => void, copy: () => void, openQr: () => void, closeQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
  * @property {{ choose: (type: string) => void, pinFull: (pin: string) => void, pinBackspace: () => void, submitPassword: () => void, biometric: () => void }} encrypt
- * @property {{ refresh: () => void, toggle: () => void, retry: () => void, info: (open: boolean) => void }} tor
+ * @property {{ refresh: () => void, pick: (kind: string) => void, retry: () => void, info: (tab: string | null) => void, setSamPort: (port: string) => void,
+ *   setSamAuth: (user: string, password: string) => boolean, changePort: () => void, clearSamError: () => void }} net
  */
 const LOGIN_HELPERS = {
     back: () => loginBack(),
@@ -1341,11 +1484,15 @@ const LOGIN_HELPERS = {
         submitPassword: () => encryptFlow?.submitPassword(),
         biometric: () => encryptFlow?.biometric(),
     },
-    tor: {
-        refresh: () => loginTor.refresh(),
-        toggle: () => loginTor.toggle(),
-        retry: () => loginTor.apply(true),
-        info: (open) => loginTor.info(open),
+    net: {
+        refresh: () => loginNet.refresh(),
+        pick: (kind) => loginNet.pick(kind),
+        retry: () => loginNet.retry(),
+        info: (tab) => loginNet.info(tab),
+        setSamPort: (port) => loginNet.setSamPort(port),
+        setSamAuth: (user, password) => loginNet.setSamAuth(user, password),
+        changePort: () => loginNet.changePort(),
+        clearSamError: () => VectorSvelte.patchLoginNet({ samError: '' }),
     },
 };
 VectorSvelte.setScreen('login', { h: LOGIN_HELPERS });

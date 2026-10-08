@@ -9,7 +9,7 @@
     const veiled = (meta) => stream.on && meta.npub !== activeNpub;
     function src(meta) {
         if (veiled(meta)) return streamTint(meta.npub);
-        return meta.avatar_cached ? h.fileSrc(meta.avatar_cached) : null;   // never the remote URL: it would bypass Tor
+        return meta.avatar_cached ? h.fileSrc(meta.avatar_cached) : null;   // never the remote URL: it would bypass the network in use
     }
 </script>
 
