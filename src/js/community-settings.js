@@ -11,6 +11,8 @@ VectorSvelte.setScreen('communitySettings', {
         reset: () => VectorSvelte.csReset(),
         unban: () => csUnbanSelected(),
         setRoleHolders: (roleId, add, remove) => csSetRoleHolders(roleId, add, remove),
+        copyIdItems: (what, id) => copyIdItems(what, id),
+        showContextMenu: (menu) => showContextMenu(menu),
         // Empty when they have no name of their own, so the row shows the key once.
         name: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
         // Streamer Mode: neither the name nor the key, while a search still finds them by name.

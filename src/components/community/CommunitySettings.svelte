@@ -16,7 +16,7 @@
     import SectionNav from '../settings/SectionNav.svelte';
 
     // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
-    //    avatarSrc(npub), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
+    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
     const ov = csOverlay.state();

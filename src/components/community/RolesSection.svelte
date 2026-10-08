@@ -90,7 +90,11 @@
 
     function gestures(role) {
         return {
-            onMenu: () => {},
+            // Advanced Mode: Copy Role ID.
+            onMenu: (x, y) => {
+                const items = h.copyIdItems('Role', role.role_id);
+                if (items.length) h.showContextMenu({ x, y, items });
+            },
             onDragStart: (ev, node) => { dragging = role.role_id; ghost = dragGhost(node, 'cs-role-ghost'); },
             onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(mv.clientY); },
             onDragEnd: (up) => {

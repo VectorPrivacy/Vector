@@ -15385,6 +15385,8 @@ button.popout-thumb {
   padding: 8px 6px 4px;
   border-radius: 6px;
   opacity: 1;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .member-section-label {

@@ -146,7 +146,7 @@
     const sectionOrder = $derived.by(() => {
         const order = [];
         for (const role of [...(graph?.roles || [])].sort((a, b) => a.position - b.position)) {
-            order.push({ id: role.role_id, label: role.name });
+            order.push({ id: role.role_id, label: role.name, role: true });
         }
         if (!order.length) order.push({ id: 'admin', label: 'Admin' });
         order.push({ id: 'members', label: 'Members' });
@@ -353,6 +353,14 @@
         return { update: (v) => { cur = v; } };
     }
 
+    // Advanced Mode: a role's heading copies its id. The Admin / Members fallbacks are not roles.
+    function headMenu(section, e) {
+        const items = section.role ? h.copyIdItems('Role', section.id) : [];
+        if (!items.length) return;
+        e.preventDefault();
+        h.showContextMenu({ x: e.clientX, y: e.clientY, items });
+    }
+
     function openMenu(vm, e) {
         e.stopPropagation();
         const r = e.currentTarget.getBoundingClientRect();
@@ -380,6 +388,7 @@
                 <div class="member-section-head btn" class:is-closed={it.closed} role="button" tabindex="0"
                      style:top="{it.top}px"
                      onclick={() => toggleSection(it.section.id)}
+                     oncontextmenu={(e) => headMenu(it.section, e)}
                      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggleSection(it.section.id))}>
                     <span class="member-section-label">{it.section.label}</span>
                     <span class="member-section-count">{it.section.rows.length}</span>
