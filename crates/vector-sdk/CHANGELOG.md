@@ -3,6 +3,42 @@
 All notable changes to `vector-sdk` are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## 0.12.0 (unreleased)
+
+Requires `vector-core` 0.11.0. Publish the two together: `vector_sdk` re-exports `vector_core`,
+so the transport changes below reach SDK users through `vector_sdk::vector_core`.
+
+### Added
+
+- **I2P, behind the `i2p` feature.** `.i2p()` and `.i2p_with(I2pOptions { .. })` route the bot
+  through the I2P router already running on the machine (SAMv3); `.clearnet()` moves a bot back
+  to direct connections. A bot whose account chose Tor or I2P must name its network on every run.
+- `xdc::allow_outside_transport`, the network-neutral name of `xdc::allow_outside_tor`.
+- `SendCallback::on_failed_reason`: one line saying why a send failed, right before `on_failed`
+  (the network refusing the recipient's relays, the network being down, no relay accepting it).
+- `net::HttpClient::without_direct()` and `transport::ws::apply_transport_without_direct`: a fetch
+  allowed only because an anonymity network was chosen fails rather than going direct after a
+  switch to Clearnet.
+
+### Changed
+
+- **Every connection is decided per connect, and fails closed.** vector-core routes relay sockets
+  and HTTP through one transport layer: a network that is chosen but not up refuses in process
+  instead of going direct.
+- `vector_core::net::build_http_client` and `shared_http_client` return a `net::HttpClient` (a
+  descriptor that picks its route per request), not a `reqwest::Client`. Requests go through
+  `HttpClient::get/post/..`, then `Req::send` and `Resp`; errors are `net::HttpError`.
+  `proxied_request` takes an `HttpClient` and returns a `Req`.
+- `TorService::start` fails with "A network is already running." while any network instance is
+  installed. `TorService::socks_addr()` and `proxy_url()` point at Vector's authenticated local
+  bridge: a stock SOCKS client using them is refused. `proxy_url()` is for display only.
+- `tor::blackhole_proxy_addr()` is deprecated and returns port 0, where nothing can listen.
+- `.onion` hosts are refused on every network with "Vector can't reach .onion addresses yet."
+  (`Refusal::NotReachable`): this build's Tor has no onion-service client.
+- A DM to a contact whose inbox list couldn't be looked up because the network was down or
+  failing no longer falls back to the bot's own relays: the send waits for the network, then
+  fails with the network's reason.
+
 ## 0.11.0
 
 Requires `vector-core` 0.10.0.

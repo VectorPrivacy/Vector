@@ -690,6 +690,27 @@ impl VectorBot {
 // Builder
 // ============================================================================
 
+/// Revive the bot's relays whenever its network becomes ready again, once per process.
+fn spawn_ready_listener() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    // spawn-detached: relays the transport's ready event to the bot's own client.
+    tokio::spawn(async {
+        let mut rx = vector_core::transport::host::subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(vector_core::transport::host::TransportEvent::Ready { .. }) => {
+                    vector_core::transport::cycle::cycle_all(vector_core::transport::cycle::CycleScope::Kick).await;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
 /// Builder for a [`VectorBot`]. Created via [`VectorBot::builder`].
 #[derive(Default)]
 pub struct VectorBotBuilder {
@@ -704,6 +725,76 @@ pub struct VectorBotBuilder {
     tor: bool,
     #[cfg(feature = "tor")]
     tor_bridges: Vec<String>,
+    #[cfg(feature = "i2p")]
+    i2p: Option<I2pOptions>,
+    clearnet: bool,
+}
+
+/// How a bot reaches I2P: the router it uses and what it may reach outside I2P. Requires the
+/// `i2p` feature.
+#[cfg(feature = "i2p")]
+#[derive(Clone)]
+pub struct I2pOptions {
+    /// The router's SAM port on `127.0.0.1`. Default `7656`.
+    pub sam_port: u16,
+    /// SAM username and password, for a router that asks for them.
+    pub sam_auth: Option<(String, String)>,
+    /// Reach only I2P relays and servers: nothing through an outproxy.
+    pub i2p_only: bool,
+    /// Outproxies for everything outside I2P, tried in order. `None`: the built-in list.
+    pub outproxies: Option<Vec<vector_core::transport::i2p_config::Outproxy>>,
+}
+
+#[cfg(feature = "i2p")]
+impl Default for I2pOptions {
+    fn default() -> Self {
+        I2pOptions {
+            sam_port: vector_core::transport::i2p_config::DEFAULT_SAM_PORT,
+            sam_auth: None,
+            i2p_only: false,
+            outproxies: None,
+        }
+    }
+}
+
+#[cfg(feature = "i2p")]
+impl I2pOptions {
+    fn config(&self) -> std::result::Result<vector_core::transport::i2p_config::I2pConfig, String> {
+        use vector_core::transport::{i2p_config, ExitPolicy};
+        let sam_port = i2p_config::validate_port(i64::from(self.sam_port))?;
+        let auth = self.sam_auth.as_ref();
+        let (sam_user, sam_password) =
+            i2p_config::validate_sam_auth(auth.map(|a| a.0.as_str()), auth.map(|a| a.1.as_str()))?.unzip();
+        let sam_password = sam_password.map(i2p_config::SamSecret::from);
+        let exit = if self.i2p_only { ExitPolicy::Off } else { ExitPolicy::Allow };
+        let cfg = i2p_config::I2pConfig { sam_port, sam_user, sam_password, exit, outproxies: self.outproxies.clone() };
+        i2p_config::validate_outproxy_list(&cfg.outproxy_list(), exit)?;
+        Ok(cfg)
+    }
+}
+
+/// Bring the bot's I2P up on its own account and wait for it, within the start budget. A router
+/// that turned the bot down fails at once with its reason.
+#[cfg(feature = "i2p")]
+async fn start_i2p(cfg: vector_core::transport::i2p_config::I2pConfig) -> std::result::Result<(), String> {
+    use vector_core::transport::{self, host, status, Kind, Op, StartCtx};
+    let factory = transport::kinds::factory(Kind::I2p).ok_or_else(|| status::not_in_build(Kind::I2p).text)?;
+    let owner = vector_core::db::current_session_id();
+    let ctx = StartCtx { owner, started_prelogin: false, dirs: None, config: Arc::new(cfg) };
+    host::activate(factory.start(ctx).await?, owner, false)?;
+    let deadline = std::time::Instant::now() + transport::budget(Op::Startup, std::time::Duration::ZERO);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let waited = transport::wait_ready(left.min(std::time::Duration::from_secs(2))).await;
+        if waited.is_ok() {
+            return Ok(());
+        }
+        let reason = status::reason_for(Kind::I2p);
+        if left.is_zero() || reason.as_ref().is_some_and(|r| r.code.starts_with("sam_")) {
+            host::deactivate(true).await;
+            return Err(reason.map(|r| r.text).unwrap_or_else(|| waited.unwrap_err()));
+        }
+    }
 }
 
 impl VectorBotBuilder {
@@ -801,12 +892,59 @@ impl VectorBotBuilder {
         self
     }
 
+    /// Route **all** of this bot's traffic through I2P, using the router already running on this
+    /// machine (i2pd, or Java I2P with its SAM bridge on) at `127.0.0.1:7656`. Relays and servers
+    /// outside I2P are reached through the built-in outproxies. Requires the `i2p` feature.
+    ///
+    /// The bot never connects in the clear: [`build`](Self::build) waits until I2P is ready
+    /// (usually under a minute) and fails with the reason when the router can't be used.
+    ///
+    /// ```no_run
+    /// # async fn run() -> vector_sdk::Result<()> {
+    /// let bot = vector_sdk::VectorBot::builder().nsec("nsec1...").i2p().build().await?;
+    /// # Ok(()) }
+    /// ```
+    #[cfg(feature = "i2p")]
+    pub fn i2p(self) -> Self {
+        self.i2p_with(I2pOptions::default())
+    }
+
+    /// Like [`i2p`](Self::i2p), with another SAM port, SAM credentials, I2P-Only, or your own
+    /// outproxy list. Saved as this bot's network.
+    #[cfg(feature = "i2p")]
+    pub fn i2p_with(mut self, opts: I2pOptions) -> Self {
+        self.i2p = Some(opts);
+        self
+    }
+
+    /// Connect directly (no Tor or I2P), and save that as this bot's network. Needed once for
+    /// an account that was set to another network before.
+    pub fn clearnet(mut self) -> Self {
+        self.clearnet = true;
+        self
+    }
+
     /// Initialize core, resolve the identity, log in, and connect to relays.
     ///
     /// If no key was supplied via [`nsec`](Self::nsec) / [`mnemonic`](Self::mnemonic), the bot loads
     /// — or, on first run, **creates and persists** — an identity (`identity.nsec`) in its data
     /// directory, so it keeps the same npub across restarts. An explicit key always takes precedence.
     pub async fn build(self) -> Result<VectorBot> {
+        // No connection before this account's network is loaded.
+        vector_core::transport::strict_boot();
+        #[cfg(feature = "tor")]
+        let wants_tor = self.tor;
+        #[cfg(not(feature = "tor"))]
+        let wants_tor = false;
+        #[cfg(feature = "i2p")]
+        let wants_i2p = self.i2p.is_some();
+        #[cfg(not(feature = "i2p"))]
+        let wants_i2p = false;
+        if [wants_tor, wants_i2p, self.clearnet].into_iter().filter(|w| *w).count() > 1 {
+            return Err(VectorError::Other("Choose one transport: tor(), i2p() or clearnet().".into()));
+        }
+        #[cfg(feature = "i2p")]
+        let i2p_config = self.i2p.as_ref().map(I2pOptions::config).transpose().map_err(VectorError::Other)?;
         let data_dir = self.data_dir.unwrap_or_else(default_data_dir);
         std::fs::create_dir_all(&data_dir).ok();
 
@@ -824,12 +962,12 @@ impl VectorBotBuilder {
             }
         };
 
-        // Bring Tor up BEFORE login connects: prime this account's DB with the Tor preference and
-        // start the service, so login's own relay connect already routes through Tor (no clear-net
-        // handshake). login re-reads the same DB setting, so the preference sticks.
-        #[cfg(feature = "tor")]
-        if self.tor {
+        // The network BEFORE login connects: open this account's DB, settle its network, and
+        // bring it up, so login's own relay connect already rides it. An account that stored a
+        // network this bot didn't ask for is never moved off it silently.
+        {
             use nostr_sdk::prelude::*;
+            use vector_core::transport::{self, prefs, Kind};
             let keys = if key.starts_with("nsec1") {
                 Keys::new(
                     SecretKey::from_bech32(&key)
@@ -843,24 +981,48 @@ impl VectorBotBuilder {
 
             vector_core::db::set_current_account(npub.clone()).map_err(VectorError::Other)?;
             vector_core::db::init_database(&npub).map_err(VectorError::Other)?;
-            vector_core::db::settings::set_sql_setting("tor_enabled".to_string(), "1".to_string())
-                .map_err(VectorError::Other)?;
-            vector_core::tor::set_tor_enabled_pref(true);
 
-            let tor_dir = vector_core::db::account_dir(&npub).map_err(VectorError::Other)?.join("tor");
-            let (state_dir, cache_dir) = (tor_dir.join("state"), tor_dir.join("cache"));
-            std::fs::create_dir_all(&state_dir).ok();
-            std::fs::create_dir_all(&cache_dir).ok();
+            if self.clearnet {
+                prefs::persist_kind(Kind::Clearnet).map_err(VectorError::Other)?;
+                transport::set_preference(Some(Kind::Clearnet));
+            } else if !wants_tor && !wants_i2p {
+                if let prefs::StoredKind::Kind(k) = prefs::stored_kind() {
+                    if k != Kind::Clearnet {
+                        return Err(VectorError::Other(format!(
+                            "This bot's account uses {}. Call .tor(), .i2p() or .clearnet().",
+                            k.label()
+                        )));
+                    }
+                }
+            }
 
-            // Fail closed: blackhole the shared client until bootstrap finishes, then start + rebuild.
-            vector_core::net::rebuild_shared_http_client().map_err(VectorError::Other)?;
-            vector_core::tor::TorService::start(state_dir, cache_dir, &self.tor_bridges)
-                .await
-                .map_err(VectorError::Other)?;
-            vector_core::net::rebuild_shared_http_client().map_err(VectorError::Other)?;
+            #[cfg(feature = "tor")]
+            if self.tor {
+                prefs::persist_kind(Kind::Tor).map_err(VectorError::Other)?;
+                transport::set_preference(Some(Kind::Tor));
+
+                let tor_dir = vector_core::db::account_dir(&npub).map_err(VectorError::Other)?.join("tor");
+                let (state_dir, cache_dir) = (tor_dir.join("state"), tor_dir.join("cache"));
+                std::fs::create_dir_all(&state_dir).ok();
+                std::fs::create_dir_all(&cache_dir).ok();
+
+                vector_core::tor::TorService::start(state_dir, cache_dir, &self.tor_bridges)
+                    .await
+                    .map_err(VectorError::Other)?;
+            }
+
+            #[cfg(feature = "i2p")]
+            if let Some(cfg) = i2p_config {
+                prefs::persist_kind(Kind::I2p).map_err(VectorError::Other)?;
+                prefs::persist_config(Kind::I2p, &cfg.to_json()).map_err(VectorError::Other)?;
+                prefs::set_config(Kind::I2p, Arc::new(cfg.clone()));
+                transport::set_preference(Some(Kind::I2p));
+                start_i2p(cfg).await.map_err(VectorError::Other)?;
+            }
         }
 
         let result = core.login(&key, self.password.as_deref()).await?;
+        spawn_ready_listener();
 
         // One-time provisioning notice — the only thing the SDK writes to stderr.
         if let Some(path) = fresh_identity {

@@ -168,6 +168,7 @@ in their data folder.
 | [`whitelist_bot`](examples/whitelist_bot.rs) | A private bot that only joins communities it trusts. |
 | [`file_bot`](examples/file_bot.rs) | Sends one file, then exits. |
 | [`save_files_bot`](examples/save_files_bot.rs) | Saves every received file to disk. |
+| [`i2p_bot`](examples/i2p_bot.rs) | An echo bot that connects only through your I2P router (`i2p` feature). |
 | [`xdc_counter_bot`](examples/xdc_counter_bot.rs) | The smallest bot-backed Mini App: a number a whole chat shares (`xdc` feature). |
 | [`xdc_tictactoe_2d_bot`](examples/xdc_tictactoe_2d_bot.rs) | Ships tic-tac-toe, referees it and plays O (`xdc` feature). |
 | [`xdc_oracle_bot`](examples/xdc_oracle_bot.rs) | Ships its own Mini App and streams LLM answers into it (`xdc` feature). |
@@ -223,8 +224,8 @@ Two guides walk through it end to end:
 | Read the app's manifest | `xdc.manifest().await` |
 
 It works the same in DMs and in Communities. Players in a session can see each other's IP
-address, and the bot's; a bot with Tor on stays out of sessions unless you call
-`vector_sdk::xdc::allow_outside_tor(true)`.
+address, and the bot's; a bot on Tor or I2P stays out of sessions unless you call
+`vector_sdk::xdc::allow_outside_transport(true)`.
 
 ## Accounts & keys
 
@@ -260,6 +261,26 @@ let bot = VectorBot::builder().nsec(key).tor().build().await?;
 
 Tor is bootstrapped during `build()` *before* the bot connects, so it never touches the
 network in the clear. The feature is off by default, keeping the dependency tree light.
+
+## Optional: I2P
+
+With the `i2p` feature, `.i2p()` routes the bot through the I2P router already running on the
+machine (i2pd, or Java I2P with its SAM bridge on, at `127.0.0.1:7656`). Vector runs no router of
+its own. `.i2p` relays are reached inside I2P and everything else through an outproxy; `build()`
+waits until I2P is ready and fails with the router's reason when it can't be used.
+`.i2p_with(I2pOptions { .. })` sets another SAM port, SAM credentials, I2P-Only (no outproxy) or
+your own outproxy list. The choice is saved with the bot's account: a bot whose account uses Tor
+or I2P must name it again on every run, and `.clearnet()` moves it back to direct connections.
+
+```toml
+vector_sdk = { version = "0.12", features = ["i2p"] }
+```
+
+```rust
+let bot = VectorBot::builder().nsec(key).i2p().build().await?;
+```
+
+See [`i2p_bot`](examples/i2p_bot.rs).
 
 ## License
 

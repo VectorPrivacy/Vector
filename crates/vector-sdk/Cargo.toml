@@ -32,6 +32,8 @@ zip = { version = "2.4", default-features = false, features = ["deflate-flate2",
 default = []
 # Pass-through: build vector-core with embedded Tor (Arti). Off by default.
 tor = ["vector-core/tor"]
+# I2P through a router the operator already runs (i2pd or Java I2P, SAM on). Off by default.
+i2p = ["vector-core/i2p"]
 # Mini Apps (WebXDC): join the realtime sessions of shared apps. Pulls in Iroh.
 xdc = ["vector-core/xdc"]
 
@@ -55,6 +57,10 @@ name = "whitelist_bot"
 
 [[example]]
 name = "save_files_bot"
+
+[[example]]
+name = "i2p_bot"
+required-features = ["i2p"]
 
 [[example]]
 name = "xdc_counter_bot"
