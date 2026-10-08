@@ -75,6 +75,13 @@ pub trait SendCallback: Send + Sync {
     /// Message delivery failed after all retry attempts.
     fn on_failed(&self, _chat_id: &str, _old_id: &str, _msg: &Message) {}
 
+    /// The network in use refuses every relay the recipient reads (I2P-Only and clearnet inbox
+    /// relays, say): the send fails at once, before `on_failed`, with this one-line reason.
+    fn on_refused(&self, _chat_id: &str, _old_id: &str, _reason: &str) {}
+
+    /// Why the send failed, in one line the user can act on: called right before `on_failed`.
+    fn on_failed_reason(&self, _chat_id: &str, _old_id: &str, _reason: &str) {}
+
     /// Persist message to database. Default is no-op.
     /// Tauri implements this to call save_message + save_slim_chat.
     fn on_persist(&self, _chat_id: &str, _msg: &Message) {}
@@ -350,13 +357,28 @@ async fn retry_send_gift_wrap(
     // Built lazily in-loop so transient signer failures (NIP-46 bunker
     // round-trips) still get the full retry schedule; a resend seeds it.
     let mut built: Option<crate::inbox_relays::BuiltGiftWrap> = prebuilt;
-    // Targets resolve once; transient inbox connections live across the
-    // whole retry window rather than reconnecting per attempt.
+    // Targets resolve once (again only after a lookup the network kept blind); transient
+    // inbox connections live across the whole retry window rather than reconnecting per attempt.
     let mut targets: Option<crate::inbox_relays::GiftWrapTargets> = None;
     let mut confirm: Option<Arc<WrapConfirm>> = None;
     let mut last_error: Option<String> = None;
+    // Why the last attempt had nowhere to publish: the lookup couldn't reach their relays.
+    let mut unknown: Option<String> = None;
+    let mut keys_stored = is_resend;
 
     let max_attempts = config.max_send_attempts.max(1);
+
+    // A network still starting is waited for once (as long as the retries would have taken, at
+    // least its ready budget), so the inbox lookup can reach the relays that list it; one that
+    // stays down fails the send with its reason.
+    if crate::transport::blocked_reason().is_some() {
+        let retries = config.retry_delay.saturating_mul(max_attempts.saturating_sub(1));
+        let budget = crate::transport::budget(crate::transport::Op::ReadyWait, std::time::Duration::ZERO).max(retries);
+        if let Err(why) = crate::transport::wait_ready(budget).await {
+            fail_pending(&callback, receiver_npub, pending_id, &why).await;
+            return Err(why);
+        }
+    }
 
     for attempt in 0..max_attempts {
         if built.is_none() {
@@ -407,14 +429,34 @@ async fn retry_send_gift_wrap(
         }
         let confirm_ref = confirm.as_ref().unwrap();
 
-        if let Some(t) = targets.as_ref() {
+        if let Some(t) = targets.as_ref().filter(|t| t.unknown.is_none()) {
             crate::inbox_relays::reconnect_gift_wrap_targets(t).await;
         } else {
             let t = crate::inbox_relays::resolve_gift_wrap_targets(client, receiver).await;
+            // No retry changes a policy refusal: fail now, and say why.
+            if let Some(why) = t.refused.clone() {
+                remove_wrap_confirm(&confirm_ref.wrap_id);
+                callback.on_refused(receiver_npub, pending_id, &why);
+                fail_pending(&callback, receiver_npub, pending_id, &why).await;
+                return Err(why);
+            }
+            // Unknown is not absent: nothing is published this attempt, and the next looks again
+            // rather than landing on our own relays.
+            if let Some(why) = t.unknown.clone() {
+                crate::log_warn!("[Send] attempt {}/{} — inbox lookup out of reach: {}", attempt + 1, max_attempts, why);
+                unknown = Some(why);
+                targets = None;
+                if attempt + 1 < max_attempts {
+                    crate::rt::time::sleep(config.retry_delay).await;
+                }
+                continue;
+            }
+            unknown = None;
             // First send only: persist the wrap key (NIP-09 delete) AND retain
             // the exact wrap event + rumor (byte-identical resend on manual
             // retry). A resend already holds both.
-            if !is_resend {
+            if !keys_stored {
+                keys_stored = true;
                 if let Some(rid) = inner_rumor_id {
                     if let Err(e) = crate::db::nip17_keys::store_wrap_key(
                         &wrap.event.id,
@@ -509,17 +551,11 @@ async fn retry_send_gift_wrap(
     if let Some(t) = targets.as_ref() {
         crate::inbox_relays::teardown_gift_wrap_targets(client, t).await;
     }
-    let failed_msg = {
-        let mut state = STATE.lock().await;
-        state.update_message(pending_id, |msg| {
-            msg.set_failed(true);
-            msg.set_pending(false);
-        })
-    };
-    if let Some((_chat_id, ref msg)) = failed_msg {
-        callback.on_failed(receiver_npub, pending_id, msg);
-        callback.on_persist(receiver_npub, msg);
-    }
+    let why = crate::transport::blocked_reason()
+        .or_else(|| unknown.clone())
+        .or_else(|| built.is_none().then(|| last_error.clone()).flatten())
+        .unwrap_or_else(|| "No relay accepted the message.".to_string());
+    fail_pending(&callback, receiver_npub, pending_id, &why).await;
     if let Some(entry) = confirm.as_ref() {
         entry.loop_exited.store(true, Ordering::SeqCst);
         // An OK that landed between the last attempt and loop_exited going
@@ -893,8 +929,8 @@ pub async fn seal_or_reuse(
     Ok(sealed)
 }
 
-/// Mark a pending file message failed (in state, in the UI, on disk) and hand back `err`.
-async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, err: String) -> String {
+/// Mark a pending message failed (in state, in the UI, on disk), saying why.
+async fn fail_pending(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, why: &str) {
     let failed_msg = {
         let mut state = STATE.lock().await;
         state.update_message(pending_id, |msg| {
@@ -903,9 +939,25 @@ async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str,
         })
     };
     if let Some((_chat_id, ref msg)) = failed_msg {
+        callback.on_failed_reason(receiver_npub, pending_id, why);
         callback.on_failed(receiver_npub, pending_id, msg);
         callback.on_persist(receiver_npub, msg);
     }
+}
+
+/// The first line of a failure, as a row can show it: a list of per-server reasons is
+/// summed up by its heading.
+pub fn failure_line(err: &str) -> String {
+    let line = err.trim().trim_start_matches("Upload failed:").trim().lines().next().unwrap_or_default().trim();
+    match line.strip_suffix(':') {
+        Some(head) => format!("{head}."),
+        None => line.to_string(),
+    }
+}
+
+/// Mark a pending file message failed (in state, in the UI, on disk) and hand back `err`.
+async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, err: String) -> String {
+    fail_pending(callback, receiver_npub, pending_id, &failure_line(&err)).await;
     err
 }
 

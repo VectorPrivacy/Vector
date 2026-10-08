@@ -234,6 +234,9 @@
             <time class="dmsg-time">{hourMinute}</time>
         </div>
         <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} {lastMine} h={h.content} media={h.media} sig={contentSig} /></div>
+        {#if current.mine && current.failed && current.fail_reason}
+            <div class="dmsg-fail-reason">{current.fail_reason}</div>
+        {/if}
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}

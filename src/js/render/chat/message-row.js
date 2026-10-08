@@ -598,7 +598,7 @@ async function _dmsgOpenFile(att, msg) {
             const topicId = att.webxdc_topic || null;
             const shouldOpen = await checkChatMiniAppPermissions(path);
             if (!shouldOpen) return;
-            // A declined Tor consent opens nothing; "Playing" must not paint over a cancelled launch.
+            // A declined network consent opens nothing; "Playing" must not paint over a cancelled launch.
             const opened = await openMiniApp(path, strOpenChat, msg.id, null, topicId);
             if (opened === false) return;
             const key = topicId || `att:${att.id}`;

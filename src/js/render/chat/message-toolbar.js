@@ -235,7 +235,7 @@ function _dmsgToolbarView(rowEl) {
 
     // A failed send isn't on the wire: only retry and delete make sense.
     if (status === 'failed') {
-        return { show: { retry: true, delete: true }, path: null, del: { mode: 'failed', label: 'Delete failed message' } };
+        return { show: { retry: true, delete: true }, path: null, del: { mode: 'failed', label: 'Delete failed message' }, why: msg?.fail_reason || null };
     }
 
     const hasContent = !!(msg && msg.content);

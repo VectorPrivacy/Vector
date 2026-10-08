@@ -14,7 +14,7 @@
 <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden={!show.edit}><span class="icon icon-edit"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden={!show.reveal} data-path={show.reveal ? tb.path : null}><span class="icon icon-file-search"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="copy-file" aria-label="Copy" title="Copy" hidden={!show.copy} data-path={show.copy ? tb.path : null}><span class="icon icon-copy"></span></button>
-<button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title="Retry send" hidden={!show.retry}><span class="icon icon-refresh"></span></button>
+<button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title={tb.why ? `Retry send. ${tb.why}` : 'Retry send'} hidden={!show.retry}><span class="icon icon-refresh"></span></button>
 <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="cancel-upload" aria-label="Cancel upload" title="Cancel upload" hidden={!show.cancel}><span class="icon icon-x"></span></button>
 <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label={deleteLabel} title={deleteLabel}
         hidden={!show.delete} data-mode={del?.mode || null} data-partial={del?.partial ? '1' : null} data-has-attachments={del?.hasAttachments ? '1' : null}

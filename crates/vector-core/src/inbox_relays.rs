@@ -182,7 +182,12 @@ pub fn spawn_tracked_publish(
         let event = event.clone();
         let tracker = tracker.clone();
         handles.push(crate::db::spawn_bound(async move {
-            let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
+            // A relay still connecting gets its connect budget on top: the event waits in its
+            // queue until the socket is up.
+            let mut wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
+            if matches!(relay.status(), RelayStatus::Initialized | RelayStatus::Pending | RelayStatus::Connecting) {
+                wait += crate::relay_connect_timeout(std::time::Duration::from_secs(6));
+            }
             let result = relay
                 .send_event(&event)
                 .ok_timeout(wait)
@@ -224,6 +229,20 @@ struct InboxRelayCache;
 
 fn inbox_relay_cache() -> Arc<Mutex<HashMap<PublicKey, CachedRelays>>> {
     crate::db::current_session().scoped::<InboxRelayCache, _>()
+}
+
+/// A recipient's inbox relays as if just fetched.
+#[cfg(test)]
+pub(crate) fn seed_inbox_relays_for_test(pk: PublicKey, relays: &[&str]) {
+    inbox_relay_cache().lock().unwrap().insert(
+        pk,
+        CachedRelays { relays: relays.iter().map(|s| s.to_string()).collect(), fetched_at: Instant::now(), fetch_ok: true },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn is_cached_for_test(pk: &PublicKey) -> bool {
+    inbox_relay_cache().lock().unwrap().contains_key(pk)
 }
 
 /// Per-key locks to prevent cache stampede (thundering herd).
@@ -315,11 +334,48 @@ async fn inbox_query_targets(client: &Client) -> Vec<RelayUrl> {
         .collect()
 }
 
+/// Why a lookup that found nothing says nothing about the recipient's list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Blind {
+    /// The exit policy keeps some of the relays asked out of reach (I2P-Only).
+    Policy(crate::transport::Refusal),
+    /// The network was down, changed, or failed to reach a relay asked: its words.
+    Network(String),
+}
+
 /// Result of a 10050 fetch: relays found, or whether the fetch itself failed.
 struct FetchResult {
     relays: Vec<String>,
     /// `true` if the network request succeeded (even if no events were found).
     fetch_ok: bool,
+    /// Nothing found while some of the relays asked were out of reach: unknown, not absent,
+    /// so it is never cached or read as "no inbox relays".
+    blind: Option<Blind>,
+}
+
+impl FetchResult {
+    fn found(relays: Vec<String>, fetch_ok: bool) -> Self {
+        FetchResult { relays, fetch_ok, blind: None }
+    }
+}
+
+/// Whether the network kept a lookup from asking its relays: down or switched while it ran, or
+/// a relay asked that isn't up because our side of the connection failed.
+async fn network_blind(client: &Client, targets: &[RelayUrl], started_epoch: u64, usable_at_start: bool) -> Option<String> {
+    if let Some(why) = crate::transport::blocked_reason() {
+        return Some(why);
+    }
+    if !usable_at_start || crate::transport::epoch() != started_epoch {
+        return Some(crate::transport::ConnectError::Stale.text());
+    }
+    let active = crate::transport::host::active()?;
+    let pool = client.relays().all().await;
+    targets.iter().find_map(|url| {
+        let up = pool.get(url).is_some_and(|r| r.status() == RelayStatus::Connected);
+        let (host, _) = crate::transport::host_port(url.as_str())?;
+        let (_, e) = active.last_failure(&host).filter(|_| !up)?;
+        e.is_network().then(|| e.text())
+    })
 }
 
 /// Fetch a pubkey's kind 10050 relay list from the network. Queries the
@@ -332,6 +388,14 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
         .limit(1);
 
     let targets = inbox_query_targets(client).await;
+    let started_epoch = crate::transport::epoch();
+    let usable_at_start = crate::transport::blocked_reason().is_none();
+    let policy = targets
+        .iter()
+        .filter_map(|u| crate::transport::refusal(u.as_str()))
+        .find(|r| *r == crate::transport::Refusal::ExitOff)
+        .map(Blind::Policy);
+    let asked = targets.clone();
     let fetched = if targets.is_empty() {
         client
             .fetch_events(filter).timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
@@ -344,11 +408,15 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
             .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
             .await
     };
+    let blind = match policy {
+        Some(p) => Some(p),
+        None => network_blind(client, &asked, started_epoch, usable_at_start).await.map(Blind::Network),
+    };
     let events = match fetched {
         Ok(events) => events,
         Err(e) => {
             eprintln!("[InboxRelays] Failed to fetch 10050 for {}: {}", pubkey, e);
-            return FetchResult { relays: Vec::new(), fetch_ok: false };
+            return FetchResult { relays: Vec::new(), fetch_ok: false, blind };
         }
     };
 
@@ -356,10 +424,10 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
     // only the newest is the user's current list.
     let event = match events.into_iter().max_by_key(|e| e.created_at) {
         Some(e) => e,
-        None => return FetchResult { relays: Vec::new(), fetch_ok: true },
+        None => return FetchResult { relays: Vec::new(), fetch_ok: true, blind },
     };
 
-    FetchResult { relays: parse_relay_tags(&event.tags), fetch_ok: true }
+    FetchResult::found(parse_relay_tags(&event.tags), true)
 }
 
 /// Extract relay URLs from kind 10050 event tags.
@@ -381,7 +449,7 @@ fn parse_relay_tags(tags: &Tags) -> Vec<String> {
 /// Uses double-checked locking to prevent cache stampede: rapid requests to the
 /// same pubkey serialize through a per-key lock, so only one fetch happens.
 /// Different pubkeys never block each other.
-async fn get_or_fetch_with_lock<F, Fut>(pubkey: &PublicKey, fetch_fn: F) -> Vec<String>
+async fn get_or_fetch_with_lock<F, Fut>(pubkey: &PublicKey, fetch_fn: F) -> FetchResult
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = FetchResult>,
@@ -393,7 +461,7 @@ where
         if let Some(entry) = cache.get(pubkey) {
             let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
             if entry.fetched_at.elapsed().as_secs() < ttl {
-                return entry.relays.clone();
+                return FetchResult::found(entry.relays.clone(), entry.fetch_ok);
             }
         }
     }
@@ -434,7 +502,7 @@ where
             if let Some(entry) = cache.get(pubkey) {
                 let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
                 if entry.fetched_at.elapsed().as_secs() < ttl {
-                    Some(entry.relays.clone())
+                    Some(FetchResult::found(entry.relays.clone(), entry.fetch_ok))
                 } else {
                     None
                 }
@@ -444,13 +512,14 @@ where
         };
 
         match cached_relays {
-            Some(relays) => relays,
+            Some(found) => found,
             None => {
                 // We won the race — do the actual fetch
                 let result = fetch_fn().await;
 
-                // Store in cache (even empty/error results to avoid hammering relays)
-                {
+                // Store in cache (even empty/error results to avoid hammering relays), except a
+                // blind one: the next send, perhaps on another network, asks again.
+                if result.blind.is_none() {
                     let owner = inbox_relay_cache();
                     let mut cache = owner.lock().unwrap();
                     cache.insert(
@@ -463,7 +532,7 @@ where
                     );
                 }
 
-                result.relays
+                result
             }
         }
     }; // per-key lock guard dropped here
@@ -475,7 +544,7 @@ where
 }
 
 /// Get inbox relays for a pubkey, using cache when available.
-async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> Vec<String> {
+async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult {
     get_or_fetch_with_lock(pubkey, || fetch_inbox_relays(client, pubkey)).await
 }
 
@@ -664,6 +733,30 @@ pub struct GiftWrapTargets {
     /// fallback). Deletion publishes the NIP-09 to this same set.
     pub targeted_relays: Vec<String>,
     transient_added: Vec<RelayUrl>,
+    /// The recipient advertised inbox relays and the network in use refuses every one: the
+    /// reason, for a send that must fail rather than land on relays they never read.
+    pub refused: Option<String>,
+    /// The lookup couldn't reach the relays that would list their inbox (the network down,
+    /// switching, or failing): why. No target this time; the next attempt looks again.
+    pub unknown: Option<String>,
+}
+
+/// Why a recipient whose every inbox relay the network refuses can't be sent to.
+fn inbox_refusal_text(r: crate::transport::Refusal) -> String {
+    use crate::transport::Refusal;
+    match r {
+        Refusal::ExitOff => "I2P-Only is on, so their inbox relays are off.".to_string(),
+        Refusal::WrongNetwork { needs } => format!("Their inbox relays are only reachable over {}.", needs.label()),
+        _ => "None of their inbox relays are reachable on this network.".to_string(),
+    }
+}
+
+/// Why a recipient's inbox relays couldn't be looked up at all.
+fn inbox_lookup_refusal_text(r: crate::transport::Refusal) -> String {
+    match r {
+        crate::transport::Refusal::ExitOff => "I2P-Only is on, so Vector can't find their inbox relays.".to_string(),
+        _ => "Vector can't find their inbox relays on this network.".to_string(),
+    }
 }
 
 /// Send a gift-wrapped rumor to a recipient using a retained ephemeral
@@ -684,6 +777,9 @@ pub async fn send_gift_wrap_retained(
 ) -> Result<GiftWrapSendOutcome, String> {
     let built = build_gift_wrap_retained(client, recipient, rumor, extra_tags).await?;
     let targets = resolve_gift_wrap_targets(client, recipient).await;
+    if let Some(why) = targets.refused.clone().or_else(|| targets.unknown.clone()) {
+        return Err(why);
+    }
     let publish_result = publish_gift_wrap_to_targets(client, &targets, &built.event).await;
     teardown_gift_wrap_targets(client, &targets).await;
     Ok(GiftWrapSendOutcome {
@@ -702,7 +798,40 @@ pub async fn resolve_gift_wrap_targets(
     client: &Client,
     recipient: &PublicKey,
 ) -> GiftWrapTargets {
-    let inbox_strs = get_or_fetch_inbox_relays(client, recipient).await;
+    // A refused inbox relay is no target; when every one is refused the send fails with why, since
+    // our own write relays are no fallback for an inbox the recipient named.
+    let mut refusal = None;
+    let lookup = get_or_fetch_inbox_relays(client, recipient).await;
+    let inbox_strs: Vec<String> = lookup
+        .relays
+        .into_iter()
+        .filter(|s| match crate::transport::refusal(s) {
+            Some(r) => {
+                refusal.get_or_insert(r);
+                false
+            }
+            None => true,
+        })
+        .collect();
+    if inbox_strs.is_empty() {
+        let (refused, unknown) = match (refusal, lookup.blind) {
+            (Some(r), _) => (Some(inbox_refusal_text(r)), None),
+            // Unknown, not absent: the relays they publish on were out of reach.
+            (None, Some(Blind::Policy(r))) => (Some(inbox_lookup_refusal_text(r)), None),
+            (None, Some(Blind::Network(why))) => (None, Some(why)),
+            (None, None) => (None, None),
+        };
+        if refused.is_some() || unknown.is_some() {
+            crate::log_warn!("[InboxRelays] the inbox relays of {} are out of reach on this network", recipient);
+            return GiftWrapTargets {
+                resolved: Vec::new(),
+                targeted_relays: Vec::new(),
+                transient_added: Vec::new(),
+                refused,
+                unknown,
+            };
+        }
+    }
     let targeted_strs: Vec<String> = if !inbox_strs.is_empty() {
         inbox_strs.clone()
     } else {
@@ -747,6 +876,8 @@ pub async fn resolve_gift_wrap_targets(
     // The recipient's inbox relays are theirs, not ours — keeping them would
     // pollute the pool, which the reconcile loop owns. Only for real inbox
     // relays; the pool-write fallback already targets live pool members.
+    // Not awaited: the publish queues on a relay still connecting, so a pooled target answers
+    // first instead of every slow inbox being waited on in turn.
     let mut transient_added: Vec<RelayUrl> = Vec::new();
     if !inbox_strs.is_empty() {
         for s in &targeted_strs {
@@ -757,7 +888,7 @@ pub async fn resolve_gift_wrap_targets(
             if in_pool || already_added { continue; }
             if pool.add_managed_relay(s.as_str()).await.is_ok() {
                 if let Ok(Some(relay)) = pool.relay(s.as_str()).await {
-                    let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(6))).await;
+                    relay.connect();
                     transient_added.push(relay.url().clone());
                     resolved.push((relay.url().clone(), relay));
                 }
@@ -784,6 +915,8 @@ pub async fn resolve_gift_wrap_targets(
         resolved,
         targeted_relays: targeted_strs,
         transient_added,
+        refused: None,
+        unknown: None,
     }
 }
 
@@ -822,6 +955,9 @@ pub async fn publish_gift_wrap_to_targets(
     targets: &GiftWrapTargets,
     event: &Event,
 ) -> Result<nostr_sdk::prelude::SendEventOutput, String> {
+    if let Some(why) = targets.refused.as_ref().or(targets.unknown.as_ref()) {
+        return Err(why.clone());
+    }
     // `resolved.is_empty()` implies no transient add succeeded (each success
     // pushes onto `resolved`), so this branch can't leak a transient relay.
     if targets.resolved.is_empty() {
@@ -1199,7 +1335,7 @@ fn plan_inbound_reconcile_pure(
         if declined_norm.contains(&norm) {
             revive.push(url.clone());
         } else if adopt.len() < MAX_FOREIGN_RELAYS
-            && url.starts_with("wss://")
+            && crate::transport::validate_relay_url(url).is_ok()
             && url.len() <= 256
         {
             adopt.push(url.clone());
@@ -1555,6 +1691,14 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_adopts_plain_ws_only_for_i2p() {
+        let i2p = "ws://nostrajmjieip3dqgeefsgpydy3bbshe3o32z65dwkssl7qxkn5a.b32.i2p".to_string();
+        let remote = vec![i2p.clone(), "ws://plaintext.example".to_string()];
+        let plan = plan_inbound_reconcile_pure(&remote, 200, &[], &[], &HashSet::new(), 100);
+        assert_eq!(plan.adopt, vec![i2p]);
+    }
+
+    #[test]
     fn reconcile_revives_locally_disabled_entry() {
         let remote = strs(&["wss://back.example"]);
         let declined = strs(&["wss://back.example/"]);
@@ -1847,10 +1991,7 @@ mod tests {
                     counter.fetch_add(1, Ordering::SeqCst);
                     // Simulate network delay so concurrent tasks pile up
                     crate::rt::time::sleep(std::time::Duration::from_millis(50)).await;
-                    FetchResult {
-                        relays: vec!["wss://test.example.com".to_string()],
-                        fetch_ok: true,
-                    }
+                    FetchResult::found(vec!["wss://test.example.com".to_string()], true)
                 })
                 .await
             });
@@ -1863,7 +2004,7 @@ mod tests {
         // All tasks should succeed and get the same result
         for result in &results {
             assert!(result.is_ok());
-            let relays = result.as_ref().unwrap();
+            let relays = &result.as_ref().unwrap().relays;
             assert_eq!(relays, &vec!["wss://test.example.com".to_string()]);
         }
 
@@ -1905,10 +2046,7 @@ mod tests {
 
         // Step 1: Fetch for pk1 (cache miss -> creates lock entry)
         get_or_fetch_with_lock(&pk1, || async {
-            FetchResult {
-                relays: vec!["wss://relay1.example.com".to_string()],
-                fetch_ok: true,
-            }
+            FetchResult::found(vec!["wss://relay1.example.com".to_string()], true)
         })
         .await;
 
@@ -1922,10 +2060,7 @@ mod tests {
 
         // Step 2: repeat with pk2
         get_or_fetch_with_lock(&pk2, || async {
-            FetchResult {
-                relays: vec!["wss://relay2.example.com".to_string()],
-                fetch_ok: true,
-            }
+            FetchResult::found(vec!["wss://relay2.example.com".to_string()], true)
         })
         .await;
 
@@ -1937,10 +2072,7 @@ mod tests {
 
         // Step 3: repeat with pk3
         get_or_fetch_with_lock(&pk3, || async {
-            FetchResult {
-                relays: vec!["wss://relay3.example.com".to_string()],
-                fetch_ok: true,
-            }
+            FetchResult::found(vec!["wss://relay3.example.com".to_string()], true)
         })
         .await;
 
@@ -1949,6 +2081,26 @@ mod tests {
             locks.len()
         };
         assert_eq!(locks_after_pk3, 0, "No lock entries should remain after pk3 call");
+    }
+
+    #[tokio::test]
+    async fn a_blind_lookup_is_never_cached() {
+        let _guard = TEST_GLOBALS_LOCK.lock().await;
+        let pk = test_pubkey();
+        let runs = Arc::new(AtomicU64::new(0));
+        for _ in 0..2 {
+            let runs = runs.clone();
+            let r = get_or_fetch_with_lock(&pk, || async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                FetchResult { relays: Vec::new(), fetch_ok: true, blind: Some(Blind::Policy(crate::transport::Refusal::ExitOff)) }
+            })
+            .await;
+            assert_eq!(r.blind, Some(Blind::Policy(crate::transport::Refusal::ExitOff)));
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "asked again, not answered from the cache");
+        assert!(!is_cached_for_test(&pk));
+        let r = get_or_fetch_with_lock(&pk, || async { FetchResult::found(Vec::new(), true) }).await;
+        assert!(r.blind.is_none() && is_cached_for_test(&pk), "a real answer is cached as before");
     }
 
     #[tokio::test]
@@ -1972,7 +2124,7 @@ mod tests {
             get_or_fetch_with_lock(&task_pk, || async move {
                 let _ = started_tx.send(());
                 crate::rt::time::sleep(std::time::Duration::from_secs(30)).await;
-                FetchResult { relays: Vec::new(), fetch_ok: false }
+                FetchResult::found(Vec::new(), false)
             })
             .await
         });

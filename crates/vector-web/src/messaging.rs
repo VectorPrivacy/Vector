@@ -14,6 +14,9 @@ thread_local! {
     /// Cancel flags for uploads in flight, by pending id.
     static UPLOAD_CANCEL: std::cell::RefCell<std::collections::HashMap<String, Arc<AtomicBool>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// A failure's reason, from `on_failed_reason` to the `on_failed` that follows it at once.
+    static FAIL_REASONS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 pub fn cancel_upload(pending_id: &str) {
@@ -70,9 +73,14 @@ impl SendCallback for WebSendCallback {
         emitter::emit("message_update", &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id }));
     }
 
+    fn on_failed_reason(&self, _chat_id: &str, old_id: &str, reason: &str) {
+        FAIL_REASONS.with(|m| m.borrow_mut().insert(old_id.to_string(), reason.to_string()));
+    }
+
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL.with(|m| m.borrow_mut().remove(old_id));
-        emitter::emit("message_update", &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id }));
+        let reason = FAIL_REASONS.with(|m| m.borrow_mut().remove(old_id));
+        emitter::emit("message_update", &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id, "reason": reason }));
     }
 
     fn on_persist(&self, chat_id: &str, msg: &Message) {

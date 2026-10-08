@@ -4,6 +4,7 @@ let tb = $state.raw({
     show: {},            // { react, reply, edit, reveal, copy, retry, cancel, delete }: true = offered
     path: null,          // the downloaded attachment behind reveal / copy
     del: null,           // { mode: 'delete' | 'hide' | 'failed', label, partial, hasAttachments }
+    why: null,           // a failed send's reason, on its Retry button
 });
 export function messageToolbar() { return tb; }
 export function setMessageToolbar(view) { tb = view; }

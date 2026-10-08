@@ -905,6 +905,9 @@ async function setupRustListeners() {
             }
         }
 
+        // A failed send says why on its own row.
+        if (evt.payload.reason && next.failed) next.fail_reason = evt.payload.reason;
+
         // Update it. The row's key rides along, so the finalized message keeps its row.
         evt.payload.message._key = cChat.messages[nMsgIdx]._key || evt.payload.old_id;
         cChat.messages[nMsgIdx] = evt.payload.message;

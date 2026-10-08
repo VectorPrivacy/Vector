@@ -20,6 +20,10 @@ pub(crate) static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String,
 pub(crate) static UPLOADS_PUBLISHING: LazyLock<std::sync::Mutex<HashSet<String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
+/// A failure's reason, from `on_failed_reason` to the `on_failed` that follows it at once.
+static FAIL_REASONS: LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 use crate::{STATE, nostr_client};
 use crate::TAURI_APP;
 
@@ -142,14 +146,21 @@ impl SendCallback for TauriSendCallback {
         }
     }
 
+    fn on_failed_reason(&self, _chat_id: &str, old_id: &str, reason: &str) {
+        FAIL_REASONS.lock().unwrap().insert(old_id.to_string(), reason.to_string());
+    }
+
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
         UPLOADS_PUBLISHING.lock().unwrap().remove(old_id);
+        // The failed row carries its own reason: the one surface for why a send failed.
+        let reason = FAIL_REASONS.lock().unwrap().remove(old_id);
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
                 "old_id": old_id,
                 "message": msg,
-                "chat_id": chat_id
+                "chat_id": chat_id,
+                "reason": reason,
             })).ok();
         }
     }
