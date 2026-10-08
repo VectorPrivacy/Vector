@@ -29,6 +29,8 @@ pub mod encryption;
 pub mod transfer;
 pub mod audio;
 pub mod tor;
+pub mod transport;
+pub mod i2p;
 pub mod emoji_packs;
 pub mod pinned;
 pub mod rail;

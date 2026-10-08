@@ -437,6 +437,22 @@
     "allow-tor-get-circuits",
     "allow-tor-get-bridges",
     "allow-tor-set-bridges",
-    "allow-tor-check-obfs4-proxy"
+    "allow-tor-check-obfs4-proxy",
+    "allow-transport-get-state",
+    "allow-transport-set",
+    "allow-transport-allow-realtime",
+    "allow-transport-set-prelogin",
+    "allow-transport-prelogin-abandon",
+    "allow-transport-retry",
+    "allow-transport-get-routes",
+    "allow-transport-get-aliases",
+    "allow-transport-set-alias",
+    "allow-transport-check-alias",
+    "allow-transport-find-alias",
+    "allow-i2p-get-config",
+    "allow-i2p-set-router",
+    "allow-i2p-test-router",
+    "allow-i2p-set-exit",
+    "allow-i2p-set-outproxies"
   ]
 }

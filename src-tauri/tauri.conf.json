@@ -24,7 +24,8 @@
         "backgroundThrottling": "throttle",
         "backgroundColor": "#030303",
         "visible": false,
-        "decorations": false
+        "decorations": false,
+        "allowLinkPreview": false
       }
     ],
     "security": {

@@ -133,6 +133,8 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any session exists: every session starts blocked until its network is loaded.
+    vector_core::transport::strict_boot();
     // Before any HTTP client exists: the user agent every request carries is
     // read when a client is built, and it should name the app's version, not
     // the core crate's.
@@ -520,15 +522,11 @@ pub fn run() {
             {
                 let handle_clone = handle.clone();
                 let chosen = account_manager::boot_select_account(&handle_clone);
-                // Booting to the welcome screen with Tor remembered: refuse clearnet before the
-                // webview can open anything; the screen then starts the service.
-                #[cfg(feature = "tor")]
-                if matches!(chosen, Ok(None)) && vector_core::tor::prelogin_preference() {
-                    vector_core::tor::arm_prelogin_carry(true);
-                    vector_core::tor::set_tor_enabled_pref(true);
+                // Booting to the welcome screen: the remembered network, before the webview can
+                // open anything; the screen then starts it. An account's own loads at unlock.
+                if matches!(chosen, Ok(None)) {
+                    vector_core::transport::prelogin::apply_at_boot();
                 }
-                #[cfg(not(feature = "tor"))]
-                let _ = chosen;
             }
 
 
@@ -537,6 +535,8 @@ pub fn run() {
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
+            // Relays revive the moment the account's network becomes ready.
+            commands::transport::spawn_ready_listener();
             // Route vector-core's failure-class logs (log_net_fail!/log_net_info!)
             // into the user-copyable vector.log — Copy Logs must tell the whole
             // blossom story, and most of it happens inside vector-core.
@@ -881,6 +881,23 @@ pub fn run() {
             commands::tor::tor_get_bridges,
             commands::tor::tor_set_bridges,
             commands::tor::tor_check_obfs4_proxy,
+            commands::transport::transport_get_state,
+            commands::transport::transport_set,
+            commands::transport::transport_allow_realtime,
+            commands::transport::transport_set_prelogin,
+            commands::transport::transport_prelogin_abandon,
+            commands::transport::transport_retry,
+            commands::transport::transport_get_routes,
+            commands::transport::transport_get_aliases,
+            commands::transport::transport_set_alias,
+            commands::transport::transport_check_alias,
+            commands::transport::transport_find_alias,
+            // I2P (SAMv3) commands
+            commands::i2p::i2p_get_config,
+            commands::i2p::i2p_set_router,
+            commands::i2p::i2p_test_router,
+            commands::i2p::i2p_set_exit,
+            commands::i2p::i2p_set_outproxies,
             // Notification sound commands (desktop only)
             #[cfg(desktop)]
             audio::get_notification_settings,

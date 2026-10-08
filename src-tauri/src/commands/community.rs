@@ -2582,10 +2582,11 @@ pub async fn debug_v2_probe_rekey_planes(community_id: String) -> Result<serde_j
         // Probe traffic must obey the user's transport, and this connection auths
         // as the PLANE key rather than the session identity — hence its own
         // authenticator instead of `nostr_client_builder()`.
-        let client = vector_core::apply_tor_proxy(
+        let client = vector_core::apply_transport(
             nostr_sdk::prelude::Client::builder().authenticator(
                 nostr_sdk::prelude::SignerAuthenticator::new(group.keys().clone()),
             ),
+            vector_core::transport::Lane::Shared,
         )
         .build();
         for r in &c.relays {

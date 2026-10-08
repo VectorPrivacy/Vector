@@ -522,14 +522,22 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // lane makes DM latency independent of community-event handling entirely.
     {
         let mut dm_notifications = client.notifications();
+        // The broadcast skips what a lagging reader missed: the reader only queues, so a slow
+        // handler during a boot sweep can never cost a DM.
+        let (dm_tx, mut dm_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        vector_core::db::spawn_bound(async move {
+            while let Some(event) = dm_rx.recv().await {
+                super::handle_event(event, true).await;
+            }
+        });
         vector_core::db::spawn_bound(async move {
             while let Some(n) = dm_notifications.next().await {
                 if let ClientNotification::Event { event, .. } = n {
                     let is_dm = event.kind.as_u16() == 1059
                         && vector_core::state::my_public_key()
                             .is_some_and(|me| event.tags.public_keys().any(|pk| pk == me));
-                    if is_dm {
-                        super::handle_event(*event, true).await;
+                    if is_dm && dm_tx.send(*event).is_err() {
+                        break;
                     }
                 }
             }

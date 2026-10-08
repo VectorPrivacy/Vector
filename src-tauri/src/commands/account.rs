@@ -290,6 +290,11 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
             relays,
             std::time::Duration::from_secs(120),
         )?;
+        // Registered until installed: a network switch meanwhile closes its sockets and fails it.
+        let pairing = vector_core::signer::track_pairing(&nc);
+        let failed = |pairing: &vector_core::signer::PairingGuard, e: String| -> String {
+            if pairing.aborted() { vector_core::signer::NETWORK_CHANGED.to_string() } else { e }
+        };
 
 
         // The new NostrConnect is held LOCALLY in the spawn until the signer
@@ -314,7 +319,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
                 Err(e) => {
                     vector_core::log_warn!("[bunker-reauth] bunker_uri failed: {}", e);
                     let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                        serde_json::json!({ "error": e.to_string() }));
+                        serde_json::json!({ "error": failed(&pairing, e.to_string()) }));
                     let _ = nc.shutdown().await;
                     return;
                 }
@@ -327,10 +332,10 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
                 Err(e) => {
                     vector_core::log_warn!("[bunker-reauth] get_public_key failed: {}", e);
                     let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                        serde_json::json!({ "error": format!(
+                        serde_json::json!({ "error": failed(&pairing, format!(
                             "Signer didn't return your pubkey. Check the signer app for an approval prompt. ({})",
                             e
-                        )}));
+                        ))}));
                     let _ = nc.shutdown().await;
                     return;
                 }
@@ -401,8 +406,14 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
             //     webview reload so the user re-enters their PIN only once.
             let was_boot_reauth = vector_core::nostr_client().is_none();
 
-            let old_signer = vector_core::take_bunker_signer();
-            vector_core::set_bunker_signer(nc);
+            let old_signer = match pairing.install(nc) {
+                Ok(old) => old,
+                Err(_) => {
+                    let _ = handle_for_task.emit("bunker_reauthorize_failed",
+                        serde_json::json!({ "error": vector_core::signer::NETWORK_CHANGED }));
+                    return;
+                }
+            };
 
             let new_inner = match vector_core::bunker_signer() {
                 Some(b) => b,
@@ -679,8 +690,8 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
     let setup_result: Result<(), String> = async {
         account_manager::set_pending_account(npub.clone())?;
         // Staging rides the welcome screen's service until the account commits.
-        if !crate::commands::tor::running_prelogin() {
-            crate::commands::tor::stop_and_join_if_running().await;
+        if !crate::commands::transport::running_prelogin() {
+            crate::commands::transport::stop_and_join_if_running().await;
         }
         account_manager::init_profile_database(&handle, &npub).await?;
 
@@ -706,7 +717,7 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
         profile.flags.set_mine(true);
         STATE.lock().await.insert_or_replace_profile(&npub, profile);
 
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+        if let Err(e) = crate::commands::transport::sync_to_active_account().await {
             vector_core::log_warn!("[NIP-55 Login] Tor start for new account failed: {}", e);
         }
         vector_core::blossom_servers::refresh_cache();
@@ -926,8 +937,8 @@ pub async fn connect_bunker<R: Runtime>(
     let setup_result: Result<(), String> = async {
         account_manager::set_pending_account(remote_npub.clone())?;
         // Staging rides the welcome screen's service until the account commits.
-        if !crate::commands::tor::running_prelogin() {
-            crate::commands::tor::stop_and_join_if_running().await;
+        if !crate::commands::transport::running_prelogin() {
+            crate::commands::transport::stop_and_join_if_running().await;
         }
         account_manager::init_profile_database(&handle, &remote_npub).await?;
 
@@ -955,7 +966,7 @@ pub async fn connect_bunker<R: Runtime>(
         profile.flags.set_mine(true);
         STATE.lock().await.insert_or_replace_profile(&remote_npub, profile);
 
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+        if let Err(e) = crate::commands::transport::sync_to_active_account().await {
             vector_core::log_warn!("[Bunker Login] Tor start for new account failed: {}", e);
         }
 
@@ -976,7 +987,7 @@ pub async fn connect_bunker<R: Runtime>(
         { use zeroize::Zeroize; let mut g = PENDING_NSEC.lock().unwrap();
           if let Some(ref mut s) = *g { s.zeroize(); } *g = None; }
         let _ = account_manager::clear_pending_account();
-        if let Err(tor_err) = crate::commands::tor::sync_to_active_account().await {
+        if let Err(tor_err) = crate::commands::transport::sync_to_active_account().await {
             vector_core::log_warn!("[Bunker Login] Tor restore after rollback failed: {}", tor_err);
         }
         if let Some(client) = vector_core::take_nostr_client() {
@@ -1074,6 +1085,11 @@ pub async fn start_nostrconnect_session<R: Runtime>(
                 return;
             }
         };
+        // This clone does the pairing outside the slot: a network switch must reach it too.
+        let pairing = vector_core::signer::track_pairing(&signer);
+        let failed = |pairing: &vector_core::signer::PairingGuard, e: String| -> String {
+            if pairing.aborted() { vector_core::signer::NETWORK_CHANGED.to_string() } else { e }
+        };
 
         vector_core::log_debug!("[bunker] awaiting signer.bunker_uri() (resolves once Amber Ack'd the connect)…");
         // First, await the bunker URI. This only blocks on the connect Ack
@@ -1091,7 +1107,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
                 vector_core::log_warn!("[bunker] bunker_uri() failed: {}", e);
                 vector_core::set_bunker_state(vector_core::BunkerConnectionState::Offline);
                 let _ = handle_for_task.emit("bunker_session_failed",
-                    serde_json::json!({ "error": e.to_string() }));
+                    serde_json::json!({ "error": failed(&pairing, e.to_string()) }));
                 if let Some(b) = vector_core::take_bunker_signer() {
                     let _ = b.shutdown().await;
                 }
@@ -1119,10 +1135,10 @@ pub async fn start_nostrconnect_session<R: Runtime>(
                 vector_core::log_warn!("[bunker] get_public_key() failed: {}", e);
                 vector_core::set_bunker_state(vector_core::BunkerConnectionState::Offline);
                 let _ = handle_for_task.emit("bunker_session_failed",
-                    serde_json::json!({ "error": format!(
+                    serde_json::json!({ "error": failed(&pairing, format!(
                         "Signer didn't return your pubkey. If you're in Manual mode, check your signer app for an approval prompt. ({})",
                         e
-                    )}));
+                    ))}));
                 if let Some(b) = vector_core::take_bunker_signer() {
                     let _ = b.shutdown().await;
                 }
@@ -1136,7 +1152,16 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             let _ = signer.shutdown().await;
             return;
         }
-        vector_core::set_bunker_signer(signer);
+        // The slot's copy shares this client: it is replaced, never shut down.
+        if pairing.install(signer).is_err() {
+            vector_core::set_bunker_state(vector_core::BunkerConnectionState::Offline);
+            let _ = handle_for_task.emit("bunker_session_failed",
+                serde_json::json!({ "error": vector_core::signer::NETWORK_CHANGED }));
+            if let Some(b) = vector_core::take_bunker_signer() {
+                let _ = b.shutdown().await;
+            }
+            return;
+        }
 
         // Same staging block as connect_bunker — extract any further if
         // a third entry point ever appears. Wraps the side-effects so a
@@ -1170,8 +1195,8 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             // during the long pairing wait.
             account_manager::set_pending_account(remote_npub.clone())?;
             // Staging rides the welcome screen's service until the account commits.
-            if !crate::commands::tor::running_prelogin() {
-                crate::commands::tor::stop_and_join_if_running().await;
+            if !crate::commands::transport::running_prelogin() {
+                crate::commands::transport::stop_and_join_if_running().await;
             }
             account_manager::init_profile_database(&handle_for_task, &remote_npub).await?;
 
@@ -1192,7 +1217,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             let mut profile = Profile::new();
             profile.flags.set_mine(true);
             STATE.lock().await.insert_or_replace_profile(&remote_npub, profile);
-            let _ = crate::commands::tor::sync_to_active_account().await;
+            let _ = crate::commands::transport::sync_to_active_account().await;
             vector_core::blossom_servers::refresh_cache();
             Ok(())
         }.await;
@@ -1438,22 +1463,28 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     let is_bunker_account = signer_type == "bunker";
     let is_nip55_account = signer_type == "nip55";
 
-    // Tor before anything touches the network: a bunker account's signer handshake below
-    // must ride it too, and the Nostr client picks up the proxy from the start. On failure
-    // the preference stays on with no service, so connections blackhole rather than leak.
-    #[cfg(feature = "tor")]
+    // The network before anything touches it: a bunker account's signer handshake below must
+    // ride it too, and the Nostr client picks it up from the start. On failure the account's
+    // network stays chosen with nothing running, so connections are refused rather than leak.
     {
-        let stored = matches!(
-            vector_core::db::settings::get_sql_setting("tor_enabled".to_string()),
-            Ok(Some(ref v)) if v == "1" || v == "true"
-        );
-        // The welcome screen's service has install-level guards; the account runs its own.
-        crate::commands::tor::stop_prelogin_service().await;
-        // Picked from the welcome screen with Tor on: inherited, saved once the account boots.
-        if vector_core::tor::effective_tor_pref(stored) && !vector_core::tor::is_active() {
-            vector_core::tor::set_tor_enabled_pref(true);
-            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
-                eprintln!("[Login] Tor auto-start failed: {e}");
+        use vector_core::transport::{self, kinds, prefs, prelogin, Kind};
+        let effective = prelogin::effective(&prefs::stored_kind());
+        transport::set_preference(effective);
+        // A welcome-screen instance is kept only where its kind adopts on unlock (Tor never does:
+        // its guards are install-level).
+        let adopt = vector_core::transport::host::active().is_some_and(|a| {
+            a.started_prelogin()
+                && Some(a.kind) == effective
+                && kinds::factory(a.kind).is_some_and(|f| f.adopt_on_unlock() && f.compatible(a.transport().as_ref(), &prelogin::config_for(a.kind)))
+        });
+        if !adopt {
+            crate::commands::transport::stop_prelogin_service().await;
+        }
+        // Started now, awaited once the credential has proved itself (or before the bunker
+        // handshake, which rides it): a wrong PIN never waits on tunnels.
+        if effective.is_some_and(|k| k != Kind::Clearnet) {
+            if let Err(e) = crate::commands::transport::start_for_active_account().await {
+                eprintln!("[Login] network auto-start failed: {e}");
             }
         }
     }
@@ -1561,6 +1592,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
             let bunker_url = vector_core::db::get_bunker_url().await
                 .map_err(|e| format!("Failed to read bunker_url: {}", e))?
                 .ok_or("Bunker account missing bunker_url")?;
+            crate::commands::transport::wait_for_active_network().await;
             // Hard requirement: if the bunker is unreachable at boot, the user
             // can't sign anything anyway — falling through with the cached
             // pubkey but no live NostrConnect leaves `client.signer()` returning
@@ -1607,6 +1639,9 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         }
     };
     set_my_public_key(public_key);
+    if !is_bunker_account {
+        crate::commands::transport::wait_for_active_network().await;
+    }
 
     // A legacy-salted account moves onto its own salt here: the credential just proved itself,
     // and nothing that writes has started yet.
@@ -1748,16 +1783,16 @@ pub(crate) async fn setup_encryption_with_key<R: Runtime>(
         // path below).
         if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
             // The welcome screen's service carries on into the new account's first session.
-            if !crate::commands::tor::running_prelogin() {
-                crate::commands::tor::stop_and_join_if_running().await;
+            if !crate::commands::transport::running_prelogin() {
+                crate::commands::transport::stop_and_join_if_running().await;
             }
             if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
-                let _ = crate::commands::tor::sync_to_active_account().await;
+                let _ = crate::commands::transport::sync_to_active_account().await;
                 return Err(e);
             }
             crate::account_manager::set_current_account(npub)?;
             crate::account_manager::clear_pending_account()?;
-            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+            if let Err(e) = crate::commands::transport::sync_to_active_account().await {
                 eprintln!("[Account] Tor start for new account failed: {}", e);
             }
         }
@@ -1772,6 +1807,7 @@ pub(crate) async fn setup_encryption_with_key<R: Runtime>(
             &user_pk_hex, &package, true, Some(&security_type), biometric_wrap.as_deref(),
             Some(&canary), kdf.descriptor().as_deref(),
         )?;
+        vector_core::transport::prelogin::commit();
         vector_core::clear_pending_nip55_setup();
         crate::ENCRYPTION_KEY.set(*key, &[&MY_SECRET_KEY]);
         crate::state::set_encryption_enabled(true);
@@ -1803,16 +1839,16 @@ pub(crate) async fn setup_encryption_with_key<R: Runtime>(
     // active account so a retry doesn't leave the user direct-connected.
     if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
         // The welcome screen's service carries on into the new account's first session.
-        if !crate::commands::tor::running_prelogin() {
-            crate::commands::tor::stop_and_join_if_running().await;
+        if !crate::commands::transport::running_prelogin() {
+            crate::commands::transport::stop_and_join_if_running().await;
         }
         if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
-            let _ = crate::commands::tor::sync_to_active_account().await;
+            let _ = crate::commands::transport::sync_to_active_account().await;
             return Err(e);
         }
         crate::account_manager::set_current_account(npub)?;
         crate::account_manager::clear_pending_account()?;
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+        if let Err(e) = crate::commands::transport::sync_to_active_account().await {
             eprintln!("[Account] Tor start for new account failed: {}", e);
         }
     }
@@ -1858,6 +1894,9 @@ pub(crate) async fn setup_encryption_with_key<R: Runtime>(
             kdf.descriptor().as_deref(),
         )?;
     }
+    // The account is durable: its network is saved with it, not at a later sync a crash or
+    // reload could stop short of.
+    vector_core::transport::prelogin::commit();
 
     // Persistent record committed — zeroize in-memory secrets. Globals
     // need explicit zeroize because the slot can be overwritten without
@@ -1907,16 +1946,16 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             .ok_or("Offline signer setup state missing. Please re-run Sign in with Amber.")?;
         if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
             // The welcome screen's service carries on into the new account's first session.
-            if !crate::commands::tor::running_prelogin() {
-                crate::commands::tor::stop_and_join_if_running().await;
+            if !crate::commands::transport::running_prelogin() {
+                crate::commands::transport::stop_and_join_if_running().await;
             }
             if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
-                let _ = crate::commands::tor::sync_to_active_account().await;
+                let _ = crate::commands::transport::sync_to_active_account().await;
                 return Err(e);
             }
             crate::account_manager::set_current_account(npub)?;
             crate::account_manager::clear_pending_account()?;
-            if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+            if let Err(e) = crate::commands::transport::sync_to_active_account().await {
                 eprintln!("[Account] Tor start for new account failed: {}", e);
             }
         }
@@ -1924,6 +1963,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             return Err("Account changed during setup. Please try again.".into());
         }
         vector_core::db::commit_nip55_account_setup(&user_pk_hex, &package, false, None, None, None, None)?;
+        vector_core::transport::prelogin::commit();
         vector_core::clear_pending_nip55_setup();
         crate::state::set_encryption_enabled(false);
         vector_core::blossom_servers::refresh_cache();
@@ -1947,16 +1987,16 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 
     if let Ok(Some(npub)) = crate::account_manager::get_pending_account() {
         // The welcome screen's service carries on into the new account's first session.
-        if !crate::commands::tor::running_prelogin() {
-            crate::commands::tor::stop_and_join_if_running().await;
+        if !crate::commands::transport::running_prelogin() {
+            crate::commands::transport::stop_and_join_if_running().await;
         }
         if let Err(e) = crate::account_manager::init_profile_database(&handle, &npub).await {
-            let _ = crate::commands::tor::sync_to_active_account().await;
+            let _ = crate::commands::transport::sync_to_active_account().await;
             return Err(e);
         }
         crate::account_manager::set_current_account(npub)?;
         crate::account_manager::clear_pending_account()?;
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
+        if let Err(e) = crate::commands::transport::sync_to_active_account().await {
             eprintln!("[Account] Tor start for new account failed: {}", e);
         }
     }
@@ -1991,6 +2031,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
             None,
         )?;
     }
+    vector_core::transport::prelogin::commit();
 
     // Persistent record committed — zeroize in-memory secrets.
     {

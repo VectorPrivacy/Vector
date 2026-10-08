@@ -387,13 +387,14 @@ fn install_bg_panic_logger() {
 fn run_standalone_sync_loop(data_dir: &str) {
     install_bg_panic_logger();
 
-    // A sign-in is in progress on the welcome screen with Tor chosen: opening some other
+    // A sign-in is in progress on the welcome screen with a network chosen: opening some other
     // account here would move the transport and the key vault under it.
-    #[cfg(feature = "tor")]
-    if vector_core::tor::prelogin_carry_armed() {
+    if vector_core::transport::prelogin::armed().is_some() {
         logcat("bg-sync skipped: welcome screen sign-in in progress");
         return;
     }
+    // No connection before this account's network is loaded, in a service-only process too.
+    vector_core::transport::strict_boot();
 
     // Create a persistent tokio runtime for this thread
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -412,6 +413,11 @@ fn run_standalone_sync_loop(data_dir: &str) {
         logcat(&format!("Failed to bootstrap pipeline: {}", e));
         // Fall through — will still try to connect and notify, just without DB persistence
     }
+    // Fail closed: without the account's stored network nothing may connect.
+    if vector_core::transport::preference().is_none() {
+        logcat("bg-sync skipped: network preference not loaded");
+        return;
+    }
 
     rt.block_on(async {
         // If the account has Tor enabled, bootstrap a TorService now. Without
@@ -421,28 +427,44 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // sync_to_active_account starts a service iff this account wants Tor.
         // First-boot pays a 5-15s consensus fetch; subsequent boots are ~2s
         // off the cached directory.
-        if let Err(e) = crate::commands::tor::sync_to_active_account().await {
-            logcat(&format!("Tor bootstrap for bg-sync failed: {} (relays will blackhole)", e));
+        // The instance running before the sync: the foreground's, when it kept one this loop
+        // must not stop on its way out.
+        let kept = vector_core::transport::host::active().map(|a| a.id());
+        if let Err(e) = crate::commands::transport::sync_to_active_account().await {
+            logcat(&format!("Network start for bg-sync failed: {} (relays stay blocked)", e));
+        }
+        // An instance still coming up retries on its own (an I2P router started later): wait
+        // for it rather than spend every relay candidate against a network that refuses them.
+        let mut waiting_logged = false;
+        while vector_core::transport::host::active().is_some_and(|a| !a.transport().ready()) {
+            if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
+                return;
+            }
+            if !waiting_logged {
+                let kind = vector_core::transport::preference().map_or("unknown", |k| k.as_str());
+                let why = vector_core::transport::preference()
+                    .and_then(vector_core::transport::status::reason_for)
+                    .map(|r| r.code)
+                    .unwrap_or_else(|| "starting".into());
+                logcat(&format!("bg-sync waiting for {kind}: {why}"));
+                waiting_logged = true;
+            }
+            let _ = vector_core::transport::wait_ready(std::time::Duration::from_secs(10)).await;
         }
 
         // Service-only mode silently drops Rust eprintln (which is what
-        // log_info!/log_warn! use), so the Tor lifecycle traces never reach
-        // logcat. Surface the resulting transport state via the JNI logger
-        // so users can confirm bg-sync is honouring the Tor preference.
-        #[cfg(feature = "tor")]
+        // log_info!/log_warn! use), so the lifecycle traces never reach logcat.
+        // Surface the resulting transport state via the JNI logger so users can
+        // confirm bg-sync is honouring the account's network.
         {
-            use vector_core::tor::TorTransportState;
-            match vector_core::tor::transport_state() {
-                TorTransportState::Active(addr) => {
-                    logcat(&format!("Tor active for bg-sync — SOCKS proxy on {}", addr));
-                }
-                TorTransportState::RequiredButInactive => {
-                    logcat("Tor required but inactive — bg-sync relays will blackhole until bootstrap completes");
-                }
-                TorTransportState::Disabled => {
-                    logcat("Tor disabled for this account — bg-sync using direct relay connections");
-                }
-            }
+            use vector_core::transport::{self, TransportState};
+            let line = match transport::state() {
+                TransportState::Active { kind } => format!("Transport {}: active", kind.as_str()),
+                TransportState::RequiredButInactive { kind } => format!("Transport {}: blocked", kind.as_str()),
+                TransportState::Clearnet => "Transport clearnet: direct".to_string(),
+                TransportState::Unknown => "Transport unknown: blocked".to_string(),
+            };
+            logcat(&line);
         }
 
         // Bootstrap the standalone client — get connected ASAP
@@ -453,6 +475,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
                 return;
             }
         };
+        let tracked = vector_core::transport::cycle::track(&client);
 
         // Store the client, keys, and public key in globals so headless operations
         // (notification reply, mark-as-read) can use them in service-only mode.
@@ -515,6 +538,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
         tokio::spawn(async move {
             STOP_NOTIFY.notified().await;
             logcat("Stop signal received, disconnecting client...");
+            vector_core::transport::cycle::untrack(tracked);
             client_for_stop.disconnect().await;
         });
 
@@ -646,18 +670,16 @@ fn run_standalone_sync_loop(data_dir: &str) {
         }
         logcat("notification stream ended");
 
-        // Clean up: stop the nostr client first, then the Tor service.
-        // The TorService was spawned on this transient runtime; if we let
-        // the runtime drop without an explicit awaited stop, the SOCKS
-        // accept loop and per-stream tasks abort abruptly, leaving the
-        // state-dir lockfile release time non-deterministic — Windows can
-        // throw sharing violations on the next foreground start, and we
-        // can leak the lock across runtimes since `tor_slot()` is process-
-        // global. Awaiting stop_and_join here guarantees the JoinSet drains
-        // and all `Arc<TorClient>` clones release before the runtime dies.
+        // A Tor this loop started lives on this short runtime: stop and join it before the
+        // runtime dies. One the foreground kept is the foreground's to keep.
+        vector_core::transport::cycle::untrack(tracked);
         client.disconnect().await;
-        crate::commands::tor::stop_and_join_if_running().await;
-        logcat("Client disconnected; Tor stopped");
+        if vector_core::transport::host::active().map(|a| a.id()) != kept {
+            crate::commands::transport::stop_tor_if_running().await;
+            logcat("Client disconnected; Tor stopped");
+        } else {
+            logcat("Client disconnected; the network stays up");
+        }
     });
 }
 

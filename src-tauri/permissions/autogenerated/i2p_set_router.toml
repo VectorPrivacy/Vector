@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-i2p-set-router"
+description = "Enables the i2p_set_router command without any pre-configured scope."
+commands.allow = ["i2p_set_router"]
+
+[[permission]]
+identifier = "deny-i2p-set-router"
+description = "Denies the i2p_set_router command without any pre-configured scope."
+commands.deny = ["i2p_set_router"]

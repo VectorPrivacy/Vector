@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-i2p-set-exit"
+description = "Enables the i2p_set_exit command without any pre-configured scope."
+commands.allow = ["i2p_set_exit"]
+
+[[permission]]
+identifier = "deny-i2p-set-exit"
+description = "Denies the i2p_set_exit command without any pre-configured scope."
+commands.deny = ["i2p_set_exit"]

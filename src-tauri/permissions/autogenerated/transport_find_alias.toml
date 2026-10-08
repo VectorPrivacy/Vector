@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transport-find-alias"
+description = "Enables the transport_find_alias command without any pre-configured scope."
+commands.allow = ["transport_find_alias"]
+
+[[permission]]
+identifier = "deny-transport-find-alias"
+description = "Denies the transport_find_alias command without any pre-configured scope."
+commands.deny = ["transport_find_alias"]

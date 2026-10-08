@@ -520,22 +520,46 @@ pub fn clear_active_account() -> Result<(), String> {
 /// the frontend stays on the same document and proceeds straight into
 /// account creation/import.
 #[tauri::command]
-pub async fn enter_add_account_mode(tor: Option<bool>) -> Result<(), String> {
+pub async fn enter_add_account_mode(
+    kind: Option<String>,
+    tor: Option<bool>,
+    mut opts: Option<serde_json::Value>,
+) -> Result<(), String> {
     refuse_if_migration_in_progress("add a new account")?;
+    let remembered = vector_core::transport::prelogin::marker().ok().flatten().map(|c| c.kind);
+    let kind = add_account_kind(kind.as_deref(), tor, remembered);
+    // Read while the current account is still on screen: its router's credentials carry over.
+    // Before the teardown: an unknown or missing network leaves the current account in place.
+    let choice = crate::commands::transport::add_account_choice(kind.as_str(), opts.as_ref());
+    if let Some(o) = opts.as_mut() {
+        vector_core::transport::prefs::scrub_json(o);
+    }
+    let choice = choice?;
     let _ = vector_core::db::clear_active_account_file();
     reset_session().await;
-    // The new account starts from the welcome screen's Tor choice, not the previous account's.
-    // A failed bootstrap stays recorded for the screen to show; the session is already gone.
-    #[cfg(feature = "tor")]
-    {
-        let on = tor.unwrap_or_else(vector_core::tor::prelogin_preference);
-        if let Err(e) = crate::commands::tor::apply_prelogin(on).await {
-            vector_core::log_warn!("[Tor] pre-login start for the new account failed: {e}");
-        }
+    // The new account starts from the welcome screen's choice, not the previous account's. A
+    // failed start stays recorded for the screen to show; the session is already gone.
+    if let Err(e) = crate::commands::transport::apply_prelogin(choice).await {
+        vector_core::log_warn!("[Transport] pre-login start for the new account failed: {e}");
     }
-    #[cfg(not(feature = "tor"))]
-    let _ = tor;
     Ok(())
+}
+
+/// The network a new account starts on. `kind` wins; the legacy `tor` switch means Tor, or "not
+/// Tor" (the remembered network unless that is Tor); neither means the remembered network.
+pub(crate) fn add_account_kind(
+    kind: Option<&str>,
+    tor: Option<bool>,
+    remembered: Option<vector_core::transport::Kind>,
+) -> String {
+    use vector_core::transport::Kind;
+    let remembered = remembered.unwrap_or(Kind::Clearnet);
+    match (kind, tor) {
+        (Some(k), _) => k.to_string(),
+        (None, Some(true)) => Kind::Tor.as_str().into(),
+        (None, Some(false)) if remembered == Kind::Tor => Kind::Clearnet.as_str().into(),
+        _ => remembered.as_str().into(),
+    }
 }
 
 /// Tear down the entire session in-process and notify the frontend to reload.
@@ -636,10 +660,9 @@ pub async fn reset_session() {
         let _ = client.shutdown().await;
     }
 
-    #[cfg(feature = "tor")]
-    vector_core::tor::cancel_prelogin_start();
-    crate::commands::tor::stop_and_join_if_running().await;
-    crate::commands::tor::set_account_booted(false);
+    vector_core::transport::prelogin::cancel_start();
+    crate::commands::transport::stop_and_join_if_running().await;
+    crate::commands::transport::set_account_booted(false);
 
     close_db_connection();
 

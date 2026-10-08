@@ -148,13 +148,9 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
     };
 
     if !has_account {
-        // Back on the welcome screen after a reload: refuse clearnet if Tor is remembered,
-        // before the screen gets to start it.
-        #[cfg(feature = "tor")]
-        if vector_core::tor::prelogin_preference() {
-            vector_core::tor::arm_prelogin_carry(true);
-            vector_core::tor::set_tor_enabled_pref(true);
-        }
+        // Back on the welcome screen after a reload: refuse clearnet if a network is
+        // remembered, before the screen gets to start it.
+        vector_core::transport::prelogin::apply_at_boot();
         return Ok(BootEncryptionInfo {
             account_exists: false,
             enabled: false,

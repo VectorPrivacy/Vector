@@ -240,14 +240,7 @@ fn is_default_relay(url: &str) -> bool {
 }
 
 fn validate_relay_url(url: &str) -> Result<String, String> {
-    let trimmed = url.trim();
-    let Some(host) = trimmed.strip_prefix("wss://") else {
-        return Err("Relay URL must start with wss://".to_string());
-    };
-    if host.is_empty() {
-        return Err("Relay URL must include a host".to_string());
-    }
-    Ok(trimmed.trim_end_matches('/').to_string())
+    vector_core::transport::validate_relay_url(url)
 }
 
 fn capabilities_for_mode(mode: &str) -> RelayCapabilities {

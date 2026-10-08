@@ -293,11 +293,10 @@ pub async fn fetch_messages<R: Runtime>(
         };
 
         // Booting an account means it committed (setup done or unlocked): it keeps the
-        // welcome screen's Tor choice.
+        // welcome screen's network choice.
         if init {
-            crate::commands::tor::set_account_booted(true);
-            #[cfg(feature = "tor")]
-            vector_core::tor::commit_prelogin_carry();
+            crate::commands::transport::set_account_booted(true);
+            vector_core::transport::prelogin::commit();
         }
 
         // One-time (per-account) migration of legacy app-private downloads into the

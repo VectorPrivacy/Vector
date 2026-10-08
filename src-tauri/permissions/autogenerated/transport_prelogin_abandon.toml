@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transport-prelogin-abandon"
+description = "Enables the transport_prelogin_abandon command without any pre-configured scope."
+commands.allow = ["transport_prelogin_abandon"]
+
+[[permission]]
+identifier = "deny-transport-prelogin-abandon"
+description = "Denies the transport_prelogin_abandon command without any pre-configured scope."
+commands.deny = ["transport_prelogin_abandon"]

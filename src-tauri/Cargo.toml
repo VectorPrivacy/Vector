@@ -8,9 +8,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["whisper", "tor"]
+default = ["whisper", "tor", "i2p"]
 whisper = ["dep:whisper-rs"]
 tor = ["vector-core/tor"]
+# I2P over a router the user already runs, through its SAMv3 bridge.
+i2p = ["vector-core/i2p"]
 # F-Droid flavour: no in-app updater. The store owns updates, and F-Droid's
 # inclusion policy wants the download path absent, not merely gated.
 fdroid = []
@@ -248,8 +250,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 url = "2.5.7"
 
-# Realtime peer channels (Iroh P2P)
-iroh = "1.0"
+# Realtime peer channels (Iroh P2P). No portmapper: an idle node must not open UPnP/NAT-PMP to
+# the gateway outside the account's network.
+iroh = { version = "1.0", default-features = false, features = ["tls-ring", "metrics", "fast-apple-datapath"] }
 iroh-gossip = "0.101"
 noq-proto = "1.1"
 rand = "0.8"
@@ -311,6 +314,9 @@ whisper-rs = { version = "0.15.1", optional = true }
 # Desktop-only dependencies (deep link single-instance support)
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.0"
+# The updater plugin's own reqwest: `socks` so the account's network can carry update checks and
+# downloads (features unify onto the plugin's copy).
+reqwest013 = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
 tauri-plugin-single-instance = { version = "2.4.0", features = ["deep-link"] }
 tauri-plugin-window-state = "2.4.1"
 

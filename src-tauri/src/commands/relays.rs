@@ -101,28 +101,27 @@ pub fn is_default_relay(url: &str) -> bool {
     DEFAULT_RELAYS.iter().any(|r| r.eq_ignore_ascii_case(normalized))
 }
 
-/// Validate a relay URL format (must be wss://)
+/// Validate a relay URL: `wss://`, or `ws://` for an `.i2p` host.
 pub fn validate_relay_url(url: &str) -> Result<String, String> {
-    let trimmed = url.trim();
-
-    if !trimmed.starts_with("wss://") {
-        return Err("Relay URL must start with wss://".to_string());
-    }
-
-    let after_protocol = &trimmed[6..];
-    if after_protocol.is_empty() {
-        return Err("Relay URL must include a host".to_string());
-    }
-
-    let normalized = trimmed.trim_end_matches('/');
-    Ok(normalized.to_string())
+    vector_core::transport::validate_relay_url(url)
 }
 
-/// Add a relay to the pool with race-safe handling of Tor bootstrap completing
-/// mid-call. nostr 0.45 resolves the proxy per connection attempt rather than
-/// storing it at `add_relay` time, so the old blackhole-goes-stale race (and the
-/// remove/re-add cycle that compensated for it) is gone: a relay added mid-bootstrap
-/// simply picks up the live transport when it connects.
+/// Is `url` on the user's own relay list (a built-in default or one they added)? Lookups that a
+/// stranger could otherwise steer stay limited to these.
+pub async fn is_own_relay(url: &str) -> bool {
+    use vector_core::transport::aliases::normalize_host;
+    let Ok(host) = normalize_host(url) else { return false };
+    let same = |u: &str| normalize_host(u).is_ok_and(|h| h == host);
+    if DEFAULT_RELAYS.iter().any(|d| same(d)) {
+        return true;
+    }
+    let Some(handle) = crate::TAURI_APP.get() else { return false };
+    load_custom_relays(handle).await.unwrap_or_default().iter().any(|c| same(&c.url))
+}
+
+/// Add a relay to the pool and connect it. Every connect asks the transport at that moment: one
+/// made while the network is still coming up is refused in process (no socket, no DNS) and lands
+/// in Terminated, which the Ready listener's Kick and the reconcile pass revive.
 async fn add_relay_failsafe<F>(
     client: &nostr_sdk::prelude::Client,
     url: &str,
@@ -152,38 +151,27 @@ where
         }
     }
 
-    if defer_connect_for_bootstrap() {
-        // Still bootstrapping; switch_relay_transport will cycle this relay
-        // when bootstrap completes.
-        return Ok(());
-    }
-
     if let Err(e) = client.connect_relay(url).await {
         eprintln!("[Relay] connect_relay({}) failed: {}", url, e);
     }
     Ok(())
 }
 
-/// True when the user has Tor enabled but the service hasn't finished
-/// bootstrapping yet. While in this state every TCP connection blackholes
-/// (failsafe), so a `connect_relay` would always fail. Better to skip it —
-/// `switch_relay_transport` cycles every relay onto the live proxy as soon
-/// as bootstrap completes, picking up anything we deferred here.
-fn defer_connect_for_bootstrap() -> bool {
-    #[cfg(feature = "tor")]
-    {
-        matches!(
-            vector_core::tor::transport_state(),
-            vector_core::tor::TorTransportState::RequiredButInactive
-        )
-    }
-    #[cfg(not(feature = "tor"))]
-    {
-        false
+/// Add a log entry for a relay
+/// Log `message` unless it is already this relay's newest line: a relay the network refuses
+/// says so once, not on every refused connect.
+fn add_relay_log_once(url: &str, level: &str, message: &str) {
+    let normalized = url.trim().trim_end_matches('/').to_lowercase();
+    let repeated = relay_logs()
+        .read()
+        .ok()
+        .and_then(|logs| logs.get(&normalized).and_then(|l| l.front()).map(|l| l.message == message))
+        .unwrap_or(false);
+    if !repeated {
+        add_relay_log(url, level, message);
     }
 }
 
-/// Add a log entry for a relay
 pub fn add_relay_log(url: &str, level: &str, message: &str) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
     let timestamp = std::time::SystemTime::now()
@@ -407,7 +395,11 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
         let url_str = *default_url;
         let is_disabled = disabled_defaults.iter().any(|d| d.eq_ignore_ascii_case(url_str));
 
-        let (status, mode) = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(url_str)) {
+        // A disabled relay can still be pooled for a moment (a transient inbox send): its row
+        // reads Disabled, never that socket's state.
+        let (status, mode) = if is_disabled {
+            ("disabled".to_string(), "both".to_string())
+        } else if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(url_str)) {
             let status = match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -436,7 +428,9 @@ pub async fn get_relays<R: Runtime>(handle: AppHandle<R>) -> Result<Vec<RelayInf
 
     // Add custom relays
     for custom in &custom_relays {
-        let status = if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(&custom.url)) {
+        let status = if !custom.enabled {
+            "disabled".to_string()
+        } else if let Some((_, relay)) = pool_relays.iter().find(|(u, _)| u.as_str().eq_ignore_ascii_case(&custom.url)) {
             match relay.status() {
                 RelayStatus::Initialized => "initialized",
                 RelayStatus::Pending => "pending",
@@ -715,13 +709,7 @@ pub async fn toggle_default_relay<R: Runtime>(handle: AppHandle<R>, url: String,
             match add_relay_failsafe(&client, &normalized_url, || {
                 relay_capabilities_for_mode("both")
             }).await {
-                Ok(_) => {
-                    if defer_connect_for_bootstrap() {
-                        println!("[Relay] Enabled default relay (deferred connect, Tor bootstrapping): {}", normalized_url);
-                    } else {
-                        println!("[Relay] Enabled default relay: {}", normalized_url);
-                    }
-                }
+                Ok(_) => println!("[Relay] Enabled default relay: {}", normalized_url),
                 Err(e) => eprintln!("[Relay] Failed to enable default relay: {}", e),
             }
         } else {
@@ -774,9 +762,6 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
             }).await {
                 Ok(_) => {
                     println!("[Relay] Added custom relay to pool: {} (mode: {})", new_relay.url, relay_mode);
-                    if defer_connect_for_bootstrap() {
-                        println!("[Relay] Connect deferred, Tor still bootstrapping: {}", new_relay.url);
-                    }
                     crate::inbox_relays::republish_inbox_relays_debounced();
                 }
                 Err(e) => eprintln!("[Relay] Failed to add relay to pool: {}", e),
@@ -1127,6 +1112,19 @@ fn monitor_started() -> Arc<std::sync::atomic::AtomicBool> {
     vector_core::db::current_session().scoped::<MonitorStarted, _>()
 }
 
+struct CatchupAfterSync;
+struct SeenConnected;
+
+/// Relays that reconnected during the boot sync, each waiting for one catch-up once it ends.
+fn catchup_after_sync() -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+    vector_core::db::current_session().scoped::<CatchupAfterSync, _>()
+}
+
+/// Relays that have connected at least once this session: only a REconnect can drop events.
+fn seen_connected() -> Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+    vector_core::db::current_session().scoped::<SeenConnected, _>()
+}
+
 #[tauri::command]
 pub async fn monitor_relay_connections() -> Result<bool, String> {
     if monitor_started().swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1155,7 +1153,13 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     let handle_clone = handle.clone();
     // spawn-detached: relay status notifications — pool health, which is the live pool by definition.
     tokio::spawn(async move {
-        while let Ok(notification) = receiver.recv().await {
+        loop {
+            // A lagged receiver skips ahead; only a closed channel ends the monitor.
+            let notification = match receiver.recv().await {
+                Ok(n) => n,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             match notification {
                 MonitorNotification::StatusChanged { relay_url, status } => {
                     let url_str = relay_url.to_string();
@@ -1177,7 +1181,10 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         RelayStatus::Banned => "error",
                         _ => "info",
                     };
-                    add_relay_log(&url_str, log_level, &format!("Status changed to {}", status_str));
+                    match vector_core::transport::refuses(&url_str).filter(|_| status != RelayStatus::Connected) {
+                        Some(why) => add_relay_log_once(&url_str, "info", &why),
+                        None => add_relay_log(&url_str, log_level, &format!("Status changed to {}", status_str)),
+                    }
 
                     let _ = handle_clone.emit("relay_status_change", serde_json::json!({
                         "url": url_str,
@@ -1185,12 +1192,41 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     }));
 
                     if status == RelayStatus::Connected {
+                        // Vector owns reconnects (`reconnect(false)`), so a fresh socket carries no
+                        // live sub. Boot included: under Tor and I2P relays come up mid-sync.
+                        if let (Some(client), Ok(relay_url)) =
+                            (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
+                        {
+                            // spawn-detached: reconnecting one relay — socket work, no account storage.
+                            tokio::spawn(async move {
+                                vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
+                            });
+                        }
                         // Only trigger single-relay sync for REconnections (mid-session).
                         // During initial sync, the main sync already covers all relays.
                         let is_syncing = {
                             let state = crate::STATE.lock().await;
                             state.is_syncing
                         };
+                        let reconnect = !seen_connected().lock().unwrap_or_else(|e| e.into_inner()).insert(url_str.clone());
+                        if is_syncing && reconnect && catchup_after_sync().lock().unwrap_or_else(|e| e.into_inner()).insert(url_str.clone()) {
+                            // The resent live sub misses what landed while this socket was down, and
+                            // the sync may already have passed the relay: catch it up when it ends.
+                            let (handle_inner, url_string) = (handle_clone.clone(), url_str.clone());
+                            vector_core::db::spawn_bound(async move {
+                                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+                                while crate::STATE.lock().await.is_syncing {
+                                    if !vector_core::db::session_is_live() || std::time::Instant::now() > deadline {
+                                        return;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                }
+                                catchup_after_sync().lock().unwrap_or_else(|e| e.into_inner()).remove(&url_string);
+                                if vector_core::db::session_is_live() {
+                                    crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
+                                }
+                            });
+                        }
                         if !is_syncing {
                             let handle_inner = handle_clone.clone();
                             let url_string = url_str.clone();
@@ -1222,19 +1258,6 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                     .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
                             if !discovery_only {
                                 crate::commands::community::trigger_community_reconnect_resync();
-                            }
-                            // A catch-up fetch is not a subscription: Vector owns reconnects
-                            // (`reconnect(false)`), so the fresh socket carries no live sub and
-                            // only an AUTH-gating relay's challenge re-sent one. Without this
-                            // every stream on a plain relay (DMs, self-sync lists, v1 + v2
-                            // communities) goes silent after its first drop.
-                            if let (Some(client), Ok(relay_url)) =
-                                (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
-                            {
-                                // spawn-detached: reconnecting one relay — socket work, no account storage.
-                                tokio::spawn(async move {
-                                    vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
-                                });
                             }
                         }
                     }
@@ -1319,7 +1342,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                 // Not `Disconnected`/`Pending`: `try_connect` is a silent no-op on both.
                 // The reconcile loop rescues Pending, and a Disconnected relay is one
                 // whose own reconnect is enabled and already retrying.
-                } else if status == RelayStatus::Terminated || status == RelayStatus::Sleeping {
+                } else if vector_core::transport::cycle::revivable(relay) {
                     let url_str = url.to_string();
                     add_relay_log(&url_str, "info", "Attempting reconnection...");
                     let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
@@ -1409,10 +1432,11 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                 // are already retrying on their own schedule.
                 // Concurrently: over Tor each attempt may take its full 60 s budget, and one
                 // unreachable relay must not hold every other relay's revival behind it.
+                // A relay the network refuses by policy (I2P-Only) waits for that to change.
                 let budget = vector_core::relay_connect_timeout(std::time::Duration::from_secs(5));
                 futures_util::future::join_all(
                     client.relays().await.into_values()
-                        .filter(|r| matches!(r.status(), RelayStatus::Terminated | RelayStatus::Sleeping))
+                        .filter(vector_core::transport::cycle::revivable)
                         .map(|relay| async move { let _ = relay.try_connect().timeout(budget).await; }),
                 ).await;
             }

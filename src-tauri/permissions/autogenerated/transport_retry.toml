@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transport-retry"
+description = "Enables the transport_retry command without any pre-configured scope."
+commands.allow = ["transport_retry"]
+
+[[permission]]
+identifier = "deny-transport-retry"
+description = "Denies the transport_retry command without any pre-configured scope."
+commands.deny = ["transport_retry"]

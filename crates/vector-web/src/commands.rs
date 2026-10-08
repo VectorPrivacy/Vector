@@ -116,7 +116,23 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             "status": "", "bootstrap_progress": 0, "socks_proxy": null,
         })),
         "tor_get_bridges" => Ok(json!([])),
-        "tor_prelogin_abandon" | "tor_get_host_circuit" => Ok(Value::Null),
+        // The browser has no sockets of its own: Vector Web connects directly, always.
+        "transport_get_state" => to_value(vector_core::transport::status::view()),
+        "transport_allow_realtime" => to_value(vector_core::transport::status::view()),
+        "transport_set" | "transport_set_prelogin" => match a.str("kind")?.as_str() {
+            "clearnet" => to_value(vector_core::transport::status::view()),
+            _ => Err("Vector Web connects directly. Tor and I2P need the desktop or Android app.".into()),
+        },
+        "transport_retry" => to_value(vector_core::transport::status::view()),
+        "transport_get_routes" => {
+            let urls: Vec<String> = a.de("urls")?;
+            to_value(urls.iter().take(512).map(|u| vector_core::transport::route_view(u)).collect::<Vec<_>>())
+        }
+        "transport_get_aliases" => Ok(json!([])),
+        "transport_set_alias" | "transport_check_alias" | "transport_find_alias" | "i2p_set_router" | "i2p_test_router"
+        | "i2p_set_exit" | "i2p_set_outproxies" => Err("I2P isn't available on Vector Web.".into()),
+        "i2p_get_config" => to_value(vector_core::transport::i2p_config::view_of(&Default::default())),
+        "tor_prelogin_abandon" | "tor_get_host_circuit" | "transport_prelogin_abandon" => Ok(Value::Null),
         "get_logs" => Ok(json!("")),
         "get_pending_share" | "get_pending_deep_link" => Ok(Value::Null),
 
