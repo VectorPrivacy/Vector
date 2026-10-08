@@ -24291,6 +24291,8 @@ body.profile-switcher-editing .profile-switcher-add {
   border-bottom: 1px solid #171717;
   box-sizing: border-box;
   flex-shrink: 0;
+  -webkit-user-select: none;
+  user-select: none;
 }
 /* The icon draws across 20 of its 24 units: a 17px box gives the design's 14px glyph. */
 .cs-search .icon {
@@ -24320,6 +24322,8 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 .cs-search input::placeholder { color: #899090; }
 .cs-search input:focus { box-shadow: inset 0 0 0 1px #3a3a3a; }
+/* Text only while typing: idle, a drag-select across the page would paint the placeholder. */
+.cs-search input:focus { -webkit-user-select: text; user-select: text; }
 
 .cs-nav-scroll {
   flex: 1;
@@ -24566,6 +24570,8 @@ body.profile-switcher-editing .profile-switcher-add {
   border-bottom: 1px solid #171717;
   box-sizing: border-box;
   flex-shrink: 0;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .cs-top-title {
   flex: 1;
