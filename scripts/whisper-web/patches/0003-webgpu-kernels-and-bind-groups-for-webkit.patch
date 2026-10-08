@@ -1,0 +1,465 @@
+diff --git a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
+index 65556f3..ca4bbfc 100644
+--- a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
++++ b/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp
+@@ -1262,6 +1262,8 @@ class ggml_webgpu_shader_lib {
+         mul_mat_vec_pipelines;   // fast mat-vec (n==1)
+     std::unordered_map<ggml_webgpu_mul_mat_pipeline_key, webgpu_pipeline, ggml_webgpu_mul_mat_pipeline_key_hash>
+         mul_mat_fast_pipelines;  // fast mat-mat (reg-tile or subgroup)
++    std::unordered_map<int, webgpu_pipeline> mul_mat_tile8_pipelines;      // key is the src0 type
++    std::unordered_map<int, webgpu_pipeline> mul_mat_vec_lanes_pipelines;  // key is the src0 type
+     std::unordered_map<ggml_webgpu_quantize_q8_pipeline_key, webgpu_pipeline, ggml_webgpu_quantize_q8_pipeline_key_hash>
+                                              quantize_q8_pipelines;
+     std::unordered_map<int, webgpu_pipeline> mul_mat_id_gather_pipelines;  // key is fixed
+@@ -2324,6 +2326,34 @@ class ggml_webgpu_shader_lib {
+         return mul_mat_fast_pipelines[key];
+     }
+ 
++    webgpu_pipeline get_mul_mat_tile8_pipeline(ggml_type src0_type) {
++        auto it = mul_mat_tile8_pipelines.find((int) src0_type);
++        if (it != mul_mat_tile8_pipelines.end()) {
++            return it->second;
++        }
++        std::vector<std::string> defines;
++        defines.push_back(src0_type == GGML_TYPE_Q8_0 ? "SRC0_Q8_0" : "SRC0_F16");
++        auto            processed = preprocessor.preprocess(wgsl_mul_mat_tile8, defines);
++        webgpu_pipeline pipeline =
++            ggml_webgpu_create_pipeline(device, processed, std::string("mul_mat_tile8_") + ggml_type_name(src0_type));
++        mul_mat_tile8_pipelines[(int) src0_type] = pipeline;
++        return pipeline;
++    }
++
++    webgpu_pipeline get_mul_mat_vec_lanes_pipeline(ggml_type src0_type) {
++        auto it = mul_mat_vec_lanes_pipelines.find((int) src0_type);
++        if (it != mul_mat_vec_lanes_pipelines.end()) {
++            return it->second;
++        }
++        std::vector<std::string> defines;
++        defines.push_back(src0_type == GGML_TYPE_Q8_0 ? "SRC0_Q8_0" : "SRC0_F16");
++        auto            processed = preprocessor.preprocess(wgsl_mul_mat_vec_lanes, defines);
++        webgpu_pipeline pipeline  = ggml_webgpu_create_pipeline(device, processed,
++                                                                std::string("mul_mat_vec_lanes_") + ggml_type_name(src0_type));
++        mul_mat_vec_lanes_pipelines[(int) src0_type] = pipeline;
++        return pipeline;
++    }
++
+     webgpu_pipeline get_mul_mat_id_gather_pipeline(const ggml_webgpu_shader_lib_context & context) {
+         auto it = mul_mat_id_gather_pipelines.find(1);
+         if (it != mul_mat_id_gather_pipelines.end()) {
+diff --git a/ggml/src/ggml-webgpu/ggml-webgpu.cpp b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+index a7986b9..65e8d2f 100644
+--- a/ggml/src/ggml-webgpu/ggml-webgpu.cpp
++++ b/ggml/src/ggml-webgpu/ggml-webgpu.cpp
+@@ -195,6 +195,9 @@ struct webgpu_global_context_struct {
+     uint32_t       max_inflight_batches      = UINT32_MAX;
+ 
+     webgpu_capabilities  capabilities;
++    // Bind groups by pipeline and bound ranges: a graph run step after step, as a decoder's is,
++    // binds the same ranges each time, and creating the group is most of an op's CPU cost.
++    std::unordered_map<std::string, wgpu::BindGroup> bind_group_cache;
+     // Shared buffer to move data from device to host
+     wgpu::Buffer         get_tensor_staging_buf;
+     // Global mutex for get_tensor
+@@ -598,12 +601,30 @@ static webgpu_encoded_op ggml_backend_webgpu_build_multi(webgpu_context &
+         entries.push_back(ggml_webgpu_make_bind_group_entry(params_binding_num, ctx->param_arena.buffer, param_offset,
+                                                             ctx->param_arena.slot_size));
+ 
+-        wgpu::BindGroupDescriptor bind_group_desc;
+-        bind_group_desc.layout     = dispatch.pipeline.pipeline.GetBindGroupLayout(0);
+-        bind_group_desc.entryCount = entries.size();
+-        bind_group_desc.entries    = entries.data();
+-        bind_group_desc.label      = dispatch.pipeline.name.c_str();
+-        bind_groups.push_back(ctx->global_ctx->device.CreateBindGroup(&bind_group_desc));
++        std::string key;
++        key.reserve(sizeof(uint64_t) * (1 + entries.size() * 4));
++        const auto  put = [&key](uint64_t v) { key.append(reinterpret_cast<const char *>(&v), sizeof(v)); };
++        put(reinterpret_cast<uintptr_t>(dispatch.pipeline.pipeline.Get()));
++        for (const auto & e : entries) {
++            put(e.binding);
++            put(reinterpret_cast<uintptr_t>(e.buffer.Get()));
++            put(e.offset);
++            put(e.size);
++        }
++        auto & cache = ctx->global_ctx->bind_group_cache;
++        auto   hit   = cache.find(key);
++        if (hit == cache.end()) {
++            if (cache.size() >= 8192) {
++                cache.clear();
++            }
++            wgpu::BindGroupDescriptor bind_group_desc;
++            bind_group_desc.layout     = dispatch.pipeline.pipeline.GetBindGroupLayout(0);
++            bind_group_desc.entryCount = entries.size();
++            bind_group_desc.entries    = entries.data();
++            bind_group_desc.label      = dispatch.pipeline.name.c_str();
++            hit = cache.emplace(std::move(key), ctx->global_ctx->device.CreateBindGroup(&bind_group_desc)).first;
++        }
++        bind_groups.push_back(hit->second);
+         param_offsets.push_back(param_offset);
+     }
+ 
+@@ -716,6 +737,8 @@ static const char * ggml_backend_webgpu_name(ggml_backend_t backend) {
+ static void ggml_backend_webgpu_free(ggml_backend_t backend) {
+     ggml_backend_webgpu_context * ctx = (ggml_backend_webgpu_context *) backend->context;
+     WEBGPU_LOG_DEBUG("ggml_backend_webgpu_free(" << ctx->name << ")");
++    // Its parameter arena goes with it, and cached groups bind that arena.
++    ctx->webgpu_ctx->global_ctx->bind_group_cache.clear();
+ 
+ #ifdef GGML_WEBGPU_CPU_PROFILE
+     std::cout << "\n[ggml_webgpu cpu profiling summary]\n";
+@@ -1648,11 +1671,40 @@ static webgpu_encoded_op ggml_webgpu_mul_mat(webgpu_context & ctx,
+     std::vector<webgpu_dispatch_desc> dispatches;
+     const bool src_overlap = ggml_webgpu_tensor_binding_overlap(ctx->global_ctx, src0, src1) && !use_mmvq;
+ 
+-    if (use_mat_vec) {
++    // vec4 tiles: k-multiple-of-4 rows, and src1 strides that keep its vec4 loads aligned
++    const size_t ts0       = ggml_type_size(src0->type);
++    const size_t ts1       = ggml_type_size(src1->type);
++    const bool   use_tile8 = !use_mat_vec && !src_overlap && !ctx->global_ctx->capabilities.supports_subgroup_matrix &&
++                           (src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16) &&
++                           src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 && src0->ne[0] % 4 == 0 &&
++                           (ggml_webgpu_tensor_misalignment(ctx, src1) / ts1) % 4 == 0 &&
++                           (src1->nb[1] / ts1) % 4 == 0 && (src1->nb[2] / ts1) % 4 == 0 &&
++                           (src1->nb[3] / ts1) % 4 == 0 &&
++                           (src0->type == GGML_TYPE_Q8_0 ||
++                            ((ggml_webgpu_tensor_misalignment(ctx, src0) / ts0) % 2 == 0 &&
++                             (src0->nb[1] / ts0) % 2 == 0 && (src0->nb[2] / ts0) % 2 == 0 &&
++                             (src0->nb[3] / ts0) % 2 == 0));
++
++    const bool use_lanes = use_mat_vec && dst->ne[1] == 1 && !use_mmvq && !src_overlap &&
++                           !ctx->global_ctx->capabilities.supports_subgroups &&
++                           (src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16) &&
++                           src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 && src0->ne[0] % 4 == 0 &&
++                           (ggml_webgpu_tensor_misalignment(ctx, src1) / ts1) % 4 == 0 &&
++                           (src1->nb[2] / ts1) % 4 == 0 && (src1->nb[3] / ts1) % 4 == 0 &&
++                           (src0->type == GGML_TYPE_Q8_0 ||
++                            ((ggml_webgpu_tensor_misalignment(ctx, src0) / ts0) % 2 == 0 &&
++                             (src0->nb[1] / ts0) % 2 == 0 && (src0->nb[2] / ts0) % 2 == 0 &&
++                             (src0->nb[3] / ts0) % 2 == 0));
++
++    if (use_lanes) {
++        pipeline = ctx->shader_lib->get_mul_mat_vec_lanes_pipeline(src0->type);
++    } else if (use_mat_vec) {
+         if (use_mmvq) {
+             ggml_webgpu_quantize_q8_dispatch(ctx, src0, src1, dst, dispatches);
+         }
+         pipeline = ctx->shader_lib->get_mul_mat_vec_pipeline(shader_lib_ctx, src_overlap);
++    } else if (use_tile8) {
++        pipeline = ctx->shader_lib->get_mul_mat_tile8_pipeline(src0->type);
+     } else {
+         pipeline = ctx->shader_lib->get_mul_mat_fast_pipeline(shader_lib_ctx, src_overlap);
+     }
+@@ -1711,13 +1763,19 @@ static webgpu_encoded_op ggml_webgpu_mul_mat(webgpu_context & ctx,
+     uint32_t       wg_y           = 1;
+     const uint32_t max_wg_per_dim = ctx->global_ctx->capabilities.limits.maxComputeWorkgroupsPerDimension;
+ 
+-    if (use_mat_vec) {
++    if (use_lanes) {
++        uint32_t total_wg = CEIL_DIV(dst->ne[0], 8) * dst->ne[2] * dst->ne[3];
++        compute_2d_workgroups(total_wg, max_wg_per_dim, wg_x, wg_y);
++    } else if (use_mat_vec) {
+         auto * decisions = static_cast<ggml_webgpu_mul_mat_vec_shader_decisions *>(pipeline.context.get());
+ 
+         uint32_t batches       = dst->ne[2] * dst->ne[3];
+         uint32_t output_groups = CEIL_DIV(dst->ne[0], decisions->outputs_per_wg);
+         uint32_t total_wg      = output_groups * batches;
+         compute_2d_workgroups(total_wg, max_wg_per_dim, wg_x, wg_y);
++    } else if (use_tile8) {
++        uint32_t total_wg = CEIL_DIV(dst->ne[0], 64) * CEIL_DIV(dst->ne[1], 64) * dst->ne[2] * dst->ne[3];
++        compute_2d_workgroups(total_wg, max_wg_per_dim, wg_x, wg_y);
+     } else {
+         auto * decisions = static_cast<ggml_webgpu_mul_mat_shader_decisions *>(pipeline.context.get());
+ 
+@@ -3716,6 +3774,8 @@ static ggml_backend_i ggml_backend_webgpu_i = {
+ static void ggml_backend_webgpu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+     ggml_backend_webgpu_buffer_context * ctx = static_cast<ggml_backend_webgpu_buffer_context *>(buffer->context);
+     if (ctx != nullptr && ctx->buffer != nullptr) {
++        // A cached group binding this buffer must not outlive it, nor be matched by its successor.
++        ctx->global_ctx->bind_group_cache.clear();
+         ctx->buffer.Destroy();
+         delete ctx;
+     }
+diff --git a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_tile8.wgsl b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_tile8.wgsl
+new file mode 100644
+index 0000000..c5666c7
+--- /dev/null
++++ b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_tile8.wgsl
+@@ -0,0 +1,169 @@
++enable f16;
++
++// Mat-mat for a Q8_0 or F16 src0 and an F32 src1, written for compilers that keep private
++// arrays in memory: shared tiles are k-major so every inner-loop load is a vec4, and each
++// thread's 8x8 output block lives in sixteen vec4 variables. 64 threads, 64x64 per workgroup.
++
++struct MulMatParams {
++    offset_src0: u32,
++    offset_src1: u32,
++    offset_dst: u32,
++    m: u32,
++    n: u32,
++    k: u32,
++    stride_01: u32,
++    stride_11: u32,
++    stride_02: u32,
++    stride_12: u32,
++    stride_03: u32,
++    stride_13: u32,
++    bs02: u32,
++    bs03: u32,
++    broadcast2: u32,
++    broadcast3: u32
++};
++
++@group(0) @binding(0) var<storage, read_write> src0: array<u32>;
++@group(0) @binding(1) var<storage, read_write> src1: array<vec4<f32>>;
++@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
++@group(0) @binding(3) var<uniform> params: MulMatParams;
++
++const TILE_K = 32u;
++
++var<workgroup> shmem_a: array<vec4<f16>, TILE_K * 16u>; // [k][m / 4]
++var<workgroup> shmem_b: array<vec4<f16>, TILE_K * 16u>; // [k][n / 4]
++
++#ifdef SRC0_Q8_0
++fn q8_word(w: u32) -> vec4<f32> {
++    return vec4<f32>(vec4<i32>(i32(w << 24u) >> 24u, i32(w << 16u) >> 24u, i32(w << 8u) >> 24u, i32(w) >> 24u));
++}
++
++// Eight weights of row `gm` from k = k8 (a multiple of 8), as two vec4s.
++fn load_a8(base: u32, gm: u32, k8: u32, lo: ptr<function, vec4<f32>>, hi: ptr<function, vec4<f32>>) {
++    let blk = (base + gm * params.stride_01 + k8 / 32u) * 34u; // byte offset of the block
++    let d = unpack2x16float(src0[blk / 4u] >> ((blk % 4u) * 8u)).x;
++    let qb = blk + 2u + k8 % 32u;
++    let qs = (qb % 4u) * 8u;
++    let qw = qb / 4u;
++    let x0 = src0[qw];
++    let x1 = src0[qw + 1u];
++    let x2 = src0[qw + 2u];
++    let w0 = select((x0 >> qs) | (x1 << (32u - qs)), x0, qs == 0u);
++    let w1 = select((x1 >> qs) | (x2 << (32u - qs)), x1, qs == 0u);
++    *lo = q8_word(w0) * d;
++    *hi = q8_word(w1) * d;
++}
++#endif
++
++#ifdef SRC0_F16
++fn load_a8(base: u32, gm: u32, k8: u32, lo: ptr<function, vec4<f32>>, hi: ptr<function, vec4<f32>>) {
++    let w = (base + gm * params.stride_01 + k8) / 2u;
++    *lo = vec4<f32>(unpack2x16float(src0[w]), unpack2x16float(src0[w + 1u]));
++    if (k8 + 4u < params.k) {
++        *hi = vec4<f32>(unpack2x16float(src0[w + 2u]), unpack2x16float(src0[w + 3u]));
++    }
++}
++#endif
++
++@compute @workgroup_size(64)
++fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
++        @builtin(local_invocation_index) t: u32,
++        @builtin(num_workgroups) num_wg: vec3<u32>) {
++    let wg_m_count = (params.m + 63u) / 64u;
++    let wg_n_count = (params.n + 63u) / 64u;
++    let wg_per_matrix = wg_m_count * wg_n_count;
++    let wg_linear = wg_id.y * num_wg.x + wg_id.x;
++    let batch_idx = wg_linear / wg_per_matrix;
++    if (batch_idx >= params.bs02 * params.broadcast2 * params.bs03 * params.broadcast3) {
++        return;
++    }
++    let wg_in_batch = wg_linear % wg_per_matrix;
++    let m0 = (wg_in_batch % wg_m_count) * 64u;
++    let n0 = (wg_in_batch / wg_m_count) * 64u;
++
++    let dst3_idx = batch_idx / (params.bs02 * params.broadcast2);
++    let dst2_idx = batch_idx % (params.bs02 * params.broadcast2);
++    let base0 = params.offset_src0 + (dst3_idx / params.broadcast3) * params.stride_03 + (dst2_idx / params.broadcast2) * params.stride_02;
++    let base1 = params.offset_src1 + dst3_idx * params.stride_13 + dst2_idx * params.stride_12;
++
++    // loader roles: four rows (m or n) per thread, a slice of k
++    let rg = t % 16u;
++    let kc = t / 16u;
++    // compute roles: an 8x8 block of the 64x64 tile
++    let lm = t % 8u;
++    let ln = t / 8u;
++
++    var c00 = vec4<f32>(); var c01 = vec4<f32>(); var c02 = vec4<f32>(); var c03 = vec4<f32>();
++    var c04 = vec4<f32>(); var c05 = vec4<f32>(); var c06 = vec4<f32>(); var c07 = vec4<f32>();
++    var c10 = vec4<f32>(); var c11 = vec4<f32>(); var c12 = vec4<f32>(); var c13 = vec4<f32>();
++    var c14 = vec4<f32>(); var c15 = vec4<f32>(); var c16 = vec4<f32>(); var c17 = vec4<f32>();
++
++    for (var k0 = 0u; k0 < params.k; k0 += TILE_K) {
++        {
++            let k8 = k0 + kc * 8u;
++            var lo: array<vec4<f32>, 4>;
++            var hi: array<vec4<f32>, 4>;
++            for (var r = 0u; r < 4u; r++) {
++                let gm = m0 + rg * 4u + r;
++                var l = vec4<f32>();
++                var h = vec4<f32>();
++                if (gm < params.m && k8 < params.k) {
++                    load_a8(base0, gm, k8, &l, &h);
++                }
++                lo[r] = l;
++                hi[r] = h;
++            }
++            for (var j = 0u; j < 4u; j++) {
++                shmem_a[(kc * 8u + j) * 16u + rg] = vec4<f16>(vec4<f32>(lo[0][j], lo[1][j], lo[2][j], lo[3][j]));
++                shmem_a[(kc * 8u + 4u + j) * 16u + rg] = vec4<f16>(vec4<f32>(hi[0][j], hi[1][j], hi[2][j], hi[3][j]));
++            }
++        }
++        for (var kq = kc * 2u; kq < kc * 2u + 2u; kq++) {
++            let gk = k0 + kq * 4u;
++            var v: array<vec4<f32>, 4>;
++            for (var r = 0u; r < 4u; r++) {
++                let gn = n0 + rg * 4u + r;
++                var x = vec4<f32>();
++                if (gn < params.n && gk < params.k) {
++                    x = src1[(base1 + gn * params.stride_11 + gk) / 4u];
++                }
++                v[r] = x;
++            }
++            for (var j = 0u; j < 4u; j++) {
++                shmem_b[(kq * 4u + j) * 16u + rg] = vec4<f16>(vec4<f32>(v[0][j], v[1][j], v[2][j], v[3][j]));
++            }
++        }
++        workgroupBarrier();
++
++        for (var kk = 0u; kk < TILE_K; kk++) {
++            let a0 = vec4<f32>(shmem_a[kk * 16u + lm * 2u]);
++            let a1 = vec4<f32>(shmem_a[kk * 16u + lm * 2u + 1u]);
++            let b0 = vec4<f32>(shmem_b[kk * 16u + ln * 2u]);
++            let b1 = vec4<f32>(shmem_b[kk * 16u + ln * 2u + 1u]);
++            c00 += a0 * b0.x; c01 += a0 * b0.y; c02 += a0 * b0.z; c03 += a0 * b0.w;
++            c04 += a0 * b1.x; c05 += a0 * b1.y; c06 += a0 * b1.z; c07 += a0 * b1.w;
++            c10 += a1 * b0.x; c11 += a1 * b0.y; c12 += a1 * b0.z; c13 += a1 * b0.w;
++            c14 += a1 * b1.x; c15 += a1 * b1.y; c16 += a1 * b1.z; c17 += a1 * b1.w;
++        }
++        workgroupBarrier();
++    }
++
++    let dst_base = params.offset_dst + dst3_idx * (params.m * params.n * params.bs02 * params.broadcast2) + dst2_idx * (params.m * params.n);
++    let gm = m0 + lm * 8u;
++    let gn = n0 + ln * 8u;
++    let blocks = array<vec4<f32>, 16>(c00, c01, c02, c03, c04, c05, c06, c07, c10, c11, c12, c13, c14, c15, c16, c17);
++    for (var j = 0u; j < 8u; j++) {
++        let n = gn + j;
++        if (n < params.n) {
++            for (var h = 0u; h < 2u; h++) {
++                let v = blocks[h * 8u + j];
++                for (var r = 0u; r < 4u; r++) {
++                    let m = gm + h * 4u + r;
++                    if (m < params.m) {
++                        dst[dst_base + n * params.m + m] = v[r];
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec_lanes.wgsl b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec_lanes.wgsl
+new file mode 100644
+index 0000000..fd3bc72
+--- /dev/null
++++ b/ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_vec_lanes.wgsl
+@@ -0,0 +1,104 @@
++enable f16;
++
++// Mat-vec (one src1 column) for a Q8_0 or F16 src0 and an F32 src1: 64 threads cover eight
++// rows, eight lanes per row striding along k with vec4 loads, then a fixed eight-way sum.
++
++struct MulMatParams {
++    offset_src0: u32,
++    offset_src1: u32,
++    offset_dst: u32,
++    m: u32,
++    n: u32,
++    k: u32,
++    stride_01: u32,
++    stride_11: u32,
++    stride_02: u32,
++    stride_12: u32,
++    stride_03: u32,
++    stride_13: u32,
++    bs02: u32,
++    bs03: u32,
++    broadcast2: u32,
++    broadcast3: u32
++};
++
++@group(0) @binding(0) var<storage, read_write> src0: array<u32>;
++@group(0) @binding(1) var<storage, read_write> src1: array<vec4<f32>>;
++@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
++@group(0) @binding(3) var<uniform> params: MulMatParams;
++
++var<workgroup> partial: array<f32, 64>;
++
++#ifdef SRC0_Q8_0
++fn q8_word(w: u32) -> vec4<f32> {
++    return vec4<f32>(vec4<i32>(i32(w << 24u) >> 24u, i32(w << 16u) >> 24u, i32(w << 8u) >> 24u, i32(w) >> 24u));
++}
++
++fn row_dot(row_base: u32, x_base: u32, lane: u32) -> f32 {
++    var acc = 0.0;
++    let nb = params.k / 32u;
++    for (var b = lane; b < nb; b += 8u) {
++        let blk = (row_base + b) * 34u;
++        let d = unpack2x16float(src0[blk / 4u] >> ((blk % 4u) * 8u)).x;
++        let qb = blk + 2u;
++        let qs = (qb % 4u) * 8u;
++        let qw = qb / 4u;
++        let xb = x_base + b * 8u;
++        var s = 0.0;
++        var prev = src0[qw];
++        for (var j = 0u; j < 8u; j++) {
++            let next = src0[qw + j + 1u];
++            let w = select((prev >> qs) | (next << (32u - qs)), prev, qs == 0u);
++            s += dot(q8_word(w), src1[xb + j]);
++            prev = next;
++        }
++        acc += s * d;
++    }
++    return acc;
++}
++#endif
++
++#ifdef SRC0_F16
++fn row_dot(row_base: u32, x_base: u32, lane: u32) -> f32 {
++    var acc = 0.0;
++    let nc = params.k / 4u;
++    for (var c = lane; c < nc; c += 8u) {
++        let w = row_base / 2u + c * 2u;
++        acc += dot(vec4<f32>(unpack2x16float(src0[w]), unpack2x16float(src0[w + 1u])), src1[x_base + c]);
++    }
++    return acc;
++}
++#endif
++
++@compute @workgroup_size(64)
++fn main(@builtin(workgroup_id) wg_id: vec3<u32>,
++        @builtin(local_invocation_index) t: u32,
++        @builtin(num_workgroups) num_wg: vec3<u32>) {
++    let row_groups = (params.m + 7u) / 8u;
++    let wg_linear = wg_id.y * num_wg.x + wg_id.x;
++    let batch_idx = wg_linear / row_groups;
++    if (batch_idx >= params.bs02 * params.broadcast2 * params.bs03 * params.broadcast3) {
++        return;
++    }
++    let dst3_idx = batch_idx / (params.bs02 * params.broadcast2);
++    let dst2_idx = batch_idx % (params.bs02 * params.broadcast2);
++    let base0 = params.offset_src0 + (dst3_idx / params.broadcast3) * params.stride_03 + (dst2_idx / params.broadcast2) * params.stride_02;
++    let base1 = params.offset_src1 + dst3_idx * params.stride_13 + dst2_idx * params.stride_12;
++
++    let row = (wg_linear % row_groups) * 8u + t / 8u;
++    let lane = t % 8u;
++
++    var acc = 0.0;
++    if (row < params.m) {
++        acc = row_dot(base0 + row * params.stride_01, base1 / 4u, lane);
++    }
++    partial[t] = acc;
++    workgroupBarrier();
++
++    if (lane == 0u && row < params.m) {
++        let p = t;
++        let total = (partial[p] + partial[p + 1u]) + (partial[p + 2u] + partial[p + 3u]) +
++                    (partial[p + 4u] + partial[p + 5u]) + (partial[p + 6u] + partial[p + 7u]);
++        dst[params.offset_dst + dst3_idx * (params.m * params.bs02 * params.broadcast2) + dst2_idx * params.m + row] = total;
++    }
++}

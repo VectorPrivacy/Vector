@@ -1,0 +1,37 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c8a0846..cde94f8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -57,10 +57,14 @@ if (EMSCRIPTEN)
+ 
+     option(WHISPER_WASM_SINGLE_FILE "whisper: embed WASM inside the generated whisper.js" ON)
+ 
++    option(WHISPER_WASM_PTHREAD "whisper: build with pthreads (needs cross-origin isolation)" ON)
++
+     # TODO: without these, we get the following error:
+     #       wasm-ld: error: --shared-memory is disallowed by whisper.cpp.o because it was not compiled with 'atomics' or 'bulk-memory' features.
+-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -pthread")
+-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
++    if (WHISPER_WASM_PTHREAD)
++        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -pthread")
++        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
++    endif()
+ 
+     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -s TOTAL_STACK=5242880")
+     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -s TOTAL_STACK=5242880")
+diff --git a/ggml/src/ggml-webgpu/CMakeLists.txt b/ggml/src/ggml-webgpu/CMakeLists.txt
+index 2eacca7..dae9c43 100644
+--- a/ggml/src/ggml-webgpu/CMakeLists.txt
++++ b/ggml/src/ggml-webgpu/CMakeLists.txt
+@@ -62,8 +62,9 @@ if(EMSCRIPTEN)
+         target_compile_options(ggml-webgpu PRIVATE "-fwasm-exceptions")
+         target_link_options(ggml-webgpu INTERFACE "-sJSPI" "-fwasm-exceptions")
+     else()
+-        target_compile_options(ggml-webgpu PRIVATE "-fexceptions")
+-        target_link_options(ggml-webgpu INTERFACE "-sASYNCIFY" "-exceptions")
++        # No try/catch in the backend: JS exceptions would route every call that may throw
++        # through an invoke_ trampoline, which is slow and hides those calls from Asyncify.
++        target_link_options(ggml-webgpu INTERFACE "-sASYNCIFY")
+     endif()
+ else()
+     find_package(Dawn REQUIRED)

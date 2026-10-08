@@ -44,6 +44,25 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   buffer and rate ladder are the shared Rust. Video is the desktop's video worker over a
   MessagePort. On WebKit the call plays through a media element, since Safari distorts Web
   Audio's own output while the microphone is open.
+- **`web/whisper.js`** + **`web/whisper/`**: voice transcription under desktop's command
+  names. The page fetches the voice message and hands it to a worker of its own (a PCM16 WAV
+  as bytes; anything else decoded by the browser first), started on first use and stopped
+  after three idle minutes; models download in a second worker, since the CPU builds hold
+  their thread for a whole transcription. The worker runs whisper.cpp built twice by
+  `scripts/whisper-web/build.sh` (pinned whisper.cpp, emsdk and Dawn, plus the patches beside
+  it; `web/whisper/BUILD.txt` records the inputs): `whisper-gpu` keeps the model on the GPU
+  through WebGPU, which needs `shader-f16`, and streams it there from OPFS in chunks;
+  `whisper-cpu` runs on threads, for a cross-origin isolated page without WebGPU, with the
+  model in wasm memory. A page that has neither uses the GPU build's single-threaded CPU
+  path. The patches add vec4 mat-mat and mat-vec kernels for compilers without subgroups
+  (Safari's, where ggml's own run several times slower) and cache bind groups, drop
+  exceptions and narrow Asyncify to the calls that wait on the GPU, and reuse the
+  language-detection encode: with an ACFT model, language is detected on the clip's own
+  length rather than a padded 30 s window, which agreed with the full window on 15 of 16
+  languages tried. `audio.js`, `results.js` and `download.js` are pure and tested by
+  `node --test scripts/test-web-whisper.mjs`; `scripts/whisper-web/test-kernels.sh` builds
+  ggml's `test-backend-ops` against the patched ggml as a page, to run in the browsers
+  themselves (Safari above all).
 - **`web/signer.js`**: the page half of NIP-07. Extensions inject `window.nostr` into pages
   only, so core's signer sends each request out as a `nip07_request` event and this answers
   it through `nip07_reply`.
@@ -60,7 +79,8 @@ receive, image compression and metadata stripping, voice messages, audio playbac
 profiles and avatars (edit, upload, blocks, nicknames), Concord v2 communities (create,
 invite, join, channels, history, live messages, reactions, roles, moderation, pins,
 images), relays and Blossom settings, notification levels and mutes, cross-device sync of
-pins, blocks, mutes, nicknames and the community list, browser notifications, emoji and
+pins, blocks, mutes, nicknames and the community list, voice transcription and translation
+(on-device Whisper), browser notifications, emoji and
 GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji,
 mini apps (from chats, history, `.xdc` links and the Nexus marketplace; per-app storage;
 permissions; realtime multiplayer over Iroh), voice and video calls with screen sharing
@@ -69,7 +89,7 @@ permissions; realtime multiplayer over Iroh), voice and video calls with screen 
 ## Not yet
 
 Notifications while the page is closed (no push), notification sounds, sending folders,
-screen-share audio in calls, voice transcription, video compression. A call ends when a
+screen-share audio in calls, video compression. A call ends when a
 phone locks or backgrounds the page.
 
 Not planned: the PIVX wallet, Nexus publishing, in-app Tor (use Tor Browser), NIP-55
@@ -99,3 +119,9 @@ message; serving apps from a separate registrable domain would let Firefox in.
 
 The media proxy (Magnitude) admits a browser by its `Origin`, since a page cannot set the
 `Vector/…` User-Agent desktop sends: a new Vector Web origin must be added to its `origins`.
+
+Voice transcription downloads its models from Vector Web's own origin, at
+`/models/whisper/base_acft_q8_0.bin` and `/models/whisper/small_acft_q8_0.bin`: FUTO's ACFT
+Whisper models (Apache-2.0, the ones Android uses), whose CDN sends no CORS headers. Serve them
+with `Content-Length` and Range support; `web/whisper.js` holds each file's exact size and
+refuses any other.

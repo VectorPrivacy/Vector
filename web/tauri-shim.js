@@ -100,6 +100,7 @@
         worker.terminate();
         worker = null;
         ready = false;
+        dispatchEvent(new Event('vector-web-step-aside'));
         holdLock?.();
         overlay('Vector is open in another tab.', 'Use here', () => { takeOver(); });
     };
@@ -171,6 +172,8 @@
             is_mobile: matchMedia('(pointer: coarse)').matches,
             multi_account: features.storage !== 'memory',
             mini_apps: hasServiceWorker(),
+            // Voice models are kept in OPFS, which only persistent storage has.
+            transcription: features.storage === 'persistent',
         };
     });
 

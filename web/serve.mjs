@@ -58,9 +58,13 @@ createServer(async (req, res) => {
     if (app) return serveMiniAppOrigin(req, res, app[1]);
     try {
         const path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^(\.\.[/\\])+/, '');
-        let file = join(ROOT, path);
+        // Voice models live outside the build, as on the server: WHISPER_MODELS=<dir>.
+        const models = process.env.WHISPER_MODELS && path.startsWith('/models/whisper/');
+        let file = models ? join(process.env.WHISPER_MODELS, path.slice('/models/whisper/'.length)) : join(ROOT, path);
         if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
-        const body = await readFile(file);
+        let body = await readFile(file);
+        let status = 200;
+        const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
         const headers = {
             'Content-Type': TYPES[extname(file)] || 'application/octet-stream',
             'Cache-Control': 'no-cache',
@@ -75,7 +79,15 @@ createServer(async (req, res) => {
         if (extname(file) === '.html') {
             headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host}`;
         }
-        res.writeHead(200, headers);
+        if (range) {
+            const start = Number(range[1]);
+            const end = range[2] ? Number(range[2]) : body.length - 1;
+            headers['Content-Range'] = `bytes ${start}-${end}/${body.length}`;
+            body = body.subarray(start, end + 1);
+            status = 206;
+        }
+        headers['Content-Length'] = body.length;
+        res.writeHead(status, headers);
         res.end(body);
     } catch {
         res.writeHead(404).end('Not found');

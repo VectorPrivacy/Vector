@@ -34,7 +34,9 @@ await buildSvelte({ dev: !release });
 
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
-for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'push.js', 'signer.js', 'miniapps.js', 'calls.js', 'calls-media.js', 'calls-worklet.js', 'worker.js', 'storage.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'push.js', 'whisper.js', 'signer.js', 'miniapps.js', 'calls.js', 'calls-media.js', 'calls-worklet.js', 'worker.js', 'storage.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+// Whisper's worker and its two builds (scripts/whisper-web/build.sh); the models are served apart.
+cpSync(join(ROOT, 'web', 'whisper'), join(OUT, 'web', 'whisper'), { recursive: true });
 cpSync(join(ROOT, 'src-tauri', 'src', 'calls', 'ended.wav'), join(OUT, 'web', 'ended.wav'));
 // Icons and the link-preview card, at the root where browsers and crawlers look.
 cpSync(join(ROOT, 'web', 'meta'), OUT, { recursive: true });
@@ -124,7 +126,7 @@ writeFileSync(indexPath, html
     // Link previews (Discord's embed stripe) take the first theme-color; media="print"
     // keeps it off the browser chrome, which falls through to the page's dark one.
     .replace('<meta name="theme-color"', '<meta name="theme-color" content="#59fcb3" media="print">\n    <meta name="theme-color"')
-    .replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/push.js"></script>\n    <script src="/web/calls.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
+    .replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/push.js"></script>\n    <script src="/web/whisper.js"></script>\n    <script src="/web/calls.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
     .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n  '));
 

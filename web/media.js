@@ -195,8 +195,6 @@
         return backend('web_send_voice', { receiver, repliedTo: repliedTo || '', filePath: voice.path });
     });
 
-    register('transcribe', () => { throw new Error('Transcription is not available on Vector Web'); });
-
     // --- Attachment actions ------------------------------------------------
     const fileName = (path) => path.split('/').pop() || 'file';
 
