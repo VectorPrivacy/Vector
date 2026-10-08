@@ -218,7 +218,85 @@ function cmpTokenize(src, opts) {
         last = to;
     }
     if (last < src.length) out.push({ kind: 'text', from: last, to: src.length });
-    return out;
+    return cmpApplyAnsi(src, out);
+}
+
+const CMP_ANSI_OPEN = /^ {0,3}```ansi(?:[ \t][^\n]*)?$/gim;
+const CMP_FENCE_CLOSE = /^ {0,3}```[ \t]*$/gm;
+
+/**
+ * ```ansi blocks, open or still being typed: fences, coloured text runs, and each
+ * escape sequence as its own token. Colours fold through the same SGR reader the
+ * message renderer uses, so the preview can't disagree with what gets sent.
+ */
+function cmpAnsiRegions(src) {
+    const regions = [];
+    CMP_ANSI_OPEN.lastIndex = 0;
+    let m;
+    while ((m = CMP_ANSI_OPEN.exec(src)) !== null) {
+        const openTo = m.index + m[0].length;
+        CMP_FENCE_CLOSE.lastIndex = Math.min(openTo + 1, src.length);
+        const close = openTo < src.length ? CMP_FENCE_CLOSE.exec(src) : null;
+        const bodyTo = close ? close.index : src.length;
+        const end = close ? close.index + close[0].length : src.length;
+        const tokens = [{ kind: 'fence', from: m.index, to: openTo }];
+        const st = { b: false, i: false, u: false, s: false, fg: null, bg: null };
+        const body = src.slice(openTo, bodyTo);
+        const text = (from, to) => {
+            if (to > from) tokens.push({ kind: 'ansitext', from, to, style: { ...st } });
+        };
+        let last = 0;
+        for (const e of body.matchAll(ANSI_ESCAPE)) {
+            text(openTo + last, openTo + e.index);
+            last = e.index + e[0].length;
+            tokens.push({ kind: 'ansicode', from: openTo + e.index, to: openTo + last });
+            if (e[2] === 'm' && /^[0-9;]*$/.test(e[1])) applyAnsiSgr(st, e[1]);
+        }
+        text(openTo + last, bodyTo);
+        if (close) tokens.push({ kind: 'fence', from: close.index, to: end });
+        regions.push({ from: m.index, to: end, tokens });
+        if (end >= src.length) break;
+        CMP_ANSI_OPEN.lastIndex = Math.max(end, m.index + 1);
+    }
+    return regions;
+}
+
+/** Fold ```ansi blocks into the token run, and hide stray escape sequences anywhere else. */
+function cmpApplyAnsi(src, tokens) {
+    if (!src.includes('\x1b') && !/```ansi/i.test(src)) return tokens;
+    const regions = cmpAnsiRegions(src);
+    const out = [];
+    for (const t of tokens) {
+        let pieces = [t];
+        for (const g of regions) {
+            if (g.to <= t.from || g.from >= t.to) continue;
+            pieces = pieces.flatMap((p) => {
+                if (g.to <= p.from || g.from >= p.to) return [p];
+                const keep = [];
+                if (p.from < g.from) keep.push({ kind: 'text', from: p.from, to: g.from });
+                if (p.to > g.to) keep.push({ kind: 'text', from: g.to, to: p.to });
+                return keep;
+            });
+        }
+        for (const p of pieces) {
+            const raw = src.slice(p.from, p.to);
+            if (p.kind !== 'text' || !raw.includes('\x1b')) { out.push(p); continue; }
+            let last = 0;
+            for (const e of raw.matchAll(ANSI_ESCAPE)) {
+                if (e.index > last) out.push({ kind: 'text', from: p.from + last, to: p.from + e.index });
+                last = e.index + e[0].length;
+                out.push({ kind: 'ansicode', from: p.from + e.index, to: p.from + last });
+            }
+            if (last < raw.length) out.push({ kind: 'text', from: p.from + last, to: p.to });
+        }
+    }
+    if (!regions.length) return out;
+    for (const g of regions) out.push(...g.tokens);
+    return out.sort((a, b) => a.from - b.from);
+}
+
+function cmpAnsiKey(st) {
+    return `${+st.b}${+st.i}${+st.u}${+st.s}/${st.fg || ''}/${st.bg || ''}`;
 }
 
 /**
@@ -235,7 +313,8 @@ function cmpSignature(tokens, src) {
     let s = '';
     for (const t of tokens) {
         s += t.kind;
-        if (t.kind === 'emoji' || t.kind === 'twemoji') s += '(' + src.slice(t.from, t.to) + ')';
+        if (t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode') s += '(' + src.slice(t.from, t.to) + ')';
+        if (t.kind === 'ansitext') s += cmpAnsiKey(t.style);
         // Levels share a kind, but `#` -> `##` must still repaint the mark.
         if (t.kind === 'header') s += t.mark;
         s += '|';
@@ -353,6 +432,37 @@ function createRichComposer(host, opts = {}) {
                     // renderer's job; here the point is that the line WILL format.
                     el.appendChild(span('cmp-mark', raw));
                     break;
+                case 'fence':
+                    el.appendChild(span('cmp-mark', raw));
+                    break;
+                case 'ansitext': {
+                    // Styles take only what applyAnsiSgr built from parsed numbers.
+                    const run = document.createElement('span');
+                    run.className = 'cmp-ansi';
+                    const st = t.style;
+                    if (st.b) run.style.fontWeight = '700';
+                    if (st.i) run.style.fontStyle = 'italic';
+                    if (st.u || st.s) run.style.textDecoration = [st.u && 'underline', st.s && 'line-through'].filter(Boolean).join(' ');
+                    if (st.fg) run.style.color = st.fg;
+                    if (st.bg) run.style.backgroundColor = st.bg;
+                    raw.split('\n').forEach((p, i) => {
+                        if (i) run.appendChild(document.createElement('br'));
+                        if (p) run.appendChild(document.createTextNode(p));
+                    });
+                    el.appendChild(run);
+                    break;
+                }
+                case 'ansicode': {
+                    // An escape sequence is styling, not text: an invisible atom, a bare
+                    // <img> like the emoji widgets so IMEs read it as one object.
+                    const img = document.createElement('img');
+                    img.className = 'cmp-ansi-code';
+                    img.dataset.src = raw;
+                    img.alt = '';
+                    img.draggable = false;
+                    el.appendChild(img);
+                    break;
+                }
                 case 'mention':
                     // Editable text, NOT an atomic widget: the caret walks through it
                     // normally and a broken pill degrades to plain text instead of
@@ -576,7 +686,7 @@ function createRichComposer(host, opts = {}) {
                 case 'header': case 'subtext':
                     expect.push(raw.slice(0, t.mark));
                     break;
-                case 'listmark':
+                case 'listmark': case 'fence':
                     expect.push(raw);
                     break;
             }
@@ -589,13 +699,26 @@ function createRichComposer(host, opts = {}) {
         return false;
     }
 
+    /**
+     * True when typed text sits outside its ```ansi run. A caret at the edge of a
+     * run after an escape code inserts beside the span, not in it, and the
+     * letter would show uncoloured until something else repainted.
+     */
+    function ansiDrifted(tokens) {
+        let expect = '';
+        for (const t of tokens) if (t.kind === 'ansitext') expect += src.slice(t.from, t.to).split('\n').join('');
+        let shown = '';
+        for (const run of el.querySelectorAll('.cmp-ansi')) shown += run.textContent;
+        return shown !== expect;
+    }
+
     function syncFromDom() {
         const next = readDom();
         src = next;
         const tokens = cmpTokenize(src, opts);
         const sig = cmpSignature(tokens, src);
         if (sig === signature) {
-            if (composing || !marksDrifted(tokens)) return;
+            if (composing || (!marksDrifted(tokens) && !ansiDrifted(tokens))) return;
         } else {
             signature = sig;
         }
@@ -639,7 +762,7 @@ function createRichComposer(host, opts = {}) {
         const sel = selectionRange();
         if (!sel || sel.start !== sel.end) return false;
         const caret = sel.start;
-        const atomic = (t) => t.kind === 'emoji' || t.kind === 'twemoji';
+        const atomic = (t) => t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode';
         const tokens = cmpTokenize(src, opts);
         const splice = (from, to) => {
             src = src.slice(0, from) + src.slice(to);
@@ -647,6 +770,19 @@ function createRichComposer(host, opts = {}) {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             return true;
         };
+        // Escape codes are invisible, so a delete passes over them to the nearest
+        // character you can see, and the colour it belongs to stays.
+        const codeAt = (pos) => tokens.find(t => t.kind === 'ansicode' && (backward ? t.to === pos : t.from === pos));
+        if (codeAt(caret)) {
+            let p = caret;
+            for (let c = codeAt(p); c; c = codeAt(p)) p = backward ? c.from : c.to;
+            const widget = tokens.find(t => atomic(t) && (backward ? t.to === p : t.from === p));
+            if (widget) return splice(widget.from, widget.to);
+            const cp = backward ? src.codePointAt(p - 2) : src.codePointAt(p);
+            const w = cp > 0xFFFF && (backward ? p >= 2 : true) ? 2 : 1;
+            if (backward ? p < 1 : p >= src.length) return true;
+            return backward ? splice(p - w, p) : splice(p, p + w);
+        }
         if (backward) {
             const hit = tokens.find(t => atomic(t) && t.to === caret);
             if (hit) return splice(hit.from, hit.to);
@@ -707,15 +843,21 @@ function createRichComposer(host, opts = {}) {
         e.preventDefault();
         const dir = e.key === 'ArrowRight' ? 'right' : 'left';
         // Bounded: a widget contributes at most two sentinels, and standing still
-        // means the caret is against an edge.
-        for (let i = 0; i < 4; i++) {
+        // means the caret is against an edge. Invisible escape codes are crossed
+        // too, so a step always lands past one visible character.
+        let from = before;
+        for (let i = 0; i < 64; i++) {
             const r = sel.getRangeAt(0);
             const node = r.startContainer;
             const off = r.startOffset;
             sel.modify('move', dir, 'character');
             const moved = sel.getRangeAt(0);
             if (moved.startContainer === node && moved.startOffset === off) break;
-            if (caretOffset() !== before) break;
+            const now = caretOffset();
+            if (now === from) continue;
+            const crossed = src.slice(Math.min(now, from), Math.max(now, from));
+            if (!crossed.includes('\x1b') || stripAnsiCodes(crossed) !== '') break;
+            from = now;
         }
     });
 

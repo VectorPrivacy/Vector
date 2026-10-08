@@ -117,13 +117,15 @@ function initializeMarked() {
         return `<code>${encodeAttr(code)}</code>`;
     };
 
-    renderer.code = function(code, infostring, escaped) {
-        const raw = toPlainString(code);
-        const info = toPlainString(infostring).trim();
+    renderer.code = function(token) {
+        const raw = toPlainString(token);
+        const info = toPlainString(token?.lang).trim();
         const lang = info.split(/\s+/)[0]?.toLowerCase() || '';
 
-        let highlighted = escaped ? raw : encodeAttr(raw);
-        if (raw && typeof hljs !== 'undefined') {
+        let highlighted = encodeAttr(raw);
+        // Painted from data-raw-code after sanitising (renderAnsiInto); plain text until then.
+        if (lang === 'ansi') highlighted = encodeAttr(stripAnsiCodes(raw));
+        else if (raw && typeof hljs !== 'undefined') {
             try {
                 if (lang && hljs.getLanguage(lang)) {
                     highlighted = hljs.highlight(raw, {
@@ -244,6 +246,90 @@ function initializeMarked() {
     };
 
     marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, spoilerExtension, subtextExtension] });
+}
+
+// Discord's dark-theme palette for the eight classic colours.
+const ANSI_PALETTE = ['#000000', '#ec6361', '#45a366', '#ce8100', '#4591ec', '#f549c9', '#049faa', '#b6b7bc'];
+const ANSI_CUBE = [0, 95, 135, 175, 215, 255];
+// A CSI escape, or a lone ESC with the byte it introduces.
+const ANSI_ESCAPE = /\x1b(?:\[([\x20-\x3f]*)([\x40-\x7e])?|[\x40-\x5f])?/g;
+
+function stripAnsiCodes(text) {
+    return text.includes('\x1b') ? text.replace(ANSI_ESCAPE, '') : text;
+}
+
+function ansiColor256(n) {
+    if (n < 16) return ANSI_PALETTE[n % 8];
+    if (n < 232) {
+        const i = n - 16;
+        return `rgb(${ANSI_CUBE[Math.floor(i / 36)]}, ${ANSI_CUBE[Math.floor(i / 6) % 6]}, ${ANSI_CUBE[i % 6]})`;
+    }
+    const v = 8 + (n - 232) * 10;
+    return `rgb(${v}, ${v}, ${v})`;
+}
+
+/** Fold one SGR parameter list into `st`. 2 (dim) and 7 (inverse) do nothing in Discord, and generators pad with them. */
+function applyAnsiSgr(st, params) {
+    const p = params === '' ? [0] : params.split(';').map((v) => (v === '' ? 0 : Number(v)));
+    for (let i = 0; i < p.length; i++) {
+        const n = p[i];
+        if (n === 0) Object.assign(st, { b: false, i: false, u: false, s: false, fg: null, bg: null });
+        else if (n === 1) st.b = true;
+        else if (n === 22) st.b = false;
+        else if (n === 3) st.i = true;
+        else if (n === 23) st.i = false;
+        else if (n === 4) st.u = true;
+        else if (n === 24) st.u = false;
+        else if (n === 9) st.s = true;
+        else if (n === 29) st.s = false;
+        else if (n >= 30 && n <= 37) st.fg = ANSI_PALETTE[n - 30];
+        else if (n >= 90 && n <= 97) st.fg = ANSI_PALETTE[n - 90];
+        else if (n === 39) st.fg = null;
+        else if (n >= 40 && n <= 47) st.bg = ANSI_PALETTE[n - 40];
+        else if (n >= 100 && n <= 107) st.bg = ANSI_PALETTE[n - 100];
+        else if (n === 49) st.bg = null;
+        else if (n === 38 || n === 48) {
+            let color;
+            if (p[i + 1] === 2 && i + 4 < p.length) {
+                const [r, g, b] = p.slice(i + 2, i + 5).map((v) => Math.min(255, v | 0));
+                color = `rgb(${r}, ${g}, ${b})`;
+                i += 4;
+            } else if (p[i + 1] === 5 && i + 2 < p.length) {
+                color = ansiColor256(Math.min(255, p[i + 2] | 0));
+                i += 2;
+            } else break;
+            if (n === 38) st.fg = color; else st.bg = color;
+        }
+    }
+}
+
+/** Paint an ```ansi block's text into `code` as nodes: a style only ever takes parsed numbers. */
+function renderAnsiInto(code, raw) {
+    const st = { b: false, i: false, u: false, s: false, fg: null, bg: null };
+    const frag = document.createDocumentFragment();
+    const emit = (text) => {
+        if (!text) return;
+        if (!st.b && !st.i && !st.u && !st.s && !st.fg && !st.bg) {
+            frag.appendChild(document.createTextNode(text));
+            return;
+        }
+        const span = document.createElement('span');
+        span.textContent = text;
+        if (st.b) span.style.fontWeight = '700';
+        if (st.i) span.style.fontStyle = 'italic';
+        if (st.u || st.s) span.style.textDecoration = [st.u && 'underline', st.s && 'line-through'].filter(Boolean).join(' ');
+        if (st.fg) span.style.color = st.fg;
+        if (st.bg) span.style.backgroundColor = st.bg;
+        frag.appendChild(span);
+    };
+    let last = 0;
+    for (const m of raw.matchAll(ANSI_ESCAPE)) {
+        emit(raw.slice(last, m.index));
+        last = m.index + m[0].length;
+        if (m[2] === 'm' && /^[0-9;]*$/.test(m[1])) applyAnsiSgr(st, m[1]);
+    }
+    emit(raw.slice(last));
+    code.replaceChildren(frag);
 }
 
 /**
@@ -602,6 +688,8 @@ function addCopyButtonsToCodeBlocks(html) {
     codeWrappers.forEach((wrapper) => {
         const rawCode = wrapper.getAttribute('data-raw-code');
         if (!rawCode) return;
+        const ansi = wrapper.querySelector('code.language-ansi');
+        if (ansi) renderAnsiInto(ansi, rawCode);
         
         // Create the copy button (safely, outside of user-controlled content)
         const button = document.createElement('button');
@@ -683,7 +771,7 @@ function stripMarkdownToPlain(content) {
     t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, '');          // headers
     t = t.replace(/^[ \t]*>[ \t]?/gm, '');               // blockquotes
     t = t.replace(/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, ''); // horizontal rules
-    return t.trim();
+    return stripAnsiCodes(t).trim();
 }
 
 /**

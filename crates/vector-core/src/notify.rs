@@ -629,6 +629,42 @@ fn display_name(p: &crate::profile::Profile) -> Option<&str> {
     [p.nickname(), &p.name, &p.display_name].into_iter().find(|n| !n.is_empty())
 }
 
+/// `content` without terminal escape sequences: an ```ansi block's colour codes are
+/// styling, and a notification has no way to show them.
+pub fn strip_ansi(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: parameter and intermediate bytes, ended by one final byte.
+            Some('[') => {
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    if !('\x20'..='\x3f').contains(&n) {
+                        if ('\x40'..='\x7e').contains(&n) {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            Some(n) if ('\x40'..='\x5f').contains(n) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// `content` with each mention (`@npub1…`, `nostr:npub1…`, a bare npub, or the same
 /// forms of an nprofile) read as `@name`. An unknown npub stays as written, except while streaming, where it and
 /// anyone hidden read as `@•••••`.
@@ -748,6 +784,15 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_ansi_drops_escape_sequences() {
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("\x1b[2;31mred\x1b[0m and \x1b[38;2;88;101;242mblurple\x1b[0m"), "red and blurple");
+        assert_eq!(strip_ansi("a\x1b[1;4mb\x1b[mc"), "abc");
+        assert_eq!(strip_ansi("lone \x1b and \x1bM up, cut \x1b[31"), "lone  and  up, cut ");
+        assert_eq!(strip_ansi("\x1b[31m\u{1F600}\x1b[\u{e9}"), "\u{1F600}\u{e9}");
+    }
 
     fn dm() -> Preview {
         Preview {

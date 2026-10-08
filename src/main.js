@@ -468,11 +468,14 @@ function contentToPreviewText(content) {
     // Strip block-level markdown: headers, blockquotes, code fences, horizontal rules
     text = text.replace(/^#{1,6}\s+/gm, '');
     text = text.replace(/^>\s?/gm, '');
+    // An ```ansi block is coloured prose, so its words stay in the preview.
+    text = text.replace(/^```ansi(?:[ \t][^\n]*)?\n([\s\S]*?)^```/gim, (_, inner) => stripAnsiCodes(inner));
     text = text.replace(/^```[\s\S]*?^```/gm, '');
     text = text.replace(/^---+$/gm, '');
     text = text.replace(/^\*\*\*+$/gm, '');
     // Strip inline code backticks (keep inner text)
     text = text.replace(/`([^`]*)`/g, '$1');
+    text = stripAnsiCodes(text);
     // Collapse whitespace and trim
     text = text.replace(/\s+/g, ' ').trim();
     return text;

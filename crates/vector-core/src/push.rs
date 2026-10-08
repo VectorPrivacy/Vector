@@ -395,7 +395,7 @@ fn notice_for(rumor: &UnsignedEvent) -> Option<Notice> {
 /// Plain text for a preview: markup and line breaks flattened, mentions left for the
 /// receiver's own names. The notice is cut to fit later.
 fn preview_text(content: &str) -> String {
-    let flat: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat: String = crate::notify::strip_ansi(content).split_whitespace().collect::<Vec<_>>().join(" ");
     flat.chars().take(600).collect()
 }
 

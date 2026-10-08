@@ -45,7 +45,7 @@ async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_la
             .get_chat(chat_id)
             .is_none_or(|c| vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All);
         let sender = vector_core::notify::sender(&state, &gate, author.unwrap_or_default(), "New Message");
-        (rings, sender, vector_core::notify::resolve_mentions(content, &state, &gate))
+        (rings, sender, vector_core::notify::resolve_mentions(&vector_core::notify::strip_ansi(content), &state, &gate))
     };
     if !rings {
         return;

@@ -109,7 +109,7 @@ impl NotificationData {
 /// to clean content *after* mention resolution but *before* passing to OS notification APIs.
 pub fn strip_content_for_preview(text: &str) -> String {
     // Replace <br> variants with space before tag stripping (so we don't lose line breaks)
-    let text = text.replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")
+    let text = vector_core::notify::strip_ansi(text).replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")
                    .replace("<BR>", " ").replace("<BR/>", " ").replace("<BR />", " ");
 
     // Strip remaining HTML tags: skip chars between '<' and '>'
