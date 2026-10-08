@@ -870,9 +870,9 @@ async function initStorageSection() {
     if (storageInfo) VectorSvelte.setStorageDistribution(storageInfo.type_distribution);
     VectorSvelte.setSettingsScreen({ storage: { autoDownload: AUTO_DOWNLOAD_ENABLED, limit: MAX_AUTO_DOWNLOAD_BYTES } });
 
-    // Hide Media from Gallery is Android only: the backend command is a no-op on
-    // desktop, and the gallery concept does not apply there.
-    if (platformFeatures.is_mobile) {
+    // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
+    // and Vector Web on a phone is mobile without a gallery to hide from.
+    if (platformFeatures.os === 'android') {
         let hidden = false;
         try { hidden = await invoke('get_gallery_hidden'); } catch (_) {}
         VectorSvelte.setSettingsScreen({ storage: { galleryShown: true, galleryHidden: !!hidden } });
