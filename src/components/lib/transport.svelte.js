@@ -14,6 +14,8 @@ const t = $state({
 });
 
 export function transportState() { return t; }
+/** The networks a server can have an address inside, the one in use first. */
+export function aliasKinds() { return t.view?.kind === 'i2p' ? ['i2p', 'tor'] : ['tor', 'i2p']; }
 
 export function setTransportView(view) {
     if (!view) return;

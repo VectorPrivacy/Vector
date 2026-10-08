@@ -1,11 +1,16 @@
 <script>
-    // A server's I2P address: in I2P mode Vector reaches the server there, inside I2P, instead of
-    // through an outproxy. TLS still runs end to end with the server, so only port 443 uses it.
+    // A server's address inside Tor or I2P: on that network Vector reaches the server there instead
+    // of through an exit. TLS still runs end to end with the server, so only port 443 uses it.
     import { transportState } from '../../lib/transport.svelte.js';
     import InfoIcon from '../InfoIcon.svelte';
 
     // url: the server's full URL. relay: one of the user's own relays, which may list its address.
-    let { url = '', relay = false, h } = $props();   // h: { help(key), save(host, address), find(url), check(host) }
+    // kind: the network this field is for, 'tor' or 'i2p'.
+    let { url = '', relay = false, kind = 'i2p', h } = $props();   // h: TransportAliasHandlers (js/transport.js)
+
+    const NET = { tor: { label: 'Tor', title: 'Onion Address', noun: 'onion address', suffix: '.onion', placeholder: 'xxxx.onion', help: 'onionAlias' },
+                  i2p: { label: 'I2P', title: 'I2P Address', noun: 'I2P address', suffix: '.i2p', placeholder: 'xxxx.b32.i2p', help: 'i2pAlias' } };
+    const net = $derived(NET[kind] || NET.i2p);
 
     const t = transportState();
     const target = $derived.by(() => {
@@ -17,14 +22,14 @@
             return null;
         }
     });
-    // An .i2p server is already inside I2P; a build without I2P has nothing to use it with.
-    const offered = $derived(!!target && !!t.view?.supported?.includes('i2p') && !target.host.endsWith('.i2p'));
+    // A server already inside the network needs no address there; a build without it has nothing to use one with.
+    const offered = $derived(!!target && !!t.view?.supported?.includes(kind) && !target.host.endsWith(net.suffix));
     const entry = $derived(target ? t.aliases.find((a) => a.host === target.host) || null : null);
-    const saved = $derived(entry?.twins?.i2p || '');
-    // Checks and lookups run inside I2P only, so they wait until it is connected. A lookup asks
-    // the relay itself over clearnet, which I2P-Only rules out.
-    const ready = $derived(t.view?.kind === 'i2p' && !!t.view.ready);
-    const canFind = $derived(relay && t.config?.exit !== 'off');
+    const saved = $derived(entry?.twins?.[kind] || '');
+    // Checks and lookups run through that network only, so they wait until it is connected. A
+    // lookup asks the relay itself over clearnet, which I2P-Only rules out.
+    const ready = $derived(t.view?.kind === kind && !!t.view.ready);
+    const canFind = $derived(relay && (kind !== 'i2p' || t.config?.exit !== 'off'));
 
     let value = $state('');
     let editing = false;
@@ -40,7 +45,7 @@
         try { await fn(); } catch (e) { note = { text: String(e), tone: 'error' }; } finally { busy = false; }
     }
     const save = () => run(async () => {
-        await h.save(target.host, value.trim().toLowerCase() || null);
+        await h.save(target.host, kind, value.trim().toLowerCase() || null);
         editing = false;
     });
     // A listed address is checked on the spot; it fills the field and the user decides, so the
@@ -56,40 +61,40 @@
             : { text: 'Found it. Save to use it.', tone: 'muted' };
     });
     const check = () => run(() => h.check(target.host));
-    const remove = () => run(async () => { await h.save(target.host, null); editing = false; });
+    const remove = () => run(async () => { await h.save(target.host, kind, null); editing = false; });
     // A twin carries TLS on 443 only: on any other port an address would never be used.
     const usable = $derived(!!target && target.port === 443);
-    // Most people never use I2P: the field stays one quiet link until I2P is in use, an address
-    // is saved, or the user asks for it (setting one up before switching still works).
+    // Most people never use the network: the field stays one quiet link until it is in use, an
+    // address is saved, or the user asks for it (setting one up before switching still works).
     let asked = $state(false);
-    const open = $derived(t.view?.kind === 'i2p' || !!saved || asked);
+    const open = $derived(t.view?.kind === kind || !!saved || asked);
 
     const line = $derived.by(() => {
         if (!target) return null;
         if (target.port !== 443) {
-            return { text: saved ? "This server doesn't use port 443, so this address isn't used." : "This server doesn't use port 443, so it can't use an I2P address.", tone: 'muted' };
+            return { text: saved ? "This server doesn't use port 443, so this address isn't used." : `This server doesn't use port 443, so it can't use an ${net.noun}.`, tone: 'muted' };
         }
         if (!saved) return null;
         const c = entry.check || {};
         if (c.state === 'ok') return { text: c.text || `Checked. It serves ${target.host}.`, tone: 'ok' };
         if (c.state === 'failed') return { text: c.text || `This address doesn't serve ${target.host}. Vector won't use it.`, tone: 'error' };
-        return { text: c.text || 'Not checked yet. Vector checks it when I2P connects.', tone: 'muted' };
+        return { text: c.text || `Not checked yet. Vector checks it when ${net.label} connects.`, tone: 'muted' };
     });
 </script>
 
 {#if offered && !open}
     {#if usable}
         <div class="alias-field alias-collapsed">
-            <button type="button" class="net-link" onclick={() => { asked = true; }}>Add I2P Address</button>
-            <InfoIcon align="middle" onclick={() => h.help('i2pAlias')} />
+            <button type="button" class="net-link" onclick={() => { asked = true; }}>Add {net.title}</button>
+            <InfoIcon align="middle" onclick={() => h.help(net.help)} />
         </div>
     {/if}
 {:else if offered}
     <div class="relay-connection alias-field">
-        <h4>I2P Address<InfoIcon onclick={() => h.help('i2pAlias')} /></h4>
+        <h4>{net.title}<InfoIcon onclick={() => h.help(net.help)} /></h4>
         {#if usable}
             <div class="alias-row">
-                <input type="text" class="relay-form-input alias-input" placeholder="xxxx.b32.i2p" aria-label="I2P address"
+                <input type="text" class="relay-form-input alias-input" placeholder={net.placeholder} aria-label={net.title}
                        autocomplete="off" autocapitalize="none" spellcheck="false" disabled={busy}
                        bind:value onfocus={() => { editing = true; }}
                        onkeydown={(e) => { if (e.key === 'Enter' && dirty) { e.preventDefault(); save(); } }}>

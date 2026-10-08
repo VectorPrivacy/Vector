@@ -9884,11 +9884,13 @@ select {
   z-index: 1;
   transition: transform 0.18s ease;
 }
-.tor-hop[data-position="Middle"] .tor-hop-dot {
+.tor-hop[data-position="Middle"] .tor-hop-dot,
+.tor-hop[data-position="Rendezvous"] .tor-hop-dot {
   background: #9530f4;
   border-color: rgba(217,179,255,0.85);
 }
-.tor-hop[data-position="Exit"] .tor-hop-dot {
+.tor-hop[data-position="Exit"] .tor-hop-dot,
+.tor-hop[data-position="Onion"] .tor-hop-dot {
   background: #d9b3ff;
   border-color: #c285ff;
 }
@@ -9906,7 +9908,9 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tor-hop[data-position="Exit"] .tor-hop-pos { color: #d9b3ff; }
+.tor-hop[data-position="Exit"] .tor-hop-pos,
+.tor-hop[data-position="Onion"] .tor-hop-pos { color: #d9b3ff; }
+.tor-hop[data-position="Onion"] .tor-hop-addr { font-family: inherit; color: rgba(255,255,255,0.6); }
 
 .tor-hop-addr {
   font-family: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -10986,6 +10990,7 @@ select {
 .alias-collapsed .net-link,
 .alias-actions .net-link { color: #7adef0; }
 .relay-form-hint.i2p-hint { color: #7adef0; }
+.relay-form-hint.tor-hint { color: #d9b3ff; }
 /* A 60-character .b32.i2p host needs the whole row; its hint goes underneath. */
 .relay-form-group.stacked { flex-wrap: wrap; }
 .relay-form-group.stacked .relay-form-input { flex: 1 1 0; min-width: 0; }

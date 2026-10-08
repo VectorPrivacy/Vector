@@ -67,19 +67,20 @@ function transportRouteTag(route) {
     }
     if (route.class !== 'refused') return null;
     if (route.text === I2P_ONLY_REFUSAL) return { cls: 'refused', text: 'Off in I2P-Only', short: 'I2P-Only', title: route.text };
-    // An .onion is out of every network's reach in this build: no tag may promise Tor.
-    const needs = /\.i2p$/i.test(route.host) ? 'I2P' : '';
+    // A build without Tor reaches no .onion, so only a refusal that names Tor promises it.
+    const needs = /\.i2p$/i.test(route.host) ? 'I2P' : /\.onion$/i.test(route.host) && /over Tor\.$/.test(route.text) ? 'Tor' : '';
     return { cls: 'refused', text: needs ? `Needs ${needs}` : 'Unreachable', title: route.text };
 }
 
-/** A mark beside a row that connects: it rides its I2P address, or the one saved for it failed its check. */
+/** A mark beside a row that connects: it rides its address inside the network, or the one saved for it failed its check. */
 function transportRouteBadge(route) {
     if (!route) return null;
-    if (route.class === 'twin') return { cls: 'twin', text: 'I2P', title: route.text };
-    if (route.kind !== 'i2p' || route.class !== 'exit') return null;
+    const noun = route.kind === 'tor' ? 'Onion' : 'I2P';
+    if (route.class === 'twin') return { cls: 'twin', text: noun, title: route.text };
+    if ((route.kind !== 'i2p' && route.kind !== 'tor') || route.class !== 'exit') return null;
     const alias = VectorSvelte.transportState().aliases.find((a) => a.host === route.host);
-    if (!alias?.twins?.i2p || alias.check?.state !== 'failed') return null;
-    return { cls: 'failed', text: 'I2P address failed', title: alias.check.text || route.text };
+    if (!alias?.twins?.[route.kind] || alias.check?.state !== 'failed') return null;
+    return { cls: 'failed', text: `${noun} address failed`, title: alias.check.text || route.text };
 }
 
 /** Take a view the backend sent or answered with, and everything that follows from it. */
@@ -338,15 +339,15 @@ async function saveI2pOutproxies(list) {
 }
 
 /**
- * TransportAliasHandlers: a server's I2P address, in the relay and media server dialogs.
- * @typedef {{ help(key: string): void, save(host: string, address: string | null): Promise<object | null>,
+ * TransportAliasHandlers: a server's address inside Tor or I2P, in the relay and media server dialogs.
+ * @typedef {{ help(key: string): void, save(host: string, kind: string, address: string | null): Promise<object | null>,
  *   find(url: string): Promise<object>, check(host: string): Promise<object> }} TransportAliasHandlers
  */
 /** @type {TransportAliasHandlers} */
 const TRANSPORT_ALIAS_HANDLERS = {
     help: (key) => showSettingsHelp(key),
-    save: async (host, address) => {
-        try { return await invoke('transport_set_alias', { host, kind: 'i2p', address }); } finally { await loadTransportAliases(); }
+    save: async (host, kind, address) => {
+        try { return await invoke('transport_set_alias', { host, kind, address }); } finally { await loadTransportAliases(); }
     },
     find: async (url) => {
         try { return await invoke('transport_find_alias', { url }); } finally { await loadTransportAliases(); }

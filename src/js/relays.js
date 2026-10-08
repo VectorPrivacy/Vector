@@ -94,11 +94,11 @@ async function handleAddRelay({ url, mode }) {
         return;
     }
 
-    // Plain ws:// only for .i2p hosts, where I2P encrypts end to end.
+    // Plain ws:// only for .i2p and .onion hosts, where the network encrypts end to end.
     const typedTls = /^wss:\/\//i.test(url);
     url = url.replace(/^wss?:\/\//i, '');
-    const i2pHost = /^[^/:?#]+\.i2p(?=[/:?#]|$)/i.test(url);
-    url = (i2pHost && !typedTls ? 'ws://' : 'wss://') + url;
+    const nativeHost = /^[^/:?#]+\.(i2p|onion)(?=[/:?#]|$)/i.test(url);
+    url = (nativeHost && !typedTls ? 'ws://' : 'wss://') + url;
 
     try {
         await invoke('add_custom_relay', { url, mode });

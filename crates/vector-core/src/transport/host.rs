@@ -84,7 +84,7 @@ impl ActiveTransport {
 
     /// Whether the live session's egress can run through this instance. One that can't (another
     /// network chosen, another account's) moves no epoch coming or going: no socket rode it.
-    fn serves_live(&self) -> bool {
+    pub(crate) fn serves_live(&self) -> bool {
         super::preference() == Some(self.kind) && self.owner == crate::db::live_session_id()
     }
 
@@ -131,6 +131,8 @@ pub fn activate(t: Arc<dyn Transport>, owner: u64, started_prelogin: bool) -> Re
         notify(TransportEvent::Changed);
     } else if a.transport().ready() {
         notify(TransportEvent::Ready { kind: a.kind, instance: a.id, owner, recovered: false });
+        #[cfg(all(feature = "twin-check", not(target_arch = "wasm32")))]
+        super::twins::check_pending();
     } else {
         super::bump_epoch();
         notify(TransportEvent::Changed);

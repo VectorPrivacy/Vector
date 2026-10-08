@@ -25,6 +25,8 @@ pub mod ws;
 pub mod bridge;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
+#[cfg(all(feature = "twin-check", not(target_arch = "wasm32")))]
+pub mod twins;
 #[cfg(test)]
 mod tests;
 
@@ -87,10 +89,22 @@ impl Kind {
         }
     }
 
-    /// Whether this build reaches the kind's own addresses. Tor's onion services need arti's
-    /// `onion-service-client`, which this build leaves out: no screen may promise one.
+    /// Whether this build reaches the kind's own addresses: a `.onion` needs the embedded Tor.
     pub fn reaches_native(self) -> bool {
-        matches!(self, Kind::I2p)
+        match self {
+            Kind::I2p => true,
+            Kind::Tor => cfg!(all(feature = "tor", not(target_arch = "wasm32"))),
+            Kind::Clearnet => false,
+        }
+    }
+
+    /// What a server's address inside this network is called, for a twin.
+    pub fn address_noun(self) -> &'static str {
+        match self {
+            Kind::Tor => "onion address",
+            Kind::I2p => "I2P address",
+            Kind::Clearnet => "address",
+        }
     }
 
     pub fn budgets(self) -> &'static Budgets {

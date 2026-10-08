@@ -878,7 +878,8 @@ pub fn current_isolation_token() -> tor_circmgr::isolation::IsolationToken {
 /// binary weight that comes with them.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct CircuitHop {
-    /// "Guard" / "Middle" / "Exit". Derived from the position in the path.
+    /// "Guard" / "Middle" / "Exit", or for an onion service "Rendezvous" / "Onion" at the end.
+    /// Derived from the position in the path.
     pub position: String,
     /// `<ip>:<port>` of the OR connection to the relay, if known.
     pub address: String,
@@ -945,6 +946,9 @@ fn tunnel_hops(tunnel: &tor_proto::ClientTunnel) -> Result<Vec<CircuitHop>, Stri
         .ok_or_else(|| "tunnel has no path".to_string())?;
 
     let total = path.n_hops();
+    // A circuit to an onion service ends in the service's end-to-end layer, which has no relay:
+    // the hop before it is the rendezvous point, and there is no exit.
+    let onion = path.hops().last().is_some_and(|h| h.as_chan_target().is_none());
     let bridge_addrs = active_bridge_addrs();
     let hops = path
         .hops()
@@ -953,7 +957,9 @@ fn tunnel_hops(tunnel: &tor_proto::ClientTunnel) -> Result<Vec<CircuitHop>, Stri
         .map(|(i, entry)| {
             let position = match i {
                 0 => "Guard",
+                n if n + 1 == total && onion => "Onion",
                 n if n + 1 == total => "Exit",
+                n if n + 2 == total && onion => "Rendezvous",
                 _ => "Middle",
             }
             .to_string();
@@ -981,7 +987,7 @@ fn tunnel_hops(tunnel: &tor_proto::ClientTunnel) -> Result<Vec<CircuitHop>, Stri
                 }
                 None => CircuitHop {
                     position,
-                    address: "<virtual>".to_string(),
+                    address: "End to end".to_string(),
                     fingerprint: String::new(),
                     is_bridge: false,
                 },

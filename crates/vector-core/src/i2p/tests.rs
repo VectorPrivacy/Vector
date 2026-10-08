@@ -964,8 +964,8 @@ fn outproxy_list_validation() {
         );
     }
     assert_eq!(aliases::validate_twin(Kind::I2p, "relay.example.com").err().as_deref(), Some("Enter a .b32.i2p address."));
-    assert_eq!(transport::validate_relay_url("ws://relay.example.com").err().as_deref(), Some("Use wss://, or ws:// for an .i2p address."));
-    assert_eq!(transport::validate_relay_url("https://relay.example.com").err().as_deref(), Some("Use wss://, or ws:// for an .i2p address."));
+    assert_eq!(transport::validate_relay_url("ws://relay.example.com").err().as_deref(), Some("Use wss://, or ws:// for an .i2p or .onion address."));
+    assert_eq!(transport::validate_relay_url("https://relay.example.com").err().as_deref(), Some("Use wss://, or ws:// for an .i2p or .onion address."));
     assert_eq!(transport::validate_relay_url(&format!(" ws://{}/ ", b32('r'))).unwrap(), format!("ws://{}", b32('r')));
     assert_eq!(transport::validate_relay_url(&format!("ws://{}:6878", b32('r'))).unwrap(), format!("ws://{}:6878", b32('r')));
     assert!(transport::validate_relay_url("ws://relay.i2p").is_ok());

@@ -300,7 +300,7 @@ pub fn route_view(url: &str) -> RouteView {
             match &route {
                 super::Route::Refuse(r) => mk("refused", None, r.text(), last),
                 super::Route::Native { .. } => mk("native", None, format!("Inside {}", kind.label()), last),
-                super::Route::Twin { via, .. } => mk("twin", Some(via.clone()), "Through its I2P address".into(), last),
+                super::Route::Twin { via, .. } => mk("twin", Some(via.clone()), format!("Through its {}", kind.address_noun()), last),
                 super::Route::Exit { .. } => {
                     let via = active.last_exit(&dest.host()).map(|id| outproxy_name(&config, &id));
                     let text = match (kind, &via) {

@@ -1,6 +1,6 @@
 <script>
-    // A Tor circuit's hops, guard to exit: the Tor settings' active circuit and each relay's
-    // and media server's own.
+    // A Tor circuit's hops, guard to exit (or to an onion service's rendezvous point and its
+    // end-to-end hop): the Tor settings' active circuit and each relay's and media server's own.
     let { hops = [] } = $props();
 </script>
 

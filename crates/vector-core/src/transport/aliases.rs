@@ -99,6 +99,8 @@ pub fn validate_twin(kind: Kind, addr: &str) -> Result<String, String> {
     match kind {
         Kind::I2p if super::i2p_config::is_i2p_address(addr) => Ok(addr.trim().to_ascii_lowercase()),
         Kind::I2p => Err("Enter a .b32.i2p address.".into()),
+        Kind::Tor if super::route::is_onion(&addr.trim().to_ascii_lowercase()) => Ok(addr.trim().to_ascii_lowercase()),
+        Kind::Tor => Err("Enter a .onion address.".into()),
         _ => Err(format!("{} addresses aren't supported yet.", kind.label())),
     }
 }

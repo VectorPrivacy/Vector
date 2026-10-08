@@ -585,16 +585,16 @@ async fn set_alias(host: String, kind: String, address: Option<String>) -> Resul
         ensure_live()?;
         aliases::set(&host, k, address.as_deref(), AliasSource::User)?
     };
-    #[cfg(feature = "i2p")]
-    if entry.is_some() && k == Kind::I2p {
-        vector_core::i2p::probe::check_unchecked();
+    #[cfg(any(feature = "tor", feature = "i2p"))]
+    if entry.is_some() {
+        vector_core::transport::twins::check_pending();
     }
     emit_view();
     revive_relays();
     Ok(entry)
 }
 
-/// Check a server's I2P address now: a TLS handshake for the server's own name over I2P.
+/// Check a server's address on the network in use now: a TLS handshake for its own name through it.
 #[tauri::command]
 pub async fn transport_check_alias(host: String) -> Result<AliasEntry, String> {
     vector_core::db::scoped_result(check_alias(host)).await
@@ -602,27 +602,27 @@ pub async fn transport_check_alias(host: String) -> Result<AliasEntry, String> {
 
 async fn check_alias(host: String) -> Result<AliasEntry, String> {
     ensure_live()?;
-    #[cfg(feature = "i2p")]
+    #[cfg(any(feature = "tor", feature = "i2p"))]
     {
         let session = vector_core::db::current_session();
-        // spawn-detached: pinned to the caller's account by with_session and awaited; runs where the router sockets live.
+        // spawn-detached: pinned to the caller's account by with_session and awaited; runs where the network's sockets live.
         let checked = transport::spawn_on(vector_core::db::with_session(session, async move {
-            vector_core::i2p::probe::check_alias(&host).await
+            vector_core::transport::twins::check_alias(&host).await
         }))
         .await
         .map_err(|e| e.to_string())?;
         emit_view();
         checked
     }
-    #[cfg(not(feature = "i2p"))]
+    #[cfg(not(any(feature = "tor", feature = "i2p")))]
     {
         let _ = host;
-        Err("Connect to I2P to check this address.".into())
+        Err("Use Tor or I2P to check this address.".into())
     }
 }
 
-/// Ask one of the user's own relays for its I2P address (NIP-11), then check it. Nothing is
-/// saved: the user decides.
+/// Ask one of the user's own relays for its address on the network in use (NIP-11), then check
+/// it. Nothing is saved: the user decides.
 #[tauri::command]
 pub async fn transport_find_alias(url: String) -> Result<Value, String> {
     vector_core::db::scoped_result(find_alias(url)).await
@@ -631,23 +631,23 @@ pub async fn transport_find_alias(url: String) -> Result<Value, String> {
 async fn find_alias(url: String) -> Result<Value, String> {
     ensure_live()?;
     if !super::relays::is_own_relay(&url).await {
-        return Err("Vector looks up I2P addresses only for your own relays.".into());
+        return Err("Vector looks these up only for your own relays.".into());
     }
-    #[cfg(feature = "i2p")]
+    #[cfg(any(feature = "tor", feature = "i2p"))]
     {
         let session = vector_core::db::current_session();
-        // spawn-detached: pinned to the caller's account by with_session and awaited; runs where the router sockets live.
+        // spawn-detached: pinned to the caller's account by with_session and awaited; runs where the network's sockets live.
         let found = transport::spawn_on(vector_core::db::with_session(session, async move {
-            vector_core::i2p::probe::find_alias(&url).await
+            vector_core::transport::twins::find_alias(&url).await
         }))
         .await
         .map_err(|e| e.to_string())??;
         serde_json::to_value(found).map_err(|e| e.to_string())
     }
-    #[cfg(not(feature = "i2p"))]
+    #[cfg(not(any(feature = "tor", feature = "i2p")))]
     {
         let _ = url;
-        Err("Connect to I2P to check this address.".into())
+        Err("Use Tor or I2P to check this address.".into())
     }
 }
 
@@ -913,7 +913,8 @@ pub(crate) mod tests {
         for host in ["nos.lol", "nostrajmjieip3dqgeefsgpydy3bbshe3o32z65dwkssl7qxkn5a.b32.i2p", "1.2.3.4"] {
             assert_eq!(transport::egress(owner, Lane::Account, host, 443), Egress::Refuse(ConnectError::Blocked(text.clone())), "{host}");
         }
-        assert_eq!(transport::egress(owner, Lane::Shared, "x.onion", 443), Egress::Refuse(ConnectError::Refused(transport::Refusal::NotReachable { network: Kind::Tor })));
+        let onion_refusal = if cfg!(feature = "tor") { transport::Refusal::WrongNetwork { needs: Kind::Tor } } else { transport::Refusal::NotReachable { network: Kind::Tor } };
+        assert_eq!(transport::egress(owner, Lane::Shared, "x.onion", 443), Egress::Refuse(ConnectError::Refused(onion_refusal)));
 
         // Same choice again: nothing restarts. Sign-in keeps the account's own instance (Android
         // resume), and its wait gives up on a silent router instead of holding sign-in.
@@ -1201,8 +1202,16 @@ pub(crate) mod tests {
         assert_eq!(transport_get_aliases(), vec![e]);
         assert_eq!(set_alias("relay.example.com".into(), "i2p".into(), Some("not-i2p.com".into())).await.unwrap_err(), "Enter a .b32.i2p address.");
         assert_eq!(set_alias("relay.example.com".into(), "nym".into(), None).await.unwrap_err(), "Unknown network: nym");
-        assert_eq!(check_alias("relay.example.com".into()).await.unwrap_err(), "Connect to I2P to check this address.");
-        assert_eq!(find_alias("wss://stranger.example".into()).await.unwrap_err(), "Vector looks up I2P addresses only for your own relays.");
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        let both = set_alias("relay.example.com".into(), "tor".into(), Some(onion.to_uppercase())).await.unwrap().unwrap();
+        assert_eq!((both.twins.get(&Kind::Tor).map(String::as_str), both.twins.len()), (Some(onion), 2), "one host, a twin per network");
+        assert_eq!(set_alias("relay.example.com".into(), "tor".into(), Some("short.onion".into())).await.unwrap_err(), "Enter a .onion address.");
+        assert_eq!(set_alias("relay.example.com".into(), "tor".into(), Some(b32.into())).await.unwrap_err(), "Enter a .onion address.");
+        assert_eq!(set_alias("relay.example.com".into(), "tor".into(), None).await.unwrap(), None);
+        let kept = transport_get_aliases();
+        assert_eq!((kept.len(), kept[0].twins.get(&Kind::I2p).map(String::as_str), kept[0].twins.get(&Kind::Tor)), (1, Some(b32), None), "the I2P twin stays");
+        assert_eq!(check_alias("relay.example.com".into()).await.unwrap_err(), "Use Tor or I2P to check this address.");
+        assert_eq!(find_alias("wss://stranger.example".into()).await.unwrap_err(), "Vector looks these up only for your own relays.");
         assert_eq!(set_alias("relay.example.com".into(), "i2p".into(), Some(String::new())).await.unwrap(), None, "an empty address removes it");
         assert!(transport_get_aliases().is_empty());
 
@@ -1210,6 +1219,8 @@ pub(crate) mod tests {
         let classes: Vec<&str> = routes.iter().map(|r| r.class.as_str()).collect();
         assert_eq!(classes, ["direct", "refused", "refused"]);
         assert_eq!(routes[1].text, "This server is only reachable over I2P.");
+        #[cfg(feature = "tor")]
+        assert_eq!(routes[2].text, "This server is only reachable over Tor.");
         assert_eq!(transport_get_routes(vec!["wss://a.com".into(); 2000]).len(), MAX_ROUTES);
         clean().await;
     }

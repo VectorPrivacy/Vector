@@ -7,7 +7,7 @@
     import RelayLogs from './RelayLogs.svelte';
     import ConnectionBlock from './ConnectionBlock.svelte';
     import AliasField from './AliasField.svelte';
-    import { shortI2pHost, transportState, routeOf } from '../../lib/transport.svelte.js';
+    import { shortI2pHost, transportState, routeOf, aliasKinds } from '../../lib/transport.svelte.js';
     let { h } = $props();   // h: close(), disable(), setMode(mode), copy(), alias: { help, save, find, check }, routeTag(route)
     const st = relayInfoDialog.state();
     const t = transportState();
@@ -51,7 +51,7 @@
                     </select>
                 </div>
                 <ConnectionBlock url={st.href} circuit={st.circuit} />
-                <AliasField url={st.href} relay h={h.alias} />
+                {#each aliasKinds() as k (k)}<AliasField url={st.href} relay kind={k} h={h.alias} />{/each}
                 <div class="relay-logs-section">
                     <div class="relay-logs-header">
                         <h4>Recent Activity</h4>

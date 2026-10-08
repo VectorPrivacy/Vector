@@ -161,7 +161,7 @@ pub(crate) async fn run(inner: Arc<Inner>) {
         inner.set_phase(I2pPhase::Ready { since: Instant::now() }, ever_ready);
         ever_ready = true;
         backoff.reset();
-        super::probe::check_pending_soon(&inner);
+        crate::transport::twins::check_pending();
 
         let end = watch(&inner, &acct_nick, &shared_nick, &mut acct, &mut shared).await;
         inner.set_sessions(None);

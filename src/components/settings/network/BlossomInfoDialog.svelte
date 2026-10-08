@@ -9,7 +9,7 @@
     import BlossomPerformance from './BlossomPerformance.svelte';
     import ConnectionBlock from './ConnectionBlock.svelte';
     import AliasField from './AliasField.svelte';
-    import { shortI2pHost } from '../../lib/transport.svelte.js';
+    import { shortI2pHost, aliasKinds } from '../../lib/transport.svelte.js';
     let { h } = $props();   // h: close(), action(), formatBytes, alias: { help, save, find, check }
     const st = blossomInfoDialog.state();
     const doc = blossomInfoState();
@@ -90,7 +90,7 @@
                     </div>
                 {/if}
                 <ConnectionBlock url={st.href} circuit={st.circuit} />
-                <AliasField url={st.href} h={h.alias} />
+                {#each aliasKinds() as k (k)}<AliasField url={st.href} kind={k} h={h.alias} />{/each}
                 <div class="relay-dialog-buttons">
                     <button class="btn danger-btn" onclick={h.action}>{actionLabel}</button>
                     <button class="btn cancel-btn" onclick={h.close}>Close</button>

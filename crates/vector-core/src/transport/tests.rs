@@ -264,9 +264,15 @@ fn route_rules_table() {
         let i2p = route::pre_route(chosen, &d(B32));
         let onion = route::pre_route(chosen, &d("abc.onion"));
         assert_eq!(i2p, (chosen != Kind::I2p).then_some(Refusal::WrongNetwork { needs: Kind::I2p }), "{chosen:?}");
-        assert_eq!(onion, Some(Refusal::NotReachable { network: Kind::Tor }), "no build reaches an onion yet, Tor included: {chosen:?}");
+        let want = match (Kind::Tor.reaches_native(), chosen) {
+            (false, _) => Some(Refusal::NotReachable { network: Kind::Tor }),
+            (true, Kind::Tor) => None,
+            (true, _) => Some(Refusal::WrongNetwork { needs: Kind::Tor }),
+        };
+        assert_eq!(onion, want, "an onion only on Tor, and only in a build with Tor: {chosen:?}");
     }
     assert_eq!(Refusal::NotReachable { network: Kind::Tor }.text(), "Vector can't reach .onion addresses yet.");
+    assert_eq!(Kind::Tor.reaches_native(), cfg!(feature = "tor"));
 
     // Tor: its own suffix native (once a build can), everything else (IPs and local names too) to an exit.
     assert_eq!(route::route_tor(&d("abc.onion"), 80, &ctx_allow), Route::Native { host: "abc.onion".into(), port: 80 });
@@ -291,6 +297,33 @@ fn route_rules_table() {
     assert_eq!(route::route_i2p(&d("nos.lol"), 443, &ctx(&table, &off)), Route::Refuse(Refusal::ExitOff));
     assert_eq!(route::route_i2p(&d(B32), 80, &ctx(&table, &off)), Route::Native { host: B32.into(), port: 80 }, "I2P-Only keeps I2P");
     assert!(matches!(route::route_i2p(&d("jskitty.com"), 443, &ctx(&table, &off)), Route::Twin { .. }), "and the twins you added");
+}
+
+#[test]
+fn onion_addresses_and_relay_urls() {
+    let v3 = format!("{}.onion", "abcdefghijklmnopqrstuvwxyz234567".repeat(2).get(..56).unwrap());
+    assert!(route::is_onion(&v3));
+    for bad in ["abc.onion", "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion.com", "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567abcdefghijklmnopqrstuvwx.onion"] {
+        assert!(!route::is_onion(bad), "{bad}");
+    }
+    assert!(!route::is_onion(&v3.replace('a', "1")), "base32 has no 1");
+    assert_eq!(route::validate_relay_url(&format!("ws://{v3}/")), Ok(format!("ws://{v3}")), "an onion encrypts end to end");
+    assert_eq!(route::validate_relay_url(&format!("wss://{v3}")), Ok(format!("wss://{v3}")));
+    assert!(route::validate_relay_url("ws://abc.onion").is_err(), "only a real onion address skips TLS");
+    assert!(route::validate_relay_url("ws://relay.example.com").is_err());
+    assert_eq!(aliases::validate_twin(Kind::Tor, &format!(" {} ", v3.to_uppercase())), Ok(v3.clone()));
+    assert_eq!(aliases::validate_twin(Kind::Tor, B32), Err("Enter a .onion address.".into()));
+    assert_eq!(aliases::validate_twin(Kind::I2p, &v3), Err("Enter a .b32.i2p address.".into()));
+}
+
+#[cfg(all(feature = "twin-check", not(target_arch = "wasm32")))]
+#[test]
+fn privacy_addresses_pick_the_network_in_use() {
+    let onion = format!("{}.onion", "q".repeat(56));
+    let doc = serde_json::json!({ "privacy_addresses": ["abc.onion", format!("ws://{onion}/"), format!("ws://{B32}"), "relay.i2p"] });
+    assert_eq!(twins::first_privacy_address(&doc, Kind::Tor), Some(onion));
+    assert_eq!(twins::first_privacy_address(&doc, Kind::I2p), Some(B32.to_string()));
+    assert_eq!(twins::first_privacy_address(&doc, Kind::Clearnet), None);
 }
 
 // ── Egress ───────────────────────────────────────────────────────────────────
@@ -333,7 +366,8 @@ fn egress_matrix_never_direct_unless_clearnet() {
                 for h in hosts {
                     let e = egress(owner, Lane::Account, h, 443);
                     let ctx = format!("pref={pref:?} inst={inst:?} live={owner_live} host={h}");
-                    let foreign = (h.ends_with(".i2p") && pref != Some(Kind::I2p)) || h.ends_with(".onion");
+                    let onion_here = pref == Some(Kind::Tor) && Kind::Tor.reaches_native();
+                    let foreign = (h.ends_with(".i2p") && pref != Some(Kind::I2p)) || (h.ends_with(".onion") && !onion_here);
                     let direct_ok = pref == Some(Kind::Clearnet) && owner_live && !foreign;
                     if direct_ok {
                         assert_eq!(e, Egress::Direct, "{ctx}");

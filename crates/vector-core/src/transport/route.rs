@@ -114,6 +114,12 @@ pub fn is_b32(h: &str) -> bool {
     (label.len() == 52 || label.len() >= 56) && label.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
+/// A v3 onion address: 56 base32 characters.
+pub fn is_onion(h: &str) -> bool {
+    let Some(label) = h.strip_suffix(".onion") else { return false };
+    label.len() == 56 && label.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+}
+
 pub fn is_local_name(h: &str) -> bool {
     h == "localhost"
         || !h.contains('.')
@@ -192,10 +198,11 @@ pub fn route_i2p(dest: &Dest, port: u16, ctx: &RouteCtx) -> Route {
     }
 }
 
-const RELAY_SCHEME: &str = "Use wss://, or ws:// for an .i2p address.";
+const RELAY_SCHEME: &str = "Use wss://, or ws:// for an .i2p or .onion address.";
 
-/// A relay URL the app can keep: `wss://` for any host, plain `ws://` only for an `.i2p` host,
-/// where I2P itself encrypts end to end. Returns the URL without a trailing slash.
+/// A relay URL the app can keep: `wss://` for any host, plain `ws://` only for an `.i2p` or
+/// `.onion` host, where the network itself encrypts end to end. Returns the URL without a
+/// trailing slash.
 pub fn validate_relay_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     let (rest, plain) = match (trimmed.strip_prefix("wss://"), trimmed.strip_prefix("ws://")) {
@@ -208,7 +215,7 @@ pub fn validate_relay_url(url: &str) -> Result<String, String> {
     }
     if plain {
         let host = url::Url::parse(trimmed).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase));
-        if !host.is_some_and(|h| h.ends_with(".i2p") && h.len() > 4) {
+        if !host.is_some_and(|h| (h.ends_with(".i2p") && h.len() > 4) || is_onion(&h)) {
             return Err(RELAY_SCHEME.into());
         }
     }

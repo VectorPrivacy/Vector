@@ -12,6 +12,15 @@ use std::time::{Duration, Instant};
 use nostr_sdk::prelude::*;
 use vector_core::transport::{self, Kind, TransportState};
 
+/// Public onion relays (NIP-66 listings); the first that answers is enough. `VECTOR_TOR_ONION`
+/// overrides them with a comma-separated list.
+const ONIONS: [&str; 4] = [
+    "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion",
+    "ws://p2rjbhfjo5uihx23ynywjtms57yq2vjqequ53nqbqdgpvd2d7o25utqd.onion",
+    "ws://7edzdssreecpm3k2dhpgzsh37mtiuoekcp7owiu2ggjjamgnw7m3fvqd.onion",
+    "ws://dbtksyiddypgaplsmbrjfhioxgpykk7gzplas4cz22jdgcuaoyubdrqd.onion",
+];
+
 fn live() -> bool {
     std::env::var("VECTOR_TOR_LIVE").is_ok_and(|v| v == "1")
 }
@@ -112,6 +121,24 @@ async fn tor_through_the_meta_glue() {
     let client = vector_core::nostr_client_builder().build();
     let (n, took) = req_to_eose(&client, "wss://nos.lol").await.expect("REQ->EOSE over Tor");
     println!("[tor-live] tor REQ->EOSE nos.lol: {:.2}s ({n} event)", took.as_secs_f64());
+
+    // An onion relay, reached inside Tor with no exit.
+    let onions: Vec<String> = std::env::var("VECTOR_TOR_ONION")
+        .map(|v| v.split(',').map(str::to_string).collect())
+        .unwrap_or_else(|_| ONIONS.iter().map(|o| o.to_string()).collect());
+    assert_eq!(transport::route_view(&onions[0]).class, "native", "an onion rides Tor itself");
+    let mut reached = false;
+    for (i, onion) in onions.iter().enumerate() {
+        match req_to_eose_tries(&client, onion, 2).await {
+            Ok((n, took)) => {
+                println!("[tor-live] onion REQ->EOSE (relay {}): {:.2}s ({n} event)", i + 1, took.as_secs_f64());
+                reached = true;
+                break;
+            }
+            Err(e) => println!("[tor-live]   onion relay {} failed: {e}", i + 1),
+        }
+    }
+    assert!(reached, "no onion relay answered over Tor");
 
     // HTTPS through the shared client: the exit says it is Tor.
     let t0 = Instant::now();

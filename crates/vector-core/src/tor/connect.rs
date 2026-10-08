@@ -38,6 +38,9 @@ impl Transport for TorService {
         let addr = (host, port).into_tor_addr().map_err(|e| ConnectError::Unreachable(format!("addr parse: {e}")))?;
         let mut prefs = StreamPrefs::new();
         prefs.set_isolation(super::isolation_for(host));
+        if host.ends_with(".onion") {
+            prefs.connect_to_onion_services(arti_client::config::BoolOrAuto::Explicit(true));
+        }
         let stream = match self.client.connect_with_prefs(addr, &prefs).await {
             Ok(s) => s,
             Err(e) => {
