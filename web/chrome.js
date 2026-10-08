@@ -28,6 +28,9 @@
     // as Android resizes it. The document's own client height stays full-size.
     // The messages keep their distance from the bottom across a resize, so the
     // latest stay in view above the keyboard rather than sliding behind it.
+    // Fixed panes measure the full-height layout viewport, so `--kb` (the keyboard's
+    // height) lets them end where it begins (web.css), and the focused field is then
+    // scrolled into what's left.
     let applied = null;
     function fit() {
         const vv = window.visualViewport;
@@ -39,12 +42,29 @@
             const fromBottom = list ? list.scrollHeight - list.scrollTop - list.clientHeight : 0;
             root.style.setProperty('--floor', `${keyboard ? 0 : radius}px`);
             root.style.height = height;
-            if (keyboard) root.style.setProperty('--app-h', height); else root.style.removeProperty('--app-h');
+            if (keyboard) {
+                root.style.setProperty('--app-h', height);
+                root.style.setProperty('--kb', `${root.clientHeight - vv.height}px`);
+            } else {
+                root.style.removeProperty('--app-h');
+                root.style.removeProperty('--kb');
+            }
             if (list?.clientHeight) list.scrollTop = list.scrollHeight - list.clientHeight - fromBottom;
+            if (keyboard) reveal();
         }
         if (keyboard && (scrollY || vv.offsetTop)) scrollTo(0, 0);
     }
+    function reveal() {
+        requestAnimationFrame(() => {
+            const field = document.activeElement;
+            if (!applied || !field?.matches('input, textarea, [contenteditable="true"]')) return;
+            if (field.closest('#chat-box, #chat-new-box')) return;   // the composer sits on the keyboard already
+            field.scrollIntoView({ block: 'nearest' });
+            if (scrollY) scrollTo(0, 0);
+        });
+    }
     fit();
+    addEventListener('focusin', reveal);
     window.visualViewport?.addEventListener('resize', fit);
     window.visualViewport?.addEventListener('scroll', fit);
     addEventListener('resize', fit);

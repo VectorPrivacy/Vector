@@ -32,8 +32,13 @@ body.mobile .navbar {
     padding-bottom: calc(var(--floor, 0px) / 2);
 }
 body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
-body.mobile #chat-list,
-body.mobile #settings { bottom: calc(70px + var(--floor, 0px) / 2); }
+body.mobile #chat-list { bottom: calc(70px + var(--floor, 0px) / 2); }
+/* Panes and dialogs pinned to the screen's bottom end at the keyboard (`--kb`, web/chrome.js). */
+body.mobile #settings { bottom: max(calc(70px + var(--floor, 0px) / 2), var(--kb, 0px)); }
+body.mobile .relay-dialog-overlay { bottom: var(--kb, 0px); }
+body.mobile .popup-container { height: calc(100% - var(--kb, 0px)); }
+body.mobile .lg { bottom: var(--kb, 0px); overflow-y: auto; }
+body.mobile .relay-dialog { max-height: calc(var(--app-h, 100vh) - 40px); overflow-y: auto; }
 body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
 body.mobile #chat-new-box { bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
 body.mobile #chat-new .chat-new-center-content { bottom: calc(50px + max(5px, var(--floor, 0px))); }
