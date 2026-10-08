@@ -727,6 +727,14 @@ body.ws .chatlist-community-head-name {
   text-overflow: ellipsis;
 }
 
+/* Unsized, a twemoji image renders at its natural 72px and shoves the name out of the head. */
+body.ws .chatlist-community-head-name .emoji {
+  width: 15px;
+  height: 15px;
+  vertical-align: -3px;
+  margin: 0;
+}
+
 body.ws .chatlist-community-head-members {
   display: flex;
   align-items: center;
