@@ -64,10 +64,6 @@
     const remove = () => run(async () => { await h.save(target.host, kind, null); editing = false; });
     // A twin carries TLS on 443 only: on any other port an address would never be used.
     const usable = $derived(!!target && target.port === 443);
-    // Most people never use the network: the field stays one quiet link until it is in use, an
-    // address is saved, or the user asks for it (setting one up before switching still works).
-    let asked = $state(false);
-    const open = $derived(t.view?.kind === kind || !!saved || asked);
 
     const line = $derived.by(() => {
         if (!target) return null;
@@ -82,15 +78,8 @@
     });
 </script>
 
-{#if offered && !open}
-    {#if usable}
-        <div class="alias-field alias-collapsed">
-            <button type="button" class="net-link" onclick={() => { asked = true; }}>Add {net.title}</button>
-            <InfoIcon align="middle" onclick={() => h.help(net.help)} />
-        </div>
-    {/if}
-{:else if offered}
-    <div class="relay-connection alias-field">
+{#if offered}
+    <div class="relay-connection alias-field alias-{kind}">
         <h4>{net.title}<InfoIcon onclick={() => h.help(net.help)} /></h4>
         {#if usable}
             <div class="alias-row">

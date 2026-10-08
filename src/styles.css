@@ -10980,15 +10980,8 @@ select {
   margin-top: 8px;
   font-size: 13px;
 }
-/* One quiet line in a dialog most people open without ever using I2P. */
-.alias-collapsed {
-  display: flex;
-  align-items: center;
-  margin-top: 12px;
-  font-size: 13px;
-}
-.alias-collapsed .net-link,
-.alias-actions .net-link { color: #7adef0; }
+.alias-i2p .alias-actions .net-link { color: #7adef0; }
+.alias-tor .alias-actions .net-link { color: #d9b3ff; }
 .relay-form-hint.i2p-hint { color: #7adef0; }
 .relay-form-hint.tor-hint { color: #d9b3ff; }
 /* A 60-character .b32.i2p host needs the whole row; its hint goes underneath. */
