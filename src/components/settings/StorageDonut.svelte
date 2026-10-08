@@ -101,11 +101,25 @@
     }
     function select(i) { selected = selected === i ? -1 : i; }
 
+    // Any press outside a slice, a legend chip or Delete drops the selection, app-wide.
+    // Held while Delete runs: its confirm dialog is outside too.
+    let confirming = false;
+    function pressOutside(e) {
+        if (selected === -1 || confirming || busy) return;
+        const t = e.target;
+        if (t.closest?.('.storage-legend-item, #storage-donut-delete')) return;
+        if (svg?.contains(t) && sliceAt(e) !== -1) return;
+        selected = -1;
+    }
+
     async function del() {
         if (selected === -1 || busy) return;
         const seg = segments[selected];
         const cat = CATEGORIES.find(c => c.name === seg.name);
-        if (!(await h.confirmDelete(cat, h.formatBytes(seg.size, 1)))) return;
+        confirming = true;
+        let ok;
+        try { ok = await h.confirmDelete(cat, h.formatBytes(seg.size, 1)); } finally { confirming = false; }
+        if (!ok) return;
         let category = 'files';
         let exts = [];
         if (cat.key === '/ai_models') category = 'ai';
@@ -132,6 +146,8 @@
         h.refresh();
     }
 </script>
+
+<svelte:document onpointerdowncapture={pressOutside} />
 
 <div class="form-group storage-summary">
     <p>{summary}</p>
