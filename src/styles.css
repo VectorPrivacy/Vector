@@ -8876,7 +8876,9 @@ audio {
 .typing-strip::before {
   content: '';
   position: absolute;
-  inset: 0 var(--typing-bar, 0px) 0 0;
+  /* Clear of the scrollbar: a measured gutter, or iOS's overlay indicator (no gutter),
+     inside the list's 10px side padding where no message reaches. */
+  inset: 0 max(var(--typing-bar, 0px), 10px) 0 0;
   z-index: -1;
   background: linear-gradient(to bottom, rgba(3, 3, 3, 0) 0%, rgba(3, 3, 3, 0.5) 30%, rgba(3, 3, 3, 0.85) 55%, #030303 100%);
   opacity: var(--typing-fade, 0);   /* set per scroll event; a transition would lag a fast scroll */
@@ -8885,7 +8887,7 @@ audio {
 .typing-face {
   display: flex;
   border-radius: 50%;
-  box-shadow: 0 0 0 2px #030303;
+  box-shadow: 0 0 0 1px #030303;
 }
 .typing-face + .typing-face { margin-left: -6px; }
 .typing-face img,
