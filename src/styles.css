@@ -793,6 +793,7 @@ html, body {
 .popup-buttons {
   margin-top: auto;
 }
+.popup-buttons > button + button { margin-left: 10px; }
 
 /* Downgrade block — a full takeover, not a popup: there is no "continue". */
 .downgrade-block {
