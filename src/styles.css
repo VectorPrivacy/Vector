@@ -3676,16 +3676,16 @@ body.mobile [contenteditable] * {
 
 
 
-.chatlist-contact:hover {
-  background-color: rgba(255, 255, 255, 0.05);
-}
+/* Rows take no fill on hover; the text brightens, only where a pointer can hover
+   (a tap on iOS would leave it stuck lit). */
+@media (hover: hover) {
+  .chatlist-contact:hover .chatlist-contact-preview h4 {
+    color: rgba(255, 255, 255, 1);
+  }
 
-.chatlist-contact:hover .chatlist-contact-preview h4 {
-  color: rgba(255, 255, 255, 1);
-}
-
-.chatlist-contact:hover .chatlist-contact-preview p {
-  color: rgba(255, 255, 255, 0.85);
+  .chatlist-contact:hover .chatlist-contact-preview p {
+    color: rgba(255, 255, 255, 0.85);
+  }
 }
 
 .chats {

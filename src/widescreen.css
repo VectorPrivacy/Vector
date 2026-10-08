@@ -2186,11 +2186,8 @@ body.ws .new-chat-btn .icon {
 }
 
 /* The open chat is marked by a bar on the pane's edge, as the emoji rail marks its
-   tab; the row itself stays unfilled, hovered or open. Declared on the base row so
-   the bar animates in rather than appearing. */
-body.ws #chat-list .chatlist-contact:hover {
-  background: none;
-}
+   tab; the row itself stays unfilled. Declared on the base row so the bar animates
+   in rather than appearing. */
 body.ws #chat-list .chatlist-contact::before {
   content: '';
   position: absolute;
