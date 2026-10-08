@@ -554,6 +554,18 @@ function _dmsgClearLongTimer() {
     if (_gLongTimer) { clearTimeout(_gLongTimer); _gLongTimer = null; }
 }
 
+/** True when an element between `el` and `row` can still scroll the way a drag of `dx` pushes it. */
+function _dmsgCanScrollX(el, row, dx) {
+    for (; el && el !== row; el = el.parentElement) {
+        if (el.scrollWidth <= el.clientWidth) continue;
+        const ox = getComputedStyle(el).overflowX;
+        if (ox !== 'auto' && ox !== 'scroll') continue;
+        const max = el.scrollWidth - el.clientWidth;
+        if (dx < 0 ? el.scrollLeft < max - 1 : el.scrollLeft > 1) return true;
+    }
+    return false;
+}
+
 function _dmsgCopyText(text) {
     if (!text) return;
     navigator.clipboard.writeText(text)
@@ -684,6 +696,8 @@ function _dmsgInitGestures() {
             _dmsgClearLongTimer();
             _gAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
             if (_gAxis === 'v') { _gTouchRow = null; return; }  // vertical = scroll
+            // A code block or table with room to scroll owns the drag; at its edge, the swipe applies.
+            if (_dmsgCanScrollX(e.target, _gTouchRow, dx)) { _gTouchRow = null; _gAxis = null; return; }
             _dmsgBeginSwipeVisual(_gTouchRow);
         }
         if (_gAxis !== 'h') return;
