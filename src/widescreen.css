@@ -468,15 +468,62 @@ body.ws.ws-details .attachment-panel {
   right: calc(var(--ws-details-w) + 8px);
 }
 
-/* The Viktor welcome was anchored to the single-pane layout: fixed against the
-   VIEWPORT — left/right 18px spanning the whole window, bottom 82px clearing the
-   bottom navbar that no longer exists here. Re-anchor it to the list column:
-   left at the rail's edge, right at the conversation pane's, 18px off the pane's
-   own bottom. Var-based, so the collapsed rail tracks automatically. */
+/* The Viktor welcome sits in the list column, 18px off its sides and bottom. Absolute
+   against #chat-list rather than fixed to the viewport: the list's slide-in transform
+   makes it the containing block mid-animation anyway, and viewport offsets measured
+   against a 240px box squeezed the welcome to a word per line. */
 body.ws .chatlist-intro {
-  left: calc(var(--ws-rail-w) + 18px);
-  right: calc(100vw - var(--ws-main-left) + 18px);
+  position: absolute;
+  left: 18px;
+  right: 18px;
   bottom: 18px;
+}
+
+/* Get Started, sized for a 200-300px pane: a list row's height and a single line. The
+   subtitle only comes back once the card can hold it on one line beside the watermark. */
+body.ws .chatlist-get-started {
+  container-type: inline-size;
+  height: 48px;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+body.ws .chatlist-get-started-badge {
+  width: 36px;
+  height: 36px;
+  margin-left: 5px;
+}
+body.ws .chatlist-get-started-badge .icon {
+  transform: scale(0.72);
+}
+body.ws .chatlist-get-started-text {
+  flex: 1;
+  min-width: 0;
+  padding-right: 44px;
+}
+body.ws .chatlist-get-started-text h4 {
+  font-size: 15px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.ws .chatlist-get-started-text p {
+  display: none;
+  margin-top: 1px;
+  font-size: 12px;
+  line-height: 14px;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.7);
+}
+@container (min-width: 290px) {
+  body.ws .chatlist-get-started-text p { display: block; }
+}
+body.ws .chatlist-get-started-watermark {
+  top: 2px;
+  right: -8px;
+  width: 44px;
+  height: 44px;
+  opacity: 0.55;
 }
 
 body.ws.ws-details .pins-drawer {
