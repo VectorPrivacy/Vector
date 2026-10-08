@@ -192,24 +192,8 @@ function updateUI(state, message = '', progress = 0) {
     }
 }
 
-// Resolve the proxy the updater's own HTTP client must use. The updater
-// plugin bypasses the backend's Tor-aware client entirely, so with Tor on
-// we either hand it the SOCKS proxy or refuse to touch the network at all.
-// Returns: { allowed: boolean, proxy?: string }
-async function resolveUpdateTransport() {
-    try {
-        const tor = await window.__TAURI__.core.invoke('tor_get_state');
-        if (!tor?.enabled) return { allowed: true };
-        if (tor.running && tor.socks_proxy) return { allowed: true, proxy: tor.socks_proxy };
-        // Tor wanted but not up (bootstrapping/failed): fail closed.
-        return { allowed: false };
-    } catch (e) {
-        console.warn('Updater: could not read Tor state, skipping update check:', e);
-        return { allowed: false };
-    }
-}
-
-// Check for updates
+// Check for updates. Every check runs in the backend, through the account's network: the page
+// never picks a proxy and never talks to the updater plugin itself.
 async function checkForUpdates(silent = false) {
     if (updateState === 'checking' || updateState === 'downloading') return;
 
@@ -217,144 +201,49 @@ async function checkForUpdates(silent = false) {
         updateUI('checking');
     }
 
-    // Android: no updater plugin — the backend fetches the release manifest
-    // through its Tor-aware client and compares versions for us. The Tor
-    // gate here is for messaging only; the backend fails closed regardless.
-    if (platformFeatures.os === 'android') {
-        try {
-            const transport = await resolveUpdateTransport();
-            if (!transport.allowed) {
-                console.log('Updater: skipping update check (Tor enabled but not connected)');
-                if (!silent) updateUI('error', 'Update check paused until Tor connects');
-                return false;
-            }
-            const info = await window.__TAURI__.core.invoke('check_app_update', { beta: followPreviewChannel() });
-            if (!info.available) {
-                if (!silent) updateUI('no-updates');
-                return false;
-            }
-            currentUpdate = { version: info.latest, body: info.notes };
-            updateUI('available');
-            return true;
-        } catch (error) {
-            console.error('Updater: Error checking for updates:', error);
-            if (!silent) updateUI('error', 'Failed to check for updates');
-            return false;
-        }
-    }
-
     try {
-        const transport = await resolveUpdateTransport();
-        if (!transport.allowed) {
-            console.log('Updater: skipping update check (Tor enabled but not connected)');
-            if (!silent) {
-                updateUI('error', 'Update check paused until Tor connects');
-            }
-            return false;
-        }
-        // The baked updater config points at the build's native channel. When
-        // the user's choice differs (stable build opted INTO beta, or a
-        // preview build opted OUT), the check runs through a backend command
-        // that builds an updater for the chosen channel at runtime. Same
-        // manifest format, same signature verification, different pointer.
-        const wantedChannel = followPreviewChannel() ? 'preview' : 'stable';
-        const bakedChannel = versionInfo.preview === null ? 'stable' : 'preview';
-        if (wantedChannel !== bakedChannel) {
-            const info = await window.__TAURI__.core.invoke('check_channel_update', {
-                channel: wantedChannel,
-                proxy: transport.proxy || null,
+        let info;
+        if (platformFeatures.os === 'android') {
+            info = await window.__TAURI__.core.invoke('check_app_update', { beta: followPreviewChannel() });
+        } else {
+            info = await window.__TAURI__.core.invoke('check_channel_update', {
+                channel: followPreviewChannel() ? 'preview' : 'stable',
             });
-            if (!info.available) {
-                if (!silent) updateUI('no-updates');
-                return false;
-            }
-            currentUpdate = { version: info.latest, body: info.notes, channelOverride: true };
-            updateUI('available');
-            return true;
         }
-
-        const update = await window.__TAURI__.updater.check(transport.proxy ? { proxy: transport.proxy } : undefined);
-        
-        if (!update) {
-            if (!silent) {
-                updateUI('no-updates');
-            }
+        if (!info.available) {
+            if (!silent) updateUI('no-updates');
             return false;
         }
-        
-        // Found an update
-        currentUpdate = update;
-        console.log(`Updater: Update available: ${update.version} from ${update.date}`);
-        
-        // Always update UI when an update is found, even in silent mode
+        currentUpdate = { version: info.latest, body: info.notes };
         updateUI('available');
-        
         return true;
     } catch (error) {
         console.error('Updater: Error checking for updates:', error);
-        if (!silent) {
-            updateUI('error', 'Failed to check for updates');
-        }
+        if (!silent) updateUI('error', typeof error === 'string' ? error : 'Failed to check for updates');
         return false;
     }
 }
 
-// Download update
+// Download update: the update found by the last check lives backend-side, so the download and
+// install run there too and stream their progress back.
 async function downloadUpdate() {
     if (!currentUpdate || updateState === 'downloading') return;
-    
+
     updateUI('downloading', '', 0);
-
-    // Channel override: the Update object lives backend-side (stashed by the
-    // check), so download + install runs there and streams progress back.
-    if (currentUpdate.channelOverride) {
-        try {
-            const stopProgress = await window.__TAURI__.event.listen('update_download_progress', (evt) => {
-                const { received = 0, total = 0 } = evt.payload || {};
-                updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
-            });
-            try {
-                await window.__TAURI__.core.invoke('install_channel_update');
-            } finally {
-                stopProgress();
-            }
-            updateUI('ready');
-        } catch (error) {
-            console.error('Updater: Error installing update:', error);
-            updateUI('error', 'Failed to download update');
-        }
-        return;
-    }
-
     try {
-        let downloaded = 0;
-        let contentLength = 0;
-        
-        await currentUpdate.downloadAndInstall((event) => {
-            switch (event.event) {
-                case 'Started':
-                    contentLength = event.data.contentLength || 0;
-                    console.log(`Updater: Started downloading ${contentLength} bytes`);
-                    break;
-                    
-                case 'Progress':
-                    downloaded += event.data.chunkLength;
-                    const percentage = contentLength > 0 ? Math.round((downloaded / contentLength) * 100) : 0;
-                    updateUI('downloading', '', percentage);
-                    break;
-                    
-                case 'Finished':
-                    console.log('Updater: Download finished');
-                    break;
-            }
+        const stopProgress = await window.__TAURI__.event.listen('update_download_progress', (evt) => {
+            const { received = 0, total = 0 } = evt.payload || {};
+            updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
         });
-        
-        console.log('Updater: Update installed successfully');
+        try {
+            await window.__TAURI__.core.invoke('install_channel_update');
+        } finally {
+            stopProgress();
+        }
         updateUI('ready');
-        
     } catch (error) {
         console.error('Updater: Error installing update:', error);
-        updateUI('error', 'Failed to download update');
+        updateUI('error', typeof error === 'string' ? error : 'Failed to download update');
     }
 }
 

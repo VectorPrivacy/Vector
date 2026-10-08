@@ -358,56 +358,107 @@ pub async fn download_and_install_update<R: Runtime>(
 static PENDING_CHANNEL_UPDATE: std::sync::Mutex<Option<tauri_plugin_updater::Update>> =
     std::sync::Mutex::new(None);
 
-/// Check a channel the baked updater config does NOT point at, by building a
-/// second updater at runtime. Two callers: a stable build opted into Beta
-/// Updates (`channel: "preview"` — the pointer, release candidates accepted),
-/// and a preview build opted back OUT (`channel: "stable"` — the stable
-/// manifest, stable versions only, so the build sits on its RC until the
-/// official release lands). Same manifest format, same signature check.
+/// The updater plugin's own reqwest client, set for the network the account uses at the moment
+/// it connects. The plugin runs this again for the download, so a switch in between never sends
+/// it the old way. A refusal points it where nothing listens.
+/// No total timeout, so a slow but steady installer download finishes; every redirect hop passes
+/// the pre-router.
+#[cfg(desktop)]
+fn apply_transport_013(builder: reqwest013::ClientBuilder, owner: u64, host: &str) -> reqwest013::ClientBuilder {
+    use vector_core::transport::{self, Egress, Lane, Op};
+    let builder = builder
+        .user_agent(vector_core::net::user_agent())
+        .connect_timeout(transport::budget(Op::HttpConnect, std::time::Duration::from_secs(15)))
+        .read_timeout(transport::budget(Op::HttpRead, std::time::Duration::from_secs(60)))
+        .redirect(reqwest013::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            if let Some(dest) = attempt.url().host_str().and_then(transport::Dest::parse) {
+                let kind = transport::preference().unwrap_or(transport::Kind::Clearnet);
+                if let Some(r) = transport::route::pre_route(kind, &dest) {
+                    return attempt.error(r.text());
+                }
+            }
+            attempt.follow()
+        }));
+    let proxy = match transport::egress(owner, Lane::Shared, host, 443) {
+        Egress::Direct => return builder,
+        Egress::Proxy(t) => transport::bridge::proxy_url(&t).ok(),
+        Egress::Refuse(_) => None,
+    };
+    let url = proxy.unwrap_or_else(|| format!("socks5h://{}", transport::bridge::NOWHERE));
+    match reqwest013::Proxy::all(url) {
+        Ok(p) => builder.proxy(p),
+        Err(_) => builder.no_proxy().proxy(reqwest013::Proxy::all("socks5h://127.0.0.1:0").expect("a literal proxy URL")),
+    }
+}
+
+/// Run an update step on the network it started on; a switch abandons it.
+#[cfg(desktop)]
+async fn on_this_network<T>(fut: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    let epoch = vector_core::transport::epoch();
+    tokio::select! {
+        r = fut => r,
+        _ = vector_core::transport::changed(epoch) => Err("The network changed. Check for updates again.".to_string()),
+    }
+}
+
+/// Check for a desktop update, on the user's chosen channel, through the account's network.
 ///
-/// `proxy` carries the Tor SOCKS address when Tor is on — the updater plugin
-/// has its own HTTP client, so the frontend resolves transport exactly as it
-/// does for the plugin's JS `check`.
+/// The build's own channel uses the baked config (endpoint and comparator); the other channel
+/// builds an updater for it at runtime: a stable build opted into Beta Updates (`preview`, release
+/// candidates accepted), or a preview build opted back out (`stable`, stable versions only, so
+/// the build sits on its RC until the official release lands). Same manifest format, same
+/// signature check.
 #[tauri::command]
 pub async fn check_channel_update<R: Runtime>(
     handle: AppHandle<R>,
     channel: String,
-    proxy: Option<String>,
 ) -> Result<AppUpdateInfo, String> {
     #[cfg(desktop)]
     {
         use tauri_plugin_updater::UpdaterExt;
         let current = handle.package_info().version.clone();
         let preview = is_preview(&current);
-        let (url, comparator): (_, fn(semver::Version, tauri_plugin_updater::RemoteRelease) -> bool) =
-            match channel.as_str() {
-                "preview" => (PREVIEW_MANIFEST_URL, |current, release| {
-                    release.version > current
-                }),
-                "stable" => (UPDATE_MANIFEST_URL, |current, release| {
-                    release.version.pre.is_empty() && release.version > current
-                }),
-                other => return Err(format!("Unknown update channel: {other}")),
-            };
-        let endpoint =
-            tauri::Url::parse(url).map_err(|e| format!("Bad update endpoint: {e}"))?;
-        let mut builder = handle
-            .updater_builder()
-            .endpoints(vec![endpoint])
-            .map_err(|e| format!("Update check failed: {e}"))?
-            .version_comparator(comparator);
-        if let Some(p) = proxy {
-            builder = builder.proxy(
-                tauri::Url::parse(&p).map_err(|e| format!("Bad proxy address: {e}"))?,
-            );
+        let baked = if preview { "preview" } else { "stable" };
+        let url = match channel.as_str() {
+            "preview" => PREVIEW_MANIFEST_URL,
+            "stable" => UPDATE_MANIFEST_URL,
+            other => return Err(format!("Unknown update channel: {other}")),
+        };
+        let endpoint = tauri::Url::parse(url).map_err(|e| format!("Bad update endpoint: {e}"))?;
+        let host = endpoint.host_str().unwrap_or_default().to_string();
+        let owner = vector_core::db::current_session_id();
+        // Refused here, the plugin never runs: no socket, no resolver.
+        if let vector_core::transport::Egress::Refuse(e) =
+            vector_core::transport::egress(owner, vector_core::transport::Lane::Shared, &host, 443)
+        {
+            return Err(match e {
+                vector_core::transport::ConnectError::Refused(vector_core::transport::Refusal::ExitOff) => {
+                    "Updates need a clearnet server. Turn off I2P-Only to check.".to_string()
+                }
+                e => e.text(),
+            });
         }
+        let mut builder = handle.updater_builder();
+        if channel != baked {
+            let comparator: fn(semver::Version, tauri_plugin_updater::RemoteRelease) -> bool = match channel.as_str() {
+                "preview" => |current, release| release.version > current,
+                _ => |current, release| release.version.pre.is_empty() && release.version > current,
+            };
+            builder = builder
+                .endpoints(vec![endpoint])
+                .map_err(|e| format!("Update check failed: {e}"))?
+                .version_comparator(comparator);
+        }
+        // The manifest check alone keeps a total cap; the plugin drops it for the download.
         let updater = builder
+            .timeout(vector_core::transport::budget(vector_core::transport::Op::HttpTotal, std::time::Duration::from_secs(120)))
+            .configure_client(move |b| apply_transport_013(b, owner, &host))
             .build()
             .map_err(|e| format!("Update check failed: {e}"))?;
-        let found = updater
-            .check()
-            .await
-            .map_err(|e| format!("Update check failed: {e}"))?;
+        let found = on_this_network(async { updater.check().await.map_err(|e| format!("Update check failed: {e}")) }).await?;
         let info = AppUpdateInfo {
             available: found.is_some(),
             current: current.to_string(),
@@ -423,7 +474,7 @@ pub async fn check_channel_update<R: Runtime>(
     }
     #[cfg(not(desktop))]
     {
-        let _ = (handle, channel, proxy);
+        let _ = (handle, channel);
         Err("Channel checks run through the manifest on this platform".to_string())
     }
 }
@@ -447,24 +498,27 @@ pub async fn install_channel_update<R: Runtime>(app: AppHandle<R>) -> Result<(),
         let mut received: u64 = 0;
         let mut last_emit = 0u64;
         let progress_app = app.clone();
-        update
-            .download_and_install(
-                move |chunk, total| {
-                    received += chunk as u64;
-                    let total = total.unwrap_or(0);
-                    // Throttle to ~256KiB steps; installers run tens of MB.
-                    if received - last_emit >= 256 * 1024 || received == total {
-                        last_emit = received;
-                        let _ = progress_app.emit(
-                            "update_download_progress",
-                            serde_json::json!({ "received": received, "total": total }),
-                        );
-                    }
-                },
-                || {},
-            )
-            .await
-            .map_err(|e| format!("Update install failed: {e}"))?;
+        on_this_network(async {
+            update
+                .download_and_install(
+                    move |chunk, total| {
+                        received += chunk as u64;
+                        let total = total.unwrap_or(0);
+                        // Throttle to ~256KiB steps; installers run tens of MB.
+                        if received - last_emit >= 256 * 1024 || received == total {
+                            last_emit = received;
+                            let _ = progress_app.emit(
+                                "update_download_progress",
+                                serde_json::json!({ "received": received, "total": total }),
+                            );
+                        }
+                    },
+                    || {},
+                )
+                .await
+                .map_err(|e| format!("Update install failed: {e}"))
+        })
+        .await?;
         *PENDING_CHANNEL_UPDATE.lock().unwrap() = None;
         Ok(())
     }
