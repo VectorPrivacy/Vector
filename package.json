@@ -21,6 +21,7 @@
     "android:build": "tauri android build --target aarch64 armv7",
     "svelte:build": "node scripts/build-svelte.mjs",
     "check:globals": "node scripts/check-globals.mjs",
+    "test:text-color": "node scripts/test-text-color.mjs",
     "svelte:watch": "node scripts/build-svelte.mjs --watch",
     "test:cache": "node --test \"tests/event-cache/*.test.mjs\"",
     "android:emu": "./scripts/android-emu.sh",

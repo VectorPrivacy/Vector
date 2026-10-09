@@ -34,7 +34,7 @@
         {#each view.sections as section (section.key)}
             <div class="command-section">
                 <div class="command-section-header">
-                    {#if section.avatarSrc}<img src={section.avatarSrc} alt="" />{/if}
+                    {#if section.avatarSrc}<img src={section.avatarSrc} alt="" class:command-mark={section.key === 'system'} />{/if}
                     <span>{section.title}</span>
                     {#if section.refreshing}
                         <span class="command-section-refresh"><span class="command-spinner"></span><span>Checking for Updates</span></span>
@@ -50,7 +50,7 @@
                         onmousedown={(e) => { e.preventDefault(); view.pick(row.index); }}
                     >
                         {#if row.bot}
-                            <img class="command-item-bot" src={row.bot.avatarSrc || 'icons/user-placeholder.svg'} alt="" />
+                            <img class="command-item-bot" class:command-mark={row.bot.mark} src={row.bot.avatarSrc || 'icons/user-placeholder.svg'} alt="" />
                         {/if}
                         <span class="command-item-name">/{row.name}</span>
                         {#each row.args as arg}
@@ -67,13 +67,22 @@
             {#each view.args as arg}
                 <span class="command-item-arg" class:optional={arg.optional} class:current={arg.current} title={arg.title}>{arg.label}</span>
             {/each}
+            {#if view.summary}<span class="command-hint-summary">{view.summary}</span>{/if}
         </div>
-        {#if view.desc}<div class="command-hint-desc">{view.desc}</div>{/if}
+        {#if view.preview}<div class="command-hint-preview" style:background-image={view.preview}></div>{/if}
+        {#if view.desc}
+            <!-- The current argument's name, styled as its highlighted pill, ties the line to it. -->
+            <div class="command-hint-desc"><span class="command-hint-arg">{view.argName}</span>{view.desc}</div>
+        {/if}
         {#if view.choices.length}
             <div class="command-hint-choices">
                 {#each view.choices as choice}
+                    <!-- A colour choice carries its swatch; any other is its own label. -->
+                    {@const value = typeof choice === 'string' ? choice : choice.value}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <span class="command-choice" onmousedown={(e) => { e.preventDefault(); view.pickChoice(choice); }}>{choice}</span>
+                    <span class="command-choice" onmousedown={(e) => { e.preventDefault(); view.pickChoice(value); }}>
+                        {#if choice.color}<span class="command-choice-swatch" style:background-color={choice.color}></span>{/if}{value}
+                    </span>
                 {/each}
             </div>
         {/if}

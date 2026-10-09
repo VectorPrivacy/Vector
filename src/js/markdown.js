@@ -463,7 +463,7 @@ function mdLinkTextSpoofsHref(text, href) {
     // quadratically on adversarial dot-runs.
     const visibleText = (text || '')
         .normalize('NFKC')
-        .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF]/g, '')
+        .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF\u{F0000}-\u{F01FF}]/gu, '')
         .replace(/\u3002/g, '.')
         .slice(0, 2048);
 

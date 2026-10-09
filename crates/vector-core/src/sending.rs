@@ -651,6 +651,9 @@ pub async fn send_dm(
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
+    let (plain, color_spans) = crate::text_color::extract(content);
+    let content = plain.as_str();
+
     // NIP-30: resolve any `:shortcode:` in the outbound text against the
     // user's subscribed packs so the rumor carries `["emoji", ...]` tags.
     // Recipients without the pack subscribed still render correctly, and
@@ -667,6 +670,7 @@ pub async fn send_dm(
         mine: true,
         npub: my_pk.to_bech32().ok(),
         emoji_tags: emoji_tags.clone(),
+        color_spans: color_spans.clone(),
         expiration: config.expiration,
         ..Default::default()
     };
@@ -702,6 +706,7 @@ pub async fn send_dm(
             [et.shortcode.clone(), et.url.clone()],
         ));
     }
+    rumor = rumor.tags(crate::text_color::to_nostr_tags(&color_spans));
     // NIP-40 self-destruct: stamp the rumor so compliant receivers honor the
     // expiry; retry_send_gift_wrap mirrors it onto the outer wrap for relays.
     if let Some(exp) = config.expiration {

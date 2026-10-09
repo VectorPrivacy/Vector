@@ -218,7 +218,8 @@ async function sendMessage(messageText) {
             // Match @Name only at word boundaries to avoid substring collisions,
             // and under any typographic variant, so a name the OS re-punctuated
             // still tags rather than sending as plain text.
-            const re = new RegExp('(?<=^|\\s)@' + cmpNamePattern(m.name) + '(?=\\s|[.,!?;:]|$)', 'g');
+            // `>` and `<` too: a mention can sit right inside colour markup.
+            const re = new RegExp('(?<=^|\\s|>)@' + cmpNamePattern(m.name) + '(?=\\s|[.,!?;:<]|$)', 'g');
             cleanedText = cleanedText.replace(re, '@' + m.npub);
         }
     }
@@ -229,6 +230,11 @@ async function sendMessage(messageText) {
         if (cleanedText === strCurrentEditOriginalContent) {
             cancelEdit();
             return;
+        }
+        // A colour command works in an edit too, unless a bot here claims the name.
+        const editCmd = tcCommand(cleanedText);
+        if (editCmd && !editCmd.error && (!commandCtrl || commandCtrl.systemOwns(editCmd.typed))) {
+            cleanedText = tcCommandToMarkup(cleanedText);
         }
 
         // Clear input and show editing state
@@ -247,26 +253,29 @@ async function sendMessage(messageText) {
             if (chat) {
                 const msg = chat.messages.find(m => m.id === editMsgId);
                 if (msg) {
+                    // Core takes the colour markup out on send; the row shows what it will keep.
+                    const colored = tcExtract(cleanedText);
                     // Build edit history if it doesn't exist yet
                     if (!msg.edit_history) {
                         msg.edit_history = [];
                         // Add original content as first entry
                         msg.edit_history.push({
-                            content: originalContent,
+                            content: tcExtract(originalContent).plain,
                             edited_at: msg.created_at * 1000 // Convert to milliseconds
                         });
                     }
                     // Add new edit entry
                     msg.edit_history.push({
-                        content: cleanedText,
+                        content: colored.plain,
                         edited_at: Date.now()
                     });
-                    msg.content = cleanedText;
+                    msg.content = colored.plain;
+                    msg.color_spans = colored.spans;
                     msg.edited = true;
                     // The optimistic row needs the tags the edit will carry: the equipped
                     // packs' shortcodes present in the new text, ahead of the backend's copy.
                     msg.emoji_tags = mergeEmojiTags(msg.emoji_tags, equippedEmojiTags())
-                        .filter(t => cleanedText.includes(`:${t.shortcode}:`));
+                        .filter(t => colored.plain.includes(`:${t.shortcode}:`));
                     // Instant repaint for responsive UX; the backend's authoritative
                     // message_update lands on the same row afterwards.
                     updateMessageRow(msg, editMsgId);
@@ -294,7 +303,7 @@ async function sendMessage(messageText) {
     // Slash command routing: a KNOWN bot command with bad arguments blocks the
     // send (draft preserved, error shown) — sending it would just post a broken
     // invocation the bot ignores. Valid commands carry their bot's routing tag;
-    // unknown "/words" stay ordinary chat.
+    // a system command rewrites the text; unknown "/words" stay ordinary chat.
     let commandBot = null;
     if (commandCtrl) {
         const route = commandCtrl.routeForSend(cleanedText);
@@ -302,7 +311,8 @@ async function sendMessage(messageText) {
             showToast(route.error);
             return;
         }
-        if (route) commandBot = route.bot || null;
+        if (route && route.text !== undefined) cleanedText = route.text;
+        else if (route) commandBot = route.bot || null;
     }
 
     // Clear input and show sending state

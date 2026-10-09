@@ -60,6 +60,9 @@ pub struct Message {
     /// — commands are actioned at delivery, never replayed from history).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addressed_bots: Vec<String>,
+    /// Coloured runs of `content` (see `text_color`), from `["color", …]` tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_spans: Vec<crate::text_color::ColorSpan>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -138,7 +141,7 @@ impl Message {
     /// content. They're adopted only when this edit becomes the newest
     /// revision, so an out-of-order older edit can't clobber the live
     /// content's emoji.
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<EmojiTag>) {
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<EmojiTag>, color_spans: Vec<crate::text_color::ColorSpan>) {
         if self.edit_history.is_none() {
             self.edit_history = Some(vec![EditEntry {
                 content: self.content.clone(),
@@ -162,6 +165,7 @@ impl Message {
                 self.content = latest.content.clone();
                 if latest.edited_at == edited_at {
                     self.emoji_tags = emoji_tags;
+                    self.color_spans = color_spans;
                 }
             }
         }
@@ -448,7 +452,7 @@ mod tests {
             at: 1000,
             ..Default::default()
         };
-        msg.apply_edit("edited content".to_string(), 2000, Vec::new());
+        msg.apply_edit("edited content".to_string(), 2000, Vec::new(), Vec::new());
 
         assert!(msg.edited, "edited flag should be set after apply_edit");
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
@@ -466,8 +470,8 @@ mod tests {
             at: 1000,
             ..Default::default()
         };
-        msg.apply_edit("edit1".to_string(), 2000, Vec::new());
-        msg.apply_edit("duplicate".to_string(), 2000, Vec::new()); // same timestamp
+        msg.apply_edit("edit1".to_string(), 2000, Vec::new(), Vec::new());
+        msg.apply_edit("duplicate".to_string(), 2000, Vec::new(), Vec::new()); // same timestamp
 
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
         assert_eq!(history.len(), 2, "duplicate timestamp edit should be ignored, history should have 2 entries");
@@ -482,7 +486,7 @@ mod tests {
         // for a prior edit and dropped the edit entirely — the message silently
         // refused to change.
         let mut msg = Message { content: "original".to_string(), at: 1000, ..Default::default() };
-        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new(), Vec::new());
         assert_eq!(msg.content, "edited!", "an edit sharing the message's stamp still applies");
         assert!(msg.edited);
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
@@ -490,7 +494,7 @@ mod tests {
         assert_eq!(history[0].content, "original", "the base revision stays first");
 
         // Repeat suppression is untouched: the same edit again is absorbed.
-        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new(), Vec::new());
         assert_eq!(msg.edit_history.as_ref().unwrap().len(), 2, "a repeat of that edit is ignored");
     }
 
@@ -501,9 +505,9 @@ mod tests {
             at: 1000,
             ..Default::default()
         };
-        msg.apply_edit("edit1".to_string(), 2000, Vec::new());
-        msg.apply_edit("edit2".to_string(), 3000, Vec::new());
-        msg.apply_edit("edit3".to_string(), 4000, Vec::new());
+        msg.apply_edit("edit1".to_string(), 2000, Vec::new(), Vec::new());
+        msg.apply_edit("edit2".to_string(), 3000, Vec::new(), Vec::new());
+        msg.apply_edit("edit3".to_string(), 4000, Vec::new(), Vec::new());
 
         assert_eq!(msg.content, "edit3", "content should reflect the latest edit by timestamp");
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
@@ -518,8 +522,8 @@ mod tests {
             ..Default::default()
         };
         // Apply edits out of order
-        msg.apply_edit("late edit".to_string(), 5000, Vec::new());
-        msg.apply_edit("early edit".to_string(), 2000, Vec::new());
+        msg.apply_edit("late edit".to_string(), 5000, Vec::new(), Vec::new());
+        msg.apply_edit("early edit".to_string(), 2000, Vec::new(), Vec::new());
 
         assert_eq!(msg.content, "late edit", "content should be the edit with the highest timestamp");
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
@@ -536,7 +540,7 @@ mod tests {
             at: 500,
             ..Default::default()
         };
-        msg.apply_edit("new content".to_string(), 600, Vec::new());
+        msg.apply_edit("new content".to_string(), 600, Vec::new(), Vec::new());
         let history = msg.edit_history.as_ref().unwrap();
         assert_eq!(history[0].content, "keep this", "original content should be preserved as first history entry");
         assert_eq!(history[0].edited_at, 500, "original timestamp should be preserved");
@@ -552,13 +556,13 @@ mod tests {
         };
         // Edit swaps the custom emoji — the new content's tags must win.
         msg.apply_edit("hi :tada:".to_string(), 2000,
-            vec![EmojiTag { shortcode: "tada".into(), url: "u/tada".into() }]);
+            vec![EmojiTag { shortcode: "tada".into(), url: "u/tada".into() }], Vec::new());
         assert_eq!(msg.emoji_tags.len(), 1);
         assert_eq!(msg.emoji_tags[0].shortcode, "tada");
 
         // An out-of-order OLDER edit must not clobber the live content's emoji.
         msg.apply_edit("hi :wave:".to_string(), 1500,
-            vec![EmojiTag { shortcode: "wave".into(), url: "u/wave".into() }]);
+            vec![EmojiTag { shortcode: "wave".into(), url: "u/wave".into() }], Vec::new());
         assert_eq!(msg.content, "hi :tada:", "newest content wins");
         assert_eq!(msg.emoji_tags[0].shortcode, "tada", "newest content's emoji wins");
     }
@@ -571,7 +575,7 @@ mod tests {
             emoji_tags: vec![EmojiTag { shortcode: "wave".into(), url: "u/wave".into() }],
             ..Default::default()
         };
-        msg.apply_edit("plain text".to_string(), 2000, Vec::new());
+        msg.apply_edit("plain text".to_string(), 2000, Vec::new(), Vec::new());
         assert!(msg.emoji_tags.is_empty(), "editing out the emoji should drop its tag");
     }
 
@@ -687,6 +691,7 @@ mod tests {
             }]),
             emoji_tags: Vec::new(),
             addressed_bots: Vec::new(),
+            color_spans: Vec::new(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

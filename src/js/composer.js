@@ -218,7 +218,77 @@ function cmpTokenize(src, opts) {
         last = to;
     }
     if (last < src.length) out.push({ kind: 'text', from: last, to: src.length });
-    return cmpApplyAnsi(src, out);
+    return cmpApplyColor(src, cmpApplyAnsi(src, out), opts);
+}
+
+// Tokens whose text keeps its own look, as a sent message's colour skips them.
+const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'emoji', 'twemoji', 'spoiler', 'ansitext', 'ansicode', 'fence', 'colormark']);
+
+/**
+ * Colour markup and a leading colour command, previewed as they'll send: the tags
+ * and the command recede like any marker, and the text they cover takes its
+ * colours glyph by glyph. The run's `paint` maps each glyph's offset to its colour;
+ * `colorKey` changes whenever a glyph would change colour, which repaints.
+ */
+function cmpApplyColor(src, tokens, opts) {
+    const pairs = tcScan(src);
+    const cmd = tcCommand(src);
+    // A bot in the chat that claims the name runs instead, and gets the text as typed.
+    let owned = true;
+    if (cmd && opts.ownsCommand) {
+        try { owned = opts.ownsCommand(cmd.typed); } catch (_) { /* host not wired yet: preview */ }
+    }
+    const command = cmd && !cmd.error && owned ? cmd : null;
+    if (!pairs.length && !command) return tokens;
+    const marks = [];
+    const spans = [];
+    if (command) {
+        marks.push([0, command.prefixEnd]);
+        spans.push({ from: command.prefixEnd, to: src.length, effect: command.effect, colors: command.colors });
+    }
+    for (const p of pairs) {
+        marks.push(p.open, p.close);
+        spans.push({ from: p.open[1], to: p.close[0], effect: p.effect, colors: p.colors });
+    }
+    const out = [];
+    for (const t of tokens) {
+        let pieces = [t];
+        for (const [from, to] of marks) {
+            pieces = pieces.flatMap((p) => {
+                if (to <= p.from || from >= p.to) return [p];
+                const keep = [];
+                if (p.from < from) keep.push({ kind: 'text', from: p.from, to: from });
+                if (p.to > to) keep.push({ kind: 'text', from: to, to: p.to });
+                return keep;
+            });
+        }
+        out.push(...pieces);
+    }
+    for (const [from, to] of marks) out.push({ kind: 'colormark', from, to });
+    out.sort((a, b) => a.from - b.from);
+
+    const skip = out.filter((t) => CMP_UNPAINTED.has(t.kind));
+    const skipped = (i) => skip.some((t) => i >= t.from && i < t.to);
+    const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    const paint = new Map();
+    let key = '';
+    spans.forEach((span) => {
+        const glyphs = [];
+        for (const g of seg.segment(src.slice(span.from, span.to))) {
+            const at = span.from + g.index;
+            if (/\S/.test(g.segment) && !skipped(at)) glyphs.push(at);
+        }
+        const colors = tcColors(span, glyphs.length);
+        glyphs.forEach((at, i) => paint.set(at, colors[i]));
+        // A solid span looks the same at any length, so typing in one repaints nothing;
+        // the others recolour as glyphs come and go.
+        key += span.effect === 'solid'
+            ? `${span.from}:solid${span.colors[0]};`
+            : `${span.from}:${span.to}:${glyphs.length}:${span.effect}${span.colors.join('')};`;
+    });
+    out.paint = paint;
+    out.colorKey = key;
+    return out;
 }
 
 const CMP_ANSI_OPEN = /^ {0,3}```ansi(?:[ \t][^\n]*)?$/gim;
@@ -319,6 +389,7 @@ function cmpSignature(tokens, src) {
         if (t.kind === 'header') s += t.mark;
         s += '|';
     }
+    if (tokens.colorKey) s += tokens.colorKey;
     return s;
 }
 
@@ -433,6 +504,7 @@ function createRichComposer(host, opts = {}) {
                     el.appendChild(span('cmp-mark', raw));
                     break;
                 case 'fence':
+                case 'colormark':
                     el.appendChild(span('cmp-mark', raw));
                     break;
                 case 'ansitext': {
@@ -540,9 +612,53 @@ function createRichComposer(host, opts = {}) {
         // discarded. Without it each read eats a newline and every second Shift+Enter
         // appears to do nothing.
         if (src.endsWith('\n')) el.appendChild(document.createElement('br'));
+        if (tokens.paint && tokens.paint.size) paintColors(tokens.paint);
         if (!el.firstChild) el.appendChild(document.createTextNode(''));
         // `:empty` can't drive the placeholder — the root always holds a text node.
         el.dataset.empty = src === '' ? '1' : '0';
+    }
+
+    /**
+     * Wrap each coloured glyph run of the rendered text in its colour. Runs are
+     * plain spans, so they read back as their text like any other decoration.
+     */
+    function paintColors(paint) {
+        const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        let at = 0;
+        const walk = (node) => {
+            for (const child of [...node.childNodes]) {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    const value = child.nodeValue;
+                    const base = at;
+                    at += value.split(CMP_ZWSP).join('').length;
+                    if (value.includes(CMP_ZWSP) || child.parentElement.closest('.cmp-mark, .cmp-code, .cmp-mention, .cmp-ansi, .cmp-spoiler')) continue;
+                    let colored = false;
+                    const frag = document.createDocumentFragment();
+                    let run = null;
+                    let runColor = null;
+                    for (const g of seg.segment(value)) {
+                        const color = paint.get(base + g.index) || (run && !/\S/.test(g.segment) ? runColor : null);
+                        if (!color) {
+                            run = null;
+                            frag.appendChild(document.createTextNode(g.segment));
+                            continue;
+                        }
+                        colored = true;
+                        if (run && color === runColor) { run.textContent += g.segment; continue; }
+                        run = span('cmp-color', g.segment);
+                        run.style.color = color;
+                        runColor = color;
+                        frag.appendChild(run);
+                    }
+                    if (colored) child.replaceWith(frag);
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    if (child.dataset && child.dataset.src !== undefined) at += child.dataset.src.length;
+                    else if (child.tagName === 'BR') at += 1;
+                    else walk(child);
+                }
+            }
+        };
+        walk(el);
     }
 
     // ---- selection mapping --------------------------------------------------
@@ -686,7 +802,7 @@ function createRichComposer(host, opts = {}) {
                 case 'header': case 'subtext':
                     expect.push(raw.slice(0, t.mark));
                     break;
-                case 'listmark': case 'fence':
+                case 'listmark': case 'fence': case 'colormark':
                     expect.push(raw);
                     break;
             }

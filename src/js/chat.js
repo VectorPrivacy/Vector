@@ -720,7 +720,7 @@ async function retryFailedMessage(msg) {
         } else {
             // Route through message() so Community retries hit send_community_message
             // (not the DM `message` command, which can't address a channel id).
-            await message(chatId, msg.content, msg.replied_to || '');
+            await message(chatId, tcRestore(msg.content, msg.color_spans), msg.replied_to || '');
         }
     } catch (e) {
         console.error('Retry send failed:', e);

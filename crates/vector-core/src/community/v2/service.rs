@@ -335,10 +335,23 @@ pub async fn send_edit<T: Transport + ?Sized>(
     new_content: &str,
     emoji: &[(&str, &str)],
 ) -> Result<String, String> {
+    send_edit_tagged(transport, community, channel_id, target_id_hex, new_content, emoji, Vec::new()).await
+}
+
+/// [`send_edit`] carrying extra tags verbatim (the edit's colour spans).
+pub async fn send_edit_tagged<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target_id_hex: &str,
+    new_content: &str,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let expiration = crate::self_destruct::edit_expiry(target_id_hex).await?;
     let at_ms = next_send_ms();
-    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, expiration, at_ms);
+    let rumor = chat::build_edit_rumor_tagged(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, expiration, extra_tags, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 

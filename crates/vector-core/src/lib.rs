@@ -87,6 +87,7 @@ pub mod blossom_info;
 pub mod blossom_stats;
 pub mod inbox_relays;
 pub mod emoji_packs;
+pub mod text_color;
 pub mod emoji_usage;
 pub mod nostr_embed;
 pub mod golink;
@@ -1082,6 +1083,8 @@ impl VectorCore {
             let receiver_pubkey = PublicKey::from_bech32(to_npub).map_err(|e| VectorError::Nostr(e.to_string()))?;
             let reference_event = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;
 
+            let (plain, color_spans) = crate::text_color::extract(new_content);
+            let new_content = plain.as_str();
             // NIP-30: resolve `:shortcode:` so the edit carries emoji image tags.
             let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
             // On the rumor and the wrap alike, so relays drop the edit with its message.
@@ -1102,6 +1105,7 @@ impl VectorCore {
                     [et.shortcode.clone(), et.url.clone()],
                 ));
             }
+            builder = builder.tags(crate::text_color::to_nostr_tags(&color_spans));
             let rumor = builder.tags(expiry_tags.clone()).finalize_unsigned_with_id(my_public_key);
             let edit_id = rumor.id.ok_or(VectorError::Other("Failed to get edit rumor ID".into()))?.to_hex();
             let edit_ts_ms = rumor.created_at.as_secs() * 1000;
@@ -1110,7 +1114,7 @@ impl VectorCore {
             let msg_for_emit = {
                 let mut st = state::STATE.lock().await;
                 st.update_message_in_chat_with(to_npub, message_id, |msg, i| {
-                    msg.apply_edit(new_content.to_string(), edit_ts_ms, emoji_tags.clone(), i);
+                    msg.apply_edit(new_content.to_string(), edit_ts_ms, emoji_tags.clone(), color_spans.clone(), i);
                     msg.set_preview_metadata(None);
                 })
             };
@@ -1118,7 +1122,7 @@ impl VectorCore {
                 traits::emit_message_update(to_npub, message_id, &mut msg).await;
                 if let Ok(db_chat_id) = db::id_cache::get_chat_id_by_identifier(to_npub) {
                     let _ = db::events::save_edit_event(
-                        &edit_id, message_id, new_content, &emoji_tags, db_chat_id, None, &my_npub,
+                        &edit_id, message_id, new_content, &emoji_tags, &color_spans, db_chat_id, None, &my_npub,
                     ).await;
                 }
             }
@@ -2234,9 +2238,11 @@ impl VectorCore {
             let reply_ref = reply.as_ref().map(|(id, author)| (id.as_str(), author.as_str()));
             // NIP-30: resolve `:shortcode:` against subscribed packs so the rumor
             // carries `["emoji", ...]` pairs — parity with the v1 inner event.
+            let (plain, color_spans) = crate::text_color::extract(content);
+            let content = plain.as_str();
             let emoji_owned = crate::emoji_packs::resolve_outbound_emoji_tags(content);
             let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-            let mut extra_tags = Vec::new();
+            let mut extra_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_color::to_nostr_tags(&color_spans).collect();
             if let Some(secs) = expires_in_secs.filter(|s| *s > 0) {
                 let at = web_time::SystemTime::now()
                     .duration_since(web_time::UNIX_EPOCH)
@@ -2262,15 +2268,18 @@ impl VectorCore {
             .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let unsigned = envelope::build_inner_typed(
+        let (plain, color_spans) = crate::text_color::extract(content);
+        let color_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_color::to_nostr_tags(&color_spans).collect();
+        let unsigned = envelope::build_inner_full(
             author_pk,
             &channel.id,
             channel.epoch,
             crate::stored_event::event_kind::COMMUNITY_MESSAGE,
-            content,
+            &plain,
             ms,
             reply,
             &[],
+            &color_tags,
         );
         let message_id = unsigned.id.ok_or_else(|| VectorError::Other("inner event has no id".into()))?.to_hex();
         let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
@@ -2523,6 +2532,9 @@ impl VectorCore {
 
     /// Edit one of your own Community messages.
     pub async fn edit_community_message(&self, channel_id: &str, message_id: &str, new_content: &str) -> Result<()> {
+        let (plain, color_spans) = crate::text_color::extract(new_content);
+        let new_content = plain.as_str();
+        let color_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_color::to_nostr_tags(&color_spans).collect();
         let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let community = crate::db::community::load_community_v2(&id)
@@ -2531,13 +2543,13 @@ impl VectorCore {
             let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content, &emoji_pairs)
+            return crate::community::v2::service::send_edit_tagged(&transport, &community, &ch, message_id, new_content, &emoji_pairs, color_tags)
                 .await
                 .map(|_| ())
                 .map_err(VectorError::Other);
         }
-        self.publish_community_control(
-            channel_id, stored_event::event_kind::COMMUNITY_EDIT, new_content, message_id, &emoji_tags,
+        self.publish_community_control_tagged(
+            channel_id, stored_event::event_kind::COMMUNITY_EDIT, new_content, message_id, &emoji_tags, &color_tags,
         ).await
     }
 
@@ -2691,6 +2703,18 @@ impl VectorCore {
         target: &str,
         emoji_tags: &[crate::types::EmojiTag],
     ) -> Result<()> {
+        self.publish_community_control_tagged(channel_id, kind, content, target, emoji_tags, &[]).await
+    }
+
+    async fn publish_community_control_tagged(
+        &self,
+        channel_id: &str,
+        kind: u16,
+        content: &str,
+        target: &str,
+        emoji_tags: &[crate::types::EmojiTag],
+        extra_tags: &[nostr_sdk::prelude::Tag],
+    ) -> Result<()> {
         use crate::community::{envelope, inbound, service, transport::LiveTransport};
         let (community, channel) = self.resolve_channel(channel_id)?;
         Self::ensure_v1_writable(&community)?;
@@ -2699,8 +2723,8 @@ impl VectorCore {
             .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let unsigned = envelope::build_inner_typed(
-            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
+        let unsigned = envelope::build_inner_full(
+            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags, extra_tags,
         );
         let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;

@@ -258,6 +258,22 @@ pub fn build_edit_rumor(
     expiration: Option<u64>,
     at_ms: u64,
 ) -> UnsignedEvent {
+    build_edit_rumor_tagged(author, channel_id, epoch, target_rumor_id_hex, new_content, emoji, expiration, Vec::new(), at_ms)
+}
+
+/// [`build_edit_rumor`] carrying extra tags verbatim (the edit's colour spans).
+#[allow(clippy::too_many_arguments)]
+pub fn build_edit_rumor_tagged(
+    author: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    target_rumor_id_hex: &str,
+    new_content: &str,
+    emoji: &[(&str, &str)],
+    expiration: Option<u64>,
+    extra_tags: Vec<Tag>,
+    at_ms: u64,
+) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
     for (shortcode, url) in emoji {
@@ -266,6 +282,7 @@ pub fn build_edit_rumor(
     if let Some(exp) = expiration {
         tags.push(Tag::expiration(Timestamp::from_secs(exp)));
     }
+    tags.extend(extra_tags);
     stream::build_rumor_ms(kind::EDIT, author, new_content, tags, at_ms)
 }
 

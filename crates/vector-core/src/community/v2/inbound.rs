@@ -38,10 +38,18 @@ pub fn chat_message_to_message(
         None => (String::new(), None),
     };
     let attachments = attachments_from_tags(opened.rumor.tags.iter(), &crate::db::get_download_dir());
+    // Drop any blob URL a foreign client (e.g. Armada) also inlined into the caption.
+    let content = super::super::attachments::strip_attachment_urls(&opened.rumor.content, &attachments);
+    // Spans count chars of the content as sent; a stripped link would shift them.
+    let color_spans = if content == opened.rumor.content {
+        crate::text_color::from_tags(opened.rumor.tags.iter(), &content)
+    } else {
+        Vec::new()
+    };
     Message {
         id: opened.rumor_id.to_hex(),
-        // Drop any blob URL a foreign client (e.g. Armada) also inlined into the caption.
-        content: super::super::attachments::strip_attachment_urls(&opened.rumor.content, &attachments),
+        content,
+        color_spans,
         replied_to,
         replied_to_npub,
         at: opened.at_ms,
@@ -199,14 +207,19 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 .iter()
                 .map(|(shortcode, url)| crate::types::EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
                 .collect();
-            let (_c, message) = state.update_message_with(&target_id, |m, i| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), i))?;
+            let color_spans = crate::text_color::from_tags(opened.rumor.tags.iter(), new_content);
+            let (_c, message) = state.update_message_with(&target_id, |m, i| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), color_spans.clone(), i))?;
             // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching
             // v1 — emoji tags included, or the reload fold re-strips what the live fold kept.
             let edit_event = crate::stored_event::StoredEventBuilder::new()
                 .id(opened.rumor_id.to_hex())
                 .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
                 .content(new_content.clone())
-                .tags(emoji.iter().map(|(s, u)| vec!["emoji".to_string(), s.clone(), u.clone()]).collect())
+                .tags(
+                    emoji.iter().map(|(s, u)| vec!["emoji".to_string(), s.clone(), u.clone()])
+                        .chain(color_spans.iter().map(|s| s.to_tag_parts()))
+                        .collect(),
+                )
                 .reference_id(Some(target_id.clone()))
                 .created_at(edited_at / 1000)
                 .mine(opened.author == *my_pubkey)
@@ -1101,6 +1114,54 @@ mod tests {
         assert_eq!(content.as_deref(), Some("edited!"), "the edit applied to the stored message");
         let edit_id = events.iter().find_map(|e| matches!(e, ChatEvent::Edit { .. }).then(|| e.opened().rumor_id.to_hex())).unwrap();
         assert!(crate::db::events::event_exists(&edit_id).unwrap(), "the MESSAGE_EDIT event is persisted (folds on reload)");
+    }
+
+    /// Colour spans ride the message and its edit as tags, fold onto the resident
+    /// message newest-edit-wins, and persist so a reload paints the same.
+    #[tokio::test]
+    async fn colour_spans_travel_with_messages_and_edits() {
+        use crate::text_color::{extract, to_nostr_tags, Effect};
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Colour", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        let (plain, spans) = extract("hi <rainbow>everyone</rainbow>!");
+        let msg_id = service::send_chat_message(&relay, &community, &general, &plain, None, &[], to_nostr_tags(&spans).collect()).await.unwrap();
+        let (edited, edit_spans) = extract("<color pink>bye</color> all");
+        service::send_edit_tagged(&relay, &community, &general, &msg_id, &edited, &[], to_nostr_tags(&edit_spans).collect()).await.unwrap();
+
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        let mut events: Vec<ChatEvent> = wraps.iter().filter_map(|w| chat::open_chat_event(w, &group, &general, community.root_epoch).ok()).collect();
+        events.sort_by_key(|e| (!matches!(e, ChatEvent::Message { .. }), e.opened().at_ms));
+
+        let sent = events.iter().find(|e| matches!(e, ChatEvent::Message { .. })).unwrap().opened();
+        assert_eq!(sent.rumor.content, "hi everyone!", "the markup never reaches the wire");
+        let wire = crate::text_color::from_tags(sent.rumor.tags.iter(), &sent.rumor.content);
+        assert_eq!(wire.len(), 1);
+        assert_eq!((wire[0].from, wire[0].to, wire[0].effect), (3, 11, Effect::Rainbow));
+        let built = chat_message_to_message(sent, &None, &[], &me.public_key());
+        assert_eq!(built.color_spans, wire, "the inbound message carries the wire's spans");
+
+        for ev in &events {
+            let o = {
+                let mut st = crate::state::STATE.lock().await;
+                apply_chat_to_state(&mut st, ev, &cid, &me.public_key())
+            };
+            if let Some(o) = o { persist_chat(&cid, &o).await; }
+        }
+        let folded = crate::state::STATE.lock().await.find_message(&msg_id).map(|(_, m)| m).unwrap();
+        assert_eq!(folded.content, "bye all");
+        assert_eq!(folded.color_spans, edit_spans, "the edit's spans replace the original's");
+
+        let chat_db = crate::db::id_cache::get_chat_id_by_identifier(&cid).unwrap();
+        let reloaded = crate::db::events::get_message_views(chat_db, 50, 0).await.unwrap()
+            .into_iter().find(|m| m.id == msg_id).expect("reloaded");
+        assert_eq!(reloaded.content, "bye all");
+        assert_eq!(reloaded.color_spans, edit_spans, "the reload fold reads the edit's spans");
     }
 
     /// An edit's custom emoji must survive the whole span: the wire (NIP-30 tags

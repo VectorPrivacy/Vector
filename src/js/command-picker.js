@@ -19,9 +19,42 @@
  *   }
  *   ctrl.isOpen()                        → list/loading panel consuming keys?
  *   ctrl.relabel()                       → repaint names (a profile or Streamer Mode changed)
- *   ctrl.routeForSend(text)              → null | {error} | {bot, name}
+ *   ctrl.routeForSend(text)              → null | {error} | {bot, name} | {text} (a system command, rewritten)
  *   ctrl.onCommandsUpdated(chatId, snap) → live swap-in from the backend event
  */
+
+/**
+ * Commands built into Vector. Listed after every bot's, and a bot that declares
+ * the same name wins; they share the Recently Used list, so one used often rises.
+ * Picking one puts `/name ` in the composer rather than opening parameter fields:
+ * a colour command previews live there, which a field can't.
+ */
+const SYSTEM_COMMAND_OWNER = 'system';
+const SYSTEM_COMMANDS = [
+    {
+        name: 'rainbow',
+        description: `Send your message in rainbow ${TC_COLOR_WORD}s`,
+        args: [{ name: 'text', type: 'string', required: true, description: `The message to ${TC_COLOR_WORD}` }],
+    },
+    {
+        name: 'gradient',
+        description: `Fade your message from one ${TC_COLOR_WORD} to another`,
+        args: [
+            { name: 'from', type: 'color', required: true, description: `The ${TC_COLOR_WORD} it starts in: a name or #hex` },
+            { name: 'to', type: 'color', required: true, description: `The ${TC_COLOR_WORD} it ends in: a name or #hex` },
+            { name: 'text', type: 'string', required: true, description: `The message to ${TC_COLOR_WORD}` },
+        ],
+    },
+    {
+        // `/color` or `/colour` by locale; the other spelling still runs it.
+        name: TC_COLOR_WORD,
+        description: `Send your message in one ${TC_COLOR_WORD}`,
+        args: [
+            { name: TC_COLOR_WORD, type: 'color', required: true, description: `Its ${TC_COLOR_WORD}: a name or #hex` },
+            { name: 'text', type: 'string', required: true, description: `The message to ${TC_COLOR_WORD}` },
+        ],
+    },
+];
 
 // eslint-disable-next-line no-unused-vars
 function initCommandSelector(textarea, io) {
@@ -76,25 +109,31 @@ function initCommandSelector(textarea, io) {
         Promise.resolve(io.load(chatId)).then((snap) => {
             loading.delete(chatId);
             snapshots.set(chatId, snap || { bots: 0, commands: [] });
-            if (isVisible() && io.chatId() === chatId) render();
+            if (isVisible() && io.chatId() === chatId) refresh();
             // The timeline may have painted before this resolved; let it upgrade
             // any untagged `/cmd args` rows now that the command set is known.
             if (io.commandsReady) io.commandsReady(chatId);
         }).catch(() => {
             loading.delete(chatId);
             if (!snapshots.has(chatId)) snapshots.set(chatId, { bots: 0, commands: [] });
-            if (isVisible() && io.chatId() === chatId) render();
+            if (isVisible() && io.chatId() === chatId) refresh();
         });
+    }
+
+    /** Redraw what's showing from the new snapshot: a hint stays a hint, since the
+     *  draft is already past the command's name. */
+    function refresh() {
+        if (mode === 'hint') onInput(); else render();
     }
 
     /** Live swap-in: the backend finished its background manifest refresh. */
     function onCommandsUpdated(chatId, snap) {
         snapshots.set(chatId, { bots: snap.bots || 0, commands: snap.commands || [], fresh: true });
-        if (isVisible() && io.chatId() === chatId) render();
+        if (isVisible() && io.chatId() === chatId) refresh();
         if (io.commandsReady) io.commandsReady(chatId);
     }
 
-    /** Every known command of the open chat: [{bot, name, description, args}]. */
+    /** Every known command of the open chat: [{bot, name, description, args}], the bots' first. */
     function allCommands() {
         const snap = snapshots.get(io.chatId());
         const out = [];
@@ -103,7 +142,18 @@ function initCommandSelector(textarea, io) {
                 out.push({ bot: b.bot, name: c.name, description: c.description || '', args: c.args || [] });
             }
         }
+        for (const c of SYSTEM_COMMANDS) out.push({ bot: SYSTEM_COMMAND_OWNER, ...c });
         return out;
+    }
+
+    function isSystem(cmd) {
+        return cmd.bot === SYSTEM_COMMAND_OWNER;
+    }
+
+    /** The command `name` runs here: a bot's first, and either spelling of colour is Vector's. */
+    function resolveCommand(name) {
+        return findCommand(name, armedPick && armedPick.name === name ? armedPick.bot : null)
+            || (name === 'color' || name === 'colour' ? allCommands().find((c) => isSystem(c) && c.name === TC_COLOR_WORD) : null);
     }
 
     function findCommand(name, preferBot) {
@@ -188,6 +238,9 @@ function initCommandSelector(textarea, io) {
             case 'choice':
                 if (!(a.choices || []).includes(v)) return 'must be one of: ' + (a.choices || []).join(', ');
                 break;
+            case 'color':
+                if (!tcHex(v)) return `must be a ${TC_COLOR_WORD} name or #hex`;
+                break;
         }
         return null;
     }
@@ -232,6 +285,7 @@ function initCommandSelector(textarea, io) {
 
     /** A bot's name and face as the app resolves them. */
     function botView(npub) {
+        if (npub === SYSTEM_COMMAND_OWNER) return { name: 'Vector', avatarSrc: './icons/vector-mark.svg', mark: true };
         const profile = io.botProfile(npub) || {};
         return { name: profile.name || getName(npub), avatarSrc: profile.avatarSrc || null };
     }
@@ -254,34 +308,22 @@ function initCommandSelector(textarea, io) {
         const chatId = io.chatId();
         const snap = snapshots.get(chatId);
 
-        // Still fetching and nothing known: the loading state ("Loading N bots").
-        if (!snap || (loading.has(chatId) && !allCommands().length)) {
-            const n = snap ? snap.bots : 0;
-            if (snap && n === 0) { hide(); return; } // known: no bots here
-            mode = 'loading';
-            show({
-                mode: 'loading',
-                label: n > 0 ? ('Loading ' + n + ' bot' + (n === 1 ? '' : 's') + '…') : 'Looking for bots…',
-            });
-            return;
-        }
-
-        if (snap.bots === 0) { hide(); return; } // no bots here — nothing to offer
-        if (!allCommands().length) {
-            // Bots ARE present but none publish a command manifest. Say so
-            // rather than silently hiding a deliberately-opened picker; if a
-            // manifest is still converging, show that instead of a false empty.
-            mode = 'list';
-            flatRows = [];
-            activeIndex = 0;
-            show(snap.fresh === false
-                ? { mode: 'message', variant: 'refreshing', label: 'Checking for commands…' }
-                : { mode: 'message', variant: 'empty', label: 'No commands available' });
-            return;
-        }
-
+        // The system commands are always on offer, so a bot snapshot still loading
+        // only shows when nothing typed so far matches one of them.
         const { recent, matches } = visibleRows();
-        if (!matches.length) { hide(); return; }
+        if (!matches.length) {
+            if (!snap || (loading.has(chatId) && snap.bots !== 0)) {
+                const n = snap ? snap.bots : 0;
+                mode = 'loading';
+                show({
+                    mode: 'loading',
+                    label: n > 0 ? ('Loading ' + n + ' bot' + (n === 1 ? '' : 's') + '…') : 'Looking for bots…',
+                });
+                return;
+            }
+            hide();
+            return;
+        }
         mode = 'list';
 
         // Flat keyboard order = exactly the render order (recents, then sections).
@@ -290,7 +332,7 @@ function initCommandSelector(textarea, io) {
         // a surprise.
         const flat = [];
         const sections = [];
-        const refreshing = snap.fresh === false;
+        const refreshing = !!snap && snap.fresh === false;
         const section = (key, title, avatarSrc, cmds, showBot, refresh) => {
             const rows = [];
             for (const cmd of cmds) {
@@ -309,7 +351,7 @@ function initCommandSelector(textarea, io) {
         }
         for (const [bot, cmds] of byBot) {
             const view = botView(bot);
-            section(bot, view.name, view.avatarSrc, cmds, false, refreshing);
+            section(bot, view.name, view.avatarSrc, cmds, false, refreshing && bot !== SYSTEM_COMMAND_OWNER);
         }
         flatRows = flat;
         if (activeIndex >= flat.length) activeIndex = 0;
@@ -318,25 +360,46 @@ function initCommandSelector(textarea, io) {
 
     /** The armed-command hint bar: signature with the CURRENT arg highlighted;
      *  a Choice arg additionally offers its values as clickable chips. */
+    let hintChoices = [];
+
     function renderHint(cmd, typedRest) {
         mode = 'hint';
 
         // Which arg is the caret conceptually on: completed tokens = args filled.
         let filled = 0;
         let cursor = 0;
+        let partial = '';
         while (filled < cmd.args.length) {
             const tok = nextToken(typedRest, cursor);
             if (tok === null || tok === undefined) break;
             // A token is "completed" once whitespace (or nothing more to type) follows.
-            if (tok.next >= typedRest.length && !/\s$/.test(typedRest)) break;
+            if (tok.next >= typedRest.length && !/\s$/.test(typedRest)) {
+                partial = tok.value;
+                break;
+            }
             cursor = tok.next;
             filled++;
         }
         const currentIdx = Math.min(filled, Math.max(cmd.args.length - 1, 0));
         const current = cmd.args[currentIdx];
+        // The colour commands show their effect as it stands, from the colours typed so far.
+        let preview = null;
+        if (isSystem(cmd)) {
+            const typed = [];
+            for (let at = 0, tok; (tok = nextToken(typedRest, at)) && typed.length < 2; at = tok.next) typed.push(tok.value);
+            preview = tcEffectPreview(cmd.name, typed);
+        }
+        // A colour argument searches the names as they're typed; Tab takes the first.
+        hintChoices = !current ? []
+            : current.type === 'choice' ? (current.choices || [])
+            : current.type === 'color' ? tcColorChoices(partial)
+            : [];
         show({
             mode: 'hint',
             name: cmd.name,
+            summary: cmd.description || '',
+            argName: current ? argSignature(current) : '',
+            preview,
             args: cmd.args.map((a, i) => ({
                 label: argSignature(a),
                 optional: !a.required,
@@ -344,7 +407,7 @@ function initCommandSelector(textarea, io) {
                 title: a.description || '',
             })),
             desc: (current && current.description) || '',
-            choices: current && current.type === 'choice' ? (current.choices || []) : [],
+            choices: hintChoices,
             pickChoice: (v) => insertChoice(v),
         });
     }
@@ -366,6 +429,14 @@ function initCommandSelector(textarea, io) {
         hintSuppressedFor = null;
         activeIndex = 0;
         hide();
+        if (isSystem(cmd)) {
+            armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
+            textarea.value = '/' + cmd.name + ' ';
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            textarea.focus();
+            return;
+        }
         enterCommandMode(cmd);
     }
 
@@ -852,6 +923,13 @@ function initCommandSelector(textarea, io) {
 
     // --- Keyboard navigation (list mode only; the hint never eats keys) ---
     function onKeyDown(e) {
+        if (mode === 'hint' && e.key === 'Tab' && !e.shiftKey && hintChoices.length) {
+            e.preventDefault();
+            e.stopPropagation();
+            const first = hintChoices[0];
+            insertChoice(typeof first === 'string' ? first : first.value);
+            return;
+        }
         if (mode === 'hint' && e.key === 'Escape') {
             e.preventDefault();
             e.stopPropagation();
@@ -899,14 +977,26 @@ function initCommandSelector(textarea, io) {
         const head = nextToken(text.slice(1), 0);
         if (!head || head.value === '' || text[1] === '"') return null;
         const name = head.value;
-        const cmd = findCommand(name, armedPick && armedPick.name === name ? armedPick.bot : null);
+        const cmd = resolveCommand(name);
         if (!cmd) return null;
+        if (isSystem(cmd)) {
+            // Typed by hand, a malformed colour command is just a message ("/color me
+            // impressed"); picked from the list, it's a mistake worth flagging.
+            const picked = armedPick && armedPick.bot === SYSTEM_COMMAND_OWNER && armedPick.name === cmd.name && armedPick.chatId === io.chatId();
+            const color = tcCommand(text);
+            if (!color || color.error) return color && picked ? { error: '/' + cmd.name + ' ' + color.error } : null;
+            bumpRecent(cmd.bot, cmd.name);
+            armedPick = null;
+            hide();
+            return { text: tcCommandToMarkup(text) };
+        }
         const parsed = parseArgs(cmd, text.slice(1 + head.next));
         if (parsed === undefined) return { error: 'Unclosed quote in /' + name };
         const err = validateArgs(cmd, parsed);
         if (err) return { error: '/' + name + ': ' + err };
         bumpRecent(cmd.bot, cmd.name);
         armedPick = null;
+        hide();
         return { bot: cmd.bot, name: cmd.name };
     }
 
@@ -953,6 +1043,11 @@ function initCommandSelector(textarea, io) {
                 for (const c of b.commands || []) names.add(c.name);
             }
             return names;
+        },
+        /** Whether `/name` runs Vector's own command in the open chat (no bot claims it). */
+        systemOwns(name) {
+            const cmd = resolveCommand(name);
+            return !!cmd && isSystem(cmd);
         },
         isComposing,
         submitComposer,

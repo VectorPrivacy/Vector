@@ -411,6 +411,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
     for et in &message.emoji_tags {
         tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
     }
+    tags.extend(message.color_spans.iter().map(|s| s.to_tag_parts()));
 
     // Bot routing targets (npubs) — persist so the passive "ran /cmd with
     // Bot" render survives a reload.
@@ -543,12 +544,17 @@ pub async fn save_system_event_at(
     Ok(rows > 0)
 }
 
+/// One edit as the reload fold reads it: when, the new content, and its emoji and colour tags.
+type FoldedEdit = (u64, String, Vec<crate::types::EmojiTag>, Vec<crate::text_color::ColorSpan>);
+
 /// Save a message edit as a kind=16 event referencing the original message.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_edit_event(
     edit_id: &str,
     message_id: &str,
     new_content: &str,
     emoji_tags: &[crate::types::EmojiTag],
+    color_spans: &[crate::text_color::ColorSpan],
     chat_id: i64,
     user_id: Option<i64>,
     npub: &str,
@@ -564,6 +570,7 @@ pub async fn save_edit_event(
     for et in emoji_tags {
         tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
     }
+    tags.extend(color_spans.iter().map(|s| s.to_tag_parts()));
 
     let event = StoredEvent {
         id: edit_id.to_string(),
@@ -1387,7 +1394,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
     let related_events = get_related_events(&message_ids).await?;
 
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
-    let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<FoldedEdit>> = HashMap::new();
 
     crate::crypto::open_batch(|at_rest| {
         for event in related_events {
@@ -1413,7 +1420,8 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
                         let decrypted = at_rest.open(event.content.clone())
                             .unwrap_or_else(|_| event.content.clone());
                         let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
-                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
+                        let edit_colors = crate::text_color::from_stored(&event.tags, &decrypted);
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji, edit_colors));
                     }
                     _ => {}
                 }
@@ -1422,7 +1430,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
     });
 
     for edits in edits_by_msg.values_mut() {
-        edits.sort_by_key(|(ts, _, _)| *ts);
+        edits.sort_by_key(|(ts, _, _, _)| *ts);
     }
 
     // Step 3: Attachments from the dedicated table (batched), with a legacy-tag fallback for any
@@ -1466,18 +1474,19 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         // Edits carry their own emoji tags; the newest edit's tags win so the
         // displayed (latest) content renders its custom emoji, not the original's.
         let original_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
-        let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+        let original_colors = crate::text_color::from_stored(&event.tags, &original_content);
+        let (content, edited, edit_history, emoji_tags, color_spans) = if let Some(edits) = edits_by_msg.remove(&event.id) {
             let mut history = Vec::with_capacity(edits.len() + 1);
             history.push(crate::types::EditEntry { content: original_content.clone(), edited_at: at });
-            for (ts, c, _) in &edits {
+            for (ts, c, _, _) in &edits {
                 history.push(crate::types::EditEntry { content: c.clone(), edited_at: *ts });
             }
-            let (latest, latest_emoji) = edits.last()
-                .map(|(_, c, e)| (c.clone(), e.clone()))
-                .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
-            (latest, true, Some(history), latest_emoji)
+            let (latest, latest_emoji, latest_colors) = edits.last()
+                .map(|(_, c, e, s)| (c.clone(), e.clone(), s.clone()))
+                .unwrap_or_else(|| (original_content.clone(), original_emoji.clone(), original_colors.clone()));
+            (latest, true, Some(history), latest_emoji, latest_colors)
         } else {
-            (original_content, false, None, original_emoji)
+            (original_content, false, None, original_emoji, original_colors)
         };
 
         let preview_metadata = event.preview_metadata
@@ -1496,6 +1505,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             edited, edit_history,
             emoji_tags,
             addressed_bots,
+            color_spans,
         });
     }
 
@@ -1742,7 +1752,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     let related_events = get_related_events(&message_ids).await?;
 
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
-    let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
+    let mut edits_by_msg: HashMap<String, Vec<FoldedEdit>> = HashMap::new();
 
     crate::crypto::open_batch(|at_rest| {
         for event in related_events {
@@ -1767,7 +1777,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                         let decrypted = at_rest.open(event.content.clone())
                             .unwrap_or_else(|_| event.content.clone());
                         let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
-                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
+                        let edit_colors = crate::text_color::from_stored(&event.tags, &decrypted);
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji, edit_colors));
                     }
                     _ => {}
                 }
@@ -1775,7 +1786,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         }
     });
     for edits in edits_by_msg.values_mut() {
-        edits.sort_by_key(|(ts, _, _)| *ts);
+        edits.sort_by_key(|(ts, _, _, _)| *ts);
     }
 
     // Step 3: Attachments from the dedicated table (batched), with a legacy-tag fallback.
@@ -1822,20 +1833,21 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 
             let stored_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json).unwrap_or_default();
             let original_emoji = crate::types::EmojiTag::extract_from_stored(&stored_tags);
+            let original_colors = crate::text_color::from_stored(&stored_tags, &original_content);
             let addressed_bots = extract_bot_tags(&stored_tags);
             let expiration = extract_expiration_tag(&stored_tags);
-            // Newest edit's emoji tags win so the latest content renders correctly.
-            let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
-                let (latest, latest_emoji) = edits.last()
-                    .map(|(_, c, e)| (c.clone(), e.clone()))
-                    .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
+            // Newest edit's emoji and colour tags win so the latest content renders correctly.
+            let (content, edited, edit_history, emoji_tags, color_spans) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+                let (latest, latest_emoji, latest_colors) = edits.last()
+                    .map(|(_, c, e, s)| (c.clone(), e.clone(), s.clone()))
+                    .unwrap_or_else(|| (original_content.clone(), original_emoji.clone(), original_colors.clone()));
                 let history: Vec<crate::types::EditEntry> = std::iter::once(crate::types::EditEntry {
                     content: original_content, edited_at: event.created_at * 1000,
-                }).chain(edits.into_iter().map(|(ts, c, _)| crate::types::EditEntry { content: c, edited_at: ts }))
+                }).chain(edits.into_iter().map(|(ts, c, _, _)| crate::types::EditEntry { content: c, edited_at: ts }))
                 .collect();
-                (latest, true, Some(history), latest_emoji)
+                (latest, true, Some(history), latest_emoji, latest_colors)
             } else {
-                (original_content, false, None, original_emoji)
+                (original_content, false, None, original_emoji, original_colors)
             };
 
             let preview_metadata = event.preview_metadata
@@ -1852,6 +1864,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 edited, edit_history,
                 emoji_tags,
                 addressed_bots,
+                color_spans,
             });
         }
     });
@@ -2212,7 +2225,7 @@ mod tests {
         assert_eq!(locate_message("locate_me").unwrap(), here("npub1locate"));
         assert_eq!(locate_message("never_stored").unwrap(), MessageLocation::default());
         let cid = crate::db::id_cache::get_chat_id_by_identifier("npub1locate").unwrap();
-        save_edit_event("an_edit", "locate_me", "hello", &[], cid, None, "npub1x").await.unwrap();
+        save_edit_event("an_edit", "locate_me", "hello", &[], &[], cid, None, "npub1x").await.unwrap();
         assert_eq!(locate_message("an_edit").unwrap(), MessageLocation::default(), "an edit is not a message to jump to");
         delete_event("locate_me").await.unwrap();
         add_message_tombstone("locate_me").unwrap();
@@ -2944,7 +2957,7 @@ mod tests {
 
         let cid = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
         let emoji = vec![crate::types::EmojiTag { shortcode: "wave".into(), url: "u/wave".into() }];
-        save_edit_event("edit1", "orig1", "edited :wave:", &emoji, cid, None, "npub1author").await.unwrap();
+        save_edit_event("edit1", "orig1", "edited :wave:", &emoji, &[], cid, None, "npub1author").await.unwrap();
 
         let m = get_message_views(cid, 50, 0).await.unwrap()
             .into_iter().find(|m| m.id == "orig1").expect("message reloaded");
@@ -2956,6 +2969,34 @@ mod tests {
         assert_eq!(m.content, "edited :wave:", "latest revision is the displayed content");
         assert_eq!(m.emoji_tags.len(), 1, "the edit's own emoji folds onto the message");
         assert_eq!(m.emoji_tags[0].shortcode, "wave");
+    }
+
+    // Colour spans persist in the tags column and fold like emoji: the newest edit's
+    // spans win, on both the chat page and the boot last-message loaders.
+    #[tokio::test]
+    async fn color_spans_persist_and_follow_the_latest_edit() {
+        use crate::text_color::{ColorSpan, Effect};
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1colourchat";
+        let rainbow = ColorSpan { from: 0, to: 5, effect: Effect::Rainbow, colors: vec![] };
+        save_message(chat, &Message {
+            id: "c1".into(), content: "hello world".into(), at: 6_000_000,
+            npub: Some("npub1author".into()), color_spans: vec![rainbow.clone()], ..Default::default()
+        }).await.unwrap();
+        let cid = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+
+        let page = |m: Vec<Message>| m.into_iter().find(|m| m.id == "c1").expect("message reloaded");
+        assert_eq!(page(get_message_views(cid, 50, 0).await.unwrap()).color_spans, vec![rainbow]);
+
+        let pink = ColorSpan { from: 4, to: 8, effect: Effect::Solid, colors: vec!["#f472b6".into()] };
+        save_edit_event("c1e", "c1", "bye world", &[], std::slice::from_ref(&pink), cid, None, "npub1author").await.unwrap();
+        assert_eq!(page(get_message_views(cid, 50, 0).await.unwrap()).color_spans, vec![pink.clone()]);
+        let boot = get_all_chats_last_messages().await.unwrap();
+        assert_eq!(page(boot.get(chat).cloned().unwrap_or_default()).color_spans, vec![pink]);
+
+        // A span the content can't hold is dropped, never painted past the end.
+        save_edit_event("c1f", "c1", "bye", &[], &[ColorSpan { from: 0, to: 9, effect: Effect::Rainbow, colors: vec![] }], cid, None, "npub1author").await.unwrap();
+        assert!(page(get_message_views(cid, 50, 0).await.unwrap()).color_spans.is_empty());
     }
 
     /// Local Encryption on for one test, off again however it ends.
@@ -2993,7 +3034,7 @@ mod tests {
             npub: Some("npub1author".into()), emoji_tags: emoji("wave"), ..Default::default()
         }).await.unwrap();
         let cid = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
-        save_edit_event("touch_edit", "touch1", "edited :cat:", &emoji("cat"), cid, None, "npub1author").await.unwrap();
+        save_edit_event("touch_edit", "touch1", "edited :cat:", &emoji("cat"), &[], cid, None, "npub1author").await.unwrap();
         let written = raw_row("touch1");
         assert_eq!(crate::crypto::maybe_decrypt_text(&written.0), "original :wave:");
 

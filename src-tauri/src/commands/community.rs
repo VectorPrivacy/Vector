@@ -987,6 +987,8 @@ pub async fn send_community_message(
         use vector_core::sending::SendCallback;
         use vector_core::Message;
         let reply = replied_to.filter(|r| !r.is_empty());
+        let (content, color_spans) = vector_core::text_color::extract(&content);
+        let color_tags: Vec<nostr_sdk::prelude::Tag> = vector_core::text_color::to_nostr_tags(&color_spans).collect();
         // A `/` picker send names its chosen bot so only that bot executes when two
         // bots share a command name (untagged = broadcast). The tag rides the
         // inner on both stacks, and the sender's own optimistic row carries the
@@ -1050,6 +1052,7 @@ pub async fn send_community_message(
             // schedule. Resolved ONCE and passed to both the precompute and the send
             // so the pure-function rumor id can't fork.
             let mut extra_tags = bot_tags;
+            extra_tags.extend(color_tags.iter().cloned());
             // Resolve the Self-Destruct expiry ONCE: it stamps both the outgoing
             // rumor (so recipients + relays honour NIP-40) AND the optimistic message
             // below, so the sender's own echo self-destructs like everyone else's.
@@ -1073,6 +1076,7 @@ pub async fn send_community_message(
                 replied_to: reply.clone().unwrap_or_default(),
                 emoji_tags: emoji_tags.clone(),
                 addressed_bots: addressed_bots.clone(),
+                color_spans: color_spans.clone(),
                 expiration: expiry,
                 ..Default::default()
             };
@@ -1172,7 +1176,7 @@ pub async fn send_community_message(
             ms,
             reply.as_deref(),
             &emoji_tags,
-            &bot_tags,
+            &[bot_tags.as_slice(), color_tags.as_slice()].concat(),
         );
         let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
 
@@ -1187,6 +1191,7 @@ pub async fn send_community_message(
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
             addressed_bots: addressed_bots.clone(),
+            color_spans: color_spans.clone(),
             ..Default::default()
         };
         // The quote rides the message itself: the parent may be nowhere in the UI's memory.
@@ -1610,6 +1615,7 @@ async fn dispatch_community_attachment_message(
         use vector_core::Message;
 
         let reply = replied_to.filter(|r| !r.is_empty());
+        let (content, color_spans) = vector_core::text_color::extract(&content);
         let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
         let my_npub = author_pk.to_bech32().ok();
 
@@ -1670,6 +1676,7 @@ async fn dispatch_community_attachment_message(
             npub: my_npub.clone(),
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
+            color_spans: color_spans.clone(),
             attachments: optimistic_attachments,
             expiration: None,
             ..Default::default()
@@ -1808,6 +1815,7 @@ async fn dispatch_community_attachment_message(
             .iter()
             .map(vector_core::community::attachments::attachment_to_imeta)
             .collect();
+        imeta_tags.extend(vector_core::text_color::to_nostr_tags(&color_spans));
 
         // v2: seal the caption + imeta rumor through the v2 service. The send echoes
         // the persisted message into STATE/DB (bot-silent), so adopt the echo over
@@ -3807,6 +3815,19 @@ async fn publish_community_control(
     target: &str,
     emoji_tags: &[vector_core::types::EmojiTag],
 ) -> Result<(), String> {
+    publish_community_control_tagged(channel_id, kind, content, target, emoji_tags, &[]).await
+}
+
+/// [`publish_community_control`] with extra inner tags for the legacy stack (an edit's
+/// colour spans); v2 rebuilds its own from the content.
+async fn publish_community_control_tagged(
+    channel_id: &str,
+    kind: u16,
+    content: &str,
+    target: &str,
+    emoji_tags: &[vector_core::types::EmojiTag],
+    extra_tags: &[nostr_sdk::prelude::Tag],
+) -> Result<(), String> {
     vector_core::db::scoped(async move {
         let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
 
@@ -3868,8 +3889,8 @@ async fn publish_community_control(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let unsigned = vector_core::community::envelope::build_inner_typed(
-            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
+        let unsigned = vector_core::community::envelope::build_inner_full(
+            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags, extra_tags,
         );
         let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
         let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
@@ -3933,14 +3954,20 @@ pub async fn edit_community_message(
     message_id: String,
     new_content: String,
 ) -> Result<(), String> {
+    // v2 hands the raw text to core, which takes its colour markup out; the legacy
+    // stack takes it out here and carries the spans as tags.
+    let v2 = is_v2_community(&vector_core::db::community::community_id_for_channel(&channel_id)?.unwrap_or_default());
+    let (new_content, color_spans) = if v2 { (new_content, Vec::new()) } else { vector_core::text_color::extract(&new_content) };
+    let color_tags: Vec<nostr_sdk::prelude::Tag> = vector_core::text_color::to_nostr_tags(&color_spans).collect();
     // The edited content may introduce/keep custom emoji → carry their tags too.
     let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&new_content);
-    publish_community_control(
+    publish_community_control_tagged(
         &channel_id,
         vector_core::stored_event::event_kind::COMMUNITY_EDIT,
         &new_content,
         &message_id,
         &emoji_tags,
+        &color_tags,
     )
     .await
 }

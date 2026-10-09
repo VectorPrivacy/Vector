@@ -310,6 +310,8 @@ function buildRichComposer(host) {
     // resolver and already shortens an npub it doesn't know, so this never renders
     // a wall of bech32.
     resolveNpub: (npub) => getName(npub),
+    // Preview a colour command only where Vector runs it; a bot claiming the name wins.
+    ownsCommand: (name) => !commandCtrl || commandCtrl.systemOwns(name),
     // Which tracked name, if any, sits at `at` in `src`. The LONGEST wins, so
     // "@Walter White and co" pills only the name. Names are arbitrary text, so
     // each one measures itself rather than being matched against a shape.

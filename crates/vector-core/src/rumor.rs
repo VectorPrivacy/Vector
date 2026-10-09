@@ -194,6 +194,8 @@ pub enum RumorProcessingResult {
         edited_at: u64,
         /// NIP-30 custom-emoji tags resolved from the new content
         emoji_tags: Vec<crate::types::EmojiTag>,
+        /// Coloured runs of the new content
+        color_spans: Vec<crate::text_color::ColorSpan>,
         /// The stored event for persistence
         event: StoredEvent,
     },
@@ -330,6 +332,12 @@ fn process_text_message(
     // The URL usually IS the whole content on such a message; rendering the
     // attachment AND the raw link would show the file twice.
     let content = crate::community::attachments::strip_attachment_urls(&rumor.content, &attachments);
+    // Spans count chars of the content as sent; a stripped link would shift them.
+    let color_spans = if content == rumor.content {
+        crate::text_color::from_tags(rumor.tags.iter(), &content)
+    } else {
+        Vec::new()
+    };
 
     let msg = Message {
         expiration,
@@ -354,6 +362,7 @@ fn process_text_message(
         edit_history: None,
         emoji_tags,
         addressed_bots,
+        color_spans,
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -603,6 +612,7 @@ fn process_file_attachment(
         edit_history: None,
         emoji_tags,
         addressed_bots: crate::bot_interface::addressed_bots(rumor.tags.iter()),
+        color_spans: Vec::new(),
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -746,6 +756,7 @@ fn process_edit_event(
     // NIP-30 custom-emoji tags ride the edit so a `:shortcode:` introduced (or
     // kept) by the edit renders as its image rather than literal text.
     let emoji_tags = crate::types::EmojiTag::extract_from_tags(rumor.tags.iter());
+    let color_spans = crate::text_color::from_tags(rumor.tags.iter(), &rumor.content);
 
     let tags: Vec<Vec<String>> = rumor.tags.iter()
         .map(|tag| {
@@ -769,6 +780,7 @@ fn process_edit_event(
         new_content: rumor.content,
         edited_at,
         emoji_tags,
+        color_spans,
         event,
     })
 }
@@ -1225,6 +1237,49 @@ mod tests {
                 assert!(msg.npub.is_none());
                 assert!(msg.attachments.is_empty());
             }
+            _ => panic!("Expected TextMessage"),
+        }
+    }
+
+    #[test]
+    fn dm_colour_tags_reach_the_message_and_its_edit() {
+        let keys = test_keypair();
+        let tags = Tags::from_list(vec![
+            Tag::custom("color", ["0", "5", "rainbow"]),
+            Tag::custom("color", ["0", "99", "rainbow"]),
+            Tag::custom("color", ["6", "11", "solid", "#f472b6", "extra"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "hello world", tags);
+        match process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::TextMessage(msg) => {
+                assert_eq!(msg.color_spans.len(), 1, "out-of-range and unknown-argument tags are dropped");
+                assert_eq!((msg.color_spans[0].from, msg.color_spans[0].to), (0, 5));
+            }
+            _ => panic!("Expected TextMessage"),
+        }
+
+        let edit_tags = Tags::from_list(vec![
+            Tag::event(EventId::from_hex(&"ab".repeat(32)).unwrap()),
+            Tag::custom("color", ["0", "3", "solid", "#60a5fa"]),
+        ]);
+        let edit = make_rumor(&keys, Kind::from(event_kind::MESSAGE_EDIT), "bye", edit_tags);
+        match process_rumor(edit, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::Edit { color_spans, .. } => assert_eq!(color_spans.len(), 1),
+            _ => panic!("Expected Edit"),
+        }
+    }
+
+    #[test]
+    fn colour_is_dropped_when_a_stripped_link_shifts_the_text() {
+        let keys = test_keypair();
+        let url = "https://blossom.example/abc.png";
+        let tags = Tags::from_list(vec![
+            Tag::custom("imeta", vec![format!("url {url}"), "m image/png".to_string()]),
+            Tag::custom("color", ["0", "2", "rainbow"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, &format!("{url} hi"), tags);
+        match process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::TextMessage(msg) => assert!(msg.color_spans.is_empty()),
             _ => panic!("Expected TextMessage"),
         }
     }
