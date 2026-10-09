@@ -90,6 +90,7 @@ pub mod emoji_packs;
 pub mod text_color;
 pub mod text_time;
 pub mod text_spans;
+pub mod secrets;
 pub mod emoji_usage;
 pub mod nostr_embed;
 pub mod golink;

@@ -190,6 +190,49 @@ function releaseUnreadHold() {
 }
 
 // Unified message sending function
+/**
+ * A draft that holds a secret (a Nostr private key, a seed phrase, a wallet key) is held
+ * until its sender says so (components/composer/SecretGuard.svelte). True to send.
+ */
+let secretGuardAnswer = null;
+document.addEventListener('DOMContentLoaded', () => {
+    VectorSvelte.setScreen('secretGuard', { h: { answer: (choice) => secretGuardAnswer?.(choice) } });
+}, { once: true });
+
+async function confirmSecretSend(text, chatId) {
+    let kind = null;
+    try { kind = await invoke('detect_secret', { text }); } catch (_) { return true; }
+    if (!kind) return true;
+    const chat = arrChats.find(c => c.id === chatId);
+    const community = !!chat && chatIsGroup(chat);
+    let timer = '';
+    if (kind !== 'nostr_key' && chatSupportsSelfDestruct(chat)) {
+        let secs = null;
+        try { secs = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
+        timer = secs ? 'on' : 'offer';
+    }
+    const choice = await new Promise((resolve) => {
+        secretGuardAnswer = (c) => {
+            secretGuardAnswer = null;
+            popBack('secret-guard');
+            VectorSvelte.secretGuard.close();
+            resolve(c);
+        };
+        VectorSvelte.secretGuard.open({
+            kind, community, timer,
+            where: community ? communityChatTitle(chat) || 'this community' : getName(chatId),
+        });
+        pushBack('secret-guard', () => { const answer = secretGuardAnswer; secretGuardAnswer = null; VectorSvelte.secretGuard.close(); answer && resolve('keep'); });
+    });
+    if (choice === 'timer') {
+        // From the chat's ⋯ button, where the timer always opens.
+        const menu = document.querySelector('.nav-menu-btn');
+        openSelfDestructPicker(chatId, menu?.offsetParent ? menu.getBoundingClientRect() : null);
+        showToast('Pick a timer, then send it again');
+    }
+    return choice === 'send';
+}
+
 async function sendMessage(messageText) {
     if (!messageText || !messageText.trim()) return;
     releaseUnreadHold();
@@ -223,6 +266,11 @@ async function sendMessage(messageText) {
             cleanedText = cleanedText.replace(re, '@' + m.npub);
         }
     }
+
+    // A private key or a seed phrase asks first, loudly; Notes to self are yours alone.
+    const sendTo = strOpenChat;
+    if (sendTo !== strPubkey && !(await confirmSecretSend(cleanedText, sendTo))) return;
+    if (strOpenChat !== sendTo) return;
 
     // Check if we're in edit mode
     if (strCurrentEditMessageId) {

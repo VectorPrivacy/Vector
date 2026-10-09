@@ -47,7 +47,7 @@ const screens = $state({ profile: null, settings: null, invites: null, chatNew: 
     communityHead: null, communityBanner: null, rail: null, chrome: null, overview: null, roster: null, packDetails: null, nostrEmbed: null,
     // Body-level singletons whose helpers live in the vanilla side; App renders each once registered.
     composerPopups: null, filePreview: null, miniProfile: null, reactionPopups: null, editHistory: null,
-    qrOverlay: null, qrScanner: null, statusDialog: null, keysModal: null, transferModal: null, downgradeBlock: null,
+    qrOverlay: null, qrScanner: null, statusDialog: null, keysModal: null, secretGuard: null, transferModal: null, downgradeBlock: null,
     modConsole: null, communitySettings: null, policyDesigner: null, pivx: null, network: null, call: null, mediaPopout: null });
 export function shellScreens() { return screens; }
 export function setScreen(name, props) {

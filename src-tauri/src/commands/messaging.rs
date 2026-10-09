@@ -348,3 +348,10 @@ pub fn set_active_chat(chat_id: Option<String>) {
 // - evict_chat_messages
 // - update_unread_counter
 // - set_active_chat
+
+/// The secret a draft holds (an nsec, a seed phrase, a wallet key), if any: the composer
+/// asks before sending one.
+#[tauri::command]
+pub async fn detect_secret(text: String) -> Result<Option<vector_core::secrets::SecretKind>, String> {
+    Ok(vector_core::secrets::detect(&text))
+}

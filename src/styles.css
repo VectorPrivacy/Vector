@@ -2254,6 +2254,15 @@ html, body {
 
 /* Your Keys */
 .keys-badge { --vcard-glyph: url("./icons/key.svg"); }
+
+/* Sending a secret: the card is the Keys card's, in the colour of a warning. */
+.secret-badge { --vcard-glyph: url("./icons/vector_warning.svg"); background-color: rgba(255, 93, 108, 0.12); }
+.secret-badge::after { background-color: #ff5d6c; }
+.secret-title { color: #ff5d6c; }
+.secret-loud { color: #ffb3ba; }
+.vcard-lead b { color: #fff; }
+.vcard-btn.secret-send { color: #ff5d6c; }
+.vcard-btn.secret-send:hover { background-color: rgba(255, 93, 108, 0.12); }
 .keys-warn { color: #fff; }
 .keys-row {
   display: flex;

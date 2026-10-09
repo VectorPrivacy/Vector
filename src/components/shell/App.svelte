@@ -40,6 +40,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
     import QrScanner from '../ui/QrScanner.svelte';
     import StatusDialog from '../ui/StatusDialog.svelte';
     import KeysModal from '../settings/KeysModal.svelte';
+    import SecretGuard from '../composer/SecretGuard.svelte';
     import TransferModal from '../settings/TransferModal.svelte';
     import DowngradeBlock from '../ui/DowngradeBlock.svelte';
     import ModConsole from '../moderation/ModConsole.svelte';
@@ -154,6 +155,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 {#if screens.qrScanner}<QrScanner h={screens.qrScanner.h} />{/if}
 {#if screens.statusDialog}<StatusDialog h={screens.statusDialog.h} />{/if}
 {#if screens.keysModal}<KeysModal h={screens.keysModal.h} />{/if}
+{#if screens.secretGuard}<SecretGuard h={screens.secretGuard.h} />{/if}
 {#if screens.transferModal}<TransferModal h={screens.transferModal.h} />{/if}
 {#if screens.call}<CallOverlay h={screens.call.h} />{/if}
 {#if screens.mediaPopout}<MediaPopout h={screens.mediaPopout.h} />{/if}

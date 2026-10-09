@@ -268,6 +268,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "get_self_destruct_timer" => to_value(vector_core::self_destruct::chat_duration_secs(&a.str("chatId")?)),
+        "detect_secret" => to_value(vector_core::secrets::detect(&a.str("text")?)),
         "mark_as_read" => Ok(json!(messaging::mark_as_read(a.str("chatId")?, a.opt_str("messageId")).await)),
         "get_chat_message_count" => to_value(messaging::get_chat_message_count(&a.str("chatId")?)?),
         "get_message_views" => to_value(

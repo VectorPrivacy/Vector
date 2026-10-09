@@ -19,6 +19,7 @@
     "allow-set-sql-setting",
     "allow-remove-setting",
     "allow-get-self-destruct-timer",
+    "allow-detect-secret",
     "allow-set-self-destruct-timer",
     "allow-load-profile",
     "allow-update-profile",

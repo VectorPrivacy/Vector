@@ -36,6 +36,7 @@ export { transportState, setTransportView, setTransportViewKind, setTransportLoc
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
 export { keysModal } from './lib/keys.svelte.js';
+export { secretGuard } from './lib/secretguard.svelte.js';
 export { transferModal } from './lib/transfer.svelte.js';
 export { modOverlay } from './lib/moderation.svelte.js';
 export { csOverlay, csState, csDirty, csOpen, csLoaded, csSetDraft, csReset, csCommitted, csSetSaving, csNudge, csSetBans, csSetUnbanning, csRemoveBans, csOverviewDirty, csRoleOrderDirty, csRoleEditDirty, csSetRolesView, csSetRoleMembers, csSetRolesBusy, csSetRoleOrder, csEditRole } from './lib/community-settings.svelte.js';
