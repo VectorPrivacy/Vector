@@ -747,9 +747,10 @@ function createRichComposer(host, opts = {}) {
      * instead of where you left off.
      */
     let lastSelection = null;
+    let caretOwed = false;
     document.addEventListener('selectionchange', () => {
         const r = liveSelectionRange();
-        if (r) lastSelection = r;
+        if (r) { lastSelection = r; caretOwed = false; }
     });
 
     function selectionRange() {
@@ -1086,7 +1087,12 @@ function createRichComposer(host, opts = {}) {
         get value() { return src; },
         set value(v) {
             src = String(v == null ? '' : v);
-            rerender(src.length);
+            // A caret placed in an unfocused editor focuses it, opening a phone's keyboard,
+            // so it waits for the next focus().
+            const focused = document.activeElement === el;
+            rerender(focused ? src.length : null);
+            caretOwed = !focused;
+            if (caretOwed) lastSelection = { start: src.length, end: src.length };
         },
         get selectionStart() { const r = selectionRange(); return r ? r.start : src.length; },
         set selectionStart(v) { setCaret(v); },
@@ -1094,7 +1100,11 @@ function createRichComposer(host, opts = {}) {
         set selectionEnd(v) { setCaret(v); },
         setSelectionRange(a, _b) { setCaret(a); },
         xAt,
-        focus() { el.focus(); },
+        focus() {
+            el.focus();
+            if (caretOwed) setCaret(src.length);
+            caretOwed = false;
+        },
         blur() { el.blur(); },
         addEventListener: (...a) => el.addEventListener(...a),
         removeEventListener: (...a) => el.removeEventListener(...a),
