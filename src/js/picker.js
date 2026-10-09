@@ -186,7 +186,7 @@ function openEmojiPanelForStatus(onInsert) {
         if (!VectorSvelte.pickerVisible()) return;
         resetEmojiPicker();
         renderEmojiPanel();
-        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+        if (!platformFeatures.is_mobile) {
             emojiSearch.focus();
         }
         if (!emojiPacksLoaded) {
@@ -279,7 +279,7 @@ function _openPanel({ isDefaultPanel, reactionId }) {
             renderEmojiPanel();
 
             // Focus the search box (desktop only — mobile keyboards are disruptive).
-            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            if (!platformFeatures.is_mobile) {
                 emojiSearch.focus();
             }
 
@@ -575,7 +575,7 @@ function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     insertAtCursor(`:${code}:`, true);
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!keepOpen) VectorSvelte.setPickerVisible(false);
-    if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+    if (!platformFeatures.is_mobile) {
         if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }
@@ -963,7 +963,7 @@ function _onPackEmojiClick(e) {
     insertAtCursor(`:${shortcode}:`, true);
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!e.shiftKey) VectorSvelte.setPickerVisible(false);
-    if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+    if (!platformFeatures.is_mobile) {
         if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }
@@ -1004,7 +1004,7 @@ function _onEmojiSpanClick(e) {
                 VectorSvelte.setPickerVisible(false);
             }
             // Focus chat input (desktop only - mobile keyboards are disruptive)
-            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            if (!platformFeatures.is_mobile) {
                 if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
         }
@@ -1052,7 +1052,7 @@ async function _onSearchKeydown(e) {
             VectorSvelte.setPickerVisible(false);
             strCurrentReactionReference = '';
             VectorSvelte.setEmojiIcon('smile');
-            if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            if (!platformFeatures.is_mobile) {
                 if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
             return;
@@ -1095,7 +1095,7 @@ async function _onSearchKeydown(e) {
         VectorSvelte.setEmojiIcon('smile');
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
-        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+        if (!platformFeatures.is_mobile) {
             if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
@@ -1119,7 +1119,7 @@ async function _onSearchKeydown(e) {
         }
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
-        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+        if (!platformFeatures.is_mobile) {
             if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     }
