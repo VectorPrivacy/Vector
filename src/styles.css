@@ -22673,7 +22673,8 @@ body.profile-switcher-editing .profile-switcher-add {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: calc(100vw - 40px);
+  /* Never wider than the lockup above it: a long name or npub ellipsizes. */
+  max-width: min(429.72px, calc(100vw - 48px));
   padding: 0;
   border: none;
   background: none;
