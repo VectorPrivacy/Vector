@@ -518,6 +518,8 @@ async function setupRustListeners() {
         const renamed = getName(evt.payload.id) !== getName(evt.payload);
         // Check if the frontend is already aware
         const nProfileIdx = arrProfiles.findIndex(p => p.id === evt.payload.id);
+        // A block hides the DM's row and an unblock brings it back: the list's membership changes.
+        const blockFlipped = !!(nProfileIdx >= 0 ? arrProfiles[nProfileIdx].is_blocked : false) !== !!evt.payload.is_blocked;
         let avatarCacheChanged = false;
         if (nProfileIdx >= 0) {
             // Check if avatar cache changed (for triggering chatlist re-render)
@@ -548,6 +550,7 @@ async function setupRustListeners() {
 
         // Every row and list entry showing this profile re-derives (name, avatar, bot mark).
         VectorSvelte.touchProfile(evt.payload.id);
+        if (blockFlipped) listChanged();
         
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
