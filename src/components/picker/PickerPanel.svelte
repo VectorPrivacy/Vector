@@ -14,11 +14,12 @@
     import PackCreator from './PackCreator.svelte';
     import GifGrid from './GifGrid.svelte';
     import CreatorOverlays from './CreatorOverlays.svelte';
+    import KaomojiGrid from './KaomojiGrid.svelte';
 
     let { h } = $props();
     // h: mounted(els), searchInput(e), searchKeydown(e), setMode('emoji'|'gif'), railClick(e), railStop(),
-    //    mainClick(e), mainScroll(), gifClick(e), gifScroll(), islands (the grids' bag), creator (the creator's bag),
-    //    overlays (the overlays' bag)
+    //    mainClick(e), mainScroll(), gifClick(e), gifScroll(), kaomojiPick(face, e), islands (the grids' bag),
+    //    creator (the creator's bag), overlays (the overlays' bag)
 
     const st = pickerState();
     const p = panelState();
@@ -29,11 +30,15 @@
 
     // A search or the creator takes the sections' place; the results section shows for a query.
     const sectionsHidden = $derived(p.creatorOpen || !!st.query);
+    // The kaomoji view builds on its first visit, then stays for the next.
+    let kaomojiSeen = $state(false);
+    $effect(() => { if (p.mode === 'kaomoji') kaomojiSeen = true; });
+    const placeholder = $derived(p.mode === 'gif' ? 'Search GIFs...' : p.mode === 'kaomoji' ? 'Search Kaomoji...' : 'Search Emojis...');
 </script>
 
 <div class="emoji-search-container">
     <div class="emoji-search-wrapper">
-        <input id="emoji-search-input" bind:this={search} placeholder={p.mode === 'gif' ? 'Search GIFs...' : 'Search Emojis...'}
+        <input id="emoji-search-input" bind:this={search} {placeholder}
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                oninput={(e) => h.searchInput(e)} onkeydown={(e) => h.searchKeydown(e)}>
         <span class="emoji-search-icon icon icon-search"></span>
@@ -41,9 +46,10 @@
     <div class="picker-mode-toggle">
         <button class="picker-mode-btn" class:active={p.mode === 'emoji'} data-mode="emoji" onclick={(e) => { e.stopPropagation(); h.setMode('emoji'); }}>Emoji</button>
         <button class="picker-mode-btn" class:active={p.mode === 'gif'} data-mode="gif" onclick={(e) => { e.stopPropagation(); h.setMode('gif'); }}>GIF</button>
+        <button class="picker-mode-btn" class:active={p.mode === 'kaomoji'} data-mode="kaomoji" title="Kaomoji" onclick={(e) => { e.stopPropagation(); h.setMode('kaomoji'); }}>(◕‿◕)</button>
     </div>
 </div>
-<div class="emoji-picker-content" style:display={p.mode === 'gif' ? 'none' : ''}>
+<div class="emoji-picker-content" style:display={p.mode === 'emoji' ? '' : 'none'}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="emoji-sidebar" bind:this={sidebar} onclick={(e) => h.railClick(e)} onpointerdown={() => h.railStop()} onwheel={() => h.railStop()}>
         {#if p.ready}<PackSidebar h={h.islands} />{/if}
@@ -91,5 +97,8 @@
     <div class="gif-grid" id="gif-grid" bind:this={gif} onclick={(e) => h.gifClick(e)} onscroll={() => h.gifScroll()}>
         {#if gif}<GifGrid grid={gif} h={h.islands} />{/if}
     </div>
+</div>
+<div class="kaomoji-picker-content" style:display={p.mode === 'kaomoji' ? 'flex' : 'none'}>
+    {#if kaomojiSeen}<KaomojiGrid h={{ pick: h.kaomojiPick }} />{/if}
 </div>
 <CreatorOverlays h={h.overlays} />

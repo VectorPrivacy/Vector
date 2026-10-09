@@ -18,7 +18,7 @@ export function bumpPickerChrome() { picker.chromeSeq = (picker.chromeSeq || 0) 
 // stock grids are built on first open, not at boot), the creator view, and the creator's
 // in-panel overlays. The app's flows write here; PickerPanel paints it.
 const panel = $state({
-    mode: 'emoji',         // 'emoji' | 'gif'
+    mode: 'emoji',         // 'emoji' | 'gif' | 'kaomoji'
     ready: false,          // the rail, grids and pack sections render once true
     creatorOpen: false,    // the creator swaps in over the sections
     error: null,           // { pretitle, title, detail, button }
@@ -41,7 +41,7 @@ export function setPickerNamingError(message) { if (panel.naming) panel.naming.e
 // close in the app writes here; PickerRoot paints it. `teleporting` suppresses the
 // transform transition for one frame so an anchor swap while closed does not slide.
 import { flushSync } from 'svelte';
-const root = $state({ visible: false, statusMode: false, noGifs: false, messageType: false, bottom: '', teleporting: false });
+const root = $state({ visible: false, statusMode: false, noGifs: false, noKaomoji: false, messageType: false, bottom: '', teleporting: false });
 const rootEls = { root: null };
 let handlers = $state.raw(null);   // the app's bag for PickerPanel
 const visibilityListeners = new Set();

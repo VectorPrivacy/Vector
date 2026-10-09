@@ -81,5 +81,24 @@ for (const [text, want] of parse) {
     if (got !== want) { failed++; console.error(`FAIL parse ${JSON.stringify(text)}: got ${got}, want ${want}`); }
 }
 
-console.log(`[text-color] ${cases.length} colour cases, ${spanCases.length} span cases, ${parse.length} typed times${failed ? ` — ${failed} failed` : ''}`);
+// Kaomoji send as typed: nothing markdown, a mention, a shortcode or a tag would read.
+const { KAOMOJI } = await import('../src/components/lib/kaomoji.js');
+const SHRUG = '¯\\_(ツ)_/¯';
+let faces = 0;
+for (const cat of KAOMOJI) {
+    const seen = new Set();
+    for (const [face, name, tags] of cat.items) {
+        faces++;
+        const bad = face !== SHRUG && /[*_`~\\|]/.test(face) ? 'a markdown character'
+            : /^[#>+=-]|^\d+[.)]/.test(face) ? 'a block marker at the start'
+            : /\]\(|!\[|<[a-zA-Z\/!?]|&\w+;|:[a-zA-Z0-9_~-]+:|@\w/.test(face) ? 'a link, tag, entity, shortcode or mention'
+            : face !== face.trim() ? 'edge whitespace'
+            : !name || !tags ? 'no name or tags'
+            : seen.has(face) ? 'a duplicate in its category' : null;
+        seen.add(face);
+        if (bad) { failed++; console.error(`FAIL kaomoji ${JSON.stringify(face)} (${cat.name}): ${bad}`); }
+    }
+}
+
+console.log(`[text-color] ${faces} kaomoji, ${cases.length} colour cases, ${spanCases.length} span cases, ${parse.length} typed times${failed ? ` — ${failed} failed` : ''}`);
 process.exit(failed ? 1 : 0);

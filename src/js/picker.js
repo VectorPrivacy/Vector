@@ -54,7 +54,8 @@ const _pickerPanelHelpers = {
     rootClickCapture: (e) => _onPackEmojiClick(e),
     rootClick: (e) => { _onEmojiSpanClick(e); _onEmojiImgClick(e); },
     searchKeydown: (e) => _onSearchKeydown(e),
-    setMode: (mode) => setPickerMode(mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI),
+    setMode: (mode) => setPickerMode(mode === 'gif' ? PICKER_MODE_GIF : mode === 'kaomoji' ? PICKER_MODE_KAOMOJI : PICKER_MODE_EMOJI),
+    kaomojiPick: (face, e) => _onKaomojiPick(face, e),
     railClick: (e) => _onRailClick(e),
     // Grabbing the rail wins over an in-flight follow: never animate against the user's own finger.
     railStop: () => _railStop(),
@@ -178,7 +179,7 @@ let _emojiPanelTarget = null;
 function openEmojiPanelForStatus(onInsert) {
     _emojiPanelTarget = { insert: onInsert };
     setPickerMode(PICKER_MODE_EMOJI);
-    VectorSvelte.setPickerAnchor({ statusMode: true, noGifs: true, messageType: false, bottom: '' });
+    VectorSvelte.setPickerAnchor({ statusMode: true, noGifs: true, noKaomoji: false, messageType: false, bottom: '' });
     VectorSvelte.setPickerVisible(true);
     requestAnimationFrame(() => requestAnimationFrame(async () => {
         if (!VectorSvelte.pickerVisible()) return;
@@ -252,7 +253,8 @@ function _openPanel({ isDefaultPanel, reactionId }) {
         // A status open may still be exiting; its centred anchor must not carry
         // into this one, and the swap has to settle before `visible` animates.
         if (VectorSvelte.pickerRoot().statusMode) VectorSvelte.setPickerAnchor({ statusMode: false, noGifs: false });
-        VectorSvelte.setPickerAnchor({ messageType: true, bottom: bottomPx || '' }, false);
+        // A reaction is one emoji; kaomoji are for writing.
+        VectorSvelte.setPickerAnchor({ messageType: true, noKaomoji: !!strReaction, bottom: bottomPx || '' }, false);
         VectorSvelte.setPickerVisible(true);
 
         // Swap the emoji button to a wink while open (message input only).
@@ -1012,10 +1014,24 @@ function _onEmojiSpanClick(e) {
     }
 }
 
-// When hitting Enter on the emoji search - choose the first emoji/GIF
+/** A kaomoji goes into the draft as text; Shift keeps the panel open for another. */
+function _onKaomojiPick(face, e) {
+    insertAtCursor(face, true);
+    if (e && e.shiftKey) return;
+    VectorSvelte.setPickerVisible(false);
+    VectorSvelte.setEmojiIcon('smile');
+    if (!platformFeatures.is_mobile && !_emojiPanelTarget) domChatMessageInput.focus();
+}
+
+// When hitting Enter on the emoji search - choose the first emoji/GIF/kaomoji
 async function _onSearchKeydown(e) {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
+
+        if (pickerMode === PICKER_MODE_KAOMOJI) {
+            VectorSvelte.pickerEls().root?.querySelector('.kaomoji-list .kaomoji-item')?.click();
+            return;
+        }
 
         // Handle GIF mode - select first GIF
         if (pickerMode === PICKER_MODE_GIF) {

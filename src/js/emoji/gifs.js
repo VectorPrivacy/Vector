@@ -6,6 +6,7 @@
 /** Picker mode enum for fast comparison */
 const PICKER_MODE_EMOJI = 0;
 const PICKER_MODE_GIF = 1;
+const PICKER_MODE_KAOMOJI = 2;
 
 /** Current picker mode */
 let pickerMode = PICKER_MODE_EMOJI;
@@ -160,8 +161,10 @@ function setPickerMode(mode) {
     pickerMode = mode;
 
     // The panel swaps its content and placeholder from the mode.
-    VectorSvelte.setPanelMode(mode === PICKER_MODE_GIF ? 'gif' : 'emoji');
+    VectorSvelte.setPanelMode(mode === PICKER_MODE_GIF ? 'gif' : mode === PICKER_MODE_KAOMOJI ? 'kaomoji' : 'emoji');
     if (mode === PICKER_MODE_GIF && !trendingGifsLoaded) loadTrendingGifs();
+    // Emoji and kaomoji share one query: what's typed carries across.
+    if (mode !== PICKER_MODE_GIF && emojiSearch) VectorSvelte.setPickerQuery(emojiSearch.value.toLowerCase());
 
     // Auto-focus search box on desktop only (mobile keyboards are intrusive)
     // Only focus if the picker is actually visible to avoid stealing focus

@@ -14,6 +14,7 @@
      class:visible={r.visible}
      class:emoji-picker-status-mode={r.statusMode}
      class:emoji-picker-no-gifs={r.noGifs}
+     class:emoji-picker-no-kaomoji={r.noKaomoji}
      class:emoji-picker-message-type={r.messageType}
      style:bottom={r.bottom || null}
      style:transition={r.teleporting ? 'none' : null}>

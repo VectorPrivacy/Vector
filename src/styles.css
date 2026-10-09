@@ -2029,6 +2029,7 @@ html, body {
    exist here */
 .emoji-picker.emoji-picker-status-mode { z-index: 10005; bottom: 10px !important; }
 .emoji-picker.emoji-picker-no-gifs .picker-mode-btn[data-mode="gif"] { display: none; }
+.emoji-picker.emoji-picker-no-kaomoji .picker-mode-btn[data-mode="kaomoji"] { display: none; }
 
 /* Fullscreen QR overlay (profile QR + bunker login QR) */
 .qr-overlay {
@@ -8055,6 +8056,83 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
 .picker-mode-btn.active {
   background: var(--icon-color-primary);
   color: #000;
+}
+
+/* Three modes on a phone: tighter buttons leave the search its words. */
+@media (max-width: 480px) {
+  .picker-mode-toggle { gap: 2px; margin-left: 6px; }
+  .picker-mode-btn { padding: 6px 8px; }
+}
+
+/* Kaomoji: a jump strip over categories of tappable faces. */
+.kaomoji-picker-content {
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background-color: #0a0a0a;
+}
+.kaomoji-cats {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px 6px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.kaomoji-cats::-webkit-scrollbar { display: none; }
+.kaomoji-cat {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.kaomoji-cat:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.kaomoji-cat.active { background: rgba(255, 255, 255, 0.16); color: #fff; }
+/* The strip fades at whichever end has more to scroll to. */
+.kaomoji-cats.fade-end { mask-image: linear-gradient(90deg, #000 85%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); }
+.kaomoji-cats.fade-start { mask-image: linear-gradient(90deg, transparent, #000 15%); -webkit-mask-image: linear-gradient(90deg, transparent, #000 15%); }
+.kaomoji-cats.fade-start.fade-end { mask-image: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent); }
+.kaomoji-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 8px 8px;
+}
+.kaomoji-list .emoji-section-header { cursor: default; padding: 8px 0 4px; }
+.kaomoji-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.kaomoji-item {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  line-height: 1.3;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.kaomoji-item:hover { background: rgba(255, 255, 255, 0.12); }
+.kaomoji-item:active { background: var(--icon-color-primary); color: #000; }
+.kaomoji-empty {
+  padding: 24px 8px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
 }
 
 /* GIF Picker Content */
