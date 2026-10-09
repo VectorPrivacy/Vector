@@ -8122,6 +8122,9 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   gap: 6px;
 }
 .kaomoji-item {
+  /* The system font: Rubik lacks the combining marks some faces are built from (a
+     Lenny's eyes), and WebKit lays a borrowed mark out with room of its own. */
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   padding: 6px 10px;
   border: none;
   border-radius: 8px;
