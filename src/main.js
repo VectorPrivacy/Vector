@@ -469,7 +469,8 @@ function contentToPreviewText(content) {
     text = text.replace(/^>\s?/gm, '');
     // An ```ansi block is coloured prose, so its words stay in the preview.
     text = text.replace(/^```ansi(?:[ \t][^\n]*)?\n([\s\S]*?)^```/gim, (_, inner) => stripAnsiCodes(inner));
-    text = text.replace(/^```[\s\S]*?^```/gm, '');
+    text = text.replace(/^```([^\n]*)\n[\s\S]*?^```/gm, (_, info) => ` ${codeblockLabel(info)} `);
+    const ruled = /^(?:---+|\*\*\*+)$/m.test(text);
     text = text.replace(/^---+$/gm, '');
     text = text.replace(/^\*\*\*+$/gm, '');
     // Strip inline code backticks (keep inner text)
@@ -477,7 +478,18 @@ function contentToPreviewText(content) {
     text = stripAnsiCodes(text);
     // Collapse whitespace and trim
     text = text.replace(/\s+/g, ' ').trim();
-    return text;
+    // A divider says nothing beside words, but alone it would leave the preview blank.
+    return text || (ruled ? 'Divider' : '');
+}
+
+/** "Rust Codeblock" from a fence's info string, or plain "Codeblock" for a language we can't name. */
+function codeblockLabel(info) {
+    const lang = String(info).trim().split(/\s+/)[0].toLowerCase();
+    let name = '';
+    try { name = (lang && hljs.getLanguage(lang)?.name) || ''; } catch (_) {}
+    // hljs names a family ("HTML, XML"): the fence already says which one.
+    if (name.includes(',')) name = lang.toUpperCase();
+    return name ? `${name} Codeblock` : 'Codeblock';
 }
 
 /**
