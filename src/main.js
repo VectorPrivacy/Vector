@@ -392,9 +392,10 @@ function toggleAttachmentPanel() {
     if (!VectorSvelte.attachmentVisible()) {
         if (VectorSvelte.pickerVisible()) closeEmojiPanel();
 
-        // Above the composer, whatever height its draft has grown it to.
+        // Above the composer, whatever height its draft has grown it to; on the web
+        // the floor and keyboard lift the composer too (web/chrome.js).
         const chatBoxHeight = VectorSvelte.composerEls().box.getBoundingClientRect().height;
-        VectorSvelte.setAttachmentVisible(true, (chatBoxHeight + 10) + 'px');
+        VectorSvelte.setAttachmentVisible(true, `calc(${chatBoxHeight + 10}px + var(--floor, 0px) + var(--kb, 0px))`);
         VectorSvelte.setAttachmentOpen(true);
         
         // Commands: only in chats with known bots; grayed while a draft exists.

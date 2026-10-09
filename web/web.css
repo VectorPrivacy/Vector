@@ -54,12 +54,9 @@ body.mobile #chat-new-box::after {
     height: calc(max(5px, var(--floor, 0px)) - 5px);
     background: rgb(22, 22, 22);
 }
-/* Over the composer, which rides the keyboard when it's up (the floor is 0 then). */
+/* Over the composer (placed by the page), in what the keyboard leaves. */
 body.mobile .emoji-picker,
-body.mobile .attachment-panel {
-    bottom: calc(65px + var(--floor, 0px) + var(--kb, 0px));
-    max-height: calc(var(--app-h, 100vh) - var(--chrome-h, 0px) - 75px);
-}
+body.mobile .attachment-panel { max-height: calc(var(--app-h, 100vh) - var(--chrome-h, 0px) - 75px); }
 /* The chat is sized by 100vh, which iOS keeps full-height under the keyboard. */
 body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
 @media (max-width: 640px) {

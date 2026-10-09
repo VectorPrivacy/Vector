@@ -246,7 +246,8 @@ function _openPanel({ isDefaultPanel, reactionId }) {
         // Read chat-box height while the layout is still clean (before .visible
         // and before the deferred render mutates panel DOM) to avoid a reflow.
         const chatBox = VectorSvelte.composerEls().box;
-        const bottomPx = chatBox ? (chatBox.getBoundingClientRect().height + 10) + 'px' : '';
+        // On the web the floor and keyboard lift the composer too (web/chrome.js).
+        const bottomPx = chatBox ? `calc(${chatBox.getBoundingClientRect().height + 10}px + var(--floor, 0px) + var(--kb, 0px))` : '';
 
         // A status open may still be exiting; its centred anchor must not carry
         // into this one, and the swap has to settle before `visible` animates.
