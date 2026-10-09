@@ -60,11 +60,13 @@ const TT_OPTIONS = {
 };
 
 let ttRelative = null;
-/** "in 2 hours", "3 days ago": the unit grows with the distance, as Discord's does. */
+/** "in 2 hours", "3 days ago": the unit grows with the distance, as Discord's does. Always
+ *  a count, never "tomorrow", so it reads as a countdown beside the date styles. */
 function ttRelativeText(unix, now = Date.now() / 1000) {
-    ttRelative ??= new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    ttRelative ??= new Intl.RelativeTimeFormat(undefined, { numeric: 'always' });
     const diff = unix - now;
     const abs = Math.abs(diff);
+    if (abs < 10) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(0, 'second');
     const [n, unit] = abs < 45 ? [diff, 'second']
         : abs < 2700 ? [diff / 60, 'minute']
         : abs < 79200 ? [diff / 3600, 'hour']

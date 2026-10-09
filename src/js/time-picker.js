@@ -10,14 +10,18 @@
  * name; `used()` is told when a time goes in that way.
  */
 
-// The order the styles are offered in, the everyday ones first; a day without a time
-// offers only the styles that don't show one.
-const TIME_STYLE_ORDER = ['f', 'F', 'R', 't', 'T', 'd', 'D', 's', 'S'];
-const TIME_DATE_STYLES = ['D', 'd', 'R'];
-const TIME_STYLE_NAMES = {
-    f: 'Date and time', F: 'Full date and time', R: 'Relative', t: 'Time', T: 'Time with seconds',
-    d: 'Short date', D: 'Long date', s: 'Short date and time', S: 'Short date, time with seconds',
-};
+// The styles offered, one per way of reading a time: Discord's other five are near
+// copies of these, and still render when typed as a code. A day without a time
+// offers only the ones that don't show one.
+const TIME_STYLE_ORDER = ['f', 'R', 't', 'D'];
+const TIME_DATE_STYLES = ['D', 'R'];
+const TIME_STYLE_NAMES = { f: 'Date and time', t: 'Time', D: 'Date' };
+
+/** What the relative style is to the reader: a countdown, or how long ago. */
+function timeStyleName(style, unix) {
+    if (style !== 'R') return TIME_STYLE_NAMES[style];
+    return unix >= Date.now() / 1000 ? 'Countdown' : 'Time since';
+}
 
 // eslint-disable-next-line no-unused-vars
 function initTimeSelector(textarea, { slash = () => false, used = () => {} } = {}) {
@@ -64,7 +68,7 @@ function initTimeSelector(textarea, { slash = () => false, used = () => {} } = {
         unix = parsed?.unix ?? null;
         styles = parsed?.dateOnly ? TIME_DATE_STYLES : TIME_STYLE_ORDER;
         const rows = unix === null ? [] : styles.map((style) => ({
-            style, name: TIME_STYLE_NAMES[style], preview: ttFormat(unix, style),
+            style, name: timeStyleName(style, unix), preview: ttFormat(unix, style),
         }));
         rowCount = rows.length;
         if (active >= rowCount) active = 0;
