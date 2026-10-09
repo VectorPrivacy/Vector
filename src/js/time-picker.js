@@ -6,8 +6,8 @@
  *   const ctrl = initTimeSelector(textarea, { slash, used });
  *   ctrl.isOpen() → the panel is up and owns Enter/Tab/arrows/Escape
  *
- * A message starting `/time ` opens it too, while `slash()` says no bot claims the
- * name; `used()` is told when a time goes in that way.
+ * `/time ` opens it too, anywhere `@time` would; at the start of a message only while
+ * `slash()` says no bot claims the name. `used()` is told when a time goes in that way.
  */
 
 // The styles offered, one per way of reading a time: Discord's other five are near
@@ -40,13 +40,14 @@ function initTimeSelector(textarea, { slash = () => false, used = () => {} } = {
         const caret = textarea.selectionStart;
         const lineStart = val.lastIndexOf('\n', caret - 1) + 1;
         const line = val.slice(lineStart, caret);
-        let found = null;
-        for (const m of line.matchAll(/(^|\s)@time(?=\s|$)/gi)) found = m;
-        let at;
-        if (found) at = lineStart + found.index + found[1].length;
-        // The slash form only opens past its space, while the command list has the name.
-        else if (/^\/time\s/i.test(val) && caret > 5 && !val.slice(0, caret).includes('\n') && slash()) at = 0;
-        else return null;
+        // The slash form only opens past its space: until then the command list has the name.
+        let at = -1;
+        for (const m of line.matchAll(/(^|\s)(@time(?=\s|$)|\/time(?=\s))/gi)) {
+            const pos = lineStart + m.index + m[1].length;
+            if (pos === 0 && m[2][0] === '/' && !slash()) continue;
+            at = pos;
+        }
+        if (at < 0) return null;
         const query = val.slice(at + 5, caret);
         viaSlash = val[at] === '/';
         return query.length > 60 ? null : { at, query };

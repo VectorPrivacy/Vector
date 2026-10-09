@@ -5,6 +5,7 @@
     import ShortcodePopup from './ShortcodePopup.svelte';
     import CommandPopup from './CommandPopup.svelte';
     import TimePopup from './TimePopup.svelte';
+    import TimeSuggestPopup from './TimeSuggestPopup.svelte';
     import ChoiceMenu from './ChoiceMenu.svelte';
 
     import { composerEls } from '../lib/composer.svelte.js';
@@ -17,4 +18,5 @@
 <ShortcodePopup {anchor} {h} />
 <CommandPopup {anchor} />
 <TimePopup {anchor} />
+<TimeSuggestPopup {anchor} />
 <ChoiceMenu />

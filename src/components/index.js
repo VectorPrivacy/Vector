@@ -152,6 +152,7 @@ export {
     setComposerStatus,
     openPopup,
     closePopup,
+    composerPopup,
     setCommand,
     setCommandBot,
     clearCommand,

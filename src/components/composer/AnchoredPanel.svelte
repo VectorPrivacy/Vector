@@ -5,7 +5,9 @@
     // open and window resize; the composer grows as the draft does. A phone's
     // keyboard moves the composer without a window resize, so the visual viewport's
     // changes re-measure too, a frame later, once the page has refit around it.
-    let { cls, open, anchor, maxWidth = 340, viewportInset = false, view, message = false, children } = $props();
+    // `shrink` sizes to the content (up to the same width) instead of the composer's width;
+    // `atX` starts it at that screen x, kept inside the composer.
+    let { cls, open, anchor, maxWidth = 340, viewportInset = false, shrink = false, atX = null, view, message = false, children } = $props();
 
     let el;
 
@@ -16,7 +18,12 @@
         const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
         el.style.left = left + 'px';
         el.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
-        el.style.width = width + 'px';
+        if (shrink) el.style.maxWidth = width + 'px';
+        else el.style.width = width + 'px';
+        if (atX != null) {
+            const room = Math.min(rect.right, window.innerWidth - margin) - el.offsetWidth;
+            el.style.left = Math.max(left, Math.min(atX, room)) + 'px';
+        }
         // The room above the anchor, which a keyboard can make shorter than the panel.
         el.style.setProperty('--room', Math.max(120, rect.top - (window.visualViewport?.offsetTop || 0) - 16) + 'px');
     }

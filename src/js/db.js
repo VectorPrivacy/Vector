@@ -235,6 +235,16 @@ async function saveEmoticonSuggestions(bool) {
     return await invoke('set_sql_setting', { key: 'emoticon_suggestions', value: bool ? 'true' : 'false' });
 }
 
+/** Time suggestions ("in 6 hours" offered as a countdown): default on. */
+async function loadTimeSuggestions() {
+    const value = await invoke('get_sql_setting', { key: 'time_suggestions' });
+    return value === null || value === undefined ? true : value === 'true' || value === '1';
+}
+
+async function saveTimeSuggestions(bool) {
+    return await invoke('set_sql_setting', { key: 'time_suggestions', value: bool ? 'true' : 'false' });
+}
+
 // ============================================================================
 // Notification Sound Settings
 // ============================================================================

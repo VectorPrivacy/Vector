@@ -344,6 +344,7 @@ async function sendMessage(messageText) {
 /** Enter sends, Escape leaves reply or edit mode; a selector that is open owns the key. */
 async function handleComposerKeydown(evt) {
         // Skip send if mention/emoji/command selector is consuming this keypress
+        if (timeSuggestCtrl && timeSuggestCtrl.takesKey(evt)) return;
         if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
         if (timeCtrl && timeCtrl.isOpen()) return;
         if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
@@ -451,6 +452,7 @@ function getMentionCandidates(includeSelf = false) {
 
 let mentionCtrl = null;
 let timeCtrl = null;
+let timeSuggestCtrl = null;
 let emojiShortcodeCtrl = null;
 let recorder = null;
 
@@ -499,6 +501,10 @@ function initComposerControllers() {
     // `@Name` renders as a pill.
     composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
     emojiShortcodeCtrl = initEmojiShortcodeSelector(domChatMessageInput);
+    timeSuggestCtrl = initTimeSuggest(domChatMessageInput, {
+        enabled: () => timeSuggestionsEnabled,
+        busy: () => { const kind = VectorSvelte.composerPopup().kind; return !!kind && kind !== 'timesuggest'; },
+    });
     timeCtrl = initTimeSelector(domChatMessageInput, {
         slash: () => !!commandCtrl && commandCtrl.systemOwns('time'),
         used: () => commandCtrl && commandCtrl.systemUsed('time'),

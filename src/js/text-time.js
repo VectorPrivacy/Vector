@@ -89,13 +89,11 @@ function ttFull(unix, dateOnly = false) {
         : ttFormatter('full', { dateStyle: 'full', timeStyle: 'long' }).format(new Date(unix * 1000));
 }
 
-function ttChip(unix, style, hidden) {
+function ttChip(unix, style) {
     const chip = document.createElement('span');
     chip.className = 'vt-time';
     chip.dataset.unix = String(unix);
     chip.dataset.style = style;
-    // A hover inside a spoiler would tell what it hides.
-    if (!hidden) chip.title = ttFull(unix);
     chip.textContent = ttFormat(unix, style);
     if (style === 'R') ttStartTicking();
     return chip;
@@ -113,7 +111,6 @@ function ttStartTicking() {
 }
 
 const TT_SKIP = 'code, pre, a, .vt-time';
-const TT_HIDDEN = '.spoiler';
 
 /**
  * Replace each time span's fallback text in a rendered message with its chip. The
@@ -148,12 +145,55 @@ function ttRenderSpans(root, content, spans) {
             if (!node.parentElement.closest(TT_SKIP)) {
                 const tail = node.splitText(at);
                 tail.nodeValue = tail.nodeValue.slice(fallback.length);
-                tail.parentNode.insertBefore(ttChip(span.unix, span.style, !!tail.parentElement.closest(TT_HIDDEN)), tail);
+                tail.parentNode.insertBefore(ttChip(span.unix, span.style), tail);
             }
             break;
         }
     }
 }
+
+/**
+ * What a chip adds when hovered (or tapped on a phone), at its shortest: a countdown's
+ * moment (its time within a day, else its date) or how far off a written time is.
+ */
+function ttHint(unix, style) {
+    if (style !== 'R') return ttRelativeText(unix);
+    if (Math.abs(unix - Date.now() / 1000) < 86400) return ttFormat(unix, 't');
+    const at = new Date(unix * 1000);
+    const thisYear = at.getFullYear() === new Date().getFullYear();
+    return ttFormatter(thisYear ? 'hint' : 'hintYear', { weekday: 'short', day: 'numeric', month: 'short', ...(thisYear ? {} : { year: 'numeric' }) }).format(at);
+}
+
+(() => {
+    const chipOf = (e) => e.target.closest?.('.vt-time');
+    function show(chip) {
+        // A spoiler's chip keeps its secret until it's revealed.
+        if (chip.closest('.spoiler:not(.revealed)')) return;
+        showGlobalTooltip(ttHint(Number(chip.dataset.unix), chip.dataset.style), chip);
+    }
+    if (matchMedia('(hover: hover) and (pointer: fine)').matches) {
+        document.addEventListener('mouseover', (e) => {
+            const chip = chipOf(e);
+            if (chip && !chip.contains(e.relatedTarget)) show(chip);
+        });
+        document.addEventListener('mouseout', (e) => {
+            const chip = chipOf(e);
+            if (chip && !chip.contains(e.relatedTarget)) hideGlobalTooltip();
+        });
+        return;
+    }
+    // A phone taps: the bubble shows once this tap is done closing tooltips, and goes by
+    // itself, or with the next touch or scroll.
+    let timer = 0;
+    document.addEventListener('click', (e) => {
+        const chip = chipOf(e);
+        if (!chip) return;
+        setTimeout(() => show(chip));
+        clearTimeout(timer);
+        timer = setTimeout(hideGlobalTooltip, 2500);
+    });
+    document.addEventListener('scroll', () => hideGlobalTooltip(), { capture: true, passive: true });
+})();
 
 /** Discord codes in text that arrived without spans (a bridge, an older client): chips too. */
 function ttRenderCodes(root) {
@@ -166,7 +206,6 @@ function ttRenderCodes(root) {
     let budget = 64;   // as many as a message's own spans may carry
     for (const node of nodes) {
         const value = node.nodeValue;
-        const hidden = !!node.parentElement.closest(TT_HIDDEN);
         const frag = document.createDocumentFragment();
         let last = 0;
         for (const m of value.matchAll(TT_TOKEN)) {
@@ -174,7 +213,7 @@ function ttRenderCodes(root) {
             const unix = Number(m[1]);
             if (ttFallback(unix) === null) continue;
             if (m.index > last) frag.appendChild(document.createTextNode(value.slice(last, m.index)));
-            frag.appendChild(ttChip(unix, m[2] || 'f', hidden));
+            frag.appendChild(ttChip(unix, m[2] || 'f'));
             last = m.index + m[0].length;
             budget--;
         }
@@ -385,4 +424,92 @@ function ttRead(input, now) {
     if (time) return Math.floor(date.setHours(time[0], time[1], time[2], 0) / 1000);
     // A day alone reads as noon: the same calendar date in nearly every zone.
     return { unix: Math.floor(date.setHours(12, 0, 0, 0) / 1000), dateOnly: true };
+}
+
+// ---- suggesting a time as it's typed ------------------------------------------------
+
+// Only phrases that can't be ordinary words: "in 6 hours" / "6 hours from now", and a
+// calendar date with its day. A bare "tomorrow" or "monday" is left alone, and so is
+// anything past: there's nothing to count down to.
+// Any word in a unit's place; ttSuggestUnit decides which it is, so one still being typed
+// ("in 10 minu") holds the suggestion rather than dropping it between keystrokes.
+const TT_SUGGEST_UNIT = '[a-z]+';
+const TT_SUGGEST_UNITS = { minutes: 2, hours: 1, days: 1, weeks: 1, months: 3, years: 1 };   // shortest unambiguous start
+const TT_SUGGEST_ALIASES = { min: 'minutes', mins: 'minutes', m: 'minutes', hr: 'hours', hrs: 'hours', wk: 'weeks', wks: 'weeks', yr: 'years', yrs: 'years' };
+
+/** The unit a typed word is, or will be once finished; null when it can't be one. After
+ *  "a" or "an" a single letter is too little ("in a d…" is as likely "different"). */
+function ttSuggestUnit(word, first, spelled) {
+    word = word.toLowerCase();
+    if (spelled && word.length < 2) return null;
+    // A lone "m" leads a phrase as minutes or months alike; after "1h" it's minutes.
+    if (word === 'm') return first ? null : 'minutes';
+    if (TT_SUGGEST_ALIASES[word]) return TT_SUGGEST_ALIASES[word];
+    for (const [unit, least] of Object.entries(TT_SUGGEST_UNITS)) {
+        if (word.length >= least && unit.startsWith(word)) return unit;
+        if (word === unit.slice(0, -1)) return unit;
+    }
+    return null;
+}
+const TT_SUGGEST_AMOUNT = '(?:\\d+(?:\\.\\d+)?|an?|half an?)';
+// A second part may be the short "30m" ("in 1h 30m"); a lone "m" could be anything.
+const TT_SUGGEST_SPAN = `${TT_SUGGEST_AMOUNT} ?${TT_SUGGEST_UNIT}(?:,?(?: and)? \\d+ ?${TT_SUGGEST_UNIT})?`;
+// A phrase may close a sentence; the mark stays outside what's replaced.
+const TT_SUGGEST_END = '[.,!?;:)]? ?$';
+const TT_SUGGEST_MONTH = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+const TT_SUGGEST_DAY = '\\d{1,2}(st|nd|rd|th)?';
+const TT_SUGGEST_CLOCK = '(,? (?:at )?(?:\\d{1,2}(?::\\d{2})? ?(?:am|pm)|\\d{1,2}:\\d{2}))?';
+const TT_SUGGEST_YEAR = '(,? \\d{4})?';
+const TT_SUGGEST_FORMS = [
+    { re: new RegExp(`(?:^|[\\s(])(in ${TT_SUGGEST_SPAN}|${TT_SUGGEST_SPAN} from now)${TT_SUGGEST_END}`, 'i'), relative: true },
+    { re: new RegExp(`(?:^|[\\s(])(${TT_SUGGEST_MONTH}\\.? ${TT_SUGGEST_DAY}${TT_SUGGEST_YEAR}${TT_SUGGEST_CLOCK})${TT_SUGGEST_END}`, 'i') },
+    { re: new RegExp(`(?:^|[\\s(])(?:the )?(${TT_SUGGEST_DAY} (?:of )?${TT_SUGGEST_MONTH}${TT_SUGGEST_YEAR}${TT_SUGGEST_CLOCK})${TT_SUGGEST_END}`, 'i') },
+    { re: new RegExp(`(?:^|[\\s(])(\\d{4}-\\d{2}-\\d{2}(?:[ T]\\d{1,2}:\\d{2})?)${TT_SUGGEST_END}`) },
+];
+
+/**
+ * A time phrase the draft ends with, worth offering as a time everyone reads in their
+ * own zone: `{ start, end, unix, style }` (string indices of `before`), or null.
+ * "in 6 hours" becomes a countdown, a date a date, a date with a time both.
+ */
+function ttSuggest(before, now = new Date()) {
+    if (!before || before.length < 6) return null;
+    const tail = before.slice(-80);
+    const offset = before.length - tail.length;
+    for (const form of TT_SUGGEST_FORMS) {
+        const m = form.re.exec(tail);
+        if (!m) continue;
+        const phrase = m[1];
+        // "may 5" is as likely a verb as a date: only with its year, time or "th".
+        if (!form.relative && /^(\d+\w* (of )?)?may\b/i.test(phrase)) {
+            const parts = phrase.match(new RegExp(`${TT_SUGGEST_YEAR}${TT_SUGGEST_CLOCK}$`, 'i'));
+            if (!/\d(st|nd|rd|th)\b/i.test(phrase) && !(parts && (parts[1] || parts[2]))) return null;
+        }
+        const start = offset + m.index + m[0].indexOf(phrase);
+        const end = start + phrase.length;
+        if (tcCodeRanges(before).some(([s, e]) => start >= s && start < e)) return null;
+        // Each unit read as the one it is (or is becoming); a word that is none isn't a time.
+        let read = phrase;
+        if (form.relative) {
+            let first = true;
+            let bad = false;
+            // A spelled amount is a whole word: "and" is not "an" + "d".
+            read = phrase.replace(/\b(?:(\d+(?:\.\d+)?) ?|(half an?|an?) )([a-z]+)/gi, (_, number, spelled, word) => {
+                const amount = number || spelled;
+                const unit = ttSuggestUnit(word, first, !number);
+                first = false;
+                if (!unit) bad = true;
+                return `${amount} ${unit}`;
+            });
+            if (bad) return null;
+        }
+        const parsed = ttParseFull(read, now);
+        if (!parsed) return null;
+        const ahead = parsed.unix - now.getTime() / 1000;
+        // Ten minutes and up, with slack for the moments between reading and checking.
+        if (ahead < (form.relative ? 590 : 60)) return null;
+        const style = form.relative ? 'R' : parsed.dateOnly ? 'D' : 'f';
+        return { start, end, unix: parsed.unix, style };
+    }
+    return null;
 }

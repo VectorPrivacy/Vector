@@ -756,23 +756,14 @@ function createRichComposer(host, opts = {}) {
         return liveSelectionRange() || lastSelection;
     }
 
-    /** Put the caret at model offset `target`. */
-    function setCaret(target) {
-        const sel = window.getSelection();
-        if (!sel) return;
+    /** The text node and index at model offset `target`, or null past the end. */
+    function pointAt(target) {
         let seen = 0;
-        let placed = false;
-        const place = (node, off) => {
-            const r = document.createRange();
-            r.setStart(node, off);
-            r.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(r);
-            placed = true;
-        };
+        let found = null;
+        const place = (node, off) => { found = [node, off]; };
         const walk = (node) => {
             for (const child of node.childNodes) {
-                if (placed) return;
+                if (found) return;
                 if (child.nodeType === Node.TEXT_NODE) {
                     const clean = child.nodeValue.split(CMP_ZWSP).join('');
                     if (seen + clean.length >= target) {
@@ -800,13 +791,40 @@ function createRichComposer(host, opts = {}) {
             }
         };
         walk(el);
-        if (!placed) {
-            const r = document.createRange();
+        return found;
+    }
+
+    /** Put the caret at model offset `target`. */
+    function setCaret(target) {
+        const sel = window.getSelection();
+        if (!sel) return;
+        const r = document.createRange();
+        const at = pointAt(target);
+        if (at) {
+            r.setStart(at[0], at[1]);
+            r.collapse(true);
+        } else {
             r.selectNodeContents(el);
             r.collapse(false);
-            sel.removeAllRanges();
-            sel.addRange(r);
         }
+        sel.removeAllRanges();
+        sel.addRange(r);
+    }
+
+    /** The screen x of model offset `target` (the left edge of its character), or null. */
+    function xAt(target) {
+        const at = pointAt(target);
+        if (!at) return null;
+        const [node, off] = at;
+        const len = node.nodeValue.length;
+        // An offset at a node's end measures the character before it, from its right.
+        const [from, to, edge] = off < len ? [off, off + 1, 'left'] : off > 0 ? [off - 1, off, 'right'] : [];
+        if (edge === undefined) return null;
+        const r = document.createRange();
+        r.setStart(node, from);
+        r.setEnd(node, to);
+        const rect = r.getClientRects()[0];
+        return rect ? rect[edge] : null;
     }
 
     // ---- the reconcile loop -------------------------------------------------
@@ -1075,6 +1093,7 @@ function createRichComposer(host, opts = {}) {
         get selectionEnd() { const r = selectionRange(); return r ? r.end : src.length; },
         set selectionEnd(v) { setCaret(v); },
         setSelectionRange(a, _b) { setCaret(a); },
+        xAt,
         focus() { el.focus(); },
         blur() { el.blur(); },
         addEventListener: (...a) => el.addEventListener(...a),

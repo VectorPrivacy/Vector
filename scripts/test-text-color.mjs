@@ -4,10 +4,11 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const root = new URL('..', import.meta.url);
-const ctx = {};
+// The page's listeners need a document to attach to; nothing here fires them.
+const ctx = { matchMedia: () => ({ matches: false }), document: { addEventListener() {} } };
 vm.createContext(ctx);
 vm.runInContext(readFileSync(new URL('src/js/text-color.js', root), 'utf8') + readFileSync(new URL('src/js/text-time.js', root), 'utf8')
-    + ';this.tcExtract = tcExtract; this.tcExtractColor = tcExtractColor; this.tcRestore = tcRestore; this.TC_NAMED = TC_NAMED; this.ttParse = ttParse; this.ttParseFull = ttParseFull;', ctx);
+    + ';this.tcExtract = tcExtract; this.tcExtractColor = tcExtractColor; this.tcRestore = tcRestore; this.TC_NAMED = TC_NAMED; this.ttParse = ttParse; this.ttParseFull = ttParseFull; this.ttSuggest = ttSuggest;', ctx);
 const cases = JSON.parse(readFileSync(new URL('crates/vector-core/src/text_color_cases.json', root), 'utf8'));
 const names = JSON.parse(readFileSync(new URL('crates/vector-core/src/text_color_names.json', root), 'utf8'));
 
@@ -81,6 +82,23 @@ for (const [text, want] of parse) {
     if (got !== want) { failed++; console.error(`FAIL parse ${JSON.stringify(text)}: got ${got}, want ${want}`); }
 }
 
+// Suggestions: future phrases that can't be ordinary words, as [phrase, style] or null.
+const suggest = [
+    ['back in 6 hours', ['in 6 hours', 'R']], ['back in 6 hours ', ['in 6 hours', 'R']], ['6 hours from now', ['6 hours from now', 'R']],
+    ['in 1h 30m', ['in 1h 30m', 'R']], ['in an hour.', ['in an hour', 'R']], ['in 2 hours and 30 minutes', ['in 2 hours and 30 minutes', 'R']],
+    ['party dec 25', ['dec 25', 'D']], ['party dec 25 at 8pm', ['dec 25 at 8pm', 'f']], ['the 25th of december 2026', ['25th of december 2026', 'D']],
+    ['2026-12-25 18:00', ['2026-12-25 18:00', 'f']], ['may 5th', ['may 5th', 'D']],
+    ['in 5 mins', null], ['3 hours ago', null], ['tomorrow', null], ['monday', null], ['I slept 6 hours', null],
+    ['may 5', null], ['you may 5', null], ['jan 3 2026', null], ['`in 6 hours`', null], ['in 6 hours and then', null],
+    ['in 10 minu', ['in 10 minu', 'R']], ['in 2 ho', ['in 2 ho', 'R']], ['in 2 hot dogs', null], ['in 10 m', null],
+    ['in a mo', null], ['in a d', null], ['in a different way', null], ['in a day', ['in a day', 'R']], ['in 3 mon', ['in 3 mon', 'R']],
+];
+for (const [text, want] of suggest) {
+    const s = ctx.ttSuggest(text, now);
+    const got = s ? [text.slice(s.start, s.end), s.style] : null;
+    if (JSON.stringify(got) !== JSON.stringify(want)) { failed++; console.error(`FAIL suggest ${JSON.stringify(text)}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); }
+}
+
 // Kaomoji send as typed: nothing markdown, a mention, a shortcode or a tag would read.
 const { KAOMOJI } = await import('../src/components/lib/kaomoji.js');
 const SHRUG = '¯\\_(ツ)_/¯';
@@ -100,5 +118,5 @@ for (const cat of KAOMOJI) {
     }
 }
 
-console.log(`[text-color] ${faces} kaomoji, ${cases.length} colour cases, ${spanCases.length} span cases, ${parse.length} typed times${failed ? ` — ${failed} failed` : ''}`);
+console.log(`[text-color] ${suggest.length} suggestions, ${faces} kaomoji, ${cases.length} colour cases, ${spanCases.length} span cases, ${parse.length} typed times${failed ? ` — ${failed} failed` : ''}`);
 process.exit(failed ? 1 : 0);

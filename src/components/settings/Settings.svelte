@@ -69,7 +69,7 @@
             id: 'appearance', label: 'Appearance', icon: 'palette',
             anchors: [
                 { id: 'theme', label: 'Theme', icon: 'palette', keys: 'theme colour color vector satoshi chatstr cosmic purple neon xmr' },
-                { id: 'display', label: 'Display', icon: 'image', keys: 'display image types background wallpaper rich composer emoticon suggestions autocorrect floating player' },
+                { id: 'display', label: 'Display', icon: 'image', keys: 'display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect floating player' },
             ],
         },
         {
