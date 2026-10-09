@@ -14,13 +14,16 @@ export function blockedVersion() { return blocked.seq; }
 export function reloadBlockedUsers() { blocked.seq++; }
 
 // The Storage breakdown: the per-extension byte map the backend last reported.
-// `seq` moves on every report so the chart re-plays its slice-in animation.
-const storage = $state({ distribution: null, seq: 0 });
+// `seq` moves on every report so the chart re-plays its slice-in animation. `loading` holds the
+// slices back until a report lands: a hidden pane coming back replays the animation too.
+const storage = $state({ distribution: null, seq: 0, loading: false });
 export function storageState() { return storage; }
 export function setStorageDistribution(distribution) {
     storage.distribution = distribution || {};
+    storage.loading = false;
     storage.seq++;
 }
+export function setStorageLoading(on) { storage.loading = on; }
 
 // Notifications: the account's sound preferences plus the cross-platform toggles.
 // `sounds` is false on mobile, where only the @everyone mute and content privacy apply.

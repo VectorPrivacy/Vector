@@ -163,6 +163,8 @@
             {#key storage.seq}
                 {#if total === 0}
                     <circle cx={CX} cy={CY} r={(R_OUT + R_IN) / 2} fill="none" stroke="rgba(255, 255, 255, 0.07)" stroke-width={R_OUT - R_IN} />
+                {:else if storage.loading}
+                    <!-- Slices wait for the fresh report, so they animate in once -->
                 {:else if segments.length === 1}
                     <!-- A lone category is a full ring; the arc path degenerates at 360 degrees -->
                     <circle class="storage-slice" class:pop={view === 0} cx={CX} cy={CY} r={(R_OUT + R_IN) / 2} fill="none" stroke={segments[0].color} stroke-width={R_OUT - R_IN} />

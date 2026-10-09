@@ -868,8 +868,10 @@ async function initAutoDownloadSettings() {
 
 /** Refresh the Storage breakdown and reflect the auto-download and gallery values. */
 async function initStorageSection() {
+    VectorSvelte.setStorageLoading(true);
     const storageInfo = await getStorageInfo();
     if (storageInfo) VectorSvelte.setStorageDistribution(storageInfo.type_distribution);
+    else VectorSvelte.setStorageLoading(false);
     VectorSvelte.setSettingsScreen({ storage: { autoDownload: AUTO_DOWNLOAD_ENABLED, limit: MAX_AUTO_DOWNLOAD_BYTES } });
 
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
