@@ -99,6 +99,8 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             Ok(Value::Null)
         }
         "get_encryption_and_key" => account::get_encryption_and_key(),
+        // A reload restarts the worker, so no session outlives the page.
+        "resume_session" => Ok(json!(false)),
         "get_encryption_status" => Ok(account::get_encryption_status()),
         "get_current_account" => to_value(db::get_current_account()?),
         "list_accounts_with_metadata" => Ok(account::list_accounts_with_metadata()),

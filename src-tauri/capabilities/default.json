@@ -179,6 +179,7 @@
     "allow-set-gallery-hidden",
     "allow-login",
     "allow-login-from-stored-key",
+    "allow-resume-session",
     "allow-biometric-status",
     "allow-switch-to-biometric",
     "allow-switch-to-credential",

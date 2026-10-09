@@ -1372,6 +1372,15 @@ pub async fn export_keys(credential: Option<String>) -> Result<serde_json::Value
 // Backend-Only Key Management (keys never cross IPC)
 // ============================================================================
 
+/// Whether this process already holds `npub` signed in and marked active, so a reloaded page can
+/// boot it without asking for its credentials again.
+#[tauri::command]
+pub fn resume_session(npub: String) -> bool {
+    let live = crate::my_public_key().and_then(|pk| pk.to_bech32().ok());
+    let marked = vector_core::db::read_active_account_file().ok().flatten();
+    nostr_client().is_some() && live.as_deref() == Some(npub.as_str()) && marked.as_deref() == Some(npub.as_str())
+}
+
 /// Login using the stored private key (boot flow).
 /// Reads pkey from DB, decrypts if needed, initializes the Nostr client.
 /// Returns only the npub — the private key never crosses IPC.

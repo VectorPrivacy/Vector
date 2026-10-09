@@ -2249,8 +2249,23 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         }
 
+        // One-shot: a later reload with the same account live still asks for its credentials.
+        const resumeNpub = sessionStorage.getItem(ADD_PROFILE_RESUME);
+        sessionStorage.removeItem(ADD_PROFILE_RESUME);
+        const resumed = account_exists && !!resumeNpub
+            && await invoke('resume_session', { npub: resumeNpub }).catch(() => false);
+
         if (account_exists) {
-            if (enabled) {
+            if (resumed) {
+                VectorSvelte.loginScreen('encrypt');
+                VectorSvelte.patchEncrypt({
+                    typeSelectShown: false, pinShown: false, passwordShown: false, bioBtnShown: false,
+                    headerShown: true, lockShown: true, title: 'Connecting…',
+                });
+                loginPicker.hide();
+                strPubkey = resumeNpub;
+                login(true);
+            } else if (enabled) {
                 // Encryption enabled - show PIN or password screen for decryption
                 openEncryptionFlow(true, security_type || 'pin');
             } else {

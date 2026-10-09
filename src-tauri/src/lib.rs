@@ -946,6 +946,7 @@ pub fn run() {
             // Account commands (commands/account.rs)
             commands::account::login,
             commands::account::login_from_stored_key,
+            commands::account::resume_session,
             commands::biometric::biometric_status,
             commands::biometric::switch_to_biometric,
             commands::encryption::switch_to_credential,

@@ -180,6 +180,7 @@ async function login(skipAnimations = false) {
             addAccountFlow.finish();
             try { await invoke('set_active_account', { npub: strPubkey }); }
             catch (e) { console.error('[add-account] marker write failed:', e); }
+            sessionStorage.setItem(ADD_PROFILE_RESUME, strPubkey);
             window.location.reload();
             return;
         }

@@ -358,6 +358,8 @@ const loginPicker = {
  * back via My Profile is always available once the new account is set up.
  */
 const ADD_PROFILE_BACK_TARGET = 'vector:add_profile_back_target';
+/** The account Add Profile reloads into, already signed in: the next boot resumes it. */
+const ADD_PROFILE_RESUME = 'vector:add_profile_resume';
 
 const addAccountFlow = {
     /** Browsing phase active (login overlay shown over current session). */
