@@ -106,11 +106,28 @@
     }
     let winW = $state(window.innerWidth), winH = $state(window.innerHeight);
     // A video can shrink to sound behind a thumbnail: a button, not a size, so a resize
-    // never changes what the box is.
-    const soundOnly = $derived(isVideo && soundPref);
+    // never changes what the box is. A tight window (a phone) opens each video that way;
+    // showing the picture there is for that video, not a new preference.
+    let openSound = $state(null);
+    $effect(() => {
+        item;
+        untrack(() => {
+            openSound = isVideo && (winW < 640 || winH < 560) ? true : null;
+            vAspect = null;
+        });
+    });
+    const soundOnly = $derived(isVideo && (openSound ?? soundPref));
     const kindKey = $derived(isVideo && !soundOnly ? 'video' : 'audio');
-    const width = $derived(Math.min(widths[kindKey], winW - 24));
-    function toggleSound() { soundPref = !soundPref; save(); }
+    // A video's height follows its width, so its width also answers to the window's height:
+    // the picture keeps to about half of it, and the box to 60% of the window's width.
+    let vAspect = $state(null);   // the loaded video's own, over what the row measured
+    const aspect = $derived(vAspect || (isVideo && item.aspect) || 16 / 9);
+    const videoCap = $derived(Math.max(160, Math.min(winW * 0.6, Math.min(winH * 0.55, winH - chromeHeight() - 160) * aspect)));
+    const width = $derived(Math.min(widths[kindKey], winW - 24, kindKey === 'video' ? videoCap : Infinity));
+    function toggleSound() {
+        if (openSound !== null) openSound = !openSound;
+        else { soundPref = !soundPref; save(); }
+    }
 
     let box = $state(null);
     function chromeHeight() {
@@ -215,7 +232,8 @@
         }
         const room = (g.pinRight ? g.ax : winW - g.ax) - 8;
         const [min, max] = LIMITS[kindKey];
-        widths[kindKey] = Math.round(Math.max(min, Math.min(max, room, w)));
+        const cap = kindKey === 'video' ? Math.max(min, videoCap) : max;
+        widths[kindKey] = Math.round(Math.max(min, Math.min(max, cap, room, w)));
         // Lay the new size out now, then put the pinned corner back where it was.
         flushSync();
         const bw = box.offsetWidth, bh = box.offsetHeight;
@@ -360,6 +378,7 @@
         for (const [ev, fn] of Object.entries(listeners)) el.addEventListener(ev, fn);
         if (adopted && el.readyState >= 1) {
             vDur = el.duration || 0;
+            if (el.videoWidth && el.videoHeight) vAspect = el.videoWidth / el.videoHeight;
             vTime = el.currentTime;
             if (!el.paused) onVideoPlay();
         } else {
@@ -386,6 +405,7 @@
     function onVideoMeta() {
         if (!item || !video) return;
         vDur = video.duration || 0;
+        if (video.videoWidth && video.videoHeight) vAspect = video.videoWidth / video.videoHeight;
         video.muted = !!item.muted;
         video.volume = item.volume ?? 1;
         video.currentTime = item.time;
