@@ -218,6 +218,7 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnNotificationTap(
             let action = crate::deep_link::DeepLinkAction {
                 action_type: "chat".to_string(),
                 target: chat_id,
+                ..Default::default()
             };
             let _ = handle.emit("deep_link_action", &action);
         }

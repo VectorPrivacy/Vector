@@ -4,12 +4,15 @@
 //! - `event_handler`: Main event dispatcher for handling incoming Nostr events
 //! - `subscription_handler`: Live subscription handling for real-time events
 //! - `notification_service`: OS notification handling
+//! - `native_notify`: rich desktop notifications, one backend per platform
 //!
 //! Services are used by command handlers and can be unit tested independently.
 
 pub mod event_handler;
 pub mod subscription_handler;
 pub mod notification_service;
+#[cfg(not(target_os = "android"))]
+pub mod native_notify;
 
 pub(crate) use event_handler::handle_event;
 pub(crate) use event_handler::tauri_commit_prepared_event_with;

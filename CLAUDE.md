@@ -82,7 +82,9 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`macros.rs`** — log_error! only (toast + log file via TAURI_APP; log_info/debug/trace/warn in vector-core)
 - **`rumor.rs`** — Pure re-export of vector-core's rumor processing
 - **`message/`** — Re-exports vector-core types + TauriSendCallback + file dedup logic
-- **`services/`** — Event handler, subscription handler, notifications
+- **`services/`** — Event handler, subscription handler, notifications. `native_notify/` gives desktop
+  notifications avatars, inline reply, mark-as-read and click-to-message: one `Backend` per OS (Windows
+  today), with activation, the account guard and image conversion shared. A new OS starts at its module doc.
 - **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
 - **`calls/`** — the desktop's `CallPlatform`: cpal + Opus + SpeexDSP media engine, the webview's video socket, native screen audio
 - **`android/`** — JNI bindings, localhost media server, background sync

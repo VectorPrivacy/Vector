@@ -131,8 +131,9 @@ async fn apply_blocks(list: IdList) {
         .map(|p| p.id)
         .collect();
     for npub in list.ids.iter() {
-        if !currently.contains(npub) {
-            vector_core::profile::sync::block_user(npub.clone(), handler).await;
+        if !currently.contains(npub) && vector_core::profile::sync::block_user(npub.clone(), handler).await {
+            #[cfg(not(target_os = "android"))]
+            crate::services::native_notify::remove_sender(npub);
         }
     }
     for npub in currently.iter().filter(|n| !list.contains(n)) {

@@ -327,10 +327,12 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 /// Block a user by npub.
 #[tauri::command]
 pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
-    let ok = vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
+    let ok = vector_core::profile::sync::block_user(npub.clone(), &crate::profile_sync::TauriProfileSyncHandler).await;
     // A block changes OTHER chats' counts too (the sender's community messages
     // stop counting in SQL), so reseed the cache before re-badging.
     if ok {
+        #[cfg(not(target_os = "android"))]
+        crate::services::native_notify::remove_sender(&npub);
         let counts = crate::db::unread_counts().await.unwrap_or_default();
         crate::STATE.lock().await.unread_seed(counts);
         crate::commands::messaging::update_unread_counter(handle).await;

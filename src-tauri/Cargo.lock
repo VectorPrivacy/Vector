@@ -11979,6 +11979,8 @@ dependencies = [
  "webkit2gtk",
  "webp",
  "whisper-rs",
+ "windows 0.61.1",
+ "windows-core 0.61.0",
  "windows-sys 0.61.2",
  "zeroize",
  "zip 2.4.2",

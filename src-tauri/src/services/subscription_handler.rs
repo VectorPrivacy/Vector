@@ -288,7 +288,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let notification = crate::services::NotificationData::community_message(
         sender_name, community_name, content, avatar, community_avatar, chat_id.to_string(),
-    );
+    ).with_message_id(msg.id.clone()).with_sender(sender_npub.to_string()).with_expiry(msg.expiration);
     crate::services::show_notification_generic(notification);
 }
 

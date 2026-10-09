@@ -97,6 +97,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
         let msg_id = msg.id.clone();
+        let expires = msg.expiration;
         vector_core::db::spawn_bound(async move {
             // If the user is actively watching this chat, advance last_read
             // before the badge recount so the message never counts as unread.
@@ -119,7 +120,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
                     let state = STATE.lock().await;
                     get_dm_notification_info(&state, &gate, &chat_id, &content)
                 };
-                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()));
+                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()).with_message_id(msg_id.clone()).with_expiry(expires));
             }
             // Update badge
             if let Some(handle) = TAURI_APP.get() {
@@ -146,6 +147,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             .map(|att| att.extension.clone())
             .unwrap_or_else(|| String::from("file"));
         let msg_id = msg.id.clone();
+        let expires = msg.expiration;
         vector_core::db::spawn_bound(async move {
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
             refresh_chat_unread(&chat_id, marked).await;
@@ -164,7 +166,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
                     let state = STATE.lock().await;
                     get_file_notification_info(&state, &gate, &chat_id, &extension)
                 };
-                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()));
+                show_notification_generic(NotificationData::direct_message(name, body, avatar, chat_id.clone()).with_message_id(msg_id.clone()).with_expiry(expires));
             }
             // Update badge
             if let Some(handle) = TAURI_APP.get() {

@@ -649,6 +649,12 @@ pub async fn reset_session() {
     // writing partially-cleared state.
     vector_core::state::clear_message_tombstones();
 
+    // The outgoing account's notifications leave with it, read while its identity still is.
+    #[cfg(not(target_os = "android"))]
+    if let Some(npub) = vector_core::my_public_key().and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok()) {
+        crate::services::native_notify::remove_account(&npub);
+    }
+
     // A call and the Mini App sessions share the account's node, which the
     // sessions' end retires; both end while the client exists to say so.
     crate::calls::session::end_all("account_changed");
@@ -813,6 +819,9 @@ pub async fn delete_account<R: Runtime>(
     if !list_accounts(&handle)?.iter().any(|a| a == &npub) {
         return Err(format!("Unknown account: {}", npub));
     }
+
+    #[cfg(not(target_os = "android"))]
+    crate::services::native_notify::remove_account(&npub);
 
     let was_active = matches!(get_current_account(), Ok(active) if active == npub);
 

@@ -6,3 +6,13 @@
 !macro NSIS_HOOK_PREINSTALL
   System::Call 'kernel32::SetErrorMode(i 0x8003)'
 !macroend
+
+; Native notifications register the app identity and its toast activator per user
+; at runtime (services/native_notify/windows.rs); the activator's CLSID is read back
+; from the identity before both go.
+!macro NSIS_HOOK_POSTUNINSTALL
+  ReadRegStr $0 HKCU "Software\Classes\AppUserModelId\${BUNDLEID}" "CustomActivator"
+  StrCmp $0 "" +2
+    DeleteRegKey HKCU "Software\Classes\CLSID\$0"
+  DeleteRegKey HKCU "Software\Classes\AppUserModelId\${BUNDLEID}"
+!macroend

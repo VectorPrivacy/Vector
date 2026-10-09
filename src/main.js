@@ -1729,8 +1729,9 @@ async function executeDeepLinkAction(payload) {
         // Open the profile view
         await openProfile(profile);
     } else if (action_type === 'chat') {
-        // Open a specific chat (triggered by tapping a notification)
+        // Open a specific chat (triggered by tapping a notification), at its message when named
         await openChat(target);
+        if (payload.message) jumpToMessage(payload.message);
     } else if (action_type === 'emoji_pack') {
         // Open the Pack Details modal for the given naddr. The modal
         // owns the fetch, render, and subscribe/unsubscribe flow; we

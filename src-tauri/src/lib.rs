@@ -561,6 +561,9 @@ pub fn run() {
             // Set as our accessible static app handle
             TAURI_APP.set(handle.clone()).unwrap();
 
+            #[cfg(desktop)]
+            services::native_notify::init(&handle);
+
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
             // Relays revive the moment the account's network becomes ready.

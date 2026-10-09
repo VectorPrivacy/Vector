@@ -42,6 +42,12 @@ pub struct NotificationData {
     pub group_avatar_path: Option<String>,
     /// Chat identifier for notification tap navigation (npub for DMs, group_id for groups)
     pub chat_id: Option<String>,
+    /// The message to land on when the notification is opened
+    pub message_id: Option<String>,
+    /// The sender's npub, so their notifications can be retracted when they're blocked
+    pub sender_npub: Option<String>,
+    /// When a self-destructing message expires (unix seconds): its notification goes with it
+    pub expires_at: Option<u64>,
 }
 
 impl NotificationData {
@@ -55,7 +61,11 @@ impl NotificationData {
             sender_name: Some(sender_name),
             avatar_path,
             group_avatar_path: None,
+            // A DM's chat is its sender.
+            sender_npub: Some(chat_id.clone()),
             chat_id: Some(chat_id),
+            message_id: None,
+            expires_at: None,
         }
     }
 
@@ -78,7 +88,25 @@ impl NotificationData {
             avatar_path,
             group_avatar_path: community_avatar_path,
             chat_id: Some(chat_id),
+            message_id: None,
+            expires_at: None,
+            sender_npub: None,
         }
+    }
+
+    pub fn with_message_id(mut self, message_id: String) -> Self {
+        self.message_id = Some(message_id);
+        self
+    }
+
+    pub fn with_sender(mut self, npub: String) -> Self {
+        self.sender_npub = Some(npub);
+        self
+    }
+
+    pub fn with_expiry(mut self, expires_at: Option<u64>) -> Self {
+        self.expires_at = expires_at;
+        self
     }
 
     /// Rewrite the visible fields per the content-privacy setting. `chat_id` is never
@@ -213,13 +241,13 @@ pub fn strip_content_for_preview(text: &str) -> String {
 
 /// Revoke the OS notification for a chat once it's been read (opened in-app) or answered on
 /// another device. Android: cancels the per-chat notification via JNI (no-op if none is showing).
-/// Desktop: no-op (desktop notifications aren't persistent or handle-tracked).
+/// Desktop: retracts it through the native backend, where the platform has one.
 pub fn cancel_chat_notification(chat_id: &str) {
     #[cfg(target_os = "android")]
     crate::android::background_sync::cancel_notification_jni(chat_id);
 
     #[cfg(not(target_os = "android"))]
-    let _ = chat_id;
+    super::native_notify::remove_chat(chat_id);
 }
 
 /// [`cancel_chat_notification`] for a read the *user* performed, rather than one
@@ -274,10 +302,8 @@ pub fn show_notification_generic(mut data: NotificationData) {
 
         // Check if the app is focused — skip notification if user is looking at it
         let is_focused = handle
-            .webview_windows()
-            .iter()
-            .next()
-            .and_then(|(_, w)| w.is_focused().ok())
+            .get_webview_window("main")
+            .and_then(|w| w.is_focused().ok())
             .unwrap_or(false);
 
         if is_focused {
@@ -293,6 +319,10 @@ pub fn show_notification_generic(mut data: NotificationData) {
                     eprintln!("Failed to play notification sound: {}", e);
                 }
             });
+        }
+
+        if super::native_notify::show(&data).is_ok() {
+            return;
         }
 
         handle

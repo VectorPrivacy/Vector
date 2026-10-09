@@ -19,12 +19,18 @@ static PENDING_DEEP_LINK: Mutex<Option<DeepLinkAction>> = Mutex::new(None);
 static LAST_URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Represents a parsed deep link action to be sent to the frontend
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DeepLinkAction {
     /// The type of action: "profile"
     pub action_type: String,
     /// The target identifier (npub)
     pub target: String,
+    /// For "chat": the message to land on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The npub the action belongs to; dropped if a different account is live when it's taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// Parse a deep link URL and return the action to perform
@@ -42,7 +48,7 @@ pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
     let url_str = url_str.trim();
 
     if let Some(link) = vector_core::golink::GoLink::parse_url(url_str) {
-        return Some(DeepLinkAction { action_type: "go".to_string(), target: link.payload() });
+        return Some(DeepLinkAction { action_type: "go".to_string(), target: link.payload(), ..Default::default() });
     }
 
     // Community invites carry secrets in the URL FRAGMENT (#…), which the path parsers below
@@ -52,6 +58,7 @@ pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
             return Some(DeepLinkAction {
                 action_type: "community_invite".to_string(),
                 target: url_str.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -106,6 +113,7 @@ fn parse_path_segments(path: &str) -> Option<DeepLinkAction> {
                 Some(DeepLinkAction {
                     action_type: "profile".to_string(),
                     target: npub.to_string(),
+                    ..Default::default()
                 })
             } else {
                 println!("[DeepLink] Invalid npub format: {}", npub);
@@ -122,6 +130,7 @@ fn parse_path_segments(path: &str) -> Option<DeepLinkAction> {
                 Some(DeepLinkAction {
                     action_type: "emoji_pack".to_string(),
                     target: naddr.to_string(),
+                    ..Default::default()
                 })
             } else {
                 println!("[DeepLink] Invalid naddr format: {}", naddr);
@@ -227,6 +236,7 @@ pub fn set_pending_notification_action(chat_id: &str) {
         *pending = Some(DeepLinkAction {
             action_type: "chat".to_string(),
             target: chat_id.to_string(),
+            ..Default::default()
         });
         println!("[DeepLink] Stored pending notification action for chat: {}", &chat_id[..chat_id.len().min(20)]);
     }
@@ -242,15 +252,42 @@ pub fn set_pending_notification_action(chat_id: &str) {
 /// * `None` if there was no pending action
 #[tauri::command]
 pub fn get_pending_deep_link() -> Option<DeepLinkAction> {
-    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
-        let action = pending.take();
-        if action.is_some() {
-            println!("[DeepLink] Retrieved and cleared pending action");
+    // Called once the frontend has an account, which is also when a reply typed into a
+    // notification before login can go out.
+    #[cfg(not(target_os = "android"))]
+    crate::services::native_notify::flush_pending_reply();
+
+    let action = PENDING_DEEP_LINK.lock().ok()?.take()?;
+    println!("[DeepLink] Retrieved and cleared pending action");
+    if let Some(account) = &action.account {
+        use nostr_sdk::prelude::ToBech32;
+        let live = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
+        if live.as_deref() != Some(account.as_str()) {
+            return None;
         }
-        action
-    } else {
-        None
     }
+    Some(action)
+}
+
+/// Open a chat from a desktop notification, at `message` when given. Held as the pending
+/// action so a notification that launched Vector still lands once its account logs in.
+#[cfg(not(target_os = "android"))]
+pub fn open_chat_from_notification<R: Runtime>(
+    handle: &AppHandle<R>,
+    chat_id: &str,
+    message: Option<&str>,
+    account: Option<&str>,
+) {
+    let action = DeepLinkAction {
+        action_type: "chat".to_string(),
+        target: chat_id.to_string(),
+        message: message.map(str::to_string),
+        account: account.filter(|a| !a.is_empty()).map(str::to_string),
+    };
+    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+        *pending = Some(action.clone());
+    }
+    let _ = handle.emit("deep_link_action", &action);
 }
 
 #[cfg(test)]
