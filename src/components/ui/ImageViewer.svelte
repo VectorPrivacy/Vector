@@ -36,6 +36,11 @@
         </div>
         <button class="image-viewer-close" aria-label="Close" onclick={() => h().close?.()}></button>
         <div class="image-viewer-controls">
+            {#if v.canSave}
+                <button class="image-viewer-ctrl-btn" aria-label="Save image" onclick={() => h().save?.()}>
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3V15M12 15L7 10M12 15L17 10M4 17V19C4 20.1 4.9 21 6 21H18C19.1 21 20 20.1 20 19V17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+            {/if}
             <button class="image-viewer-ctrl-btn" aria-label="Rotate image" onclick={() => h().rotate?.()}>
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 10C2 10 4.00498 7.26822 5.63384 5.63824C7.26269 4.00827 9.5136 3 12 3C16.9706 3 21 7.02944 21 12C21 16.9706 16.9706 21 12 21C7.89691 21 4.43511 18.2543 3.35177 14.5M2 10V4M2 10H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>

@@ -3,7 +3,7 @@
 // WAV, and saving/copying attachments.
 (() => {
     'use strict';
-    const { register, emit, backend, storeFiles, fileUrl } = window.__vectorWeb;
+    const { register, emit, backend, storeFiles, fileUrl, pathOf } = window.__vectorWeb;
 
     // --- Audio engine ------------------------------------------------------
     const FPS = 30;
@@ -217,6 +217,69 @@
         if (navigator.canShare?.({ files: [file] })) return navigator.share({ files: [file] });
         save(path);
     });
+    // --- Save: the share sheet on a touch screen (Save Image, Save to Files), a download
+    // elsewhere. A phone's share sheet only opens inside the tap, so the file is fetched
+    // ahead, when its menu opens or the viewer shows it; one at a time, as it may be a video.
+    const SAVE_TYPES = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+        avif: 'image/avif', heic: 'image/heic', bmp: 'image/bmp', mp4: 'video/mp4', m4v: 'video/mp4',
+        mov: 'video/quicktime', webm: 'video/webm', mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+        ogg: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac', pdf: 'application/pdf',
+    };
+    const touchSave = matchMedia('(pointer: coarse)').matches;
+    let prepared = null;   // { key, file, failed }
+    // What's on screen is often a stored file behind a handed-out URL: save that, by its name.
+    const savePath = ({ path, url }) => path || (url && pathOf(url)) || null;
+    const saveKey = (args) => savePath(args) || args.url;
+    function saveName(args) {
+        const path = savePath(args);
+        if (path) return fileName(path);
+        const last = (() => { try { return new URL(args.url, location.href).pathname.split('/').pop(); } catch (_) { return ''; } })();
+        return /\.[a-z0-9]+$/i.test(last) ? decodeURIComponent(last) : 'image';
+    }
+
+    async function saveFile(args) {
+        const path = savePath(args);
+        const blob = await (await fetch(path ? await urlOf(path) : args.url)).blob();
+        const name = saveName(args);
+        // iOS offers Save Image / Save Video only for a file it knows is one.
+        const ext = (/\.([a-z0-9]+)$/i.exec(name) || [])[1];
+        const type = SAVE_TYPES[ext?.toLowerCase()] || blob.type || 'application/octet-stream';
+        return new File([blob], name, { type });
+    }
+
+    register('prepare_attachment', async (args) => {
+        if (!touchSave) return;
+        const key = saveKey(args);
+        if (prepared?.key === key) return;
+        const entry = { key, file: null, failed: false };
+        prepared = entry;
+        try {
+            entry.file = await saveFile(args);
+        } catch (_) {
+            entry.failed = true;   // another site's image: a download still works
+        }
+    });
+
+    register('save_attachment', (args) => {
+        if (touchSave) {
+            const entry = prepared?.key === saveKey(args) ? prepared : null;
+            const file = entry?.file;
+            if (!file && !entry?.failed) throw new Error('Still getting it ready, tap Save again');
+            if (file && navigator.canShare?.({ files: [file] })) {
+                return navigator.share({ files: [file] }).catch((e) => { if (e?.name !== 'AbortError') throw e; });
+            }
+        }
+        const path = savePath(args);
+        if (path) return save(path);
+        const a = document.createElement('a');
+        a.href = args.url;
+        a.download = saveName(args);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    });
+
     register('write_clipboard_files', async ({ paths }) => {
         const blob = await (await fetch(await urlOf(paths[0]))).blob();
         const type = blob.type.startsWith('image/') ? 'image/png' : blob.type;

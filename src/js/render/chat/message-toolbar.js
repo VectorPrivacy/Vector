@@ -805,6 +805,17 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                         .then(() => showToast('Copied file to clipboard'))
                         .catch((err) => showToast(String(err)));
                 } });
+            } else if (platformFeatures?.os === 'web') {
+                // A browser has no folder to reveal: the file is saved, or shared on a phone.
+                invoke('prepare_attachment', { path: downloadedPath }).catch(() => {});
+                items.push({ label: 'Save', icon: 'download', onClick: () => saveWebFile({ path: downloadedPath }) });
+                if (!platformFeatures.is_mobile) {
+                    items.push({ label: 'Copy', icon: 'copy', onClick: () => {
+                        invoke('write_clipboard_files', { paths: [downloadedPath] })
+                            .then(() => showToast('Copied file to clipboard'))
+                            .catch((err) => showToast(String(err)));
+                    } });
+                }
             } else if (!platformFeatures?.is_mobile) {
                 items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {

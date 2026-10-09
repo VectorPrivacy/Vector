@@ -29,6 +29,7 @@ let baseHeight = 0;
 VectorSvelte.setImageViewerHandlers({
     close: () => closeViewer(),
     rotate: () => rotateCCW(),
+    save: () => saveWebFile({ url: VectorSvelte.imageViewerState().src }),
     load: () => {
         // A sharper render of the same SVG: same size on screen, so the view stays where it is.
         if (svgSwapping) {
@@ -178,7 +179,10 @@ async function openImageViewer(imageSrc, svgPath = null) {
 
     // Hidden and unanimated until the first settled frame: the image otherwise paints at
     // the container's top-left and slides to centre once the load measures it.
-    VectorSvelte.setImageViewer({ open: true, active: false, src: imageSrc, size: null, settling: true, zoomed: false, transform: 'translate(0, 0) scale(1)' });
+    // Vector Web saves what's on screen; the apps save from the message's menu.
+    const canSave = platformFeatures.os === 'web';
+    VectorSvelte.setImageViewer({ open: true, active: false, src: imageSrc, size: null, settling: true, zoomed: false, transform: 'translate(0, 0) scale(1)', canSave });
+    if (canSave) invoke('prepare_attachment', { url: imageSrc }).catch(() => {});
     VectorSvelte.setImageViewerTip(platformFeatures.is_mobile ? 'Pinch to zoom' : 'Scroll to zoom', false);
     setTimeout(() => VectorSvelte.setImageViewer({ active: true }), 10);
 
@@ -433,6 +437,11 @@ function updateZoomInfo() {
         VectorSvelte.setImageViewerZoom(VectorSvelte.imageViewerState().zoom.text, false);
         zoomInfoTimeout = null;
     }, 1000);
+}
+
+/** Save a file on Vector Web: `{ path }` of a stored file, or `{ url }` of one on screen. */
+function saveWebFile(args) {
+    invoke('save_attachment', args).catch((err) => showToast(String(err?.message ?? err)));
 }
 
 /**

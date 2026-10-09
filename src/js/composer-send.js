@@ -5,8 +5,8 @@
 
 /** The attachment panel's file and folder pickers. */
 function initComposerAttachments() {
-    // Folders zip on the desktop only.
-    VectorSvelte.attachmentPatch({ folderShown: platformFeatures.os !== 'android' });
+    // Folders zip on the desktop only: no phone's picker, app or browser, chooses a folder.
+    VectorSvelte.attachmentPatch({ folderShown: !platformFeatures.is_mobile });
 }
 
 /**

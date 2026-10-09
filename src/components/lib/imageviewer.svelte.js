@@ -1,7 +1,7 @@
 // The fullscreen image viewer: what it shows and how the image is placed. The zoom and
 // pan arithmetic stays in previewer.js and writes here; the component paints it.
 const v = $state({
-    open: false, active: false, src: '',
+    open: false, active: false, src: '', canSave: false,
     size: null,                 // { w, h } in CSS px: an SVG fills the viewer at any render size
     transform: 'translate(0, 0) scale(1)', zoomed: false,
     settling: false,            // hidden and unanimated until the first measured frame
@@ -10,7 +10,7 @@ const v = $state({
     tip: { text: '', visible: false },
 });
 const els = { container: null, image: null };
-let handlers = $state.raw({});   // close, rotate, load, error, wheel, mouseDown, touchStart, touchMove, touchEnd
+let handlers = $state.raw({});   // close, rotate, save, load, error, wheel, mouseDown, touchStart, touchMove, touchEnd
 
 export function imageViewerState() { return v; }
 export function imageViewerEls() { return els; }
