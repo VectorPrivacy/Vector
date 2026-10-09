@@ -61,7 +61,38 @@ const SYSTEM_COMMANDS = [
         args: [{ name: 'when', type: 'string', required: true, description: 'Like “friday 8pm” or “in 2 hours”' }],
         picker: true,
     },
+    {
+        name: 'shrug',
+        description: 'Add ¯\\_(ツ)_/¯ to your message',
+        args: [{ name: 'message', type: 'string', required: false, description: 'What to say before it' }],
+        text: (rest) => cmdAppendFace(rest, '¯\\_(ツ)_/¯'),
+    },
+    {
+        name: 'flip',
+        aliases: ['tableflip'],
+        description: 'Add (╯°□°)╯︵ ┻━┻ to your message',
+        args: [{ name: 'message', type: 'string', required: false, description: 'What to say before it' }],
+        text: (rest) => cmdAppendFace(rest, '(╯°□°)╯︵ ┻━┻'),
+    },
+    {
+        name: 'unflip',
+        description: 'Add ┬─┬ノ( º _ ºノ) to your message',
+        args: [{ name: 'message', type: 'string', required: false, description: 'What to say before it' }],
+        text: (rest) => cmdAppendFace(rest, '┬─┬ノ( º _ ºノ)'),
+    },
+    {
+        name: 'coinflip',
+        description: 'Flip a coin: heads or tails',
+        args: [],
+        // Decided on the sender's device, as any dice roll in a chat is.
+        text: () => `🪙 Coin flip: **${crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 'Heads' : 'Tails'}**`,
+    },
 ];
+
+/** A message with a face after it, or the face alone. */
+function cmdAppendFace(message, face) {
+    return message ? `${message} ${face}` : face;
+}
 
 // eslint-disable-next-line no-unused-vars
 function initCommandSelector(textarea, io) {
@@ -157,10 +188,12 @@ function initCommandSelector(textarea, io) {
         return cmd.bot === SYSTEM_COMMAND_OWNER;
     }
 
-    /** The command `name` runs here: a bot's first, and either spelling of colour is Vector's. */
+    /** The command `name` runs here: a bot's first, then Vector's by an alias (either spelling of colour). */
     function resolveCommand(name) {
         return findCommand(name, armedPick && armedPick.name === name ? armedPick.bot : null)
-            || (name === 'color' || name === 'colour' ? allCommands().find((c) => isSystem(c) && c.name === TC_COLOR_WORD) : null);
+            || (name === 'color' || name === 'colour' ? allCommands().find((c) => isSystem(c) && c.name === TC_COLOR_WORD) : null)
+            || allCommands().find((c) => isSystem(c) && c.aliases && c.aliases.includes(name))
+            || null;
     }
 
     function findCommand(name, preferBot) {
@@ -436,6 +469,13 @@ function initCommandSelector(textarea, io) {
         hintSuppressedFor = null;
         activeIndex = 0;
         hide();
+        if (isSystem(cmd) && cmd.text && !cmd.args.length) {
+            // Nothing to type: the pick is the send.
+            armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
+            textarea.value = '';
+            io.submit('/' + cmd.name);
+            return;
+        }
         if (isSystem(cmd)) {
             armedPick = { chatId: io.chatId(), bot: cmd.bot, name: cmd.name };
             textarea.value = '/' + cmd.name + ' ';
@@ -920,7 +960,7 @@ function initCommandSelector(textarea, io) {
         }
         // Past the name: hint the exact command, or get out of the way.
         const name = val.slice(1, nameEnd);
-        const cmd = findCommand(name, armedPick && armedPick.name === name ? armedPick.bot : null);
+        const cmd = resolveCommand(name);
         if (cmd && isSystem(cmd) && cmd.picker) {
             if (isVisible()) hide();
         } else if (cmd && hintSuppressedFor !== val) {
@@ -988,6 +1028,12 @@ function initCommandSelector(textarea, io) {
         const name = head.value;
         const cmd = resolveCommand(name);
         if (!cmd) return null;
+        if (isSystem(cmd) && cmd.text) {
+            bumpRecent(cmd.bot, cmd.name);
+            armedPick = null;
+            hide();
+            return { text: cmd.text(text.slice(1 + head.next).trim()) };
+        }
         if (isSystem(cmd)) {
             // Typed by hand, a malformed colour command is just a message ("/color me
             // impressed"); picked from the list, it's a mistake worth flagging.

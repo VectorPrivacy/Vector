@@ -197,6 +197,24 @@ function initializeMarked() {
         }
     };
 
+    // A shrug is a face, not markup: its `\_` and `_` would read as an escape and
+    // emphasis. Discord's escaped `¯\\_(ツ)_/¯` reads the same.
+    const shrugExtension = {
+        name: 'shrug',
+        level: 'inline',
+        start(src) {
+            const i = src.indexOf('¯\\');
+            return i < 0 ? undefined : i;
+        },
+        tokenizer(src) {
+            const match = /^¯\\{1,2}_\(ツ\)_\/¯/.exec(src);
+            if (match) return { type: 'shrug', raw: match[0] };
+        },
+        renderer() {
+            return '¯\\_(ツ)_/¯';
+        }
+    };
+
     // Spoiler extension: ||spoiler text||
     const spoilerExtension = {
         name: 'spoiler',
@@ -245,7 +263,7 @@ function initializeMarked() {
         }
     };
 
-    marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, spoilerExtension, subtextExtension] });
+    marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, shrugExtension, spoilerExtension, subtextExtension] });
 }
 
 // Discord's dark-theme palette for the eight classic colours.
