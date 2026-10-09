@@ -1244,6 +1244,14 @@ body.ws .profile-switcher-panel.ws-dropup .profile-switcher-row {
   gap: 10px;
 }
 
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-list::-webkit-scrollbar-thumb {
+  border-width: 1px;
+}
+
 body.ws .profile-switcher-panel.ws-dropup .profile-switcher-avatar {
   width: 24px;
   height: 24px;

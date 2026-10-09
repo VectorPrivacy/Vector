@@ -22411,7 +22411,8 @@ body.profile-switcher-editing .profile-switcher-trash-toggle {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex-shrink: 0;
+  /* The npub grows from nothing, so it gives way first and the name ellipsises only once it's gone. */
+  min-width: 0;
 }
 .profile-switcher-npub {
   font-family: ui-monospace, SFMono-Regular, monospace;
@@ -23168,6 +23169,7 @@ body.profile-switcher-editing .profile-switcher-add {
   align-items: center;
   justify-content: center;
   padding: 16px;
+  padding-top: calc(16px + var(--chrome-h));
   box-sizing: border-box;
   background-color: rgba(0, 0, 0, 0.72);
   pointer-events: auto;
