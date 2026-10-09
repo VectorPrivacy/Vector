@@ -66,8 +66,9 @@ function ttRelativeText(unix, now = Date.now() / 1000) {
     ttRelative ??= new Intl.RelativeTimeFormat(undefined, { numeric: 'always' });
     const diff = unix - now;
     const abs = Math.abs(diff);
-    if (abs < 10) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(0, 'second');
-    const [n, unit] = abs < 45 ? [diff, 'second']
+    // The last minute counts down by the second; "now" is the moment itself.
+    if (abs < 0.5) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(0, 'second');
+    const [n, unit] = abs < 59.5 ? [diff, 'second']
         : abs < 2700 ? [diff / 60, 'minute']
         : abs < 79200 ? [diff / 3600, 'hour']
         : abs < 2246400 ? [diff / 86400, 'day']
@@ -100,14 +101,25 @@ function ttChip(unix, style) {
 }
 
 let ttTicker = 0;
-/** Relative chips stay current: one shared tick for whatever is on screen. */
+/** Relative chips stay current: one shared tick for whatever is on screen, every half
+ *  minute, or every second, on the second, while one is within its last minute and a half
+ *  either side of now. It stops when none is left. */
 function ttStartTicking() {
     if (ttTicker) return;
-    ttTicker = setInterval(() => {
+    const tick = () => {
         const chips = document.querySelectorAll('.vt-time[data-style="R"]');
-        if (!chips.length) { clearInterval(ttTicker); ttTicker = 0; return; }
-        for (const chip of chips) chip.textContent = ttRelativeText(Number(chip.dataset.unix));
-    }, 30000);
+        if (!chips.length) { ttTicker = 0; return; }
+        const now = Date.now() / 1000;
+        let near = false;
+        for (const chip of chips) {
+            const unix = Number(chip.dataset.unix);
+            const text = ttRelativeText(unix, now);
+            if (chip.textContent !== text) chip.textContent = text;
+            if (Math.abs(unix - now) < 90) near = true;
+        }
+        ttTicker = setTimeout(tick, near ? 1000 - (Date.now() % 1000) + 5 : 30000);
+    };
+    ttTicker = setTimeout(tick, 1000 - (Date.now() % 1000) + 5);
 }
 
 const TT_SKIP = 'code, pre, a, .vt-time';
