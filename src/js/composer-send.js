@@ -499,7 +499,10 @@ function initComposerControllers() {
     // `@Name` renders as a pill.
     composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
     emojiShortcodeCtrl = initEmojiShortcodeSelector(domChatMessageInput);
-    timeCtrl = initTimeSelector(domChatMessageInput);
+    timeCtrl = initTimeSelector(domChatMessageInput, {
+        slash: () => !!commandCtrl && commandCtrl.systemOwns('time'),
+        used: () => commandCtrl && commandCtrl.systemUsed('time'),
+    });
 }
 
 /**

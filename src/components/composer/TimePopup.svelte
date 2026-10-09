@@ -26,6 +26,6 @@
             </div>
         {/each}
     {:else}
-        <div class="time-selector-hint">Try “tomorrow 5pm”, “friday 9:30”, “dec 25” or “in 2 hours”</div>
+        <div class="time-selector-hint">Try “tomorrow 5pm”, “next monday”, “dec 25” or “in 2 hours”</div>
     {/if}
 </AnchoredPanel>

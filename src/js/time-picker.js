@@ -3,25 +3,32 @@
  * pick how it should read. The pick becomes a `<t:UNIX:STYLE>` code that everyone sees
  * in their own zone; core sends it as fixed UTC text plus a time span.
  *
- *   const ctrl = initTimeSelector(textarea);
+ *   const ctrl = initTimeSelector(textarea, { slash, used });
  *   ctrl.isOpen() → the panel is up and owns Enter/Tab/arrows/Escape
+ *
+ * A message starting `/time ` opens it too, while `slash()` says no bot claims the
+ * name; `used()` is told when a time goes in that way.
  */
 
-// The order the styles are offered in, the everyday ones first.
+// The order the styles are offered in, the everyday ones first; a day without a time
+// offers only the styles that don't show one.
 const TIME_STYLE_ORDER = ['f', 'F', 'R', 't', 'T', 'd', 'D', 's', 'S'];
+const TIME_DATE_STYLES = ['D', 'd', 'R'];
 const TIME_STYLE_NAMES = {
     f: 'Date and time', F: 'Full date and time', R: 'Relative', t: 'Time', T: 'Time with seconds',
     d: 'Short date', D: 'Long date', s: 'Short date and time', S: 'Short date, time with seconds',
 };
 
 // eslint-disable-next-line no-unused-vars
-function initTimeSelector(textarea) {
+function initTimeSelector(textarea, { slash = () => false, used = () => {} } = {}) {
     let open = false;
     let active = 0;
     let trigger = -1;
     let unix = null;
     let rowCount = 0;
+    let styles = TIME_STYLE_ORDER;
     let dismissed = -1;     // the trigger an Escape closed, until the draft moves past it
+    let viaSlash = false;
 
     /** The `@time` the caret is in: its start and what's typed after it, or null. */
     function find() {
@@ -31,9 +38,13 @@ function initTimeSelector(textarea) {
         const line = val.slice(lineStart, caret);
         let found = null;
         for (const m of line.matchAll(/(^|\s)@time(?=\s|$)/gi)) found = m;
-        if (!found) return null;
-        const at = lineStart + found.index + found[1].length;
+        let at;
+        if (found) at = lineStart + found.index + found[1].length;
+        // The slash form only opens past its space, while the command list has the name.
+        else if (/^\/time\s/i.test(val) && caret > 5 && !val.slice(0, caret).includes('\n') && slash()) at = 0;
+        else return null;
         const query = val.slice(at + 5, caret);
+        viaSlash = val[at] === '/';
         return query.length > 60 ? null : { at, query };
     }
 
@@ -49,8 +60,10 @@ function initTimeSelector(textarea) {
         if (!f || f.at === dismissed) { hide(); return; }
         if (f.at !== trigger) active = 0;
         trigger = f.at;
-        unix = ttParse(f.query);
-        const rows = unix === null ? [] : TIME_STYLE_ORDER.map((style) => ({
+        const parsed = ttParseFull(f.query);
+        unix = parsed?.unix ?? null;
+        styles = parsed?.dateOnly ? TIME_DATE_STYLES : TIME_STYLE_ORDER;
+        const rows = unix === null ? [] : styles.map((style) => ({
             style, name: TIME_STYLE_NAMES[style], preview: ttFormat(unix, style),
         }));
         rowCount = rows.length;
@@ -58,7 +71,7 @@ function initTimeSelector(textarea) {
         open = true;
         VectorSvelte.openPopup('time', {
             query: f.query.trim(),
-            full: unix === null ? '' : ttFull(unix),
+            full: unix === null ? '' : ttFull(unix, parsed.dateOnly),
             rows,
             active,
             pick: (i) => select(rows[i].style),
@@ -77,12 +90,13 @@ function initTimeSelector(textarea) {
         const pos = f.at + insert.length;
         textarea.setSelectionRange(pos, pos);
         hide();
+        if (viaSlash) used();
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
         textarea.focus();
     }
 
     function onInput() {
-        if (dismissed >= 0 && !textarea.value.slice(dismissed).toLowerCase().startsWith('@time')) dismissed = -1;
+        if (dismissed >= 0 && !/^[@/]time/i.test(textarea.value.slice(dismissed))) dismissed = -1;
         render();
     }
 
@@ -108,7 +122,7 @@ function initTimeSelector(textarea) {
         } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
             e.preventDefault();
             e.stopPropagation();
-            select(TIME_STYLE_ORDER[active]);
+            select(styles[active]);
         }
     }
 

@@ -54,6 +54,13 @@ const SYSTEM_COMMANDS = [
             { name: 'text', type: 'string', required: true, description: `The message to ${TC_COLOR_WORD}` },
         ],
     },
+    {
+        // `@time`'s other door: past the name, the time picker takes over.
+        name: 'time',
+        description: 'A time everyone sees in their own zone',
+        args: [{ name: 'when', type: 'string', required: true, description: 'Like “friday 8pm” or “in 2 hours”' }],
+        picker: true,
+    },
 ];
 
 // eslint-disable-next-line no-unused-vars
@@ -914,7 +921,9 @@ function initCommandSelector(textarea, io) {
         // Past the name: hint the exact command, or get out of the way.
         const name = val.slice(1, nameEnd);
         const cmd = findCommand(name, armedPick && armedPick.name === name ? armedPick.bot : null);
-        if (cmd && hintSuppressedFor !== val) {
+        if (cmd && isSystem(cmd) && cmd.picker) {
+            if (isVisible()) hide();
+        } else if (cmd && hintSuppressedFor !== val) {
             renderHint(cmd, val.slice(nameEnd));
         } else if (isVisible()) {
             hide();
@@ -1048,6 +1057,11 @@ function initCommandSelector(textarea, io) {
         systemOwns(name) {
             const cmd = resolveCommand(name);
             return !!cmd && isSystem(cmd);
+        },
+        /** A system command that finished in another picker still counts as used. */
+        systemUsed(name) {
+            bumpRecent(SYSTEM_COMMAND_OWNER, name);
+            armedPick = null;
         },
         isComposing,
         submitComposer,

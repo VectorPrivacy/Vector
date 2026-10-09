@@ -80,9 +80,11 @@ function ttFormat(unix, style) {
     return ttFormatter(style, TT_OPTIONS[style] || TT_OPTIONS.f).format(new Date(unix * 1000));
 }
 
-/** The hover text: the full date and time, with the reader's zone. */
-function ttFull(unix) {
-    return ttFormatter('full', { dateStyle: 'full', timeStyle: 'long' }).format(new Date(unix * 1000));
+/** The hover text: the full date and time, with the reader's zone; just the date for a day. */
+function ttFull(unix, dateOnly = false) {
+    return dateOnly
+        ? ttFormatter('fullDate', { dateStyle: 'full' }).format(new Date(unix * 1000))
+        : ttFormatter('full', { dateStyle: 'full', timeStyle: 'long' }).format(new Date(unix * 1000));
 }
 
 function ttChip(unix, style, hidden) {
@@ -224,14 +226,35 @@ function ttDayFirst() {
 /**
  * A typed time as epoch seconds, or null when it isn't one. Reads "now", epoch numbers,
  * "in 2 hours" / "3 days ago", and a date and a time in either order: today, tonight,
- * tomorrow, yesterday, weekdays (next friday), 2026-12-25, 25/12, dec 25 or 25th of
- * december with an optional year, and 5pm, 5:30 pm, 17:30, noon or midnight. A word it
- * can't place makes the whole phrase null rather than a guess.
+ * tomorrow, yesterday, weekdays (this, next or last monday), next week / month / year,
+ * the weekend, 2026-12-25, 25/12, dec 25 or 25th of december with an optional year, and
+ * 5pm, 5:30 pm, 17:30, noon, midnight or morning / afternoon / evening / night. A word
+ * it can't place makes the whole phrase null rather than a guess.
  */
 function ttParse(input, now = new Date()) {
-    const unix = ttRead(input, now);
-    return unix === null || ttFallback(unix) === null ? null : unix;
+    return ttParseFull(input, now)?.unix ?? null;
 }
+
+/** As ttParse, plus `dateOnly` when no time of day was given (it then reads as noon). */
+function ttParseFull(input, now = new Date()) {
+    const read = ttRead(input, now);
+    if (read === null) return null;
+    const out = typeof read === 'number' ? { unix: read, dateOnly: false } : read;
+    return ttFallback(out.unix) === null ? null : out;
+}
+
+/** The day a week starts on in the reader's locale, 0 for Sunday. */
+function ttWeekStart() {
+    try {
+        const locale = new Intl.Locale(new Intl.DateTimeFormat().resolvedOptions().locale);
+        const info = locale.getWeekInfo?.() ?? locale.weekInfo;
+        return (info?.firstDay ?? 1) % 7;
+    } catch (_) {
+        return 1;
+    }
+}
+
+const TT_PARTS = { morning: 9, afternoon: 15, evening: 18, night: 20 };
 
 function ttRead(input, now) {
     let text = (input || '').toLowerCase().trim().replace(/[,]+/g, ' ').replace(/\s+/g, ' ');
@@ -247,6 +270,7 @@ function ttRead(input, now) {
 
     const date = new Date(now);
     let haveDate = false;
+    let yearless = false;   // "dec 25" is the next one, so a passed date means next year
     let time = null;
     const take = (re) => {
         const found = re.exec(text);
@@ -273,6 +297,10 @@ function ttRead(input, now) {
         time = [Number(t[1]), 0, 0];
         clock24 = true;
     }
+    // A part of the day sets the hour, or moves a bare "at 8" past noon.
+    const part = take(/\b(?:in the |this )?(morning|afternoon|evening|night)\b/);
+    if (part && !time) time = [TT_PARTS[part[1]], 0, 0];
+    else if (part && clock24 && part[1] !== 'morning' && time[0] < 12) time[0] += 12;
 
     // A date that rolls over (Feb 30, month 13) was mistyped or misread, not meant.
     const setDate = (y, month, day) => {
@@ -288,6 +316,7 @@ function ttRead(input, now) {
         const [day, month] = ttDayFirst() ? [a, b] : [b, a];
         const year = d[3] ? (d[3].length === 2 ? 2000 + Number(d[3]) : Number(d[3])) : date.getFullYear();
         if (!setDate(year, month, day)) return null;
+        yearless = !d[3];
         haveDate = true;
     } else {
         const monthRe = '(' + TT_MONTHS.map((n) => n.slice(0, 3) + '(?:' + n.slice(3) + ')?').join('|') + ')\\.?';
@@ -300,6 +329,7 @@ function ttRead(input, now) {
         if (found) {
             const mi = TT_MONTHS.findIndex((n) => n.startsWith(month.slice(0, 3)));
             if (!setDate(y ? Number(y) : date.getFullYear(), mi + 1, Number(day))) return null;
+            yearless = !y;
             haveDate = true;
         }
     }
@@ -311,10 +341,33 @@ function ttRead(input, now) {
             if (w[1] === 'tonight' && !time) time = [20, 0, 0];
             else if (w[1] === 'tonight' && clock24 && time[0] < 12) time[0] += 12;
             haveDate = true;
-        } else if ((w = take(/\b(?:(next|this|on) )?(sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*\b/))) {
-            const target = TT_DAYS.findIndex((n) => n.startsWith(w[2].slice(0, 3)));
-            let ahead = (target - date.getDay() + 7) % 7;
-            if (w[1] === 'next' && ahead === 0) ahead = 7;
+        } else if ((w = take(/\b(next|last|this) (week|month|year)\b/))) {
+            const step = { next: 1, last: -1, this: 0 }[w[1]];
+            if (w[2] === 'week') date.setDate(date.getDate() + 7 * step);
+            else {
+                // The same day of the month, or its last day when that month is shorter.
+                const day = date.getDate();
+                date.setDate(1);
+                if (w[2] === 'month') date.setMonth(date.getMonth() + step);
+                else date.setFullYear(date.getFullYear() + step);
+                date.setDate(Math.min(day, new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate()));
+            }
+            haveDate = true;
+        } else if ((w = take(/\b(?:(next|this|last|on|coming) )?(?:the )?(weekend|sun(?:day)?|mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:r|rs|rsday)?|fri(?:day)?|sat(?:urday)?)\b/))) {
+            const weekend = w[2] === 'weekend';
+            const target = weekend ? 6 : TT_DAYS.findIndex((n) => n.startsWith(w[2].slice(0, 3)));
+            const today = date.getDay();
+            let ahead;
+            if (w[1] === 'last') ahead = -(((today - target + 7) % 7) || 7);
+            else if (weekend && today === 0 && w[1] !== 'next') ahead = 0;
+            else {
+                ahead = (target - today + 7) % 7;
+                // "next friday" is the one in next week, not merely the next one to come.
+                if (w[1] === 'next') {
+                    if (ahead === 0) ahead = 7;
+                    if (ahead < (((ttWeekStart() - today + 7) % 7) || 7)) ahead += 7;
+                }
+            }
             date.setDate(date.getDate() + ahead);
             haveDate = true;
         }
@@ -322,7 +375,12 @@ function ttRead(input, now) {
     text = text.replace(/\b(at|on)\b/g, '').trim();
     if (text) return null;
     if (!haveDate && !time) return null;
-    if (time) date.setHours(time[0], time[1], time[2], 0);
-    else date.setSeconds(0, 0);
-    return Math.floor(date.getTime() / 1000);
+    if (yearless && date < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        const [month, day] = [date.getMonth(), date.getDate()];
+        date.setFullYear(date.getFullYear() + 1, month, day);
+        if (date.getDate() !== day) return null;
+    }
+    if (time) return Math.floor(date.setHours(time[0], time[1], time[2], 0) / 1000);
+    // A day alone reads as noon: the same calendar date in nearly every zone.
+    return { unix: Math.floor(date.setHours(12, 0, 0, 0) / 1000), dateOnly: true };
 }

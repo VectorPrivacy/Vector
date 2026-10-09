@@ -7,7 +7,7 @@ const root = new URL('..', import.meta.url);
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(readFileSync(new URL('src/js/text-color.js', root), 'utf8') + readFileSync(new URL('src/js/text-time.js', root), 'utf8')
-    + ';this.tcExtract = tcExtract; this.tcExtractColor = tcExtractColor; this.tcRestore = tcRestore; this.TC_NAMED = TC_NAMED; this.ttParse = ttParse;', ctx);
+    + ';this.tcExtract = tcExtract; this.tcExtractColor = tcExtractColor; this.tcRestore = tcRestore; this.TC_NAMED = TC_NAMED; this.ttParse = ttParse; this.ttParseFull = ttParseFull;', ctx);
 const cases = JSON.parse(readFileSync(new URL('crates/vector-core/src/text_color_cases.json', root), 'utf8'));
 const names = JSON.parse(readFileSync(new URL('crates/vector-core/src/text_color_names.json', root), 'utf8'));
 
@@ -59,9 +59,9 @@ const parse = [
     ['', at(2026, 10, 7)], ['now', at(2026, 10, 7)],
     ['5pm', at(2026, 10, 7, 17, 0)], ['5:30 pm', at(2026, 10, 7, 17, 30)], ['17:30', at(2026, 10, 7, 17, 30)], ['at 9', at(2026, 10, 7, 9, 0)],
     ['noon', at(2026, 10, 7, 12, 0)], ['midnight', at(2026, 10, 7, 0, 0)],
-    ['tomorrow', at(2026, 10, 8)], ['tomorrow 5pm', at(2026, 10, 8, 17, 0)], ['5pm tomorrow', at(2026, 10, 8, 17, 0)], ['tonight', at(2026, 10, 7, 20, 0)],
-    ['friday', at(2026, 10, 9)], ['friday 9:30am', at(2026, 10, 9, 9, 30)], ['next wednesday', at(2026, 10, 14)], ['wednesday', at(2026, 10, 7)], ['on mon at 8pm', at(2026, 10, 12, 20, 0)],
-    ['2026-12-25', at(2026, 12, 25)], ['2026-12-25 18:00', at(2026, 12, 25, 18, 0)], ['dec 25', at(2026, 12, 25)], ['25th of december 2027 at 9am', at(2027, 12, 25, 9, 0)], ['december 25th', at(2026, 12, 25)],
+    ['tomorrow', at(2026, 10, 8, 12, 0)], ['tomorrow 5pm', at(2026, 10, 8, 17, 0)], ['5pm tomorrow', at(2026, 10, 8, 17, 0)], ['tonight', at(2026, 10, 7, 20, 0)],
+    ['friday', at(2026, 10, 9, 12, 0)], ['friday 9:30am', at(2026, 10, 9, 9, 30)], ['next wednesday', at(2026, 10, 14, 12, 0)], ['wednesday', at(2026, 10, 7, 12, 0)], ['on mon at 8pm', at(2026, 10, 12, 20, 0)],
+    ['2026-12-25', at(2026, 12, 25, 12, 0)], ['2026-12-25 18:00', at(2026, 12, 25, 18, 0)], ['dec 25', at(2026, 12, 25, 12, 0)], ['25th of december 2027 at 9am', at(2027, 12, 25, 9, 0)], ['december 25th', at(2026, 12, 25, 12, 0)],
     ['in 2 hours', Math.round(now.getTime() / 1000) + 7200], ['in 1h30m', Math.round(now.getTime() / 1000) + 5400], ['in an hour', Math.round(now.getTime() / 1000) + 3600],
     ['3 days ago', Math.round(now.getTime() / 1000) - 259200], ['in half an hour', Math.round(now.getTime() / 1000) + 1800],
     ['1700000000', 1700000000], ['1700000000000', 1700000000],
@@ -69,6 +69,12 @@ const parse = [
     ['2026-02-30', null], ['feb 30', null], ['13/13', null], ['999999999999', null], ['in 9999 years', null], ['1000000 days ago', null],
     ['tonight at 9', at(2026, 10, 7, 21, 0)], ['tonight at 9:30', at(2026, 10, 7, 21, 30)], ['tonight at 11pm', at(2026, 10, 7, 23, 0)],
     ['5 p.m.', at(2026, 10, 7, 17, 0)], ['9:30 a.m. tomorrow', at(2026, 10, 8, 9, 30)],
+    ['Monday', at(2026, 10, 12, 12, 0)], ['this monday', at(2026, 10, 12, 12, 0)], ['next monday', at(2026, 10, 12, 12, 0)], ['last monday', at(2026, 10, 5, 12, 0)],
+    ['this friday', at(2026, 10, 9, 12, 0)], ['next friday', at(2026, 10, 16, 12, 0)], ['last wednesday', at(2026, 9, 30, 12, 0)], ['next thurs 6pm', at(2026, 10, 15, 18, 0)],
+    ['next week', at(2026, 10, 14, 12, 0)], ['last week', at(2026, 9, 30, 12, 0)], ['next month', at(2026, 11, 7, 12, 0)], ['next year', at(2027, 10, 7, 12, 0)],
+    ['this weekend', at(2026, 10, 10, 12, 0)], ['next weekend', at(2026, 10, 17, 12, 0)], ['on the weekend', at(2026, 10, 10, 12, 0)],
+    ['tomorrow morning', at(2026, 10, 8, 9, 0)], ['friday evening', at(2026, 10, 9, 18, 0)], ['this afternoon', at(2026, 10, 7, 15, 0)], ['tomorrow night at 8', at(2026, 10, 8, 20, 0)],
+    ['next month banana', null], ['month', null], ['jan 31', at(2027, 1, 31, 12, 0)], ['jan 31 2026', at(2026, 1, 31, 12, 0)], ['oct 7 9am', at(2026, 10, 7, 9, 0)],
 ];
 for (const [text, want] of parse) {
     const got = ctx.ttParse(text, now);
