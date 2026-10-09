@@ -61,6 +61,13 @@ async function setupRustListeners() {
         listChanged();
     });
 
+    // The archive changed here or on another device.
+    _on('archived_chats_updated', (evt) => {
+        objArchivedChats = evt.payload && typeof evt.payload === 'object' ? evt.payload : {};
+        readArchivedChats();
+        listChanged();
+    });
+
     // The boot DM-relay-list sync adopted/retired relays; repaint the Network
     // panel so an already-open list reflects them without a reopen.
     _on('relay_list_updated', () => renderRelayList());

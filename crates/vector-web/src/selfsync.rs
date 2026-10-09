@@ -9,7 +9,7 @@ use nostr_sdk::prelude::*;
 use serde_json::json;
 use vector_core::community::transport::LiveTransport;
 use vector_core::stored_event::event_kind::APPLICATION_SPECIFIC;
-use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref, StreamerSettings, SyncedSettings};
+use vector_core::synced_prefs::{self, ArchiveMap, IdList, NicknameMap, NotifyMap, Pref, StreamerSettings, SyncedSettings};
 use vector_core::{db, notify, STATE};
 
 use crate::sync::WebProfileSyncHandler;
@@ -50,6 +50,9 @@ async fn apply(pref: Pref, json: &str, before: &StreamerSettings) {
             "hidden_banners_updated",
             json!({ "ids": IdList::from_json(json).ids }),
         ),
+        Pref::Archive => {
+            vector_core::traits::emit_event_json("archived_chats_updated", json!(ArchiveMap::from_json(json).times()))
+        }
         Pref::Settings => settings_changed(before, &SyncedSettings::from_json(json)),
     }
 }
@@ -146,6 +149,7 @@ async fn subscribe() {
         synced_prefs::RAIL_D_TAG.to_string(),
         synced_prefs::BANNERS_D_TAG.to_string(),
         synced_prefs::SETTINGS_D_TAG.to_string(),
+        synced_prefs::ARCHIVE_D_TAG.to_string(),
     ]);
     let v2_list = Filter::new().author(me).kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
     let emoji = Filter::new().author(me).kind(Kind::Custom(10030));

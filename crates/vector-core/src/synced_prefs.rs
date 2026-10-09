@@ -30,6 +30,7 @@ pub const NOTIFY_D_TAG: &str = "vector/notify";
 pub const RAIL_D_TAG: &str = "vector/rail";
 pub const BANNERS_D_TAG: &str = "vector/banners";
 pub const SETTINGS_D_TAG: &str = "vector/settings";
+pub const ARCHIVE_D_TAG: &str = "vector/archive";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
@@ -38,6 +39,9 @@ const NOTIFY_LOCAL_KEY: &str = "synced_notify_local";
 const RAIL_LOCAL_KEY: &str = "synced_rail_local";
 const BANNERS_LOCAL_KEY: &str = "synced_banners_local";
 const SETTINGS_LOCAL_KEY: &str = "synced_settings_local";
+const ARCHIVE_LOCAL_KEY: &str = "synced_archive_local";
+/// The newest `created_at` of an archive copy this device holds, adopted or published.
+const ARCHIVE_SEEN_KEY: &str = "synced_archive_seen";
 /// Persisted, so a change survives a quit until the relays have it.
 const SETTINGS_INTENT_KEY: &str = "synced_settings_intent";
 const SETTINGS_SEEN_KEY: &str = "synced_settings_seen";
@@ -72,6 +76,59 @@ pub struct NicknameMap {
     pub v: u32,
     #[serde(default)]
     pub names: BTreeMap<String, String>,
+}
+
+/// An entry is about 80 bytes. Padded, encrypted and base64'd, 500 of them keep the event under the
+/// 64KB that strfry relays accept by default.
+const ARCHIVE_MAX_ENTRIES: usize = 500;
+
+/// chat id → the newest message time the archiving device had seen (unix ms). A chat counts
+/// as archived only while nothing newer has been said in it, so a reply brings it back on
+/// every device whether or not this list has caught up.
+///
+/// Entries stay raw JSON, and unknown keys ride along, so an entry in a shape a newer build
+/// writes survives this one's republish instead of collapsing the whole map.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveMap {
+    #[serde(default = "one")]
+    pub v: u32,
+    #[serde(default)]
+    pub chats: BTreeMap<String, serde_json::Value>,
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ArchiveMap {
+    pub fn from_json(s: &str) -> Self {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{\"v\":1,\"chats\":{}}".to_string())
+    }
+    pub fn at(&self, chat_id: &str) -> Option<u64> {
+        self.chats.get(chat_id).and_then(serde_json::Value::as_u64)
+    }
+    /// The entries this build understands, for the page.
+    pub fn times(&self) -> BTreeMap<String, u64> {
+        self.chats.iter().filter_map(|(id, v)| v.as_u64().map(|at| (id.clone(), at))).collect()
+    }
+    pub fn set(&mut self, chat_id: &str, at: u64) -> Result<(), String> {
+        if chat_id.trim().is_empty() {
+            return Err("empty chat id".to_string());
+        }
+        if !self.chats.contains_key(chat_id) && self.chats.len() >= ARCHIVE_MAX_ENTRIES {
+            return Err(format!("the archive is full ({ARCHIVE_MAX_ENTRIES} chats)"));
+        }
+        self.chats.insert(chat_id.to_string(), at.into());
+        Ok(())
+    }
+    /// Drop `chat_id` if it was archived before `active_at`; a later archive stands.
+    pub fn revoke(&mut self, chat_id: &str, active_at: u64) -> bool {
+        match self.at(chat_id) {
+            Some(at) if at < active_at => self.chats.remove(chat_id).is_some(),
+            _ => false,
+        }
+    }
 }
 
 /// One scope's notification settings on the wire. Level is spelled out rather
@@ -341,12 +398,22 @@ pub enum Pref {
     Banners,
     /// The general settings document.
     Settings,
+    /// Chats tidied out of the list until someone speaks in them again.
+    Archive,
 }
 
 /// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
 /// so a device holding both applies the richer one last and wins the overlap.
-pub const ALL_PREFS: [Pref; 7] =
-    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail, Pref::Banners, Pref::Settings];
+pub const ALL_PREFS: [Pref; 8] = [
+    Pref::Blocks,
+    Pref::Mutes,
+    Pref::Nicknames,
+    Pref::Notify,
+    Pref::Rail,
+    Pref::Banners,
+    Pref::Settings,
+    Pref::Archive,
+];
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -358,6 +425,7 @@ impl Pref {
             Pref::Rail => RAIL_D_TAG,
             Pref::Banners => BANNERS_D_TAG,
             Pref::Settings => SETTINGS_D_TAG,
+            Pref::Archive => ARCHIVE_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -369,6 +437,7 @@ impl Pref {
             Pref::Rail => RAIL_LOCAL_KEY,
             Pref::Banners => BANNERS_LOCAL_KEY,
             Pref::Settings => SETTINGS_LOCAL_KEY,
+            Pref::Archive => ARCHIVE_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -381,6 +450,7 @@ impl Pref {
             RAIL_D_TAG => Some(Pref::Rail),
             BANNERS_D_TAG => Some(Pref::Banners),
             SETTINGS_D_TAG => Some(Pref::Settings),
+            ARCHIVE_D_TAG => Some(Pref::Archive),
             _ => None,
         }
     }
@@ -441,6 +511,18 @@ pub async fn hydrate_all(client: &Client) -> Vec<(Pref, String)> {
                 continue;
             }
         };
+        if pref == Pref::Archive {
+            match fetched.map(|copy| adopt_archive(&copy.json, copy.created_at).map(|took| (copy, took))) {
+                Some(Ok((copy, true))) => {
+                    mark_hydrated(pref);
+                    applied.push((pref, copy.json));
+                }
+                // Nothing stored, or older than what this device holds: ours stands.
+                None | Some(Ok((_, false))) => mark_hydrated(pref),
+                Some(Err(e)) => crate::log_warn!("[SyncedPrefs] adopting {} failed: {e}", pref.d_tag()),
+            }
+            continue;
+        }
         if pref == Pref::Settings {
             match adopt_settings(fetched.as_ref()) {
                 Ok(adopted) => {
@@ -512,6 +594,89 @@ pub fn set_banner_hidden(community_id: &str, hidden: bool) -> Result<IdList, Str
     }
     save_local_raw(Pref::Banners, &list.to_json())?;
     Ok(list)
+}
+
+pub fn load_archive() -> ArchiveMap {
+    load_local_raw(Pref::Archive).map(|s| ArchiveMap::from_json(&s)).unwrap_or_default()
+}
+
+/// Serialises every read-modify-write of the archive: commands run on several threads.
+struct ArchiveLock;
+
+fn archive_lock() -> std::sync::Arc<std::sync::Mutex<()>> {
+    crate::db::current_session().scoped::<ArchiveLock, _>()
+}
+
+fn archive_seen() -> u64 {
+    crate::db::settings::get_sql_setting(ARCHIVE_SEEN_KEY.to_string())
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Archive a chat as of `at` (`Some`) or bring it back (`None`), committed locally. The caller
+/// publishes. Refused until the relay copy has been read, for the same reason as the banners.
+pub fn set_archived(chat_id: &str, at: Option<u64>) -> Result<ArchiveMap, String> {
+    if !is_hydrated(Pref::Archive) {
+        return Err("Still syncing your settings, try again in a moment".to_string());
+    }
+    let lock = archive_lock();
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load_archive();
+    match at {
+        Some(at) => map.set(chat_id, at)?,
+        None => {
+            map.chats.remove(chat_id);
+        }
+    }
+    save_local_raw(Pref::Archive, &map.to_json())?;
+    Ok(map)
+}
+
+/// Forget an archive that activity at `active_at` has outlived, on this device only. An outlived
+/// entry is harmless (every reader looks past it) and leaves the relays with the next archive
+/// change; publishing it from every device the message reaches would race them against each other.
+/// The bool says whether anything changed.
+pub fn revoke_archive(chat_id: &str, active_at: u64) -> Result<(ArchiveMap, bool), String> {
+    let lock = archive_lock();
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = load_archive();
+    if !map.revoke(chat_id, active_at) {
+        return Ok((map, false));
+    }
+    save_local_raw(Pref::Archive, &map.to_json())?;
+    Ok((map, true))
+}
+
+/// Take a relay copy signed at `created_at` unless this device already holds a newer one: a relay
+/// that was down can replay a week-old copy, and adopting it would bring back what was since
+/// unarchived and drop what was since archived.
+fn adopt_archive(json: &str, created_at: u64) -> Result<bool, String> {
+    let lock = archive_lock();
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if created_at < archive_seen() {
+        return Ok(false);
+    }
+    save_local_raw(Pref::Archive, json)?;
+    crate::db::settings::set_sql_setting(ARCHIVE_SEEN_KEY.to_string(), created_at.to_string())?;
+    Ok(true)
+}
+
+/// The archive to publish and the `created_at` to sign it with: after every copy this device has
+/// seen, since relays keep the lower id when two copies tie on a second.
+fn claim_archive_publish(now: u64) -> Result<(String, u64), String> {
+    let lock = archive_lock();
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let at = now.max(archive_seen() + 1);
+    crate::db::settings::set_sql_setting(ARCHIVE_SEEN_KEY.to_string(), at.to_string())?;
+    Ok((load_archive().to_json(), at))
+}
+
+async fn publish_archive(client: &Client) -> Result<(), String> {
+    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+    let (json, at) = claim_archive_publish(Timestamp::now().as_secs())?;
+    send_list(client, my_pk, Pref::Archive, &json, Some(at)).await
 }
 
 pub fn load_settings() -> SyncedSettings {
@@ -787,6 +952,9 @@ pub async fn publish_raw(client: &Client, pref: Pref, json: &str) -> Result<(), 
     if pref == Pref::Settings {
         return publish_settings(client, false).await.map(|_| ());
     }
+    if pref == Pref::Archive {
+        return publish_archive(client).await;
+    }
     let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
     save_local_raw(pref, json)?;
     send_list(client, my_pk, pref, json, None).await
@@ -833,6 +1001,19 @@ pub async fn ingest_remote(my_pk: &PublicKey, event: &Event) -> Option<(Pref, St
             publish_settings_soon();
         }
         return adopted.json.map(|json| (pref, json));
+    }
+    if pref == Pref::Archive {
+        return match adopt_archive(&json, event.created_at.as_secs()) {
+            Ok(true) => {
+                mark_hydrated(pref);
+                Some((pref, json))
+            }
+            Ok(false) => None,
+            Err(e) => {
+                crate::log_warn!("[SyncedPrefs] persisting {} failed: {e}", pref.d_tag());
+                None
+            }
+        };
     }
     if let Err(e) = save_local_raw(pref, &json) {
         crate::log_warn!("[SyncedPrefs] persisting {} failed: {e}", pref.d_tag());
@@ -936,6 +1117,82 @@ mod tests {
         assert_eq!(Pref::from_d_tag("vector/communities"), None);
         assert_eq!(Pref::from_d_tag("vector/pinned"), None);
         assert_eq!(Pref::from_d_tag(""), None);
+    }
+
+    #[test]
+    fn an_archive_is_revoked_only_by_later_activity() {
+        let mut m = ArchiveMap::default();
+        m.set("npub1a", 1_000).unwrap();
+        assert!(!m.revoke("npub1a", 1_000), "activity at the archive moment is what was archived");
+        assert!(!m.revoke("npub1a", 900));
+        assert!(!m.revoke("npub1b", 5_000), "nothing to revoke");
+        assert!(m.revoke("npub1a", 1_001));
+        assert!(m.chats.is_empty());
+        assert!(m.set(" ", 1).is_err());
+    }
+
+    #[test]
+    fn an_archive_keeps_what_a_newer_build_wrote() {
+        let mut m = ArchiveMap::default();
+        m.set("npub1a", 1_700_000_000_123).unwrap();
+        assert_eq!(ArchiveMap::from_json(&m.to_json()), m);
+        assert_eq!(ArchiveMap::from_json("not json"), ArchiveMap::default());
+        assert_eq!(ArchiveMap::from_json("{}").v, 1);
+
+        let newer = r#"{"v":1,"chats":{"npub1a":5,"npub1b":{"at":7,"why":"x"}},"folders":[1]}"#;
+        let m = ArchiveMap::from_json(newer);
+        assert_eq!(m.at("npub1a"), Some(5));
+        assert_eq!(m.at("npub1b"), None, "a shape this build can't read is not archived here");
+        assert_eq!(m.times().len(), 1);
+        let back: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
+        assert_eq!(back["chats"]["npub1b"]["why"], "x", "and survives our republish");
+        assert_eq!(back["folders"], serde_json::json!([1]));
+    }
+
+    #[test]
+    fn the_archive_caps_new_chats_but_not_existing_ones() {
+        let mut m = ArchiveMap::default();
+        for i in 0..ARCHIVE_MAX_ENTRIES {
+            m.set(&format!("npub1{i}"), 1).unwrap();
+        }
+        assert!(m.set("npub1new", 1).is_err());
+        assert!(m.set("npub10", 2).is_ok(), "re-archiving a chat already held still works");
+        let mut full = ArchiveMap::default();
+        for i in 0..ARCHIVE_MAX_ENTRIES {
+            full.set(&format!("npub1{:058}", i), 1_760_000_000_000).unwrap();
+        }
+        // NIP-44: padded plaintext plus version, nonce, length prefix and MAC, then base64.
+        let len = full.to_json().len();
+        let next = (len - 1).next_power_of_two();
+        let chunk = if next <= 256 { 32 } else { next / 8 };
+        let padded = chunk * ((len - 1) / chunk + 1);
+        let content = (padded + 67).div_ceil(3) * 4;
+        assert!(content + 1024 < 65_536, "a full archive fits a relay's default 64KB event cap ({content} bytes)");
+    }
+
+    #[test]
+    fn archiving_waits_for_the_relay_copy_but_forgetting_does_not() {
+        let (_tmp, _guard) = init_test_db();
+        assert!(set_archived("npub1a", Some(10)).is_err(), "would publish over the other devices' archive");
+        assert!(adopt_archive(r#"{"v":1,"chats":{"npub1a":10}}"#, 100).unwrap());
+        let (map, changed) = revoke_archive("npub1a", 11).unwrap();
+        assert!(changed && map.chats.is_empty(), "an outlived entry goes without the relay copy");
+        mark_hydrated(Pref::Archive);
+        assert_eq!(set_archived("npub1a", Some(20)).unwrap().at("npub1a"), Some(20));
+        let (_, changed) = revoke_archive("npub1a", 15).unwrap();
+        assert!(!changed, "a re-archive outlives a message older than it");
+    }
+
+    #[test]
+    fn an_older_archive_copy_never_replaces_a_newer_one() {
+        let (_tmp, _guard) = init_test_db();
+        assert!(adopt_archive(r#"{"v":1,"chats":{"npub1p":1}}"#, 200).unwrap());
+        assert!(!adopt_archive(r#"{"v":1,"chats":{"npub1x":1}}"#, 150).unwrap(), "a relay replaying last week");
+        assert_eq!(load_archive().at("npub1p"), Some(1));
+        assert!(load_archive().at("npub1x").is_none());
+        let (_, at) = claim_archive_publish(100).unwrap();
+        assert!(at > 200, "our publish lands after every copy we hold");
+        assert!(!adopt_archive(r#"{"v":1,"chats":{}}"#, at - 1).unwrap(), "nor does one signed before ours");
     }
 
     #[test]

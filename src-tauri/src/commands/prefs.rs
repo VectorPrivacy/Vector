@@ -1,4 +1,5 @@
-//! Cross-device sync for blocks, mutes and nicknames.
+//! Cross-device sync for the account's own lists: blocks, mutes, nicknames, notification
+//! levels, banners, the archive and the general settings.
 //!
 //! Local state stays the single source of truth on this device; each synced
 //! list is a PROJECTION of it, republished whenever it changes. That is what
@@ -8,7 +9,7 @@
 
 use nostr_sdk::prelude::Event;
 use vector_core::notify;
-use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref, SyncedSettings};
+use vector_core::synced_prefs::{self, ArchiveMap, IdList, NicknameMap, NotifyMap, Pref, SyncedSettings};
 
 /// Publish a projection of the current local state for `pref`. Runs behind the
 /// caller's return: these are triggered by user actions whose UI has already
@@ -57,6 +58,7 @@ pub fn publish_projection(pref: Pref) {
                 return;
             }
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
+            Pref::Archive => synced_prefs::load_archive().to_json(),
             Pref::Settings => return,
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
@@ -90,6 +92,7 @@ pub async fn hydrate_prefs() {
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
             Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
             Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
+            Pref::Archive => emit_archive(&ArchiveMap::from_json(&json)),
             Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),
         }
     }
@@ -107,6 +110,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
         Pref::Banners => emit_hidden_banners(&IdList::from_json(&json)),
+        Pref::Archive => emit_archive(&ArchiveMap::from_json(&json)),
         Pref::Settings => settings_changed(was_live, &SyncedSettings::from_json(&json)),
     }
 }
@@ -246,6 +250,42 @@ fn emit_hidden_banners(list: &IdList) {
     vector_core::traits::emit_event_json("hidden_banners_updated", serde_json::json!({ "ids": list.ids }));
 }
 
+/// Archived chats (chat id → archived at, unix ms), for the first paint.
+#[tauri::command]
+pub async fn get_archived_chats() -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move { Ok(serde_json::json!(synced_prefs::load_archive().times())) }).await
+}
+
+/// Archive a DM as of `at` (unix ms), or bring it back when `at` is absent.
+#[tauri::command]
+pub async fn set_chat_archived(chat_id: String, at: Option<u64>) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let map = synced_prefs::set_archived(&chat_id, at)?;
+        emit_archive(&map);
+        publish_projection(Pref::Archive);
+        Ok(serde_json::json!(map.times()))
+    })
+    .await
+}
+
+/// A message at `active_at` (unix ms) outlived the chat's archive: forget it here. Returns the
+/// archive as it now stands, so a page holding a stale entry stops asking.
+#[tauri::command]
+pub async fn revoke_chat_archive(chat_id: String, active_at: u64) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let (map, changed) = synced_prefs::revoke_archive(&chat_id, active_at)?;
+        if changed {
+            emit_archive(&map);
+        }
+        Ok(serde_json::json!(map.times()))
+    })
+    .await
+}
+
+fn emit_archive(map: &ArchiveMap) {
+    vector_core::traits::emit_event_json("archived_chats_updated", serde_json::json!(map.times()));
+}
+
 /// The synced settings, for the first paint.
 #[tauri::command]
 pub async fn get_synced_settings() -> Result<serde_json::Value, String> {
@@ -315,5 +355,5 @@ fn emit_settings(settings: &SyncedSettings) {
     vector_core::traits::emit_event_json("synced_settings_updated", settings.view());
 }
 
-// Handlers: get_hidden_banners, set_banner_hidden, get_synced_settings, set_advanced_mode,
+// Handlers: get_hidden_banners, set_banner_hidden, get_archived_chats, set_chat_archived, revoke_chat_archive, get_synced_settings, set_advanced_mode,
 // set_streamer_mode, set_streamer_notif, set_streamer_wallpapers

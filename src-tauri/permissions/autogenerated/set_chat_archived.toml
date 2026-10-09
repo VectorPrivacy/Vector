@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-chat-archived"
+description = "Enables the set_chat_archived command without any pre-configured scope."
+commands.allow = ["set_chat_archived"]
+
+[[permission]]
+identifier = "deny-set-chat-archived"
+description = "Denies the set_chat_archived command without any pre-configured scope."
+commands.deny = ["set_chat_archived"]

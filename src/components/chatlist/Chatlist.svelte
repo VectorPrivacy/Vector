@@ -11,6 +11,7 @@
     import EmptyState from './EmptyState.svelte';
     import { listVersion, invitesVersion, paneState, openChatId, setListHasRows, clockTick } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
+    import ArchiveRow from './ArchiveRow.svelte';
 
     // Snapshot re-pulls the raw page state when the list's shape, the invites, the
     // pane or the open chat change. Rows keep their own derivations through all of it.
@@ -24,23 +25,26 @@
 
     // Visible chats in list order — the wrapper's subscriber runs sortChats() before
     // this derives (it subscribed first), so snapshot().chats is already sorted.
-    const chats = $derived.by(() => {
+    // Archived DMs leave the list for the archive row, in the same order.
+    const lists = $derived.by(() => {
         const { chats: all, dmsOnly } = snap;
-        const out = [];
+        const out = [], archived = [];
         for (const chat of all) {
             if (!h.chatIsVisibleInList(chat)) continue;
             if (dmsOnly && h.chatIsGroup(chat)) continue;
-            out.push(chat);
+            (h.chatIsArchived(chat) ? archived : out).push(chat);
         }
-        return out;
+        return { chats: out, archived };
     });
+    const chats = $derived(lists.chats);
+    const archived = $derived(lists.archived);
 
     // Invites are spliced in place rather than reassigned, so the snapshot copies
     // them — a same-reference array would never invalidate this derived.
     const invites = $derived(snap.invites);
     const paneCommunityId = $derived(snap.paneCommunityId);
     const openChat = $derived(snap.openChat);
-    const empty = $derived(chats.length === 0 && invites.length === 0);
+    const empty = $derived(chats.length === 0 && invites.length === 0 && archived.length === 0);
 
     // Clock tick for relative timestamps and presence-dot recency, into the rows as a prop.
     const tick = $derived(clockTick());
@@ -58,6 +62,7 @@
     // rebuild; rows persist here, so re-stamp on list shape / selection changes.
     $effect(() => {
         chats;
+        archived;
         invites;
         paneCommunityId;
         openChat;
@@ -66,12 +71,22 @@
 
     // The pane's bottom fadeout hides over an empty list: it exists to soften a
     // scroller, and over the empty state it just washes out the intro.
-    $effect(() => { setListHasRows(paneCommunityId ? channelsShown : (chats.length + invites.length) > 0); });
+    $effect(() => { setListHasRows(paneCommunityId ? channelsShown : (chats.length + invites.length + archived.length) > 0); });
 </script>
 
 {#if paneCommunityId}
     {#key paneCommunityId}<ChannelList communityId={paneCommunityId} pane {h} onShown={(on) => (channelsShown = on)} />{/key}
 {:else}
+    {#if archived.length}
+        <!-- With nothing else listed there is nothing to pull past, so it shows outright. -->
+        <ArchiveRow {h} chats={archived} forced={chats.length + invites.length === 0}>
+            {#snippet rows()}
+                {#each archived as chat (chat.id)}
+                    <ChatlistRow {h} {chat} pinned={snap.pinned.includes(chat.id)} {tick} />
+                {/each}
+            {/snippet}
+        </ArchiveRow>
+    {/if}
     {#each invites as invite (invite.community_id)}
         <InviteRow {invite} {h} />
     {/each}

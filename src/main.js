@@ -1038,10 +1038,100 @@ async function ensurePinnedLoaded() {
 }
 
 /**
+ * Archived DMs: chat id → when it was archived (unix ms), synced across the account's
+ * own devices. Consulted at render time, like the pins.
+ * @type {Object<string, number>}
+ */
+let objArchivedChats = {};
+let _archiveLoaded = false;
+
+/** Pull the archive once, from whichever path paints the chat list first (see ensurePinnedLoaded). */
+async function ensureArchiveLoaded() {
+    if (_archiveLoaded) return;
+    _archiveLoaded = true;
+    try {
+        objArchivedChats = await invoke('get_archived_chats') || {};
+        readArchivedChats();
+        listChanged();
+    } catch (e) {
+        _archiveLoaded = false;
+        console.error('Failed to load archived chats:', e);
+    }
+}
+
+/**
+ * Whether a DM sits in the archive: nothing has been said in it since the newest message the
+ * archiving device had seen. Judged from the messages themselves, so a reply brings it back on
+ * every device even before the archive list catches up.
+ * @param {Chat} chat
+ */
+function chatIsArchived(chat) {
+    if (!chat || chatIsGroup(chat)) return false;
+    const at = objArchivedChats[chat.id];
+    return at !== undefined && getChatOwnSortTimestamp(chat) <= at;
+}
+
+/**
+ * Nothing in the archive waits on you: the device that archived a chat read it then. Not an
+ * explicit read, so a chat deliberately marked unread inside the archive stays so.
+ */
+function readArchivedChats() {
+    for (const chat of arrChats) {
+        if (!chatIsArchived(chat) || computeRowUnreadCount(chat) === 0) continue;
+        markChatCaughtUp(chat);
+        chatChanged(chat);
+    }
+}
+
+const _archiveRevoking = new Set();
+
+/** Forget the archives a newer message has outlived. */
+function revokeOutlivedArchives() {
+    for (const chat of arrChats) {
+        const at = objArchivedChats[chat.id];
+        if (at === undefined || _archiveRevoking.has(chat.id)) continue;
+        const activeAt = getChatOwnSortTimestamp(chat);
+        if (activeAt <= at) continue;
+        _archiveRevoking.add(chat.id);
+        invoke('revoke_chat_archive', { chatId: chat.id, activeAt })
+            .then((map) => {
+                if (!map) return;
+                objArchivedChats = map;
+                listChanged();
+            })
+            .catch((e) => console.warn('[Archive] revoke failed:', e))
+            .finally(() => _archiveRevoking.delete(chat.id));
+    }
+}
+
+/** Archive a DM, or bring it back. Archiving reads it. The list repaints from the change event. */
+async function setChatArchived(chat, archive) {
+    if (blockedBySync()) return;
+    try {
+        // The newest message seen here, not the clock: a message this device has yet to receive
+        // must bring the chat back wherever it lands, not hide behind a later timestamp.
+        const at = archive ? getChatOwnSortTimestamp(chat) : null;
+        await invoke('set_chat_archived', { chatId: chat.id, at });
+        if (archive) {
+            markChatCaughtUp(chat, /* explicit */ true);
+            chatChanged(chat);
+        }
+        if (!archive) return showToast('Chat Unarchived');
+        let hinted = false;
+        try { hinted = !!localStorage.getItem('archive_hint_shown'); localStorage.setItem('archive_hint_shown', '1'); } catch (_) {}
+        showToast(hinted ? 'Chat Archived' : 'Chat Archived. Pull or scroll past the top of your chats to find it.');
+    } catch (e) {
+        showToast(e);
+    }
+}
+
+/**
  * The one chat-list ordering: pinned first in pin order, then newest activity.
  */
 function sortChats() {
     ensurePinnedLoaded();
+    ensureArchiveLoaded();
+    revokeOutlivedArchives();
     // Keys once per chat, not per comparison: a community row's key spans its siblings,
     // which inside the comparator made every sort quadratic in the chat count.
     const communityNewest = new Map();
@@ -2115,6 +2205,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // rather than correcting itself an IPC hop later.
                 arrPinnedChats = hotReloadState.pinned || [];
                 _pinnedLoaded = true;
+                await ensureArchiveLoaded();
                 // Before the first paint: Streamer Mode decides which names may show.
                 await loadSyncedSettings();
 

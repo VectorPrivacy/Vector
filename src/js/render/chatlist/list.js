@@ -88,6 +88,7 @@ function chatlistSnapshot() {
  * @typedef {Object} ChatlistHelpers
  * @property {(chat: object) => boolean} chatIsVisibleInList
  * @property {(chat: object) => boolean} chatIsGroup
+ * @property {(chat: object) => boolean} chatIsArchived
  * @property {(npub: string) => object|null} getProfile
  * @property {(profileOrNpub: object|string) => string} getName
  * @property {(chat: object) => number} computeListRowBadgeCount
@@ -135,6 +136,7 @@ function chatlistHelpers() {
         // membership + row policy
         chatIsVisibleInList,
         chatIsGroup,
+        chatIsArchived,
         getProfile,
         getName,
         computeListRowBadgeCount,
@@ -379,7 +381,8 @@ function ensureListSignals() {
 /** The list's order and membership as one string — what a reorder can change. */
 function listShapeKey() {
     let key = '';
-    for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + ',';
+    // Archive state too: a chat already at the top changes no order when a reply brings it back.
+    for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + (chatIsArchived(c) ? '~,' : ',');
     return key;
 }
 

@@ -218,6 +218,10 @@
   mask-image: url("./icons/pin.svg");
 }
 
+.icon-archive {
+  mask-image: url("./icons/archive.svg");
+}
+
 .icon-chevron-double-left {
   mask-image: url("./icons/chevron-double-left.svg");
 }
@@ -3724,6 +3728,72 @@ body.mobile [contenteditable] * {
    A multi-channel community renders one row, with its channels underneath. Rows are
    deliberately lighter than a `.chatlist-contact`: they're a level down the hierarchy,
    not peers of it. */
+/* Archived Chats: a row tucked above the list that a pull draws down, and the chats it unfolds.
+   The slot clips it from the bottom up, so it descends into view as the slot opens. */
+.chatlist-archive-slot {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+.chatlist-archive-slot.settling {
+  transition: height 0.2s cubic-bezier(0.33, 1, 0.68, 1);
+}
+.chatlist-archive {
+  flex-shrink: 0;
+  content-visibility: visible;
+}
+.chatlist-archive-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.chatlist-archive-icon .icon {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+body.ws #chat-list .chatlist-archive-icon {
+  width: 40px;
+  height: 40px;
+}
+body.ws #chat-list .chatlist-archive-icon .icon {
+  width: 18px;
+  height: 18px;
+}
+.chatlist-archive-count {
+  padding: 2.5px 5.5px;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 11px;
+  min-width: 16px;
+  text-align: center;
+  box-sizing: border-box;
+}
+.chatlist-archive-count.has-unread {
+  background: var(--primary-color);
+  color: #000;
+}
+/* Few, and only drawn when unfolded: the list's pre-render observer watches its direct rows only. */
+.chatlist-archived .chatlist-contact {
+  content-visibility: visible;
+}
+.chatlist-archived {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .chatlist-expander {
   display: flex;
   align-items: center;

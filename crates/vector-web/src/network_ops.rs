@@ -1050,6 +1050,7 @@ pub(crate) fn publish_projection(pref: Pref) {
         let json = match pref {
             Pref::Notify => notify::to_wire().to_json(),
             Pref::Banners => synced_prefs::load_hidden_banners().to_json(),
+            Pref::Archive => synced_prefs::load_archive().to_json(),
             Pref::Mutes => {
                 let mut list = IdList::default();
                 let state = STATE.lock().await;

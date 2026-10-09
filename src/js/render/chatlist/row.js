@@ -1,6 +1,6 @@
 /**
  * Chat list row context menu: right-click / long-press actions for a
- * `.chatlist-contact` row (mark read/unread, mute, pin, block, leave). The rows
+ * `.chatlist-contact` row (mark read/unread, mute, pin, archive, block, leave). The rows
  * themselves are the Svelte island (src/components/chatlist/), which gets this
  * through the mount-time `h` helper bundle.
  */
@@ -58,6 +58,12 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
                     showToast(e);
                 }
             },
+        });
+        const fArchived = chatIsArchived(chat);
+        items.push({
+            label: fArchived ? 'Unarchive' : 'Archive',
+            icon: 'archive',
+            onClick: () => setChatArchived(chat, !fArchived),
         });
     }
     const rowCommunity = isGroup ? chat.metadata?.custom_fields?.community_id : null;

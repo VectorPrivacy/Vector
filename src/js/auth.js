@@ -227,6 +227,8 @@ async function login(skipAnimations = false) {
             // sibling-device edit in afterwards.
             _pinnedLoaded = false; // a fresh account's pins are not the last one's
             await ensurePinnedLoaded();
+            _archiveLoaded = false;
+            await ensureArchiveLoaded();
             loadRailLayout();
             loadHiddenBanners();
             // Awaited: Streamer Mode decides which names the first paint may show.

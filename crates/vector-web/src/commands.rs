@@ -209,6 +209,22 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Banners);
             Ok(json!(list.ids))
         }
+        "get_archived_chats" => Ok(json!(vector_core::synced_prefs::load_archive().times())),
+        "set_chat_archived" => {
+            let at: Option<u64> = a.de("at")?;
+            let map = vector_core::synced_prefs::set_archived(&a.str("chatId")?, at)?;
+            vector_core::traits::emit_event_json("archived_chats_updated", json!(map.times()));
+            crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Archive);
+            Ok(json!(map.times()))
+        }
+        "revoke_chat_archive" => {
+            let active_at: u64 = a.de("activeAt")?;
+            let (map, changed) = vector_core::synced_prefs::revoke_archive(&a.str("chatId")?, active_at)?;
+            if changed {
+                vector_core::traits::emit_event_json("archived_chats_updated", json!(map.times()));
+            }
+            Ok(json!(map.times()))
+        }
         "locate_message" => to_value(db::events::locate_message(&a.str("messageId")?)?),
         "get_synced_settings" => Ok(vector_core::synced_prefs::load_settings().view()),
         "set_advanced_mode" => {
