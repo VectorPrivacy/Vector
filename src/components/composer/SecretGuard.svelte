@@ -10,6 +10,18 @@
     const title = $derived(key ? 'This is a private key' : st.kind === 'seed_phrase' ? 'This is a seed phrase' : 'This is a wallet key');
     let keep = $state(null);
     $effect(() => { st.tick; if (st.active) keep?.focus(); });
+
+    // Send Anyway waits ten seconds from each opening: long enough to read, and no
+    // reflexive tap or double press can reach it.
+    const WAIT = 10;
+    let wait = $state(WAIT);
+    $effect(() => {
+        st.tick;
+        if (!st.active) return;
+        wait = WAIT;
+        const timer = setInterval(() => { if (--wait <= 0) clearInterval(timer); }, 1000);
+        return () => clearInterval(timer);
+    });
 </script>
 
 <svelte:window onkeydown={(e) => { if (st.active && !st.closing && e.key === 'Escape') h.answer('keep'); }} />
@@ -54,7 +66,9 @@
             {#if st.timer === 'offer'}
                 <button type="button" class="vcard-btn ghost" onclick={() => h.answer('timer')}>Set a Self-Destruct Timer</button>
             {/if}
-            <button type="button" class="vcard-btn ghost secret-send" onclick={() => h.answer('send')}>Send Anyway</button>
+            <button type="button" class="vcard-btn ghost secret-send" disabled={wait > 0} onclick={() => { if (wait <= 0) h.answer('send'); }}>
+                {wait > 0 ? `Send Anyway (${wait})` : 'Send Anyway'}
+            </button>
         </div>
     </div>
 </div>

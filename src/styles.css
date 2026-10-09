@@ -2261,8 +2261,8 @@ html, body {
 .secret-title { color: #ff5d6c; }
 .secret-loud { color: #ffb3ba; }
 .vcard-lead b { color: #fff; }
-.vcard-btn.secret-send { color: #ff5d6c; }
-.vcard-btn.secret-send:hover { background-color: rgba(255, 93, 108, 0.12); }
+.vcard-btn.secret-send { color: #ff5d6c; font-variant-numeric: tabular-nums; }
+.vcard-btn.secret-send:not(:disabled):hover { background-color: rgba(255, 93, 108, 0.12); }
 .keys-warn { color: #fff; }
 .keys-row {
   display: flex;
