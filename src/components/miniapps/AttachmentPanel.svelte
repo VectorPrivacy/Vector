@@ -49,15 +49,13 @@
                 <span class="attachment-panel-label">Folder</span>
             </button>
         {/if}
-        {#if st.commandsShown}
-            <button class="attachment-panel-item" class:disabled={st.commandsDisabled}
-                    onclick={h.commands} onmouseenter={(e) => h.commandsEnter(e.currentTarget)} onmouseleave={h.commandsLeave}>
-                <div class="attachment-panel-btn">
-                    <svg class="attachment-panel-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 22L17 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </div>
-                <span class="attachment-panel-label">Commands</span>
-            </button>
-        {/if}
+        <button class="attachment-panel-item" class:disabled={st.commandsDisabled}
+                onclick={h.commands} onmouseenter={(e) => h.commandsEnter(e.currentTarget)} onmouseleave={h.commandsLeave}>
+            <div class="attachment-panel-btn">
+                <svg class="attachment-panel-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 22L17 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <span class="attachment-panel-label">Commands</span>
+        </button>
         <button class="attachment-panel-item attachment-panel-miniapps" onclick={h.miniapps}>
             <div class="attachment-panel-btn"><span class="icon icon-gamepad"></span></div>
             <span class="attachment-panel-label">Mini Apps</span>

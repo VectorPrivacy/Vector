@@ -398,12 +398,8 @@ function toggleAttachmentPanel() {
         VectorSvelte.setAttachmentVisible(true, `calc(${chatBoxHeight + 10}px + var(--floor, 0px) + var(--kb, 0px))`);
         VectorSvelte.setAttachmentOpen(true);
         
-        // Commands: only in chats with known bots; grayed while a draft exists.
-        const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
-        VectorSvelte.attachmentPatch({
-            commandsShown: showCmds,
-            commandsDisabled: showCmds && domChatMessageInput.value.trim().length > 0,
-        });
+        // Commands: in every chat (Vector's own are everywhere); grayed while a draft exists.
+        VectorSvelte.attachmentPatch({ commandsDisabled: domChatMessageInput.value.trim().length > 0 });
         VectorSvelte.attachmentPulse('main');
     } else {
         // Hide the attachment panel

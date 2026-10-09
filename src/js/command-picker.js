@@ -1078,8 +1078,8 @@ function initCommandSelector(textarea, io) {
             }
         },
         /** Whether `chatId` (default: the open chat) has any known bots. Also
-         *  warms the snapshot, so a later caller (e.g. the attachment menu) sees
-         *  it even on the first look at a chat. */
+         *  warms the snapshot, so the command list has them even on the first
+         *  look at a chat. */
         hasBots(chatId) {
             const id = chatId || io.chatId();
             if (!id) return false;

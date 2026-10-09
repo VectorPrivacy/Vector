@@ -1105,8 +1105,7 @@ async function openChat(contact, { reread = true } = {}) {
     const openSeq = ++_openChatSeq;
     wsSyncOpenChat();
     updateSelfDestructIndicator(contact);
-    // Warm the command-bot snapshot so the attachment menu's Commands item
-    // (bot-chats only) is ready by the time the panel opens.
+    // Warm the command-bot snapshot so the command list has the chat's bots on first open.
     if (commandCtrl && commandCtrl.hasBots) commandCtrl.hasBots(contact);
     // Snapshot last_read BEFORE the open-time markAsRead — the divider needs
     // the stale value to find the boundary, but we still want to advance

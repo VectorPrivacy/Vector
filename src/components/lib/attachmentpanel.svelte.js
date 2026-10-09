@@ -5,7 +5,6 @@ const p = $state({
     visible: false, bottom: '',   // the root's `visible` class and offset above the composer
     view: 'main',              // main | miniapps | pivx
     folderShown: false,
-    commandsShown: false,
     commandsDisabled: false,
     search: '',
     tick: { main: 0, grid: 0, pivx: 0 },

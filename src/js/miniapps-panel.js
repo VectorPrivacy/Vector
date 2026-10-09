@@ -738,7 +738,7 @@ async function wireMiniAppsUi() {
     VectorSvelte.setAttachmentHandlers({
         file: attachmentPickFile,
         folder: attachmentPickFolder,
-        // Commands: bot chats only. Drops a `/` into the composer and opens the command list.
+        // Commands: drops a `/` into the composer and opens the command list.
         commands: () => {
             if (VectorSvelte.attachmentState().commandsDisabled) return;
             closeAttachmentPanel();
