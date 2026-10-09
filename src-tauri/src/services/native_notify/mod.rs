@@ -14,7 +14,7 @@
 //! at it under that platform's `cfg`.
 
 // The helpers for backends go unused on a platform until it has one.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,12 @@ mod macos;
 #[cfg(target_os = "macos")]
 type Platform = macos::MacOS;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+type Platform = linux::Linux;
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 type Platform = Unsupported;
 
 /// Which delivered notifications a retraction removes, judged by their [`Activation`].
@@ -54,10 +59,10 @@ pub trait Backend {
     fn retract(matches: Matcher);
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub struct Unsupported;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl Backend for Unsupported {
     fn init(_: &AppHandle) -> Result<(), String> {
         Err("no native notification backend on this platform".into())
@@ -156,6 +161,8 @@ pub enum Action {
     Mute,
 }
 
+// Linux keeps activations in memory rather than round-tripping them through the OS.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 impl Action {
     fn as_str(self) -> &'static str {
         match self {
@@ -219,6 +226,7 @@ impl Activation {
     }
 
     /// A query string that fits any platform's opaque "arguments" or "user info" slot.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn encode(&self) -> String {
         let mut s = url::form_urlencoded::Serializer::new(String::new());
         s.append_pair("a", self.action.as_str())
@@ -237,6 +245,7 @@ impl Activation {
     }
 
     /// Reverse of [`encode`](Self::encode); `reply` is whatever the user typed, if anything.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn decode(encoded: &str, reply: Option<&str>) -> Option<Self> {
         let mut map: HashMap<String, String> =
             url::form_urlencoded::parse(encoded.as_bytes()).into_owned().collect();
