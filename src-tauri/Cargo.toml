@@ -276,7 +276,7 @@ whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 # Native file clipboard (read/write file references). Already in the lock via
 # the wry/tao stack — promoted to direct deps with the pasteboard features on.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSProcessInfo", "NSBundle", "NSDictionary", "NSSet", "NSURL", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 # ScreenCaptureKit: a shared screen's sound, minus our own process, where the
 # webview's picker cannot give any.
@@ -288,6 +288,8 @@ objc2-core-foundation = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", features = ["CGWindow"] }
 block2 = "0.6"
 dispatch2 = "0.3"
+# Native notifications (services/native_notify/macos.rs).
+objc2-user-notifications = { version = "0.3.1", features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger"] }
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }

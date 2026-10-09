@@ -19,6 +19,7 @@ pub(crate) fn renamed(name: &str, ext: &str) -> String {
 }
 
 /// The settings key for the video preset: `small`, `balanced` (the default), `high` or `original`.
+#[cfg_attr(not(feature = "video"), allow(dead_code))]
 pub(crate) const QUALITY_SETTING: &str = "video_quality";
 
 /// Whether this build and device can compress video at all.

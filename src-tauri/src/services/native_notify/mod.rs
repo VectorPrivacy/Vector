@@ -14,7 +14,7 @@
 //! at it under that platform's `cfg`.
 
 // The helpers for backends go unused on a platform until it has one.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,12 @@ mod windows;
 #[cfg(windows)]
 type Platform = windows::Windows;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+type Platform = macos::MacOS;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 type Platform = Unsupported;
 
 /// Which delivered notifications a retraction removes, judged by their [`Activation`].
@@ -49,10 +54,10 @@ pub trait Backend {
     fn retract(matches: Matcher);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct Unsupported;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Backend for Unsupported {
     fn init(_: &AppHandle) -> Result<(), String> {
         Err("no native notification backend on this platform".into())

@@ -6324,7 +6324,10 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a3f5ec77a81d9e0c5a0b32159b0cb143d7086165e79708351e02bf37dfc65cd"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.1",
  "objc2 0.6.4",
+ "objc2-core-location 0.3.1",
  "objc2-foundation 0.3.2",
 ]
 
@@ -11940,6 +11943,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "objc2-user-notifications 0.3.1",
  "openssl",
  "opus",
  "rand 0.8.7",

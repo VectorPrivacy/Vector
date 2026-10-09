@@ -45,6 +45,8 @@
     "category": "SocialNetworking",
     "macOS": {
       "entitlements": "./Entitlements.plist",
+      "signingIdentity": "-",
+      "hardenedRuntime": false,
       "dmg": {
 				"background": "./assets/dmg_background.png",
 				"windowSize": {
