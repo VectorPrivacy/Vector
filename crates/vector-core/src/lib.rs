@@ -1051,6 +1051,10 @@ impl VectorCore {
         let client = state::nostr_client().ok_or(VectorError::Other("Not connected".into()))?;
         let my_public_key = state::my_public_key().ok_or(VectorError::Other("Not logged in".into()))?;
         let pubkey = PublicKey::from_bech32(to_npub).map_err(|e| VectorError::Nostr(e.to_string()))?;
+        // Notes: nobody to tell.
+        if pubkey == my_public_key {
+            return Ok(());
+        }
 
         let expiry = Timestamp::from_secs(Timestamp::now().as_secs() + 30);
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "typing")
