@@ -44,6 +44,8 @@
             emojiTags: veiled ? [] : p.status?.emoji_tags || [],
             bannerSrc: h.getProfileBannerSrc(p),
             avatarSrc: h.getProfileAvatarSrc(p),
+            // The big picture wants the original: a thumb is small, and a new contact's may not exist yet.
+            avatarFull: h.getProfileAvatarSrc(p, true),
             hasBanner: !veiled && !!p.banner,
             secondary: veiled ? h.getName(p) : p.nickname || p.name || p.display_name || (p.mine ? 'Anonymous' : id.substring(0, 10) + '…'),
             bot: !!p.bot,
@@ -63,7 +65,7 @@
 
     // ── pictures: the profile's, or the pick previewed in Edit Mode ──
     const bannerSrc = $derived(edit.active && edit.preview.banner ? edit.preview.banner : (m?.bannerSrc || ''));
-    const avatarSrc = $derived(edit.active && edit.preview.avatar ? edit.preview.avatar : (m?.avatarSrc || ''));
+    const avatarSrc = $derived(edit.active && edit.preview.avatar ? edit.preview.avatar : (m?.avatarFull || ''));
     let bannerBroken = $state(false);
     let avatarBroken = $state(false);
     $effect(() => { bannerSrc; bannerBroken = false; });
