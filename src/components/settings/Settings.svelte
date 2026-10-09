@@ -30,7 +30,7 @@
     let { h } = $props();
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
-    //    setAutoDownloadLimit(bytes), clearStorage(), setBackgroundService(on), batteryWarningTap(),
+    //    setAutoDownloadLimit(bytes), setVideoQuality(quality), clearStorage(), setBackgroundService(on), batteryWarningTap(),
     //    security: {...}, setAdvancedMode(on), copyLogs(), logout()
 
     const sc = settingsScreen();
@@ -44,6 +44,9 @@
     const LIMITS = [
         [1048576, '1 MB'], [5242880, '5 MB'], [10485760, '10 MB'],
         [26214400, '25 MB'], [52428800, '50 MB'], [104857600, '100 MB'],
+    ].map(([value, label]) => ({ value, label }));
+    const VIDEO_QUALITIES = [
+        ['small', 'Small'], ['balanced', 'Balanced'], ['high', 'High'], ['original', 'Original'],
     ].map(([value, label]) => ({ value, label }));
 
     // Each theme's swatch is its palette, top to bottom; Vector wears its own logo instead.
@@ -96,7 +99,7 @@
         {
             id: 'storage', label: 'Storage', icon: 'folder',
             anchors: [
-                { id: 'storage', label: 'Storage', icon: 'folder', keys: 'storage usage clear auto-download download limit gallery hide media' },
+                { id: 'storage', label: 'Storage', icon: 'folder', keys: 'storage usage clear auto-download download limit gallery hide media video quality compression compress' },
             ],
         },
         {
@@ -259,6 +262,14 @@
         <Select class="vselect-narrow" options={LIMITS} value={sc.storage.limit} disabled={!sc.storage.autoDownload}
                 onchange={(v) => h.setAutoDownloadLimit(v)} />
     </div>
+    {#if sc.storage.videoShown}
+        <div class="form-group st-line">
+            <InfoIcon side="right" flex onclick={() => h.help('videoQuality')} />
+            <span class="st-line-label">Video Quality</span>
+            <Select class="vselect-narrow" options={VIDEO_QUALITIES} value={sc.storage.videoQuality}
+                    onchange={(v) => h.setVideoQuality(v)} />
+        </div>
+    {/if}
     <div class="form-group st-line">
         <InfoIcon side="right" flex onclick={() => h.help('clearStorage')} />
         <span class="st-line-label">Clear Storage</span>

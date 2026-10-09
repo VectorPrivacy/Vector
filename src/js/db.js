@@ -1,3 +1,12 @@
+/** The video preset: 'small', 'balanced', 'high' or 'original'. */
+async function loadVideoQuality() {
+    return await invoke('get_sql_setting', { key: 'video_quality' }) || 'balanced';
+}
+
+async function saveVideoQuality(quality) {
+    await invoke('set_sql_setting', { key: 'video_quality', value: quality });
+}
+
 async function saveMaxAutoDownloadBytes(bytes) {
     await invoke('set_sql_setting', { key: 'max_auto_download_bytes', value: String(bytes) });
 }

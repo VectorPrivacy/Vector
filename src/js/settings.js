@@ -2,6 +2,7 @@ const { open } = window.__TAURI__.dialog;
 
 let AUTO_DOWNLOAD_ENABLED = true;
 let MAX_AUTO_DOWNLOAD_BYTES = 10_485_760;
+let VIDEO_QUALITY = 'balanced';
 /** Smallest selectable auto-download limit; also the value a migrated-off account lands on. */
 const AUTO_DOWNLOAD_MIN_BYTES = 1_048_576;
 
@@ -866,13 +867,21 @@ async function initAutoDownloadSettings() {
     await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
 }
 
+/** Whether this device can compress the videos it sends. */
+function videoCompressionOffered() {
+    return !!platformFeatures?.video_compression && platformFeatures.os !== 'android';
+}
+
 /** Refresh the Storage breakdown and reflect the auto-download and gallery values. */
 async function initStorageSection() {
     VectorSvelte.setStorageLoading(true);
     const storageInfo = await getStorageInfo();
     if (storageInfo) VectorSvelte.setStorageDistribution(storageInfo.type_distribution);
     else VectorSvelte.setStorageLoading(false);
-    VectorSvelte.setSettingsScreen({ storage: { autoDownload: AUTO_DOWNLOAD_ENABLED, limit: MAX_AUTO_DOWNLOAD_BYTES } });
+    VectorSvelte.setSettingsScreen({ storage: {
+        autoDownload: AUTO_DOWNLOAD_ENABLED, limit: MAX_AUTO_DOWNLOAD_BYTES,
+        videoQuality: VIDEO_QUALITY, videoShown: videoCompressionOffered(),
+    } });
 
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
     // and Vector Web on a phone is mobile without a gallery to hide from.
@@ -1208,6 +1217,7 @@ async function initSettings() {
     // Auto-download toggle + limit (migrates pre-split accounts). At boot so the
     // gate in message-row.js is correct before Settings is opened.
     await initAutoDownloadSettings();
+    VIDEO_QUALITY = await loadVideoQuality();
 
     // The network in use, and the settings of each network this build has. Signing in changes
     // whose settings they are, so they are read again whatever the view says.
@@ -1905,6 +1915,7 @@ const SETTINGS_HELP = {
     gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
     autoDownloadLimit: ['Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.'],
+    videoQuality: ['Video Quality', 'How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows.'],
     clearStorage: ['Clear Storage', 'Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.'],
     encryption: ['Local Encryption', 'Protects your messages and keys if your device is lost or stolen.<br><br>Disabling speeds up app launch but stores data in plain text.', 'vector-check.svg'],
     unlockMethod: ['Unlock Method',
@@ -2051,6 +2062,11 @@ const SETTINGS_HELPERS = {
     setAutoDownload: async (on) => {
         AUTO_DOWNLOAD_ENABLED = on;
         await saveAutoDownloadEnabled(on);
+    },
+    setVideoQuality: async (quality) => {
+        VIDEO_QUALITY = quality;
+        VectorSvelte.setSettingsScreen({ storage: { videoQuality: quality } });
+        await saveVideoQuality(quality);
     },
     setAutoDownloadLimit: async (bytes) => {
         MAX_AUTO_DOWNLOAD_BYTES = bytes;

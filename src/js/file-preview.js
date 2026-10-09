@@ -375,13 +375,13 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     stopCompressionPolling();
 
     // Compress shows for any image above 25KB, GIFs included, and for videos above 1MB where the
-    // build has an encoder (smaller clips are already under its bitrate); Keep Metadata for any
-    // non-GIF image (GIFs carry none). Mini Apps don't get either option.
+    // build has an encoder and the Video Quality preset compresses (a smaller clip isn't worth the
+    // wait); Keep Metadata for any non-GIF image (GIFs carry none). Mini Apps don't get either option.
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const MIN_VIDEO_COMPRESS_SIZE = 1024 * 1024;
     const isGif = ext === 'gif';
     const offerOptions = isImage && !isGif && !isMiniApp;
-    const compressVideo = isVideo && !isAndroid && !!platformFeatures?.video_compression && fileSize > MIN_VIDEO_COMPRESS_SIZE;
+    const compressVideo = isVideo && videoCompressionOffered() && VIDEO_QUALITY !== 'original' && fileSize > MIN_VIDEO_COMPRESS_SIZE;
     const showCompress = !isMiniApp && ((isImage && fileSize > MIN_COMPRESS_SIZE) || compressVideo);
 
     VectorSvelte.fpOpen({

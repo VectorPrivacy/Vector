@@ -1,5 +1,5 @@
-//! Video compression for sending: any common phone or web video in, H.264 + AAC MP4 out,
-//! at most 720p, through the platform's hardware H.264 encoder. FFmpeg is a selective static
+//! Video compression for sending: any common phone or web video in, H.264 Main + AAC MP4 out,
+//! at most 720p and 30 fps, through the platform's hardware H.264 encoder. FFmpeg is a selective static
 //! build (scripts/build-ffmpeg.sh); rare containers and codecs are not compiled in, and frames
 //! scale through the photo path's SIMD resizer rather than swscale.
 
@@ -9,12 +9,69 @@ use format::Pixel;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Longest side of a compressed video.
-pub const MAX_LONG_SIDE: u32 = 1280;
-/// Bits per pixel per frame the video encoder is given: ~2.2 Mbit/s at 720p30.
-const BITS_PER_PIXEL: f64 = 0.08;
-const AUDIO_BIT_RATE: usize = 128_000;
 const AUDIO_RATE: i32 = 48_000;
+/// Weak decoders (Android Go and the like) stall above Main@3.1, which tops out at 720p30.
+const MAX_FPS: i32 = 30;
+const PROFILE_MAIN: &str = "77";
+const LEVEL_3_1: &str = "31";
+/// The least the video is given, in bits per pixel per frame, against a source that misreports.
+const MIN_BITS_PER_PIXEL: f64 = 0.02;
+/// Below this share of the source's size an encode is worth running.
+const WORTH_IT: f64 = 0.95;
+
+/// How hard a video is squeezed. The bitrate follows the source's own, so a lean clip is never
+/// inflated: hardware encoders spend whatever they are given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    Small,
+    Balanced,
+    High,
+}
+
+impl Quality {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "small" => Some(Self::Small),
+            "balanced" => Some(Self::Balanced),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// The box the frame fits in, either way round.
+    fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::Small => (960, 540),
+            _ => (1280, 720),
+        }
+    }
+
+    /// The share of the source's bitrate kept, before scaling for fewer pixels and frames.
+    fn share(self) -> f64 {
+        match self {
+            Self::Small => 0.6,
+            Self::Balanced => 0.7,
+            Self::High => 0.85,
+        }
+    }
+
+    /// The most the video gets, in bits per second, for a frame that fills the box.
+    fn ceiling(self) -> f64 {
+        match self {
+            Self::Small => 900_000.0,
+            Self::Balanced => 1_500_000.0,
+            Self::High => 2_200_000.0,
+        }
+    }
+
+    fn audio_bit_rate(self) -> usize {
+        match self {
+            Self::Small => 64_000,
+            Self::Balanced => 96_000,
+            Self::High => 128_000,
+        }
+    }
+}
 
 /// Hardware H.264 encoders, the platform's first. `mpeg4` is FFmpeg's own encoder, compiled
 /// in only by a test build (FFMPEG_TEST_ENCODER=1) so the pipeline can run without hardware.
@@ -60,7 +117,8 @@ fn video_encoder() -> Option<ffmpeg::Codec> {
 
 /// Open the encoder with its per-platform options. Media Foundation defaults to Microsoft's
 /// software encoder, so the GPU's is asked for first; `camera_record` keeps it from dropping
-/// frames, and VBR spends the bitrate where the picture needs it.
+/// frames, and VBR spends the bitrate where the picture needs it. Profile and level are numeric:
+/// VideoToolbox takes them as its own options, the rest through the codec context.
 fn open_video_encoder(
     codec: ffmpeg::Codec,
     configured: impl Fn() -> Result<encoder::video::Video, String>,
@@ -75,6 +133,8 @@ fn open_video_encoder(
     let mut last = String::new();
     for opts in attempts {
         let mut dict = Dictionary::new();
+        dict.set("profile", PROFILE_MAIN);
+        dict.set("level", LEVEL_3_1);
         for (k, v) in opts.iter() {
             dict.set(k, v);
         }
@@ -91,22 +151,47 @@ pub fn available() -> bool {
     init().is_ok() && video_encoder().is_some()
 }
 
-/// Fit within MAX_LONG_SIDE keeping the aspect ratio, never upscaling, even sides for 4:2:0.
-fn output_size(w: u32, h: u32) -> (u32, u32) {
-    let scale = (f64::from(MAX_LONG_SIDE) / f64::from(w.max(h))).min(1.0);
+/// Fit within the box (`long` x `short`, either orientation) keeping the aspect ratio, never
+/// upscaling, even sides for 4:2:0.
+fn output_size(w: u32, h: u32, (long, short): (u32, u32)) -> (u32, u32) {
+    let scale = (f64::from(long) / f64::from(w.max(h))).min(f64::from(short) / f64::from(w.min(h))).min(1.0);
     let even = |v: u32| ((f64::from(v) * scale).round() as u32 & !1).max(2);
     (even(w), even(h))
 }
 
-/// Compress `input` to an MP4 at `output`. `progress` gets the fraction done; setting
-/// `cancel` stops at the next packet with an error.
-pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: impl FnMut(f32)) -> Result<VideoInfo, String> {
+/// The video bitrate for an output of `out_px` pixels at `out_fps`, from a source of `src_px`
+/// at `src_fps` running at `src_bps` (0 when unknown). Bitrate grows slower than pixel rate, so
+/// the source's is scaled by the ratio to the power 0.75.
+fn video_bit_rate(q: Quality, src_bps: f64, (src_px, src_fps): (f64, f64), (out_px, out_fps): (f64, f64)) -> f64 {
+    let (long, short) = q.bounds();
+    let ceiling = q.ceiling() * out_px / f64::from(long * short);
+    let floor = out_px * out_fps * MIN_BITS_PER_PIXEL;
+    let relative = src_bps * q.share() * ((out_px * out_fps) / (src_px * src_fps)).powf(0.75);
+    let target = if src_bps > 0.0 { relative.min(ceiling) } else { ceiling };
+    target.max(floor)
+}
+
+/// The bitrate a stream's parameters record, 0 when they leave it out.
+fn recorded_bit_rate(params: &codec::Parameters) -> f64 {
+    // SAFETY: reads a plain field of the stream's own parameters.
+    unsafe { (*params.as_ptr()).bit_rate.max(0) as f64 }
+}
+
+/// Compress `input` to an MP4 at `output`, or `Ok(None)` without writing when the result could
+/// not come out meaningfully smaller. `progress` gets the fraction done; setting `cancel` stops
+/// at the next packet with an error.
+pub fn compress(input: &Path, output: &Path, quality: Quality, cancel: &AtomicBool, mut progress: impl FnMut(f32)) -> Result<Option<VideoInfo>, String> {
     init()?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("video compression cancelled".into());
+    }
     let mut ictx = format::input(&input).map_err(err("open video"))?;
     let vin = ictx.streams().best(media::Type::Video).ok_or("no video stream")?;
     let vin_index = vin.index();
     let vin_tb = vin.time_base();
-    let fps = [vin.avg_frame_rate(), vin.rate()].into_iter().find(|r| r.numerator() > 0 && r.denominator() > 0).unwrap_or(Rational(30, 1));
+    let src_fps = [vin.avg_frame_rate(), vin.rate()].into_iter().find(|r| r.numerator() > 0 && r.denominator() > 0).unwrap_or(Rational(30, 1));
+    let fps = if f64::from(src_fps) > f64::from(MAX_FPS) { Rational(MAX_FPS, 1) } else { src_fps };
+    let vin_bps = recorded_bit_rate(&vin.parameters());
     let mut decoder = {
         let mut ctx = codec::context::Context::from_parameters(vin.parameters()).map_err(err("video decoder"))?;
         // Frame threads on every core; the count follows the machine.
@@ -116,8 +201,27 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
     let display_matrix = display_matrix(&vin);
     let ain = ictx.streams().best(media::Type::Audio).map(|s| (s.index(), s.time_base(), s.parameters()));
     let total_us = ictx.duration().max(1) as f64;
+    let ain_bps = ain.as_ref().map_or(0.0, |(_, _, p)| recorded_bit_rate(p));
+    // A container that records only its total: the video is what the audio leaves.
+    let vin_bps = if vin_bps > 0.0 { vin_bps } else { (ictx.bit_rate() as f64 - ain_bps).max(0.0) };
 
-    let (w, h) = output_size(decoder.width(), decoder.height());
+    let (w, h) = output_size(decoder.width(), decoder.height(), quality.bounds());
+    let fps_f = f64::from(fps.numerator()) / f64::from(fps.denominator());
+    let video_bps = video_bit_rate(
+        quality,
+        vin_bps,
+        (f64::from(decoder.width() * decoder.height()), f64::from(src_fps)),
+        (f64::from(w * h), fps_f),
+    );
+    let copy_audio = ain.as_ref().is_some_and(|(_, _, p)| p.id() == codec::Id::AAC && ain_bps > 0.0 && ain_bps <= quality.audio_bit_rate() as f64);
+    let audio_bps = match &ain {
+        None => 0.0,
+        Some(_) if copy_audio => ain_bps,
+        Some(_) => quality.audio_bit_rate() as f64,
+    };
+    if vin_bps > 0.0 && video_bps + audio_bps >= (vin_bps + ain_bps) * WORTH_IT {
+        return Ok(None);
+    }
     let mut octx = format::output(&output).map_err(err("create output"))?;
     let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
@@ -130,7 +234,6 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         .and_then(|mut f| f.find(|p| matches!(p, Pixel::YUV420P | Pixel::NV12)))
         .unwrap_or(Pixel::YUV420P);
     let enc_tb = fps.invert();
-    let fps_f = f64::from(fps.numerator()) / f64::from(fps.denominator());
     let configured = || -> Result<encoder::video::Video, String> {
         let mut venc = codec::context::Context::new_with_codec(vcodec).encoder().video().map_err(err("video encoder"))?;
         venc.set_width(w);
@@ -146,7 +249,7 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         venc.set_colorspace(decoder.color_space());
         venc.set_color_primaries(decoder.color_primaries());
         venc.set_color_transfer_characteristic(decoder.color_transfer_characteristic());
-        venc.set_bit_rate((f64::from(w * h) * fps_f.min(60.0) * BITS_PER_PIXEL) as usize);
+        venc.set_bit_rate(video_bps as usize);
         venc.set_gop((fps_f * 2.0).round().max(1.0) as u32);
         if global_header {
             venc.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -163,16 +266,16 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         ost.index()
     };
 
-    // Audio: AAC is copied as it is, anything else re-encoded to AAC.
+    // Audio: copied when it is lean AAC already, else re-encoded to AAC at the preset.
     let mut audio = match ain {
-        Some((index, tb, params)) if params.id() == codec::Id::AAC => {
+        Some((index, tb, params)) if copy_audio => {
             let mut ost = octx.add_stream(encoder::find(codec::Id::None)).map_err(err("audio stream"))?;
             ost.set_parameters(params);
             // SAFETY: a zero tag lets the MP4 muxer choose the right one for AAC.
             unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = 0 };
             Some(Audio::Copy { index, tb, out: ost.index() })
         }
-        Some((index, tb, params)) => Some(Audio::encoder(&mut octx, index, tb, params, global_header)?),
+        Some((index, tb, params)) => Some(Audio::encoder(&mut octx, index, tb, params, quality.audio_bit_rate(), global_header)?),
         None => None,
     };
 
@@ -222,7 +325,7 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
     }
     octx.write_trailer().map_err(err("write trailer"))?;
     progress(1.0);
-    Ok(VideoInfo { width: w, height: h, duration_ms: (total_us / 1000.0) as u64 })
+    Ok(Some(VideoInfo { width: w, height: h, duration_ms: (total_us / 1000.0) as u64 }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,12 +341,15 @@ fn drain_video(
     octx: &mut format::context::Output,
 ) -> Result<(), String> {
     while decoder.receive_frame(decoded).is_ok() {
+        // One frame a tick: a frame landing on a tick already filled is dropped, which is how a
+        // faster source comes down to the output rate.
+        let pts = decoded.timestamp().map(|t| t.rescale(in_tb, enc_tb)).unwrap_or(last_pts.map_or(0, |p| p + 1));
+        if last_pts.is_some_and(|p| pts <= p) {
+            continue;
+        }
+        *last_pts = Some(pts);
         // A fresh frame each time: the encoder keeps references to frames it still holds.
         let mut scaled = scale_frame(decoded, w, h, pix)?;
-        // Timestamps must rise strictly; two source frames can round onto one tick.
-        let pts = decoded.timestamp().map(|t| t.rescale(in_tb, enc_tb)).unwrap_or(last_pts.map_or(0, |p| p + 1));
-        let pts = last_pts.map_or(pts, |p| pts.max(p + 1));
-        *last_pts = Some(pts);
         scaled.set_pts(Some(pts));
         scaled.set_kind(ffmpeg::picture::Type::None);
         scaled.set_color_range(decoded.color_range());
@@ -371,7 +477,7 @@ impl Audio {
         }
     }
 
-    fn encoder(octx: &mut format::context::Output, index: usize, tb: Rational, params: codec::Parameters, global_header: bool) -> Result<Self, String> {
+    fn encoder(octx: &mut format::context::Output, index: usize, tb: Rational, params: codec::Parameters, bit_rate: usize, global_header: bool) -> Result<Self, String> {
         let decoder = codec::context::Context::from_parameters(params).map_err(err("audio decoder"))?.decoder().audio().map_err(err("audio decoder"))?;
         let codec = encoder::find(codec::Id::AAC).ok_or("no AAC encoder")?;
         let mut enc = codec::context::Context::new_with_codec(codec).encoder().audio().map_err(err("audio encoder"))?;
@@ -379,7 +485,7 @@ impl Audio {
         enc.set_rate(AUDIO_RATE);
         enc.set_channel_layout(layout);
         enc.set_format(format::Sample::F32(format::sample::Type::Planar));
-        enc.set_bit_rate(AUDIO_BIT_RATE);
+        enc.set_bit_rate(bit_rate);
         enc.set_time_base(Rational(1, AUDIO_RATE));
         if global_header {
             enc.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -503,16 +609,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_fits_720p_keeps_aspect_and_even_sides() {
-        assert_eq!(output_size(1920, 1080), (1280, 720));
-        assert_eq!(output_size(1080, 1920), (720, 1280));
-        assert_eq!(output_size(640, 360), (640, 360));
-        assert_eq!(output_size(1281, 721), (1280, 720));
-        assert_eq!(output_size(3, 3), (2, 2));
+    fn output_fits_the_box_keeps_aspect_and_even_sides() {
+        let hd = Quality::Balanced.bounds();
+        assert_eq!(output_size(1920, 1080, hd), (1280, 720));
+        assert_eq!(output_size(1080, 1920, hd), (720, 1280));
+        assert_eq!(output_size(640, 360, hd), (640, 360));
+        assert_eq!(output_size(1281, 721, hd), (1278, 720));
+        assert_eq!(output_size(1080, 1080, hd), (720, 720));
+        assert_eq!(output_size(3, 3, hd), (2, 2));
+        assert_eq!(output_size(1080, 1920, Quality::Small.bounds()), (540, 960));
+    }
+
+    #[test]
+    fn the_bitrate_follows_the_source_under_the_ceiling() {
+        let px = |w: u32, h: u32| f64::from(w * h);
+        // A lean 720p30 source keeps the preset's share of its own rate.
+        let lean = video_bit_rate(Quality::Balanced, 1_000_000.0, (px(1280, 720), 30.0), (px(1280, 720), 30.0));
+        assert!((lean - 700_000.0).abs() < 1.0);
+        // A heavy 1080p60 source stops at the ceiling for the box it lands in.
+        let heavy = video_bit_rate(Quality::Balanced, 20_000_000.0, (px(1920, 1080), 60.0), (px(1280, 720), 30.0));
+        assert!((heavy - 1_500_000.0).abs() < 1.0);
+        // Unknown source rate: the ceiling, scaled to the frame.
+        let unknown = video_bit_rate(Quality::Small, 0.0, (px(480, 270), 30.0), (px(480, 270), 30.0));
+        assert!((unknown - 225_000.0).abs() < 1.0);
+        // Never below the floor.
+        let starved = video_bit_rate(Quality::Small, 10_000.0, (px(640, 360), 30.0), (px(640, 360), 30.0));
+        assert!((starved - px(640, 360) * 30.0 * MIN_BITS_PER_PIXEL).abs() < 1.0);
+        // Each preset gives less than the one above it.
+        let at = |q| video_bit_rate(q, 3_000_000.0, (px(1920, 1080), 30.0), (px(1920, 1080), 30.0));
+        assert!(at(Quality::Small) < at(Quality::Balanced) && at(Quality::Balanced) < at(Quality::High));
     }
 
     struct Probe {
         dims: (u32, u32),
+        fps: f64,
+        profile: i32,
         duration_s: f64,
         audio: Option<codec::Id>,
         rotated: bool,
@@ -524,14 +655,18 @@ mod tests {
         let dec = codec::context::Context::from_parameters(v.parameters()).unwrap().decoder().video().unwrap();
         Probe {
             dims: (dec.width(), dec.height()),
+            fps: f64::from(v.avg_frame_rate()),
+            // SAFETY: reads a plain field of the stream's own parameters.
+            profile: unsafe { (*v.parameters().as_ptr()).profile },
             duration_s: ictx.duration() as f64 / 1e6,
             audio: ictx.streams().best(media::Type::Audio).map(|a| a.parameters().id()),
             rotated: display_matrix(&v).is_some(),
         }
     }
 
-    /// Every file in VIDEO_FIXTURES compresses to a playable MP4 that keeps its length,
-    /// orientation and sound. Needs an encoder: a hardware one, or a test build of FFmpeg.
+    /// Every file in VIDEO_FIXTURES compresses at each preset to a playable Main-profile MP4 of
+    /// at most 30 fps that keeps its length, orientation and sound, or is left alone. Needs an
+    /// encoder: a hardware one, or a test build of FFmpeg.
     #[test]
     #[ignore = "needs VIDEO_FIXTURES and an FFmpeg with an encoder"]
     fn fixtures_compress_and_keep_their_length_rotation_and_sound() {
@@ -539,22 +674,31 @@ mod tests {
         let out_dir = tempfile::tempdir().unwrap();
         let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         paths.sort();
-        for p in paths {
-            let src = probe(&p);
-            let out = out_dir.path().join(format!("{}.mp4", p.file_stem().unwrap().to_string_lossy()));
+        for q in [Quality::Small, Quality::Balanced, Quality::High] {
+        for p in &paths {
+            let src = probe(p);
+            let out = out_dir.path().join(format!("{q:?}-{}.mp4", p.file_stem().unwrap().to_string_lossy()));
             let t = std::time::Instant::now();
             let mut steps = Vec::new();
-            let info = compress(&p, &out, &AtomicBool::new(false), |f| steps.push(f)).unwrap();
+            let a = std::fs::metadata(p).unwrap().len();
+            let Some(info) = compress(p, &out, q, &AtomicBool::new(false), |f| steps.push(f)).unwrap() else {
+                println!("{q:?} {}: {} KB, left alone", p.display(), a / 1024);
+                assert!(!out.exists(), "nothing written");
+                continue;
+            };
             let got = probe(&out);
-            let (a, b) = (std::fs::metadata(&p).unwrap().len(), std::fs::metadata(&out).unwrap().len());
-            println!("{}: {}x{} -> {}x{}, {} KB -> {} KB, {:.0} ms", p.display(), src.dims.0, src.dims.1, got.dims.0, got.dims.1, a / 1024, b / 1024, t.elapsed().as_secs_f64() * 1e3);
-            assert_eq!(got.dims, output_size(src.dims.0, src.dims.1));
+            let b = std::fs::metadata(&out).unwrap().len();
+            println!("{q:?} {}: {}x{}@{:.0} -> {}x{}@{:.0}, {} KB -> {} KB ({:.0}%), {:.0} ms", p.display(), src.dims.0, src.dims.1, src.fps, got.dims.0, got.dims.1, got.fps, a / 1024, b / 1024, b as f64 * 100.0 / a as f64, t.elapsed().as_secs_f64() * 1e3);
+            assert_eq!(got.dims, output_size(src.dims.0, src.dims.1, q.bounds()));
             assert_eq!((info.width, info.height), got.dims);
+            assert!(got.fps <= f64::from(MAX_FPS) + 0.5, "{} fps", got.fps);
+            assert_eq!(got.profile, 77, "Main profile");
             assert!((got.duration_s - src.duration_s).abs() <= src.duration_s * 0.05 + 0.1, "{} s vs {} s", got.duration_s, src.duration_s);
             assert_eq!(got.audio.is_some(), src.audio.is_some(), "sound kept");
             assert!(got.audio.is_none_or(|id| id == codec::Id::AAC));
             assert_eq!(got.rotated, src.rotated, "orientation kept");
             assert!(steps.windows(2).all(|w| w[0] <= w[1]) && steps.last() == Some(&1.0), "progress runs to 1");
+        }
         }
     }
 
@@ -565,6 +709,6 @@ mod tests {
         let p = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).next().unwrap();
         let out = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(true);
-        assert!(compress(&p, &out.path().join("x.mp4"), &cancel, |_| {}).is_err());
+        assert!(compress(&p, &out.path().join("x.mp4"), Quality::Small, &cancel, |_| {}).is_err());
     }
 }

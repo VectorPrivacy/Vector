@@ -132,7 +132,7 @@ const screen = $state({
     theme: 'vector',
     privacy: { webPreviews: true, stripTracking: true, sendTyping: true, proxyMedia: true },
     battery: { shown: false, enabled: false, warning: false },
-    storage: { galleryShown: false, galleryHidden: false, autoDownload: true, limit: 10485760, clearing: false },
+    storage: { galleryShown: false, galleryHidden: false, autoDownload: true, limit: 10485760, videoQuality: 'balanced', videoShown: false, clearing: false },
     platform: { voice: false, updates: true },
     bridges: {
         enabled: false, lines: '', saved: '',   // `saved` is the persisted text: Apply gates on a diff

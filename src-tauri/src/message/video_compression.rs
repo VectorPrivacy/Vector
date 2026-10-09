@@ -18,6 +18,9 @@ pub(crate) fn renamed(name: &str, ext: &str) -> String {
     format!("{stem}.{ext}")
 }
 
+/// The settings key for the video preset: `small`, `balanced` (the default), `high` or `original`.
+pub(crate) const QUALITY_SETTING: &str = "video_quality";
+
 /// Whether this build and device can compress video at all.
 pub(crate) fn available() -> bool {
     #[cfg(feature = "video")]
@@ -63,8 +66,8 @@ pub(crate) fn cancel_all() {
     }
 }
 
-/// Compress the video at `path` for sending: an MP4 kept only when at least a tenth smaller,
-/// else the original file (already under the target bitrate, it would only lose detail),
+/// Compress the video at `path` for sending at the account's preset: an MP4 kept only when at
+/// least a tenth smaller, else the original file (already lean, it would only lose detail),
 /// which is left on disk to stream rather than read into memory.
 pub(crate) fn compress_file(path: &str) -> Result<CachedCompressedImage, String> {
     let original_size = std::fs::metadata(path).map_err(|e| format!("Failed to read video: {e}"))?.len();
@@ -77,7 +80,7 @@ pub(crate) fn compress_file(path: &str) -> Result<CachedCompressedImage, String>
         compressed_size: original_size,
     };
     match encode(path) {
-        Ok(out) if (out.len() as u64) * 10 <= original_size * 9 => Ok(CachedCompressedImage {
+        Ok(Some(out)) if (out.len() as u64) * 10 <= original_size * 9 => Ok(CachedCompressedImage {
             compressed_size: out.len() as u64,
             bytes: Arc::new(out),
             extension: "mp4".into(),
@@ -94,14 +97,18 @@ pub(crate) fn compress_file(path: &str) -> Result<CachedCompressedImage, String>
 }
 
 #[cfg(feature = "video")]
-fn encode(path: &str) -> Result<Vec<u8>, String> {
+fn encode(path: &str) -> Result<Option<Vec<u8>>, String> {
+    let setting = vector_core::db::settings::get_sql_setting(QUALITY_SETTING.into()).ok().flatten();
+    let Some(quality) = crate::video::Quality::parse(setting.as_deref().unwrap_or("balanced")) else {
+        return Ok(None);
+    };
     let job = Arc::new(Job::default());
     if let Ok(mut jobs) = JOBS.lock() {
         jobs.insert(path.to_string(), job.clone());
     }
     let out = std::env::temp_dir().join(format!("vector-video-{}.mp4", &vector_core::crypto::sha256_hex(path.as_bytes())[..16]));
-    let result = crate::video::compress(path.as_ref(), &out, &job.cancel, |f| job.progress.store((f * 1000.0) as u32, Ordering::Relaxed))
-        .and_then(|_| std::fs::read(&out).map_err(|e| format!("read compressed video: {e}")));
+    let result = crate::video::compress(path.as_ref(), &out, quality, &job.cancel, |f| job.progress.store((f * 1000.0) as u32, Ordering::Relaxed))
+        .and_then(|done| done.map(|_| std::fs::read(&out).map_err(|e| format!("read compressed video: {e}"))).transpose());
     let _ = std::fs::remove_file(&out);
     if let Ok(mut jobs) = JOBS.lock() {
         // A newer encode of the same file may have replaced this one.
@@ -113,7 +120,7 @@ fn encode(path: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(feature = "video"))]
-fn encode(_path: &str) -> Result<Vec<u8>, String> {
+fn encode(_path: &str) -> Result<Option<Vec<u8>>, String> {
     Err("video compression is not in this build".into())
 }
 
