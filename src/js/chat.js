@@ -1276,6 +1276,7 @@ async function openChat(contact, { reread = true } = {}) {
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
     windowAtTail = true;
+    VectorSvelte.markOpenChat();
     // A chat open is where the most media resolves at once, and every one of
     // those loads grows the content below the fold — hold the bottom until the
     // layout settles instead of finishing short of the newest message.

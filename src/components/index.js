@@ -89,6 +89,7 @@ export {
     touchInvites,
     reorderChatlist,
     setOpenChat,
+    markOpenChat,
     setPane,
     profileViewState,
     setOpenProfile,

@@ -73,12 +73,37 @@ export function reorderChatlist() {
 
 // Which chat is open: the rail's active shortcut and (later) the list's active row
 // derive from it instead of being re-stamped by hand.
-const ui = $state({ openChat: null });
+const ui = $state({ openChat: null, marked: null });
 export function openChatId() {
     return ui.openChat;
 }
+// The list's selection mark moves once the opened chat has rendered (markOpenChat): WebKit
+// runs a transition's clock through the render's block, so a mark moved before it would
+// finish animating before its first frame. The timer covers an open that never renders.
+let markFrame = 0;
+let markTimer = 0;
+const MARK_FALLBACK_MS = 600;
+function markSoon() {
+    clearTimeout(markTimer);
+    cancelAnimationFrame(markFrame);
+    markFrame = requestAnimationFrame(() => { ui.marked = ui.openChat; });
+}
+export function markedChatId() {
+    return ui.marked;
+}
 export function setOpenChat(id) {
-    ui.openChat = id || null;
+    const next = id || null;
+    if (next === ui.openChat) return;
+    ui.openChat = next;
+    if (next) {
+        clearTimeout(markTimer);
+        markTimer = setTimeout(markSoon, MARK_FALLBACK_MS);
+    } else {
+        markSoon();
+    }
+}
+export function markOpenChat() {
+    markSoon();
 }
 
 // Pending community invites are spliced into the list above the chats; they have

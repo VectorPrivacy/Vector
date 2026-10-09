@@ -2,7 +2,7 @@
     // A community's channels: nested under its chat-list row as a flat disclosure, or as
     // the widescreen pane in Public / Private sections. Each row derives its own weight
     // (muted, unread, pings) from its chat's signal, so a message repaints one row.
-    import { communityVersion, chatVersion, openChatId } from '../lib/signals.svelte.js';
+    import { communityVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
@@ -70,7 +70,7 @@
          to be quiet. Muted wins outright: a standing instruction, not a state unread overrides. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="chatlist-channel" id="chatlist-channel-{channel.id}"
-         class:active={openChatId() === channel.id}
+         class:active={markedChatId() === channel.id}
          class:is-muted={r.muted}
          class:has-unread={r.unread}
          class:is-read={!r.unread}

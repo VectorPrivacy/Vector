@@ -1,5 +1,5 @@
 <script>
-    import { openChatId } from '../lib/signals.svelte.js';
+    import { markedChatId } from '../lib/signals.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     // One chat row.
     //
@@ -125,7 +125,7 @@
     class="chatlist-contact"
     class:has-unread={vm.nMark}
     class:chatlist-joining={vm.joining}
-    class:ws-active={shellState().ws && openChatId() === vm.chat.id}
+    class:ws-active={shellState().ws && markedChatId() === vm.chat.id}
     id="chatlist-{vm.chat.id}"
     use:rowMenu={vm}
     onclick={() => h.rowClick(vm)}
