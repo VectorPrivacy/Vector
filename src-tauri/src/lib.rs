@@ -131,6 +131,13 @@ mod services;
 // Re-export notification types for backwards compatibility
 pub(crate) use services::{NotificationData, show_notification_generic};
 
+/// Restored in setup rather than by the plugin at window creation: on Windows a frameless
+/// window measures a native caption until its frame is recalculated, and a size set before
+/// then comes back that much taller on every launch.
+#[cfg(desktop)]
+const MAIN_WINDOW_STATE: tauri_plugin_window_state::StateFlags = tauri_plugin_window_state::StateFlags::all()
+    .difference(tauri_plugin_window_state::StateFlags::VISIBLE.union(tauri_plugin_window_state::StateFlags::DECORATIONS));
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before any session exists: every session starts blocked until its network is loaded.
@@ -357,10 +364,11 @@ pub fn run() {
         // Window state plugin: saves and restores window position, size, maximized state, etc.
         // VISIBLE is excluded so the window starts hidden (shown after content loads to prevent
         // the white flash); DECORATIONS so tauri.conf.json owns the chrome, not a saved state.
-        use tauri_plugin_window_state::StateFlags;
+        // "main" is restored in setup instead: see MAIN_WINDOW_STATE.
         builder = builder.plugin(
             tauri_plugin_window_state::Builder::new()
-                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE & !StateFlags::DECORATIONS)
+                .with_state_flags(MAIN_WINDOW_STATE)
+                .skip_initial_state("main")
                 .build()
         );
         
@@ -406,6 +414,26 @@ pub fn run() {
             let handle = app.app_handle().clone();
 
             let window = app.get_webview_window("main").unwrap();
+
+            #[cfg(windows)]
+            if let Ok(hwnd) = window.hwnd() {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                };
+                unsafe {
+                    SetWindowPos(
+                        hwnd.0 as _,
+                        std::ptr::null_mut(),
+                        0, 0, 0, 0,
+                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_window_state::WindowExt;
+                let _ = window.restore_state(MAIN_WINDOW_STATE);
+            }
 
             // The window is born hidden (tauri.conf `visible: false`) so the frontend
             // can paint before it appears — which makes the frontend the ONLY thing
