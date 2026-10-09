@@ -31,7 +31,7 @@ body.mobile .navbar {
     height: calc(65px + var(--floor, 0px) / 2);
     padding-bottom: calc(var(--floor, 0px) / 2);
 }
-body.mobile .profile-content { bottom: calc(65px + var(--floor, 0px) / 2); }
+body.mobile .profile-content { bottom: max(calc(65px + var(--floor, 0px) / 2), var(--kb, 0px)); }
 body.mobile #chat-list { bottom: calc(70px + var(--floor, 0px) / 2); }
 /* Panes and dialogs pinned to the screen's bottom end at the keyboard (`--kb`, web/chrome.js). */
 body.mobile #settings { bottom: max(calc(70px + var(--floor, 0px) / 2), var(--kb, 0px)); }
@@ -39,6 +39,27 @@ body.mobile .relay-dialog-overlay { bottom: var(--kb, 0px); }
 body.mobile .popup-container { height: calc(100% - var(--kb, 0px)); }
 body.mobile .lg { bottom: var(--kb, 0px); overflow-y: auto; }
 body.mobile .relay-dialog { max-height: calc(var(--app-h, 100vh) - 40px); overflow-y: auto; }
+/* Full-screen backdrops end at the keyboard, so the card they centre stays in view. */
+body.mobile .status-dialog-overlay,
+body.mobile .vcard-overlay,
+body.mobile .mod-overlay,
+body.mobile .pivx-dialog-overlay,
+body.mobile .pop-dialog-overlay,
+body.mobile .modal-overlay,
+body.mobile .publish-app-overlay,
+body.mobile .lg-net-modal,
+body.mobile .marketplace-panel { bottom: var(--kb, 0px); }
+body.mobile .file-preview-overlay { height: var(--app-h, 100%); }
+/* Cards sized in vh would outgrow what the keyboard leaves. */
+body.mobile .modal-box,
+body.mobile .publish-app-container { max-height: min(85vh, calc(var(--app-h, 100vh) - 40px)); }
+body.mobile .pivx-dialog { max-height: calc(var(--app-h, 100vh) - 40px); overflow-y: auto; }
+body.mobile .file-preview-container { height: min(650px, calc(var(--app-h, 100dvh) - 40px)); }
+/* The prompt popup is fixed itself, so it centres in what's visible rather than in its container. */
+body.mobile .popup { top: calc(var(--app-h, 100vh) / 2); }
+body.mobile .popup-content { max-height: calc(var(--app-h, 100vh) * 0.9 - 150px); }
+/* The status editor's emoji panel sits on the keyboard, not behind it. */
+body.mobile .emoji-picker.emoji-picker-status-mode { bottom: calc(10px + var(--kb, 0px)) !important; }
 body.mobile #chat-box { margin-bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
 body.mobile #chat-new-box { bottom: calc(max(5px, var(--floor, 0px)) - 5px); }
 body.mobile #chat-new .chat-new-center-content { bottom: calc(50px + max(5px, var(--floor, 0px))); }
@@ -57,8 +78,10 @@ body.mobile #chat-new-box::after {
 /* Over the composer (placed by the page), in what the keyboard leaves. */
 body.mobile .emoji-picker,
 body.mobile .attachment-panel { max-height: calc(var(--app-h, 100vh) - var(--chrome-h, 0px) - 75px); }
-/* The chat is sized by 100vh, which iOS keeps full-height under the keyboard. */
-body.mobile .chat { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
+/* Panes sized by 100vh, which iOS keeps full-height under the keyboard. */
+body.mobile .chat,
+body.mobile #chat-new,
+body.mobile .create-group-container { height: calc(var(--app-h, 100vh) - var(--chrome-h)); }
 @media (max-width: 640px) {
     .lg-bg-toggle { margin-bottom: max(10px, var(--floor, 0px)); }
 }

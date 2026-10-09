@@ -20086,7 +20086,9 @@ hr {
   z-index: 2000;
   width: calc(100% - 55px);
   max-width: 340px;
-  overflow: hidden;
+  max-height: var(--room, none);
+  overflow-x: hidden;
+  overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -20274,7 +20276,7 @@ hr {
   z-index: 2000;
   width: calc(100% - 55px);
   max-width: min(420px, calc(100vw - 20px));
-  max-height: min(320px, 45vh);
+  max-height: min(320px, 45vh, var(--room, 100vh));
   overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
@@ -21041,7 +21043,9 @@ textarea.command-part-input {
   z-index: 2000;
   width: calc(100% - 55px);
   max-width: 340px;
-  overflow: hidden;
+  max-height: var(--room, none);
+  overflow-x: hidden;
+  overflow-y: auto;
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
