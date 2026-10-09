@@ -8093,6 +8093,7 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   cursor: pointer;
 }
 .kaomoji-cat:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.kaomoji-cat:active { background: rgba(255, 255, 255, 0.2); }
 .kaomoji-cat.active { background: rgba(255, 255, 255, 0.16); color: #fff; }
 /* The strip fades at whichever end has more to scroll to. */
 .kaomoji-cats.fade-end { mask-image: linear-gradient(90deg, #000 85%, transparent); -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); }
@@ -8127,7 +8128,7 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   transition: background 0.15s ease;
 }
 .kaomoji-item:hover { background: rgba(255, 255, 255, 0.12); }
-.kaomoji-item:active { background: var(--icon-color-primary); color: #000; }
+.kaomoji-item:active { background: rgba(255, 255, 255, 0.2); }
 .kaomoji-empty {
   padding: 24px 8px;
   text-align: center;

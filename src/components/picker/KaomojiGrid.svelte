@@ -63,10 +63,15 @@
     }
 
     // A mouse wheel only scrolls down: over the strip, down is sideways.
-    function wheel(e) {
-        if (!strip || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-        e.preventDefault();
-        strip.scrollLeft += e.deltaY;
+    function sideways(node) {
+        const wheel = (e) => {
+            if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+            e.preventDefault();
+            node.scrollLeft += e.deltaY;
+        };
+        node.addEventListener('wheel', wheel, { passive: false });
+        requestAnimationFrame(stripScrolled);
+        return { destroy: () => node.removeEventListener('wheel', wheel) };
     }
 
     function stripScrolled() {
@@ -88,12 +93,6 @@
         strip?.querySelector(`[data-cat="${at}"]`)?.scrollIntoView({ inline: 'center', block: 'nearest' });
     }
 
-    $effect(() => {
-        if (!strip) return;
-        strip.addEventListener('wheel', wheel, { passive: false });
-        stripScrolled();
-        return () => strip.removeEventListener('wheel', wheel);
-    });
 </script>
 
 {#snippet items(entries)}
@@ -105,7 +104,7 @@
 {/snippet}
 
 {#if !query}
-    <div class="kaomoji-cats" class:fade-start={!edges.start} class:fade-end={!edges.end} bind:this={strip} onscroll={stripScrolled}>
+    <div class="kaomoji-cats" class:fade-start={!edges.start} class:fade-end={!edges.end} bind:this={strip} use:sideways onscroll={stripScrolled}>
         {#each KAOMOJI as cat, i (cat.name)}
             <button class="kaomoji-cat" class:active={i === current} data-cat={i} onclick={() => jump(i)}>{cat.name}</button>
         {/each}
