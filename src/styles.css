@@ -5298,6 +5298,16 @@ textarea#chat-input::placeholder {
 /* An ```ansi block previews as it will send: monospace runs in their colours,
    each escape sequence an invisible atom between them. */
 #chat-input.rich-composer .cmp-ansi { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+/* A time in the reader's zone: a quiet chip, its full date on hover. */
+.vt-time,
+#chat-input.rich-composer .cmp-time {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* A coloured run keeps the ordinary caret, as a mention does. */
 #chat-input.rich-composer .cmp-color { caret-color: var(--text-color); }
 .rich-composer img.cmp-ansi-code {
@@ -20051,6 +20061,44 @@ hr {
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--icon-color-primary, #59fcb3);
+}
+
+/* `.icon` is absolutely placed, so the box it centres in must be positioned. */
+.mention-item-time {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+.mention-item-time .icon {
+  width: 18px;
+  height: 18px;
+  background-color: var(--icon-color-primary, #59fcb3);
+}
+.mention-item-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* @time: the style rows lead with how the time will read. */
+.time-selector { max-width: 420px; }
+.time-selector-query { text-transform: none; letter-spacing: 0; opacity: 0.8; }
+.time-selector-full,
+.time-selector-hint {
+  padding: 2px 12px 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.time-item { justify-content: space-between; }
+.time-item-preview { color: rgba(255, 255, 255, 0.92); }
+.time-item-name {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  white-space: nowrap;
 }
 
 .mention-item img {

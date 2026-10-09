@@ -63,15 +63,30 @@ function initMentionSelector(textarea, candidatesFn) {
             if (c.npub.toLowerCase().includes(q)) return 2;
             return 3;
         };
+        // `@time` is the time picker's, and on the way there it offers itself, after
+        // the people, so "@tim" + Enter still mentions Tim.
+        if (q === 'time') return [];
+        const time = q && 'time'.startsWith(q) ? [{ npub: '@time', name: 'time', special: 'time' }] : [];
         return cachedCandidates
             .map(c => [tier(c), c])
             .filter(([t]) => t < 3)
             .sort((a, b) => a[0] - b[0])
             .map(([, c]) => c)
-            .slice(0, 5);
+            .slice(0, 5)
+            .concat(time);
     }
 
     function selectItem(item) {
+        if (item.special === 'time') {
+            // Hand over to the time picker, which wakes on the `@time` this leaves.
+            const before = textarea.value.substring(0, atStart);
+            const after = textarea.value.substring(textarea.selectionStart);
+            textarea.value = before + '@time ' + after;
+            textarea.selectionStart = textarea.selectionEnd = atStart + 6;
+            hide();
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+        }
         // Replace '@query' with '@DisplayName '
         const before = textarea.value.substring(0, atStart);
         const after = textarea.value.substring(textarea.selectionStart);

@@ -1,0 +1,18 @@
+[
+  { "input": "Party at <t:1618953600:F>!", "plain": "Party at 2021-04-20 21:20 UTC!", "spans": [{ "kind": "time", "from": 9, "to": 29, "unix": 1618953600, "style": "F" }] },
+  { "input": "<t:1618953630>", "plain": "2021-04-20 21:20:30 UTC", "spans": [{ "kind": "time", "from": 0, "to": 23, "unix": 1618953630, "style": "f" }] },
+  { "input": "<t:-1:R> and <t:0:t>", "plain": "1969-12-31 23:59:59 UTC and 1970-01-01 00:00 UTC", "spans": [{ "kind": "time", "from": 0, "to": 23, "unix": -1, "style": "R" }, { "kind": "time", "from": 28, "to": 48, "unix": 0, "style": "t" }] },
+  { "input": "<rainbow>Party</rainbow> at <t:1618953600:F>, <color pink>be there</color> <t:0:R>!", "plain": "Party at 2021-04-20 21:20 UTC, be there 1970-01-01 00:00 UTC!", "spans": [
+    { "kind": "color", "from": 0, "to": 5, "effect": "rainbow" },
+    { "kind": "color", "from": 31, "to": 39, "effect": "solid", "colors": ["#f472b6"] },
+    { "kind": "time", "from": 9, "to": 29, "unix": 1618953600, "style": "F" },
+    { "kind": "time", "from": 40, "to": 60, "unix": 0, "style": "R" }] },
+  { "input": "<color teal>doors <t:1618953600:t></color>", "plain": "doors 2021-04-20 21:20 UTC", "spans": [{ "kind": "color", "from": 0, "to": 26, "effect": "solid", "colors": ["#2dd4bf"] }, { "kind": "time", "from": 6, "to": 26, "unix": 1618953600, "style": "t" }] },
+  { "input": "`<t:5:R>` and\n```\n<t:5:R>\n```", "plain": "`<t:5:R>` and\n```\n<t:5:R>\n```", "spans": [] },
+  { "input": "<t:9:x> <t:12:Rx> <t:abc:R> <t:1:R", "plain": "<t:9:x> <t:12:Rx> <t:abc:R> <t:1:R", "spans": [] },
+  { "input": "<t:253402300799:D> <t:253402300800:D>", "plain": "9999-12-31 23:59:59 UTC <t:253402300800:D>", "spans": [{ "kind": "time", "from": 0, "to": 23, "unix": 253402300799, "style": "D" }] },
+  { "input": "🎉 <t:1618953600:R> ✨", "plain": "🎉 2021-04-20 21:20 UTC ✨", "spans": [{ "kind": "time", "from": 2, "to": 22, "unix": 1618953600, "style": "R" }] },
+  { "input": "<t:0001618953600:F> stays", "plain": "<t:0001618953600:F> stays", "spans": [] },
+  { "input": "<t:16<color red>18953600</color>:F>", "plain": "<t:1618953600:F>", "spans": [{ "kind": "color", "from": 5, "to": 13, "effect": "solid", "colors": ["#f04848"] }] },
+  { "input": "<t:5:F> (<t:5:R>)", "plain": "1970-01-01 00:00:05 UTC (1970-01-01 00:00:05 UTC)", "spans": [{ "kind": "time", "from": 0, "to": 23, "unix": 5, "style": "F" }, { "kind": "time", "from": 25, "to": 48, "unix": 5, "style": "R" }] }
+]

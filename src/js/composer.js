@@ -218,11 +218,33 @@ function cmpTokenize(src, opts) {
         last = to;
     }
     if (last < src.length) out.push({ kind: 'text', from: last, to: src.length });
-    return cmpApplyColor(src, cmpApplyAnsi(src, out), opts);
+    return cmpApplyColor(src, cmpApplyTime(src, cmpApplyAnsi(src, out)), opts);
+}
+
+/** Discord time codes as atomic chips: the draft keeps `<t:…>`, the eye sees the time. */
+function cmpApplyTime(src, tokens) {
+    const codes = ttTokens(src);
+    if (!codes.length) return tokens;
+    const out = [];
+    for (const t of tokens) {
+        let pieces = [t];
+        for (const c of codes) {
+            pieces = pieces.flatMap((p) => {
+                if (c.end <= p.from || c.at >= p.to) return [p];
+                const keep = [];
+                if (p.from < c.at) keep.push({ kind: 'text', from: p.from, to: c.at });
+                if (p.to > c.end) keep.push({ kind: 'text', from: c.end, to: p.to });
+                return keep;
+            });
+        }
+        out.push(...pieces);
+    }
+    for (const c of codes) out.push({ kind: 'timestamp', from: c.at, to: c.end, unix: c.unix, style: c.style });
+    return out.sort((a, b) => a.from - b.from);
 }
 
 // Tokens whose text keeps its own look, as a sent message's colour skips them.
-const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'emoji', 'twemoji', 'spoiler', 'ansitext', 'ansicode', 'fence', 'colormark']);
+const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'timestamp', 'emoji', 'twemoji', 'spoiler', 'ansitext', 'ansicode', 'fence', 'colormark']);
 
 /**
  * Colour markup and a leading colour command, previewed as they'll send: the tags
@@ -383,7 +405,7 @@ function cmpSignature(tokens, src) {
     let s = '';
     for (const t of tokens) {
         s += t.kind;
-        if (t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode') s += '(' + src.slice(t.from, t.to) + ')';
+        if (t.kind === 'emoji' || t.kind === 'twemoji' || t.kind === 'ansicode' || t.kind === 'timestamp') s += '(' + src.slice(t.from, t.to) + ')';
         if (t.kind === 'ansitext') s += cmpAnsiKey(t.style);
         // Levels share a kind, but `#` -> `##` must still repaint the mark.
         if (t.kind === 'header') s += t.mark;
@@ -541,6 +563,17 @@ function createRichComposer(host, opts = {}) {
                     // trapping the caret. The source already carries the short name.
                     el.appendChild(span('cmp-mention', raw));
                     break;
+                case 'timestamp': {
+                    // Atomic like a pasted mention: the text shown isn't the source.
+                    const w = span('cmp-time', ttFormat(t.unix, t.style));
+                    w.contentEditable = 'false';
+                    w.dataset.src = raw;
+                    w.title = ttFull(t.unix);
+                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    el.appendChild(w);
+                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    break;
+                }
                 case 'npubmention': {
                     // Atomic, unlike the name form: the text shown ("@Alice") is not
                     // the source ("@npub1…"), so the caret must not enter it. `data-src`

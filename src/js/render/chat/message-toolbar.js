@@ -351,7 +351,7 @@ function _dmsgHandleToolbarClick(e) {
         case 'edit': {
             const row = document.getElementById(targetId);
             const msg = row ? _dmsgLookupMessage(row) : null;
-            if (msg) startEditMessage(targetId, tcRestore(msg.content, msg.color_spans));
+            if (msg) startEditMessage(targetId, tcRestore(msg.content, msg.text_spans));
             break;
         }
         case 'reveal-file': {
@@ -786,7 +786,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         // channel and the user holds PIN_MESSAGES.
         items.push(...pinsMenuItems(targetId));
         if (mine && hasContent && !hasAttachments && !_dmsgCommandInfo(msg)) {
-            items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, tcRestore(msg.content, msg.color_spans)); } });
+            items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, tcRestore(msg.content, msg.text_spans)); } });
         }
     }
     // Reveal/Open a downloaded attachment. Desktop reveals it in the file

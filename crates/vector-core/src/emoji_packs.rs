@@ -323,6 +323,12 @@ pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag>
                 if !ok { break; }
                 j += 1;
             }
+            // A clock's `21:20:30` isn't a shortcode.
+            let clock = start >= 2 && bytes[start - 2].is_ascii_digit() && bytes[start..j].iter().all(u8::is_ascii_digit);
+            if clock {
+                i = j;
+                continue;
+            }
             if j > start && j < bytes.len() && bytes[j] == b':' {
                 if let Ok(token) = std::str::from_utf8(&bytes[start..j]) {
                     if !seen.contains(token) {

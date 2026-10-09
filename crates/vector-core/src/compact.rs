@@ -1019,7 +1019,7 @@ pub struct MessageExtras {
     pub emoji_tags: TinyVec<u32>,
     /// Bot routing targets as interned npub handles
     pub addressed_bots: TinyVec<u16>,
-    pub color_spans: Vec<crate::text_color::ColorSpan>,
+    pub text_spans: Vec<crate::text_spans::TextSpan>,
 }
 
 impl MessageExtras {
@@ -1028,7 +1028,7 @@ impl MessageExtras {
             && self.preview_metadata.is_none()
             && self.emoji_tags.is_empty()
             && self.addressed_bots.is_empty()
-            && self.color_spans.is_empty()
+            && self.text_spans.is_empty()
     }
 }
 
@@ -1111,7 +1111,7 @@ impl CompactMessage {
     /// `emoji_tags` are the NIP-30 custom-emoji tags resolved from the new
     /// content; they're adopted only when this edit is the newest revision so
     /// an out-of-order older edit can't clobber the live content's emoji.
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>, color_spans: Vec<crate::text_color::ColorSpan>, interner: &mut NpubInterner) {
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>, text_spans: Vec<crate::text_spans::TextSpan>, interner: &mut NpubInterner) {
         let original = EditEntry { content: self.content.to_string(), edited_at: self.timestamp_ms() };
         let extras = self.extras_mut();
         // Initialize edit history with original content if not present
@@ -1130,7 +1130,7 @@ impl CompactMessage {
         if is_latest {
             self.content = new_content.into_boxed_str();
             self.extras_mut().emoji_tags = intern_emoji_tags(&emoji_tags, interner);
-            self.extras_mut().color_spans = color_spans;
+            self.extras_mut().text_spans = text_spans;
         }
     }
 
@@ -1674,7 +1674,7 @@ impl CompactMessage {
             preview_metadata: msg.preview_metadata.map(Box::new),
             emoji_tags: intern_emoji_tags(&msg.emoji_tags, interner),
             addressed_bots: msg.addressed_bots.iter().map(|n| interner.intern(n)).collect(),
-            color_spans: msg.color_spans,
+            text_spans: msg.text_spans,
         };
         Self {
             id: encode_message_id(&msg.id),
@@ -1725,7 +1725,7 @@ impl CompactMessage {
             addressed_bots: extras
                 .map(|x| x.addressed_bots.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
                 .unwrap_or_default(),
-            color_spans: extras.map(|x| x.color_spans.clone()).unwrap_or_default(),
+            text_spans: extras.map(|x| x.text_spans.clone()).unwrap_or_default(),
         }
     }
 }
@@ -1921,7 +1921,7 @@ mod tests {
                     preview_metadata: None,
                     emoji_tags: Vec::new(),
                     addressed_bots: Vec::new(),
-                    color_spans: Vec::new(),
+                    text_spans: Vec::new(),
                 }
             })
             .collect();
@@ -3213,7 +3213,7 @@ mod tests {
             ]),
             emoji_tags: Vec::new(),
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
-            color_spans: vec![crate::text_color::ColorSpan { from: 0, to: 2, effect: crate::text_color::Effect::Rainbow, colors: Vec::new() }],
+            text_spans: vec![crate::text_spans::TextSpan::Color(crate::text_color::ColorSpan { from: 0, to: 2, effect: crate::text_color::Effect::Rainbow, colors: Vec::new() })],
         }
     }
 

@@ -1,0 +1,328 @@
+/**
+ * Times that read the same everywhere: the JS half of `vector_core::text_time`.
+ *
+ * A message carries each time as a fixed UTC rendering plus a `time` span; here it is
+ * shown in the reader's zone and locale, Discord's `<t:UNIX:STYLE>` codes are read in
+ * the composer and in bridged text, and `@time` turns a typed phrase into one.
+ */
+
+const TT_STYLES = 'tTdDfFsSR';
+const TT_MIN = -62167219200;
+const TT_MAX = 253402300799;
+// One code: `<t:UNIX>` or `<t:UNIX:STYLE>`, seconds since the epoch.
+const TT_TOKEN = /<t:(-?\d{1,12})(?::([tTdDfFsSR]))?>/g;
+
+/** The fixed UTC text a time travels as, matching core: `YYYY-MM-DD HH:MM UTC`, `:SS` when set. */
+function ttFallback(unix) {
+    if (!Number.isInteger(unix) || unix < TT_MIN || unix > TT_MAX) return null;
+    const d = new Date(unix * 1000);
+    const pad = (n, w = 2) => String(n).padStart(w, '0');
+    const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` + (d.getUTCSeconds() ? `:${pad(d.getUTCSeconds())}` : '');
+    return `${pad(d.getUTCFullYear(), 4)}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${time} UTC`;
+}
+
+/** Every valid code in `src` outside code: `{ at, end, unix, style }` in string indices. */
+function ttTokens(src) {
+    if (!src || src.indexOf('<t:') < 0) return [];
+    const code = tcCodeRanges(src);
+    const out = [];
+    for (const m of src.matchAll(TT_TOKEN)) {
+        if (code.some(([s, e]) => m.index >= s && m.index < e)) continue;
+        const unix = Number(m[1]);
+        if (ttFallback(unix) === null) continue;
+        out.push({ at: m.index, end: m.index + m[0].length, unix, style: m[2] || 'f' });
+        if (out.length === 64) break;
+    }
+    return out;
+}
+
+// ---- showing a time -----------------------------------------------------------------
+
+const ttFormats = new Map();
+function ttFormatter(key, options) {
+    let f = ttFormats.get(key);
+    if (!f) {
+        f = new Intl.DateTimeFormat(undefined, options);
+        ttFormats.set(key, f);
+    }
+    return f;
+}
+
+const TT_OPTIONS = {
+    t: { hour: 'numeric', minute: '2-digit' },
+    T: { hour: 'numeric', minute: '2-digit', second: '2-digit' },
+    d: { year: 'numeric', month: '2-digit', day: '2-digit' },
+    D: { year: 'numeric', month: 'long', day: 'numeric' },
+    f: { dateStyle: 'long', timeStyle: 'short' },
+    F: { dateStyle: 'full', timeStyle: 'short' },
+    s: { year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' },
+    S: { year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit', second: '2-digit' },
+};
+
+let ttRelative = null;
+/** "in 2 hours", "3 days ago": the unit grows with the distance, as Discord's does. */
+function ttRelativeText(unix, now = Date.now() / 1000) {
+    ttRelative ??= new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    const diff = unix - now;
+    const abs = Math.abs(diff);
+    const [n, unit] = abs < 45 ? [diff, 'second']
+        : abs < 2700 ? [diff / 60, 'minute']
+        : abs < 79200 ? [diff / 3600, 'hour']
+        : abs < 2246400 ? [diff / 86400, 'day']
+        : abs < 28512000 ? [diff / 2592000, 'month']
+        : [diff / 31536000, 'year'];
+    return ttRelative.format(Math.round(n), unit);
+}
+
+/** A time in the reader's zone and locale, in one of Discord's styles. */
+function ttFormat(unix, style) {
+    if (style === 'R') return ttRelativeText(unix);
+    return ttFormatter(style, TT_OPTIONS[style] || TT_OPTIONS.f).format(new Date(unix * 1000));
+}
+
+/** The hover text: the full date and time, with the reader's zone. */
+function ttFull(unix) {
+    return ttFormatter('full', { dateStyle: 'full', timeStyle: 'long' }).format(new Date(unix * 1000));
+}
+
+function ttChip(unix, style, hidden) {
+    const chip = document.createElement('span');
+    chip.className = 'vt-time';
+    chip.dataset.unix = String(unix);
+    chip.dataset.style = style;
+    // A hover inside a spoiler would tell what it hides.
+    if (!hidden) chip.title = ttFull(unix);
+    chip.textContent = ttFormat(unix, style);
+    if (style === 'R') ttStartTicking();
+    return chip;
+}
+
+let ttTicker = 0;
+/** Relative chips stay current: one shared tick for whatever is on screen. */
+function ttStartTicking() {
+    if (ttTicker) return;
+    ttTicker = setInterval(() => {
+        const chips = document.querySelectorAll('.vt-time[data-style="R"]');
+        if (!chips.length) { clearInterval(ttTicker); ttTicker = 0; return; }
+        for (const chip of chips) chip.textContent = ttRelativeText(Number(chip.dataset.unix));
+    }, 30000);
+}
+
+const TT_SKIP = 'code, pre, a, .vt-time';
+const TT_HIDDEN = '.spoiler';
+
+/**
+ * Replace each time span's fallback text in a rendered message with its chip. The
+ * fallback is found as the same occurrence it is in the content, so a matching string
+ * typed elsewhere in the message is left alone; one inside code stays text.
+ */
+function ttRenderSpans(root, content, spans) {
+    // Last first: a chip takes its text out, which would renumber the copies after it.
+    const times = (spans || []).filter((s) => s.kind === 'time').sort((a, b) => b.from - a.from);
+    if (!times.length) return;
+    const points = [...content];
+    const textNodes = () => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const out = [];
+        while (walker.nextNode()) out.push(walker.currentNode);
+        return out;
+    };
+    for (const span of times) {
+        const fallback = points.slice(span.from, span.to).join('');
+        if (fallback !== ttFallback(span.unix)) continue;
+        const before = points.slice(0, span.from).join('');
+        let occurrence = 0;
+        for (let i = before.indexOf(fallback); i >= 0; i = before.indexOf(fallback, i + fallback.length)) occurrence++;
+        let seen = 0;
+        for (const node of textNodes()) {
+            let at = node.nodeValue.indexOf(fallback);
+            while (at >= 0 && seen < occurrence) {
+                seen++;
+                at = node.nodeValue.indexOf(fallback, at + fallback.length);
+            }
+            if (at < 0) continue;
+            if (!node.parentElement.closest(TT_SKIP)) {
+                const tail = node.splitText(at);
+                tail.nodeValue = tail.nodeValue.slice(fallback.length);
+                tail.parentNode.insertBefore(ttChip(span.unix, span.style, !!tail.parentElement.closest(TT_HIDDEN)), tail);
+            }
+            break;
+        }
+    }
+}
+
+/** Discord codes in text that arrived without spans (a bridge, an older client): chips too. */
+function ttRenderCodes(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+        const n = walker.currentNode;
+        if (n.nodeValue.includes('<t:') && !n.parentElement.closest(TT_SKIP)) nodes.push(n);
+    }
+    let budget = 64;   // as many as a message's own spans may carry
+    for (const node of nodes) {
+        const value = node.nodeValue;
+        const hidden = !!node.parentElement.closest(TT_HIDDEN);
+        const frag = document.createDocumentFragment();
+        let last = 0;
+        for (const m of value.matchAll(TT_TOKEN)) {
+            if (!budget) break;
+            const unix = Number(m[1]);
+            if (ttFallback(unix) === null) continue;
+            if (m.index > last) frag.appendChild(document.createTextNode(value.slice(last, m.index)));
+            frag.appendChild(ttChip(unix, m[2] || 'f', hidden));
+            last = m.index + m[0].length;
+            budget--;
+        }
+        if (!last) continue;
+        if (last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+        node.replaceWith(frag);
+    }
+}
+
+/** `content` with each time span shown as the reader would see it, for one-line previews. */
+function ttLocalize(content, spans) {
+    const times = (spans || []).filter((s) => s.kind === 'time').sort((a, b) => b.from - a.from);
+    if (!times.length) return content;
+    const points = [...content];
+    for (const s of times) {
+        if (points.slice(s.from, s.to).join('') !== ttFallback(s.unix)) continue;
+        points.splice(s.from, s.to - s.from, ttFormat(s.unix, s.style));
+    }
+    return points.join('');
+}
+
+// ---- reading a typed time -----------------------------------------------------------
+
+const TT_UNITS = [
+    [/^(s|secs?|seconds?)$/, 1], [/^(m|mins?|minutes?)$/, 60], [/^(h|hrs?|hours?)$/, 3600],
+    [/^(d|days?)$/, 86400], [/^(w|wks?|weeks?)$/, 604800], [/^(mo|mos|months?)$/, 2592000], [/^(y|yrs?|years?)$/, 31536000],
+];
+const TT_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const TT_MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+/** "2h 30m", "an hour", "3 days and 4 hours": seconds, or null when any word isn't one. */
+function ttDuration(text) {
+    const clean = text.replace(/\band\b/g, ' ').replace(/(\d)([a-z])/g, '$1 $2').replace(/([a-z])(\d)/g, '$1 $2').replace(/\s+/g, ' ').trim();
+    const re = /(\d+(?:\.\d+)?|half an?|an?|one|half) ([a-z]+)/g;
+    let total = 0;
+    for (const m of clean.matchAll(re)) {
+        const amount = /^\d/.test(m[1]) ? Number(m[1]) : m[1].startsWith('half') ? 0.5 : 1;
+        const unit = TT_UNITS.find(([u]) => u.test(m[2]));
+        if (!unit) return null;
+        total += amount * unit[1];
+    }
+    return total && !clean.replace(re, '').trim() ? total : null;
+}
+
+/** Day/month order for a bare `4/5`, from the reader's locale. */
+function ttDayFirst() {
+    const parts = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'numeric' }).formatToParts(new Date(2000, 10, 22));
+    return parts.findIndex((p) => p.type === 'day') < parts.findIndex((p) => p.type === 'month');
+}
+
+/**
+ * A typed time as epoch seconds, or null when it isn't one. Reads "now", epoch numbers,
+ * "in 2 hours" / "3 days ago", and a date and a time in either order: today, tonight,
+ * tomorrow, yesterday, weekdays (next friday), 2026-12-25, 25/12, dec 25 or 25th of
+ * december with an optional year, and 5pm, 5:30 pm, 17:30, noon or midnight. A word it
+ * can't place makes the whole phrase null rather than a guess.
+ */
+function ttParse(input, now = new Date()) {
+    const unix = ttRead(input, now);
+    return unix === null || ttFallback(unix) === null ? null : unix;
+}
+
+function ttRead(input, now) {
+    let text = (input || '').toLowerCase().trim().replace(/[,]+/g, ' ').replace(/\s+/g, ' ');
+    if (!text || text === 'now') return Math.floor(now.getTime() / 60000) * 60;
+    if (/^-?\d{9,13}$/.test(text)) {
+        const n = Number(text);
+        return text.replace('-', '').length === 13 ? Math.trunc(n / 1000) : n;
+    }
+    let m = /^in (.+)$/.exec(text);
+    if (m) { const d = ttDuration(m[1]); return d === null ? null : Math.round(now.getTime() / 1000 + d); }
+    m = /^(.+) (ago|from now)$/.exec(text);
+    if (m) { const d = ttDuration(m[1]); return d === null ? null : Math.round(now.getTime() / 1000 + (m[2] === 'ago' ? -d : d)); }
+
+    const date = new Date(now);
+    let haveDate = false;
+    let time = null;
+    const take = (re) => {
+        const found = re.exec(text);
+        if (!found) return null;
+        text = (text.slice(0, found.index) + ' ' + text.slice(found.index + found[0].length)).trim();
+        return found;
+    };
+
+    // Time of day first: its forms are the most specific.
+    let t = take(/\b(?:at )?(\d{1,2})(?::(\d{2}))?(?::(\d{2}))? ?(am|pm|a\.m\.|p\.m\.|a|p)(?![a-z.])/);
+    let clock24 = false;   // read without am/pm, so "tonight" can move it to the evening
+    if (t) {
+        let h = Number(t[1]) % 12;
+        if (t[4].startsWith('p')) h += 12;
+        if (Number(t[1]) > 12 || Number(t[2] || 0) > 59) return null;
+        time = [h, Number(t[2] || 0), Number(t[3] || 0)];
+    } else if ((t = take(/\b(?:at )?([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?\b/))) {
+        time = [Number(t[1]), Number(t[2]), Number(t[3] || 0)];
+        clock24 = true;
+    } else if ((t = take(/\b(?:at )?(noon|midday|midnight)\b/))) {
+        time = t[1] === 'midnight' ? [0, 0, 0] : [12, 0, 0];
+    } else if ((t = take(/\bat (\d{1,2})\b/))) {
+        if (Number(t[1]) > 23) return null;
+        time = [Number(t[1]), 0, 0];
+        clock24 = true;
+    }
+
+    // A date that rolls over (Feb 30, month 13) was mistyped or misread, not meant.
+    const setDate = (y, month, day) => {
+        date.setFullYear(y, month - 1, day);
+        return date.getMonth() === month - 1 && date.getDate() === day;
+    };
+    let d = take(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+    if (d) {
+        if (!setDate(Number(d[1]), Number(d[2]), Number(d[3]))) return null;
+        haveDate = true;
+    } else if ((d = take(/\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?\b/))) {
+        const [a, b] = [Number(d[1]), Number(d[2])];
+        const [day, month] = ttDayFirst() ? [a, b] : [b, a];
+        const year = d[3] ? (d[3].length === 2 ? 2000 + Number(d[3]) : Number(d[3])) : date.getFullYear();
+        if (!setDate(year, month, day)) return null;
+        haveDate = true;
+    } else {
+        const monthRe = '(' + TT_MONTHS.map((n) => n.slice(0, 3) + '(?:' + n.slice(3) + ')?').join('|') + ')\\.?';
+        const ord = '(\\d{1,2})(?:st|nd|rd|th)?';
+        const year = '(?: (\\d{4}))?';
+        let found = take(new RegExp('\\b' + monthRe + ' ' + ord + year + '\\b'));
+        let month, day, y;
+        if (found) [month, day, y] = [found[1], found[2], found[3]];
+        else if ((found = take(new RegExp('\\b' + ord + ' (?:of )?' + monthRe + year + '\\b')))) [day, month, y] = [found[1], found[2], found[3]];
+        if (found) {
+            const mi = TT_MONTHS.findIndex((n) => n.startsWith(month.slice(0, 3)));
+            if (!setDate(y ? Number(y) : date.getFullYear(), mi + 1, Number(day))) return null;
+            haveDate = true;
+        }
+    }
+    if (!haveDate) {
+        let w = take(/\b(today|tonight|tomorrow|tmrw|tmr|yesterday)\b/);
+        if (w) {
+            const shift = { today: 0, tonight: 0, tomorrow: 1, tmrw: 1, tmr: 1, yesterday: -1 }[w[1]];
+            date.setDate(date.getDate() + shift);
+            if (w[1] === 'tonight' && !time) time = [20, 0, 0];
+            else if (w[1] === 'tonight' && clock24 && time[0] < 12) time[0] += 12;
+            haveDate = true;
+        } else if ((w = take(/\b(?:(next|this|on) )?(sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*\b/))) {
+            const target = TT_DAYS.findIndex((n) => n.startsWith(w[2].slice(0, 3)));
+            let ahead = (target - date.getDay() + 7) % 7;
+            if (w[1] === 'next' && ahead === 0) ahead = 7;
+            date.setDate(date.getDate() + ahead);
+            haveDate = true;
+        }
+    }
+    text = text.replace(/\b(at|on)\b/g, '').trim();
+    if (text) return null;
+    if (!haveDate && !time) return null;
+    if (time) date.setHours(time[0], time[1], time[2], 0);
+    else date.setSeconds(0, 0);
+    return Math.floor(date.getTime() / 1000);
+}

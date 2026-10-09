@@ -70,7 +70,7 @@ pub fn build_message(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Message {
     let stripped = super::attachments::strip_attachment_urls(&msg.content, &msg.attachments);
     if stripped != msg.content {
         // Colour spans count chars of the text as sent; a stripped link shifts them.
-        msg.color_spans.clear();
+        msg.text_spans.clear();
         msg.content = stripped;
     }
     msg.wrapper_event_id = Some(opened.wrapper_id.to_hex());
@@ -486,8 +486,8 @@ fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &Pub
 fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
     use crate::rumor::{process_rumor, RumorProcessingResult};
     let (rumor, ctx) = concord_rumor(opened, nostr_sdk::prelude::Kind::from(event_kind::MESSAGE_EDIT), my_pubkey);
-    let (target_id, new_content, edited_at, emoji_tags, color_spans, edit_event) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
-        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, color_spans, event }) => (message_id, new_content, edited_at, emoji_tags, color_spans, event),
+    let (target_id, new_content, edited_at, emoji_tags, text_spans, edit_event) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
+        Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, text_spans, event }) => (message_id, new_content, edited_at, emoji_tags, text_spans, event),
         _ => return None,
     };
     // Author-scoped: you can't edit someone else's message (not a parser concern — needs the resident
@@ -501,7 +501,7 @@ fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicK
     // The canonical edit applier seeds history with the original ONCE, dedups by `edited_at` (a
     // relay-replayed edit is a no-op, not history corruption), sorts, and swaps the content.
     let (_chat_id, message) = state.update_message_with(&target_id, |m, i| {
-        m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), color_spans.clone(), i);
+        m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), text_spans.clone(), i);
     })?;
     // Persist the edit as a folded MESSAGE_EDIT event (caller sets chat_id), mirroring DMs —
     // no row overwrite, no JSON snapshot.

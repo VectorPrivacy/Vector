@@ -72,7 +72,7 @@ impl ColorSpan {
         parts
     }
 
-    fn from_parts(parts: &[&str], content_chars: u32) -> Option<Self> {
+    pub(crate) fn from_parts(parts: &[&str], content_chars: u32) -> Option<Self> {
         if parts.len() < 4 || parts[0] != TAG {
             return None;
         }
@@ -212,7 +212,7 @@ fn attr<'a>(args: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Byte ranges markup must not reach into: fenced blocks and inline code.
-fn code_ranges(content: &str) -> Vec<(usize, usize)> {
+pub(crate) fn code_ranges(content: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut fence_start: Option<usize> = None;
     let mut line_start = 0;

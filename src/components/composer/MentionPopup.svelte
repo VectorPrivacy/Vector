@@ -13,7 +13,7 @@
 </script>
 
 <AnchoredPanel cls="mention-selector" {open} {anchor} {view}>
-    <div class="mention-selector-header">Members</div>
+    <div class="mention-selector-header">{view.items.some((i) => !i.special) ? 'Members' : 'Time'}</div>
     {#each view.items as item, i (item.npub)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -21,8 +21,14 @@
             class:active={i === view.active}
             onmousedown={(e) => { e.preventDefault(); view.pick(i); }}
         >
-            <img src={item.avatarSrc || 'icons/user-placeholder.svg'} alt="" />
-            <span class="mention-item-name">{item.name}</span>
+            {#if item.special === 'time'}
+                <span class="mention-item-time"><span class="icon icon-clock"></span></span>
+                <span class="mention-item-name">time</span>
+                <span class="mention-item-hint">A time everyone sees in their own zone</span>
+            {:else}
+                <img src={item.avatarSrc || 'icons/user-placeholder.svg'} alt="" />
+                <span class="mention-item-name">{item.name}</span>
+            {/if}
         </div>
     {/each}
 </AnchoredPanel>

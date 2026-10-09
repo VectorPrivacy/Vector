@@ -4,6 +4,7 @@
     import MentionPopup from './MentionPopup.svelte';
     import ShortcodePopup from './ShortcodePopup.svelte';
     import CommandPopup from './CommandPopup.svelte';
+    import TimePopup from './TimePopup.svelte';
     import ChoiceMenu from './ChoiceMenu.svelte';
 
     import { composerEls } from '../lib/composer.svelte.js';
@@ -15,4 +16,5 @@
 <MentionPopup {anchor} />
 <ShortcodePopup {anchor} {h} />
 <CommandPopup {anchor} />
+<TimePopup {anchor} />
 <ChoiceMenu />

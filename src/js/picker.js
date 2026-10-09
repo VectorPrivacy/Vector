@@ -475,7 +475,7 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
             let p = node.parentElement;
             while (p && p !== rootEl) {
                 if (p.tagName === 'CODE' || p.tagName === 'PRE') return NodeFilter.FILTER_REJECT;
-                if (p.classList && p.classList.contains('emoji-pack-emoji')) return NodeFilter.FILTER_REJECT;
+                if (p.classList && (p.classList.contains('emoji-pack-emoji') || p.classList.contains('vt-time'))) return NodeFilter.FILTER_REJECT;
                 p = p.parentElement;
             }
             // A `g` regex's test() resumes from the PREVIOUS node's lastIndex —
@@ -499,6 +499,8 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
         while ((m = pattern.exec(original)) !== null) {
             const url = map.get(m[1]);
             if (!url) continue;
+            // A clock's `21:20:30` isn't a shortcode, as core reads it on send.
+            if (/^\d+$/.test(m[1]) && /\d/.test(original[m.index - 1] || '')) { pattern.lastIndex = m.index + 1; continue; }
             if (m.index > lastIndex) {
                 frag.appendChild(document.createTextNode(original.slice(lastIndex, m.index)));
             }

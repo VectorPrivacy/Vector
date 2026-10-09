@@ -231,7 +231,7 @@ function tcScan(src) {
 
 /** `src` without its colour markup, and the spans in code points of what's left;
  *  markup around nothing but whitespace stays, so a send is never emptied by it. */
-function tcExtract(src) {
+function tcExtractColor(src) {
     const pairs = tcScan(src);
     if (!pairs.length) return { plain: src, spans: [] };
     const cuts = pairs.flatMap((p) => [p.open, p.close]).sort((a, b) => a[0] - b[0]);
@@ -250,15 +250,62 @@ function tcExtract(src) {
     plain += src.slice(pos);
     if (!tcTrim(plain)) return { plain: src, spans: [] };
     const spans = pairs
-        .map((p) => ({ from: pointAt.get(p.open[1]), to: pointAt.get(p.close[0]), effect: p.effect, colors: p.colors }))
+        .map((p) => ({ kind: 'color', from: pointAt.get(p.open[1]), to: pointAt.get(p.close[0]), effect: p.effect, colors: p.colors }))
         .filter((s) => s.from < s.to)
         .slice(0, TC_MAX_SPANS);
     return { plain, spans };
 }
 
-/** `content` with its spans written back as markup, for the editor. */
+/**
+ * All the markup out of `src`, as core takes it at send: colour tags, then `<t:…>` times,
+ * each replaced by its fixed UTC text. Spans count code points of the result.
+ */
+function tcExtract(src) {
+    const { plain, spans: colors } = tcExtractColor(src);
+    // A code split by colour markup isn't one: its edges would fall inside the time.
+    let seen = 0;
+    let seenPoints = 0;
+    const tokens = ttTokens(plain).filter((t) => {
+        seenPoints += [...plain.slice(seen, t.at)].length;
+        seen = t.at;
+        const s = seenPoints;
+        const e = s + [...plain.slice(t.at, t.end)].length;
+        return !colors.some((c) => (c.from > s && c.from < e) || (c.to > s && c.to < e));
+    });
+    if (!tokens.length) return { plain, spans: colors };
+    let out = '';
+    let pos = 0;
+    let points = 0;
+    let delta = 0;
+    const shifts = [];
+    const times = [];
+    for (const t of tokens) {
+        const before = plain.slice(pos, t.at);
+        out += before;
+        points += [...before].length;
+        const tokenPoints = [...plain.slice(t.at, t.end)].length;
+        const text = ttFallback(t.unix);
+        const textPoints = [...text].length;
+        times.push({ kind: 'time', from: points, to: points + textPoints, unix: t.unix, style: t.style });
+        out += text;
+        const originalEnd = points - delta + tokenPoints;
+        delta += textPoints - tokenPoints;
+        shifts.push([originalEnd, delta]);
+        points += textPoints;
+        pos = t.end;
+    }
+    out += plain.slice(pos);
+    const shift = (p) => p + ([...shifts].reverse().find(([at]) => p >= at)?.[1] ?? 0);
+    return { plain: out, spans: [...colors.map((c) => ({ ...c, from: shift(c.from), to: shift(c.to) })), ...times] };
+}
+
+/** `content` with its spans written back as markup, for the editor: colour tags and `<t:…>` codes. */
 function tcRestore(content, spans) {
     if (!spans || !spans.length) return content;
+    const times = new Map(spans.filter((s) => s.kind === 'time').map((s) => [s.from, s]));
+    // A colour edge inside a time moves to its border, where the code leaves room for a tag.
+    const inside = (p) => [...times.values()].find((t) => p > t.from && p < t.to);
+    spans = spans.filter((s) => s.kind !== 'time').map((s) => ({ ...s, from: inside(s.from)?.from ?? s.from, to: inside(s.to)?.to ?? s.to }));
     const points = [...content];
     // The shortest name for a colour reads best back in the editor (by length, then a-z).
     const named = (hex) => Object.keys(TC_NAMED).filter((k) => TC_NAMED[k] === hex)
@@ -281,6 +328,12 @@ function tcRestore(content, spans) {
     for (let i = 0; i <= points.length; i++) {
         if (closes.has(i)) out += closes.get(i).join('');
         if (opens.has(i)) out += opens.get(i).join('');
+        const time = times.get(i);
+        if (time && points.slice(time.from, time.to).join('') === ttFallback(time.unix)) {
+            out += `<t:${time.unix}:${time.style}>`;
+            i = time.to - 1;
+            continue;
+        }
         if (i < points.length) out += points[i];
     }
     return out;
@@ -362,7 +415,7 @@ const TC_OPEN = 0xF0000;
 const TC_SHUT = 0xF0100;
 const TC_SENTINEL = /[\u{F0000}-\u{F01FF}]/u;
 const TC_SENTINELS = /[\u{F0000}-\u{F01FF}]/gu;
-const TC_UNPAINTED = 'a, code, pre, .mention, .spoiler, .spoiler-wrapper, .golink, .custom-emoji-inline';
+const TC_UNPAINTED = 'a, code, pre, .mention, .spoiler, .spoiler-wrapper, .golink, .custom-emoji-inline, .vt-time';
 // Runs a span edge must never split: links in any form, nostr references, emoji
 // shortcodes, HTML entities, inline code and escape codes. A sentinel inside one would
 // show the link guards and the linkifier different text from the reader's.
@@ -379,7 +432,9 @@ const TC_RULE = /^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
  * table row, and neither touches an atomic run.
  */
 function tcMarkSpans(text, spans) {
-    if (!spans || !spans.length || TC_SENTINEL.test(text)) return null;
+    const times = (spans || []).filter((s) => s.kind === 'time');
+    spans = (spans || []).filter((s) => s.kind !== 'time');
+    if (!spans.length || TC_SENTINEL.test(text)) return null;
     const points = [...text];
     const n = points.length;
     // Code-point offset → string index, and back.
@@ -387,7 +442,9 @@ function tcMarkSpans(text, spans) {
     for (let i = 0, at = 0; i <= n; i++) { index[i] = at; if (i < n) at += points[i].length; }
     const pointOf = new Map(index.map((at, i) => [at, i]));
     const fences = tcCodeRanges(text).filter(([s]) => /^ {0,3}```/.test(text.slice(s, s + 8)));
-    const atomic = [...text.matchAll(TC_ATOMIC)].map((m) => [m.index, m.index + m[0].length]);
+    // A time's text is replaced by its chip later, so it must reach the DOM in one piece.
+    const atomic = [...text.matchAll(TC_ATOMIC)].map((m) => [m.index, m.index + m[0].length])
+        .concat(times.filter((t) => t.to <= n).map((t) => [index[t.from], index[t.to]]));
     const lineStart = (at) => at === 0 || text[at - 1] === '\n';
     const lineOf = (at) => {
         const s = text.lastIndexOf('\n', at - 1) + 1;
@@ -521,7 +578,8 @@ function tcSentinelsToMarkers(root) {
  * Where spans overlap, the later one paints.
  */
 function tcPaint(root, spans) {
-    if (!spans || !spans.length) return;
+    spans = (spans || []).filter((s) => s.kind !== 'time');
+    if (!spans.length) return;
     const runs = [];
     const active = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);

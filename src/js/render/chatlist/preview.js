@@ -160,7 +160,8 @@ function generateChatPreviewText(chat) {
 
     // Regular text message — strip HTML/markdown, render inline formatting, resolve @npub mentions.
     // emojiTags lets the renderer swap :shortcode: for inline custom emojis (like in-chat).
-    let previewSource = cLastMsg.content;
+    // Times read in the viewer's own zone, as they do in the chat.
+    let previewSource = ttLocalize(cLastMsg.content, cLastMsg.text_spans);
     // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
             previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
     previewSource = replaceNostrEmbedRefsForPreview(previewSource);

@@ -270,7 +270,7 @@ async function sendMessage(messageText) {
                         edited_at: Date.now()
                     });
                     msg.content = colored.plain;
-                    msg.color_spans = colored.spans;
+                    msg.text_spans = colored.spans;
                     msg.edited = true;
                     // The optimistic row needs the tags the edit will carry: the equipped
                     // packs' shortcodes present in the new text, ahead of the backend's copy.
@@ -345,6 +345,7 @@ async function sendMessage(messageText) {
 async function handleComposerKeydown(evt) {
         // Skip send if mention/emoji/command selector is consuming this keypress
         if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
+        if (timeCtrl && timeCtrl.isOpen()) return;
         if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
         if (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()) return;
         // A phone browser's Return key is a newline; its Send button sends.
@@ -449,6 +450,7 @@ function getMentionCandidates(includeSelf = false) {
 }
 
 let mentionCtrl = null;
+let timeCtrl = null;
 let emojiShortcodeCtrl = null;
 let recorder = null;
 
@@ -497,6 +499,7 @@ function initComposerControllers() {
     // `@Name` renders as a pill.
     composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
     emojiShortcodeCtrl = initEmojiShortcodeSelector(domChatMessageInput);
+    timeCtrl = initTimeSelector(domChatMessageInput);
 }
 
 /**

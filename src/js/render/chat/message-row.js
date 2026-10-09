@@ -525,8 +525,8 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
 
     // Colour spans count chars of the content as sent, so their edges are marked
     // before anything below trims or strips it.
-    const colorSpans = !isRevealedBlockedMsg && displayContent === msg.content ? msg.color_spans : null;
-    const marked = colorSpans?.length ? tcMarkSpans(displayContent, colorSpans) : null;
+    const textSpans = !isRevealedBlockedMsg && displayContent === msg.content ? msg.text_spans : null;
+    const marked = textSpans?.length ? tcMarkSpans(displayContent, textSpans) : null;
     // NIP-19 naddrs for emoji packs are rendered as a preview card; strip
     // the bech32 string so it doesn't double up as a long unreadable line.
     let textBody = (marked ?? (displayContent || '')).trim();
@@ -538,6 +538,9 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     // Defensive: displayContent can be null/undefined for attachment-only messages.
     span.innerHTML = parseMarkdown(textBody);
     if (marked) tcSentinelsToMarkers(span);
+    // Times become chips before linkify and mentions walk the text nodes.
+    if (textSpans?.length) ttRenderSpans(span, displayContent, textSpans);
+    if (!isRevealedBlockedMsg && textBody.includes('<t:')) ttRenderCodes(span);
     linkifyUrls(span);
     if (!isRevealedBlockedMsg) processInlineImages(span);
 
@@ -555,7 +558,7 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     if (!isRevealedBlockedMsg && msg.emoji_tags && msg.emoji_tags.length) {
         renderCustomEmojiShortcodes(span, msg.emoji_tags);
     }
-    if (marked) tcPaint(span, colorSpans);
+    if (marked) tcPaint(span, textSpans);
 
     return span;
 }
@@ -730,7 +733,7 @@ function _dmsgContentSig(msg) {
     const parts = [msg.content, msg.replied_to, !!msg.edited, VectorSvelte.streamerState().seq];
     // An edit's authoritative update can carry new emoji tags under unchanged text.
     if (msg.emoji_tags?.length) parts.push(...msg.emoji_tags.map(t => t.shortcode + '=' + t.url));
-    if (msg.color_spans?.length) parts.push(JSON.stringify(msg.color_spans));
+    if (msg.text_spans?.length) parts.push(JSON.stringify(msg.text_spans));
     // Link-preview metadata arrives async via message_update.
     const pm = msg.preview_metadata;
     if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);

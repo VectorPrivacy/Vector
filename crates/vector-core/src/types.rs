@@ -60,9 +60,9 @@ pub struct Message {
     /// — commands are actioned at delivery, never replayed from history).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addressed_bots: Vec<String>,
-    /// Coloured runs of `content` (see `text_color`), from `["color", …]` tags.
+    /// Coloured runs and times in `content` (see `text_spans`), from `["color", …]` and `["time", …]` tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub color_spans: Vec<crate::text_color::ColorSpan>,
+    pub text_spans: Vec<crate::text_spans::TextSpan>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -141,7 +141,7 @@ impl Message {
     /// content. They're adopted only when this edit becomes the newest
     /// revision, so an out-of-order older edit can't clobber the live
     /// content's emoji.
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<EmojiTag>, color_spans: Vec<crate::text_color::ColorSpan>) {
+    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<EmojiTag>, text_spans: Vec<crate::text_spans::TextSpan>) {
         if self.edit_history.is_none() {
             self.edit_history = Some(vec![EditEntry {
                 content: self.content.clone(),
@@ -165,7 +165,7 @@ impl Message {
                 self.content = latest.content.clone();
                 if latest.edited_at == edited_at {
                     self.emoji_tags = emoji_tags;
-                    self.color_spans = color_spans;
+                    self.text_spans = text_spans;
                 }
             }
         }
@@ -691,7 +691,7 @@ mod tests {
             }]),
             emoji_tags: Vec::new(),
             addressed_bots: Vec::new(),
-            color_spans: Vec::new(),
+            text_spans: Vec::new(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");
