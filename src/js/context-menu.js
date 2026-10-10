@@ -143,18 +143,23 @@ function _showContextMenuFrame(items) {
     // which is the same path the back row walks.
     if (!wasVisible) pushBack('context-menu', contextMenuBack);
     const rect = VectorSvelte.contextMenuEls().root.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    // The visible area, not the layout viewport: iOS keeps the page full height
+    // under its keyboard, so a menu fitted to innerHeight can open beneath it.
+    const vv = window.visualViewport;
+    const left = (vv ? vv.offsetLeft : 0) + 8;
+    const top = (vv ? vv.offsetTop : 0) + 8;
+    const right = left - 16 + (vv ? vv.width : window.innerWidth);
+    const bottom = top - 16 + (vv ? vv.height : window.innerHeight);
     // Opened where the pointer is: step clear of it, further for a finger than a cursor.
     const p = _ctxMenuPress;
     const atPress = Math.hypot(x - p.x, y - p.y) < 24;
     const gap = atPress ? (p.touch ? 16 : 4) : 0;
     let nx = x + gap;
     let ny = y + gap;
-    if (nx + rect.width > vw - 8)  nx = Math.max(8, atPress ? x - gap - rect.width : vw - rect.width - 8);
-    if (ny + rect.height > vh - 8) ny = Math.max(8, y - gap - rect.height); // flip up
-    if (nx < 8) nx = 8;
-    if (ny < 8) ny = 8;
+    if (nx + rect.width > right)  nx = Math.max(left, atPress ? x - gap - rect.width : right - rect.width);
+    if (ny + rect.height > bottom) ny = Math.max(top, y - gap - rect.height); // flip up
+    if (nx < left) nx = left;
+    if (ny < top) ny = top;
     VectorSvelte.setContextMenu({ x: nx, y: ny });
 }
 
