@@ -317,6 +317,7 @@ function _nostrArticleImages(root) {
 }
 
 const _nostrVideoFetches = new Map();   // video url -> Promise<path>
+const _nostrVideoPreviews = new Map();   // url -> Promise<path>, while in flight
 const _nostrAuthorsQueued = new Set();
 
 function _fmtMediaDuration(secs) {
@@ -345,6 +346,7 @@ function _fmtMediaDuration(secs) {
  *   inlineVideo: () => boolean,
  *   willAutoDownload: (media: object) => boolean,
  *   fetchVideo: (media: object) => Promise<string>,
+ *   videoPreview: (media: object) => Promise<string>,
  *   cancelVideo: (url: string) => void,
  *   mediaUrl: (path: string) => string,
  *   reveal: (path: string) => void,
@@ -388,6 +390,16 @@ const NOSTR_EMBED_HELPERS = {
             _nostrVideoFetches.set(media.url, p);
             // Shared only while in flight: the file can be pruned or cleared later.
             p.finally(() => _nostrVideoFetches.delete(media.url)).catch(() => {});
+        }
+        return p;
+    },
+    // The opening few hundred KB, as ranges: enough for a first frame without the whole file.
+    videoPreview: (media) => {
+        let p = _nostrVideoPreviews.get(media.url);
+        if (!p) {
+            p = invoke('embed_video_preview', { url: media.url, sha256: media.sha256 ?? null });
+            _nostrVideoPreviews.set(media.url, p);
+            p.finally(() => _nostrVideoPreviews.delete(media.url)).catch(() => {});
         }
         return p;
     },

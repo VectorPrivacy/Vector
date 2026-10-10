@@ -9,7 +9,7 @@
 <div class="ne-media" class:is-grid={shown.length > 1}>
     {#each shown as m, i (i)}
         {#if m.is_video}
-            <EmbedVideo media={m} poster={m.poster} {origin} {h} />
+            <EmbedVideo media={m} poster={m.poster} tile={shown.length > 1} {origin} {h} />
         {:else}
             <EmbedImage url={m.url} cls="ne-media-img" ratio={m.width && m.height ? `${m.width} / ${m.height}` : null} preview {h} onload={() => h.onResized()} />
         {/if}

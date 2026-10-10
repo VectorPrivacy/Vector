@@ -7378,24 +7378,24 @@ img.emoji-img-loading {
   object-fit: cover;
 }
 
+/* The link card's player button: a dark glass circle that reads on any frame. */
 .ne-video-play {
   position: relative;
-  width: 52px;
-  height: 52px;
+  width: 56px;
+  height: 56px;
+  box-sizing: border-box;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  /* The audio player's play button: the theme colour with the app's own icon. */
-  background: var(--icon-color-primary);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
-  transition: transform 0.15s ease, filter 0.15s ease;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: transform 0.15s ease;
 }
 
 .ne-video-poster:hover .ne-video-play {
   transform: scale(1.06);
-  filter: brightness(1.08);
 }
 
 .ne-video-poster:active .ne-video-play {
@@ -7403,10 +7403,12 @@ img.emoji-img-loading {
 }
 
 .ne-video-play .icon {
-  width: 30px;
-  height: 30px;
-  background-color: #0a0a0a;
-  mask-size: 30px;
+  position: static;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  background-color: #fff;
+  mask-size: 26px;
 }
 
 /* A download or an error keeps a dark backing, so the ring and the glyph read on it. */

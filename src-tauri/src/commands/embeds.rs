@@ -59,6 +59,31 @@ pub async fn cache_embed_video<R: Runtime>(
     Ok(path)
 }
 
+/// The opening of the video at `url`, enough to show its first frame, fetched as byte ranges
+/// rather than the whole file. The whole file, when it is already here, does as well.
+#[tauri::command]
+pub async fn embed_video_preview<R: Runtime>(handle: AppHandle<R>, url: String, sha256: Option<String>) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Not a web video".into());
+    }
+    let dir = video_dir(&handle)?;
+    let stem = video_stem(&url, sha256.as_deref());
+    if let Some(done) = cached(&dir, &stem) {
+        return Ok(done);
+    }
+    let preview = format!("{stem}-poster");
+    if let Some(done) = cached(&dir, &preview) {
+        return Ok(done);
+    }
+    let poster = vector_core::video_poster::fetch(&url).await?;
+    let path = dir.join(format!("{preview}.{}", poster.ext));
+    // Written aside and renamed, so a card never reads half a file.
+    let part = dir.join(format!("{preview}.poster-part"));
+    tokio::fs::write(&part, &poster.bytes).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&part, &path).await.map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// A file is reused only for the same link AND the same promised hash: another event naming
 /// the link with a different hash must not be handed bytes that were never checked against it.
 fn video_stem(url: &str, sha256: Option<&str>) -> String {

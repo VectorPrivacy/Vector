@@ -73,6 +73,7 @@
     "allow-cache-gif-preview",
     "allow-fetch-nostr-embed",
     "allow-cache-embed-video",
+    "allow-embed-video-preview",
     "allow-cancel-embed-video",
     "allow-verify-remote-media",
     "allow-clear-image-cache",

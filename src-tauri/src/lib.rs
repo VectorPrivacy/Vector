@@ -865,6 +865,7 @@ pub fn run() {
             commands::gifs::cache_gif_preview,
             commands::embeds::fetch_nostr_embed,
             commands::embeds::cache_embed_video,
+            commands::embeds::embed_video_preview,
             commands::embeds::cancel_embed_video,
             commands::players::player_url,
             image_cache::verify_remote_media,

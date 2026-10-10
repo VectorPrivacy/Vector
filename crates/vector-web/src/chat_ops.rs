@@ -74,6 +74,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
             Value::String(cache_embed_video(&a.str("url")?, sha256.as_deref(), fallbacks.unwrap_or_default()).await?)
         }
         "cancel_embed_video" => json!(false),
+        "embed_video_preview" => Value::String(embed_video_preview(&a.str("url")?, a.opt_str("sha256").as_deref()).await?),
         _ => return Ok(None),
     }))
 }
@@ -558,6 +559,27 @@ async fn cache_embed_video(url: &str, sha256: Option<&str>, fallbacks: Vec<Strin
         return Ok(path);
     }
     Err(last_err)
+}
+
+/// The opening of an embedded video, enough to show its first frame, fetched as byte ranges.
+/// The whole file, when it is already here, does as well.
+async fn embed_video_preview(url: &str, sha256: Option<&str>) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Not a web video".into());
+    }
+    let stem = &vector_core::crypto::sha256_hex(format!("{url}\n{}", sha256.unwrap_or("").to_ascii_lowercase()).as_bytes())[..32];
+    for name in [stem.to_string(), format!("{stem}-poster")] {
+        for ext in ["mp4", "webm", "mov"] {
+            let path = format!("/cache/embed_videos/{name}.{ext}");
+            if vector_core::webfiles::exists(Path::new(&path)).await {
+                return Ok(path);
+            }
+        }
+    }
+    let poster = vector_core::video_poster::fetch(url).await?;
+    let path = format!("/cache/embed_videos/{stem}-poster.{}", poster.ext);
+    vector_core::webfiles::write(Path::new(&path), &poster.bytes).await?;
+    Ok(path)
 }
 
 /// The path is fixed here; the caller only picks the query.
