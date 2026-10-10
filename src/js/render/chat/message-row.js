@@ -666,23 +666,36 @@ function _dmsgLinkPreviewData(msg) {
         }
         return null;
     }
+    const video = _dmsgPreviewVideo(msg, meta);
     return {
-        url: meta.og_url || meta.domain,
+        url: video?.href || meta.og_url || meta.domain,
         title: meta.title || meta.og_title || 'Link Preview',
         description: meta.og_description || meta.description || '',
         favicon: meta.favicon,
         image: meta.og_image || null,
-        video: _dmsgPreviewVideo(msg, meta),
+        video,
         msgId: msg.id,
     };
 }
 
-/** The YouTube video a card previews, with the start time of the link as it was sent. */
+/** The YouTube video a card previews, with the start time and `href` of the link as it was sent. */
 function _dmsgPreviewVideo(msg, meta) {
-    const sent = ((msg.content || '').match(/https?:\/\/\S+/g) || []).map((u) => VectorSvelte.youtubeVideo(u)).filter(Boolean);
-    const card = meta.og_url ? VectorSvelte.youtubeVideo(meta.og_url) : sent[0];
+    const sent = ((msg.content || '').match(/https?:\/\/\S+/g) || [])
+        .map((href) => { const v = VectorSvelte.youtubeVideo(href); return v && { ...v, href }; })
+        .filter(Boolean);
+    let card = meta.og_url ? VectorSvelte.youtubeVideo(meta.og_url) : sent[0];
+    // An unfurler can return a broken og:url for a YouTube page; its host and thumbnail still name the video.
+    if (!card && _dmsgIsYouTubeHost(meta.domain)) {
+        let thumb = meta.og_image || '';
+        try { thumb = decodeURIComponent(thumb); } catch { /* malformed: match it as it is */ }
+        card = sent.find((v) => thumb.includes(`/vi/${v.id}/`)) || sent[0];
+    }
     if (!card) return null;
     return sent.find((v) => v.id === card.id) || card;
+}
+
+function _dmsgIsYouTubeHost(url) {
+    try { return /^(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)$/i.test(new URL(url).hostname); } catch { return false; }
 }
 
 /** og:url is the linked page's own metadata, so the scheme is gated before the OS opener. */
