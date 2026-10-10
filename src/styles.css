@@ -1095,6 +1095,7 @@ html, body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  min-width: 0;
   max-width: 60%;
 }
 
@@ -1104,12 +1105,14 @@ html, body {
 }
 
 
+/* Capped at its column: centred in one, it would otherwise size to the whole name and spill out both sides. */
 .profile-header-name-row {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   min-width: 0;
+  max-width: 100%;
   margin-top: 5px;
 }
 
@@ -21473,12 +21476,25 @@ textarea.command-part-input {
   box-sizing: border-box;
 }
 
+/* One line: a long name ellipsizes rather than pushing the time and badges below it. */
 .dmsg-header {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: -2px;
-  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dmsg-header > * {
+  flex-shrink: 0;
+}
+
+.dmsg-header > .dmsg-author {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dmsg-author {
