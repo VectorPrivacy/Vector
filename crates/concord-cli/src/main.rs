@@ -14,7 +14,7 @@
 //!
 //! `--invites` answers "is a direct invite actually on the network for this account?" — it fetches every
 //! gift wrap addressed to me from my inbox relays (paged past the relay cap), unwraps each, and reports
-//! which are COMMUNITY_INVITE_BUNDLE.
+//! which are community invites: a v1 COMMUNITY_INVITE_BUNDLE (3304) or a v2 Direct Invite (3313).
 //!
 //! Run against a COPY of the data dir — login writes a pkey row and purges the per-account mls store.
 
@@ -605,16 +605,49 @@ fn resolve_account_npub(data_dir: &std::path::Path) -> Result<String, String> {
     }
 }
 
+/// One community invite found in my inbox, whichever protocol carried it.
+#[derive(Debug)]
+struct FoundInvite {
+    protocol: &'static str,
+    name: String,
+    community_id: String,
+    relays: usize,
+    channels: usize,
+}
+
+/// Parse an unwrapped rumor with the bundle parser the app uses for its kind: `None` for a kind that
+/// is not an invite, `Some(Err)` for a bundle that fails to parse or validate.
+fn invite_of(kind: nostr_sdk::prelude::Kind, content: &str) -> Option<Result<FoundInvite, String>> {
+    use vector_core::community::v2::kind::DIRECT_INVITE;
+    use vector_core::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE;
+    match kind.as_u16() {
+        COMMUNITY_INVITE_BUNDLE => Some(
+            vector_core::community::invite::parse_invite_rumor(kind, content)
+                .map(|inv| FoundInvite { protocol: "v1", relays: inv.relays.len(), channels: inv.channels.len(), name: inv.name, community_id: inv.community_id })
+                .ok_or_else(|| "v1 bundle does not parse".to_string()),
+        ),
+        DIRECT_INVITE => Some(
+            vector_core::community::v2::invite::CommunityInvite::from_bundle_json(content)
+                .map(|inv| FoundInvite { protocol: "v2", relays: inv.relays.len(), channels: inv.channels.len(), name: inv.name, community_id: inv.community_id })
+                .map_err(|e| e.to_string()),
+        ),
+        _ => None,
+    }
+}
+
 /// INVITE PROBE: is a direct community invite actually on the network for THIS account?
 ///
 /// Fetches every kind-1059 gift wrap addressed to me from my own inbox relays (kind 10050) plus the
 /// trusted relays, per-relay so a "delivered to relay A, missing on relay B" split is visible, unwraps
-/// each with my key, and reports which inner rumors are COMMUNITY_INVITE_BUNDLE (3304) — with sender,
-/// community, channel count and the rumor's own timestamp (the real send time; the wrap backdates).
+/// each with my key, and reports which inner rumors are community invites — a v1 COMMUNITY_INVITE_BUNDLE
+/// (3304) or a v2 Direct Invite (3313) — with sender, community, channel count and the rumor's own
+/// timestamp (the real send time; the wrap backdates). An invite whose bundle fails validation is listed
+/// with the reason, since the app drops it too.
 async fn probe_invites(since_hours: u64, from: Option<&str>) {
     use nostr_sdk::prelude::{Filter, Kind, RelayUrl, Timestamp, ToBech32};
     use std::collections::{BTreeMap, HashSet};
     use std::time::Duration;
+    use vector_core::community::v2::kind::DIRECT_INVITE;
     use vector_core::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE;
 
     let Some(me) = vector_core::state::my_public_key() else {
@@ -699,7 +732,8 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     // Unwrap each, tally inner kinds, detail every invite bundle.
     let mut by_kind: BTreeMap<u16, usize> = BTreeMap::new();
     let mut undecryptable = 0usize;
-    let mut invites_found: Vec<(nostr_sdk::prelude::PublicKey, u64, vector_core::community::invite::CommunityInvite, nostr_sdk::prelude::EventId, u64)> = Vec::new();
+    let mut invites_found: Vec<(nostr_sdk::prelude::PublicKey, u64, FoundInvite, nostr_sdk::prelude::EventId, u64)> = Vec::new();
+    let mut invites_refused: Vec<(nostr_sdk::prelude::PublicKey, String, nostr_sdk::prelude::EventId)> = Vec::new();
     let mut seen_senders: HashSet<nostr_sdk::prelude::PublicKey> = HashSet::new();
     for ev in union.values() {
         match nostr_sdk::prelude::nip59::UnwrappedGift::from_gift_wrap(&keys, ev) {
@@ -707,12 +741,13 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
                 let k = g.rumor.kind.as_u16();
                 *by_kind.entry(k).or_default() += 1;
                 seen_senders.insert(g.sender);
-                if k == COMMUNITY_INVITE_BUNDLE {
-                    if let Some(inv) = vector_core::community::invite::parse_invite_rumor(g.rumor.kind, &g.rumor.content) {
-                        if from_pk.map(|p| p == g.sender).unwrap_or(true) {
-                            invites_found.push((g.sender, g.rumor.created_at.as_secs(), inv, ev.id, ev.created_at.as_secs()));
-                        }
-                    }
+                if from_pk.is_some_and(|p| p != g.sender) {
+                    continue;
+                }
+                match invite_of(g.rumor.kind, &g.rumor.content) {
+                    Some(Ok(inv)) => invites_found.push((g.sender, g.rumor.created_at.as_secs(), inv, ev.id, ev.created_at.as_secs())),
+                    Some(Err(why)) => invites_refused.push((g.sender, why, ev.id)),
+                    None => {}
                 }
             }
             Err(_) => undecryptable += 1,
@@ -724,7 +759,8 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
         let label = match *k {
             14 => " (nip17 dm)",
             15 => " (nip17 file)",
-            COMMUNITY_INVITE_BUNDLE => " (COMMUNITY INVITE)",
+            COMMUNITY_INVITE_BUNDLE => " (COMMUNITY INVITE v1)",
+            DIRECT_INVITE => " (COMMUNITY INVITE v2)",
             _ => "",
         };
         println!("      kind {k:<5} ×{n}{label}");
@@ -735,23 +771,34 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     println!("  distinct senders seen: {}", seen_senders.len());
 
     println!("\n  ── community invites on network: {} ──", invites_found.len());
-    if invites_found.is_empty() {
-        println!("    NONE. No COMMUNITY_INVITE_BUNDLE gift wrap for this account on these relays in-window.");
+    if invites_found.is_empty() && invites_refused.is_empty() {
+        println!("    NONE. No community invite gift wrap (v1 {COMMUNITY_INVITE_BUNDLE} / v2 {DIRECT_INVITE}) for this account on these relays in-window.");
         println!("    → the invite never reached these relays (sender-side / relay-mismatch), OR it is older than {since_hours}h.");
     }
     invites_found.sort_by_key(|(_, ts, _, _, _)| *ts);
     for (sender, ts, inv, wrap_id, wrap_ts) in &invites_found {
         println!(
-            "    • '{}'  ({}…)\n        from {}\n        sent {}  relays {}  channels {}\n        wrap {}  outer_ts {}",
+            "    • '{}'  ({}…)  {}\n        from {}\n        sent {}  relays {}  channels {}\n        wrap {}  outer_ts {}",
             inv.name,
             &inv.community_id[..inv.community_id.len().min(16)],
+            inv.protocol,
             sender.to_bech32().unwrap_or_else(|_| sender.to_hex()),
             ts,
-            inv.relays.len(),
-            inv.channels.len(),
+            inv.relays,
+            inv.channels,
             wrap_id.to_hex(),
             wrap_ts,
         );
+    }
+    if !invites_refused.is_empty() {
+        println!("\n  ── invites the app would refuse: {} ──", invites_refused.len());
+        for (sender, why, wrap_id) in &invites_refused {
+            println!(
+                "    • from {}\n        {why}\n        wrap {}",
+                sender.to_bech32().unwrap_or_else(|_| sender.to_hex()),
+                wrap_id.to_hex(),
+            );
+        }
     }
 }
 
@@ -775,4 +822,71 @@ fn fmt_ts(secs: u64) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| secs.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::prelude::nip59::UnwrappedGift;
+    use nostr_sdk::prelude::{Keys, Kind};
+    use vector_core::community::v2::control::CommunityIdentity;
+    use vector_core::community::v2::invite::{build_direct_invite, CommunityInvite};
+    use vector_core::simd::hex::bytes_to_hex_32 as hex;
+
+    fn v2_bundle(owner: &Keys) -> CommunityInvite {
+        let id = CommunityIdentity::mint(&owner.public_key());
+        CommunityInvite {
+            community_id: hex(&id.community_id.0),
+            owner: hex(&id.owner_xonly),
+            owner_salt: hex(&id.owner_salt),
+            community_root: "11".repeat(32),
+            root_epoch: 0,
+            control_pk: None,
+            channels: Vec::new(),
+            relays: vec!["wss://r".into()],
+            name: "Club".into(),
+            icon: None,
+            expires_at: None,
+            creator_npub: None,
+            label: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn unwrapped_v2(bundle: &CommunityInvite) -> UnwrappedGift {
+        let (inviter, me) = (Keys::generate(), Keys::generate());
+        let wrap = build_direct_invite(&inviter, &me.public_key(), bundle).unwrap();
+        UnwrappedGift::from_gift_wrap(&me, &wrap).unwrap()
+    }
+
+    #[test]
+    fn a_v2_direct_invite_is_found() {
+        let bundle = v2_bundle(&Keys::generate());
+        let g = unwrapped_v2(&bundle);
+        let inv = invite_of(g.rumor.kind, &g.rumor.content).expect("an invite kind").expect("a valid bundle");
+        assert_eq!((inv.protocol, inv.name.as_str(), inv.relays, inv.channels), ("v2", "Club", 1, 0));
+        assert_eq!(inv.community_id, bundle.community_id);
+    }
+
+    #[test]
+    fn a_v2_bundle_with_a_foreign_owner_is_refused_with_the_reason() {
+        let mut bundle = v2_bundle(&Keys::generate());
+        bundle.owner = hex(&Keys::generate().public_key().to_bytes());
+        let g = unwrapped_v2(&bundle);
+        let why = invite_of(g.rumor.kind, &g.rumor.content).expect("an invite kind").unwrap_err();
+        assert!(why.contains("owner"), "the refusal names the cause: {why}");
+    }
+
+    #[test]
+    fn a_v1_invite_is_still_found() {
+        let community = vector_core::community::Community::create("HQ", "general", vec!["wss://r".into()]);
+        let rumor = vector_core::community::invite::build_invite_rumor(&community, Keys::generate().public_key(), 1_800_000_000).unwrap();
+        let inv = invite_of(rumor.kind, &rumor.content).expect("an invite kind").expect("a valid bundle");
+        assert_eq!((inv.protocol, inv.name.as_str(), inv.relays), ("v1", "HQ", 1));
+    }
+
+    #[test]
+    fn a_dm_is_not_an_invite() {
+        assert!(invite_of(Kind::Custom(14), "hello").is_none());
+    }
 }
