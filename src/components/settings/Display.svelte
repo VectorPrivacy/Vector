@@ -13,6 +13,7 @@
         { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions', group: 'Composer' },
         { key: 'timeSuggestions', id: 'time-suggestions-toggle', label: 'Time Suggestions', group: 'Composer' },
         { key: 'autocorrect', id: 'autocorrect-toggle', label: 'Autocorrect', group: 'Composer' },
+        { key: 'sendOnEnter', id: 'send-on-enter-toggle', label: 'Send on Enter', group: 'Composer' },
         { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player', group: 'Media' },
     ];
     function info(key) {

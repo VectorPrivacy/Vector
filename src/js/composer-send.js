@@ -389,17 +389,24 @@ async function sendMessage(messageText) {
     }
 }
 
+/** A mention, emoji, time or command selector is open, and owns Enter. */
+function composerSelectorOpen() {
+    return !!((mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen())
+        || (timeCtrl && timeCtrl.isOpen())
+        || (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen())
+        || (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()));
+}
+
 /** Enter sends, Escape leaves reply or edit mode; a selector that is open owns the key. */
 async function handleComposerKeydown(evt) {
-        // Skip send if mention/emoji/command selector is consuming this keypress
         if (timeSuggestCtrl && timeSuggestCtrl.takesKey(evt)) return;
-        if (mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen()) return;
-        if (timeCtrl && timeCtrl.isOpen()) return;
-        if (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen()) return;
-        if (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()) return;
-        // A phone browser's Return key is a newline; its Send button sends.
-        const returnIsNewline = platformFeatures.os === 'web' && platformFeatures.is_mobile;
-        if ((evt.key === 'Enter' || evt.keyCode === 13) && !evt.shiftKey && !returnIsNewline) {
+        if (composerSelectorOpen()) return;
+        // A phone's Return is read from the line break it asks for (wirePhoneSendOnEnter).
+        // Here, Enter sends while Send on Enter is on; Ctrl/Cmd + Enter always does.
+        const enter = evt.key === 'Enter' || evt.keyCode === 13;
+        const sends = enter && !evt.shiftKey && !platformFeatures.is_mobile
+            && (sendOnEnter() || evt.ctrlKey || evt.metaKey);
+        if (sends) {
             evt.preventDefault();
             await sendMessage(domChatMessageInput.value);
         }
@@ -743,12 +750,34 @@ async function initComposerVoice() {
     window.voiceSettings.initVoiceSettings();
 }
 
+/**
+ * Send on Enter, on a phone. Read from the line break the keyboard asks for rather than
+ * the key: Android keyboards rarely report Enter as a key at all. Shift+Return on an
+ * attached keyboard still breaks the line.
+ */
+function wirePhoneSendOnEnter() {
+    // On the host, so it runs before the composer's own line-break handling in every engine.
+    const host = document.getElementById('chat-input-host');
+    let shiftReturn = false;
+    host.addEventListener('keydown', (e) => { if (e.key === 'Enter') shiftReturn = e.shiftKey; }, true);
+    host.addEventListener('beforeinput', (e) => {
+        if (e.inputType !== 'insertParagraph' && e.inputType !== 'insertLineBreak') return;
+        const shift = shiftReturn;
+        shiftReturn = false;
+        if (!sendOnEnter() || shift || composerSelectorOpen()) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        sendMessage(domChatMessageInput.value);
+    }, true);
+}
+
 /** Wire the composer once the DOM is up. */
 async function initComposer() {
     initComposerAttachments();
     document.onpaste = handleComposerPaste;
     // Android composes through its own keyboard actions.
     if (platformFeatures.os !== 'android') domChatMessageInput.addEventListener('keydown', handleComposerKeydown);
+    if (platformFeatures.is_mobile) wirePhoneSendOnEnter();
     initComposerControllers();
     initCommandController();
     domChatMessageInput.oninput = handleComposerInput;

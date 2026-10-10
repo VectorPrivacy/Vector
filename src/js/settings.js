@@ -779,6 +779,27 @@ function applyAutocorrectSetting() {
     domChatMessageInput.setAttribute('autocorrect', fAutocorrectEnabled ? 'on' : 'off');
 }
 
+// Send on Enter: Return sends rather than starting a line. On by default with a real keyboard,
+// off on a phone, whose Send button is in reach. Per device, as it suits one keyboard and not
+// another, so it lives in localStorage.
+let fSendOnEnter = null;
+
+/** Send on Enter, resolved once the platform is known (the default depends on it). */
+function sendOnEnter() {
+    if (fSendOnEnter !== null || !platformFeatures) return !!fSendOnEnter;
+    fSendOnEnter = !platformFeatures.is_mobile;
+    try {
+        const saved = localStorage.getItem('send_on_enter');
+        if (saved !== null) fSendOnEnter = saved === 'true';
+    } catch (_) { /* storage blocked: the default */ }
+    return fSendOnEnter;
+}
+
+/** The keyboard's Return key reads as what it does. */
+function applySendOnEnterSetting() {
+    domChatMessageInput.setAttribute('enterkeyhint', sendOnEnter() ? 'send' : 'enter');
+}
+
 // Security Settings - Encryption state
 let fEncryptionEnabled = true;
 let fSecurityType = 'pin';
@@ -925,6 +946,7 @@ const DISPLAY_EXPLAINERS = {
     richComposer: ['Rich Composer', 'The chat box formats <b>bold</b>, <i>italics</i>, code and links as you type.<br><br>Turn it off to use a plain text box instead. The change applies on the next app start.'],
     emoticons: ['Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.'],
     autocorrect: ['Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.'],
+    sendOnEnter: ['Send on Enter', 'When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only.'],
     floatingPlayer: ['Floating Player', 'When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat.'],
 };
 
@@ -965,6 +987,11 @@ const DISPLAY_HANDLERS = {
                 applyAutocorrectSetting();
                 await saveAutocorrect(on);
                 break;
+            case 'sendOnEnter':
+                fSendOnEnter = on;
+                try { localStorage.setItem('send_on_enter', on ? 'true' : 'false'); } catch (_) { /* this session only */ }
+                applySendOnEnterSetting();
+                break;
             case 'floatingPlayer':
                 VectorSvelte.setPopoutEnabled(on);
                 await saveFloatingPlayer(on);
@@ -982,6 +1009,7 @@ async function initDisplaySettings() {
     timeSuggestionsEnabled = await loadTimeSuggestions();
     fAutocorrectEnabled = await loadAutocorrect();
     applyAutocorrectSetting();
+    applySendOnEnterSetting();
     const floatingPlayer = await loadFloatingPlayer();
     VectorSvelte.setPopoutEnabled(floatingPlayer);
     VectorSvelte.setDisplaySettings({
@@ -991,6 +1019,7 @@ async function initDisplaySettings() {
         emoticons: emoticonSuggestionsEnabled,
         timeSuggestions: timeSuggestionsEnabled,
         autocorrect: fAutocorrectEnabled,
+        sendOnEnter: sendOnEnter(),
         floatingPlayer,
     });
 }

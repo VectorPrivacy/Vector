@@ -66,8 +66,8 @@ export function setSecurity({ enabled, type, bioSupported }) {
 export function setSigner(signer) { security.signer = signer || null; }
 export function setSignerDot(dot) { security.dot = dot || ''; }
 
-// Display: seven toggles. The rows render from here; the app applies each one.
-const display = $state({ loaded: false, imageTypes: false, chatBg: true, richComposer: true, emoticons: true, timeSuggestions: true, autocorrect: true, floatingPlayer: true });
+// Display: the toggles. The rows render from here; the app applies each one.
+const display = $state({ loaded: false, imageTypes: false, chatBg: true, richComposer: true, emoticons: true, timeSuggestions: true, autocorrect: true, sendOnEnter: false, floatingPlayer: true });
 export function displayState() { return display; }
 export function setDisplaySettings(values) {
     Object.assign(display, values);
