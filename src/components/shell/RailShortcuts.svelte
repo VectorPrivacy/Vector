@@ -239,8 +239,8 @@
     });
 </script>
 
-<!-- With nothing unread, one door to the DMs stands where the unread rows would. -->
-<div id="ws-rail-messages" class="ws-rail-group" hidden={groups.dms.length > 0}>
+<!-- The door to the DMs, always first; unread DMs list under it. -->
+<div id="ws-rail-messages" class="ws-rail-group">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="ws-rail-messages btn" title="Messages" onclick={() => h.openDmHome()}>
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">

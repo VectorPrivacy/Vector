@@ -1303,9 +1303,9 @@ body.ws #ws-rail-dms {
   flex-shrink: 0;
 }
 
-/* The Messages tile: a labelled door in the unread rows' slot, lit while the DM
-   list is the pane on screen the way a chosen community's shortcut lights. It
-   stands as far under the header seam as it does above the divider. */
+/* The Messages tile: a labelled door to the DMs, lit while the DM list is the
+   pane on screen the way a chosen community's shortcut lights. It stands as far
+   under the header seam as it does above the divider. */
 body.ws #ws-rail-messages {
   padding-top: 10px;
 }
@@ -1859,7 +1859,7 @@ body.ws #ws-rail-collapse {
   border-radius: 6px;
   flex-shrink: 0;
   opacity: 0.4;
-  transition: opacity 0.12s ease, background-color 0.12s ease;
+  transition: opacity 0.12s ease, background-color 0.12s ease, height 0.2s ease;
 }
 
 body.ws #ws-rail-collapse:hover {
@@ -1867,10 +1867,14 @@ body.ws #ws-rail-collapse:hover {
   background-color: var(--ws-hover);
 }
 
-/* The window is too narrow for the rail to expand: nothing to toggle. Coming back is
-   a fade, not a pop: the rail's width jumps at the same moment and the toggle
-   arriving with it read as a flash. */
-body.ws.ws-rail-locked #ws-rail-collapse {
+/* The window is too narrow for the rail to expand: nothing to toggle, so it folds
+   away and the tabs slide down into its room, which goes to Communities. Coming
+   back is a fade, not a pop: the rail's width jumps at the same moment and the
+   toggle arriving with it read as a flash. Locked is always collapsed, so this
+   outranks the collapsed tile's height. */
+body.ws.ws-rail-collapsed.ws-rail-locked #ws-rail-collapse {
+  height: 0;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
 }
@@ -2014,6 +2018,11 @@ body.ws.ws-rail-collapsed #ws-rail-account #account:hover {
   border: 0;
   box-shadow: none;
   transition: none;
+}
+
+/* The toggle still folds in and out as the window locks the rail. */
+body.ws.ws-rail-collapsed #navbar #ws-rail-collapse {
+  transition: height 0.2s ease;
 }
 
 /* ========================= 6. The list resizer =========================== */
