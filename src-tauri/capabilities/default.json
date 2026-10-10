@@ -251,6 +251,7 @@
     "allow-get-relays",
     "allow-get-media-servers",
     "allow-get-blossom-servers-config",
+    "allow-warm-inbox-relays",
     "allow-add-custom-blossom-server",
     "allow-remove-custom-blossom-server",
     "allow-toggle-custom-blossom-server",

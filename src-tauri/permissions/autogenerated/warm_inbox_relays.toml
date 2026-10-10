@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-warm-inbox-relays"
+description = "Enables the warm_inbox_relays command without any pre-configured scope."
+commands.allow = ["warm_inbox_relays"]
+
+[[permission]]
+identifier = "deny-warm-inbox-relays"
+description = "Denies the warm_inbox_relays command without any pre-configured scope."
+commands.deny = ["warm_inbox_relays"]

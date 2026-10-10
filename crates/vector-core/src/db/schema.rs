@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 98;
+pub const HIGHEST_MIGRATION_ID: u32 = 100;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1429,6 +1429,10 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             .map_err(|e| format!("add chats.unread_from: {e}"))?;
         Ok(())
     })?;
+
+    run_atomic_migration(conn, 99, "Persisted inbox relay lists", |tx| crate::inbox_relays::migrate(tx))?;
+
+    run_atomic_migration(conn, 100, "Inbox relay list revisions", |tx| crate::inbox_relays::migrate_event_at(tx))?;
 
     Ok(())
 }

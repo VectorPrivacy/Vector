@@ -22,6 +22,12 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
         Some(match cmd {
             // --- Relays ---
             "get_relays" => get_relays().await,
+            "warm_inbox_relays" => {
+                if let Some(pk) = a.str("npub").ok().and_then(|n| nostr_sdk::prelude::PublicKey::parse(&n).ok()) {
+                    vector_core::inbox_relays::refresh_in_background(pk);
+                }
+                Ok(Value::Null)
+            }
             "get_custom_relays" => load_custom_relays().and_then(to_value),
             "add_custom_relay" => match a.str("url") {
                 Ok(url) => add_custom_relay(url, a.opt_str("mode")).await.and_then(to_value),

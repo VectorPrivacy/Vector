@@ -209,18 +209,56 @@ pub fn spawn_tracked_publish(
 // Cache
 // ============================================================================
 
-/// How long cached relay lists stay valid before re-fetching.
-const CACHE_TTL_SECS: u64 = 3600; // 1 hour
+/// A known list is used whatever its age, so a send never waits on someone looked up before.
+/// Past this it is refreshed in the background (a send, or their chat opening), at most this
+/// often per person.
+const REFRESH_AFTER_SECS: u64 = 3600;
 
-/// Shorter TTL for failed fetches so transient errors don't suppress routing too long.
-const CACHE_TTL_ERROR_SECS: u64 = 60; // 1 minute
+/// A failed lookup with no list to fall back on is asked again after this.
+const CACHE_TTL_ERROR_SECS: u64 = 60;
 
+/// After a send whose every relay refused, the list is asked for again unless it is this fresh.
+const RECHECK_AFTER_SECS: u64 = 300;
+
+#[derive(Clone)]
 struct CachedRelays {
     relays: Vec<String>,
-    fetched_at: Instant,
+    /// Unix seconds.
+    fetched_at: u64,
     /// Whether the fetch succeeded (true) or failed/timed out (false).
-    /// Failed fetches use a shorter cache TTL.
     fetch_ok: bool,
+    /// The kind 10050's `created_at`; 0 when no list was found.
+    event_at: u64,
+}
+
+impl CachedRelays {
+    fn age(&self) -> u64 {
+        now_secs().saturating_sub(self.fetched_at)
+    }
+
+    /// Served without asking: any list a lookup found, or a failure still fresh.
+    fn usable(&self) -> bool {
+        self.fetch_ok || self.age() < CACHE_TTL_ERROR_SECS
+    }
+
+    fn served(&self) -> FetchResult {
+        FetchResult {
+            relays: self.relays.clone(),
+            fetch_ok: self.fetch_ok,
+            blind: None,
+            cached_at: Some(self.fetched_at),
+            event_at: (self.event_at > 0).then_some(self.event_at),
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Relay urls as a set, for telling whether two lists name the same relays.
+fn relay_set(relays: &[String]) -> HashSet<String> {
+    relays.iter().map(|r| normalize_relay_url(r)).collect()
 }
 
 /// Recipient-keyed, so technically account-agnostic — but the set of
@@ -231,12 +269,115 @@ fn inbox_relay_cache() -> Arc<Mutex<HashMap<PublicKey, CachedRelays>>> {
     crate::db::current_session().scoped::<InboxRelayCache, _>()
 }
 
+/// When each person's list was last asked for, this session: the gate on background refreshes.
+struct InboxRelayAsked;
+
+fn asked_at() -> Arc<Mutex<HashMap<PublicKey, u64>>> {
+    crate::db::current_session().scoped::<InboxRelayAsked, _>()
+}
+
+/// The list known for `pubkey`: in memory, else in the account's database (where only lists a
+/// lookup found are kept, never failures).
+fn cached(pubkey: &PublicKey) -> Option<CachedRelays> {
+    let owner = inbox_relay_cache();
+    if let Some(entry) = owner.lock().unwrap().get(pubkey) {
+        return Some(entry.clone());
+    }
+    let stored = load_stored(pubkey)?;
+    let entry = owner.lock().unwrap().entry(*pubkey).or_insert(stored).clone();
+    Some(entry)
+}
+
+/// Keep what a lookup found. A known list is only ever replaced by a newer revision: a
+/// failure, an older revision, or finding none at all (a struggling network can answer empty)
+/// leaves it, and the next refresh asks again. A blind lookup keeps nothing.
+fn keep(pubkey: &PublicKey, result: &FetchResult) {
+    if result.blind.is_some() {
+        return;
+    }
+    let now = now_secs();
+    asked_at().lock().unwrap().insert(*pubkey, now);
+    let known = cached(pubkey).filter(|e| e.fetch_ok);
+    let next = if !result.fetch_ok {
+        if known.is_some() {
+            return;
+        }
+        CachedRelays { relays: Vec::new(), fetched_at: now, fetch_ok: false, event_at: 0 }
+    } else {
+        match (result.event_at, known) {
+            // An older revision than ours: ours stands, and is confirmed current.
+            (Some(at), Some(k)) if at < k.event_at => CachedRelays { fetched_at: now, ..k },
+            (Some(at), _) => CachedRelays { relays: result.relays.clone(), fetched_at: now, fetch_ok: true, event_at: at },
+            (None, Some(k)) if !k.relays.is_empty() => return,
+            (None, _) => CachedRelays { relays: result.relays.clone(), fetched_at: now, fetch_ok: true, event_at: 0 },
+        }
+    };
+    inbox_relay_cache().lock().unwrap().insert(*pubkey, next.clone());
+    if next.fetch_ok {
+        store(pubkey, &next);
+    }
+}
+
+/// Our own list, as just published or confirmed: self-send copies go where it says now.
+fn keep_own(pubkey: &PublicKey, relays: &[String], event_at: u64) {
+    keep(pubkey, &FetchResult { relays: relays.to_vec(), fetch_ok: true, blind: None, cached_at: None, event_at: Some(event_at) });
+}
+
+/// The persisted lists: per account, so a restart starts warm.
+pub(crate) fn migrate(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS inbox_relays (
+            pubkey     TEXT    PRIMARY KEY,
+            relays     TEXT    NOT NULL,
+            fetched_at INTEGER NOT NULL
+        );",
+    )
+    .map_err(|e| format!("create inbox_relays: {e}"))
+}
+
+/// Which revision each persisted list is, so an older or empty answer never replaces it.
+pub(crate) fn migrate_event_at(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    tx.execute("ALTER TABLE inbox_relays ADD COLUMN event_at INTEGER NOT NULL DEFAULT 0", [])
+        .map(|_| ())
+        .map_err(|e| format!("add inbox_relays.event_at: {e}"))
+}
+
+fn load_stored(pubkey: &PublicKey) -> Option<CachedRelays> {
+    let conn = crate::db::get_db_connection_guard_static().ok()?;
+    let (relays, fetched_at, event_at): (String, i64, i64) = conn
+        .query_row(
+            "SELECT relays, fetched_at, event_at FROM inbox_relays WHERE pubkey = ?1",
+            [pubkey.to_hex()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok()?;
+    Some(CachedRelays {
+        relays: serde_json::from_str(&relays).ok()?,
+        // A row written while the clock ran ahead would read as fresh until it caught up.
+        fetched_at: (fetched_at.max(0) as u64).min(now_secs()),
+        fetch_ok: true,
+        event_at: event_at.max(0) as u64,
+    })
+}
+
+fn store(pubkey: &PublicKey, entry: &CachedRelays) {
+    let Ok(conn) = crate::db::get_write_connection_guard_static() else { return };
+    let Ok(json) = serde_json::to_string(&entry.relays) else { return };
+    if let Err(e) = conn.execute(
+        "INSERT INTO inbox_relays (pubkey, relays, fetched_at, event_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(pubkey) DO UPDATE SET relays = excluded.relays, fetched_at = excluded.fetched_at, event_at = excluded.event_at",
+        rusqlite::params![pubkey.to_hex(), json, entry.fetched_at as i64, entry.event_at as i64],
+    ) {
+        crate::log_warn!("[InboxRelays] couldn't keep the list for {}: {}", pubkey, e);
+    }
+}
+
 /// A recipient's inbox relays as if just fetched.
 #[cfg(test)]
 pub(crate) fn seed_inbox_relays_for_test(pk: PublicKey, relays: &[&str]) {
     inbox_relay_cache().lock().unwrap().insert(
         pk,
-        CachedRelays { relays: relays.iter().map(|s| s.to_string()).collect(), fetched_at: Instant::now(), fetch_ok: true },
+        CachedRelays { relays: relays.iter().map(|s| s.to_string()).collect(), fetched_at: now_secs(), fetch_ok: true, event_at: 1 },
     );
 }
 
@@ -351,11 +492,16 @@ struct FetchResult {
     /// Nothing found while some of the relays asked were out of reach: unknown, not absent,
     /// so it is never cached or read as "no inbox relays".
     blind: Option<Blind>,
+    /// When the list served was fetched (unix seconds), or None when it was fetched just now.
+    cached_at: Option<u64>,
+    /// The kind 10050's `created_at`, or None when no list was found.
+    event_at: Option<u64>,
 }
 
 impl FetchResult {
+    #[cfg(test)]
     fn found(relays: Vec<String>, fetch_ok: bool) -> Self {
-        FetchResult { relays, fetch_ok, blind: None }
+        FetchResult { relays, fetch_ok, blind: None, cached_at: None, event_at: None }
     }
 }
 
@@ -416,7 +562,7 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
         Ok(events) => events,
         Err(e) => {
             eprintln!("[InboxRelays] Failed to fetch 10050 for {}: {}", pubkey, e);
-            return FetchResult { relays: Vec::new(), fetch_ok: false, blind };
+            return FetchResult { relays: Vec::new(), fetch_ok: false, blind, cached_at: None, event_at: None };
         }
     };
 
@@ -424,10 +570,10 @@ async fn fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult 
     // only the newest is the user's current list.
     let event = match events.into_iter().max_by_key(|e| e.created_at) {
         Some(e) => e,
-        None => return FetchResult { relays: Vec::new(), fetch_ok: true, blind },
+        None => return FetchResult { relays: Vec::new(), fetch_ok: true, blind, cached_at: None, event_at: None },
     };
 
-    FetchResult::found(parse_relay_tags(&event.tags), true)
+    FetchResult { relays: parse_relay_tags(&event.tags), fetch_ok: true, blind: None, cached_at: None, event_at: Some(event.created_at.as_secs()) }
 }
 
 /// Extract relay URLs from kind 10050 event tags.
@@ -445,107 +591,122 @@ fn parse_relay_tags(tags: &Tags) -> Vec<String> {
         .collect()
 }
 
+/// This pubkey's fetch lock, behind a guard that tidies the lock map when it drops.
+fn key_lock(pubkey: &PublicKey) -> FetchLockEntryCleanup {
+    let mut locks = FETCH_LOCKS.lock().unwrap();
+
+    // Periodic cleanup: remove dead Weak entries every PRUNE_INTERVAL accesses.
+    // Avoids O(n) scan in global critical section on every cache miss; instead
+    // amortizes cost to O(n/PRUNE_INTERVAL) per miss under heavy fan-out.
+    if PRUNE_COUNTER.fetch_add(1, Ordering::Relaxed).is_multiple_of(PRUNE_INTERVAL) {
+        locks.retain(|_, weak| Weak::strong_count(weak) > 0);
+    }
+
+    let weak = locks.entry(*pubkey).or_default();
+    let key_lock = match weak.upgrade() {
+        Some(arc) => arc,
+        None => {
+            let new_arc = Arc::new(tokio::sync::Mutex::new(()));
+            *weak = Arc::downgrade(&new_arc);
+            new_arc
+        }
+    };
+    // Wrap lock Arc in drop-guard so map cleanup runs even on cancellation.
+    FetchLockEntryCleanup::new(*pubkey, key_lock)
+}
+
 /// Generic cache-with-lock implementation used by both production and test code.
-/// Uses double-checked locking to prevent cache stampede: rapid requests to the
-/// same pubkey serialize through a per-key lock, so only one fetch happens.
+/// Any known list is served at once, whatever its age. Otherwise rapid requests for
+/// the same pubkey serialize through a per-key lock, so only one fetch happens.
 /// Different pubkeys never block each other.
 async fn get_or_fetch_with_lock<F, Fut>(pubkey: &PublicKey, fetch_fn: F) -> FetchResult
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = FetchResult>,
 {
-    // Fast path: cache hit (no per-key lock needed, no pruning)
-    {
-        let owner = inbox_relay_cache();
-        let cache = owner.lock().unwrap();
-        if let Some(entry) = cache.get(pubkey) {
-            let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
-            if entry.fetched_at.elapsed().as_secs() < ttl {
-                return FetchResult::found(entry.relays.clone(), entry.fetch_ok);
-            }
-        }
+    if let Some(entry) = cached(pubkey).filter(CachedRelays::usable) {
+        return entry.served();
     }
 
-    // Per-key lock — serializes fetches for the same pubkey only.
-    // Uses Weak references + periodic pruning (every PRUNE_INTERVAL cache misses).
-    let cleanup_guard = {
-        let mut locks = FETCH_LOCKS.lock().unwrap();
-
-        // Periodic cleanup: remove dead Weak entries every PRUNE_INTERVAL accesses.
-        // Avoids O(n) scan in global critical section on every cache miss; instead
-        // amortizes cost to O(n/PRUNE_INTERVAL) per miss under heavy fan-out.
-        if PRUNE_COUNTER.fetch_add(1, Ordering::Relaxed).is_multiple_of(PRUNE_INTERVAL) {
-            locks.retain(|_, weak| Weak::strong_count(weak) > 0);
-        }
-
-        let weak = locks.entry(*pubkey).or_default();
-        // Try to upgrade the weak reference; if it fails (Arc was dropped),
-        // create a new Arc and update the map.
-        let key_lock = match weak.upgrade() {
-            Some(arc) => arc,
-            None => {
-                let new_arc = Arc::new(tokio::sync::Mutex::new(()));
-                *weak = Arc::downgrade(&new_arc);
-                new_arc
-            }
-        };
-        // Wrap lock Arc in drop-guard so map cleanup runs even on cancellation.
-        FetchLockEntryCleanup::new(*pubkey, key_lock)
-    };
-    let relays = {
+    let cleanup_guard = key_lock(pubkey);
+    let result = {
         let _guard = cleanup_guard.key_lock.lock().await;
-
-        // Double-check: another task may have filled the cache while we waited
-        let cached_relays = {
-            let owner = inbox_relay_cache();
-            let cache = owner.lock().unwrap();
-            if let Some(entry) = cache.get(pubkey) {
-                let ttl = if entry.fetch_ok { CACHE_TTL_SECS } else { CACHE_TTL_ERROR_SECS };
-                if entry.fetched_at.elapsed().as_secs() < ttl {
-                    Some(FetchResult::found(entry.relays.clone(), entry.fetch_ok))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        match cached_relays {
-            Some(found) => found,
+        // Double-check: another task may have filled the cache while we waited.
+        match cached(pubkey).filter(CachedRelays::usable) {
+            Some(entry) => entry.served(),
             None => {
-                // We won the race — do the actual fetch
                 let result = fetch_fn().await;
-
-                // Store in cache (even empty/error results to avoid hammering relays), except a
-                // blind one: the next send, perhaps on another network, asks again.
-                if result.blind.is_none() {
-                    let owner = inbox_relay_cache();
-                    let mut cache = owner.lock().unwrap();
-                    cache.insert(
-                        *pubkey,
-                        CachedRelays {
-                            relays: result.relays.clone(),
-                            fetched_at: Instant::now(),
-                            fetch_ok: result.fetch_ok,
-                        },
-                    );
-                }
-
+                keep(pubkey, &result);
                 result
             }
         }
-    }; // per-key lock guard dropped here
-
+    };
     // Explicit drop on normal path. On cancellation/panic unwind this still runs
     // via Drop when the future is torn down.
     drop(cleanup_guard);
-    relays
+    result
 }
 
-/// Get inbox relays for a pubkey, using cache when available.
+/// Get inbox relays for a pubkey: a known list at once, refreshed in the background when old.
+/// Bound to the account it started under, so a swap mid-lookup keeps it in that account.
 async fn get_or_fetch_inbox_relays(client: &Client, pubkey: &PublicKey) -> FetchResult {
-    get_or_fetch_with_lock(pubkey, || fetch_inbox_relays(client, pubkey)).await
+    let result = crate::db::scoped(get_or_fetch_with_lock(pubkey, || fetch_inbox_relays(client, pubkey))).await;
+    if result.fetch_ok && result.cached_at.is_some_and(|at| now_secs().saturating_sub(at) >= REFRESH_AFTER_SECS) {
+        refresh_in_background(*pubkey);
+    }
+    result
+}
+
+/// Look up `pubkey`'s list in the background (their chat opening, a send on an old list), unless
+/// it is under an hour old or was asked for in the last hour.
+pub fn refresh_in_background(pubkey: PublicKey) {
+    if cached(&pubkey).is_some_and(|e| e.fetch_ok && e.age() < REFRESH_AFTER_SECS) {
+        return;
+    }
+    let now = now_secs();
+    {
+        let owner = asked_at();
+        let mut asked = owner.lock().unwrap();
+        if asked.get(&pubkey).is_some_and(|at| now.saturating_sub(*at) < REFRESH_AFTER_SECS) {
+            return;
+        }
+        asked.insert(pubkey, now);
+    }
+    crate::db::spawn_bound(async move {
+        if let Some(client) = nostr_client() {
+            refresh_now(&client, &pubkey, REFRESH_AFTER_SECS).await;
+        }
+    });
+}
+
+/// Ask for `pubkey`'s list past the cache, unless, once its lock is held, it is younger than
+/// `fresh_for` seconds (another lookup just ran).
+async fn refresh_now(client: &Client, pubkey: &PublicKey, fresh_for: u64) {
+    let cleanup_guard = key_lock(pubkey);
+    {
+        let _guard = cleanup_guard.key_lock.lock().await;
+        if !cached(pubkey).is_some_and(|e| e.fetch_ok && e.age() < fresh_for) {
+            let result = fetch_inbox_relays(client, pubkey).await;
+            keep(pubkey, &result);
+        }
+    }
+    drop(cleanup_guard);
+}
+
+/// A send to `pubkey` that its relays refused, on a list the cache served: ask again unless it
+/// was just asked for. True when the list now known names other relays than `tried`, the ones
+/// the send used, so the next attempt goes to those.
+pub async fn recheck_after_failure(client: &Client, pubkey: &PublicKey, tried: &[String]) -> bool {
+    crate::db::scoped(async {
+        refresh_now(client, pubkey, RECHECK_AFTER_SECS).await;
+        list_moved(pubkey, tried)
+    })
+    .await
+}
+
+/// Whether the list known for `pubkey` names other relays than `tried`.
+fn list_moved(pubkey: &PublicKey, tried: &[String]) -> bool {
+    cached(pubkey).is_some_and(|e| e.fetch_ok && relay_set(&e.relays) != relay_set(tried))
 }
 
 // ============================================================================
@@ -739,6 +900,11 @@ pub struct GiftWrapTargets {
     /// The lookup couldn't reach the relays that would list their inbox (the network down,
     /// switching, or failing): why. No target this time; the next attempt looks again.
     pub unknown: Option<String>,
+    /// The inbox list came from the cache rather than a lookup just now, so may be out of date.
+    pub from_cache: bool,
+    /// The inbox list this was resolved from, before any relay was refused: what a re-check
+    /// compares against.
+    pub inbox_tried: Vec<String>,
 }
 
 /// Why a recipient whose every inbox relay the network refuses can't be sent to.
@@ -776,11 +942,28 @@ pub async fn send_gift_wrap_retained(
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<GiftWrapSendOutcome, String> {
     let built = build_gift_wrap_retained(client, recipient, rumor, extra_tags).await?;
-    let targets = resolve_gift_wrap_targets(client, recipient).await;
+    let mut targets = resolve_gift_wrap_targets(client, recipient).await;
+    // A cached list may be out of date: one the network refuses, or whose every relay refuses
+    // the wrap, is asked for again once, and the same wrap goes to the new list.
+    if targets.refused.is_some()
+        && targets.from_cache
+        && recheck_after_failure(client, recipient, &targets.inbox_tried).await
+    {
+        targets = resolve_gift_wrap_targets(client, recipient).await;
+    }
     if let Some(why) = targets.refused.clone().or_else(|| targets.unknown.clone()) {
         return Err(why);
     }
-    let publish_result = publish_gift_wrap_to_targets(client, &targets, &built.event).await;
+    let mut publish_result = publish_gift_wrap_to_targets(client, &targets, &built.event).await;
+    let landed = matches!(&publish_result, Ok(out) if !out.success.is_empty());
+    if !landed && targets.from_cache && recheck_after_failure(client, recipient, &targets.inbox_tried).await {
+        let fresh = resolve_gift_wrap_targets(client, recipient).await;
+        if fresh.refused.is_none() && fresh.unknown.is_none() {
+            teardown_gift_wrap_targets(client, &targets).await;
+            targets = fresh;
+            publish_result = publish_gift_wrap_to_targets(client, &targets, &built.event).await;
+        }
+    }
     teardown_gift_wrap_targets(client, &targets).await;
     Ok(GiftWrapSendOutcome {
         output: publish_result?,
@@ -802,6 +985,8 @@ pub async fn resolve_gift_wrap_targets(
     // our own write relays are no fallback for an inbox the recipient named.
     let mut refusal = None;
     let lookup = get_or_fetch_inbox_relays(client, recipient).await;
+    let from_cache = lookup.cached_at.is_some();
+    let inbox_tried = lookup.relays.clone();
     let inbox_strs: Vec<String> = lookup
         .relays
         .into_iter()
@@ -829,6 +1014,8 @@ pub async fn resolve_gift_wrap_targets(
                 transient_added: Vec::new(),
                 refused,
                 unknown,
+                from_cache,
+                inbox_tried,
             };
         }
     }
@@ -917,6 +1104,8 @@ pub async fn resolve_gift_wrap_targets(
         transient_added,
         refused: None,
         unknown: None,
+        from_cache,
+        inbox_tried,
     }
 }
 
@@ -1417,7 +1606,11 @@ pub async fn publish_inbox_relays_synced(
         note_list_seen(remote_ts);
     }
 
+    // Our own copies (self-sends) go where the list says now, not where the cache last saw it.
     if remote_found && !plan.changed {
+        if let Some(me) = crate::state::my_public_key() {
+            keep_own(&me, &remote, remote_ts);
+        }
         crate::log_info!(
             "[InboxRelays] kind 10050 already in sync ({} relay(s)), not publishing",
             plan.list.len()
@@ -1481,6 +1674,7 @@ pub async fn publish_inbox_relays_synced(
     // wrongly-advanced anchor gates future syncs off real network state.
     if session.is_live() {
         note_list_seen(event.created_at.as_secs().max(remote_ts));
+        keep_own(&event.pubkey, &plan.list, event.created_at.as_secs());
     }
 
     crate::log_info!(
@@ -1871,277 +2065,324 @@ mod tests {
     static TEST_GLOBALS_LOCK: LazyLock<tokio::sync::Mutex<()>> =
         LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-    #[test]
-    fn cache_stores_and_retrieves() {
-        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
-        let pk = test_pubkey();
-        let relays = vec!["wss://a.example.com".to_string()];
+    /// The test's own session: no database, nothing shared with a test that has one open.
+    async fn isolated<F: std::future::Future>(fut: F) -> F::Output {
+        crate::db::with_session(crate::db::Session::empty(), fut).await
+    }
 
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.insert(pk, CachedRelays {
-                relays: relays.clone(),
-                fetched_at: Instant::now(),
-                fetch_ok: true,
-            });
-        }
+    fn put(pk: PublicKey, relays: &[&str], age: u64, fetch_ok: bool, event_at: u64) {
+        inbox_relay_cache().lock().unwrap().insert(pk, CachedRelays {
+            relays: relays.iter().map(|s| s.to_string()).collect(),
+            fetched_at: now_secs() - age,
+            fetch_ok,
+            event_at,
+        });
+    }
 
-        let owner = inbox_relay_cache();
-        let cache = owner.lock().unwrap();
-        let entry = cache.get(&pk).unwrap();
-        assert_eq!(entry.relays, relays);
-        assert!(entry.fetch_ok);
-        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
+    fn answer(relays: &[&str], event_at: Option<u64>) -> FetchResult {
+        FetchResult { relays: relays.iter().map(|s| s.to_string()).collect(), fetch_ok: true, blind: None, cached_at: None, event_at }
+    }
+
+    fn relays_of(pk: &PublicKey) -> Vec<String> {
+        cached(pk).unwrap().relays
+    }
+
+    #[tokio::test]
+    async fn a_known_list_is_served_at_any_age_without_a_lookup() {
+        isolated(async {
+            let pk = test_pubkey();
+            put(pk, &["wss://old.example.com"], 30 * 24 * 3600, true, 10);
+            let r = get_or_fetch_with_lock(&pk, || async { panic!("a known list must not wait on a lookup") }).await;
+            assert_eq!(r.relays, vec!["wss://old.example.com".to_string()]);
+            assert!(r.cached_at.is_some(), "served from the cache, so a send may re-check it");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_is_served_briefly_then_asked_again() {
+        isolated(async {
+            let pk = test_pubkey();
+            put(pk, &[], 10, false, 0);
+            let r = get_or_fetch_with_lock(&pk, || async { panic!("a fresh failure is served") }).await;
+            assert!(!r.fetch_ok);
+            put(pk, &[], CACHE_TTL_ERROR_SECS + 1, false, 0);
+            let r = get_or_fetch_with_lock(&pk, || async { answer(&["wss://new.example.com"], Some(5)) }).await;
+            assert_eq!(r.relays, vec!["wss://new.example.com".to_string()]);
+            assert!(r.cached_at.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn only_a_newer_revision_replaces_a_known_list() {
+        isolated(async {
+            let pk = test_pubkey();
+            put(pk, &["wss://known.example.com"], 7200, true, 100);
+            // A failed lookup, an older revision, and finding no list at all leave it.
+            keep(&pk, &FetchResult { relays: Vec::new(), fetch_ok: false, blind: None, cached_at: None, event_at: None });
+            keep(&pk, &answer(&["wss://older.example.com"], Some(99)));
+            keep(&pk, &answer(&[], None));
+            assert_eq!(relays_of(&pk), vec!["wss://known.example.com".to_string()]);
+            // The older revision still confirmed it current.
+            assert!(cached(&pk).unwrap().age() < 5);
+            // A newer revision replaces it, even one that names no relays: they removed it.
+            keep(&pk, &answer(&["wss://newer.example.com"], Some(101)));
+            assert_eq!(relays_of(&pk), vec!["wss://newer.example.com".to_string()]);
+            keep(&pk, &answer(&[], Some(102)));
+            assert!(relays_of(&pk).is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_recheck_compares_with_the_relays_the_send_used_not_the_cache() {
+        isolated(async {
+            let pk = test_pubkey();
+            let tried = vec!["wss://a.example.com".to_string()];
+            put(pk, &["wss://a.example.com/"], 0, true, 1);
+            assert!(!list_moved(&pk, &tried), "same relays, however they are spelled");
+            // A refresh (their chat opening) learned the new list after the send resolved.
+            keep(&pk, &answer(&["wss://b.example.com"], Some(2)));
+            assert!(list_moved(&pk, &tried));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_background_refresh_runs_at_most_hourly_and_not_for_a_fresh_list() {
+        isolated(async {
+            let fresh = test_pubkey();
+            put(fresh, &["wss://a.example.com"], 60, true, 1);
+            refresh_in_background(fresh);
+            assert!(!asked_at().lock().unwrap().contains_key(&fresh), "under an hour old: nothing to ask");
+
+            let stale = test_pubkey();
+            put(stale, &["wss://a.example.com"], REFRESH_AFTER_SECS + 1, true, 1);
+            refresh_in_background(stale);
+            let first = *asked_at().lock().unwrap().get(&stale).expect("asked for");
+            asked_at().lock().unwrap().insert(stale, first - 10);
+            refresh_in_background(stale);
+            assert_eq!(asked_at().lock().unwrap().get(&stale), Some(&(first - 10)), "not again within the hour");
+        })
+        .await;
     }
 
     #[test]
-    fn cache_expires_after_ttl() {
-        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
+    fn a_list_found_survives_a_restart() {
+        let _globals = TEST_GLOBALS_LOCK.blocking_lock();
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+
         let pk = test_pubkey();
+        let other = test_pubkey();
+        keep(&pk, &answer(&["wss://kept.example.com"], Some(42)));
+        keep(&other, &FetchResult { relays: Vec::new(), fetch_ok: false, blind: None, cached_at: None, event_at: None });
 
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.insert(pk, CachedRelays {
-                relays: vec!["wss://stale.example.com".to_string()],
-                fetched_at: Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1),
-                fetch_ok: true,
-            });
-        }
+        crate::db::close_database();
+        crate::db::init_database(&account).unwrap();
+        inbox_relay_cache().lock().unwrap().clear();
 
-        let owner = inbox_relay_cache();
-        let cache = owner.lock().unwrap();
-        let entry = cache.get(&pk).unwrap();
-        assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_SECS);
+        let entry = cached(&pk).expect("read back from the database");
+        assert_eq!(entry.relays, vec!["wss://kept.example.com".to_string()]);
+        assert_eq!(entry.event_at, 42);
+        assert!(entry.fetch_ok && entry.age() < 5);
+        // A failure is never written down: a restart asks again rather than trusting it.
+        assert!(cached(&other).is_none());
     }
-
-    #[test]
-    fn cache_stores_empty_results() {
-        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
-        let pk = test_pubkey();
-
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.insert(pk, CachedRelays {
-                relays: vec![],
-                fetched_at: Instant::now(),
-                fetch_ok: true,
-            });
-        }
-
-        let owner = inbox_relay_cache();
-        let cache = owner.lock().unwrap();
-        let entry = cache.get(&pk).unwrap();
-        assert!(entry.relays.is_empty());
-        assert!(entry.fetch_ok);
-        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
-    }
-
-    #[test]
-    fn cache_error_uses_short_ttl() {
-        let _guard = TEST_GLOBALS_LOCK.blocking_lock();
-        let pk = test_pubkey();
-
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.insert(pk, CachedRelays {
-                relays: vec![],
-                // Inserted 2 minutes ago — past the error TTL (60s) but within success TTL (3600s)
-                fetched_at: Instant::now() - std::time::Duration::from_secs(120),
-                fetch_ok: false,
-            });
-        }
-
-        let owner = inbox_relay_cache();
-        let cache = owner.lock().unwrap();
-        let entry = cache.get(&pk).unwrap();
-        assert!(!entry.fetch_ok);
-        // Should be considered expired under error TTL
-        assert!(entry.fetched_at.elapsed().as_secs() >= CACHE_TTL_ERROR_SECS);
-        // But would still be valid under success TTL
-        assert!(entry.fetched_at.elapsed().as_secs() < CACHE_TTL_SECS);
-    }
-
-    // ---- Concurrency / stampede prevention ----
 
     #[tokio::test]
     async fn concurrent_fetches_for_same_pubkey_serialize() {
         let _guard = TEST_GLOBALS_LOCK.lock().await;
-        let pk = test_pubkey();
+        isolated(async {
+            let pk = test_pubkey();
 
-        // Clear cache so all tasks see a cold cache
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.remove(&pk);
-        }
+            // Clear cache so all tasks see a cold cache
+            {
+                let owner = inbox_relay_cache();
+                let mut cache = owner.lock().unwrap();
+                cache.remove(&pk);
+            }
 
-        let fetch_counter = Arc::new(AtomicU64::new(0));
+            let fetch_counter = Arc::new(AtomicU64::new(0));
 
-        // Spawn 10 concurrent tasks all trying to fetch the same pubkey.
-        // Uses production get_or_fetch_with_lock so this tests actual code path.
-        let mut handles = vec![];
-        for _ in 0..10 {
-            let counter = fetch_counter.clone();
-            let handle = crate::db::spawn_bound(async move {
-                get_or_fetch_with_lock(&pk, || async {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    // Simulate network delay so concurrent tasks pile up
-                    crate::rt::time::sleep(std::time::Duration::from_millis(50)).await;
-                    FetchResult::found(vec!["wss://test.example.com".to_string()], true)
-                })
-                .await
-            });
-            handles.push(handle);
-        }
+            // Spawn 10 concurrent tasks all trying to fetch the same pubkey.
+            // Uses production get_or_fetch_with_lock so this tests actual code path.
+            let mut handles = vec![];
+            for _ in 0..10 {
+                let counter = fetch_counter.clone();
+                let handle = crate::db::spawn_bound(async move {
+                    get_or_fetch_with_lock(&pk, || async {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        // Simulate network delay so concurrent tasks pile up
+                        crate::rt::time::sleep(std::time::Duration::from_millis(50)).await;
+                        FetchResult::found(vec!["wss://test.example.com".to_string()], true)
+                    })
+                    .await
+                });
+                handles.push(handle);
+            }
 
-        // Wait for all tasks to complete
-        let results = futures_util::future::join_all(handles).await;
+            // Wait for all tasks to complete
+            let results = futures_util::future::join_all(handles).await;
 
-        // All tasks should succeed and get the same result
-        for result in &results {
-            assert!(result.is_ok());
-            let relays = &result.as_ref().unwrap().relays;
-            assert_eq!(relays, &vec!["wss://test.example.com".to_string()]);
-        }
+            // All tasks should succeed and get the same result
+            for result in &results {
+                assert!(result.is_ok());
+                let relays = &result.as_ref().unwrap().relays;
+                assert_eq!(relays, &vec!["wss://test.example.com".to_string()]);
+            }
 
-        // CRITICAL: Only ONE fetch should have executed (others waited on lock + hit cache)
-        assert_eq!(
-            fetch_counter.load(Ordering::SeqCst),
-            1,
-            "Expected exactly 1 fetch for 10 concurrent requests to same pubkey"
-        );
+            // CRITICAL: Only ONE fetch should have executed (others waited on lock + hit cache)
+            assert_eq!(
+                fetch_counter.load(Ordering::SeqCst),
+                1,
+                "Expected exactly 1 fetch for 10 concurrent requests to same pubkey"
+            );
 
-        let locks_after = {
-            let locks = FETCH_LOCKS.lock().unwrap();
-            locks.len()
-        };
-        assert_eq!(locks_after, 0, "Lock entry should be removed after all waiters complete");
+            let locks_after = {
+                let locks = FETCH_LOCKS.lock().unwrap();
+                locks.len()
+            };
+            assert_eq!(locks_after, 0, "Lock entry should be removed after all waiters complete");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn fetch_locks_do_not_accumulate_after_calls_complete() {
         let _guard = TEST_GLOBALS_LOCK.lock().await;
+        isolated(async {
 
-        // Verify that lock entries are removed eagerly when the last in-flight
-        // caller for a key exits (true bounded growth, no idle-after-burst leak).
+            // Verify that lock entries are removed eagerly when the last in-flight
+            // caller for a key exits (true bounded growth, no idle-after-burst leak).
 
-        let pk1 = test_pubkey();
-        let pk2 = test_pubkey();
-        let pk3 = test_pubkey();
+            let pk1 = test_pubkey();
+            let pk2 = test_pubkey();
+            let pk3 = test_pubkey();
 
-        // Clear both cache and locks to avoid interference from other tests
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.clear();
-        }
-        {
-            let mut locks = FETCH_LOCKS.lock().unwrap();
-            locks.clear();
-        }
+            // Clear both cache and locks to avoid interference from other tests
+            {
+                let owner = inbox_relay_cache();
+                let mut cache = owner.lock().unwrap();
+                cache.clear();
+            }
+            {
+                let mut locks = FETCH_LOCKS.lock().unwrap();
+                locks.clear();
+            }
 
-        // Step 1: Fetch for pk1 (cache miss -> creates lock entry)
-        get_or_fetch_with_lock(&pk1, || async {
-            FetchResult::found(vec!["wss://relay1.example.com".to_string()], true)
+            // Step 1: Fetch for pk1 (cache miss -> creates lock entry)
+            get_or_fetch_with_lock(&pk1, || async {
+                FetchResult::found(vec!["wss://relay1.example.com".to_string()], true)
+            })
+            .await;
+
+            // Single-call path: no waiters, so eager cleanup should remove key immediately.
+
+            let locks_after_pk1 = {
+                let locks = FETCH_LOCKS.lock().unwrap();
+                locks.len()
+            };
+            assert_eq!(locks_after_pk1, 0, "No lock entries should remain after pk1 call");
+
+            // Step 2: repeat with pk2
+            get_or_fetch_with_lock(&pk2, || async {
+                FetchResult::found(vec!["wss://relay2.example.com".to_string()], true)
+            })
+            .await;
+
+            let locks_after_pk2 = {
+                let locks = FETCH_LOCKS.lock().unwrap();
+                locks.len()
+            };
+            assert_eq!(locks_after_pk2, 0, "No lock entries should remain after pk2 call");
+
+            // Step 3: repeat with pk3
+            get_or_fetch_with_lock(&pk3, || async {
+                FetchResult::found(vec!["wss://relay3.example.com".to_string()], true)
+            })
+            .await;
+
+            let locks_after_pk3 = {
+                let locks = FETCH_LOCKS.lock().unwrap();
+                locks.len()
+            };
+            assert_eq!(locks_after_pk3, 0, "No lock entries should remain after pk3 call");
         })
         .await;
-
-        // Single-call path: no waiters, so eager cleanup should remove key immediately.
-
-        let locks_after_pk1 = {
-            let locks = FETCH_LOCKS.lock().unwrap();
-            locks.len()
-        };
-        assert_eq!(locks_after_pk1, 0, "No lock entries should remain after pk1 call");
-
-        // Step 2: repeat with pk2
-        get_or_fetch_with_lock(&pk2, || async {
-            FetchResult::found(vec!["wss://relay2.example.com".to_string()], true)
-        })
-        .await;
-
-        let locks_after_pk2 = {
-            let locks = FETCH_LOCKS.lock().unwrap();
-            locks.len()
-        };
-        assert_eq!(locks_after_pk2, 0, "No lock entries should remain after pk2 call");
-
-        // Step 3: repeat with pk3
-        get_or_fetch_with_lock(&pk3, || async {
-            FetchResult::found(vec!["wss://relay3.example.com".to_string()], true)
-        })
-        .await;
-
-        let locks_after_pk3 = {
-            let locks = FETCH_LOCKS.lock().unwrap();
-            locks.len()
-        };
-        assert_eq!(locks_after_pk3, 0, "No lock entries should remain after pk3 call");
     }
 
     #[tokio::test]
     async fn a_blind_lookup_is_never_cached() {
         let _guard = TEST_GLOBALS_LOCK.lock().await;
-        let pk = test_pubkey();
-        let runs = Arc::new(AtomicU64::new(0));
-        for _ in 0..2 {
-            let runs = runs.clone();
-            let r = get_or_fetch_with_lock(&pk, || async move {
-                runs.fetch_add(1, Ordering::SeqCst);
-                FetchResult { relays: Vec::new(), fetch_ok: true, blind: Some(Blind::Policy(crate::transport::Refusal::ExitOff)) }
-            })
-            .await;
-            assert_eq!(r.blind, Some(Blind::Policy(crate::transport::Refusal::ExitOff)));
-        }
-        assert_eq!(runs.load(Ordering::SeqCst), 2, "asked again, not answered from the cache");
-        assert!(!is_cached_for_test(&pk));
-        let r = get_or_fetch_with_lock(&pk, || async { FetchResult::found(Vec::new(), true) }).await;
-        assert!(r.blind.is_none() && is_cached_for_test(&pk), "a real answer is cached as before");
+        isolated(async {
+            let pk = test_pubkey();
+            let runs = Arc::new(AtomicU64::new(0));
+            for _ in 0..2 {
+                let runs = runs.clone();
+                let r = get_or_fetch_with_lock(&pk, || async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    FetchResult { relays: Vec::new(), fetch_ok: true, blind: Some(Blind::Policy(crate::transport::Refusal::ExitOff)), cached_at: None, event_at: None }
+                })
+                .await;
+                assert_eq!(r.blind, Some(Blind::Policy(crate::transport::Refusal::ExitOff)));
+            }
+            assert_eq!(runs.load(Ordering::SeqCst), 2, "asked again, not answered from the cache");
+            assert!(!is_cached_for_test(&pk));
+            let r = get_or_fetch_with_lock(&pk, || async { FetchResult::found(Vec::new(), true) }).await;
+            assert!(r.blind.is_none() && is_cached_for_test(&pk), "a real answer is cached as before");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn cancelled_fetch_cleans_up_lock_entry() {
         let _guard = TEST_GLOBALS_LOCK.lock().await;
-        let pk = test_pubkey();
+        isolated(async {
+            let pk = test_pubkey();
 
-        {
-            let owner = inbox_relay_cache();
-            let mut cache = owner.lock().unwrap();
-            cache.clear();
-        }
-        {
-            let mut locks = FETCH_LOCKS.lock().unwrap();
-            locks.clear();
-        }
+            {
+                let owner = inbox_relay_cache();
+                let mut cache = owner.lock().unwrap();
+                cache.clear();
+            }
+            {
+                let mut locks = FETCH_LOCKS.lock().unwrap();
+                locks.clear();
+            }
 
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-        let task_pk = pk;
-        let handle = crate::db::spawn_bound(async move {
-            get_or_fetch_with_lock(&task_pk, || async move {
-                let _ = started_tx.send(());
-                crate::rt::time::sleep(std::time::Duration::from_secs(30)).await;
-                FetchResult::found(Vec::new(), false)
-            })
-            .await
-        });
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+            let task_pk = pk;
+            let handle = crate::db::spawn_bound(async move {
+                get_or_fetch_with_lock(&task_pk, || async move {
+                    let _ = started_tx.send(());
+                    crate::rt::time::sleep(std::time::Duration::from_secs(30)).await;
+                    FetchResult::found(Vec::new(), false)
+                })
+                .await
+            });
 
-        started_rx.await.expect("fetch closure should start before abort");
-        handle.abort();
-        let _ = handle.await;
-        crate::rt::yield_now().await;
+            started_rx.await.expect("fetch closure should start before abort");
+            handle.abort();
+            let _ = handle.await;
+            crate::rt::yield_now().await;
 
-        let locks_after = {
-            let locks = FETCH_LOCKS.lock().unwrap();
-            locks.len()
-        };
-        assert_eq!(
-            locks_after, 0,
-            "Lock entry should be removed even if fetch task is cancelled"
-        );
+            let locks_after = {
+                let locks = FETCH_LOCKS.lock().unwrap();
+                locks.len()
+            };
+            assert_eq!(
+                locks_after, 0,
+                "Lock entry should be removed even if fetch task is cancelled"
+            );
+        })
+        .await;
     }
 
     // ---- Debounce ----

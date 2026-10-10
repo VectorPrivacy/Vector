@@ -1105,6 +1105,8 @@ async function openChat(contact, { reread = true } = {}) {
     const openSeq = ++_openChatSeq;
     wsSyncOpenChat();
     updateSelfDestructIndicator(contact);
+    // A DM's inbox relays, looked up ahead of the first send (the backend holds it to hourly).
+    if (!isGroup && contact.startsWith('npub1')) invoke('warm_inbox_relays', { npub: contact }).catch(() => {});
     // Warm the command-bot snapshot so the command list has the chat's bots on first open.
     if (commandCtrl && commandCtrl.hasBots) commandCtrl.hasBots(contact);
     // Snapshot last_read BEFORE the open-time markAsRead — the divider needs

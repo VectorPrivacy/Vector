@@ -1013,6 +1013,7 @@ pub fn run() {
             commands::relays::get_relays,
             commands::relays::get_media_servers,
             commands::relays::get_blossom_servers_config,
+            commands::relays::warm_inbox_relays,
             commands::relays::add_custom_blossom_server,
             commands::relays::remove_custom_blossom_server,
             commands::relays::toggle_custom_blossom_server,

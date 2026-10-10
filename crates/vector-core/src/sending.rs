@@ -365,6 +365,8 @@ async fn retry_send_gift_wrap(
     // Why the last attempt had nowhere to publish: the lookup couldn't reach their relays.
     let mut unknown: Option<String> = None;
     let mut keys_stored = is_resend;
+    // A cached inbox list is checked again at most once per send, after its relays all refused.
+    let mut rechecked = false;
 
     let max_attempts = config.max_send_attempts.max(1);
 
@@ -433,6 +435,13 @@ async fn retry_send_gift_wrap(
             crate::inbox_relays::reconnect_gift_wrap_targets(t).await;
         } else {
             let t = crate::inbox_relays::resolve_gift_wrap_targets(client, receiver).await;
+            // A cached list the network refuses may be out of date: ask once before failing.
+            if t.refused.is_some() && t.from_cache && !rechecked {
+                rechecked = true;
+                if crate::inbox_relays::recheck_after_failure(client, receiver, &t.inbox_tried).await {
+                    continue;
+                }
+            }
             // No retry changes a policy refusal: fail now, and say why.
             if let Some(why) = t.refused.clone() {
                 remove_wrap_confirm(&confirm_ref.wrap_id);
@@ -475,9 +484,17 @@ async fn retry_send_gift_wrap(
                     }
                 }
             }
+            // A resend, or targets swapped after a re-check: a later delete must reach these too.
+            if keys_stored && (is_resend || rechecked) {
+                if let Err(e) = crate::db::nip17_keys::add_wrap_relays(&wrap.event.id, &t.targeted_relays) {
+                    eprintln!("[NIP-17] failed to note the new wrap relays: {}", e);
+                }
+            }
             targets = Some(t);
         }
         let targets_ref = targets.as_ref().unwrap();
+        let from_cache = targets_ref.from_cache;
+        let inbox_tried = targets_ref.inbox_tried.clone();
 
         match crate::inbox_relays::publish_gift_wrap_to_targets(
             client, targets_ref, &wrap.event,
@@ -526,6 +543,19 @@ async fn retry_send_gift_wrap(
                 client, my_pk, receiver_npub, pending_id, event_id,
                 &rumor, config, &callback, confirm_ref, targets_ref,
             ).await);
+        }
+
+        // Every relay refused a list the cache served, which may be out of date: ask again, and
+        // if it changed, the next attempt goes to the new one at once.
+        if from_cache && !rechecked && attempt + 1 < max_attempts {
+            rechecked = true;
+            if crate::inbox_relays::recheck_after_failure(client, receiver, &inbox_tried).await {
+                crate::log_info!("[Send] {}'s inbox relays changed; sending to the new ones", receiver_npub);
+                if let Some(old) = targets.take() {
+                    crate::inbox_relays::teardown_gift_wrap_targets(client, &old).await;
+                }
+                continue;
+            }
         }
 
         if attempt + 1 < max_attempts {

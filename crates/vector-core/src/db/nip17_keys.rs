@@ -91,6 +91,31 @@ pub fn store_wrap_key(
     Ok(())
 }
 
+/// More relays a wrap was published to, so a delete reaches them too.
+pub fn add_wrap_relays(wrap_event_id: &EventId, relay_urls: &[String]) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
+    let conn = super::get_write_connection_guard_static()?;
+    // No row: the key was never kept (no rumor id), so there is nothing to delete later.
+    let Some(current): Option<String> = conn
+        .query_row("SELECT relay_urls FROM nip17_wrap_keys WHERE wrap_event_id = ?1", [wrap_event_id.to_hex()], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("Failed to read wrap relays: {}", e))?
+    else {
+        return Ok(());
+    };
+    let mut urls: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
+    let norm = crate::inbox_relays::normalize_relay_url;
+    for url in relay_urls {
+        if !urls.iter().any(|u| norm(u) == norm(url)) {
+            urls.push(url.clone());
+        }
+    }
+    let json = serde_json::to_string(&urls).map_err(|e| format!("Failed to encode relay urls: {}", e))?;
+    conn.execute("UPDATE nip17_wrap_keys SET relay_urls = ?1 WHERE wrap_event_id = ?2", params![json, wrap_event_id.to_hex()])
+        .map_err(|e| format!("Failed to update wrap relays: {}", e))?;
+    Ok(())
+}
+
 /// Fetch every retained wrap key (recipient + self + retry) for a given
 /// inner rumor id. Used at delete time to construct one NIP-09 per wrap.
 pub fn get_wrap_keys_for_rumor(rumor_id: &EventId) -> Result<Vec<StoredWrapKey>, String> {

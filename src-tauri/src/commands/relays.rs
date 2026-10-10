@@ -469,6 +469,14 @@ pub async fn get_media_servers() -> Vec<String> {
 // Blossom (BUD-03) server CRUD
 // ============================================================================
 
+/// Look up a DM partner's inbox relays ahead of the first send, at most hourly per person.
+#[tauri::command]
+pub async fn warm_inbox_relays(npub: String) {
+    if let Ok(pk) = PublicKey::parse(&npub) {
+        crate::inbox_relays::refresh_in_background(pk);
+    }
+}
+
 #[tauri::command]
 pub async fn get_blossom_servers_config() -> Vec<vector_core::blossom_servers::BlossomServerInfo> {
     vector_core::blossom_servers::list_all_servers()
