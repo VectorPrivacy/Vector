@@ -174,7 +174,23 @@
             mini_apps: hasServiceWorker(),
             // Voice models are kept in OPFS, which only persistent storage has.
             transcription: features.storage === 'persistent',
+            players: playersFramable(),
         };
+    });
+
+    // The onion frames nothing, and a cross-origin isolated page frames a player only as a
+    // credentialless iframe, which Firefox lacks.
+    function playersFramable() {
+        if (location.hostname.endsWith('.onion')) return false;
+        return !window.crossOriginIsolated || 'credentialless' in HTMLIFrameElement.prototype;
+    }
+    // A real https origin sends YouTube its Referer, so the card frames the player directly.
+    local.set('player_url', async ({ provider, id, start }) => {
+        if (provider !== 'youtube' || !/^[A-Za-z0-9_-]{11}$/.test(id) || !playersFramable()) throw 'Not a video Vector can play';
+        const settings = await backend('get_synced_settings').catch(() => null);
+        if (!settings || settings.players === false) throw 'Video players are switched off in Settings';
+        const at = Number.isInteger(start) && start > 0 ? `&start=${start}` : '';
+        return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1${at}`;
     });
 
     // A Vector link opened into this tab (`/#go/<payload>`, from vectorapp.io/go): taken once,

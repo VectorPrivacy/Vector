@@ -8,6 +8,8 @@
     // moves the same <video> element rather than remounting it.
     import { untrack, flushSync } from 'svelte';
     import { createVideo, adoptVideo, ownsVideo, dropVideo, videoLane } from '../lib/videohost.js';
+    import { adoptFrame, ownsFrame, placeFrame, dropFrame } from '../lib/framehost.js';
+    import { playersState, playersAvailable, stopPlayer } from '../lib/players.svelte.js';
     import { popoutState, closePopout } from '../lib/popout.svelte.js';
     import { audioInfo, claimPlayback, releasePlayback, patchTranscription, modelDownloadState, setLyricsOpen,
              splitTitle, songLyrics, accentOf, ensureAccent, smoothBin, toggleTranscript, transcriptButton } from '../lib/audio.svelte.js';
@@ -22,6 +24,8 @@
     const item = $derived(pop.item);
     const session = $derived(item?.kind === 'audio' ? item.session : null);
     const isVideo = $derived(item?.kind === 'video');
+    // A YouTube player: always the picture, which is YouTube's to control.
+    const isFrame = $derived(item?.kind === 'frame');
     // What both kinds carry: the attachment, its message and the chat it came from.
     const ref = $derived(session || item);
     const meta = $derived(session ? audioInfo(session.id)?.meta ?? null : null);
@@ -86,13 +90,14 @@
             const t = splitTitle(session.tracks[trackIdx]?.title);
             return { title: t.main, sub: [`${trackIdx + 1} of ${session.tracks.length}`, splitTitle(meta?.album || '').main || meta?.artist].filter(Boolean).join(' · ') };
         }
+        if (isFrame) return { title: item.title || 'YouTube', sub: chat, place };
         if (meta?.artist) return { title: meta.track || ref.att.name, sub: meta.artist };
         return { title: meta?.track || ref.att.name || (isVideo ? 'Video' : 'Audio'), sub: chat, place };
     });
 
     // ── place and size: remembered per device, the width per kind ──
     const KEY = 'media_popout';
-    const LIMITS = { audio: [260, 480], video: [220, 720] };
+    const LIMITS = { audio: [260, 480], video: [220, 720], frame: [356, 720] };
     function load() {
         try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (_) { return {}; }
     }
@@ -117,13 +122,15 @@
         });
     });
     const soundOnly = $derived(isVideo && (openSound ?? soundPref));
-    const kindKey = $derived(isVideo && !soundOnly ? 'video' : 'audio');
+    const kindKey = $derived(isFrame || (isVideo && !soundOnly) ? 'video' : 'audio');
     // A video's height follows its width, so its width also answers to the window's height:
     // the picture keeps to about half of it, and the box to 60% of the window's width.
     let vAspect = $state(null);   // the loaded video's own, over what the row measured
-    const aspect = $derived(vAspect || (isVideo && item.aspect) || 16 / 9);
+    const aspect = $derived(isFrame ? 16 / 9 : vAspect || (isVideo && item.aspect) || 16 / 9);
     const videoCap = $derived(Math.max(160, Math.min(winW * 0.6, Math.min(winH * 0.55, winH - chromeHeight() - 160) * aspect)));
-    const width = $derived(Math.min(widths[kindKey], winW - 24, kindKey === 'video' ? videoCap : Infinity));
+    // YouTube asks for a player of at least 200px each way, so a player keeps its floor (to the window's).
+    const width = $derived(Math.min(Math.max(widths[kindKey], isFrame ? LIMITS.frame[0] : 0), winW - 24,
+                                    kindKey === 'video' ? Math.max(videoCap, isFrame ? LIMITS.frame[0] : 0) : Infinity));
     function toggleSound() {
         if (openSound !== null) openSound = !openSound;
         else { soundPref = !soundPref; save(); }
@@ -225,13 +232,14 @@
         // corner can only travel one line: take the point on that line nearest the pointer.
         // Continuous in the pointer, so a small move is only ever a small change.
         let w = dx;
-        if (kindKey === 'video' && video?.offsetHeight) {
-            const a = video.offsetWidth / video.offsetHeight;
-            const chrome = box.offsetHeight - video.offsetHeight;
+        const pic = isFrame ? frameSlot : video;
+        if (kindKey === 'video' && pic?.offsetHeight) {
+            const a = pic.offsetWidth / pic.offsetHeight;
+            const chrome = box.offsetHeight - pic.offsetHeight;
             w = (dx + (dy - chrome) / a) / (1 + 1 / (a * a));
         }
         const room = (g.pinRight ? g.ax : winW - g.ax) - 8;
-        const [min, max] = LIMITS[kindKey];
+        const [min, max] = LIMITS[isFrame ? 'frame' : kindKey];
         const cap = kindKey === 'video' ? Math.max(min, videoCap) : max;
         widths[kindKey] = Math.round(Math.max(min, Math.min(max, cap, room, w)));
         // Lay the new size out now, then put the pinned corner back where it was.
@@ -433,6 +441,46 @@
         item.volume = video.volume;
     }
 
+    // ── a YouTube player: lib/framehost.js keeps it; this box is where it is laid ──
+    const players = playersState();
+    let frameSlot = $state(null);
+    let hostedFrame = null;   // { key, owner } of the player this box holds
+    function popFrame(node, it) {
+        const owner = {};
+        const key = it.frameKey;
+        if (!adoptFrame(key, owner)) { untrack(closePopout); return {}; }
+        frameSlot = node;
+        hostedFrame = { key, owner };
+        const shell = node.closest('.media-popout');
+        const cs = getComputedStyle(shell);
+        // Above the box. Its top corners are the picture's: it resizes from the bottom ones.
+        placeFrame(key, {
+            box: node,
+            lifted: true,
+            radius: `${cs.borderTopLeftRadius} ${cs.borderTopRightRadius} 0 0`,
+        });
+        return {
+            destroy() {
+                // Taken back by its card, the player is the card's now and plays on.
+                if (ownsFrame(key, owner)) {
+                    dropFrame(key);
+                    stopPlayer(key);
+                }
+                if (frameSlot === node) frameSlot = null;
+                if (hostedFrame?.owner === owner) hostedFrame = null;
+            },
+        };
+    }
+    // Another player starting, the setting off, or the network leaving Clearnet: gone at once.
+    $effect(() => { if (isFrame && (!playersAvailable() || players.playing !== item.frameKey)) untrack(closePopout); });
+    // Closed, the player stops at once rather than playing on under the fade; taken back by its
+    // card, it is the card's now.
+    $effect(() => {
+        if (item || !hostedFrame || !ownsFrame(hostedFrame.key, hostedFrame.owner)) return;
+        dropFrame(hostedFrame.key);
+        stopPlayer(hostedFrame.key);
+    });
+
     const playing = $derived(isVideo ? vPlaying : !!session?.playing);
     const loading = $derived(!!session?.loading);
     function toggle() {
@@ -460,7 +508,7 @@
 
 {#if item}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="media-popout" class:is-album={isAlbum} bind:this={box} in:cardPop={{ duration: 160 }} out:cardPop={{ duration: 150 }} class:is-video={isVideo && !soundOnly} class:is-sound={!isVideo || soundOnly}
+    <div class="media-popout" class:is-album={isAlbum} bind:this={box} in:cardPop={{ duration: 160 }} out:cardPop={{ duration: 150 }} class:is-video={isFrame || (isVideo && !soundOnly)} class:is-sound={!isFrame && (!isVideo || soundOnly)}
          style:width="{width}px" style:right="{right}px" style:bottom="{bottom}px" style:--icon-color-primary={accent}
          onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}
          onlostpointercapture={() => { if (gesture && !gesture.pending) onPointerUp(); }} ondragstart={(e) => e.preventDefault()}
@@ -475,6 +523,11 @@
         {#if isVideo}
             {#key item.id}
                 <div style="display: contents" use:popVideo={item}></div>
+            {/key}
+        {:else if isFrame}
+            <!-- Each hand-off is its own item: a box still fading out must adopt the new one. -->
+            {#key item}
+                <div class="popout-frame-slot" use:popFrame={item}></div>
             {/key}
         {:else if art}
             <button class="popout-thumb" aria-label="View cover art" onclick={() => h.audio.viewImage(art)}><img src={art} alt=""></button>
@@ -525,7 +578,7 @@
             <button class="popout-action" aria-label="Close" title="Close" onclick={() => closePopout()}><span class="icon icon-x"></span></button>
         </div>
 
-        {#if !isVideo || soundOnly}
+        {#if !isFrame && (!isVideo || soundOnly)}
             <span class="popout-play-group">
                 {#if isAlbum}<button class="audio-skip" aria-label="Previous" onclick={() => session.prev()}><span class="icon icon-skip-back"></span></button>{/if}
                 <button class="audio-play-btn popout-play" aria-label={playing ? 'Pause' : 'Play'} onclick={toggle}>

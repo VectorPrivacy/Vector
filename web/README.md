@@ -107,7 +107,8 @@ Mini apps need Vector served by host name, with every `*.xdc.<host>` subdomain r
 the same server: `serve.mjs` answers those with only the mini app host page, its service
 worker and the bridge template. On localhost that works as is (`*.localhost` resolves to
 the machine); a deployment needs wildcard DNS and a wildcard certificate for
-`*.xdc.<host>`, and should send the page `frame-src <scheme>://*.xdc.<host>` as serve.mjs does.
+`*.xdc.<host>`, and should send the page `frame-src <scheme>://*.xdc.<host> https://www.youtube-nocookie.com`
+as serve.mjs does; without the second source, a YouTube player a click starts is blocked.
 
 Threaded mini apps (`cross_origin_isolated = true` in the manifest) need the page cross-origin
 isolated: send every response of Vector's own origin `Cross-Origin-Opener-Policy: same-origin`

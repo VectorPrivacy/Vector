@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-player-url"
+description = "Enables the player_url command without any pre-configured scope."
+commands.allow = ["player_url"]
+
+[[permission]]
+identifier = "deny-player-url"
+description = "Denies the player_url command without any pre-configured scope."
+commands.deny = ["player_url"]

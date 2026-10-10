@@ -71,7 +71,8 @@ collect(join(OUT, 'fonts'), '/fonts/');
 writeFileSync(join(OUT, 'web', 'warm.json'), JSON.stringify(warm));
 
 // Desktop's policy, minus Tauri's schemes. Nothing remote: every remote file reaches the page
-// as a local copy the worker fetched and checked.
+// as a local copy the worker fetched and checked. Frames are the exception: Mini Apps, and a
+// video player a click starts (the server's header narrows them).
 export const CSP = [
     "default-src 'self'",
     "script-src 'self'",

@@ -215,6 +215,8 @@
     "allow-set-streamer-mode",
     "allow-set-streamer-notif",
     "allow-set-streamer-wallpapers",
+    "allow-set-embedded-players",
+    "allow-player-url",
     "allow-list-emoji-packs",
     "allow-get-pack-share-naddr",
     "allow-refresh-emoji-packs",

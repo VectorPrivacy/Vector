@@ -303,6 +303,18 @@ pub async fn set_advanced_mode(on: bool) -> Result<serde_json::Value, String> {
     .await
 }
 
+/// Takes effect at once, synced or not: switching players off must not wait for the relay copy.
+#[tauri::command]
+pub async fn set_embedded_players(on: bool) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let settings = synced_prefs::set_players(on)?;
+        emit_settings(&settings);
+        publish_projection(Pref::Settings);
+        Ok(settings.view())
+    })
+    .await
+}
+
 /// Takes effect at once, synced or not: before hydration the relay copy adopts it later.
 #[tauri::command]
 pub async fn set_streamer_mode(on: bool) -> Result<serde_json::Value, String> {
@@ -356,4 +368,4 @@ fn emit_settings(settings: &SyncedSettings) {
 }
 
 // Handlers: get_hidden_banners, set_banner_hidden, get_archived_chats, set_chat_archived, revoke_chat_archive, get_synced_settings, set_advanced_mode,
-// set_streamer_mode, set_streamer_notif, set_streamer_wallpapers
+// set_embedded_players, set_streamer_mode, set_streamer_notif, set_streamer_wallpapers

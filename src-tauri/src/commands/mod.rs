@@ -42,3 +42,4 @@ pub mod clipboard;
 pub mod updates;
 pub mod gifs;
 pub mod embeds;
+pub mod players;

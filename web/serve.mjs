@@ -75,9 +75,10 @@ createServer(async (req, res) => {
             'Cross-Origin-Opener-Policy': 'same-origin',
             'Cross-Origin-Embedder-Policy': 'credentialless',
         };
-        // Clickjacking guard for the app page; meta CSP can't carry frame-ancestors.
+        // Clickjacking guard for the app page; meta CSP can't carry frame-ancestors. Frames:
+        // Mini Apps, and the video players a click starts.
         if (extname(file) === '.html') {
-            headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host}`;
+            headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host} https://www.youtube-nocookie.com`;
         }
         if (range) {
             const start = Number(range[1]);

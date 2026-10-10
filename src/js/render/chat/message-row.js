@@ -189,6 +189,7 @@ const _dmsgLookups = {
  *   nostrEmbedsOn: (ctx: object) => boolean,
  *   embeds: NostrEmbedHelpers,
  *   linkPreviewData: (msg: object) => object|null,
+ *   playerUrl: (video: {id: string, start: number}) => Promise<string|null>,
  *   fmtCountdown: (secs: number) => string,
  *   selfDestructTooltip: (el: Element) => void,
  *   selfDestructTooltipEnd: () => void,
@@ -219,6 +220,8 @@ const _dmsgContentHelpers = {
     nostrEmbedsOn: (ctx) => !!fWebPreviewsEnabled && !ctx.revealedBlocked,
     get embeds() { return NOSTR_EMBED_HELPERS; },
     linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
+    playerUrl: (video) => invoke('player_url', { provider: 'youtube', id: video.id, start: video.start || null })
+        .catch((e) => { showToast(String(e)); return null; }),
     fmtCountdown: (secs) => _fmtCountdown(secs),
     selfDestructTooltip: (el) => _selfDestructTooltip(el),
     selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
@@ -669,7 +672,17 @@ function _dmsgLinkPreviewData(msg) {
         description: meta.og_description || meta.description || '',
         favicon: meta.favicon,
         image: meta.og_image || null,
+        video: _dmsgPreviewVideo(msg, meta),
+        msgId: msg.id,
     };
+}
+
+/** The YouTube video a card previews, with the start time of the link as it was sent. */
+function _dmsgPreviewVideo(msg, meta) {
+    const sent = ((msg.content || '').match(/https?:\/\/\S+/g) || []).map((u) => VectorSvelte.youtubeVideo(u)).filter(Boolean);
+    const card = meta.og_url ? VectorSvelte.youtubeVideo(meta.og_url) : sent[0];
+    if (!card) return null;
+    return sent.find((v) => v.id === card.id) || card;
 }
 
 /** og:url is the linked page's own metadata, so the scheme is gated before the OS opener. */

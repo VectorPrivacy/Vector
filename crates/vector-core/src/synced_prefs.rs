@@ -196,6 +196,10 @@ pub struct SyncedSettings {
     pub advanced: bool,
     #[serde(default, skip_serializing_if = "StreamerSettings::is_default")]
     pub streamer: StreamerSettings,
+    /// Embedded video players (click to play) are switched off. Stored as the opt-out so
+    /// every default, an empty or unreadable document included, keeps them on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub players_off: bool,
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
@@ -211,6 +215,7 @@ impl SyncedSettings {
     pub fn view(&self) -> serde_json::Value {
         serde_json::json!({
             "advanced": self.advanced,
+            "players": !self.players_off,
             "streamer": {
                 "on": self.streamer.on,
                 "seed": self.streamer.seed,
@@ -299,12 +304,17 @@ struct SettingsIntent {
     notif: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hide_wallpapers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    players_off: Option<bool>,
 }
 
 impl SettingsIntent {
     fn apply(&self, s: &mut SyncedSettings) {
         if let Some(advanced) = self.advanced {
             s.advanced = advanced;
+        }
+        if let Some(off) = self.players_off {
+            s.players_off = off;
         }
         let st = &mut s.streamer;
         if let Some(on) = self.on {
@@ -732,6 +742,16 @@ pub fn set_streamer_wallpapers(hide: bool) -> Result<SyncedSettings, String> {
     change_settings(|s, intent| {
         s.streamer.hide_wallpapers = hide;
         intent.hide_wallpapers = Some(hide);
+        Ok(())
+    })
+}
+
+/// Allow or refuse embedded video players. Held like [`set_streamer_on`]: switching them
+/// off is a privacy choice, so it must not wait for the relay copy.
+pub fn set_players(on: bool) -> Result<SyncedSettings, String> {
+    change_settings(|s, intent| {
+        s.players_off = !on;
+        intent.players_off = Some(!on);
         Ok(())
     })
 }
@@ -1270,7 +1290,7 @@ mod tests {
         assert!(!s.to_json().contains("streamer"));
         assert_eq!(
             s.view(),
-            serde_json::json!({ "advanced": false, "streamer": { "on": false, "seed": "", "notif": "none", "hide_wallpapers": true } })
+            serde_json::json!({ "advanced": false, "players": true, "streamer": { "on": false, "seed": "", "notif": "none", "hide_wallpapers": true } })
         );
     }
 
@@ -1285,6 +1305,20 @@ mod tests {
         assert!(adopted.publish, "the relays lack it");
         let held = load_settings().streamer;
         assert!(held.on && !held.hide_wallpapers, "theirs and ours both stand");
+    }
+
+    #[test]
+    fn players_default_on_and_switching_them_off_is_kept_through_adoption() {
+        let (_tmp, _guard) = init_test_db();
+        assert!(!SyncedSettings::default().players_off && !SyncedSettings::from_json("not json").players_off);
+        set_players(false).unwrap();
+        assert!(load_settings().to_json().contains(r#""players_off":true"#), "off is the one value on the wire");
+        let adopted = adopt_settings(Some(&copy(r#"{"v":1,"advanced":true}"#, 100))).unwrap();
+        assert!(adopted.publish, "the relays lack it");
+        let held = load_settings();
+        assert!(held.advanced && held.players_off, "theirs and ours both stand");
+        set_players(true).unwrap();
+        assert!(!load_settings().to_json().contains("players_off"));
     }
 
     #[test]

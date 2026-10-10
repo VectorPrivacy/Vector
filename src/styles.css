@@ -222,6 +222,10 @@
   mask-image: url("./icons/archive.svg");
 }
 
+.icon-external {
+  mask-image: url("./icons/external.svg");
+}
+
 .icon-chevron-double-left {
   mask-image: url("./icons/chevron-double-left.svg");
 }
@@ -13957,6 +13961,29 @@ button.popout-thumb {
     height: 22px;
 }
 
+/* Where a YouTube player is laid (lib/framehost.js): the player itself lives outside the box. */
+.popout-frame-slot {
+    grid-area: thumb;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+}
+
+/* A YouTube player, laid over a card or the floating player every frame. Inline it sits over
+   the chat but under every panel and menu; floating, over the floating player. */
+.player-frame {
+    position: fixed;
+    left: 0;
+    top: 0;
+    border: 0;
+    background: #000;
+    z-index: 1;
+    visibility: hidden;
+}
+.player-frame.lifted {
+    z-index: 8501;
+}
+
 .media-popout.is-video .popout-video {
     width: 100%;
     height: auto;
@@ -21796,6 +21823,75 @@ textarea.command-part-input {
   border-radius: 4px;
   margin-top: 6px;
 }
+/* A video link: thumbnail and player share one 16:9 box, so starting it moves nothing.
+   YouTube asks for a player of at least 200px each way. */
+.dmsg-preview-video {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  min-width: 200px;
+  min-height: 200px;
+  margin-top: 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+}
+.dmsg-preview .dmsg-preview-video img.dmsg-preview-img {
+  height: 100%;
+  max-height: none;
+  margin-top: 0;
+  border-radius: 0;
+}
+.dmsg-preview-player,
+.dmsg-preview-player iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+.dmsg-preview-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  transition: background 0.15s ease;
+}
+.dmsg-preview-play:hover { background: rgba(0, 0, 0, 0.4); }
+.dmsg-preview-play-btn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: transform 0.15s ease;
+}
+.dmsg-preview-play:hover .dmsg-preview-play-btn { transform: scale(1.06); }
+.dmsg-preview-play-btn .icon {
+  position: static;
+  width: 26px;
+  height: 26px;
+  mask-size: 26px;
+  background-color: #fff;
+}
+.dmsg-preview-play.external .dmsg-preview-play-btn .icon {
+  width: 22px;
+  height: 22px;
+  mask-size: 22px;
+}
+.dmsg-preview-play-label {
+  font-size: 12px;
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
 .dmsg-preview-description {
   display: -webkit-box;
   -webkit-line-clamp: 3;

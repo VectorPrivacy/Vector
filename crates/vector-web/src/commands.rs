@@ -234,6 +234,13 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Settings);
             Ok(settings.view())
         }
+        "set_embedded_players" => {
+            let on = a.bool("on").ok_or("missing argument `on`")?;
+            let settings = vector_core::synced_prefs::set_players(on)?;
+            vector_core::traits::emit_event_json("synced_settings_updated", settings.view());
+            crate::network_ops::publish_projection(vector_core::synced_prefs::Pref::Settings);
+            Ok(settings.view())
+        }
         "set_streamer_mode" | "set_streamer_notif" | "set_streamer_wallpapers" => {
             let before = vector_core::synced_prefs::load_settings().streamer;
             let settings = match cmd {

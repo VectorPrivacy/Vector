@@ -30,6 +30,7 @@ async function loadPausedDownloads() {
  * @property {boolean} is_mobile - Whether the platform is mobile (Android or iOS)
  * @property {boolean} debug_mode - Whether the app is running in debug/development mode
  * @property {string|null} media_url - Localhost media server URL prefix (Android only)
+ * @property {boolean} players - Whether this build can host an embedded video player
  */
 
 /** @type {PlatformFeatures} */
@@ -217,6 +218,7 @@ function mediaUrl(filePath) {
  */
 async function fetchPlatformFeatures() {
     platformFeatures = await invoke("get_platform_features");
+    VectorSvelte.setPlayersSupported(platformFeatures.players);
     // Touch surfaces key off `.mobile` for gesture-driven affordances
     // (long-press menus, swipe-to-reply, bigger hit targets).
     document.body.classList.toggle('mobile', !!platformFeatures.is_mobile);
@@ -1119,9 +1121,10 @@ async function loadSyncedSettings() {
     applySyncedSettings(settings);
 }
 
-/** One settings view, { advanced, streamer: { on, seed, notif, hide_wallpapers } }, from a read, a save or another device. */
+/** One settings view, { advanced, players, streamer: { on, seed, notif, hide_wallpapers } }, from a read, a save or another device. */
 function applySyncedSettings(view) {
     VectorSvelte.setAdvancedMode(!!view?.advanced);
+    if (view) VectorSvelte.setPlayersOn(view.players);
     const seq = VectorSvelte.streamerState().seq;
     VectorSvelte.setStreamer(view?.streamer);
     if (VectorSvelte.streamerState().seq !== seq) streamerChanged();
@@ -1187,6 +1190,17 @@ async function saveAdvancedMode(on) {
         VectorSvelte.setAdvancedMode((await invoke('set_advanced_mode', { on })).advanced);
     } catch (e) {
         VectorSvelte.setAdvancedMode(!on);
+        showToast(String(e));
+    }
+}
+
+/** Shown at once, put back if the backend refuses. */
+async function saveEmbeddedPlayers(on) {
+    VectorSvelte.setPlayersOn(on);
+    try {
+        applySyncedSettings(await invoke('set_embedded_players', { on }));
+    } catch (e) {
+        VectorSvelte.setPlayersOn(!on);
         showToast(String(e));
     }
 }
@@ -1931,6 +1945,7 @@ const SETTINGS_HELP = {
     streamConsent: ['Show me on streams', 'Lets people using Streamer Mode show your name and picture on their streams.'],
     streamerWallpapers: ['Hide chat wallpapers', 'Shows a plain background in chats while you stream, since a wallpaper can give away who you are talking to.'],
     streamerNotif: ['While streaming, also hide', 'Hides more of each notification while Streamer Mode is on, on top of Notification Content Privacy.'],
+    players: ['Video Players', 'Lets YouTube links play right in the chat, from their Web Preview. Nothing loads from YouTube until you press play, and then YouTube sees your IP address like any visit would.<br><br>Players stay off while you use Tor or I2P, since they load outside them.<br><br>This setting follows your account to your other devices.'],
     advancedMode: ['Advanced Mode', 'Shows extra detail meant for developers, such as <b>Copy ID</b> on communities, channels and messages, so a bot can be set up to work in just one of them.<br><br>This setting follows your account to your other devices.'],
     crashLog: ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
     logout: ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
@@ -2088,6 +2103,7 @@ const SETTINGS_HELPERS = {
         help: showSettingsHelp,
     },
     setAdvancedMode: saveAdvancedMode,
+    setPlayers: saveEmbeddedPlayers,
     copyLogs,
     logout: logoutAccount,
 };

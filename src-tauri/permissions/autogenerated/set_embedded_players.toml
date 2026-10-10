@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-embedded-players"
+description = "Enables the set_embedded_players command without any pre-configured scope."
+commands.allow = ["set_embedded_players"]
+
+[[permission]]
+identifier = "deny-set-embedded-players"
+description = "Denies the set_embedded_players command without any pre-configured scope."
+commands.deny = ["set_embedded_players"]

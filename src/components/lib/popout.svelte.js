@@ -279,6 +279,7 @@ function playNextVoice(h, done) {
 // ── the pop-out's one item ──
 // audio: { kind, session }
 // video: { kind, id, hostKey, att, msg, chatId, src, time, playing, aspect }  (hostKey: lib/videohost.js)
+// frame: { kind, id (the message's), frameKey, msg, chatId, title }  (frameKey: lib/framehost.js)
 const popout = $state({ item: null });
 export function popoutState() { return popout; }
 

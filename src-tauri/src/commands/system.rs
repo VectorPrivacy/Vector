@@ -37,6 +37,8 @@ pub struct PlatformFeatures {
     pub self_update: bool,
     /// Whether videos can be compressed before sending (the `video` build and an encoder).
     pub video_compression: bool,
+    /// Whether this build can host an embedded video player.
+    pub players: bool,
 }
 
 // ============================================================================
@@ -81,6 +83,8 @@ pub async fn get_platform_features() -> PlatformFeatures {
         media_url,
         self_update: !cfg!(feature = "fdroid"),
         video_compression: crate::message::video_compression::available(),
+        // F-Droid counts a built-in YouTube player as promoting a non-free network service.
+        players: !cfg!(feature = "fdroid"),
     }
 }
 

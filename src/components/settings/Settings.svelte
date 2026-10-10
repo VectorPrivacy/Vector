@@ -8,6 +8,7 @@
     import { settingsScreen, settingsHandlers } from '../lib/settings.svelte.js';
     import { transportState, viewedKind, routingOffered } from '../lib/transport.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
+    import { playersState } from '../lib/players.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import InfoIcon from './InfoIcon.svelte';
@@ -31,7 +32,7 @@
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
     //    setAutoDownloadLimit(bytes), setVideoQuality(quality), clearStorage(), setBackgroundService(on), batteryWarningTap(),
-    //    security: {...}, setAdvancedMode(on), copyLogs(), logout()
+    //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout()
 
     const sc = settingsScreen();
     const hs = settingsHandlers();
@@ -40,6 +41,7 @@
     const panel = $derived(net.view?.supported.includes(viewedKind()) ? viewedKind() : '');
     const shell = shellState();
     const adv = advancedState();
+    const players = playersState();
 
     const LIMITS = [
         [1048576, '1 MB'], [5242880, '5 MB'], [10485760, '10 MB'],
@@ -105,7 +107,7 @@
         {
             id: 'privacy', label: 'Privacy', icon: 'eye-off',
             anchors: [
-                { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews url tracking typing indicators proxy media' },
+                { id: 'privacy', label: 'Privacy', icon: 'eye-off', keys: 'web previews video players youtube embeds url tracking typing indicators proxy media' },
                 { id: 'streamer', label: 'Streamer Mode', icon: 'video', keys: 'streamer stream streaming live obs twitch screen share hide names pictures notifications' },
                 ...(routingOffered() ? [{ id: 'routing', label: 'Routing', icon: 'shield-filled', keys: 'routing network tor i2p onion clearnet bridges obfs4 circuit outproxy sam router anonymity' }] : []),
                 { id: 'blocked', label: 'Blocked Users', icon: 'x-user', keys: 'blocked users block unblock' },
@@ -192,6 +194,16 @@
             <span class="neon-toggle"></span>
         </label>
     </div>
+    {#if players.supported}
+        <div class="form-group">
+            <label class="toggle-container">
+                <span><InfoIcon onclick={() => h.help('players')} />Video Players</span>
+                <input type="checkbox" checked={players.on}
+                       onchange={async (e) => { const box = e.currentTarget; await h.setPlayers(box.checked); box.checked = players.on; }}>
+                <span class="neon-toggle"></span>
+            </label>
+        </div>
+    {/if}
     <div class="form-group">
         <label class="toggle-container">
             <span><InfoIcon onclick={() => h.help('stripTracking')} />Prevent URL Tracking</span>
