@@ -2,8 +2,9 @@
 //!
 //! YouTube refuses an embed that arrives without a Referer, and a page on a custom scheme
 //! (`tauri://`) sends none. So the card frames a page served from loopback, which frames the
-//! player and gives it `http://127.0.0.1:<port>/` to send. The player loads over the webview's
-//! own network stack, outside `vector_core::transport`, so it is offered on Clearnet only.
+//! player and gives it `http://localhost:<port>/` to send: a named host, since some videos
+//! refuse a bare IP. The player loads over the webview's own network stack, outside
+//! `vector_core::transport`, so it is offered on Clearnet only.
 
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ pub async fn player_url(provider: String, id: String, start: Option<u32>) -> Res
     }
     let port = PORT.get_or_try_init(listen).await?;
     let start = start.filter(|s| *s > 0).map(|s| format!("?start={s}")).unwrap_or_default();
-    Ok(format!("http://127.0.0.1:{port}/youtube/{id}{start}"))
+    Ok(format!("http://localhost:{port}/youtube/{id}{start}"))
 }
 
 /// Why no player may load now. The player loads outside `vector_core::transport`, so only
@@ -107,8 +108,8 @@ async fn serve(mut stream: TcpStream, port: u16) -> std::io::Result<()> {
 fn page(request: &str, port: u16) -> Option<String> {
     let mut lines = request.split("\r\n");
     let target = lines.next()?.strip_prefix("GET ")?.strip_suffix(" HTTP/1.1")?;
-    // A name that merely resolves here (DNS rebinding) is not us.
-    let host = format!("127.0.0.1:{port}");
+    // Only the name we hand out: one that merely resolves here (DNS rebinding) is not us.
+    let host = format!("localhost:{port}");
     if !lines.any(|l| l.split_once(':').is_some_and(|(k, v)| k.eq_ignore_ascii_case("host") && v.trim() == host)) {
         return None;
     }
@@ -145,7 +146,7 @@ Connection: close\r\n\r\n{body}",
 mod tests {
     use super::*;
 
-    const REQ: &str = "GET /youtube/aqz-KE-bpKQ?start=90 HTTP/1.1\r\nHost: 127.0.0.1:4000\r\n\r\n";
+    const REQ: &str = "GET /youtube/aqz-KE-bpKQ?start=90 HTTP/1.1\r\nHost: localhost:4000\r\n\r\n";
 
     #[test]
     fn the_host_page_frames_only_a_well_formed_video() {
@@ -180,8 +181,9 @@ mod tests {
     async fn the_host_serves_its_own_host_name_only() {
         let port = listen().await.unwrap();
         let get = |host: &str| format!("GET /youtube/aqz-KE-bpKQ HTTP/1.1\r\nHost: {host}\r\n\r\n");
-        assert!(ask(port, get(&format!("127.0.0.1:{port}")).as_bytes()).await.starts_with("HTTP/1.1 200"));
-        assert!(ask(port, get(&format!("localhost:{port}")).as_bytes()).await.starts_with("HTTP/1.1 404"));
+        assert!(ask(port, get(&format!("localhost:{port}")).as_bytes()).await.starts_with("HTTP/1.1 200"));
+        assert!(ask(port, get(&format!("127.0.0.1:{port}")).as_bytes()).await.starts_with("HTTP/1.1 404"));
+        assert!(ask(port, get(&format!("localhost.evil.example:{port}")).as_bytes()).await.starts_with("HTTP/1.1 404"));
         assert!(ask(port, get("evil.example").as_bytes()).await.starts_with("HTTP/1.1 404"));
         assert_eq!(ask(port, &[b'a'; MAX_REQUEST + 1024]).await, "", "an oversized request gets no answer");
     }
