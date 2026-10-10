@@ -440,8 +440,9 @@ function ttRead(input, now) {
 
 // ---- suggesting a time as it's typed ------------------------------------------------
 
-// Only phrases that can't be ordinary words: "in 6 hours" / "6 hours from now", and a
-// calendar date with its day. A bare "tomorrow" or "monday" is left alone, and so is
+// Only phrases that can't be ordinary words: "in 6 hours" / "6 hours from now", a
+// calendar date with its day, and a day or "at" with a clock time ("tomorrow at 10:30pm",
+// "2:30pm on monday", "at 9am"). A bare "tomorrow" or "monday" is left alone, and so is
 // anything past: there's nothing to count down to.
 // Any word in a unit's place; ttSuggestUnit decides which it is, so one still being typed
 // ("in 10 minu") holds the suggestion rather than dropping it between keystrokes.
@@ -472,11 +473,20 @@ const TT_SUGGEST_MONTH = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|
 const TT_SUGGEST_DAY = '\\d{1,2}(st|nd|rd|th)?';
 const TT_SUGGEST_CLOCK = '(,? (?:at )?(?:\\d{1,2}(?::\\d{2})? ?(?:am|pm)|\\d{1,2}:\\d{2}))?';
 const TT_SUGGEST_YEAR = '(,? \\d{4})?';
+// A clock that can't be a score or a ratio: with am/pm, or as hours and minutes.
+const TT_SUGGEST_TIME = '(?:\\d{1,2}(?::\\d{2})? ?(?:am|pm|a\\.m\\.|p\\.m\\.)|\\d{1,2}:\\d{2})';
+const TT_SUGGEST_WEEKDAY = '(?:(?:this|next|coming) )?(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)day';
+const TT_SUGGEST_DAYWORD = `(?:today|tonight|tomorrow|tmrw|tmr|${TT_SUGGEST_WEEKDAY})`;
 const TT_SUGGEST_FORMS = [
     { re: new RegExp(`(?:^|[\\s(])(in ${TT_SUGGEST_SPAN}|${TT_SUGGEST_SPAN} from now)${TT_SUGGEST_END}`, 'i'), relative: true },
     { re: new RegExp(`(?:^|[\\s(])(${TT_SUGGEST_MONTH}\\.? ${TT_SUGGEST_DAY}${TT_SUGGEST_YEAR}${TT_SUGGEST_CLOCK})${TT_SUGGEST_END}`, 'i') },
     { re: new RegExp(`(?:^|[\\s(])(?:the )?(${TT_SUGGEST_DAY} (?:of )?${TT_SUGGEST_MONTH}${TT_SUGGEST_YEAR}${TT_SUGGEST_CLOCK})${TT_SUGGEST_END}`, 'i') },
     { re: new RegExp(`(?:^|[\\s(])(\\d{4}-\\d{2}-\\d{2}(?:[ T]\\d{1,2}:\\d{2})?)${TT_SUGGEST_END}`) },
+    // A leading "on" stays in the sentence: "meeting on" reads on into the date.
+    { re: new RegExp(`(?:^|[\\s(])(?:on )?(${TT_SUGGEST_DAYWORD}(?:,? (?:at )?${TT_SUGGEST_TIME}| at \\d{1,2}))${TT_SUGGEST_END}`, 'i') },
+    { re: new RegExp(`(?:^|[\\s(])((?:at )?${TT_SUGGEST_TIME},? (?:on )?${TT_SUGGEST_DAYWORD})${TT_SUGGEST_END}`, 'i') },
+    // A clock alone is today, so only while it's still ahead.
+    { re: new RegExp(`(?:^|[\\s(])((?:at )?\\d{1,2}(?::\\d{2})? ?(?:am|pm|a\\.m\\.|p\\.m\\.)|at \\d{1,2}:\\d{2})${TT_SUGGEST_END}`, 'i'), alone: true },
 ];
 
 /**
@@ -499,6 +509,8 @@ function ttSuggest(before, now = new Date()) {
         }
         const start = offset + m.index + m[0].indexOf(phrase);
         const end = start + phrase.length;
+        // "yesterday at 4pm", "last week at 9am": a clock after a day it doesn't know isn't today.
+        if (form.alone && /(?:day|night|week|month|year|\d)[,.]? *$/i.test(before.slice(Math.max(0, start - 24), start))) return null;
         if (tcCodeRanges(before).some(([s, e]) => start >= s && start < e)) return null;
         // Each unit read as the one it is (or is becoming); a word that is none isn't a time.
         let read = phrase;

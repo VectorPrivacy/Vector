@@ -92,6 +92,11 @@ const suggest = [
     ['may 5', null], ['you may 5', null], ['jan 3 2026', null], ['`in 6 hours`', null], ['in 6 hours and then', null],
     ['in 10 minu', ['in 10 minu', 'R']], ['in 2 ho', ['in 2 ho', 'R']], ['in 2 hot dogs', null], ['in 10 m', null],
     ['in a mo', null], ['in a d', null], ['in a different way', null], ['in a day', ['in a day', 'R']], ['in 3 mon', ['in 3 mon', 'R']],
+    ["Let's meet tomorrow at 10:30pm", ['tomorrow at 10:30pm', 'f']], ['Meeting on Monday 2:30pm', ['Monday 2:30pm', 'f']],
+    ['meeting on monday at 2:30pm.', ['monday at 2:30pm', 'f']], ['next friday, 6pm', ['next friday, 6pm', 'f']], ['tonight at 9', ['tonight at 9', 'f']],
+    ['see you at 10:30pm tomorrow', ['at 10:30pm tomorrow', 'f']], ['2:30pm on friday', ['2:30pm on friday', 'f']], ['call me tmrw 9am', ['tmrw 9am', 'f']],
+    ["let's meet at 10:30pm", ['at 10:30pm', 'f']], ['meet at 17:30', ['at 17:30', 'f']], ['by 9 p.m.', ['9 p.m.', 'f']],
+    ['I woke at 7am', null], ['today at 3pm', null], ['it ended 5:30', null], ['monday 5', null], ['the score was 3:2', null], ['yesterday at 4pm', null], ['last week at 9pm', null], ['dec 24 at 9pm', ['dec 24 at 9pm', 'f']],
 ];
 for (const [text, want] of suggest) {
     const s = ctx.ttSuggest(text, now);
