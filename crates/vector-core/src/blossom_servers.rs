@@ -17,10 +17,38 @@ use crate::state::nostr_client;
 /// Default servers in trust order (first = first try). All verified to
 /// accept Vector's encrypted octet-stream uploads at common sizes.
 pub const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
+    "https://magnitude.vectorapp.io",
     "https://blossom.ditto.pub",
     "https://blossom.primal.net",
     "https://blossom.data.haus",
 ];
+
+/// When a default joined the list (unix seconds). A published list older than that
+/// never had the chance to name it, so its absence there is not a choice to disable it.
+const DEFAULT_ADDED_AT: &[(&str, u64)] = &[("https://magnitude.vectorapp.io", 1_791_658_800)];
+
+fn default_added_at(url: &str) -> u64 {
+    DEFAULT_ADDED_AT.iter().find(|(u, _)| *u == url).map_or(0, |(_, at)| *at)
+}
+
+/// The disabled defaults after reading a published list made at `published_at`: a default
+/// it names is enabled, one it leaves out is disabled, unless the list predates it.
+fn reconcile_defaults(listed: &HashSet<String>, published_at: u64, mut disabled: Vec<String>) -> (Vec<String>, bool) {
+    let mut changed = false;
+    for d in DEFAULT_BLOSSOM_SERVERS {
+        let key = d.trim_end_matches('/').to_lowercase();
+        let in_event = listed.contains(&key);
+        let currently_disabled = disabled.iter().any(|s| s.trim_end_matches('/').to_lowercase() == key);
+        if in_event && currently_disabled {
+            disabled.retain(|s| s.trim_end_matches('/').to_lowercase() != key);
+            changed = true;
+        } else if !in_event && !currently_disabled && published_at >= default_added_at(d) {
+            disabled.push(d.to_string());
+            changed = true;
+        }
+    }
+    (disabled, changed)
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CustomBlossomServer {
@@ -120,6 +148,14 @@ pub fn is_enabled_server(url: &str) -> bool {
         .any(|s| s.trim_end_matches('/').to_lowercase() == target)
 }
 
+/// The customs that aren't also a default: a server the user added before it became
+/// one is listed, and tried, once.
+fn customs_beside_defaults() -> Vec<CustomBlossomServer> {
+    let mut customs = load_custom_blossom_servers().unwrap_or_default();
+    customs.retain(|c| !is_default_server(&c.url));
+    customs
+}
+
 pub fn compute_enabled_servers() -> Vec<String> {
     let disabled = load_disabled_default_blossom_servers().unwrap_or_default();
     let disabled_lower: HashSet<String> = disabled.iter()
@@ -132,8 +168,7 @@ pub fn compute_enabled_servers() -> Vec<String> {
     // encrypted type, transform the bytes, or refuse deletion) below the
     // defaults, so a bad custom quietly falls through to ditto/etc.
     let mut out: Vec<String> = Vec::new();
-    let customs = load_custom_blossom_servers().unwrap_or_default();
-    for c in customs {
+    for c in customs_beside_defaults() {
         if c.enabled {
             out.push(c.url);
         }
@@ -166,7 +201,7 @@ pub fn list_all_servers() -> Vec<BlossomServerInfo> {
             status: crate::blossom_stats::status_for(d, enabled),
         });
     }
-    for c in load_custom_blossom_servers().unwrap_or_default() {
+    for c in customs_beside_defaults() {
         let status = crate::blossom_stats::status_for(&c.url, c.enabled);
         out.push(BlossomServerInfo {
             url: c.url,
@@ -310,21 +345,11 @@ pub async fn fetch_and_merge_own_list(
     let urls_lower: HashSet<String> = urls_from_event.iter()
         .map(|u| u.trim().trim_end_matches('/').to_lowercase())
         .collect();
-    let mut disabled = load_disabled_default_blossom_servers().unwrap_or_default();
-    let mut defaults_changed = false;
-    for d in DEFAULT_BLOSSOM_SERVERS {
-        let key = d.trim_end_matches('/').to_lowercase();
-        let in_event = urls_lower.contains(&key);
-        let currently_disabled = disabled.iter()
-            .any(|s| s.trim_end_matches('/').to_lowercase() == key);
-        if in_event && currently_disabled {
-            disabled.retain(|s| s.trim_end_matches('/').to_lowercase() != key);
-            defaults_changed = true;
-        } else if !in_event && !currently_disabled {
-            disabled.push(d.to_string());
-            defaults_changed = true;
-        }
-    }
+    let (disabled, defaults_changed) = reconcile_defaults(
+        &urls_lower,
+        event.created_at.as_secs(),
+        load_disabled_default_blossom_servers().unwrap_or_default(),
+    );
 
     let customs = load_custom_blossom_servers().unwrap_or_default();
     let (new_customs, customs_added) = merge_urls_into_customs(&urls_from_event, customs);
@@ -457,6 +482,21 @@ pub async fn author_swap_servers(author_npub: Option<&str>, is_own_blob: bool) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_list_published_before_a_default_existed_does_not_disable_it() {
+        let new = "https://magnitude.vectorapp.io";
+        let added = default_added_at(new);
+        let others: HashSet<String> = DEFAULT_BLOSSOM_SERVERS.iter().filter(|d| **d != new).map(|d| d.to_lowercase()).collect();
+        let (disabled, _) = reconcile_defaults(&others, added - 1, Vec::new());
+        assert!(disabled.is_empty(), "an older list never chose against it: {disabled:?}");
+        let (disabled, changed) = reconcile_defaults(&others, added + 1, Vec::new());
+        assert_eq!((disabled, changed), (vec![new.to_string()], true), "a newer list that leaves it out does");
+        let all: HashSet<String> = DEFAULT_BLOSSOM_SERVERS.iter().map(|d| d.to_lowercase()).collect();
+        let (disabled, changed) = reconcile_defaults(&all, 0, vec![new.to_string()]);
+        assert_eq!((disabled.len(), changed), (0, true), "naming it turns it back on, whenever the list was made");
+        assert_eq!(default_added_at("https://blossom.ditto.pub"), 0);
+    }
     use super::*;
 
     #[test]
@@ -476,6 +516,25 @@ mod tests {
         let servers = crate::state::get_blossom_servers();
         assert_eq!(servers.first().map(String::as_str), Some("https://self.hosted"));
         assert!(!servers.iter().any(|s| s == DEFAULT_BLOSSOM_SERVERS[0]), "{servers:?}");
+    }
+
+    #[test]
+    fn a_custom_server_that_became_a_default_is_listed_once() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        use nostr_sdk::prelude::ToBech32;
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+
+        save_custom_blossom_servers(&[custom("https://magnitude.vectorapp.io/", true), custom("https://self.hosted", true)]).unwrap();
+        let rows: Vec<String> = list_all_servers().into_iter().map(|r| r.url.trim_end_matches('/').to_string()).collect();
+        assert_eq!(rows.iter().filter(|u| *u == "https://magnitude.vectorapp.io").count(), 1, "{rows:?}");
+        assert!(rows.contains(&"https://self.hosted".to_string()));
+        let enabled = compute_enabled_servers();
+        assert_eq!(enabled.iter().filter(|u| u.trim_end_matches('/') == "https://magnitude.vectorapp.io").count(), 1, "{enabled:?}");
     }
 
     fn custom(url: &str, enabled: bool) -> CustomBlossomServer {
