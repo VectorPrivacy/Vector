@@ -94,6 +94,7 @@ pub mod secrets;
 pub mod emoji_usage;
 pub mod nostr_embed;
 pub mod video_poster;
+pub mod image_crop;
 pub mod golink;
 pub mod badges;
 pub mod bot_interface;

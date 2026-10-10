@@ -293,13 +293,7 @@ async fn edit_role(a: &Args) -> Result<Value, String> {
     db::scoped(async move { core(VectorCore.edit_role(&id, &role, &name, color, &perms, channel.as_deref()).await) }).await
 }
 
-#[derive(serde::Deserialize)]
-struct CropRect {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-}
+pub(crate) use vector_core::image_crop::CropRect;
 
 /// Metadata stripped and size capped before encrypting: every member downloads it.
 fn prepare_image(bytes: Vec<u8>, is_banner: bool) -> Result<(Vec<u8>, String), String> {
@@ -337,7 +331,7 @@ fn prepare_image(bytes: Vec<u8>, is_banner: bool) -> Result<(Vec<u8>, String), S
 
 async fn set_community_image(a: &Args) -> Result<Value, String> {
     let (id, filepath, is_banner) = (a.str("communityId")?, a.str("filepath")?, a.bool("isBanner").unwrap_or(false));
-    let crop = a.de::<Option<CropRect>>("crop").ok().flatten().map(|c| [c.x, c.y, c.w, c.h]);
+    let crop = a.de::<Option<CropRect>>("crop").ok().flatten();
     db::scoped(async move {
         let session = db::current_session();
         if !is_v2(&id) {
@@ -349,7 +343,7 @@ async fn set_community_image(a: &Args) -> Result<Value, String> {
             return Err(vector_core::community::SVG_REFUSED.into());
         }
         let raw = match crop {
-            Some([x, y, w, h]) => crate::emoji_ops::crop_image(&raw, x, y, w, h)?,
+            Some(c) => crate::emoji_ops::crop_drawn(&raw, c)?,
             None => raw,
         };
         let (bytes, ext) = prepare_image(raw, is_banner)?;

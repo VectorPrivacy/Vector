@@ -723,6 +723,7 @@ pub fn run() {
             message::send_cached_compressed_file,
             message::is_directory,
             message::read_image_preview,
+            message::crop_image_preview,
             message::render_svg,
             message::allow_video_preview,
             message::zip_paths,

@@ -31,7 +31,8 @@
     const maxW = () => Math.min(img.width, img.height * ov.aspect);
     const minW = () => Math.min(maxW(), MIN_EDGE * Math.max(1, ov.aspect));
 
-    // The crop in the source image's pixels: what the caller encodes and the preview draws.
+    // The crop in the shown image's pixels, with that image's size (`sw` x `sh`): a preview copy
+    // may be scaled down, and the backend maps the rectangle onto the original.
     const rect = $derived.by(() => {
         if (!img.width || !natural.w) return null;
         const k = natural.w / img.width;
@@ -42,6 +43,8 @@
             y: clamp(Math.round((crop.y - img.top) * k), 0, natural.h - h),
             w,
             h,
+            sw: natural.w,
+            sh: natural.h,
         };
     });
 
@@ -214,7 +217,7 @@
                          class:ready={img.width > 0}>
                 {/if}
                 {#if img.width}
-                    <div class="crop-box" style="left: {crop.x}px; top: {crop.y}px; width: {crop.w}px; height: {crop.h}px;"
+                    <div class="crop-box" class:round={!!ov.shape} style="left: {crop.x}px; top: {crop.y}px; width: {crop.w}px; height: {crop.h}px;"
                          onpointerdown={(e) => begin(e, 'move', { sx: e.clientX, sy: e.clientY, cx: crop.x, cy: crop.y })}>
                         {#if ov.preview === 'banner'}
                             <div class="crop-guide" style="height: {BANNER_FADE * 100}%">
@@ -282,9 +285,9 @@
                     </div>
                 {:else}
                     <div class="crop-chips">
-                        <div class="crop-chip" style="width: 96px; height: 96px; {chipStyle(96)}"></div>
-                        <div class="crop-chip" style="width: 48px; height: 48px; {chipStyle(48)}"></div>
-                        <div class="crop-chip" style="width: 24px; height: 24px; {chipStyle(24)}"></div>
+                        <div class="crop-chip" class:round={!!ov.shape} style="width: 96px; height: 96px; {chipStyle(96)}"></div>
+                        <div class="crop-chip" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="width: 48px; height: 48px; {chipStyle(48)}"></div>
+                        <div class="crop-chip" class:round={!!ov.shape} style="width: 24px; height: 24px; {chipStyle(24)}"></div>
                     </div>
                 {/if}
             </aside>

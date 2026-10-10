@@ -1187,6 +1187,13 @@ pub(crate) fn crop_image(bytes: Vec<u8>, x: u32, y: u32, w: u32, h: u32) -> Resu
     crop_and_reencode_blocking(EmojiCropInput { bytes, mime, x, y, w, h }, None)
 }
 
+/// A crop drawn on whatever copy the page showed (maybe a scaled preview), made on the image itself.
+pub(crate) fn crop_drawn(bytes: Vec<u8>, crop: vector_core::image_crop::CropRect) -> Result<Vec<u8>, String> {
+    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
+    let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
+    crop_image(bytes, x, y, w, h)
+}
+
 /// `max_bytes`: shrink until the output fits, or `None` to keep the native size.
 fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
     let EmojiCropInput { bytes, mime, x, y, w, h } = input;
@@ -1220,9 +1227,14 @@ fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -
         .with_guessed_format()
         .map_err(|e| format!("sniff: {}", e))?;
     reader.limits(vector_core::crypto::bounded_image_limits());
-    let dynimg = reader
-        .decode()
-        .map_err(|e| format!("decode: {}", e))?;
+    // Upright, as the cropper showed it: a webview applies EXIF orientation, so the
+    // rectangle is in rotated pixels.
+    let mut decoder = reader.into_decoder().map_err(|e| format!("decode: {}", e))?;
+    let orientation = image::ImageDecoder::orientation(&mut decoder).ok();
+    let mut dynimg = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {}", e))?;
+    if let Some(o) = orientation {
+        dynimg.apply_orientation(o);
+    }
     let (sw, sh) = (dynimg.width(), dynimg.height());
     validate_crop_bounds(x, y, w, h, sw, sh)?;
     let cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();

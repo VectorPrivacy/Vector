@@ -223,21 +223,29 @@ async function pickProfilePicture(kind) {
         filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
     });
     if (!file || !fProfileEditMode) return;
-    VectorSvelte.setProfileEditPicture(kind, file, await pickedImagePreviewSrc(file) || '');
+    const preview = await pickedImagePreviewSrc(file) || '';
+    if (kind !== 'avatar') {
+        VectorSvelte.setProfileEditPicture(kind, file, preview);
+        return;
+    }
+    const cropped = await cropAvatarPick(file, preview, 'Crop Profile Picture', 'round');
+    if (!cropped || !fProfileEditMode) return;
+    VectorSvelte.setProfileEditPicture(kind, file, cropped.preview, cropped.crop);
 }
 
 /** Upload a picked picture and publish it; the profile keeps showing the pick meanwhile. */
-function saveProfilePicture(cProfile, kind, path) {
+function saveProfilePicture(cProfile, kind, path, crop = null) {
     const cachedKey = kind === 'avatar' ? 'avatar_cached' : 'banner_cached';
     const label = kind === 'avatar' ? 'Avatar' : 'Banner';
     const prev = cProfile[cachedKey];
-    // The backend's upload updates the cached path authoritatively once it lands.
-    cProfile[cachedKey] = path;
+    // The backend's upload updates the cached path authoritatively once it lands. A cropped
+    // pick isn't the file on disk, so the old picture stays until then.
+    if (!crop) cProfile[cachedKey] = path;
     const revert = () => {
         cProfile[cachedKey] = prev;
         if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
     };
-    invoke('upload_avatar', { filepath: path, uploadType: kind })
+    invoke('upload_avatar', { filepath: path, uploadType: kind, crop })
         .then(url => {
             if (!url) return revert();
             invoke('update_profile', { name: '', avatar: kind === 'avatar' ? url : '', banner: kind === 'banner' ? url : '', about: '' })
@@ -257,6 +265,7 @@ function exitProfileEditMode(fCancel = false) {
     const draft = { name: edit.draft.name.trim(), about: edit.draft.about.trim() };
     const snapshot = edit.snapshot;
     const pending = { ...edit.pending };
+    const crop = { ...edit.crop };
     fProfileEditMode = false;
     VectorSvelte.endProfileEdit();
     VectorSvelte.setProfileEditing(false);
@@ -279,8 +288,8 @@ function exitProfileEditMode(fCancel = false) {
                     if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
                 }).catch(e => popupConfirm('Profile Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
             }
-            if (pending.avatar) saveProfilePicture(cProfile, 'avatar', pending.avatar);
-            if (pending.banner) saveProfilePicture(cProfile, 'banner', pending.banner);
+            if (pending.avatar) saveProfilePicture(cProfile, 'avatar', pending.avatar, crop.avatar);
+            if (pending.banner) saveProfilePicture(cProfile, 'banner', pending.banner, crop.banner);
             showToast('Profile Saved');
         }
         renderProfileTab(cProfile);

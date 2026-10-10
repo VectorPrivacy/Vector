@@ -1266,6 +1266,19 @@ async function pickedImagePreviewSrc(path) {
     return null;
 }
 
+/**
+ * An avatar picked and cropped square, framed as it shows (`shape`: 'round' or 'community').
+ * `path` is the picked file, `src` its preview. Resolves { crop, preview }: the crop, and the
+ * picture exactly as it will upload (a moving one keeps moving); null when cancelled.
+ */
+async function cropAvatarPick(path, src, title, shape) {
+    if (!src) return null;
+    const crop = await VectorSvelte.openCropper({ src, aspect: 1, title, hint: 'Drag to move, or drag a corner to resize.', shape });
+    if (!crop) return null;
+    const preview = await invoke('crop_image_preview', { path, crop }).then(convertFileSrc, () => null);
+    return { crop, preview: preview || src };
+}
+
 /** Extract a valid npub from a bare npub string or a vectorapp.io profile URL */
 function extractNpub(input) {
     const trimmed = (input || '').trim();

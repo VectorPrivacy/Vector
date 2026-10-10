@@ -104,7 +104,9 @@ async function csPickIcon() {
         showToast('That image could not be read');
         return;
     }
-    VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: preview });
+    const cropped = await cropAvatarPick(filePath, preview, 'Crop Icon', 'community');
+    if (!cropped) return;
+    VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: cropped.preview, iconCrop: cropped.crop });
 }
 
 /** The banner template: 238 x 146 at the foot of the channel list. */
@@ -214,6 +216,7 @@ async function csSaveOverview(communityId) {
     const renamed = name !== st.saved.name;
     const described = description !== st.saved.description;
     const iconPath = st.draft.iconPath;
+    const iconCrop = st.draft.iconCrop;
     if (renamed || described) {
         await invoke('update_community_metadata', {
             communityId,
@@ -238,7 +241,7 @@ async function csSaveOverview(communityId) {
     });
     try {
         if (iconPath) {
-            await invoke('set_community_image', { communityId, filepath: iconPath, isBanner: false });
+            await invoke('set_community_image', { communityId, filepath: iconPath, isBanner: false, crop: iconCrop });
             const cached = await invoke('cache_community_image', { communityId, isBanner: false }).catch(() => null);
             for (const chat of csCommunityChats(communityId)) {
                 chat.metadata.custom_fields.icon = '1';

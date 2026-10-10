@@ -208,9 +208,14 @@ pub async fn update_status(status: String) -> bool {
 }
 
 /// Uploads an avatar or banner image with progress reporting
-/// `upload_type` should be "avatar" or "banner" to specify which is being uploaded
+/// `upload_type` should be "avatar" or "banner" to specify which is being uploaded;
+/// `crop`, the part of the picked image the user chose.
 #[tauri::command]
-pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Result<String, String> {
+pub async fn upload_avatar(
+    filepath: String,
+    upload_type: Option<String>,
+    crop: Option<crate::commands::community::CropRect>,
+) -> Result<String, String> {
     let handle = TAURI_APP.get().unwrap();
     let upload_type = upload_type.unwrap_or_else(|| "avatar".to_string());
 
@@ -246,6 +251,18 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     crate::util::mime_from_extension_safe(&attachment_file.extension, true)
         .map_err(|_| "File type is not allowed for avatars (only images are permitted)")?;
 
+    let source = match crop {
+        Some(c) => {
+            let bytes = (*attachment_file.bytes).clone();
+            Arc::new(
+                tokio::task::spawn_blocking(move || crate::commands::emoji_packs::crop_drawn(bytes, c))
+                    .await
+                    .map_err(|e| format!("crop join: {e}"))??,
+            )
+        }
+        None => attachment_file.bytes.clone(),
+    };
+
     // Compress + resize + strip metadata before upload: a public avatar/banner
     // uploads fast and stays small, and the byte budget is enforced post-compression.
     let kind = if upload_type == "banner" {
@@ -253,7 +270,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     } else {
         crate::shared::image::UploadImageKind::Avatar
     };
-    let prepared = crate::shared::image::prepare_upload_image(&attachment_file.bytes, kind)?;
+    let prepared = crate::shared::image::prepare_upload_image(&source, kind)?;
     let mime_type = crate::shared::image::upload_mime_for(prepared.extension);
     let upload_bytes = Arc::new(prepared.bytes);
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-crop-image-preview"
+description = "Enables the crop_image_preview command without any pre-configured scope."
+commands.allow = ["crop_image_preview"]
+
+[[permission]]
+identifier = "deny-crop-image-preview"
+description = "Denies the crop_image_preview command without any pre-configured scope."
+commands.deny = ["crop_image_preview"]

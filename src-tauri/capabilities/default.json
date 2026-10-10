@@ -401,6 +401,7 @@
     "allow-verify-credential",
     "allow-is-directory",
     "allow-read-image-preview",
+    "allow-crop-image-preview",
     "allow-render-svg",
     "allow-allow-video-preview",
     "allow-zip-paths",

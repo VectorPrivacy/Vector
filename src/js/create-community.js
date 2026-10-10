@@ -34,7 +34,8 @@ async function ccPickAvatar() {
     });
     if (!file) return;
     // On Android a content:// URI needs cache_android_file's preview file, not convertFileSrc.
-    VectorSvelte.ccSetAvatar(file, await pickedImagePreviewSrc(file));
+    const cropped = await cropAvatarPick(file, await pickedImagePreviewSrc(file), 'Crop Community Icon', 'community');
+    if (cropped) VectorSvelte.ccSetAvatar(file, cropped.preview, cropped.crop);
 }
 
 /**
@@ -112,6 +113,7 @@ async function createCommunityFromPanel(inviteeNpubs) {
     const name = st.name.trim();
     if (!name || st.busy) return;
     const avatarPath = st.avatarPath;
+    const avatarCrop = st.avatarCrop;
     VectorSvelte.ccSetBusy(true, 'Creating...');
     try {
         const created = await invoke('create_community', { name, channelName: null, relays: null });
@@ -137,8 +139,9 @@ async function createCommunityFromPanel(inviteeNpubs) {
         if (avatarPath) {
             chat.metadata.custom_fields.icon = '1';
             // avatar_cached is a RAW path. Desktop: the picked file previews at once. Android: a
-            // content:// URI isn't renderable, so the header refreshes after the upload below.
-            if (platformFeatures.os !== 'android') chat.metadata.avatar_cached = avatarPath;
+            // content:// URI isn't renderable, and a crop isn't the file, so either shows once
+            // the upload below lands.
+            if (platformFeatures.os !== 'android' && !avatarCrop) chat.metadata.avatar_cached = avatarPath;
         }
         listChanged();
 
@@ -151,7 +154,7 @@ async function createCommunityFromPanel(inviteeNpubs) {
             // Icon BEFORE invites: the private invite bundle snapshots community.icon.
             if (avatarPath) {
                 try {
-                    await invoke('set_community_image', { communityId, filepath: avatarPath, isBanner: false });
+                    await invoke('set_community_image', { communityId, filepath: avatarPath, isBanner: false, crop: avatarCrop });
                     const path = await invoke('cache_community_image', { communityId, isBanner: false });
                     if (path) {
                         chat.metadata.avatar_cached = path;

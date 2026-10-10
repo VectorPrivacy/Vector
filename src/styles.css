@@ -6680,6 +6680,10 @@ img.emoji-img-loading {
   background: #050505 no-repeat;
   border-radius: 6px;
 }
+/* An avatar's frame: round, or the community rail's rounded square. */
+.crop-chip.round,
+.crop-box.round { border-radius: 50%; }
+.crop-chip.rail { border-radius: 31%; }
 /* The banner preview: the channel pane as a member sees it, built from the
    live pane's own classes. Width and background come from the real pane. */
 .crop-pane {

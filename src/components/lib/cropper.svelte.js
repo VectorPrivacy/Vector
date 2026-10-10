@@ -2,21 +2,22 @@
 // image's pixels, or null when cancelled; the caller owns the encode.
 import { popOverlay } from './dialog-lifecycle.svelte.js';
 
-export const cropOverlay = popOverlay({ src: '', aspect: 1, title: '', hint: '', preview: 'square', context: null });
+export const cropOverlay = popOverlay({ src: '', aspect: 1, title: '', hint: '', preview: 'square', shape: null, context: null });
 
 let answer = null;
 
 /**
  * `context` dresses the banner preview as the real pane: { width, background, name, iconSrc,
- * members, sections: [{ label, rows: [{ name, tier }] }] }.
- * @param {{ src: string, aspect: number, title: string, hint?: string, preview?: 'square' | 'banner', context?: object }} opts
+ * members, sections: [{ label, rows: [{ name, tier }] }] }. `shape` frames a square crop as it
+ * shows: 'round' (a person), 'community' (round, and the rail's rounded square).
+ * @param {{ src: string, aspect: number, title: string, hint?: string, preview?: 'square' | 'banner', shape?: 'round' | 'community' | null, context?: object }} opts
  * @returns {Promise<{ x: number, y: number, w: number, h: number } | null>}
  */
 export function openCropper(opts) {
     answer?.(null);
     return new Promise((resolve) => {
         answer = resolve;
-        cropOverlay.open({ hint: '', preview: 'square', context: null, ...opts });
+        cropOverlay.open({ hint: '', preview: 'square', shape: null, context: null, ...opts });
     });
 }
 

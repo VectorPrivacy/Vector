@@ -878,6 +878,52 @@ pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<S
     .map_err(|e| e.to_string())?
 }
 
+/// The picked image at `path` as it will upload as an avatar with `crop`: cropped, shrunk and
+/// re-encoded the same way, so the preview is the upload, and a moving picture keeps moving.
+#[tauri::command]
+pub async fn crop_image_preview(
+    app: tauri::AppHandle,
+    path: String,
+    crop: vector_core::image_crop::CropRect,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "android"))]
+    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
+    let bytes = (*crate::android::filesystem::read_android_uri(path)?.bytes).clone();
+    tokio::task::spawn_blocking(move || {
+        if vector_core::svg::looks_like_svg(&bytes) {
+            return Err(vector_core::community::SVG_REFUSED.to_string());
+        }
+        let cropped = crate::commands::emoji_packs::crop_drawn(bytes, crop)?;
+        let prepared = crate::shared::image::prepare_upload_image(&cropped, crate::shared::image::UploadImageKind::Avatar)?;
+        let dir = preview_cache_dir(&app)?;
+        prune_dir(&dir);
+        write_preview_as_is(&dir, &prepared.bytes, prepared.extension).map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `bytes` into the preview cache unchanged, keyed by content.
+fn write_preview_as_is(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let key = crate::util::bytes_to_hex_string(&Sha256::digest(bytes)[..16]);
+    let path = dir.join(format!("{key}.{ext}"));
+    if path.is_file() {
+        return Ok(path);
+    }
+    let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{key}.{ext}.tmp-{}-{seq}", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("Failed to write preview: {}", e))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        if !path.is_file() {
+            return Err(format!("Failed to place preview: {}", e));
+        }
+    }
+    Ok(path)
+}
+
 /// An SVG attachment drawn for display: the file itself stays as received, and the webview only
 /// ever shows this render. Cached by content and size (sizes rounded up to 256 px steps, so a
 /// viewer's many window sizes share renders); `None` when the SVG refuses to render.

@@ -4493,14 +4493,7 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     }
 }
 
-/// A source-pixel rectangle the user chose in the cropper.
-#[derive(serde::Deserialize)]
-pub struct CropRect {
-    pub x: u32,
-    pub y: u32,
-    pub w: u32,
-    pub h: u32,
-}
+pub use vector_core::image_crop::CropRect;
 
 /// Set a Community's logo or banner: encrypt the image at `filepath` with a
 /// fresh per-file key (NIP-17 attachment technique), upload the ciphertext to Blossom,
@@ -4565,9 +4558,7 @@ pub async fn set_community_image(
             return Err(vector_core::community::SVG_REFUSED.to_string());
         }
         let raw_bytes = match crop {
-            Some(CropRect { x, y, w, h }) => tokio::task::spawn_blocking(move || {
-                crate::commands::emoji_packs::crop_image(raw_bytes, x, y, w, h)
-            })
+            Some(c) => tokio::task::spawn_blocking(move || crate::commands::emoji_packs::crop_drawn(raw_bytes, c))
             .await
             .map_err(|e| format!("crop join: {e}"))??,
             None => raw_bytes,

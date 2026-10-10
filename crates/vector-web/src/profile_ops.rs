@@ -32,6 +32,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             },
             "update_status" => Ok(json!(profile_sync::update_status(a.opt_str("status").unwrap_or_default()).await)),
             "upload_avatar" => upload_avatar(a).await,
+            "crop_image_preview" => crop_image_preview(a).await,
             "set_nickname" => set_nickname(a).await,
             "block_user" => set_blocked(a, true).await,
             "unblock_user" => set_blocked(a, false).await,
@@ -239,6 +240,21 @@ fn upload_mime_for(extension: &str) -> &'static str {
     }
 }
 
+/// The picked image as it will upload as an avatar with `crop`, so the preview is the upload.
+async fn crop_image_preview(a: &Args) -> Result<Value, String> {
+    let path = a.str("path")?;
+    let crop: crate::community_ops::CropRect = a.de("crop")?;
+    let bytes = vector_core::webfiles::read(Path::new(&path)).await.map_err(|_| "Image couldn't be loaded")?;
+    if vector_core::svg::looks_like_svg(&bytes) {
+        return Err(vector_core::community::SVG_REFUSED.to_string());
+    }
+    let cropped = crate::emoji_ops::crop_drawn(&bytes, crop)?;
+    let (prepared, ext) = prepare_upload_image(cropped, false)?;
+    let out = format!("/cache/previews/{}.{ext}", &vector_core::crypto::sha256_hex(&prepared)[..32]);
+    vector_core::webfiles::write(Path::new(&out), &prepared).await?;
+    Ok(Value::String(out))
+}
+
 async fn upload_avatar(a: &Args) -> Result<Value, String> {
     let filepath = a.str("filepath")?;
     let upload_type = a.opt_str("uploadType").unwrap_or_else(|| "avatar".into());
@@ -249,6 +265,10 @@ async fn upload_avatar(a: &Args) -> Result<Value, String> {
         .await
         .map_err(|_| "Image couldn't be loaded from disk")?;
     let banner = upload_type == "banner";
+    let bytes = match a.de::<Option<crate::community_ops::CropRect>>("crop").ok().flatten() {
+        Some(c) => crate::emoji_ops::crop_drawn(&bytes, c)?,
+        None => bytes,
+    };
     let (prepared, ext) = prepare_upload_image(bytes, banner)?;
     let upload_bytes = Arc::new(prepared);
 

@@ -236,6 +236,19 @@ pub(crate) fn crop_image(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result
     crop(bytes, vector_core::crypto::mime_from_magic_bytes(bytes), x, y, w, h, None)
 }
 
+/// A crop drawn on whatever copy the page showed (maybe a scaled preview), made on the image itself.
+pub(crate) fn crop_drawn(bytes: &[u8], crop: vector_core::image_crop::CropRect) -> Result<Vec<u8>, String> {
+    let dims = vector_core::image_crop::upright_dims(bytes).ok_or("Couldn't read the image")?;
+    let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
+    crop_image(bytes, x, y, w, h)
+}
+
+fn orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+    decoder.orientation().ok()
+}
+
 /// `max_bytes`: shrink until the output fits, or `None` to keep the native size.
 fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
     let bounds = |fw: u32, fh: u32| {
@@ -253,7 +266,11 @@ fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, w: u32, h: u32, max_bytes: Opt
             decoded.into_iter().map(|(img, d)| (image::imageops::crop_imm(&img, x, y, w, h).to_image(), d.max(20))).collect();
         return fit_budget(&cropped, max_bytes, encode_gif);
     }
-    let img = vector_core::crypto::decode_image_bounded(bytes).map_err(|e| format!("decode: {e}"))?;
+    let mut img = vector_core::crypto::decode_image_bounded(bytes).map_err(|e| format!("decode: {e}"))?;
+    // Upright, as the cropper showed it: the page applies EXIF orientation.
+    if let Some(o) = orientation(bytes) {
+        img.apply_orientation(o);
+    }
     bounds(img.width(), img.height())?;
     let cropped = img.crop_imm(x, y, w, h).to_rgba8();
     let jpeg = mime.contains("jpeg") || mime.contains("jpg");

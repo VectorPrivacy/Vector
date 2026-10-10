@@ -6,6 +6,7 @@ const edit = $state({
     draft: { name: '', about: '' },
     pending: { avatar: null, banner: null },     // picked file paths
     preview: { avatar: '', banner: '' },         // their on-screen previews
+    crop: { avatar: null, banner: null },        // the part of each pick to upload
 });
 
 export function profileEdit() { return edit; }
@@ -15,16 +16,19 @@ export function startProfileEdit(snapshot) {
     edit.draft = { name: snapshot.name || '', about: snapshot.about || '' };
     edit.pending = { avatar: null, banner: null };
     edit.preview = { avatar: '', banner: '' };
+    edit.crop = { avatar: null, banner: null };
     edit.active = true;
 }
 export function endProfileEdit() {
     edit.active = false;
     edit.pending = { avatar: null, banner: null };
     edit.preview = { avatar: '', banner: '' };
+    edit.crop = { avatar: null, banner: null };
 }
-export function setProfileEditPicture(kind, path, preview) {
+export function setProfileEditPicture(kind, path, preview, crop = null) {
     edit.pending[kind] = path;
     edit.preview[kind] = preview || '';
+    edit.crop[kind] = crop;
 }
 /** Whether anything differs from the snapshot. */
 export function profileEditDirty() {
