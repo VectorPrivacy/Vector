@@ -1948,8 +1948,9 @@ async function wireChatUi() {
         // when the DOM is "at its bottom" — keep the button up whenever we're not
         // viewing the live tail so the user can always get back to "now".
         shouldForceVisible: () => !isAtDataBottom(),
-        // Inverse: at the live tail, force-hide so a media-reflow scroll can't strand the button on.
-        shouldForceHidden: () => isAtDataBottom(),
+        // Inverse: at the live tail, force-hide so a media-reflow scroll can't strand the button on,
+        // unless the user scrolled away, when the distance alone decides.
+        shouldForceHidden: () => isAtDataBottom() && !_userScrolledAway,
         // Click must reach the true data bottom. When windowed away, re-render the
         // newest window + pin; otherwise fall through to the default scrollTo.
         onJumpToBottom: () => {
