@@ -33,10 +33,9 @@ nostr = { version = "=0.45.1", features = ["nip04", "nip06", "nip44", "nip46", "
 nostr-sdk = "=0.45.1"
 # Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).
 nostr-database = "=0.45.1"
-nostr-blossom = "=0.45.0"
 nostr-connect = "=0.45.1"
-# Blossom blob hashing. Must track nostr-blossom's own bitcoin_hashes major, or
-# the Sha256Hash we hand it is a different type. `hex` is explicit because it
+# Blossom blob hashing. Must track nostr's own bitcoin_hashes major, or the
+# tree carries two copies. `hex` is explicit because it
 # gates Display/FromStr on the hash: the `std` default only forwards to it
 # (`hex?/std`), so relying on a sibling's feature union would be a silent trap.
 bitcoin_hashes = { version = "1.2", default-features = false, features = ["std", "hex"] }

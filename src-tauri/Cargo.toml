@@ -173,7 +173,6 @@ vector-core = { path = "../crates/vector-core", default-features = false, featur
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.
 nostr-sdk = "=0.45.1"
-nostr-blossom = "=0.45.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"

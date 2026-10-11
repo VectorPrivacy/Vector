@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use web_time::Instant;
 
-use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
-use nostr_blossom::prelude::*;
+use nostr_sdk::prelude::Url;
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Serialize;
 use serde_json::Value;
@@ -296,20 +295,8 @@ pub async fn build_get_auth_header<T>(signer: &T, server: &Url, reason: &str) ->
 where
     T: VectorSigner,
 {
-    let expiration = Timestamp::now() + Duration::from_secs(120);
-    let auth = BlossomAuthorization::new(
-        reason.to_string(),
-        expiration,
-        BlossomAuthorizationVerb::Get,
-        BlossomAuthorizationScope::ServerUrl(server.clone()),
-    );
-    let auth_event: Event = auth
-        .finalize_async(signer)
-        .await
-        .map_err(|e| format!("Failed to sign auth event: {}", e))?;
-    let encoded = base64_simd::STANDARD.encode_to_string(auth_event.as_json());
-    reqwest::header::HeaderValue::try_from(format!("Nostr {}", encoded))
-        .map_err(|e| format!("Failed to create header value: {}", e))
+    let ttl = Duration::from_secs(120);
+    crate::blossom::auth_header(signer, "get", crate::blossom::AuthScope::Server(server), reason, ttl).await
 }
 
 /// Ask `server_url` for its document. `Ok(None)` is a server without one.

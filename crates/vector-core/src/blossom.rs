@@ -1,8 +1,7 @@
 use crate::signer::VectorSigner;
 use crate::blossom_error::{host_of, summarise_failures, Refusal, UploadFailure};
-use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
+use nostr_sdk::prelude::{Event, EventBuilder, FinalizeEventAsync, Kind, Tag, Timestamp, Url};
 use bitcoin_hashes::sha256::Hash as Sha256Hash;
-use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
 use std::str::FromStr;
@@ -320,35 +319,65 @@ fn upload_failure(e: crate::net::HttpError) -> UploadFailure {
     }
 }
 
-/// Builds the Blossom authorization header
-async fn build_auth_header<T>(
+/// What a BUD-01 authorization covers: named blobs, or a whole server.
+pub(crate) enum AuthScope<'a> {
+    Blob(Sha256Hash),
+    Server(&'a Url),
+}
+
+fn auth_event(verb: &str, scope: AuthScope<'_>, content: &str, expiration: Timestamp) -> EventBuilder {
+    let scope = match scope {
+        AuthScope::Blob(hash) => Tag::custom("x", [hash.to_string()]),
+        AuthScope::Server(url) => Tag::custom("server", [url.to_string()]),
+    };
+    EventBuilder::new(Kind::BlossomAuth, content).tags([scope, Tag::expiration(expiration), Tag::hashtag(verb)])
+}
+
+/// A signed BUD-01 `Authorization: Nostr <base64 kind 24242>` header for `verb`, valid for `ttl`.
+pub(crate) async fn auth_header<T>(
     signer: &T,
-    hash: Sha256Hash,
+    verb: &str,
+    scope: AuthScope<'_>,
+    content: &str,
+    ttl: std::time::Duration,
 ) -> Result<HeaderValue, String>
 where
     T: VectorSigner,
 {
-    // Create Blossom authorization
-    let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
-    let auth = BlossomAuthorization::new(
-        "Blossom upload authorization".to_string(),
-        expiration,
-        BlossomAuthorizationVerb::Upload,
-        BlossomAuthorizationScope::BlobSha256Hashes(vec![hash]),
-    );
-
-    // Sign the authorization event
-    let auth_event: Event = auth
+    let event: Event = auth_event(verb, scope, content, Timestamp::now() + ttl)
         .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
-
-    // Encode as base64
-    let encoded_auth = base64_simd::STANDARD.encode_to_string(auth_event.as_json());
-    let value = format!("Nostr {}", encoded_auth);
-
-    HeaderValue::try_from(value)
+    let encoded = base64_simd::STANDARD.encode_to_string(event.as_json());
+    HeaderValue::try_from(format!("Nostr {}", encoded))
         .map_err(|e| format!("Failed to create header value: {}", e))
+}
+
+async fn build_auth_header<T>(signer: &T, hash: Sha256Hash) -> Result<HeaderValue, String>
+where
+    T: VectorSigner,
+{
+    let ttl = std::time::Duration::from_secs(300);
+    auth_header(signer, "upload", AuthScope::Blob(hash), "Blossom upload authorization", ttl).await
+}
+
+/// The server's reply to an upload or mirror (BUD-02); only the fields Vector checks.
+#[derive(serde::Deserialize)]
+struct BlobDescriptor {
+    #[serde(deserialize_with = "from_str")]
+    url: Url,
+    #[serde(deserialize_with = "from_str")]
+    sha256: Sha256Hash,
+}
+
+fn from_str<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let s: String = serde::Deserialize::deserialize(d)?;
+    s.parse().map_err(serde::de::Error::custom)
 }
 
 /// Upload to a single Blossom server with progress callbacks.
@@ -1105,32 +1134,12 @@ where
 // Blossom DELETE — paired with NIP-17 message deletion
 // ============================================================================
 
-/// Build a BUD-01 DELETE authorization header (kind-24242, verb=delete).
-async fn build_delete_auth_header<T>(
-    signer: &T,
-    hash: Sha256Hash,
-) -> Result<HeaderValue, String>
+async fn build_delete_auth_header<T>(signer: &T, hash: Sha256Hash) -> Result<HeaderValue, String>
 where
     T: VectorSigner,
 {
-    let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
-    let auth = BlossomAuthorization::new(
-        "Blossom delete authorization".to_string(),
-        expiration,
-        BlossomAuthorizationVerb::Delete,
-        BlossomAuthorizationScope::BlobSha256Hashes(vec![hash]),
-    );
-
-    let auth_event: Event = auth
-        .finalize_async(signer)
-        .await
-        .map_err(|e| format!("Failed to sign auth event: {}", e))?;
-
-    let encoded_auth = base64_simd::STANDARD.encode_to_string(auth_event.as_json());
-    let value = format!("Nostr {}", encoded_auth);
-
-    HeaderValue::try_from(value)
-        .map_err(|e| format!("Failed to create header value: {}", e))
+    let ttl = std::time::Duration::from_secs(300);
+    auth_header(signer, "delete", AuthScope::Blob(hash), "Blossom delete authorization", ttl).await
 }
 
 /// Delete a blob from a Blossom server. 2xx and 404 both count as
@@ -1880,5 +1889,46 @@ mod stall_watch_tests {
         assert_eq!(w.observe(0), None, "nothing to send is not a stall");
         crate::rt::time::advance(RESPONSE).await;
         assert!(matches!(w.observe(0), Some(Stall::NoResponse { .. })));
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use nostr_sdk::prelude::{FinalizeUnsignedEvent, Keys};
+
+    const HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn tags(verb: &str, scope: AuthScope<'_>) -> String {
+        let exp = Timestamp::from(1_900_000_000);
+        let event = auth_event(verb, scope, "c", exp).finalize_unsigned(Keys::generate().public_key());
+        assert_eq!(event.kind, Kind::BlossomAuth);
+        serde_json::to_string(&event.tags).unwrap()
+    }
+
+    #[test]
+    fn auth_event_tags_follow_bud01() {
+        let hash: Sha256Hash = HASH.parse().unwrap();
+        let url: Url = "https://blossom.example.com/".parse().unwrap();
+        assert_eq!(
+            tags("upload", AuthScope::Blob(hash)),
+            format!(r#"[["x","{HASH}"],["expiration","1900000000"],["t","upload"]]"#)
+        );
+        assert_eq!(
+            tags("get", AuthScope::Server(&url)),
+            r#"[["server","https://blossom.example.com/"],["expiration","1900000000"],["t","get"]]"#
+        );
+    }
+
+    #[test]
+    fn blob_descriptor_needs_only_url_and_hash() {
+        let full = format!(r#"{{"url":"https://cdn.example.com/x.bin","sha256":"{HASH}","size":3,"type":"application/octet-stream","uploaded":1700000000}}"#);
+        let bare = format!(r#"{{"url":"https://cdn.example.com/x.bin","sha256":"{HASH}"}}"#);
+        for json in [full, bare] {
+            let d: BlobDescriptor = serde_json::from_str(&json).unwrap();
+            assert_eq!(d.sha256.to_string(), HASH);
+            assert_eq!(d.url.as_str(), "https://cdn.example.com/x.bin");
+        }
+        assert!(serde_json::from_str::<BlobDescriptor>(r#"{"url":"https://a/","sha256":"zz"}"#).is_err());
     }
 }

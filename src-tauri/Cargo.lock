@@ -5536,20 +5536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nostr-blossom"
-version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683e3c9c7fb030a6a0b0816eb525defbb61691d367e321856d4c6645b1478a1e"
-dependencies = [
- "base64 0.22.1",
- "bitcoin_hashes 1.2.0",
- "nostr",
- "opaquerr",
- "reqwest 0.12.24",
- "serde",
-]
-
-[[package]]
 name = "nostr-connect"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11933,7 +11919,6 @@ dependencies = [
  "memchr",
  "ndk-context",
  "noq-proto",
- "nostr-blossom",
  "nostr-sdk",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.1",
@@ -12033,7 +12018,6 @@ dependencies = [
  "libcrux-ml-kem",
  "noq-proto",
  "nostr",
- "nostr-blossom",
  "nostr-connect",
  "nostr-database",
  "nostr-sdk",
