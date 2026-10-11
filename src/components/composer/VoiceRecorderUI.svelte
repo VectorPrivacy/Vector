@@ -4,6 +4,7 @@
     // `dot` (the red record dot) rides beside the mic button, `overlays` (the hold hint
     // and the lock target) float over the box. All paint lib/voicerecorder.
     import { recorderState, voiceHandlers, bindVoiceEl } from '../lib/voicerecorder.svelte.js';
+    import { voiceState } from '../lib/settings.svelte.js';
 
     let { part } = $props();   // 'strip' | 'dot' | 'overlays'
 
@@ -15,6 +16,9 @@
     const locked = $derived(v.state === 'locked');
     const preview = $derived(v.state === 'preview');
     const pct = $derived(v.preview.progress);
+    // Dictation is offered only once the chosen model is on the device: no surprise download.
+    const voice = voiceState();
+    const modelReady = $derived(voice.models.some((m) => m.model.name === voice.selected && m.downloaded));
 
     // The chevron's slide animation restarts on every recording, not just the first.
     function restartAnim(node, tick) {
@@ -48,6 +52,10 @@
             </div>
             <span class="voice-preview-time">{v.preview.time}</span>
         </div>
+        {#if modelReady}
+            <button class="voice-preview-dictate" aria-label="Turn into text" title="Turn into text" disabled={v.preview.dictating}
+                    onclick={() => h()?.previewDictate()}><span class="icon {v.preview.dictating ? 'icon-loading spin' : 'icon-align-left'}"></span></button>
+        {/if}
     </div>
 {:else if part === 'dot'}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

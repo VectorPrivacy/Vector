@@ -738,6 +738,24 @@ async function initComposerVoice() {
         cancelReply();
     };
 
+    // Dictation leaves the words in the composer to edit before sending; a reply stays a reply.
+    // Words for a chat the user has since left wait there as its draft.
+    recorder.onDictate = (text, chatId) => {
+        if (chatId !== strOpenChat) {
+            const draft = chatDrafts.get(chatId);
+            chatDrafts.set(chatId, { text: draft?.text ? `${draft.text} ${text}` : text, replyRef: draft?.replyRef || '' });
+            showToast('Dictation saved as a draft in its chat');
+            return;
+        }
+        if (strCurrentEditMessageId) cancelEdit();
+        domChatMessageInput.value = text;
+        VectorSvelte.setDraftEmpty(false, false);
+        VectorSvelte.flushSync();
+        domChatMessageInput.focus();
+        domChatMessageInput.setSelectionRange(text.length, text.length);
+        autoResizeChatInput();
+    };
+
     // Initialize voice transcription with default model
     window.cTranscriber = new VoiceTranscriptionUI();
     window.voiceSettings = new VoiceSettings();

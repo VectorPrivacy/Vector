@@ -9708,7 +9708,8 @@ select {
   margin: 0 auto;
 }
 
-.voice-preview-play {
+.voice-preview-play,
+.voice-preview-dictate {
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -9721,13 +9722,19 @@ select {
   flex-shrink: 0;
 }
 
-.voice-preview-play .icon {
+.voice-preview-play .icon,
+.voice-preview-dictate .icon {
   background-color: #fff;
   transition: opacity 0.15s ease;
 }
 
-.voice-preview-play:hover .icon {
+.voice-preview-play:hover .icon,
+.voice-preview-dictate:not(:disabled):hover .icon {
   opacity: 0.7;
+}
+
+.voice-preview-dictate:disabled {
+  cursor: default;
 }
 
 .voice-preview-waveform {
@@ -9784,6 +9791,12 @@ select {
 
 #chat-input-send.voice-preview-send .icon {
   background-color: var(--icon-color-primary);
+}
+
+/* A recording being turned into text can't also go out as audio. */
+#chat-input-send.voice-preview-send:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* ============================================================================

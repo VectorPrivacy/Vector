@@ -2088,7 +2088,12 @@ const SETTINGS_HELPERS = {
         // misc.js loads after this file: resolve at call time.
         formatBytes: (n) => formatBytes(n),
         confirmDelete: confirmStorageDelete,
-        deleteCategory: (category, exts) => invoke('clear_storage_category', { category, exts }),
+        deleteCategory: async (category, exts) => {
+            const result = await invoke('clear_storage_category', { category, exts });
+            // The voice settings and dictation read which models are downloaded from this list.
+            if (category === 'ai' && platformFeatures.transcription) await window.voiceSettings.loadWhisperModels();
+            return result;
+        },
         refresh: () => initStorageSection(),
         // The emoji memos and any rendered <img>s point at the deleted cache files
         onCacheCleared: () => reloadCachedEmojiImgs(),

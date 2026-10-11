@@ -774,6 +774,7 @@ pub fn run() {
             commands::media::start_recording,
             commands::media::stop_recording,
             commands::media::transcribe,
+            commands::media::transcribe_recording,
             commands::media::download_whisper_model,
             commands::messaging::update_unread_counter,
             commands::messaging::get_unread_counts,

@@ -12,7 +12,7 @@ const v = $state({
     dot: { transform: '', returning: false },
     lock: { opacity: null, indicatorTransform: '', arrowOpacity: null, fading: false },
     tooltip: false,
-    preview: { playing: false, progress: 0, time: '0:00' },
+    preview: { playing: false, progress: 0, time: '0:00', dictating: false },
     // Bumped when the composer's controls return: each plays the fade-in once.
     fadeTick: 0,
 });
@@ -28,7 +28,7 @@ export function setVoiceState(state) {
     v.lock = { opacity: null, indicatorTransform: '', arrowOpacity: null, fading: false };
     // The clock keeps running through a lock; only a fresh recording starts it over.
     if (state !== 'locked') v.timer = '0:00';
-    v.preview = { playing: false, progress: 0, time: '0:00' };
+    v.preview = { playing: false, progress: 0, time: '0:00', dictating: false };
 }
 export function setVoiceStatusText(text) { v.statusText = text; }
 export function setVoiceTimer(text) { v.timer = text; }
@@ -47,7 +47,7 @@ export function voiceFadeIn() { v.fadeTick++; }
 
 // The recorder's handlers for the preview controls and the red dot, and the waveform
 // element its seek gesture measures. Registered by VoiceRecorder once it exists.
-let handlers = $state.raw(null);   // { dotClick, previewDelete, previewPlayPause, waveformPointerDown }
+let handlers = $state.raw(null);   // { dotClick, previewDelete, previewPlayPause, previewDictate, waveformPointerDown }
 export function voiceHandlers() { return handlers; }
 export function setVoiceHandlers(h) { handlers = h; }
 const els = {};

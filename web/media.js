@@ -195,6 +195,11 @@
         return backend('web_send_voice', { receiver, repliedTo: repliedTo || '', filePath: voice.path });
     });
 
+    register('transcribe_recording', ({ modelName }) => {
+        if (!pendingVoice) throw new Error('No pending recording');
+        return window.__TAURI__.core.invoke('transcribe', { filePath: pendingVoice.path, modelName, translate: false });
+    });
+
     // --- Attachment actions ------------------------------------------------
     const fileName = (path) => path.split('/').pop() || 'file';
 

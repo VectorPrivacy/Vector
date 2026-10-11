@@ -63,6 +63,8 @@ class VoiceRecorder {
         this.onSend = null;
         this.onCancel = null;
         this.onStateChange = null;
+        this.onDictate = null;
+        this.dictation = null;   // { chat } while a recording is being turned into text
 
         this.isPlaying = false;
         this._bindEvents();
@@ -86,6 +88,7 @@ class VoiceRecorder {
             dotClick: () => this._onRedCircleClick(),
             previewDelete: () => this._onPreviewDelete(),
             previewPlayPause: () => this._onPreviewPlayPause(),
+            previewDictate: () => this._onPreviewDictate(),
             waveformPointerDown: (e) => this._onWaveformPointerDown(e),
         });
 
@@ -412,6 +415,42 @@ class VoiceRecorder {
      * Handles delete button in preview
      */
     async _onPreviewDelete() {
+        await this._closePreview();
+        if (this.onCancel) this.onCancel();
+    }
+
+    /**
+     * Dictation: the recording becomes the text of the chat it was recorded in, and the
+     * recording goes. Until then it can't be sent; deleting it cancels.
+     */
+    async _onPreviewDictate() {
+        if (this.state !== RecordingState.PREVIEW || this.dictation) return;
+        const run = { chat: strOpenChat };
+        this.dictation = run;
+        VectorSvelte.setVoicePreview({ dictating: true });
+        let text = '';
+        let failed = false;
+        try {
+            text = await window.cTranscriber.transcribeRecording();
+        } catch (err) {
+            console.error('Dictation failed:', err);
+            failed = true;
+        }
+        // Deleted meanwhile: the words go with it.
+        if (this.dictation !== run) return;
+        this.dictation = null;
+        VectorSvelte.setVoicePreview({ dictating: false });
+        if (failed || !text) {
+            showToast(failed ? 'Couldn\'t turn that into text' : 'No words heard in that recording');
+            return;
+        }
+        await this._closePreview();
+        if (this.onDictate) this.onDictate(text, run.chat);
+    }
+
+    /** Leave the preview for the composer, dropping the recording's playback. */
+    async _closePreview() {
+        this.dictation = null;
         this._stopPreviewAnimation();
         VectorSvelte.releasePlayback('voice-preview');
         if (this.previewSourceId) {
@@ -424,7 +463,6 @@ class VoiceRecorder {
         this.isPlaying = false;
         this._setState(RecordingState.IDLE);
         this._animateChatInputFadeIn();
-        if (this.onCancel) this.onCancel();
     }
 
     /**
@@ -432,7 +470,7 @@ class VoiceRecorder {
      * Returns true if send was initiated, false otherwise.
      */
     send() {
-        if (this.state !== RecordingState.PREVIEW || !this.previewSourceId) return false;
+        if (this.state !== RecordingState.PREVIEW || !this.previewSourceId || this.dictation) return false;
 
         this._stopPreviewAnimation();
         VectorSvelte.releasePlayback('voice-preview');
@@ -755,6 +793,16 @@ class VoiceTranscriptionUI {
             modelName: selectedModel,
             translate: window.voiceSettings?.autoTranslate || false
         });
+    }
+
+    /**
+     * Dictation: the recording in the composer's preview, as one line of text, with the
+     * selected model (the button shows only once it is downloaded).
+     * @returns {Promise<string>}
+     */
+    async transcribeRecording() {
+        const data = await invoke('transcribe_recording', { modelName: window.voiceSettings.selectedModel });
+        return (data.sections || []).map((s) => s.text.trim()).filter(Boolean).join(' ');
     }
 }
 

@@ -284,6 +284,7 @@
     "allow-get-platform-features",
     "allow-get-device-memory",
     "allow-transcribe",
+    "allow-transcribe-recording",
     "allow-download-whisper-model",
     "allow-cancel-whisper-download",
     "allow-get-or-create-invite-code",

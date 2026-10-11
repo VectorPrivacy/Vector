@@ -70,6 +70,28 @@ pub async fn transcribe<R: Runtime>(
     Err("Whisper transcription is not supported on this platform".to_string())
 }
 
+/// Dictation: the recording waiting in the preview, as text. Never translated, as the
+/// words are the user's own message.
+#[cfg(feature = "whisper")]
+#[tauri::command]
+pub async fn transcribe_recording<R: Runtime>(
+    handle: AppHandle<R>,
+    model_name: String,
+) -> Result<whisper::TranscriptionResult, String> {
+    let audio_data = AudioRecorder::global().pending_for_whisper()?;
+    whisper::transcribe(&handle, &model_name, false, audio_data).await
+        .map_err(|e| format!("Transcription error: {}", e))
+}
+
+#[cfg(not(feature = "whisper"))]
+#[tauri::command]
+pub async fn transcribe_recording<R: Runtime>(
+    _handle: AppHandle<R>,
+    _model_name: String,
+) -> Result<String, String> {
+    Err("Whisper transcription is not supported on this platform".to_string())
+}
+
 /// Download a Whisper model for transcription
 #[cfg(feature = "whisper")]
 #[tauri::command]
@@ -98,4 +120,5 @@ pub async fn download_whisper_model<R: Runtime>(
 // - start_recording
 // - stop_recording
 // - transcribe (platform-specific)
+// - transcribe_recording (platform-specific)
 // - download_whisper_model (platform-specific)
