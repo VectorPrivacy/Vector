@@ -1017,6 +1017,7 @@ fn install(next: Arc<Session>) {
     };
     // After the write lock: the epoch bump reads the live id.
     crate::transport::on_session_installed(prev, next_id);
+    crate::profile::sync::wake_processor();
 }
 
 /// RAII guard for READ connections — auto-returns to its OWN session's pool.
@@ -1434,6 +1435,7 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // that path with the chat state lock held.
     crate::notify::warm();
 
+    crate::profile::sync::wake_processor();
     Ok(())
 }
 
@@ -1556,6 +1558,18 @@ mod pool_generation_tests {
     /// migrations because we only care about the guard's Drop pathway.
     fn fake_conn() -> rusqlite::Connection {
         rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_new_session_wakes_the_idle_profile_processor() {
+        let _guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let woke = crate::profile::sync::wait_for_wake(std::time::Duration::from_millis(0));
+        let _ = woke.await;
+        close_database();
+        assert!(
+            crate::profile::sync::wait_for_wake(std::time::Duration::from_millis(200)).await,
+            "a session going live must wake the processor, or queued profiles wait for its next timer"
+        );
     }
 
     #[test]

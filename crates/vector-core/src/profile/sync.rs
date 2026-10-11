@@ -257,6 +257,18 @@ fn profile_sync_queue() -> Arc<Mutex<ProfileSyncQueue>> {
 /// stored permit covers an add that lands between its last look and its wait.
 static PROCESSOR_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
+/// Wake the idle processor to look at the live session's queue: entries added before that
+/// session went live woke it against the previous one.
+pub(crate) fn wake_processor() {
+    PROCESSOR_WAKE.notify_one();
+}
+
+/// Whether a wake arrives within `within`, consuming it.
+#[cfg(test)]
+pub(crate) async fn wait_for_wake(within: Duration) -> bool {
+    crate::rt::time::timeout(within, PROCESSOR_WAKE.notified()).await.is_ok()
+}
+
 // ============================================================================
 // ProfileSyncHandler — platform-specific callbacks
 // ============================================================================
