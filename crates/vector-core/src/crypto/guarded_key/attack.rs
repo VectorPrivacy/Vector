@@ -518,3 +518,53 @@ fn retired_slots_stay_out_of_two_diffs() {
     }
     PARTNER.clear(&[]);
 }
+
+/// A slot whose value changed by its lowest bit alone was forced odd, not decoyed: random
+/// decoys almost never do that, so it names a key's multiplier slots.
+#[test]
+#[ignore = "attack demo: run by name with --nocapture"]
+fn low_bit_only_changes_across_sets() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x21; 32]);
+    let mut flagged = 0;
+    let sets = 40u8;
+    for n in 0..sets {
+        let d1 = dump();
+        SETTER.set([n; 32], &[&PARTNER]);
+        let d2 = dump();
+        flagged += changed(&d1, &d2).iter().filter(|p| d1[p.array][p.slot] ^ d2[p.array][p.slot] == 1).count();
+    }
+    println!("{sets} sets: {flagged} slots changed by their low bit alone");
+    assert_eq!(flagged, 0, "every write is a whole random word");
+    SETTER.clear(&[&PARTNER]);
+    PARTNER.clear(&[]);
+}
+
+/// A key set again into a lane it held before re-derives that lane's positions. Unless they
+/// move, its new shares land on its old slots, which then change in two diffs.
+#[test]
+#[ignore = "attack demo: run by name with --nocapture"]
+fn a_lane_held_again_gets_fresh_slots() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x31; 32]);
+    let mut seen: HashMap<usize, [VaultPos; SHARE_ENTRIES]> = HashMap::new();
+    let (mut reuses, mut same) = (0, 0);
+    for n in 0..200u8 {
+        SETTER.set([n; 32], &[&PARTNER]);
+        let lane = SETTER.lane();
+        let now = share_positions(SETTER.instance_addr(), lane);
+        if let Some(before) = seen.get(&lane) {
+            reuses += 1;
+            let overlap = now.iter().filter(|p| before.contains(p)).count();
+            if overlap == SHARE_ENTRIES {
+                same += 1;
+            }
+        }
+        seen.insert(lane, now);
+    }
+    println!("{reuses} sets into a lane held before: {same} landed on exactly the same 16 slots");
+    assert!(reuses > 0, "the run reused a lane");
+    assert_eq!(same, 0, "a fresh seed moves the shares");
+    SETTER.clear(&[&PARTNER]);
+    PARTNER.clear(&[]);
+}

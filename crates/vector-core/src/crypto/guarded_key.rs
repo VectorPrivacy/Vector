@@ -1,4 +1,4 @@
-//! Memory-hardened key storage: 32 indistinguishable arrays with decoy writes, and a
+//! Memory-hardened key storage: 32 arrays of random-looking words with decoy writes, and a
 //! shielded key.
 //!
 //! The real 32-byte key is never stored. What is stored is the key XORed with
@@ -7,33 +7,40 @@
 //! own random fill: the key's lane row in 8 arrays, which nothing writes while the key is live.
 //!
 //! Defense layers:
-//! 1. **Shielding**: recovering the key needs every one of the prekey's 131,072 bits
-//!    exactly. Noisy or partial extraction (cold boot, Rowhammer/RAMBleed, speculative
-//!    leaks, torn dumps) yields nothing; one wrong bit gives an unrelated key.
+//! 1. **Shielding**: the vault opens only with every one of the prekey's 131,072 bits
+//!    exact, so a noisy or partial capture of the vault (cold boot, Rowhammer/RAMBleed,
+//!    speculative leaks, torn dumps) gives an unrelated key. Copies a read leaves on its
+//!    own stack are not covered.
 //! 2. **Secret splitting**: the shielded key is XOR-split into 4 shares
-//! 3. **32 indistinguishable arrays**: all same size, all randomly initialized, all
-//!    modified identically during set()/clear()
-//! 4. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
+//! 3. **32 alike arrays**: same size, all randomly filled, all receiving the same number of
+//!    decoys per set()/clear(). A single dump shows nothing that singles one out.
+//! 4. **No heap allocations**: zero pointers, zero mlock
 //! 5. **Scattered positions**: prekey rows, seed, multipliers and share data each sit at
 //!    (array, slot) positions derived from the ASLR instance address. The slot
 //!    dimension is partitioned into LANE_COUNT disjoint lanes; each live key owns one
 //!    lane (chosen at set() to differ from every live key's, its own included), so two
 //!    keys can never share a slot.
-//! 6. **Decoy writes**: during set()/clear(), ALL arrays receive random writes, so real
-//!    writes are indistinguishable via snapshot diffing. Decoys keep off other live keys'
-//!    slots and prekey rows: a key rewritten in place would sit in a diff under two pads,
-//!    and pad1 ^ pad2 then singles out its slots.
+//! 6. **Decoy writes**: during set()/clear(), every array receives random writes, so the
+//!    real ones hide among ~2,000 changed slots in a snapshot diff. Decoys keep off other
+//!    live keys' slots and prekey rows, so those rows go untouched in a diff: two snapshots
+//!    around a change show which lane and arrays another live key uses.
 //! 7. **Retire by prekey**: a replaced or cleared key's shares are left in place and its
-//!    prekey changed instead, so its slots are never rewritten twice across two diffs.
+//!    prekey changed instead, and each set() draws a fresh seed, so no slot is rewritten
+//!    across two diffs.
 //! 8. **Zero writes on read**: get() only loads.
-//! 9. **Zero searchable constants**: all multipliers and round counts derive from ASLR
-//!    addresses, all modular arithmetic uses power-of-2 AND masks.
+//! 9. **No fixed layout constants**: multipliers and round counts derive from ASLR
+//!    addresses, and all modular arithmetic uses power-of-2 AND masks.
 //!
 //! Security tiers:
-//!   **Without source code** (info-stealers, forensic tools): immune.
-//!   Arrays are information-theoretically indistinguishable.
+//!   **Without source code** (info-stealers, forensic tools): nothing marks the vault or
+//!   the key's place in it.
 //!
-//!   **Noisy or partial memory extraction**: needs the full 16 KiB prekey bit-exact.
+//!   **Noisy or partial capture of the vault**: needs the full 16 KiB prekey bit-exact.
+//!
+//!   **Source code + snapshots of the vault alone, no load address**: the address is
+//!   guessed. Every key's layout follows from it, so one guess that fits any key opens
+//!   them all. A diff around any set() or clear() checks a guess without a hash or a curve
+//!   operation; a single snapshot needs both per guess.
 //!
 //!   **Source code + a clean, complete dump**: recoverable, as any in-process secret is.
 //!   A dump carries the image base, so the layout is one derivation away. The defence
@@ -62,6 +69,8 @@ const USIZES_PER_SHARE: usize = 32 / std::mem::size_of::<usize>();
 const SHARE_ENTRIES: usize = NUM_SHARES * USIZES_PER_SHARE;
 /// Lane rows that make up one key's prekey: 16 KiB on 64-bit and on 32-bit alike.
 const PREKEY_ROWS: usize = 16 * 1024 / (LANE_WIDTH * std::mem::size_of::<usize>());
+// Retirement picks a prekey row with an AND mask, and the rows must leave arrays for shares.
+const _: () = assert!(PREKEY_ROWS.is_power_of_two() && PREKEY_ROWS < ARRAY_COUNT);
 
 /// Number of disjoint slot-lanes the slot dimension is partitioned into.
 /// Each live key occupies exactly one lane, so two keys in distinct lanes can
@@ -470,9 +479,8 @@ impl GuardedKey {
     /// the same VAULTS arrays. The caller is responsible for passing all other
     /// active keys to ensure cross-key protection.
     ///
-    /// Sized for up to LANE_COUNT live keys (the max that can coexist in distinct
-    /// lanes). Extra entries are simply not collected — lanes already guarantee
-    /// disjointness, so the decoy exclusion is a redundant safety net.
+    /// Sized for up to LANE_COUNT live keys (the max that can coexist in distinct lanes).
+    /// Decoys roam every lane, so this exclusion is what keeps them off a partner's slots.
     fn collect_other_protected(&self, others: &[&GuardedKey]) -> ([VaultPos; (3 + SHARE_ENTRIES) * LANE_COUNT], usize) {
         let mut buf = [VaultPos { array: 0, slot: 0 }; (3 + SHARE_ENTRIES) * LANE_COUNT];
         let mut n = 0;
@@ -539,6 +547,12 @@ impl GuardedKey {
         let old_marker = self.active.load(Ordering::Acquire);
         let (protected, pcount) = self.collect_other_protected(others);
         let rows = self.other_prekey_rows(others);
+        // Drawn before the window: nothing inside it may fail, or the epoch would stay odd and
+        // every read spin (a wasm panic aborts without running the guard's drop).
+        let mut splits = zeroize::Zeroizing::new([[0u8; 32]; NUM_SHARES - 1]);
+        for share in splits.iter_mut() {
+            rng.fill_bytes(share);
+        }
         let rewriting = Rewriting::begin();
         let retiring = (old_marker != 0).then(|| Retiring::begin(self.instance_addr(), Self::lane_of(old_marker)));
 
@@ -546,15 +560,12 @@ impl GuardedKey {
         // that landed on OUR slots; every other key's slots and prekey rows are left alone.
         write_decoys(&protected[..pcount], &rows, &mut draws);
 
-        // Force multiplier entries odd (mixing quality).
-        // ~50% of all entries are already odd, so this isn't a fingerprint.
-        let (_, mul1_pos, mul2_pos) = config_positions(self.instance_addr(), lane);
-        let v = VAULTS[mul1_pos.array][mul1_pos.slot].load(Ordering::Relaxed);
-        VAULTS[mul1_pos.array][mul1_pos.slot].store(v | 1, Ordering::Relaxed);
-        let v = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed);
-        VAULTS[mul2_pos.array][mul2_pos.slot].store(v | 1, Ordering::Relaxed);
+        // A fresh seed, so a lane this key held before never hands its shares the same slots:
+        // a slot rewritten in two diffs stands out. One random word, like any decoy.
+        let (seed_pos, _, _) = config_positions(self.instance_addr(), lane);
+        VAULTS[seed_pos.array][seed_pos.slot].store(draws.next(), Ordering::Relaxed);
 
-        Self::write_shielded(self.instance_addr(), lane, &mut key, &mut rng);
+        Self::write_shielded(self.instance_addr(), lane, &mut key, &splits);
 
         // Commit the lane-bearing marker. get() re-derives the same lane from it.
         self.active.store(marker, Ordering::Release);
@@ -566,14 +577,13 @@ impl GuardedKey {
         drop(rewriting);
     }
 
-    /// Shield `key` under `lane`'s prekey and write it as 4 shares. Wipes `key`.
-    fn write_shielded(instance_addr: usize, lane: usize, key: &mut [u8; 32], rng: &mut rand::rngs::OsRng) {
+    /// Shield `key` under `lane`'s prekey and write it as 4 shares, the first 3 being `splits`.
+    /// Wipes `key`.
+    fn write_shielded(instance_addr: usize, lane: usize, key: &mut [u8; 32], splits: &[[u8; 32]; NUM_SHARES - 1]) {
         let layout = layout(instance_addr, lane);
         let mut pad = shield(lane, &layout.prekey);
-        let mut shares = [[0u8; 32]; NUM_SHARES];
-        for share in shares.iter_mut().take(NUM_SHARES - 1) {
-            rng.fill_bytes(share);
-        }
+        let mut shares = zeroize::Zeroizing::new([[0u8; 32]; NUM_SHARES]);
+        shares[..NUM_SHARES - 1].copy_from_slice(splits);
         for j in 0..32 {
             let mut last = key[j] ^ pad[j];
             for share in shares.iter().take(NUM_SHARES - 1) {
@@ -596,7 +606,6 @@ impl GuardedKey {
                 VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
             }
         }
-        for share in shares.iter_mut() { share.zeroize(); }
     }
 
     /// Recover the key. Zero writes — invisible to snapshot diffing.
@@ -651,11 +660,11 @@ impl GuardedKey {
         }
         let mut draws = Draws::new();
         let rows = self.other_prekey_rows(others);
+        let (protected, pcount) = self.collect_other_protected(others);
         let rewriting = Rewriting::begin();
 
         let old_marker = self.active.swap(0, Ordering::SeqCst);
         let retiring = Retiring::begin(self.instance_addr(), Self::lane_of(old_marker));
-        let (protected, pcount) = self.collect_other_protected(others);
         write_decoys(&protected[..pcount], &rows, &mut draws);
         retiring.finish(&mut draws);
         drop(rewriting);
