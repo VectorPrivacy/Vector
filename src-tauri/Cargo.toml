@@ -253,9 +253,8 @@ rand = "0.8"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
 # PIVX Promos (addressless crypto payments)
-secp256k1 = "0.29"
-ripemd = "0.1.3"
-bs58 = "0.5.1"
+secp256k1 = { version = "0.30", default-features = false, features = ["std"] }
+bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"] }
 
 # Android-only dependencies
 [target.'cfg(target_os = "android")'.dependencies]

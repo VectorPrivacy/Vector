@@ -9,7 +9,6 @@
 use vector_core::event_ext::FinalizeUnsignedWithId;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
-use ripemd::Ripemd160;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
@@ -161,38 +160,101 @@ fn double_sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(first).into()
 }
 
-/// RIPEMD-160 hash (used in address derivation)
-fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
-    let mut hasher = Ripemd160::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
+/// 58^5, the largest power of 58 below 2^32: one u32 limb holds five Base58 digits.
+const B58_LIMB: u64 = 58 * 58 * 58 * 58 * 58;
 
-/// Base58 encoding (delegates to the `bs58` crate)
+/// Base58 (Bitcoin alphabet): each leading zero byte is a leading '1'.
 fn base58_encode(data: &[u8]) -> String {
-    bs58::encode(data).into_string()
+    let zeros = data.iter().take_while(|&&b| b == 0).count();
+    // Little-endian limbs in base 58^5, fed three input bytes at a time.
+    let mut limbs: Vec<u32> = Vec::with_capacity(data.len() / 3 + 1);
+    for chunk in data[zeros..].chunks(3) {
+        let (mut carry, shift) = chunk.iter().fold((0u64, 0), |(v, s), &b| (v << 8 | b as u64, s + 8));
+        for l in limbs.iter_mut() {
+            carry += (*l as u64) << shift;
+            *l = (carry % B58_LIMB) as u32;
+            carry /= B58_LIMB;
+        }
+        while carry > 0 {
+            limbs.push((carry % B58_LIMB) as u32);
+            carry /= B58_LIMB;
+        }
+    }
+    let mut digits = Vec::with_capacity(limbs.len() * 5);
+    for &l in &limbs {
+        let mut l = l;
+        for _ in 0..5 {
+            digits.push(BASE58_ALPHABET[(l % 58) as usize]);
+            l /= 58;
+        }
+    }
+    while digits.last() == Some(&b'1') {
+        digits.pop();
+    }
+    digits.extend(std::iter::repeat_n(b'1', zeros));
+    digits.reverse();
+    // Every byte is from the ASCII alphabet.
+    String::from_utf8(digits).unwrap_or_default()
 }
 
-/// Base58 decoding (delegates to the `bs58` crate)
+/// ASCII -> Base58 digit, 0xFF where the character is not in the alphabet.
+const BASE58_DIGITS: [u8; 128] = {
+    let mut t = [0xFF; 128];
+    let mut i = 0;
+    while i < 58 {
+        t[BASE58_ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    t
+};
+
 fn base58_decode(encoded: &str) -> Result<Vec<u8>, String> {
-    bs58::decode(encoded)
-        .into_vec()
-        .map_err(|e| format!("Base58 decode error: {}", e))
+    let input = encoded.as_bytes();
+    let zeros = input.iter().take_while(|&&c| c == b'1').count();
+    // Little-endian u32 limbs, fed up to five digits at a time.
+    let mut limbs: Vec<u32> = Vec::with_capacity(input.len() / 5 + 1);
+    let mut at = zeros;
+    for chunk in input[zeros..].chunks(5) {
+        let (mut carry, mut scale) = (0u64, 1u64);
+        for &c in chunk {
+            let digit = BASE58_DIGITS.get(c as usize).copied().unwrap_or(0xFF);
+            if digit == 0xFF {
+                return Err(format!("Base58 decode error: invalid character at {}", at));
+            }
+            carry = carry * 58 + digit as u64;
+            scale *= 58;
+            at += 1;
+        }
+        for l in limbs.iter_mut() {
+            carry += *l as u64 * scale;
+            *l = carry as u32;
+            carry >>= 32;
+        }
+        if carry > 0 {
+            limbs.push(carry as u32);
+        }
+    }
+    let mut out = Vec::with_capacity(zeros + limbs.len() * 4);
+    out.resize(zeros, 0);
+    for &l in limbs.iter().rev() {
+        out.extend_from_slice(&l.to_be_bytes());
+    }
+    let pad = out[zeros..].iter().take_while(|&&b| b == 0).count();
+    out.drain(zeros..zeros + pad);
+    Ok(out)
 }
 
 /// Derive PIVX address from private key
 pub fn privkey_to_address(privkey: &[u8; 32]) -> Result<String, String> {
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(privkey)
+    let secret_key = SecretKey::from_byte_array(privkey)
         .map_err(|e| format!("Invalid private key: {}", e))?;
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
 
     // Compressed public key (33 bytes)
     let pubkey_bytes = public_key.serialize();
 
-    // SHA256 then RIPEMD160 (Hash160)
-    let sha256_hash = Sha256::digest(pubkey_bytes);
-    let hash160 = ripemd160_hash(&sha256_hash);
+    let hash160 = bitcoin_hashes::hash160::Hash::hash(&pubkey_bytes).to_byte_array();
 
     // Prepend version byte
     let mut payload = vec![PIVX_PUBKEY_ADDRESS_PREFIX];
@@ -433,7 +495,7 @@ pub async fn build_sweep_transaction(
     dest_address: &str,
 ) -> Result<String, String> {
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(privkey)
+    let secret_key = SecretKey::from_byte_array(privkey)
         .map_err(|e| format!("Invalid private key: {}", e))?;
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
 
@@ -549,8 +611,7 @@ pub async fn build_sweep_transaction(
         let sighash = double_sha256(&preimage);
 
         // Sign
-        let message = Message::from_digest_slice(&sighash)
-            .map_err(|e| format!("Failed to create message: {}", e))?;
+        let message = Message::from_digest(sighash);
         let signature = secp.sign_ecdsa(&message, &secret_key);
         let mut sig_bytes = signature.serialize_der().to_vec();
         sig_bytes.push(0x01); // SIGHASH_ALL
@@ -1564,7 +1625,7 @@ async fn build_withdrawal_transaction(
     signed_tx.push(all_inputs.len() as u8);
 
     for (i, (utxo, privkey, _)) in all_inputs.iter().enumerate() {
-        let secret_key = SecretKey::from_slice(*privkey)
+        let secret_key = SecretKey::from_byte_array(privkey)
             .map_err(|e| format!("Invalid private key: {}", e))?;
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
 
@@ -1618,8 +1679,7 @@ async fn build_withdrawal_transaction(
         let sighash = double_sha256(&preimage);
 
         // Sign
-        let message = Message::from_digest_slice(&sighash)
-            .map_err(|e| format!("Failed to create message: {}", e))?;
+        let message = Message::from_digest(sighash);
         let signature = secp.sign_ecdsa(&message, &secret_key);
         let mut sig_bytes = signature.serialize_der().to_vec();
         sig_bytes.push(0x01); // SIGHASH_ALL
@@ -1889,4 +1949,39 @@ pub fn pivx_get_preferred_currency<R: Runtime>(
     _handle: AppHandle<R>,
 ) -> Result<Option<String>, String> {
     crate::db::get_sql_setting("pivx_preferred_currency".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base58_matches_bitcoin_core_vectors() {
+        for (hex, b58) in [
+            ("", ""),
+            ("61", "2g"),
+            ("626262", "a3gV"),
+            ("73696d706c792061206c6f6e6720737472696e67", "2cFupjhnEsSn59qHXstmK2ffpLv2"),
+            ("00eb15231dfceb60925886b67d065299925915aeb172c06647", "1NS17iag9jJgTHD1VXjvLCEnZuQ3rJDE9L"),
+            ("bf4f89001e670274dd", "3SEo3LWLoPntC"),
+            ("ecac89cad93923c02321", "EJDM8drfXA6uyA"),
+            ("00000000000000000000", "1111111111"),
+        ] {
+            let bytes = hex_string_to_bytes(hex);
+            assert_eq!(base58_encode(&bytes), b58);
+            assert_eq!(base58_decode(b58).unwrap(), bytes);
+        }
+        assert!(base58_decode("1NS17iag9jJgTHD1VXjvLCEnZuQ3rJDE9l").is_err());
+        assert!(base58_decode("0").is_err());
+    }
+
+    #[test]
+    fn address_derivation_is_stable() {
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        assert_eq!(privkey_to_address(&one).unwrap(), "DFpN6QqFfUm3gKNaxN6tNcab1FArL9cZLE");
+        let addr = privkey_to_address(&[0x42; 32]).unwrap();
+        assert_eq!(addr, "D73NiBcVFv7VaRFp36yKHiUqRAgJ7zeYdc");
+        assert!(decode_pivx_address(&addr).is_ok());
+    }
 }
