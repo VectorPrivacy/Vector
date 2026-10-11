@@ -983,42 +983,11 @@ fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<
 }
 
 fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
-    // Animated WebPs go through libwebp directly. `image-webp` 0.2.x
-    // returns per-frame raw pixels without applying the spec's disposal
-    // + blend modes, so transparent regions flicker as residue from the
-    // prior frame on a cleared canvas. libwebp is the reference decoder
-    // and produces fully-composed RGBA frames.
-    if let Ok(anim) = webp::AnimDecoder::new(bytes).decode() {
-        if anim.has_animation() {
-            let mut out = Vec::with_capacity(anim.len());
-            let mut prev_ts: i32 = 0;
-            for frame in anim.into_iter() {
-                let w = frame.width();
-                let h = frame.height();
-                let layout = frame.get_layout();
-                let pixels = frame.get_image();
-                let rgba = if layout.is_alpha() {
-                    image::RgbaImage::from_raw(w, h, pixels.to_vec())
-                        .ok_or_else(|| "webp anim: malformed RGBA frame".to_string())?
-                } else {
-                    let mut buf = Vec::with_capacity((w * h * 4) as usize);
-                    for px in pixels.chunks_exact(3) {
-                        buf.extend_from_slice(px);
-                        buf.push(255);
-                    }
-                    image::RgbaImage::from_raw(w, h, buf)
-                        .ok_or_else(|| "webp anim: malformed RGB frame".to_string())?
-                };
-                let ts = frame.get_time_ms();
-                // libwebp reports cumulative end-of-frame timestamps;
-                // per-frame duration is the delta from the previous one.
-                let duration = (ts - prev_ts).max(20) as u32;
-                prev_ts = ts;
-                out.push((rgba, duration));
-            }
-            if !out.is_empty() {
-                return Ok(out);
-            }
+    // Animated WebPs go through libwebp, which composites disposal and blending;
+    // `image-webp` 0.2.x leaves transparent regions holding the prior frame.
+    if let Ok(anim) = crate::shared::animated_webp::Decoder::new(bytes) {
+        if anim.frame_count() > 1 {
+            return anim.map(|f| f.map(|(rgba, ms)| (rgba, ms.max(20)))).collect();
         }
     }
 
@@ -1206,13 +1175,10 @@ fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -
     } else if mime.contains("gif") {
         "gif"
     } else if mime.contains("webp") {
-        // Animated WebP routes to the dedicated AnimEncoder round-trip;
-        // detect via libwebp itself rather than a header sniff so we
-        // catch single-frame-anim edge cases correctly.
-        if let Ok(anim) = webp::AnimDecoder::new(&bytes).decode() {
-            if anim.has_animation() {
-                return crop_animated_webp(&bytes, x, y, w, h, max_bytes);
-            }
+        // Animated WebP routes to the animated round-trip; libwebp's frame count, so a
+        // one-frame ANIM counts as a still.
+        if crate::shared::animated_webp::Decoder::new(&bytes).is_ok_and(|d| d.frame_count() > 1) {
+            return crop_animated_webp(&bytes, x, y, w, h, max_bytes);
         }
         "webp"
     } else {
@@ -1304,21 +1270,11 @@ fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: O
 
     encode_within_budget(&cropped, max_bytes, |scaled| {
         let (fw, fh) = scaled[0].0.dimensions();
-        let mut config = webp::WebPConfig::new().map_err(|_| "webp config init failed".to_string())?;
-        config.quality = 80.0;
-        let mut encoder = webp::AnimEncoder::new(fw, fh, &config);
-        encoder.set_loop_count(0);
-        // libwebp wants cumulative end-of-frame timestamps (not per-frame
-        // deltas). Decoder gives us deltas, so re-accumulate here.
-        let mut cumulative: i32 = 0;
+        let mut encoder = crate::shared::animated_webp::Encoder::lossy(fw, fh, 80.0)?;
         for (img, duration) in scaled.iter() {
-            cumulative = cumulative.saturating_add(*duration as i32);
-            encoder.add_frame(webp::AnimFrame::from_rgba(img.as_raw(), fw, fh, cumulative));
+            encoder.add(img.as_raw(), *duration)?;
         }
-        let mem = encoder
-            .try_encode()
-            .map_err(|e| format!("webp anim encode: {:?}", e))?;
-        Ok(mem.to_vec())
+        encoder.finish()
     })
 }
 
@@ -1366,6 +1322,10 @@ fn validate_crop_bounds(x: u32, y: u32, w: u32, h: u32, sw: u32, sh: u32) -> Res
 }
 
 fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, String> {
+    if format == "webp" {
+        // libwebp lossy: much smaller than image-webp's lossless-only encoder for natural images.
+        return crate::shared::animated_webp::encode_still(rgba.as_raw(), rgba.width(), rgba.height(), 88.0);
+    }
     let mut out = Vec::with_capacity((rgba.width() * rgba.height()) as usize);
     match format {
         "png" => {
@@ -1391,13 +1351,6 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 88)
                 .write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
                 .map_err(|e| format!("jpeg encode: {}", e))?;
-        }
-        "webp" => {
-            // Static WebP via libwebp — much smaller than image-webp's
-            // lossless-only encoder for natural images.
-            let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
-            let mem = encoder.encode(88.0);
-            out.extend_from_slice(&mem);
         }
         _ => return Err(format!("encode: unsupported format {}", format)),
     }

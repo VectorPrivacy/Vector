@@ -11781,7 +11781,6 @@ dependencies = [
  "url",
  "vector-core",
  "webkit2gtk",
- "webp",
  "whisper-rs",
  "windows 0.61.1",
  "windows-core 0.61.0",
@@ -12283,16 +12282,6 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
-]
-
-[[package]]
-name = "webp"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c071456adef4aca59bf6a583c46b90ff5eb0b4f758fc347cea81290288f37ce1"
-dependencies = [
- "image",
- "libwebp-sys",
 ]
 
 [[package]]

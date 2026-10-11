@@ -206,12 +206,8 @@ fast_image_resize = "5.5"
 # Checksums for PNG output (deflate is flate2 below).
 crc32fast = "1.5"
 simd-adler32 = "0.3"
-# libwebp bindings — `image-webp` 0.2.x mishandles ANIM disposal/blend
-# composition (transparent frames flicker as previous-frame residue).
-# libwebp is the reference decoder and produces fully-composed RGBA.
-webp = "0.3"
-# libwebp's streaming animation decoder and encoder (shared/animated_webp.rs), which the
-# `webp` crate only offers holding every frame in memory.
+# libwebp, through shared/animated_webp.rs: `image-webp` 0.2.x mishandles ANIM disposal and
+# blending, and only libwebp streams an animation a frame at a time.
 libwebp-sys = "0.9"
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-resampling", "static"], optional = true }
 fast-thumbhash = "0.2"

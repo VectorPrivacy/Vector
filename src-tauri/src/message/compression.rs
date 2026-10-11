@@ -446,14 +446,12 @@ mod gif_send_tests {
     }
 
     fn animated_webp(w: u32, h: u32, frames: u32) -> Vec<u8> {
-        let cfg = webp::WebPConfig::new().unwrap();
-        let px: Vec<Vec<u8>> = (0..frames).map(|i| (0..w * h).flat_map(|p| [(p % w * 2 + i * 40) as u8, (p / w) as u8, 90, 255]).collect()).collect();
-        let mut enc = webp::AnimEncoder::new(w, h, &cfg);
-        enc.set_loop_count(0);
-        for (i, f) in px.iter().enumerate() {
-            enc.add_frame(webp::AnimFrame::from_rgba(f, w, h, i as i32 * 100));
+        let mut enc = crate::shared::animated_webp::Encoder::lossy(w, h, 75.0).unwrap();
+        for i in 0..frames {
+            let px: Vec<u8> = (0..w * h).flat_map(|p| [(p % w * 2 + i * 40) as u8, (p / w) as u8, 90, 255]).collect();
+            enc.add(&px, 100).unwrap();
         }
-        enc.try_encode().unwrap().to_vec()
+        enc.finish().unwrap()
     }
 
     /// Every combination of the send options keeps an animated WebP moving.

@@ -10,6 +10,7 @@ pub struct Decoder<'a> {
     dec: *mut ffi::WebPAnimDecoder,
     width: u32,
     height: u32,
+    frames: u32,
     last_ts: i32,
     _bytes: PhantomData<&'a [u8]>,
 }
@@ -36,12 +37,17 @@ impl<'a> Decoder<'a> {
                 ffi::WebPAnimDecoderDelete(dec);
                 return Err("webp decode: unreadable header".into());
             }
-            Ok(Decoder { dec, width: info.canvas_width, height: info.canvas_height, last_ts: 0, _bytes: PhantomData })
+            Ok(Decoder { dec, width: info.canvas_width, height: info.canvas_height, frames: info.frame_count, last_ts: 0, _bytes: PhantomData })
         }
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// From the container's headers; nothing is decoded to learn it.
+    pub fn frame_count(&self) -> u32 {
+        self.frames
     }
 }
 
@@ -88,6 +94,16 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(width: u32, height: u32, quality: f32) -> Result<Self, String> {
+        Self::build(width, height, quality, true)
+    }
+
+    /// Plain lossy frames at libwebp's defaults: cheaper per attempt than [`Encoder::new`],
+    /// for callers that re-encode until a size fits.
+    pub fn lossy(width: u32, height: u32, quality: f32) -> Result<Self, String> {
+        Self::build(width, height, quality, false)
+    }
+
+    fn build(width: u32, height: u32, quality: f32, tuned: bool) -> Result<Self, String> {
         // SAFETY: options and config are initialised by libwebp before use.
         unsafe {
             let mut opts = std::mem::MaybeUninit::<ffi::WebPAnimEncoderOptions>::uninit();
@@ -95,13 +111,17 @@ impl Encoder {
                 return Err("webp encode: libwebp version mismatch".into());
             }
             let mut opts = opts.assume_init();
-            opts.allow_mixed = 1;
             opts.anim_params.loop_count = 0;
             let mut config = ffi::WebPConfig::new_with_preset(ffi::WebPPreset::WEBP_PRESET_DEFAULT, quality)
                 .map_err(|_| String::from("webp encode: bad config"))?;
-            config.method = 4;
-            config.use_sharp_yuv = 1;
-            config.thread_level = 1;
+            if tuned {
+                opts.allow_mixed = 1;
+                config.method = 4;
+                config.use_sharp_yuv = 1;
+                config.thread_level = 1;
+            } else {
+                opts.anim_params.bgcolor = 0;
+            }
             if ffi::WebPValidateConfig(&config) == 0 {
                 return Err("webp encode: bad config".into());
             }
@@ -167,6 +187,38 @@ impl Drop for Encoder {
     fn drop(&mut self) {
         // SAFETY: created by WebPAnimEncoderNewInternal and deleted exactly once.
         unsafe { ffi::WebPAnimEncoderDelete(self.enc) }
+    }
+}
+
+/// A still lossy WebP of `rgba` at libwebp's defaults.
+pub fn encode_still(rgba: &[u8], width: u32, height: u32, quality: f32) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+        return Err("webp encode: frame size".into());
+    }
+    // SAFETY: config and picture are initialised by libwebp; the picture imports a copy of
+    // `rgba`, the memory writer collects the output, and both are freed before returning.
+    unsafe {
+        let mut config = ffi::WebPConfig::new_with_preset(ffi::WebPPreset::WEBP_PRESET_DEFAULT, quality)
+            .map_err(|_| String::from("webp encode: bad config"))?;
+        if ffi::WebPValidateConfig(&config) == 0 {
+            return Err("webp encode: bad config".into());
+        }
+        let mut pic = ffi::WebPPicture::new().map_err(|_| String::from("webp encode: picture"))?;
+        pic.use_argb = 1;
+        pic.width = width as i32;
+        pic.height = height as i32;
+        let mut writer = std::mem::MaybeUninit::<ffi::WebPMemoryWriter>::uninit();
+        ffi::WebPMemoryWriterInit(writer.as_mut_ptr());
+        let mut writer = writer.assume_init();
+        pic.writer = Some(ffi::WebPMemoryWrite);
+        pic.custom_ptr = &mut writer as *mut ffi::WebPMemoryWriter as *mut std::ffi::c_void;
+        let ok = ffi::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as i32 * 4) != 0
+            && ffi::WebPEncode(&config, &mut pic) != 0;
+        let code = pic.error_code;
+        ffi::WebPPictureFree(&mut pic);
+        let out = if ok { Ok(std::slice::from_raw_parts(writer.mem, writer.size).to_vec()) } else { Err(format!("webp encode: {code:?}")) };
+        ffi::WebPMemoryWriterClear(&mut writer);
+        out
     }
 }
 
