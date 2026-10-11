@@ -5662,24 +5662,35 @@ impl VectorCore {
             let client_health = client.clone();
             db::spawn_bound(async move {
                 crate::rt::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
+                // Bytes each relay had delivered when last checked: a relay that sent anything
+                // since is serving, so it skips the probe.
+                let heard = std::sync::Mutex::new(std::collections::HashMap::<RelayUrl, usize>::new());
                 loop {
                     // A false "unhealthy" costs a full reconnect, so the probe follows the
                     // transport; probed concurrently so one slow relay can't stall the rest.
                     let budget = relay_request_timeout(std::time::Duration::from_secs(8));
                     let client_health = &client_health;
+                    let heard = &heard;
                     futures_util::future::join_all(client_health.relays().await.into_iter().map(|(url, relay)| async move {
                         match relay.status() {
                             RelayStatus::Connected => {
+                                let received = relay.stats().bytes_received();
+                                let before = heard.lock().unwrap().insert(url.clone(), received);
+                                if before.is_some_and(|b| received > b) {
+                                    return;
+                                }
+                                // An id no event can have: the relay answers with a bare EOSE.
                                 let probe = crate::rt::time::timeout(
                                     budget + std::time::Duration::from_secs(2),
                                     client_health
                                         .fetch_events(nostr_sdk::prelude::ReqTarget::single(
                                             url.to_string(),
-                                            [Filter::new().kind(Kind::Metadata).limit(1)],
+                                            [Filter::new().id(EventId::from_byte_array([0; 32]))],
                                         ))
                                         .timeout(budget),
                                 )
                                 .await;
+                                heard.lock().unwrap().insert(url.clone(), relay.stats().bytes_received());
                                 if !matches!(probe, Ok(Ok(_))) {
                                     relay.disconnect();
                                     crate::rt::time::sleep(std::time::Duration::from_millis(500)).await;
