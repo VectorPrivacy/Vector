@@ -476,3 +476,45 @@ fn bench_set_with_a_live_partner() {
     SETTER.clear(&[&PARTNER]);
     PARTNER.clear(&[]);
 }
+
+/// A key set and later replaced or cleared would, if its shares were scrubbed, show up in both
+/// diffs: written in the first, rewritten in the second. The dump between holds it live.
+#[test]
+#[ignore = "attack demo: run by name with --nocapture"]
+fn retired_slots_stay_out_of_two_diffs() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x55; 32]);
+    for retire_by_clear in [false, true] {
+        let d0 = dump();
+        let first = [0x99u8; 32];
+        SETTER.set(first, &[&PARTNER]);
+        let lane = SETTER.lane();
+        let live = share_positions(SETTER.instance_addr(), lane);
+        let prekey = layout(SETTER.instance_addr(), lane).prekey;
+        let d1 = dump();
+        if retire_by_clear { SETTER.clear(&[&PARTNER]) } else { SETTER.set([0x98; 32], &[&PARTNER]) }
+        let d2 = dump();
+
+        let b = changed(&d1, &d2);
+        let both: Vec<VaultPos> = changed(&d0, &d1).into_iter().filter(|p| b.contains(p)).collect();
+        let hit = live.iter().filter(|p| both.contains(p)).count();
+        let mut stale = pad_from(&d2, lane, &prekey);
+        for (i, p) in live.iter().enumerate() {
+            let off = (i % USIZES_PER_SHARE) * 8;
+            for (a, b) in stale[off..off + 8].iter_mut().zip(d2[p.array][p.slot].to_ne_bytes()) { *a ^= b; }
+        }
+        println!(
+            "retired by {}: {} slots in both diffs, {hit}/{} of them the key's live slots; old key readable after: {}",
+            if retire_by_clear { "clear" } else { "set" },
+            both.len(),
+            live.len(),
+            stale == first
+        );
+        // Decoys hit any slot with p = 1/64 per pass, so stray hits are ~Binomial(16, 1/64);
+        // a scrubbed retirement shows all 16.
+        assert!(hit <= 8, "a retired key's slots are not rewritten: {hit}/16");
+        assert_ne!(stale, first, "a retired key cannot be read back from what it left behind");
+        if !retire_by_clear { SETTER.clear(&[&PARTNER]); }
+    }
+    PARTNER.clear(&[]);
+}

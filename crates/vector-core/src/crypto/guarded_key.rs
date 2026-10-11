@@ -23,8 +23,10 @@
 //!    writes are indistinguishable via snapshot diffing. Decoys keep off other live keys'
 //!    slots and prekey rows: a key rewritten in place would sit in a diff under two pads,
 //!    and pad1 ^ pad2 then singles out its slots.
-//! 7. **Zero writes on read**: get() only loads.
-//! 8. **Zero searchable constants**: all multipliers and round counts derive from ASLR
+//! 7. **Retire by prekey**: a replaced or cleared key's shares are left in place and its
+//!    prekey changed instead, so its slots are never rewritten twice across two diffs.
+//! 8. **Zero writes on read**: get() only loads.
+//! 9. **Zero searchable constants**: all multipliers and round counts derive from ASLR
 //!    addresses, all modular arithmetic uses power-of-2 AND masks.
 //!
 //! Security tiers:
@@ -341,6 +343,37 @@ fn write_decoys(protected: &[VaultPos], rows: &[u16; ARRAY_COUNT], draws: &mut D
     }
 }
 
+/// A key being replaced or cleared. Its shares stay where they are: rewriting them would mark
+/// them in a diff against the dump before. Changing one prekey word is enough to make them
+/// useless, and the decoys all but always do that already.
+struct Retiring {
+    prekey: [usize; PREKEY_ROWS],
+    lane: usize,
+    pad: [u8; 32],
+}
+
+impl Retiring {
+    fn begin(instance_addr: usize, lane: usize) -> Self {
+        let prekey = layout(instance_addr, lane).prekey;
+        Self { pad: shield(lane, &prekey), prekey, lane }
+    }
+
+    fn finish(mut self, draws: &mut Draws) {
+        let mut now = shield(self.lane, &self.prekey);
+        if now == self.pad {
+            let slot = self.lane * LANE_WIDTH + (draws.next() & (LANE_WIDTH - 1));
+            VAULTS[self.prekey[draws.next() & (PREKEY_ROWS - 1)]][slot].store(draws.next(), Ordering::Release);
+        }
+        now.zeroize();
+    }
+}
+
+impl Drop for Retiring {
+    fn drop(&mut self) {
+        self.pad.zeroize();
+    }
+}
+
 /// Serialises every set() and clear(). Each one reads its partners' lanes once, so two running
 /// together could decoy over each other's fresh slots. Reads never take it.
 static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -498,22 +531,10 @@ impl GuardedKey {
         let lane = Self::lane_of(marker);
 
         let old_marker = self.active.load(Ordering::Acquire);
-        let old_positions = (old_marker != 0)
-            .then(|| share_positions(self.instance_addr(), Self::lane_of(old_marker)));
-
-        let (mut protected, mut pcount) = self.collect_other_protected(others);
-        if old_marker != 0 {
-            let (s, m1, m2) = config_positions(self.instance_addr(), Self::lane_of(old_marker));
-            for pos in [s, m1, m2].into_iter().chain(old_positions.into_iter().flatten()) {
-                if pcount < protected.len() {
-                    protected[pcount] = pos;
-                    pcount += 1;
-                }
-            }
-        }
-
+        let (protected, pcount) = self.collect_other_protected(others);
         let rows = self.other_prekey_rows(others);
         let rewriting = Rewriting::begin();
+        let retiring = (old_marker != 0).then(|| Retiring::begin(self.instance_addr(), Self::lane_of(old_marker)));
 
         // Decoys first, our new prekey rows included. Real writes below overwrite any decoy
         // that landed on OUR slots; every other key's slots and prekey rows are left alone.
@@ -532,9 +553,8 @@ impl GuardedKey {
         // Commit the lane-bearing marker. get() re-derives the same lane from it.
         self.active.store(marker, Ordering::Release);
 
-        // Scrub the previous key's shares so it never lingers (matches clear()'s scrub).
-        for pos in old_positions.iter().flatten() {
-            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
+        if let Some(retiring) = retiring {
+            retiring.finish(&mut draws);
         }
 
         drop(rewriting);
@@ -616,8 +636,8 @@ impl GuardedKey {
         key
     }
 
-    /// Clear the key. Overwrites shares with random values and writes decoys to all arrays,
-    /// keeping off every other live key named in `others`.
+    /// Clear the key: retire its prekey and write decoys to all arrays, keeping off every other
+    /// live key named in `others`.
     pub fn clear(&self, others: &[&GuardedKey]) {
         let _writer = writer();
         if self.active.load(Ordering::Acquire) == 0 {
@@ -628,13 +648,10 @@ impl GuardedKey {
         let rewriting = Rewriting::begin();
 
         let old_marker = self.active.swap(0, Ordering::SeqCst);
-        // Scrub the slots we actually wrote: lane from the now-cleared marker.
-        let positions = share_positions(self.instance_addr(), Self::lane_of(old_marker));
-        for pos in &positions {
-            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
-        }
+        let retiring = Retiring::begin(self.instance_addr(), Self::lane_of(old_marker));
         let (protected, pcount) = self.collect_other_protected(others);
         write_decoys(&protected[..pcount], &rows, &mut draws);
+        retiring.finish(&mut draws);
         drop(rewriting);
     }
 
