@@ -1202,12 +1202,25 @@ impl LiveTransport {
     }
 }
 
-/// Send to one pooled relay, true on its ACK. The per-relay fan-outs verify the event once
-/// up front: `Client::send_event` re-verifies it (~45 µs) for every relay and every round.
+/// Send to one pooled relay, true on its ACK. Callers verify the event and mark it as ours
+/// once; `Client::send_event` would redo both for every relay, every round.
 async fn send_to_relay(client: &Client, event: &Event, url: &str) -> bool {
     let Ok(Some(relay)) = client.relay(url).await else { return false };
     let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
     relay.send_event(event).ok_timeout(wait).authentication_timeout(wait).await.is_ok()
+}
+
+/// Mark our own event as seen before it goes out, so the relays' echoes of it are dropped
+/// before any work. The mark only silences echoes; it never stands for delivery, which is
+/// each relay's OK.
+pub(crate) async fn mark_own(client: &Client, event: &Event) {
+    let _ = client.database().save_event(event).await;
+}
+
+/// Undo [`mark_own`] once no relay took the event: nobody holds it, so a copy that turns up
+/// later is handled like anyone else's.
+pub(crate) async fn unmark_own(client: &Client, event: &Event) {
+    let _ = client.database().delete(nostr_sdk::prelude::Filter::new().id(event.id)).await;
 }
 
 #[async_trait::async_trait]
@@ -1226,6 +1239,7 @@ impl Transport for LiveTransport {
         // keep delivering to every relay after we return (dropping a JoinHandle detaches, it doesn't abort).
         // Single attempt — durable retry is publish_durable's job.
         use futures_util::stream::{FuturesUnordered, StreamExt};
+        mark_own(&client, event).await;
         let mut sends: FuturesUnordered<_> = targets
             .into_iter()
             .map(|r| {
@@ -1245,6 +1259,8 @@ impl Transport for LiveTransport {
                 return Ok(()); // first relay ACKed; the others keep delivering in the background
             }
         }
+        // Every send has finished without an ACK.
+        unmark_own(&client, event).await;
         Err("no relay accepted the event".to_string())
     }
 
@@ -1383,6 +1399,7 @@ impl Transport for LiveTransport {
         // latency), so we fan out one send per relay and take the first winner; the losers are cancelled and
         // re-sent in the background. Retry rounds within CONFIRM_WINDOW; zero ACKs in the window = failure.
         let mut acked_any = false;
+        mark_own(&client, &event).await;
         // Over Tor one round alone can take the 30 s request floor: the 60 s connect floor leaves
         // room for a retry. Clearnet keeps 30 s.
         let confirm_window = crate::relay_connect_timeout(CONFIRM_WINDOW);
@@ -1413,6 +1430,7 @@ impl Transport for LiveTransport {
         .await;
 
         if !acked_any {
+            unmark_own(&client, &event).await;
             return Err(format!("no relay accepted the event within {}s", confirm_window.as_secs()));
         }
         if pending.is_empty() {

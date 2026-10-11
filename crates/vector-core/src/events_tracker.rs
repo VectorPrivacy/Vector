@@ -27,6 +27,12 @@ struct Seen {
 }
 
 impl Seen {
+    fn remove(&mut self, id: &EventId) {
+        if self.ids.remove(id) {
+            self.order.retain(|o| o != id);
+        }
+    }
+
     fn insert(&mut self, id: EventId) {
         if !self.ids.insert(id) {
             return;
@@ -81,8 +87,19 @@ impl NostrDatabase for LazyEventsTracker {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn delete(&self, _filter: Filter) -> Fut<'_, ()> {
-        Box::pin(async move { Err(Error::unsupported("delete is not supported for the events tracker")) })
+    /// Forget events by id, so a later copy of one counts as new. Only by id: the tracker
+    /// keeps nothing else to match a filter against.
+    fn delete(&self, filter: Filter) -> Fut<'_, ()> {
+        Box::pin(async move {
+            let Some(ids) = filter.ids else {
+                return Err(Error::unsupported("the events tracker forgets by id only"));
+            };
+            let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+            for id in ids {
+                seen.remove(&id);
+            }
+            Ok(())
+        })
     }
 
     fn wipe(&self) -> Fut<'_, ()> {
@@ -112,5 +129,18 @@ mod tests {
         assert_eq!(seen.ids.len(), MAX_EVENTS);
         assert_eq!(seen.order.len(), MAX_EVENTS);
         assert!(!seen.ids.contains(&id(2)) && seen.ids.contains(&id(3)));
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_event_counts_as_new_again() {
+        use nostr_sdk::prelude::*;
+        let tracker = LazyEventsTracker::default();
+        let ev = EventBuilder::new(Kind::TextNote, "mine").finalize(&Keys::generate()).unwrap();
+        tracker.save_event(&ev).await.unwrap();
+        assert_eq!(tracker.check_id(&ev.id).await.unwrap(), DatabaseEventStatus::Saved);
+        tracker.delete(Filter::new().id(ev.id)).await.unwrap();
+        assert_eq!(tracker.check_id(&ev.id).await.unwrap(), DatabaseEventStatus::NotExistent);
+        assert!(tracker.seen.lock().unwrap().order.is_empty(), "no stale entry left to evict it early later");
+        assert!(tracker.delete(Filter::new().kind(Kind::TextNote)).await.is_err(), "only ids can be forgotten");
     }
 }

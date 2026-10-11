@@ -2203,6 +2203,49 @@ async fn delivered(client: &nostr_sdk::prelude::Client, relay: &PushRelay) -> bo
     .unwrap_or(false)
 }
 
+/// Our own publish is marked seen so the relay's echo costs nothing, and unmarked when no
+/// relay took it, so a copy arriving later is handled again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_own_publish_echo_is_dropped_until_it_is_unmarked() {
+    use futures_util::StreamExt;
+    use nostr_sdk::prelude::*;
+    let _s = scene();
+    let relay = push_relay().await;
+    let url = format!("ws://127.0.0.1:{}", relay.port);
+    let client = crate::nostr_client_builder().build();
+    client.add_relay(url.as_str()).await.unwrap();
+    client.connect().await;
+    let r = client.relay(url.as_str()).await.unwrap().unwrap();
+    settle("connected", || r.status() == RelayStatus::Connected).await;
+    let out = client.subscribe(Filter::new().kind(nostr_sdk::prelude::Kind::TextNote).limit(0)).await.unwrap();
+    let id = out.value.to_string();
+    settle("the REQ reached the relay", || relay.reqs.lock().unwrap().contains(&id)).await;
+
+    let ev = EventBuilder::new(nostr_sdk::prelude::Kind::TextNote, "mine").finalize(&Keys::generate()).unwrap();
+    let echo = |ev: &nostr_sdk::prelude::Event| {
+        let mut notes = client.notifications();
+        let _ = relay.push.send(ev.as_json());
+        let want = ev.id;
+        async move {
+            tokio::time::timeout(Duration::from_millis(800), async {
+                while let Some(n) = notes.next().await {
+                    if matches!(&n, ClientNotification::Event { event, .. } if event.id == want) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        }
+    };
+    crate::community::transport::mark_own(&client, &ev).await;
+    assert!(!echo(&ev).await, "the echo of our own publish is dropped");
+    crate::community::transport::unmark_own(&client, &ev).await;
+    assert!(echo(&ev).await, "once unmarked, a copy is handled like anyone else's");
+    client.shutdown().await;
+}
+
 /// Live subscriptions made while the network was still starting reach the relay once it
 /// connects, and a relay that lost them gets them back from the per-relay re-assert the shell
 /// runs on every connect, under the same id and only on that relay.
