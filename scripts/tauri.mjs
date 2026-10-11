@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 
 const args = process.argv.slice(2);
 enableVideo(args);
+enableMcpBridge(args);
 let command;
 let commandArgs;
 
@@ -66,6 +67,13 @@ function enableVideo(args) {
     }
     console.log(`[tauri] video compression on: FFmpeg at ${process.env.FFMPEG_DIR}`);
     args.splice(sep < 0 ? args.length : sep, 0, '--features', 'video');
+}
+
+/** A desktop `dev` links the MCP debugging bridge; release builds never compile it. */
+function enableMcpBridge(args) {
+    if (args[0] !== 'dev') return;
+    const sep = args.indexOf('--');
+    args.splice(sep < 0 ? args.length : sep, 0, '--features', 'mcp-bridge');
 }
 
 function hostTarget() {

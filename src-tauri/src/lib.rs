@@ -353,7 +353,7 @@ pub fn run() {
         .manage(miniapps::state::MiniAppsState::new());
 
     // MCP Bridge plugin for AI-assisted debugging (desktop debug builds only)
-    #[cfg(all(debug_assertions, desktop))]
+    #[cfg(all(debug_assertions, desktop, feature = "mcp-bridge"))]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
     }
