@@ -243,8 +243,8 @@ url = "2.5.7"
 
 # Realtime peer channels (Iroh P2P). No portmapper: an idle node must not open UPnP/NAT-PMP to
 # the gateway outside the account's network.
-iroh = { version = "1.0", default-features = false, features = ["tls-ring", "metrics", "fast-apple-datapath"] }
-iroh-gossip = "0.101"
+iroh = { version = "1.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
 noq-proto = "1.1"
 rand = "0.8"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
