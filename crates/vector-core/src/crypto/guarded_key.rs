@@ -138,12 +138,15 @@ fn lane_slot(raw: usize, lane: usize) -> usize {
 /// keys in different lanes can never collide. Guaranteed collision-free within a key
 /// (rehash on collision).
 fn config_positions(instance_addr: usize, lane: usize) -> (VaultPos, VaultPos, VaultPos) {
+    config_positions_with(instance_addr, lane, mix_iterations(instance_addr))
+}
+
+fn config_positions_with(instance_addr: usize, lane: usize, iters: usize) -> (VaultPos, VaultPos, VaultPos) {
     let base = VAULTS.as_ptr() as usize;
     // Derive multipliers from ASLR addresses — forced odd for mixing quality.
     // These change every launch. No constants in the binary.
     let m1 = (instance_addr as u64) | 1;
     let m2 = (base as u64) | 1;
-    let iters = mix_iterations(instance_addr);
     let mut h = addr_mix((instance_addr as u64) ^ (base as u64).rotate_left(19), m1, m2, iters);
 
     let mut positions = [VaultPos { array: 0, slot: 0 }; 3];
@@ -171,7 +174,14 @@ fn config_positions(instance_addr: usize, lane: usize) -> (VaultPos, VaultPos, V
 /// config positions). Returns SHARE_ENTRIES (array, slot) pairs — each guaranteed
 /// unique and non-overlapping with config positions (rehash on collision).
 fn share_positions(instance_addr: usize, lane: usize) -> [VaultPos; SHARE_ENTRIES] {
-    let (seed_pos, mul1_pos, mul2_pos) = config_positions(instance_addr, lane);
+    share_positions_from(instance_addr, lane, config_positions(instance_addr, lane))
+}
+
+fn share_positions_from(
+    instance_addr: usize,
+    lane: usize,
+    (seed_pos, mul1_pos, mul2_pos): (VaultPos, VaultPos, VaultPos),
+) -> [VaultPos; SHARE_ENTRIES] {
     let seed = VAULTS[seed_pos.array][seed_pos.slot].load(Ordering::Relaxed) as u64;
     let mul1 = VAULTS[mul1_pos.array][mul1_pos.slot].load(Ordering::Relaxed) as u64;
     let mul2 = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed) as u64;
@@ -1116,6 +1126,127 @@ mod tests {
             assert_ne!(TEST_KEY_A.lane(), before);
             assert_eq!(TEST_KEY_A.get(), Some(test_key(i)));
         }
+        TEST_KEY_A.clear(&others_for_a());
+    }
+
+    /// Prices each candidate vault design's read, all over the same live vault so cache
+    /// behaviour matches production. Run with `--release -- --ignored bench_vault_designs --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_vault_designs() {
+        use sha2::Digest;
+        use std::hint::black_box;
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        TEST_KEY_A.set(test_key(9), &others_for_a());
+        let addr = TEST_KEY_A.instance_addr();
+        let lane = TEST_KEY_A.lane();
+        let today = mix_iterations(addr);
+        let few = 16 + (mix_iterations(addr) & 15);
+
+        let read = |iters: usize| -> [u8; 32] {
+            let cfg = config_positions_with(addr, lane, iters);
+            let positions = share_positions_from(addr, lane, cfg);
+            let mut key = [0u8; 32];
+            for (i, pos) in positions.iter().enumerate() {
+                let v = VAULTS[pos.array][pos.slot].load(Ordering::Acquire).to_ne_bytes();
+                let off = (i % USIZES_PER_SHARE) * 8;
+                for (k, b) in key[off..off + 8].iter_mut().zip(v) { *k ^= b; }
+            }
+            key
+        };
+        // Prekey: `kib` KiB as whole 2 KiB lane rows (256 slots) across consecutive arrays,
+        // streamed through a 2 KiB stack buffer that is wiped after each read.
+        fn prekey_rows(lane: usize, kib: usize, mut f: impl FnMut(&[u8])) {
+            let mut buf = [0u8; LANE_WIDTH * 8];
+            for row in 0..kib / 2 {
+                let arr = &VAULTS[(lane * 8 + row) & (ARRAY_COUNT - 1)];
+                for (j, slot) in arr[lane * LANE_WIDTH..(lane + 1) * LANE_WIDTH].iter().enumerate() {
+                    buf[j * 8..j * 8 + 8].copy_from_slice(&slot.load(Ordering::Relaxed).to_ne_bytes());
+                }
+                f(&buf);
+            }
+            buf.zeroize();
+        }
+        let shield_blake3 = |kib: usize| -> [u8; 32] {
+            let mut h = blake3::Hasher::new();
+            prekey_rows(lane, kib, |b| { h.update(b); });
+            *h.finalize().as_bytes()
+        };
+        let shield_sha256 = |kib: usize| -> [u8; 32] {
+            let mut h = sha2::Sha256::new();
+            prekey_rows(lane, kib, |b| h.update(b));
+            h.finalize().into()
+        };
+        let shield_sha512 = |kib: usize| -> [u8; 32] {
+            let mut h = sha2::Sha512::new();
+            prekey_rows(lane, kib, |b| h.update(b));
+            h.finalize()[..32].try_into().unwrap()
+        };
+        // Whole prekey in one buffer, so BLAKE3 can hash its 1 KiB chunks in parallel SIMD lanes.
+        fn prekey_flat(lane: usize, kib: usize, f: impl FnOnce(&[u8]) -> [u8; 32]) -> [u8; 32] {
+            let mut buf = [0u8; 64 * 1024];
+            let rows = kib / 2;
+            for row in 0..rows {
+                let arr = &VAULTS[(lane * 8 + row) & (ARRAY_COUNT - 1)];
+                let dst = &mut buf[row * LANE_WIDTH * 8..(row + 1) * LANE_WIDTH * 8];
+                for (j, slot) in arr[lane * LANE_WIDTH..(lane + 1) * LANE_WIDTH].iter().enumerate() {
+                    dst[j * 8..j * 8 + 8].copy_from_slice(&slot.load(Ordering::Relaxed).to_ne_bytes());
+                }
+            }
+            let out = f(&buf[..kib * 1024]);
+            buf[..kib * 1024].zeroize();
+            out
+        }
+        let copy_only = |kib: usize| prekey_flat(lane, kib, |b| [b[0]; 32]);
+        let flat_blake3 = |kib: usize| prekey_flat(lane, kib, |b| *blake3::hash(b).as_bytes());
+        // Hash the prekey where it lies: a contiguous run of one array, no stack copy to wipe.
+        // Sound only while nothing writes those slots during a read (set() would own that).
+        let direct_blake3 = |kib: usize| -> [u8; 32] {
+            let arr = &VAULTS[(lane * 8) & (ARRAY_COUNT - 1)];
+            let bytes = unsafe { std::slice::from_raw_parts(arr.as_ptr() as *const u8, kib * 1024) };
+            *blake3::hash(bytes).as_bytes()
+        };
+        let direct_sha512 = |kib: usize| -> [u8; 32] {
+            let arr = &VAULTS[(lane * 8) & (ARRAY_COUNT - 1)];
+            let bytes = unsafe { std::slice::from_raw_parts(arr.as_ptr() as *const u8, kib * 1024) };
+            sha2::Sha512::digest(bytes)[..32].try_into().unwrap()
+        };
+        let unshield = |mut k: [u8; 32], pad: [u8; 32]| { for (a, b) in k.iter_mut().zip(pad) { *a ^= b; } k };
+
+        // Median of 15 runs of `n` calls, in µs per call.
+        let time = |n: usize, f: &dyn Fn() -> [u8; 32]| -> f64 {
+            let mut runs: Vec<f64> = (0..15).map(|_| {
+                let t = std::time::Instant::now();
+                for _ in 0..n { black_box(f()); }
+                t.elapsed().as_nanos() as f64 / n as f64 / 1000.0
+            }).collect();
+            runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            runs[7]
+        };
+
+        eprintln!("BENCH rounds today={today} few={few}");
+        let base = time(300, &|| TEST_KEY_A.get().unwrap());
+        eprintln!("BENCH {:<44} {:>8.2} µs", "get() today", base);
+        let row = |name: &str, us: f64| eprintln!("BENCH {name:<44} {us:>8.2} µs  ({:+.1}%)", (us / base - 1.0) * 100.0);
+        row("today's rounds, re-implemented", time(300, &|| read(today)));
+        row("few rounds", time(20000, &|| read(few)));
+        for kib in [4, 16, 64] {
+            row(&format!("few rounds + BLAKE3 shield {kib} KiB"), time(5000, &|| unshield(read(few), shield_blake3(kib))));
+        }
+        for kib in [16] {
+            row(&format!("few rounds + SHA-256 shield {kib} KiB"), time(2000, &|| unshield(read(few), shield_sha256(kib))));
+            row(&format!("few rounds + SHA-512 shield {kib} KiB (OpenSSH)"), time(2000, &|| unshield(read(few), shield_sha512(kib))));
+        }
+        for kib in [4, 16, 64] {
+            row(&format!("  prekey copy + wipe only, {kib} KiB"), time(5000, &|| copy_only(kib)));
+            row(&format!("few rounds + BLAKE3 one-shot {kib} KiB"), time(5000, &|| unshield(read(few), flat_blake3(kib))));
+        }
+        for kib in [4, 16, 32] {
+            row(&format!("few rounds + BLAKE3 in place {kib} KiB"), time(5000, &|| unshield(read(few), direct_blake3(kib))));
+        }
+        row("few rounds + SHA-512 in place 16 KiB", time(2000, &|| unshield(read(few), direct_sha512(16))));
+        row("today's rounds + BLAKE3 shield 16 KiB", time(300, &|| unshield(read(today), shield_blake3(16))));
         TEST_KEY_A.clear(&others_for_a());
     }
 }
