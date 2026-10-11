@@ -70,6 +70,32 @@
     addEventListener('resize', fit);
     addEventListener('scroll', fit, { passive: true });
 
+    // With the keyboard up, iOS pans the whole page under a drag that starts on
+    // anything that doesn't scroll (the header, the composer), and fit() snaps it
+    // back. Only a scroller that can move along the drag gets it.
+    function scrolls(el, vertical) {
+        for (; el && el !== document.body && el !== root; el = el.parentElement) {
+            if (el.matches('input[type="range"]')) return true;
+            const room = vertical ? el.scrollHeight > el.clientHeight : el.scrollWidth > el.clientWidth;
+            if (!room) continue;
+            const overflow = getComputedStyle(el)[vertical ? 'overflowY' : 'overflowX'];
+            if (overflow === 'auto' || overflow === 'scroll' || (el.tagName === 'TEXTAREA' && overflow !== 'hidden')) return true;
+        }
+        return false;
+    }
+    let startX = 0;
+    let startY = 0;
+    addEventListener('touchstart', (e) => {
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+    }, { passive: true });
+    addEventListener('touchmove', (e) => {
+        if (!applied || !e.cancelable || e.touches.length > 1) return;
+        const t = e.touches[0];
+        const vertical = Math.abs(t.clientY - startY) >= Math.abs(t.clientX - startX);
+        if (!scrolls(e.target instanceof Element ? e.target : e.target.parentElement, vertical)) e.preventDefault();
+    }, { passive: false });
+
     // ─── Top edge ───────────────────────────────────────────────────────────
     // iOS colours the status bar from an opaque fixed box at the top edge (a
     // screen's own header is skipped). The cap is that box, over a strip kept
