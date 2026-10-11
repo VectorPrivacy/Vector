@@ -1694,11 +1694,11 @@ pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec
             .map_err(|e| e.to_string())?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
     };
-    let mut out: Vec<PolicyMessage> = rows
+    let mut out: Vec<PolicyMessage> = crate::crypto::open_batch(|at_rest| rows
         .into_iter()
         .filter_map(|(id, npub, chat_id, created_at, content)| {
             let channel_id = chat_to_channel.get(&chat_id)?.clone();
-            let content = crate::crypto::maybe_decrypt_text(&content);
+            let content = at_rest.open_or_keep(content);
             // Vector has no mention tag: a mention is an npub in the body, which
             // the renderer turns into a pill. Counting `p` tags counted the reply
             // parent and the reaction target instead — 1 on an ordinary reply, 0
@@ -1713,7 +1713,7 @@ pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec
                 mentions,
             })
         })
-        .collect();
+        .collect());
     out.reverse(); // oldest-first
     Ok(out)
 }
@@ -1777,10 +1777,9 @@ pub fn community_recent_texts(community_id: &str, limit: usize) -> Result<Vec<(S
             .map_err(|e| e.to_string())?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
     };
-    Ok(rows
-        .into_iter()
-        .map(|(npub, at, content)| (npub, at, crate::crypto::maybe_decrypt_text(&content)))
-        .collect())
+    Ok(crate::crypto::open_batch(|at_rest| {
+        rows.into_iter().map(|(npub, at, content)| (npub, at, at_rest.open_or_keep(content))).collect()
+    }))
 }
 
 /// Replace a Community's stored banlist (JSON array of hex pubkeys) + the `created_at` (secs) of
@@ -3312,6 +3311,62 @@ mod tests {
             std::hint::black_box(load_community_v2(v2.id()).unwrap().unwrap());
         });
 
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    fn encrypted_community_with_messages(n: usize) -> String {
+        crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let c = Community::create("HQ", "general", vec!["wss://r".into()]);
+        save_community(&c).unwrap();
+        let ch = c.channels[0].id.to_hex();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for i in 0..n {
+            let msg = crate::types::Message {
+                id: format!("{i:064x}"),
+                content: format!("message number {i}, a few words long"),
+                at: 1_700_000_000_000 + i as u64 * 1000,
+                npub: Some(make_test_npub(i as u32 % 7)),
+                ..Default::default()
+            };
+            rt.block_on(crate::db::events::save_message(&ch, &msg)).unwrap();
+        }
+        c.id.to_hex()
+    }
+
+    #[test]
+    fn the_policy_window_and_recent_texts_open_sealed_rows() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = encrypted_community_with_messages(5);
+        let window = community_policy_messages(&cid, 100).unwrap();
+        assert_eq!(window.len(), 5);
+        assert_eq!(window[0].text, "message number 0, a few words long");
+        let recent = community_recent_texts(&cid, 100).unwrap();
+        assert_eq!(recent[0].2, "message number 4, a few words long");
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    /// `cargo test --release -p vector-core --lib bench_policy_window -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark, not an assertion"]
+    fn bench_policy_window_encrypted() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = encrypted_community_with_messages(2000);
+        for name in ["community_policy_messages, 2000 rows", "community_recent_texts, 2000 rows"] {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                if name.starts_with("community_policy") {
+                    std::hint::black_box(community_policy_messages(&cid, 4000).unwrap());
+                } else {
+                    std::hint::black_box(community_recent_texts(&cid, 4000).unwrap());
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("{name:<44} {best:>9.2} ms");
+        }
         crate::state::set_encryption_enabled(false);
         crate::state::ENCRYPTION_KEY.clear(&[]);
     }
