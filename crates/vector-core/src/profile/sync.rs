@@ -940,7 +940,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
                 queue.next_ready_in()
             };
             // Sleep until the next entry ripens or the own-profile check is due, unless an add
-            // comes first: an idle poll would wake the CPU every second for nothing.
+            // comes first, so an idle processor costs no wakeups.
             let own_due = own_profile_sync_interval.saturating_sub(last_own_profile_sync.elapsed());
             let wait = ready_in.map_or(own_due, |r| r.min(own_due)).max(Duration::from_millis(50));
             let _ = crate::rt::time::timeout(wait, PROCESSOR_WAKE.notified()).await;

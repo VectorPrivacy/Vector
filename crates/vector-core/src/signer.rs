@@ -1203,6 +1203,24 @@ pub fn drain_bunker_state() -> Option<NostrConnect> {
 mod tests {
     use super::*;
 
+    /// A signer other than the vault (here the test stand-in for a remote one) seals and wraps
+    /// through its own signing, never the vault's key.
+    #[tokio::test]
+    async fn a_signer_that_is_not_the_vault_seals_and_wraps_itself() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (vault_key, remote, peer) = (Keys::generate(), Keys::generate(), Keys::generate());
+        crate::state::MY_SECRET_KEY.store_from_keys(&vault_key, &[]);
+        set_test_signer(Some(ActiveSigner::Keys(remote.clone())));
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "x").finalize_unsigned(remote.public_key());
+        let seal = seal_rumor(rumor.clone(), &peer.public_key()).await;
+        let wrap = gift_wrap(&peer.public_key(), rumor, []).await;
+        set_test_signer(None);
+        crate::state::MY_SECRET_KEY.clear(&[]);
+        assert_eq!(seal.unwrap().pubkey, remote.public_key(), "sealed by the signer");
+        let opened = UnwrappedGift::from_gift_wrap(&peer, &wrap.unwrap()).unwrap();
+        assert_eq!(opened.sender, remote.public_key(), "wrapped by the signer");
+    }
+
     #[test]
     fn the_vault_keys_owner_follows_every_set_and_clear() {
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());

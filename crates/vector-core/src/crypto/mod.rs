@@ -1128,6 +1128,26 @@ mod at_rest_batch_tests {
     }
 
     #[test]
+    fn a_batch_opens_rows_still_under_the_key_a_pin_change_replaced() {
+        let (old, new) = ([0x31u8; 32], [0x32u8; 32]);
+        let text = encrypt_with_key("sealed before the change", &old).unwrap();
+        let blob = encrypt_blob_with_key(&[7u8; 32], &old).unwrap();
+        let (batched, single) = with_vault(Some(new), true, || {
+            hold_previous_key(&old);
+            let batched = open_batch(|at_rest| {
+                (at_rest.open_or_keep(text.clone()), at_rest.open_blob_or_keep(&blob), at_rest.open(text.clone()))
+            });
+            let single = (maybe_decrypt_text(&text), maybe_decrypt_blob(&blob));
+            crate::state::PREVIOUS_AT_REST_KEY.clear(&[]);
+            (batched, single)
+        });
+        assert_eq!(batched.0, "sealed before the change");
+        assert_eq!(batched.1, vec![7u8; 32]);
+        assert_eq!(batched.2, Ok("sealed before the change".to_string()));
+        assert_eq!((batched.0, batched.1), single, "the batch answers as the single-row opens do");
+    }
+
+    #[test]
     fn plaintext_rows_never_need_the_key() {
         let got = with_vault(None, true, || open_batch(|at_rest| vec![at_rest.open("hello".into()), at_rest.open("a b c".into())]));
         assert_eq!(got, vec![Ok("hello".to_string()), Ok("a b c".to_string())]);

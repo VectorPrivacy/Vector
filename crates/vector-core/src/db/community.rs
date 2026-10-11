@@ -584,7 +584,7 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
     let dissolved = dissolved_int != 0;
 
     // Unwrap at-rest encryption before parsing (no-op when off, or for not-yet-wrapped rows).
-    // One vault read for the whole row set, where per-field opens paid one each.
+    // One vault read for the whole row set.
     let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
     let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
     crate::crypto::open_batch(|o| {
@@ -669,17 +669,8 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
 
         // The AUTHORIZED roster (cached by fetch_and_apply_roles, post delegation check), denormalized
         // onto each channel so the inbound delete path can verify a keyless moderation-hide.
-        // get_community_roles inlined onto this batch: it would pay its own vault read.
-        let roster: crate::community::roles::CommunityRoles = conn
-            .query_row("SELECT roles FROM communities WHERE community_id = ?1", params![id_hex], |r| {
-                r.get::<_, Option<String>>(0)
-            })
-            .optional()
-            .ok()
-            .flatten()
-            .flatten()
-            .and_then(|j| serde_json::from_str(&dt(o, &j)).ok())
-            .unwrap_or_default();
+        // Opened on this batch: get_community_roles would pay its own vault read.
+        let roster = parse_roles(stored_roles(&conn, &id_hex).ok().flatten(), |j| dt(o, j));
 
         let mut channels = Vec::new();
         for (cid_hex, key_blob, epoch, cname) in raw_channels {
@@ -2007,15 +1998,19 @@ pub fn get_community_roles(
     community_id: &str,
 ) -> Result<crate::community::roles::CommunityRoles, String> {
     let conn = super::get_db_connection_guard_static()?;
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT roles FROM communities WHERE community_id = ?1",
-            params![community_id],
-            |r| r.get(0),
-        )
+    let json = stored_roles(&conn, community_id).map_err(|e| format!("get roles: {e}"))?;
+    Ok(parse_roles(json, dec_txt))
+}
+
+/// A community's roles JSON as stored (sealed when Local Encryption is on).
+fn stored_roles(conn: &rusqlite::Connection, community_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT roles FROM communities WHERE community_id = ?1", params![community_id], |r| r.get(0))
         .optional()
-        .map_err(|e| format!("get roles: {e}"))?;
-    Ok(json.and_then(|j| serde_json::from_str(&dec_txt(&j)).ok()).unwrap_or_default())
+}
+
+/// Open and parse stored roles; anything missing or unreadable is the empty roster.
+fn parse_roles(json: Option<String>, open: impl FnOnce(&str) -> String) -> crate::community::roles::CommunityRoles {
+    json.and_then(|j| serde_json::from_str(&open(&j)).ok()).unwrap_or_default()
 }
 
 /// The `created_at` (secs) of the role-graph edition currently stored, or 0 if none.
@@ -3076,7 +3071,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         return Err("v2 community row is missing its owner commitment".to_string());
     };
 
-    // One vault read for the whole row set, where per-field opens paid one each.
+    // One vault read for the whole row set.
     let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
     let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
     crate::crypto::open_batch(|o| {
@@ -3349,14 +3344,25 @@ mod tests {
     #[test]
     fn the_policy_window_and_recent_texts_open_sealed_rows() {
         let (_tmp, _guard) = init_test_db();
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::set_encryption_enabled(false);
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+            }
+        }
+        let _vault = Vault;
         let cid = encrypted_community_with_messages(5);
+        let stored: String = crate::db::get_db_connection_guard_static()
+            .unwrap()
+            .query_row("SELECT content FROM events WHERE content != '' LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(crate::crypto::looks_encrypted(&stored), "the rows read back are sealed on disk");
         let window = community_policy_messages(&cid, 100).unwrap();
         assert_eq!(window.len(), 5);
         assert_eq!(window[0].text, "message number 0, a few words long");
         let recent = community_recent_texts(&cid, 100).unwrap();
         assert_eq!(recent[0].2, "message number 4, a few words long");
-        crate::state::set_encryption_enabled(false);
-        crate::state::ENCRYPTION_KEY.clear(&[]);
     }
 
     /// `cargo test --release -p vector-core --lib bench_policy_window -- --ignored --nocapture`
@@ -3615,6 +3621,45 @@ mod tests {
 
         crate::state::set_encryption_enabled(false);
         crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    #[test]
+    fn an_encrypted_v2_community_loads_back_whole() {
+        let (_tmp, _guard) = init_test_db();
+        struct Vault;
+        impl Drop for Vault {
+            fn drop(&mut self) {
+                crate::state::set_encryption_enabled(false);
+                crate::state::ENCRYPTION_KEY.clear(&[]);
+            }
+        }
+        let _vault = Vault;
+        crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Sealed".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let mut v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Sealed", Some("about".into()), vec!["wss://r".into()], 1_000);
+        let mut private = v2.channels[0].clone();
+        private.id = ChannelId([0x61; 32]);
+        private.name = "staff".into();
+        private.private = true;
+        private.key = Some([0x62; 32]);
+        v2.channels.push(private);
+        save_community_v2(&v2).unwrap();
+
+        let name: String = crate::db::get_db_connection_guard_static()
+            .unwrap()
+            .query_row("SELECT name FROM communities WHERE community_id = ?1", params![v2.id().to_hex()], |r| r.get(0))
+            .unwrap();
+        assert!(crate::crypto::looks_encrypted(&name), "sealed on disk");
+        let loaded = load_community_v2(v2.id()).unwrap().unwrap();
+        assert_eq!(format!("{loaded:?}"), format!("{v2:?}"), "every field opens back to what was saved");
     }
 
     #[test]

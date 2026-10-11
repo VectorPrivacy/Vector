@@ -1060,6 +1060,9 @@ impl VectorCore {
             .tag(Tag::expiration(expiry))
             .finalize_unsigned_with_id(my_public_key);
 
+        // No usable signer stays VectorError::Other, as SDK callers match it; a resolve is an
+        // atomic load for a local key.
+        signer::active_signer().map_err(VectorError::Other)?;
         // Client no longer wraps: build the wrap, then publish it to the target relays.
         let wrap = signer::gift_wrap(&pubkey, rumor, [Tag::expiration(expiry)])
             .await

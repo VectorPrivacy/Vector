@@ -568,3 +568,35 @@ fn a_lane_held_again_gets_fresh_slots() {
     SETTER.clear(&[&PARTNER]);
     PARTNER.clear(&[]);
 }
+
+/// What the round count buys: a read's layout cost against one slide guess's, per setting.
+#[test]
+#[ignore = "benchmark"]
+fn bench_rounds_dial() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x13; 32]);
+    let inst = PARTNER.instance_addr();
+    let lane = PARTNER.lane();
+    let lay = layout(inst, lane);
+    let shield_cost = {
+        let t = Instant::now();
+        for _ in 0..2000 { std::hint::black_box(shield(lane, &lay.prekey)); }
+        t.elapsed().as_secs_f64() * 1e6 / 2000.0
+    };
+    for iters in [24usize, 96, 384, 1536, 6144] {
+        let n = (200_000 / iters).max(50) as u32;
+        let t = Instant::now();
+        for k in 0..n as usize {
+            let l = layout_with(inst ^ (k << 12), lane, iters);
+            std::hint::black_box(share_positions_from(inst, lane, &l));
+        }
+        let per = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        let guesses = (1u64 << 32) as f64;
+        println!(
+            "rounds ~{iters:>5}: read ≈ {:>7.1} µs (layout {per:.1} + shield {shield_cost:.1}); one diff guess {per:.1} µs, 2^32 guesses = {:>8.1} core-hours",
+            per + shield_cost,
+            guesses * per / 1e6 / 3600.0
+        );
+    }
+    PARTNER.clear(&[]);
+}
