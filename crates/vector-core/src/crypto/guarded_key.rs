@@ -1,9 +1,9 @@
-//! Memory-hardened key storage: 128 indistinguishable arrays with decoy writes, and a
+//! Memory-hardened key storage: 32 indistinguishable arrays with decoy writes, and a
 //! shielded key.
 //!
 //! The real 32-byte key is never stored. What is stored is the key XORed with
 //! BLAKE3(prekey), XOR-split into 4 shares (16 `usize` values on 64-bit) and scattered
-//! across 128 static arrays of 4,096 entries each. The prekey is 16 KiB of the arrays'
+//! across 32 static arrays of 4,096 entries each. The prekey is 16 KiB of the arrays'
 //! own random fill: the key's lane row in 8 arrays, which `set()` never writes.
 //!
 //! Defense layers:
@@ -11,7 +11,7 @@
 //!    exactly. Noisy or partial extraction (cold boot, Rowhammer/RAMBleed, speculative
 //!    leaks, torn dumps) yields nothing; one wrong bit gives an unrelated key.
 //! 2. **Secret splitting**: the shielded key is XOR-split into 4 shares
-//! 3. **128 indistinguishable arrays**: all same size, all randomly initialized, all
+//! 3. **32 indistinguishable arrays**: all same size, all randomly initialized, all
 //!    modified identically during set()/clear()
 //! 4. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
 //! 5. **Scattered positions**: prekey rows, seed, multipliers and share data each sit at
@@ -45,9 +45,12 @@ use zeroize::Zeroize;
 /// constants), maximizing false positives during memory scanning.
 const ARRAY_SIZE: usize = 4096;
 /// Total arrays: 3 config (seed, mul1, mul2) + 4 shares scattered across random arrays + decoys.
-/// Power-of-2: `% 128` compiles to `AND #0x7f` — hundreds of hits in any binary.
+/// Power-of-2: `% 32` compiles to `AND #0x1f` — hundreds of hits in any binary.
 /// Non-power-of-2 would use a unique magic-multiply constant (trivially searchable).
-const ARRAY_COUNT: usize = 128;
+const ARRAY_COUNT: usize = 32;
+/// Decoy writes per array per set()/clear(). With 32 arrays this keeps the 2,048 changed
+/// slots a snapshot diff must search the same as 128 arrays × 16 gave.
+const DECOYS_PER_ARRAY: usize = 64;
 /// Number of real XOR shares the key is split into.
 const NUM_SHARES: usize = 4;
 /// `usize` values per 32-byte share (4 on 64-bit, 8 on 32-bit).
@@ -67,8 +70,8 @@ const LANE_COUNT: usize = 16;
 /// Slots per lane. `ARRAY_SIZE / LANE_COUNT`, power-of-2.
 const LANE_WIDTH: usize = ARRAY_SIZE / LANE_COUNT;
 
-/// 128 vault arrays — all identical, all randomly initialized, all modified during set().
-/// Memory: 128 × 4096 × size_of::<usize>() = 4 MB on 64-bit, 2 MB on 32-bit.
+/// 32 vault arrays — all identical, all randomly initialized, all modified during set().
+/// Memory: 32 × 4096 × size_of::<usize>() = 1 MiB on 64-bit, 512 KiB on 32-bit.
 static VAULTS: [[AtomicUsize; ARRAY_SIZE]; ARRAY_COUNT] = {
     // Array-repeat seeds for this static only; each use is a fresh copy.
     #[allow(clippy::declare_interior_mutable_const)]
@@ -78,7 +81,7 @@ static VAULTS: [[AtomicUsize; ARRAY_SIZE]; ARRAY_COUNT] = {
     [ROW; ARRAY_COUNT]
 };
 
-/// Initialize all 128 arrays with random values (once per process).
+/// Initialize all arrays with random values (once per process).
 /// Every entry across all arrays is filled — real and decoy arrays are identical.
 fn ensure_vaults() {
     if VAULTS[0][0].load(Ordering::Relaxed) == 0 {
@@ -334,13 +337,13 @@ impl Drop for Held<'_> {
     }
 }
 
-/// Write ~16 random entries to EVERY array (real + decoy), excluding protected positions.
+/// Write DECOYS_PER_ARRAY random entries to EVERY array (real + decoy), excluding protected positions.
 /// Protected positions belong to other active GuardedKey instances — overwriting them would
 /// corrupt the other key's share/config data. Snapshot-diffing still shows identical change
-/// patterns across all 128 arrays (excluded slots are ≤19 out of 524,288 — invisible).
+/// patterns across all arrays (excluded slots are a few dozen out of 131,072 — invisible).
 fn write_decoys(protected: &[VaultPos], draws: &mut Draws) {
     for (array_idx, row) in VAULTS.iter().enumerate() {
-        for _ in 0..SHARE_ENTRIES {
+        for _ in 0..DECOYS_PER_ARRAY {
             let mut slot = draws.next() & (ARRAY_SIZE - 1);
             // Reroll if this hits another key's data (~0.004% chance, essentially never)
             while protected.iter().any(|p| p.array == array_idx && p.slot == slot) {
@@ -359,7 +362,7 @@ fn writer() -> std::sync::MutexGuard<'static, ()> {
     WRITER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Memory-hardened key vault backed by 128 indistinguishable static arrays.
+/// Memory-hardened key vault backed by 32 indistinguishable static arrays.
 pub struct GuardedKey {
     /// Non-zero when a key is stored. Stores a random non-zero value (not 0/1)
     /// so it looks like any other random data in `__DATA`.
@@ -686,7 +689,7 @@ mod tests {
     static TEST_KEY_A: GuardedKey = GuardedKey::empty();
     static TEST_KEY_B: GuardedKey = GuardedKey::empty();
 
-    // SERIALIZE on the crate-wide `DB_TEST_GUARD` — NOT a vault-local lock. The 128 `VAULTS` arrays are
+    // SERIALIZE on the crate-wide `DB_TEST_GUARD` — NOT a vault-local lock. The `VAULTS` arrays are
     // ONE process-global shared by EVERY GuardedKey, including the production `MY_SECRET_KEY` /
     // `ENCRYPTION_KEY` that other tests write via `init_test_db` (which holds `DB_TEST_GUARD`). Those
     // writers pass only their partner in `others`, so their decoys/lane don't know about TEST_KEY_A/B and
@@ -1130,8 +1133,8 @@ mod tests {
     }
 
     /// Run write_decoys 500 times with protected positions — verify they are NEVER overwritten.
-    /// Without exclusion, P(at least one hit) per position ~ 86%. With 6 positions:
-    /// P(all survive unprotected) ~ 0.14^6 ~ 0.00075%, so a broken exclusion is caught with near-certainty.
+    /// Without exclusion, P(at least one hit) per position ~ 99.96%, so a broken exclusion is
+    /// caught with near-certainty.
     #[test]
     #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn write_decoys_respects_exclusions_500() {
@@ -1140,10 +1143,10 @@ mod tests {
         let protected = [
             VaultPos { array: 0, slot: 100 },
             VaultPos { array: 0, slot: 200 },
-            VaultPos { array: 50, slot: 2000 },
-            VaultPos { array: 50, slot: 3000 },
-            VaultPos { array: 100, slot: 500 },
-            VaultPos { array: 127, slot: 4095 },
+            VaultPos { array: 13, slot: 2000 },
+            VaultPos { array: 13, slot: 3000 },
+            VaultPos { array: 25, slot: 500 },
+            VaultPos { array: 31, slot: 4095 },
         ];
         let before: Vec<usize> = protected.iter()
             .map(|p| VAULTS[p.array][p.slot].load(Ordering::Relaxed))
