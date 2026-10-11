@@ -150,6 +150,21 @@ impl ProfileSyncQueue {
             SyncPriority::Medium => self.medium_queue.push_back(entry),
             SyncPriority::Low => self.low_queue.push_back(entry),
         }
+        PROCESSOR_WAKE.notify_one();
+    }
+
+    /// How long until [`Self::get_next_batch`] has something to return; `None` when every lane
+    /// is empty. Mirrors its lane choice: a waiting higher lane holds the lower ones back.
+    fn next_ready_in(&mut self) -> Option<Duration> {
+        self.prune_fronts();
+        [
+            (&self.critical_queue, SyncPriority::Critical),
+            (&self.high_queue, SyncPriority::High),
+            (&self.medium_queue, SyncPriority::Medium),
+            (&self.low_queue, SyncPriority::Low),
+        ]
+        .into_iter()
+        .find_map(|(lane, p)| lane.front().map(|e| p.processing_delay().saturating_sub(e.added_at.elapsed())))
     }
 
     fn is_live(queued: &HashMap<String, u64>, e: &QueueEntry) -> bool {
@@ -237,6 +252,10 @@ struct ProfileSyncQueueKey;
 fn profile_sync_queue() -> Arc<Mutex<ProfileSyncQueue>> {
     crate::db::current_session().scoped::<ProfileSyncQueueKey, _>()
 }
+
+/// Wakes the idle processor when an entry is queued. Process-wide like the processor itself; a
+/// stored permit covers an add that lands between its last look and its wait.
+static PROCESSOR_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 // ============================================================================
 // ProfileSyncHandler — platform-specific callbacks
@@ -902,12 +921,17 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
         }
 
         if batch.is_empty() {
-            {
+            let ready_in = {
                 let owner = profile_sync_queue();
                 let mut queue = owner.lock().unwrap();
                 queue.is_processing = false;
-            }
-            crate::rt::time::sleep(Duration::from_secs(1)).await;
+                queue.next_ready_in()
+            };
+            // Sleep until the next entry ripens or the own-profile check is due, unless an add
+            // comes first: an idle poll would wake the CPU every second for nothing.
+            let own_due = own_profile_sync_interval.saturating_sub(last_own_profile_sync.elapsed());
+            let wait = ready_in.map_or(own_due, |r| r.min(own_due)).max(Duration::from_millis(50));
+            let _ = crate::rt::time::timeout(wait, PROCESSOR_WAKE.notified()).await;
             continue;
         }
 
@@ -1097,6 +1121,21 @@ mod tests {
         fn live(&self, lane: &VecDeque<QueueEntry>) -> Vec<String> {
             lane.iter().filter(|e| Self::is_live(&self.queued, e)).map(|e| e.npub.clone()).collect()
         }
+    }
+
+    #[test]
+    fn next_ready_in_follows_the_lane_the_batch_would_take() {
+        let mut queue = ProfileSyncQueue::new();
+        assert_eq!(queue.next_ready_in(), None, "empty: nothing to wake for");
+        let now = Instant::now();
+        queue.push_raw(SyncPriority::Low, "npub1low", now - Duration::from_secs(10 * 60));
+        assert_eq!(queue.next_ready_in(), Some(Duration::ZERO), "a ripe low entry is due now");
+        queue.push_raw(SyncPriority::High, "npub1high", now);
+        let wait = queue.next_ready_in().unwrap();
+        assert!(wait > Duration::from_secs(4) && wait <= Duration::from_secs(5), "a waiting high entry holds the low lane back: {wait:?}");
+        assert!(queue.get_next_batch().is_empty());
+        queue.add("npub1high".into(), SyncPriority::Critical, true);
+        assert_eq!(queue.next_ready_in(), Some(Duration::ZERO), "the superseded high entry no longer counts");
     }
 
     #[test]
@@ -1303,5 +1342,54 @@ mod tests {
         let handler = NoOpProfileSyncHandler;
         let slim = crate::SlimProfile::default();
         handler.on_profile_fetched(&slim, "", "");
+    }
+}
+
+#[cfg(test)]
+mod processor_bench {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Thread wakeups while the queue sits empty, and how long a user-clicked refresh waits
+    /// before the processor picks it up. `#[ignore]`d: a measurement, run deliberately:
+    ///   cargo test --release -p vector-core --lib bench_profile_processor -- --ignored --nocapture
+    #[test]
+    #[ignore = "benchmark, not an assertion"]
+    fn bench_profile_processor() {
+        static UNPARKS: AtomicUsize = AtomicUsize::new(0);
+        const IDLE: Duration = Duration::from_secs(20);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_unpark(|| {
+                UNPARKS.fetch_add(1, Ordering::Relaxed);
+            })
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::spawn(start_profile_sync_processor(Arc::new(NoOpProfileSyncHandler)));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let before = UNPARKS.load(Ordering::Relaxed);
+            tokio::time::sleep(IDLE).await;
+            let woke = UNPARKS.load(Ordering::Relaxed) - before;
+            println!("idle wakeups: {woke} in {IDLE:?} ({:.2}/min)", woke as f64 * 60.0 / IDLE.as_secs_f64());
+
+            let mut waits = Vec::new();
+            for i in 0..20u64 {
+                tokio::time::sleep(Duration::from_millis(700 + i * 37)).await;
+                let npub = format!("npub1bench{i}");
+                let t = Instant::now();
+                refresh_profile_now(npub.clone());
+                while !profile_sync_queue().lock().unwrap().last_fetched.contains_key(&npub) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                waits.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            waits.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "critical refresh pickup: median {:.1} ms, max {:.1} ms",
+                waits[waits.len() / 2],
+                waits[waits.len() - 1]
+            );
+        });
     }
 }
