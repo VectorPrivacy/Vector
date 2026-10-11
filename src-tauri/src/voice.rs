@@ -301,6 +301,7 @@ impl AudioRecorder {
     }
 
     /// The pending recording as Whisper reads it, 16 kHz mono; it stays pending to be sent.
+    #[cfg(feature = "whisper")]
     pub fn pending_for_whisper(&self) -> Result<Vec<f32>, String> {
         let samples = self.pending.lock().unwrap().as_ref().map(|p| p.samples.clone()).ok_or("No pending recording")?;
         let resampled = audio::resample_mono_i16(&samples, TARGET_SAMPLE_RATE, 16000)?;
