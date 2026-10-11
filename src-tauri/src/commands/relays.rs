@@ -1382,9 +1382,10 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     // Pool reconcile: nostr-sdk auto-reconnect is off by design (every registration
     // goes through `add_managed_relay`), so a relay that drops can leave the pool
     // entirely and never return on its own.
-    // Every 10s, re-add any enabled relay missing from the pool and reconnect
-    // dead ones; the short warmup covers the startup window. Re-resolves the
-    // active client each pass so an account swap can't reconcile a stale pool.
+    // Every 10s while something needs repair, re-add any enabled relay missing from
+    // the pool and reconnect dead ones; once all is well it waits for a status change.
+    // The short warmup covers the startup window. Re-resolves the active client each
+    // pass so an account swap can't reconcile a stale pool.
     let handle_recon = handle.clone();
     // spawn-detached: the reconciler re-resolves the active client each pass, deliberately.
     tokio::spawn(async move {
@@ -1395,7 +1396,11 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
         loop {
-            if let Some(client) = nostr_client() {
+            let client = nostr_client();
+            // Subscribed before the pass, so a status change during it still ends the wait below.
+            let mut changes = client.as_ref().and_then(|c| c.monitor()).map(|m| m.subscribe());
+            let mut settled = false;
+            if let Some(client) = client {
                 let desired = desired_enabled_relays(&handle_recon).await;
                 let pool = client.clone();
                 let pool_keys: Vec<String> = client.relays().await.keys()
@@ -1403,8 +1408,11 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                     .collect();
 
                 // Re-add anything in the desired set that's missing entirely.
+                let mut missing = false;
                 for (url, mode) in &desired {
-                    if !pool_keys.iter().any(|k| k == &norm(url))
+                    let absent = !pool_keys.iter().any(|k| k == &norm(url));
+                    missing |= absent;
+                    if absent
                         && pool.add_managed_relay(url.as_str()).capabilities(relay_capabilities_for_mode(mode)).await.is_ok() {
                             println!("[Reconcile] re-added missing relay {}; connecting...", url);
                             add_relay_log(url.as_str(), "info", "Reconcile: re-added missing relay; connecting...");
@@ -1460,9 +1468,21 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         .filter(vector_core::transport::cycle::revivable)
                         .map(|relay| async move { let _ = relay.try_connect().timeout(budget).await; }),
                 ).await;
+
+                settled = !missing
+                    && client.relays().all().await.values().all(|r| {
+                        r.status() != RelayStatus::Pending && !vector_core::transport::cycle::revivable(r)
+                    });
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            match changes.as_mut().filter(|_| settled) {
+                // Nothing to repair: wait for a relay to change status, with a slow sweep for
+                // what changes without one (a relay leaving the pool).
+                Some(rx) => {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await;
+                }
+                None => tokio::time::sleep(std::time::Duration::from_secs(10)).await,
+            }
         }
     });
 
