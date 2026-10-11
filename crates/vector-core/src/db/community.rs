@@ -1108,11 +1108,16 @@ pub fn list_public_invites(community_id: &str) -> Result<Vec<PublicInviteRecord>
         out.push(row.map_err(|e| e.to_string())?);
     }
     // Fill per-link join counts (distinct joiners via each label, attributed to me).
-    if let Some(me) = crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+    if let Some(me) = crate::state::my_public_key() {
         if let Ok(counts) = community_invite_join_counts(community_id, &me) {
+            // A v2 link minted without a label is joined as "": that bucket is only
+            // its own while it is the one unlabeled link.
+            let unlabeled = out.iter().filter(|r| r.label.as_deref().is_none_or(str::is_empty)).count();
             for rec in &mut out {
-                if let Some(l) = rec.label.as_deref() {
-                    rec.join_count = counts.get(l).copied().unwrap_or(0);
+                match rec.label.as_deref() {
+                    Some(l) if !l.is_empty() => rec.join_count = counts.get(l).copied().unwrap_or(0),
+                    _ if unlabeled == 1 => rec.join_count = counts.get("").copied().unwrap_or(0),
+                    _ => {}
                 }
             }
         }
@@ -1437,15 +1442,35 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
 }
 
 /// Per-link join counts for the owner's public invites: `label -> distinct joiners` who joined
-/// via a link minted by `inviter_npub` (bech32). Reads the `invited-by` / `invited-label` tags on
-/// MemberJoined system events; distinct by joiner npub so a rejoin isn't double-counted. Labels are
+/// via a link minted by `inviter`. Distinct by joiner so a rejoin isn't double-counted. Labels are
 /// unique per creator (random fallback ensures it), so (inviter, label) keys a single link.
+///
+/// v1 reads the `invited-by` / `invited-label` tags on MemberJoined system events; v2 reads the
+/// attribution each joiner echoes into their Guestbook Join.
 pub fn community_invite_join_counts(
     community_id: &str,
-    inviter_npub: &str,
+    inviter: &PublicKey,
 ) -> Result<std::collections::HashMap<String, u64>, String> {
     use std::collections::{HashMap, HashSet};
-    let community = match load_community(&CommunityId(hex_id_to_32(community_id)?))? {
+    let id = CommunityId(hex_id_to_32(community_id)?);
+    if let Some(crate::community::ConcordProtocol::V2) = community_protocol(&id)? {
+        // Bundles name their creator in hex; older ones in bech32.
+        let (hex, npub) = (inviter.to_hex(), inviter.to_bech32().unwrap_or_default());
+        let (events, _) = get_guestbook(community_id)?;
+        let mut per_label: HashMap<String, HashSet<PublicKey>> = HashMap::new();
+        for e in &events {
+            let crate::community::v2::guestbook::GuestbookEntry::Join { member, invited_by: Some((by, label)), .. } = &e.entry else {
+                continue;
+            };
+            if by.eq_ignore_ascii_case(&hex) || *by == npub {
+                per_label.entry(label.clone()).or_default().insert(*member);
+            }
+        }
+        return Ok(per_label.into_iter().map(|(k, v)| (k, v.len() as u64)).collect());
+    }
+    let Ok(inviter_npub) = inviter.to_bech32();
+    let inviter_npub = inviter_npub.as_str();
+    let community = match load_community(&id)? {
         Some(c) => c,
         None => return Ok(HashMap::new()),
     };
@@ -4419,6 +4444,46 @@ mod tests {
     /// Every encrypting writer, on the real schema, through a PIN change and a disable. The
     /// sweep list alone must leave nothing on the old key, so a writer whose column it misses
     /// fails here. A new writer that encrypts a column belongs in this test.
+    #[test]
+    fn a_v2_link_counts_the_members_who_joined_through_it() {
+        use crate::community::v2::guestbook::{GuestbookEntry, GuestbookEvent};
+        let (_tmp, _guard) = init_test_db();
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Hub".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Hub", None, vec!["wss://r".into()], 1_000);
+        save_community_v2(&v2).unwrap();
+        let cid = v2.id().to_hex();
+
+        let me = owner.public_key();
+        let someone_else = nostr_sdk::prelude::Keys::generate().public_key();
+        let (a, b, c) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        let join = |n: u8, member: PublicKey, by: Option<(String, &str)>| GuestbookEvent {
+            epoch: None,
+            observed_at: None,
+            rumor_id: [n; 32],
+            entry: GuestbookEntry::Join { member, invited_by: by.map(|(c, l)| (c, l.to_string())), at_ms: n as u64 },
+        };
+        let events = vec![
+            join(1, a, Some((me.to_hex(), "hub"))),
+            join(2, b, Some((me.to_bech32().unwrap(), "hub"))),
+            join(3, a, Some((me.to_hex(), "hub"))),
+            join(4, c, Some((me.to_hex(), ""))),
+            join(5, c, Some((someone_else.to_hex(), "hub"))),
+            join(6, b, None),
+        ];
+        set_guestbook(&cid, &events, 9).unwrap();
+
+        let counts = community_invite_join_counts(&cid, &me).unwrap();
+        assert_eq!(counts.get("hub"), Some(&2), "a rejoin counts once, either spelling of the creator counts");
+        assert_eq!(counts.get(""), Some(&1), "an unlabeled link's joins are kept apart");
+        assert_eq!(counts.len(), 2, "another creator's link and a bare join count for nobody here");
+    }
+
     #[test]
     fn a_group_chat_becomes_a_community_with_a_second_channel_or_an_invite_link() {
         let (_tmp, _guard) = init_test_db();

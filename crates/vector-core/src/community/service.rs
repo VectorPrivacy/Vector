@@ -1520,6 +1520,33 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
 /// canonical link is an owner action. `std::sync::Arc<crate::db::Session>`-gated around the token persist.
 /// A short, human-typable label for an unlabeled invite link. Crockford-ish base32 (no 0/1/I/O)
 /// so it's unambiguous to read and share aloud; 6 chars ≈ 1B combinations (collision-improbable).
+/// Every link gets a label: the one provided, else a random 6-char handle. A stable label makes
+/// the link identifiable in the UI and keys per-link join attribution off (creator, label), so it
+/// must be unique among THIS creator's links in the community (else two links share a join bucket).
+pub(crate) fn resolve_invite_label(community_id: &str, label: Option<String>) -> Result<String, String> {
+    let existing = crate::db::community::list_public_invites(community_id).unwrap_or_default();
+    let label_taken = |cand: &str| {
+        existing.iter().any(|r| r.label.as_deref().map(|e| e.eq_ignore_ascii_case(cand)).unwrap_or(false))
+    };
+    match label {
+        Some(l) if !l.trim().is_empty() => {
+            let l = l.trim().to_string();
+            if label_taken(&l) {
+                return Err(format!("You already have an invite link labeled \u{201c}{l}\u{201d}. Pick a different label."));
+            }
+            Ok(l)
+        }
+        // Random handle — regenerate on the (astronomically unlikely) collision.
+        _ => {
+            let mut l = generate_invite_label();
+            while label_taken(&l) {
+                l = generate_invite_label();
+            }
+            Ok(l)
+        }
+    }
+}
+
 fn generate_invite_label() -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -1538,30 +1565,7 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
             return Err("you need the create-invite permission to mint a public invite".to_string());
         }
 
-        // Every link gets a label: use the one provided, else mint a random 6-char handle. A stable label
-        // makes the link identifiable in the UI and keys per-link join attribution off (creator, label),
-        // so it must be unique among THIS creator's links (else two links share a join bucket).
-        let existing = crate::db::community::list_public_invites(&community.id.to_hex()).unwrap_or_default();
-        let label_taken = |cand: &str| {
-            existing.iter().any(|r| r.label.as_deref().map(|e| e.eq_ignore_ascii_case(cand)).unwrap_or(false))
-        };
-        let label = match label {
-            Some(l) if !l.trim().is_empty() => {
-                let l = l.trim().to_string();
-                if label_taken(&l) {
-                    return Err(format!("You already have an invite link labeled \u{201c}{l}\u{201d}. Pick a different label."));
-                }
-                Some(l)
-            }
-            // Random handle — regenerate on the (astronomically unlikely) collision.
-            _ => {
-                let mut l = generate_invite_label();
-                while label_taken(&l) {
-                    l = generate_invite_label();
-                }
-                Some(l)
-            }
-        };
+        let label = Some(resolve_invite_label(&community.id.to_hex(), label)?);
 
         // Attribution (metrics): stamp the bundle with who minted it (my npub) + the creator's label, so
         // a joiner's Presence can announce "invited by me via <label>".

@@ -2028,6 +2028,7 @@ impl VectorCore {
             // v2 `build_invite_url` appends its own `/invite/<naddr>`, so pass the
             // bare domain (strip the `/invite` the v1 constant carries).
             let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
+            let label = Some(service::resolve_invite_label(community_id, label).map_err(VectorError::Other)?);
             let minted =
                 crate::community::v2::service::mint_public_link(&transport, &community, base, expires_at_ms, label)
                     .await
@@ -2158,7 +2159,7 @@ impl VectorCore {
     /// The public invite links this account minted for a Community (to list + revoke). Each carries
     /// the hex `token` (the link secret) needed by [`Self::revoke_public_invite`]. A local read for
     /// both protocols — links minted on this device (a v2 mint also syncs the cross-device 13303
-    /// record; v2 `join_count` is not yet tracked and is always 0).
+    /// record). `join_count` comes from v1's join events or v2's Guestbook.
     pub fn list_public_invites(&self, community_id: &str) -> Result<Vec<crate::db::community::PublicInviteRecord>> {
         crate::db::community::list_public_invites(community_id).map_err(VectorError::Other)
     }
