@@ -274,14 +274,17 @@ impl GuardedKey {
         Self::lane_of(self.active.load(Ordering::Acquire))
     }
 
-    /// Pick a marker whose lane differs from every currently-live other key's lane,
-    /// so this key's positions stay disjoint from theirs. `rng` supplies the random
+    /// Pick a marker whose lane differs from every currently-live key's lane, this one's
+    /// included, so this key's positions stay disjoint from theirs and from its own old ones. `rng` supplies the random
     /// marker; we reroll until its lane is free. With LANE_COUNT lanes and far fewer
     /// concurrent keys, this terminates in ~1 try. The marker itself remains a
     /// full-range random non-zero usize — the lane is an emergent low-bit property,
     /// not separately stored, so it adds no searchable fingerprint.
     fn pick_marker(&self, others: &[&GuardedKey], rng: &mut rand::rngs::OsRng) -> usize {
         let mut taken = [false; LANE_COUNT];
+        if self.has_key() {
+            taken[self.lane()] = true;
+        }
         for key in partners(others) {
             if std::ptr::eq(key, self) || !key.has_key() { continue; }
             taken[key.lane()] = true;
@@ -359,22 +362,22 @@ impl GuardedKey {
         let marker = self.pick_marker(others, &mut rng);
         let lane = Self::lane_of(marker);
 
-        // Overwriting a live key into a different lane? Scrub the old lane's share
-        // slots so the previous key never lingers (matches clear()'s scrub).
+        // The old key stays readable in its own lane until the commit below; readers check the
+        // marker after reading, so none can return a half-replaced key.
         let old_marker = self.active.load(Ordering::Acquire);
+        let old_positions = (old_marker != 0)
+            .then(|| share_positions(self.instance_addr(), Self::lane_of(old_marker)));
+
+        let (mut protected, mut pcount) = self.collect_other_protected(others);
         if old_marker != 0 {
-            let old_lane = Self::lane_of(old_marker);
-            if old_lane != lane {
-                for pos in share_positions(self.instance_addr(), old_lane).iter() {
-                    let mut val = rng.next_u64() as usize;
-                    if val == 0 { val = 1; }
-                    VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
+            let (s, m1, m2) = config_positions(self.instance_addr(), Self::lane_of(old_marker));
+            for pos in [s, m1, m2].into_iter().chain(old_positions.into_iter().flatten()) {
+                if pcount < protected.len() {
+                    protected[pcount] = pos;
+                    pcount += 1;
                 }
             }
         }
-
-        // Protect other active key's positions from decoy writes
-        let (protected, pcount) = self.collect_other_protected(others);
 
         // Write decoys FIRST — random noise across all 128 arrays.
         // Excludes other keys' positions. Real writes below overwrite any decoy
@@ -421,15 +424,34 @@ impl GuardedKey {
         // Commit the lane-bearing marker. share_positions() in get() re-derives the
         // same lane from this marker, so reads land on exactly these slots.
         self.active.store(marker, Ordering::Release);
+
+        // Scrub the previous key's shares so it never lingers (matches clear()'s scrub).
+        for pos in old_positions.iter().flatten() {
+            let mut val = rng.next_u64() as usize;
+            if val == 0 { val = 1; }
+            VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
+        }
     }
 
     /// Recover the key. Zero writes — invisible to snapshot diffing.
+    ///
+    /// The marker doubles as a seqlock: a read that a set() or clear() overlapped sees it change
+    /// and starts again, so a replacement can never hand out a mix of two keys' shares.
     pub fn get(&self) -> Option<[u8; 32]> {
-        let marker = self.active.load(Ordering::Acquire);
-        if marker == 0 {
-            return None;
+        loop {
+            let marker = self.active.load(Ordering::Acquire);
+            if marker == 0 {
+                return None;
+            }
+            let mut key = self.read_shares(marker);
+            if self.active.load(Ordering::Acquire) == marker {
+                return Some(key);
+            }
+            key.zeroize();
         }
+    }
 
+    fn read_shares(&self, marker: usize) -> [u8; 32] {
         // Lane comes from the marker, so reads land on exactly the slots set() wrote.
         let positions = share_positions(self.instance_addr(), Self::lane_of(marker));
         let mut key = [0u8; 32];
@@ -446,9 +468,10 @@ impl GuardedKey {
             for (a, b) in key.iter_mut().zip(share.iter()) {
                 *a ^= *b;
             }
+            share.zeroize();
         }
 
-        Some(key)
+        key
     }
 
     /// Clear the key. Overwrites shares with random values, writes decoys to all arrays.
@@ -1047,4 +1070,52 @@ mod tests {
     // should be placed in the integrating crate that provides both the
     // GuardedKey vault and the encryption pipeline.
     // ================================================================
+
+    /// A read racing a stream of replacements only ever sees one of the keys, never a blend.
+    #[test]
+    fn reads_racing_a_replacement_see_a_whole_key() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let (k1, k2) = (test_key(1), test_key(2));
+        TEST_KEY_A.set(k1, &others_for_a());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reads, torn) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let reader = {
+            let (stop, reads, torn) = (stop.clone(), reads.clone(), torn.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let got = TEST_KEY_A.get();
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    if got != Some(k1) && got != Some(k2) {
+                        torn.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+        for i in 0..200 {
+            TEST_KEY_A.set(if i % 2 == 0 { k2 } else { k1 }, &others_for_a());
+        }
+        stop.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+        assert!(reads.load(Ordering::SeqCst) > 0);
+        assert_eq!(torn.load(Ordering::SeqCst), 0);
+        TEST_KEY_A.clear(&others_for_a());
+    }
+
+    /// Replacing a key always moves it to a fresh lane, so the old shares stay intact for readers.
+    #[test]
+    fn a_replacement_never_reuses_the_live_lane() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        TEST_KEY_A.set(test_key(7), &others_for_a());
+        for i in 0..64u8 {
+            let before = TEST_KEY_A.lane();
+            TEST_KEY_A.set(test_key(i), &others_for_a());
+            assert_ne!(TEST_KEY_A.lane(), before);
+            assert_eq!(TEST_KEY_A.get(), Some(test_key(i)));
+        }
+        TEST_KEY_A.clear(&others_for_a());
+    }
 }
