@@ -57,7 +57,7 @@ pub fn sanitize(bytes: &[u8]) -> Option<String> {
     let square = img.resize_to_fill(side, side, FilterType::Lanczos3);
     let mut png = Vec::new();
     square.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).ok()?;
-    Some(format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png)))
+    Some(format!("data:image/png;base64,{}", crate::simd::base64::STANDARD.encode_to_string(&png)))
 }
 
 #[cfg(test)]
@@ -86,7 +86,7 @@ mod tests {
     fn only_a_small_raster_reaches_the_page_and_always_as_png() {
         let url = sanitize(&thumbnail(&png(300, 300, 255)).unwrap()).unwrap();
         let body = url.strip_prefix("data:image/png;base64,").expect("png data url");
-        let bytes = base64_simd::STANDARD.decode_to_vec(body).unwrap();
+        let bytes = crate::simd::base64::STANDARD.decode_to_vec(body).unwrap();
         assert_eq!(image::guess_format(&bytes).unwrap(), ImageFormat::Png);
 
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;

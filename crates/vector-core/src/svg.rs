@@ -131,7 +131,7 @@ pub fn is_raster_wrapped(bytes: &[u8]) -> bool {
 fn wrap_png(png: &[u8], w: u32, h: u32) -> Vec<u8> {
     format!(
         r#"{RASTER_MARKER}<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image width="{w}" height="{h}" href="data:image/png;base64,{}"/></svg>"#,
-        base64_simd::STANDARD.encode_to_string(png)
+        crate::simd::base64::STANDARD.encode_to_string(png)
     )
     .into_bytes()
 }
@@ -573,12 +573,12 @@ mod tests {
         image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
-        let b64 = base64_simd::STANDARD.encode_to_string(&png);
+        let b64 = crate::simd::base64::STANDARD.encode_to_string(&png);
         let ok = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><image width="2" height="2" href="data:image/png;base64,{b64}"/></svg>"#);
         assert_eq!(pixel(&rasterize(ok.as_bytes(), 2).unwrap(), 1, 1), [0, 0, 255, 255]);
 
         // A nested SVG would bring its own document past the budget: never decoded.
-        let inner = base64_simd::STANDARD.encode_to_string(br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#00ff00"/></svg>"##);
+        let inner = crate::simd::base64::STANDARD.encode_to_string(br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#00ff00"/></svg>"##);
         let nested = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><image width="2" height="2" href="data:image/svg+xml;base64,{inner}"/></svg>"#);
         assert_eq!(pixel(&rasterize(nested.as_bytes(), 2).unwrap(), 1, 1)[3], 0);
 

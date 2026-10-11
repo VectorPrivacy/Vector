@@ -120,11 +120,11 @@ async fn delete_blob(url: String) -> Result<Value, String> {
 }
 
 fn b64(bytes: &[u8]) -> String {
-    base64_simd::STANDARD.encode_to_string(bytes)
+    vector_core::simd::base64::STANDARD.encode_to_string(bytes)
 }
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
-    base64_simd::STANDARD.decode_to_vec(s).map_err(|e| format!("bytes base64: {e}"))
+    vector_core::simd::base64::STANDARD.decode_to_vec(s).map_err(|e| format!("bytes base64: {e}"))
 }
 
 fn is_animated(bytes: &[u8]) -> bool {

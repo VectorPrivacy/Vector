@@ -348,7 +348,7 @@ where
         .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
-    let encoded = base64_simd::STANDARD.encode_to_string(event.as_json());
+    let encoded = crate::simd::base64::STANDARD.encode_to_string(event.as_json());
     HeaderValue::try_from(format!("Nostr {}", encoded))
         .map_err(|e| format!("Failed to create header value: {}", e))
 }

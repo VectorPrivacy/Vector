@@ -344,7 +344,7 @@ pub fn encode_fragment(token: &[u8; TOKEN_LEN], relays: &[String]) -> Result<Str
         }
     }
     bytes.extend_from_slice(token);
-    Ok(base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes))
+    Ok(crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&bytes))
 }
 
 /// Decode a fragment into its token + bootstrap relays. Strict on framing: a
@@ -352,7 +352,7 @@ pub fn encode_fragment(token: &[u8; TOKEN_LEN], relays: &[String]) -> Result<Str
 /// token is fatal; an unknown dictionary id is skipped, not fatal, so the
 /// dictionary can grow without breaking older readers.
 pub fn decode_fragment(fragment: &str) -> Result<([u8; TOKEN_LEN], Vec<String>), InviteError> {
-    let bytes = base64_simd::URL_SAFE_NO_PAD
+    let bytes = crate::simd::base64::URL_SAFE_NO_PAD
         .decode_to_vec(fragment.trim().as_bytes())
         .map_err(|_| InviteError::BadFragment("not base64url"))?;
 
@@ -777,12 +777,12 @@ fn first_tag(event: &Event, name: &str) -> Option<String> {
 pub(crate) fn seal_bundle(bundle_key: &[u8; 32], json: &str) -> Result<String, InviteError> {
     let ck = ConversationKey::new(*bundle_key);
     let ct = crate::community::cipher::encrypt_with_random_nonce(&ck, json.as_bytes()).map_err(|e| InviteError::Crypto(e.to_string()))?;
-    Ok(base64_simd::STANDARD.encode_to_string(&ct))
+    Ok(crate::simd::base64::STANDARD.encode_to_string(&ct))
 }
 
 fn open_bundle(bundle_key: &[u8; 32], content: &str) -> Result<String, InviteError> {
     let ck = ConversationKey::new(*bundle_key);
-    let ct = base64_simd::STANDARD
+    let ct = crate::simd::base64::STANDARD
         .decode_to_vec(content.as_bytes())
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let pt = decrypt_to_bytes(&ck, &ct).map_err(|e| InviteError::Crypto(e.to_string()))?;
@@ -986,7 +986,7 @@ mod tests {
         for bad in [3u8, 5u8] {
             let mut bytes = vec![bad, FLAG_STOCK_SET];
             bytes.extend_from_slice(&token);
-            let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
+            let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&bytes);
             assert!(matches!(decode_fragment(&frag), Err(InviteError::BadVersion(v)) if v == bad));
         }
     }
@@ -997,7 +997,7 @@ mod tests {
         let mut bytes = vec![FRAGMENT_VERSION, FLAG_STOCK_SET];
         bytes.extend_from_slice(&token);
         bytes.push(0xff); // one byte past the token
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&bytes);
         assert!(matches!(decode_fragment(&frag), Err(InviteError::BadFragment("trailing bytes"))));
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
         let mut bytes = vec![FRAGMENT_VERSION, 0x00, 0x04]; // count 4 > cap
         bytes.extend_from_slice(&[1, 2, 3, 4]);
         bytes.extend_from_slice(&token);
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&bytes);
         assert!(matches!(decode_fragment(&frag), Err(InviteError::BadFragment("too many bootstrap relays"))));
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         // count 1, dict id 200 (unknown gen-4 id) → skipped, not fatal.
         let mut bytes = vec![FRAGMENT_VERSION, 0x00, 0x01, 200];
         bytes.extend_from_slice(&token);
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&bytes);
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&bytes);
         let (t, relays) = decode_fragment(&frag).unwrap();
         assert_eq!(t, token);
         assert!(relays.is_empty());

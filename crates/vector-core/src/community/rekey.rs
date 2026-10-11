@@ -571,10 +571,10 @@ mod tests {
         )
         .unwrap();
         // Flip a byte mid-ciphertext → NIP-44 MAC fails.
-        let mut bytes = base64_simd::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).unwrap();
+        let mut bytes = crate::simd::base64::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
-        blob.wrapped = base64_simd::STANDARD.encode_to_string(&bytes);
+        blob.wrapped = crate::simd::base64::STANDARD.encode_to_string(&bytes);
         assert!(open_rekey_blob(
             recipient.secret_key(), &sender.public_key(), RekeyScope::ServerRoot, Epoch(1), &blob,
         )

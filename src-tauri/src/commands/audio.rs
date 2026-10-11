@@ -156,7 +156,7 @@ pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, S
                 lofty::picture::MimeType::Tiff => "image/tiff",
                 _ => "image/jpeg",
             };
-            let b64 = base64_simd::STANDARD.encode_to_string(pic.data());
+            let b64 = vector_core::simd::base64::STANDARD.encode_to_string(pic.data());
             format!("data:{};base64,{}", mime_str, b64)
         });
 

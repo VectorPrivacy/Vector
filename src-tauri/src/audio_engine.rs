@@ -245,7 +245,7 @@ impl AudioWaveformPayload {
         } else {
             (waveform, WAVEFORM_FPS as f32)
         };
-        AudioWaveformPayload { id, waveform: base64_simd::STANDARD.encode_to_string(&data), waveform_fps: fps, bins: WAVEFORM_BINS as u8 }
+        AudioWaveformPayload { id, waveform: vector_core::simd::base64::STANDARD.encode_to_string(&data), waveform_fps: fps, bins: WAVEFORM_BINS as u8 }
     }
 }
 
@@ -2370,7 +2370,7 @@ mod waveform_payload_tests {
         let mut levels = vec![10u8; frames * WAVEFORM_BINS];
         levels[(frames - 1) * WAVEFORM_BINS + 5] = 250;   // a lone peak in the last frame
         let p = AudioWaveformPayload::new(7, levels);
-        let bytes = base64_simd::STANDARD.decode_to_vec(&p.waveform).unwrap();
+        let bytes = vector_core::simd::base64::STANDARD.decode_to_vec(&p.waveform).unwrap();
         assert!(bytes.len() / WAVEFORM_BINS <= MAX_WAVEFORM_FRAMES);
         assert_eq!(p.waveform_fps, WAVEFORM_FPS as f32 / 3.0);
         assert_eq!(bytes[bytes.len() - WAVEFORM_BINS + 5], 250);
@@ -2379,7 +2379,7 @@ mod waveform_payload_tests {
     #[test]
     fn a_short_waveform_travels_whole() {
         let p = AudioWaveformPayload::new(7, vec![1, 2, 3, 4].repeat(WAVEFORM_BINS));
-        assert_eq!(base64_simd::STANDARD.decode_to_vec(&p.waveform).unwrap().len(), 4 * WAVEFORM_BINS);
+        assert_eq!(vector_core::simd::base64::STANDARD.decode_to_vec(&p.waveform).unwrap().len(), 4 * WAVEFORM_BINS);
         assert_eq!(p.waveform_fps, WAVEFORM_FPS as f32);
     }
 }

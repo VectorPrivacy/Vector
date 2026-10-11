@@ -114,11 +114,11 @@ fn icon_data_url(icon: &Option<(Vec<u8>, &'static str)>) -> Value {
     let Some((bytes, mime)) = icon else { return Value::Null };
     if vector_core::svg::looks_like_svg(bytes) {
         return match vector_core::svg::rasterize_png(bytes, 256) {
-            Ok(png) => json!(format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png))),
+            Ok(png) => json!(format!("data:image/png;base64,{}", vector_core::simd::base64::STANDARD.encode_to_string(&png))),
             Err(_) => Value::Null,
         };
     }
-    json!(format!("data:{mime};base64,{}", base64_simd::STANDARD.encode_to_string(bytes)))
+    json!(format!("data:{mime};base64,{}", vector_core::simd::base64::STANDARD.encode_to_string(bytes)))
 }
 
 fn info_json(pkg: &package::Package, uses_realtime: bool) -> Value {

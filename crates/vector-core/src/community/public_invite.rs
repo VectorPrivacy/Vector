@@ -317,7 +317,7 @@ pub fn encode_invite_url(relays: &[String], token: &[u8; 32]) -> String {
         }
     }
     payload.extend_from_slice(token);
-    let b64 = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
+    let b64 = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&payload);
     format!("{INVITE_URL_BASE}#{b64}")
 }
 
@@ -329,7 +329,7 @@ pub fn parse_invite_url(url: &str) -> Result<(Vec<String>, [u8; 32]), PublicInvi
     if fragment.is_empty() {
         return Err(PublicInviteError::BadUrl("no fragment".into()));
     }
-    let raw = base64_simd::URL_SAFE_NO_PAD
+    let raw = crate::simd::base64::URL_SAFE_NO_PAD
         .decode_to_vec(fragment.as_bytes())
         .map_err(|e| PublicInviteError::BadUrl(format!("base64: {e}")))?;
     match raw.first() {
@@ -443,7 +443,7 @@ mod tests {
             "{{\"v\":1,\"relays\":[\"wss://r1\",\"wss://r2\"],\"t\":\"{}\"}}",
             crate::simd::hex::bytes_to_hex_32(&token)
         );
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
         let (relays, parsed) = parse_invite_url(&format!("{INVITE_URL_BASE}#{frag}")).unwrap();
         assert_eq!(parsed, token);
         assert_eq!(relays, vec!["wss://r1".to_string(), "wss://r2".to_string()]);
@@ -456,7 +456,7 @@ mod tests {
         let token = new_token();
         let mut payload = vec![2u8, 0, 2, 250, 1]; // count=2: unknown id 250, then id 1
         payload.extend_from_slice(&token);
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&payload);
         let (relays, parsed) = parse_invite_url(&frag).unwrap();
         assert_eq!(parsed, token);
         assert_eq!(relays, vec!["wss://jskitty.com/nostr".to_string()]);
@@ -471,7 +471,7 @@ mod tests {
             vec![2u8, 1, 0xAA],      // token wrong length
             vec![9u8, 1, 2, 3],      // unknown version byte
         ] {
-            let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&frag_bytes);
+            let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&frag_bytes);
             assert!(parse_invite_url(&frag).is_err());
         }
     }
@@ -594,7 +594,7 @@ mod tests {
         // …a hand-crafted v2 fragment claiming an absurd count is refused outright…
         let mut payload = vec![URL_V2, 0, (MAX_URL_RELAYS + 1) as u8];
         payload.extend_from_slice(&token);
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(&payload);
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(&payload);
         assert!(parse_invite_url(&frag).is_err());
         // …and v1 JSON fragments keep their original cap.
         let json = format!(
@@ -602,7 +602,7 @@ mod tests {
             (0..MAX_URL_RELAYS + 1).map(|i| format!("\"wss://r{i}\"")).collect::<Vec<_>>().join(","),
             crate::simd::hex::bytes_to_hex_32(&token)
         );
-        let frag = base64_simd::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
+        let frag = crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(json.as_bytes());
         assert!(parse_invite_url(&frag).is_err());
     }
 }

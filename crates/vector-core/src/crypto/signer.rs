@@ -175,7 +175,7 @@ fn nip44_open(ck: &nip44::v2::ConversationKey, payload: &str) -> Result<String, 
     if payload.len() > NIP44_MAX_ENCODED {
         return Err(SignerError::from("nip44 payload too long"));
     }
-    let bytes = base64_simd::STANDARD.decode_to_vec(payload.as_bytes()).map_err(SignerError::backend)?;
+    let bytes = crate::simd::base64::STANDARD.decode_to_vec(payload.as_bytes()).map_err(SignerError::backend)?;
     if bytes.first() != Some(&nip44::Version::V2.as_u8()) {
         return Err(SignerError::from("unsupported nip44 version"));
     }

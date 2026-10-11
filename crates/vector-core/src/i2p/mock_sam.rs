@@ -398,5 +398,5 @@ pub fn own_destination(nick: &str) -> String {
     use sha2::Digest;
     let seed = sha2::Sha256::digest(nick.as_bytes());
     let bytes: Vec<u8> = seed.iter().copied().cycle().take(391).collect();
-    base64_simd::STANDARD.encode_to_string(&bytes).replace('+', "-").replace('/', "~")
+    crate::simd::base64::STANDARD.encode_to_string(&bytes).replace('+', "-").replace('/', "~")
 }

@@ -642,16 +642,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "base64-simd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
-dependencies = [
- "outref",
- "vsimd",
-]
-
-[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6535,12 +6525,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "outref"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
-
-[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11773,7 +11757,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "base64-simd",
  "bip39",
  "block2 0.6.1",
  "bs58",
@@ -11883,7 +11866,6 @@ dependencies = [
  "arti-client",
  "async-trait",
  "async-wsocket",
- "base64-simd",
  "bip39",
  "bitcoin_hashes 1.2.0",
  "blake3",
@@ -11951,7 +11933,7 @@ name = "vector-push"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "base64-simd",
+ "base64 0.22.1",
  "getrandom 0.2.15",
  "hkdf",
  "hmac",
@@ -11991,12 +11973,6 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
-
-[[package]]
-name = "vsimd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vswhom"

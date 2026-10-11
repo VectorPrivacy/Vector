@@ -198,7 +198,7 @@ fn bound_plaintext(scope: RekeyScope, epoch: Epoch, new_key: &[u8; 32]) -> [u8; 
 /// The base64 string a blob's NIP-44 layer actually encrypts (D5). Exposed so
 /// the service-layer bunker path can `signer.nip44_encrypt(recipient, this)`.
 pub fn bound_plaintext_b64(scope: RekeyScope, epoch: Epoch, new_key: &[u8; 32]) -> String {
-    base64_simd::STANDARD.encode_to_string(bound_plaintext(scope, epoch, new_key))
+    crate::simd::base64::STANDARD.encode_to_string(bound_plaintext(scope, epoch, new_key))
 }
 
 /// Parse + verify a decrypted bound plaintext (the base64 already stripped),
@@ -256,7 +256,7 @@ fn bound_base_plaintext(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32]
 /// The base64 string a BASE blob's NIP-44 layer encrypts (D5) — the 104-byte
 /// member form, or the 136-byte staff form when `control_root` rides.
 pub fn bound_base_plaintext_b64(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32], control_root: Option<&[u8; 32]>) -> String {
-    base64_simd::STANDARD.encode_to_string(bound_base_plaintext(epoch, new_root, control_pk, control_root))
+    crate::simd::base64::STANDARD.encode_to_string(bound_base_plaintext(epoch, new_root, control_pk, control_root))
 }
 
 /// Parse + verify a decrypted BASE blob plaintext (CORD-06 §1): 72 (legacy
@@ -341,7 +341,7 @@ pub async fn open_base_blob<S: crate::signer::VectorSigner + ?Sized>(
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
     let pt = Zeroizing::new(
-        base64_simd::STANDARD
+        crate::simd::base64::STANDARD
             .decode_to_vec(inner_b64.as_bytes())
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
@@ -363,7 +363,7 @@ pub fn encode_control_wrap(epoch: Epoch, control_root: &[u8; 32]) -> [u8; 40] {
 /// The base64 string a control_wrap's NIP-44 layer encrypts (string-typed
 /// signer surfaces, the D5 transport discipline).
 pub fn control_wrap_b64(epoch: Epoch, control_root: &[u8; 32]) -> String {
-    base64_simd::STANDARD.encode_to_string(encode_control_wrap(epoch, control_root))
+    crate::simd::base64::STANDARD.encode_to_string(encode_control_wrap(epoch, control_root))
 }
 
 /// Parse a decrypted 40-byte control_wrap plaintext. The caller verifies the
@@ -403,7 +403,7 @@ pub fn build_blob_local(
     let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, inner_b64.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     Ok(RekeyBlob {
         locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), scope, epoch),
-        wrapped: base64_simd::STANDARD.encode_to_string(&payload),
+        wrapped: crate::simd::base64::STANDARD.encode_to_string(&payload),
     })
 }
 
@@ -420,12 +420,12 @@ pub fn open_blob_local(
     blob: &RekeyBlob,
 ) -> Result<[u8; 32], RekeyError> {
     let ck = ConversationKey::derive(my_sk, rotator_pk).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let payload = base64_simd::STANDARD
+    let payload = crate::simd::base64::STANDARD
         .decode_to_vec(blob.wrapped.as_bytes())
         .map_err(|e| RekeyError::Crypto(e.to_string()))?;
     let inner_b64 = Zeroizing::new(decrypt_to_bytes(&ck, &payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
     let pt = Zeroizing::new(
-        base64_simd::STANDARD
+        crate::simd::base64::STANDARD
             .decode_to_vec(inner_b64.as_slice())
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
@@ -473,7 +473,7 @@ pub async fn open_blob<S: crate::signer::VectorSigner + ?Sized>(
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
     let pt = Zeroizing::new(
-        base64_simd::STANDARD
+        crate::simd::base64::STANDARD
             .decode_to_vec(inner_b64.as_bytes())
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
@@ -1136,7 +1136,7 @@ mod tests {
         let recipient = keys(8);
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[5u8; 32]).unwrap();
         let ck = ConversationKey::derive(recipient.secret_key(), &rotator.public_key()).unwrap();
-        let payload = base64_simd::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).unwrap();
+        let payload = crate::simd::base64::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).unwrap();
         let inner = decrypt_to_bytes(&ck, &payload).unwrap();
         assert_eq!(String::from_utf8(inner).unwrap(), bound_plaintext_b64(RekeyScope::Root, Epoch(1), &[5u8; 32]));
     }

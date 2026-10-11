@@ -106,7 +106,7 @@ pub async fn invoke_bytes(cmd: String, bytes: Vec<u8>, headers: String) -> Resul
     let header = |k: &str| headers.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     match cmd.as_str() {
         "cache_file_bytes" => {
-            let name = base64_simd::STANDARD
+            let name = vector_core::simd::base64::STANDARD
                 .decode_to_vec(header("file-name"))
                 .ok()
                 .and_then(|b| String::from_utf8(b).ok())

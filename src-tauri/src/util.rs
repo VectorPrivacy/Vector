@@ -18,7 +18,7 @@ pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
     result.push_str("data:");
     result.push_str(mime);
     result.push_str(";base64,");
-    base64_simd::STANDARD.encode_append(bytes, &mut result);
+    vector_core::simd::base64::STANDARD.encode_append(bytes, &mut result);
     result
 }
 

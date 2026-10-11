@@ -1085,7 +1085,7 @@ mod tests {
         let owner = Keys::generate();
         let cid = CommunityId([0x42u8; 32]);
         // ~10 KB of key material — a realistic large community.
-        let m = Some(base64_simd::STANDARD.encode_to_string(vec![0xabu8; 7_500]));
+        let m = Some(crate::simd::base64::STANDARD.encode_to_string(vec![0xabu8; 7_500]));
         let content = build_migration_content(&signpost(), m).unwrap();
         let inner = roster::build_group_dissolved_edition_with_content(&owner, &cid, 1_753_000_000, &content).unwrap();
 

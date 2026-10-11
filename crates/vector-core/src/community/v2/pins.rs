@@ -344,7 +344,7 @@ pub fn serialize_sealed_pin_list(
     let inner = serde_json::to_string(&PlainForm { entries: entries.to_vec() })
         .map_err(|e| e.to_string())?;
     let sealed_raw = crate::community::cipher::encrypt_with_random_nonce(conv_key, inner.as_bytes())?;
-    let sealed = base64_simd::STANDARD.encode_to_string(&sealed_raw);
+    let sealed = crate::simd::base64::STANDARD.encode_to_string(&sealed_raw);
     let content = serde_json::json!({ "epoch": epoch.to_string(), "sealed": sealed }).to_string();
     assert_caps(entries.len(), &content)?;
     Ok(content)
@@ -415,7 +415,7 @@ pub fn read_pin_list(
     let Some(conv_key) = nostr_sdk::prelude::nip44::v2::ConversationKey::from_slice(&key).ok() else {
         return EMPTY();
     };
-    let Ok(raw) = base64_simd::STANDARD.decode_to_vec(sealed.as_bytes()) else {
+    let Ok(raw) = crate::simd::base64::STANDARD.decode_to_vec(sealed.as_bytes()) else {
         return EMPTY();
     };
     let Ok(inner) = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv_key, &raw) else {

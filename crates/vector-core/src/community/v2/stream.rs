@@ -254,7 +254,7 @@ pub fn seal_content(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey) -> 
         SealForm::Plaintext => Ok(json),
         SealForm::Encrypted => {
             let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
-            Ok(base64_simd::STANDARD.encode_to_string(&ct))
+            Ok(crate::simd::base64::STANDARD.encode_to_string(&ct))
         }
     }
 }
@@ -302,7 +302,7 @@ pub fn wrap_seal_with_tags(
     let ephemeral = Keys::generate();
     let mut tags = vec![Tag::public_key(ephemeral.public_key())];
     tags.extend_from_slice(extra_tags);
-    let wrap = EventBuilder::new(Kind::Custom(wrap_kind), base64_simd::STANDARD.encode_to_string(&ct))
+    let wrap = EventBuilder::new(Kind::Custom(wrap_kind), crate::simd::base64::STANDARD.encode_to_string(&ct))
         .tags(tags)
         .custom_created_at(wrap_at)
         .finalize(group.keys())
@@ -458,7 +458,7 @@ fn cap(len: usize) -> Result<(), StreamError> {
 }
 
 fn open_nip44(conv_key: &ConversationKey, content_b64: &str) -> Result<String, StreamError> {
-    let ct = base64_simd::STANDARD
+    let ct = crate::simd::base64::STANDARD
         .decode_to_vec(content_b64.as_bytes())
         .map_err(|e| StreamError::Decrypt(e.to_string()))?;
     let pt = decrypt_to_bytes(conv_key, &ct).map_err(|e| StreamError::Decrypt(e.to_string()))?;

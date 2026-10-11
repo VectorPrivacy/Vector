@@ -25,13 +25,13 @@ pub fn encrypt_with_random_nonce(
 pub fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<String, String> {
     let ck = ConversationKey::new(*key);
     let ciphertext = encrypt_with_random_nonce(&ck, plaintext)?;
-    Ok(base64_simd::STANDARD.encode_to_string(&ciphertext))
+    Ok(crate::simd::base64::STANDARD.encode_to_string(&ciphertext))
 }
 
 /// Inverse of [`seal`]: base64-decode then NIP-44-decrypt under the raw key. A
 /// wrong key or tampered payload fails the MAC and returns `Err`.
 pub fn open(key: &[u8; 32], content_b64: &str) -> Result<Vec<u8>, String> {
-    let ciphertext = base64_simd::STANDARD
+    let ciphertext = crate::simd::base64::STANDARD
         .decode_to_vec(content_b64.as_bytes())
         .map_err(|e| e.to_string())?;
     let ck = ConversationKey::new(*key);

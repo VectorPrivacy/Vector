@@ -47,12 +47,12 @@ struct Wire {
 }
 
 fn b64(bytes: &[u8]) -> Option<String> {
-    Some(base64_simd::STANDARD.encode_to_string(bytes))
+    Some(crate::simd::base64::STANDARD.encode_to_string(bytes))
 }
 
 fn unb64(field: &Option<String>) -> Result<Vec<u8>, DecodeError> {
     let text = field.as_deref().ok_or(DecodeError::Malformed)?;
-    base64_simd::STANDARD.decode_to_vec(text).map_err(|_| DecodeError::Malformed)
+    crate::simd::base64::STANDARD.decode_to_vec(text).map_err(|_| DecodeError::Malformed)
 }
 
 impl Msg {

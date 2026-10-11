@@ -20,7 +20,8 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
-base64-simd = "0.8"
+# Already in the tree through nostr; its strictness matches the rest of Vector's base64.
+base64 = "0.22"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

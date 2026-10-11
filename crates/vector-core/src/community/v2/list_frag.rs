@@ -106,7 +106,7 @@ pub struct FragTombstone {
 /// KEYS, and an unknown field from a peer may hold anything at all.
 fn b64(value: &str) -> String {
     match crate::simd::hex::hex_to_bytes_32_checked(value) {
-        Some(bytes) => base64_simd::URL_SAFE_NO_PAD.encode_to_string(bytes),
+        Some(bytes) => crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(bytes),
         None => value.to_string(),
     }
 }
@@ -145,7 +145,7 @@ fn unb64(value: &str) -> String {
     if value.len() != 43 {
         return value.to_string();
     }
-    match base64_simd::URL_SAFE_NO_PAD.decode_to_vec(value) {
+    match crate::simd::base64::URL_SAFE_NO_PAD.decode_to_vec(value) {
         Ok(bytes) if bytes.len() == 32 => {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);

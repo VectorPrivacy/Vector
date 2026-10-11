@@ -698,10 +698,10 @@ mod tests {
             seal_message(&author, &key(), &chan(), Epoch(0), "integrity", 1).unwrap();
         // Rebuild an outer event with a corrupted content (events are immutable, so
         // re-sign a mutated copy with a fresh ephemeral key).
-        let mut bytes = base64_simd::STANDARD.decode_to_vec(outer.content.as_bytes()).unwrap();
+        let mut bytes = crate::simd::base64::STANDARD.decode_to_vec(outer.content.as_bytes()).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
-        let corrupted = base64_simd::STANDARD.encode_to_string(&bytes);
+        let corrupted = crate::simd::base64::STANDARD.encode_to_string(&bytes);
         let ephemeral = Keys::generate();
         outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), corrupted)
             .tags([
@@ -868,9 +868,9 @@ mod tests {
         // Distinct from the bit-flip test: chop bytes off the payload → length/MAC fail.
         let author = Keys::generate();
         let outer = seal_message(&author, &key(), &chan(), Epoch(0), "intact", 1).unwrap();
-        let mut bytes = base64_simd::STANDARD.decode_to_vec(outer.content.as_bytes()).unwrap();
+        let mut bytes = crate::simd::base64::STANDARD.decode_to_vec(outer.content.as_bytes()).unwrap();
         bytes.truncate(bytes.len().saturating_sub(5));
-        let truncated = base64_simd::STANDARD.encode_to_string(&bytes);
+        let truncated = crate::simd::base64::STANDARD.encode_to_string(&bytes);
         let mangled = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), truncated)
             .tags([
                 Tag::custom(

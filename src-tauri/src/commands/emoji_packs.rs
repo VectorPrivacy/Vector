@@ -261,7 +261,7 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
     vector_core::db::scoped(async move {
         // JSON base64 in: an async command doesn't reliably receive a raw ipc::Request
         // body on Android's WebView (only sync commands do), so bytes ride a base64 arg.
-        let bytes = base64_simd::STANDARD
+        let bytes = vector_core::simd::base64::STANDARD
             .decode_to_vec(&bytes_b64)
             .map_err(|e| format!("bytes base64: {}", e))?;
 
@@ -1102,7 +1102,7 @@ pub async fn emoji_crop_and_reencode(
     // Fully-JSON (base64) IPC: Android's WebView is unreliable with raw request
     // bodies for this command and drops raw responses outright, so base64 in +
     // base64 out is the JSON path that works on every platform.
-    let bytes = base64_simd::STANDARD
+    let bytes = vector_core::simd::base64::STANDARD
         .decode_to_vec(&source_b64)
         .map_err(|e| format!("source base64: {}", e))?;
     let input = EmojiCropInput { mime, x, y, w, h, bytes };
@@ -1121,7 +1121,7 @@ pub async fn emoji_crop_and_reencode(
     let out = tokio::task::spawn_blocking(move || crop_and_reencode_blocking(input, Some(MAX_EMOJI_BYTES)))
         .await
         .map_err(|e| format!("crop join: {}", e))??;
-    Ok(base64_simd::STANDARD.encode_to_string(&out))
+    Ok(vector_core::simd::base64::STANDARD.encode_to_string(&out))
 }
 
 /// Import an image (a content URI on Android or a file path on desktop) for the
@@ -1141,7 +1141,7 @@ pub fn import_image_for_emoji(source: String) -> Result<String, String> {
         vector_core::crypto::mime_from_magic_bytes(&bytes),
         "image/png" | "image/jpeg" | "image/gif" | "image/webp"
     ) {
-        return Ok(base64_simd::STANDARD.encode_to_string(&bytes));
+        return Ok(vector_core::simd::base64::STANDARD.encode_to_string(&bytes));
     }
 
     // Anything else the image crate decodes (TIFF/BMP/ICO): normalize to PNG.
@@ -1155,7 +1155,7 @@ pub fn import_image_for_emoji(source: String) -> Result<String, String> {
     let mut png = Vec::new();
     img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("png encode: {}", e))?;
-    Ok(base64_simd::STANDARD.encode_to_string(&png))
+    Ok(vector_core::simd::base64::STANDARD.encode_to_string(&png))
 }
 
 fn read_emoji_image_source(source: &str) -> Result<Vec<u8>, String> {

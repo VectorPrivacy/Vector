@@ -104,7 +104,6 @@ fast-thumbhash = "0.2"
 # std::time on native; the browser clock on wasm32, where std's panics.
 web-time = "1"
 rand = "0.8"
-base64-simd = "0.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # SVG to pixels in Rust, so untrusted SVG markup never reaches a webview (see `svg.rs`). No
 # SVGZ (a decompression bomb), no GIF/WebP decoders for embedded images, no text (an SVG with any is refused).
@@ -177,8 +176,9 @@ i2p = ["twin-check"]
 twin-check = ["dep:tokio-rustls"]
 
 [dev-dependencies]
-# Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.
+# Reference oracles for the differential tests of crypto::chachapoly, crypto::gcm and simd::base64.
 aes-gcm = "0.11"
+base64 = "0.22"
 chacha20poly1305 = "0.10.1"
 # Independent FIPS 203 implementation the transfer's ML-KEM is differentially tested against.
 ml-kem = { version = "0.2", features = ["deterministic"] }

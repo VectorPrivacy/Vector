@@ -294,7 +294,7 @@ pub fn thumbhash_data_url(thumbhash: &str) -> Option<String> {
     let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
     let mut png = Vec::new();
     DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
-    Some(format!("data:image/png;base64,{}", base64_simd::STANDARD.encode_to_string(&png)))
+    Some(format!("data:image/png;base64,{}", vector_core::simd::base64::STANDARD.encode_to_string(&png)))
 }
 
 /// Whether a picked image carries metadata worth offering to strip.

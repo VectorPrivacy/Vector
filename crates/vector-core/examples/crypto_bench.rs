@@ -435,7 +435,7 @@ async fn main() {
         black_box(nostr_sdk::prelude::nip44::v2::ConversationKey::derive(me.secret_key(), &wrap.pubkey).unwrap());
     });
     let ck = nostr_sdk::prelude::nip44::v2::ConversationKey::derive(me.secret_key(), &wrap.pubkey).unwrap();
-    let payload = base64_simd::STANDARD.decode_to_vec(wrap.content.as_bytes()).unwrap();
+    let payload = vector_core::simd::base64::STANDARD.decode_to_vec(wrap.content.as_bytes()).unwrap();
     bench("nip44 v2 decrypt_to_bytes (given conv key)", 20000, || {
         black_box(nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&ck, &payload).unwrap());
     });

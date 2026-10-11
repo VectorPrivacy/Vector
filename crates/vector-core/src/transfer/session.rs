@@ -293,9 +293,9 @@ impl Session {
     }
 
     fn hello(&self) -> Zeroizing<Vec<u8>> {
-        let kem = (!self.my_kem_public.is_empty()).then(|| base64_simd::STANDARD.encode_to_string(&self.my_kem_public));
+        let kem = (!self.my_kem_public.is_empty()).then(|| crate::simd::base64::STANDARD.encode_to_string(&self.my_kem_public));
         let (name, avatar) = match self.role {
-            Role::Sender => (self.face_name.clone(), self.face_avatar.as_ref().map(|a| base64_simd::STANDARD.encode_to_string(a))),
+            Role::Sender => (self.face_name.clone(), self.face_avatar.as_ref().map(|a| crate::simd::base64::STANDARD.encode_to_string(a))),
             Role::Receiver => (None, None),
         };
         let hello = Hello { role: self.role, npub: self.identity.and_then(|pk| pk.to_bech32().ok()), kem, name, avatar };
@@ -322,10 +322,10 @@ impl Session {
             self.face_name = hello.name.map(|n| n.chars().take(64).collect());
             self.face_avatar = hello
                 .avatar
-                .and_then(|a| base64_simd::STANDARD.decode_to_vec(a).ok())
+                .and_then(|a| crate::simd::base64::STANDARD.decode_to_vec(a).ok())
                 .filter(|a| a.len() <= super::avatar::MAX_BYTES);
         } else {
-            let kem = hello.kem.as_deref().and_then(|k| base64_simd::STANDARD.decode_to_vec(k).ok());
+            let kem = hello.kem.as_deref().and_then(|k| crate::simd::base64::STANDARD.decode_to_vec(k).ok());
             match kem.filter(|k| kem_public_ok(k)) {
                 Some(k) => self.peer_kem_public = k,
                 None => return Err(self.fail_loudly(Failure::Protocol("receiver without a post-quantum key"), "protocol")),

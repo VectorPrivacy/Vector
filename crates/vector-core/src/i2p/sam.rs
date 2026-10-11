@@ -385,7 +385,7 @@ async fn own_address(s: &mut TcpStream) -> Option<String> {
 pub fn b32_of(destination: &str) -> Option<String> {
     use sha2::Digest;
     let standard: String = destination.chars().map(|c| match c { '-' => '+', '~' => '/', c => c }).collect();
-    let bytes = base64_simd::STANDARD.decode_to_vec(standard.as_bytes()).ok()?;
+    let bytes = crate::simd::base64::STANDARD.decode_to_vec(standard.as_bytes()).ok()?;
     // 256-byte encryption key, 128-byte signing key, 3-byte certificate header.
     if bytes.len() < 387 {
         return None;

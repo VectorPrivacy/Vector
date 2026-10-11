@@ -85,7 +85,7 @@ fn decode_payload(payload: &str) -> Option<Payload> {
     if payload.len() < 132 || payload.starts_with('#') {
         return None;
     }
-    let data = base64_simd::STANDARD.decode_to_vec(payload.as_bytes()).ok()?;
+    let data = crate::simd::base64::STANDARD.decode_to_vec(payload.as_bytes()).ok()?;
     if data.len() < 99 || data[0] != 2 {
         return None;
     }
@@ -212,11 +212,11 @@ mod tests {
     fn tampered_payload_fails_the_mac() {
         let (bytes, ck) = conv_key();
         let raw = v2::encrypt_to_bytes_with_nonce(&ck, b"pin me", rand_nonce()).unwrap();
-        let keys = disclose_keys_for(&base64_simd::STANDARD.encode_to_string(&raw), &bytes).unwrap();
+        let keys = disclose_keys_for(&crate::simd::base64::STANDARD.encode_to_string(&raw), &bytes).unwrap();
         // Flip one ciphertext bit and re-encode.
         let mut bad = raw.clone();
         bad[40] ^= 1;
-        assert!(decrypt_with_disclosed_keys(&base64_simd::STANDARD.encode_to_string(&bad), &keys).is_none());
+        assert!(decrypt_with_disclosed_keys(&crate::simd::base64::STANDARD.encode_to_string(&bad), &keys).is_none());
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
         // Valid base64, right length, wrong version byte.
         let mut fake = vec![1u8; 100];
         fake[0] = 1;
-        assert!(decrypt_with_disclosed_keys(&base64_simd::STANDARD.encode_to_string(&fake), &keys).is_none());
+        assert!(decrypt_with_disclosed_keys(&crate::simd::base64::STANDARD.encode_to_string(&fake), &keys).is_none());
     }
 
     /// Padding edges: exactly-32, the 32/33 chunk boundary, and a large body.
@@ -276,6 +276,6 @@ mod tests {
     // path must open.
     fn nostr_encrypt(ck: &ConversationKey, msg: &[u8]) -> String {
         let raw = v2::encrypt_to_bytes_with_nonce(ck, msg, rand_nonce()).expect("encrypt");
-        base64_simd::STANDARD.encode_to_string(&raw)
+        crate::simd::base64::STANDARD.encode_to_string(&raw)
     }
 }

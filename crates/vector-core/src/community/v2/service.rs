@@ -7268,7 +7268,7 @@ async fn adopt_my_control_wrap(community: &CommunityV2, editions: &[ParsedEditio
         // The granter is the edition's sealed author — the pairwise key's other
         // half (one ECDH either side can compute; bunker accounts included).
         let Ok(plain_b64) = signer.nip44_decrypt_async(&ed.author, &wrap_b64).await else { continue };
-        let Ok(plain) = base64_simd::STANDARD.decode_to_vec(plain_b64.as_bytes()) else { continue };
+        let Ok(plain) = crate::simd::base64::STANDARD.decode_to_vec(plain_b64.as_bytes()) else { continue };
         let Ok((epoch, root)) = super::rekey::parse_control_wrap(&plain) else { continue };
         if epoch != community.root_epoch {
             continue;
@@ -11353,7 +11353,7 @@ mod tests {
         let control_wrap = community.control_root.filter(|_| community.control_pk.is_some()).map(|cr| {
             let ck = nostr_sdk::prelude::nip44::v2::ConversationKey::derive(signer.secret_key(), member).unwrap();
             let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, super::rekey::control_wrap_b64(community.root_epoch, &cr).as_bytes()).unwrap();
-            base64_simd::STANDARD.encode_to_string(&payload)
+            crate::simd::base64::STANDARD.encode_to_string(&payload)
         });
         let content = crate::community::v2::roles::grant_content_json_with_wrap(&grant, control_wrap).unwrap();
         let cite = cite_on_relay(relay, community, signer).await;
@@ -12206,7 +12206,7 @@ mod tests {
         let wrap_for = |epoch: Epoch, secret: &[u8; 32]| {
             let ck = nostr_sdk::prelude::nip44::v2::ConversationKey::derive(owner.keys.secret_key(), &member.keys.public_key()).unwrap();
             let ct = crate::community::cipher::encrypt_with_random_nonce(&ck, super::rekey::control_wrap_b64(epoch, secret).as_bytes()).unwrap();
-            base64_simd::STANDARD.encode_to_string(&ct)
+            crate::simd::base64::STANDARD.encode_to_string(&ct)
         };
         let eid = crate::community::v2::derive::grant_locator(community.id(), &member.keys.public_key().to_bytes());
         let ed_with = |wrap: String| {

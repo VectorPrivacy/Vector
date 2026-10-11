@@ -60,6 +60,6 @@ pub fn header(request: &tauri::ipc::Request<'_>, name: &str) -> Option<String> {
 /// that may carry non-ASCII (e.g. a filename) is base64'd by the caller.
 pub fn header_b64(request: &tauri::ipc::Request<'_>, name: &str) -> Option<String> {
     let raw = header(request, name)?;
-    let bytes = base64_simd::STANDARD.decode_to_vec(raw).ok()?;
+    let bytes = vector_core::simd::base64::STANDARD.decode_to_vec(raw).ok()?;
     String::from_utf8(bytes).ok()
 }

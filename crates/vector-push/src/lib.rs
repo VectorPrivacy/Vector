@@ -52,13 +52,12 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn b64url(bytes: &[u8]) -> String {
-    base64_simd::URL_SAFE_NO_PAD.encode_to_string(bytes)
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }
 
 /// Lenient on padding: browsers hand out keys with and without it.
 pub(crate) fn unb64url(s: &str) -> Result<Vec<u8>> {
-    base64_simd::URL_SAFE_NO_PAD
-        .decode_to_vec(s.trim_end_matches('='))
+    base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, s.trim_end_matches('='))
         .map_err(|_| Error::Format("bad base64url".into()))
 }
 
