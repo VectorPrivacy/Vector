@@ -1133,21 +1133,6 @@ pub fn encode_rgba_auto(pixels: &[u8], width: u32, height: u32, jpeg_quality: u8
     }
 }
 
-/// Map a file extension to the `little_exif` reader for that container. Covers
-/// the EXIF-bearing formats Android/desktop actually send (JPEG, TIFF, WebP,
-/// PNG); GIF/ICO and unknowns return None (no EXIF to read).
-fn little_exif_filetype(extension: &str) -> Option<little_exif::filetype::FileExtension> {
-    use little_exif::filetype::FileExtension;
-    match extension.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => Some(FileExtension::JPEG),
-        "tiff" | "tif" => Some(FileExtension::TIFF),
-        "webp" => Some(FileExtension::WEBP),
-        "png" => Some(FileExtension::PNG { as_zTXt_chunk: false }),
-        _ => None,
-    }
-}
-
-
 /// Whether a JPEG segment is structure a decoder needs rather than metadata: every
 /// non-APPn segment, JFIF without a thumbnail, the ICC profile and the Adobe
 /// transform. `head` need only be the payload's first 14 bytes.
@@ -1285,17 +1270,10 @@ fn png_has_metadata<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<bool>
 /// Screenshots, memes, and our own re-encoded sends have none, so the "Keep
 /// Metadata" affordance can be hidden for them.
 pub fn image_bytes_have_metadata(bytes: &[u8], extension: &str) -> bool {
-    use little_exif::metadata::Metadata;
-    use little_exif::exif_tag::ExifTag;
-
     if matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png") {
         return header_has_metadata(&mut std::io::Cursor::new(bytes), extension).unwrap_or(false);
     }
-    let Some(filetype) = little_exif_filetype(extension) else { return false; };
-    match Metadata::new_from_vec(&bytes.to_vec(), filetype) {
-        Ok(md) => (&md).into_iter().any(|tag| !matches!(tag, ExifTag::Orientation(_))),
-        Err(_) => false,
-    }
+    super::exif::exif_block(bytes, extension).is_some_and(|tiff| exif_beyond_orientation(&tiff))
 }
 
 /// Losslessly strip an image's metadata while keeping its Orientation.
@@ -1586,29 +1564,18 @@ fn strip_png_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
 ///
 /// The original is read as `original_extension`'s container (JPEG/TIFF/WebP/PNG),
 /// so an Android TIFF or WebP photo keeps its GPS/camera tags through a compress.
+/// What described the original's pixels (strips, dimensions, thumbnail, MakerNote)
+/// is left behind; see [`super::exif::rebuild`].
 ///
 /// Best-effort: returns `compressed_jpeg` unchanged if the original carries no
-/// readable EXIF or the write fails. Only meaningful for JPEG output — callers
+/// readable EXIF or the rebuild fails. Only meaningful for JPEG output — callers
 /// should gate on the encoded extension.
 pub fn reattach_exif_jpeg(compressed_jpeg: Vec<u8>, original: &[u8], original_extension: &str) -> Vec<u8> {
-    use little_exif::metadata::Metadata;
-    use little_exif::exif_tag::ExifTag;
-    use little_exif::filetype::FileExtension;
-
-    let Some(src_filetype) = little_exif_filetype(original_extension) else { return compressed_jpeg; };
-    let original_vec = original.to_vec();
-    let mut md = match Metadata::new_from_vec(&original_vec, src_filetype) {
-        Ok(m) => m,
-        Err(_) => return compressed_jpeg,
-    };
-    md.set_tag(ExifTag::Orientation(vec![1u16]));
-
-    // Write into a clone so a mid-write failure can't hand back a corrupt image.
-    let mut out = compressed_jpeg.clone();
-    match md.write_to_vec(&mut out, FileExtension::JPEG) {
-        Ok(()) => out,
-        Err(_) => compressed_jpeg,
-    }
+    use super::exif;
+    exif::exif_block(original, original_extension)
+        .and_then(|tiff| exif::rebuild(&tiff, 1))
+        .and_then(|block| exif::insert_into_jpeg(&compressed_jpeg, &block))
+        .unwrap_or(compressed_jpeg)
 }
 
 /// Calculate target dimensions to fit within max_dimension while preserving aspect ratio.

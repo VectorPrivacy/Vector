@@ -115,8 +115,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.fast-thumbhash]
 opt-level = 3
-[profile.dev.package.little_exif]
-opt-level = 3
 # The audio stack: unoptimized, a song's decode (and so its waveform) takes ~80x longer.
 [profile.dev.package.symphonia]
 opt-level = 3
@@ -206,7 +204,6 @@ fast_image_resize = "5.5"
 # Checksums for PNG output (deflate is flate2 below).
 crc32fast = "1.5"
 simd-adler32 = "0.3"
-little_exif = "0.6.23"
 # libwebp bindings — `image-webp` 0.2.x mishandles ANIM disposal/blend
 # composition (transparent frames flicker as previous-frame residue).
 # libwebp is the reference decoder and produces fully-composed RGBA.

@@ -12,6 +12,7 @@ pub mod animated_webp;
 pub mod cancel;
 #[allow(dead_code)]
 pub mod error;
+pub mod exif;
 #[allow(dead_code)]
 pub mod image;
 pub mod ipc;
