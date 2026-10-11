@@ -22,6 +22,9 @@
     function into(node, fill) {
         fill(node);
     }
+    function expires(_node, at) {
+        h.armExpiry(at);
+    }
     function packPreviews(node, text) {
         h.renderEmojiPackPreviews(node, text);
         return { destroy: () => h.destroyEmojiPackPreviews(node) };
@@ -92,7 +95,7 @@
     {#if msg.expiration}
         <!-- Inline SVG, not an .icon: .icon is absolutely inset and would escape this span. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <span class="dmsg-selfdestruct" data-expiration={String(msg.expiration)}
+        <span class="dmsg-selfdestruct" data-expiration={String(msg.expiration)} use:expires={msg.expiration}
               onmouseenter={h.isAndroid() ? null : (e) => h.selfDestructTooltip(e.currentTarget)}
               onmouseleave={h.isAndroid() ? null : () => h.selfDestructTooltipEnd()}>
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>

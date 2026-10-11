@@ -193,6 +193,7 @@ const _dmsgLookups = {
  *   fmtCountdown: (secs: number) => string,
  *   selfDestructTooltip: (el: Element) => void,
  *   selfDestructTooltipEnd: () => void,
+ *   armExpiry: (at: number) => void,
  * }} ContentHelpers
  */
 const _dmsgContentHelpers = {
@@ -225,6 +226,7 @@ const _dmsgContentHelpers = {
     fmtCountdown: (secs) => _fmtCountdown(secs),
     selfDestructTooltip: (el) => _selfDestructTooltip(el),
     selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
+    armExpiry: (at) => armExpiry(at),
 };
 
 /**

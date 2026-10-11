@@ -128,14 +128,33 @@ function derezMessageLocally(id, chatId) {
     scheduleUnreadRefresh();
 }
 
-// Derez expired messages in the OPEN chat on the second (the rows' countdowns tick on
-// the store's clock). Off-screen and closed-chat expiries fall to the backend sweep.
-setInterval(() => {
+// Derez expired messages in the OPEN chat when the soonest comes due: rendered rows arm it,
+// so an app with nothing expiring on screen never wakes. Closed chats fall to the backend sweep.
+let _expiryTimer = null;
+let _expiryAt = Infinity;
+function armExpiry(at) {
+    if (!(at < _expiryAt)) return;
+    clearTimeout(_expiryTimer);
+    _expiryAt = at;
+    // setTimeout fires at once past 2^31-1 ms; a far expiry re-arms on the way.
+    _expiryTimer = setTimeout(_derezExpired, Math.min(Math.max(0, at * 1000 - Date.now()), 0x7fffffff));
+}
+function _derezExpired() {
+    _expiryTimer = null;
+    _expiryAt = Infinity;
     const chat = strOpenChat ? getChat(strOpenChat) : null;
     if (!chat?.messages?.length) return;
     const now = Math.floor(Date.now() / 1000);
-    for (const m of chat.messages.filter(m => m.expiration && m.expiration <= now)) derezMessageLocally(m.id, chat.id);
-}, 1000);
+    let expired = null;
+    let next = Infinity;
+    for (const m of chat.messages) {
+        if (!m.expiration) continue;
+        if (m.expiration <= now) (expired ??= []).push(m.id);
+        else if (m.expiration < next) next = m.expiration;
+    }
+    if (expired) for (const id of expired) derezMessageLocally(id, chat.id);
+    if (next !== Infinity) armExpiry(next);
+}
 
 /** DMs and Concord v2 community channels support the Self-Destruct Timer
  *  (sender-controlled NIP-40 TTL). A v1 community's send path ignores the tag,

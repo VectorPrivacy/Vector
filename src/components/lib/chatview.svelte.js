@@ -5,7 +5,7 @@
 // The window is anchored by message IDS, like the engine's own anchors: the array
 // mutates underneath (prepends, mid-inserts), and ids survive that where indices do
 // not. `rev` says "the slice's contents changed in place" (an edit, a splice).
-import { SvelteMap } from 'svelte/reactivity';
+import { SvelteMap, createSubscriber } from 'svelte/reactivity';
 
 const win = $state({ chatId: null, topId: null, bottomId: null, seq: 0 });
 const divider = $state({ targetId: null, after: false });
@@ -72,10 +72,14 @@ export function arrivalState() { return arrival; }
 export function setArrival(id) { arrival.id = id || null; }
 
 // A once-a-second clock for the countdowns: a row reading it re-derives on the tick. It
-// starts on the first read, so an app with no countdown on screen never wakes for it.
+// runs only while a countdown is on screen.
 const clock = $state({ sec: Math.floor(Date.now() / 1000) });
-let clockTimer = null;
+const clockSubscribe = createSubscriber(() => {
+    clock.sec = Math.floor(Date.now() / 1000);
+    const timer = setInterval(() => { clock.sec = Math.floor(Date.now() / 1000); }, 1000);
+    return () => clearInterval(timer);
+});
 export function clockSec() {
-    if (!clockTimer) clockTimer = setInterval(() => { clock.sec = Math.floor(Date.now() / 1000); }, 1000);
+    clockSubscribe();
     return clock.sec;
 }
