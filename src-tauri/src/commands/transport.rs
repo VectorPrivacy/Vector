@@ -1199,7 +1199,8 @@ pub(crate) mod tests {
         let e = set_alias("wss://Relay.Example.com/".into(), "i2p".into(), Some(format!(" {b32} "))).await.unwrap().unwrap();
         assert_eq!(e.host, "relay.example.com");
         assert_eq!(e.twins.get(&Kind::I2p).map(String::as_str), Some(b32));
-        assert_eq!(transport_get_aliases(), vec![e]);
+        let mine = || transport_get_aliases().into_iter().filter(|a| a.source != AliasSource::BuiltIn).collect::<Vec<_>>();
+        assert_eq!(mine(), vec![e]);
         assert_eq!(set_alias("relay.example.com".into(), "i2p".into(), Some("not-i2p.com".into())).await.unwrap_err(), "Enter a .b32.i2p address.");
         assert_eq!(set_alias("relay.example.com".into(), "nym".into(), None).await.unwrap_err(), "Unknown network: nym");
         let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
@@ -1208,12 +1209,12 @@ pub(crate) mod tests {
         assert_eq!(set_alias("relay.example.com".into(), "tor".into(), Some("short.onion".into())).await.unwrap_err(), "Enter a .onion address.");
         assert_eq!(set_alias("relay.example.com".into(), "tor".into(), Some(b32.into())).await.unwrap_err(), "Enter a .onion address.");
         assert_eq!(set_alias("relay.example.com".into(), "tor".into(), None).await.unwrap(), None);
-        let kept = transport_get_aliases();
+        let kept = mine();
         assert_eq!((kept.len(), kept[0].twins.get(&Kind::I2p).map(String::as_str), kept[0].twins.get(&Kind::Tor)), (1, Some(b32), None), "the I2P twin stays");
         assert_eq!(check_alias("relay.example.com".into()).await.unwrap_err(), "Use Tor or I2P to check this address.");
         assert_eq!(find_alias("wss://stranger.example".into()).await.unwrap_err(), "Vector looks these up only for your own relays.");
         assert_eq!(set_alias("relay.example.com".into(), "i2p".into(), Some(String::new())).await.unwrap(), None, "an empty address removes it");
-        assert!(transport_get_aliases().is_empty());
+        assert!(mine().is_empty());
 
         let routes = transport_get_routes(vec!["wss://nos.lol".into(), format!("ws://{b32}"), "https://x.onion/".into()]);
         let classes: Vec<&str> = routes.iter().map(|r| r.class.as_str()).collect();

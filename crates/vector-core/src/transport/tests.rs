@@ -34,6 +34,7 @@ fn reset() {
     prelogin::disarm();
     realtime::allow_always(false);
     prefs::live().set_config_value(Kind::I2p, Arc::new(i2p_config::I2pConfig::default()));
+    aliases::built_ins_for_test(false);
     prefs::live().set_aliases(Arc::new(aliases::AliasTable::default()));
     budget::clear_overrides_for_test();
 }
@@ -324,6 +325,17 @@ fn privacy_addresses_pick_the_network_in_use() {
     assert_eq!(twins::first_privacy_address(&doc, Kind::Tor), Some(onion));
     assert_eq!(twins::first_privacy_address(&doc, Kind::I2p), Some(B32.to_string()));
     assert_eq!(twins::first_privacy_address(&doc, Kind::Clearnet), None);
+}
+
+#[cfg(all(feature = "twin-check", not(target_arch = "wasm32")))]
+#[test]
+fn nip11_lives_at_the_relay_url() {
+    assert_eq!(twins::nip11_url("wss://jskitty.com/nostr"), Ok("https://jskitty.com/nostr".into()), "not the site at /");
+    assert_eq!(twins::nip11_url(" wss://relay.example.com "), Ok("https://relay.example.com/".into()));
+    assert_eq!(twins::nip11_url(&format!("ws://{B32}/nostr")), Ok(format!("http://{B32}/nostr")));
+    assert_eq!(twins::nip11_url("wss://relay.example.com:8443/a?b=1#c"), Ok("https://relay.example.com:8443/a?b=1".into()));
+    assert!(twins::nip11_url("ftp://relay.example.com").is_err());
+    assert!(twins::nip11_url("jskitty.com").is_err());
 }
 
 // ── Egress ───────────────────────────────────────────────────────────────────
@@ -1532,9 +1544,60 @@ fn concurrent_alias_writes_all_land() {
     checker.join().unwrap();
     let live = aliases::table();
     let stored = prefs::read_stored(&crate::db::get_db_connection_guard_static().unwrap()).aliases;
-    assert_eq!(live.entries().len(), 121, "every edit is in the live table");
-    assert_eq!(stored.len(), 121, "and in the saved row");
+    let users = |v: Vec<aliases::AliasEntry>| v.into_iter().filter(|e| e.source != aliases::AliasSource::BuiltIn).count();
+    assert_eq!(users(live.entries()), 121, "every edit is in the live table");
+    assert_eq!(users(stored), 121, "and in the saved row");
     assert_eq!(live.get("checked.example.com").map(|e| e.check.state), Some(aliases::CheckState::Unchecked), "the last check holds");
+    crate::db::close_database();
+}
+
+/// Vector's own relay has its twins with no setup. They are never saved; the user's own entry
+/// replaces them, and removing them sticks.
+#[test]
+fn built_in_twins() {
+    let _s = scene();
+    aliases::built_ins_for_test(true);
+    crate::db::close_database();
+    let acct = test_account();
+    crate::db::init_database(&acct).unwrap();
+    let saved = || crate::db::get_sql_setting(prefs::KEY_ALIASES.to_string()).unwrap();
+    let onion = "jskittynoz22rnwlzyg2akvixkyqp243dd4iq7rs2imry5d6imv4uoyd.onion";
+    let b32 = "nk7ghqbv2nwrleccnq5yz5nsvbkkufhwvcya5gqskxv37bnbfaea.b32.i2p";
+    for (_, kind, addr) in aliases::BUILT_IN {
+        assert_eq!(aliases::validate_twin(*kind, addr).as_deref(), Ok(*addr));
+    }
+
+    let t = aliases::table();
+    assert_eq!(t.twin("jskitty.com", Kind::Tor), Some(onion));
+    assert_eq!(t.twin("jskitty.com", Kind::I2p), Some(b32));
+    assert_eq!(t.get("jskitty.com").unwrap().source, aliases::AliasSource::BuiltIn);
+    let only: KindConfig = Arc::new(i2p_config::I2pConfig { exit: ExitPolicy::Off, ..Default::default() });
+    let d = Dest::parse("jskitty.com").unwrap();
+    let ctx = RouteCtx { aliases: &t, config: &only };
+    assert_eq!(route::route_tor(&d, 443, &ctx), Route::Twin { host: "jskitty.com".into(), via: onion.into(), port: 443 });
+    assert_eq!(route::route_i2p(&d, 443, &ctx), Route::Twin { host: "jskitty.com".into(), via: b32.into(), port: 443 }, "I2P-Only too");
+    assert!(aliases::AliasTable::default().twin("jskitty.com", Kind::Tor).is_some(), "before any account loads");
+
+    // A check is held for the session, never saved.
+    aliases::record_check("jskitty.com", aliases::AliasCheck { state: aliases::CheckState::Failed, at: None, text: None }).unwrap();
+    assert_eq!(aliases::table().twin("jskitty.com", Kind::Tor), None, "never a failed twin");
+    assert!(!saved().unwrap_or_default().contains("jskitty.com"));
+    assert_eq!(aliases::AliasTable::parse(saved().as_deref()).twin("jskitty.com", Kind::Tor), Some(onion), "checked again next start");
+
+    // Changing one makes the entry the user's, the other twin with it.
+    aliases::set("jskitty.com", Kind::I2p, Some(B32), aliases::AliasSource::User).unwrap();
+    let mine = aliases::AliasTable::parse(saved().as_deref());
+    assert_eq!(mine.twin("jskitty.com", Kind::I2p), Some(B32));
+    assert_eq!(mine.twin("jskitty.com", Kind::Tor), Some(onion));
+    assert_eq!(mine.get("jskitty.com").unwrap().source, aliases::AliasSource::User);
+
+    // Removing both leaves an empty entry that keeps them off.
+    aliases::set("jskitty.com", Kind::I2p, None, aliases::AliasSource::User).unwrap();
+    aliases::set("jskitty.com", Kind::Tor, None, aliases::AliasSource::User).unwrap();
+    let off = aliases::AliasTable::parse(saved().as_deref());
+    assert_eq!(off.twin("jskitty.com", Kind::Tor), None);
+    assert_eq!(off.twin("jskitty.com", Kind::I2p), None);
+    assert_eq!(aliases::table().twin("jskitty.com", Kind::Tor), None);
     crate::db::close_database();
 }
 

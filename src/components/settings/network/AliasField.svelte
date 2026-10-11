@@ -26,6 +26,7 @@
     const offered = $derived(!!target && !!t.view?.supported?.includes(kind) && !target.host.endsWith(net.suffix));
     const entry = $derived(target ? t.aliases.find((a) => a.host === target.host) || null : null);
     const saved = $derived(entry?.twins?.[kind] || '');
+    const builtIn = $derived(entry?.source === 'builtin');
     // Checks and lookups run through that network only, so they wait until it is connected. A
     // lookup asks the relay itself over clearnet, which I2P-Only rules out.
     const ready = $derived(t.view?.kind === kind && !!t.view.ready);
@@ -72,9 +73,10 @@
         }
         if (!saved) return null;
         const c = entry.check || {};
-        if (c.state === 'ok') return { text: c.text || `Checked. It serves ${target.host}.`, tone: 'ok' };
+        const lead = builtIn ? 'Built into Vector. ' : '';
+        if (c.state === 'ok') return { text: lead + (c.text || `Checked. It serves ${target.host}.`), tone: 'ok' };
         if (c.state === 'failed') return { text: c.text || `This address doesn't serve ${target.host}. Vector won't use it.`, tone: 'error' };
-        return { text: c.text || `Not checked yet. Vector checks it when ${net.label} connects.`, tone: 'muted' };
+        return { text: lead + (c.text || `Not checked yet. Vector checks it when ${net.label} connects.`), tone: 'muted' };
     });
 </script>
 

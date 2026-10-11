@@ -106,7 +106,7 @@ pub async fn find_alias(url: &str) -> Result<FindAlias, String> {
         }
     }
     let noun = a.kind.address_noun();
-    match find_privacy_address(&host, a.kind).await? {
+    match find_privacy_address(url, a.kind).await? {
         None => Ok(FindAlias { found: None, check: None, text: format!("This relay doesn't list an {noun}.") }),
         Some(addr) => {
             let mut check = probe(&a, &host, &addr).await;
@@ -121,11 +121,11 @@ fn now_secs() -> u64 {
 }
 
 /// GET the relay's NIP-11 document over the account's network and return the first
-/// `privacy_addresses` entry inside `kind`.
-pub async fn find_privacy_address(host: &str, kind: Kind) -> Result<Option<String>, String> {
+/// `privacy_addresses` entry inside `kind`. A reply that isn't a NIP-11 document lists nothing.
+pub async fn find_privacy_address(relay_url: &str, kind: Kind) -> Result<Option<String>, String> {
     let client = crate::net::build_http_client(NIP11_TIMEOUT)?;
     let resp = client
-        .get(format!("https://{host}/"))
+        .get(nip11_url(relay_url)?)
         .header("Accept", "application/nostr+json")
         .send()
         .await
@@ -133,8 +133,23 @@ pub async fn find_privacy_address(host: &str, kind: Kind) -> Result<Option<Strin
     if !resp.status().is_success() {
         return Ok(None);
     }
-    let doc: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let Ok(doc) = resp.json::<serde_json::Value>().await else { return Ok(None) };
     Ok(first_privacy_address(&doc, kind))
+}
+
+/// Where a relay serves its NIP-11 document: its own URL over HTTP, path included. A relay at
+/// `wss://jskitty.com/nostr` answers there, while `https://jskitty.com/` is a website.
+pub fn nip11_url(relay_url: &str) -> Result<String, String> {
+    let bad = || "That isn't a valid server address.".to_string();
+    let mut u = url::Url::parse(relay_url.trim()).map_err(|_| bad())?;
+    let scheme = match u.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => return Err(bad()),
+    };
+    u.set_scheme(scheme).map_err(|_| bad())?;
+    u.set_fragment(None);
+    Ok(u.to_string())
 }
 
 /// The first `privacy_addresses` entry whose host is `kind`'s own address (a `.b32.i2p`, a v3

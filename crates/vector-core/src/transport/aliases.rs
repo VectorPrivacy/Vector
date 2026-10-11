@@ -13,6 +13,36 @@ pub enum AliasSource {
     #[default]
     User,
     Nip11,
+    /// From [`BUILT_IN`]. Never saved, so a change to that list reaches every install.
+    BuiltIn,
+}
+
+/// Twins of Vector's own relay, run by its operator. Each serves that host's TLS on 443 and
+/// nothing else. A user's entry for the host, even an empty one, replaces them.
+pub const BUILT_IN: &[(&str, Kind, &str)] = &[
+    ("jskitty.com", Kind::Tor, "jskittynoz22rnwlzyg2akvixkyqp243dd4iq7rs2imry5d6imv4uoyd.onion"),
+    ("jskitty.com", Kind::I2p, "nk7ghqbv2nwrleccnq5yz5nsvbkkufhwvcya5gqskxv37bnbfaea.b32.i2p"),
+];
+
+#[cfg(test)]
+static BUILT_INS_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Off in the transport tests, whose mock networks would otherwise see the built-ins' checks.
+#[cfg(test)]
+pub(crate) fn built_ins_for_test(on: bool) {
+    BUILT_INS_OFF.store(!on, std::sync::atomic::Ordering::Release);
+}
+
+fn built_ins() -> &'static [(&'static str, Kind, &'static str)] {
+    #[cfg(test)]
+    if BUILT_INS_OFF.load(std::sync::atomic::Ordering::Acquire) {
+        return &[];
+    }
+    BUILT_IN
+}
+
+fn has_built_in(host: &str) -> bool {
+    built_ins().iter().any(|(h, _, _)| *h == host)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -43,14 +73,33 @@ pub struct AliasEntry {
     pub check: AliasCheck,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AliasTable {
     by_host: HashMap<String, AliasEntry>,
 }
 
+impl Default for AliasTable {
+    fn default() -> Self {
+        Self::from_entries(Vec::new())
+    }
+}
+
 impl AliasTable {
+    /// `entries` plus [`BUILT_IN`] for every host they leave out.
     pub fn from_entries(entries: Vec<AliasEntry>) -> Self {
-        AliasTable { by_host: entries.into_iter().map(|e| (e.host.clone(), e)).collect() }
+        let mut by_host: HashMap<String, AliasEntry> = entries.into_iter().map(|e| (e.host.clone(), e)).collect();
+        for (host, kind, addr) in built_ins() {
+            let e = by_host.entry(host.to_string()).or_insert_with(|| AliasEntry {
+                host: host.to_string(),
+                twins: BTreeMap::new(),
+                source: AliasSource::BuiltIn,
+                check: AliasCheck::default(),
+            });
+            if e.source == AliasSource::BuiltIn {
+                e.twins.entry(*kind).or_insert_with(|| addr.to_string());
+            }
+        }
+        AliasTable { by_host }
     }
 
     pub fn parse(json: Option<&str>) -> Self {
@@ -77,7 +126,8 @@ impl AliasTable {
     }
 
     fn to_json(&self) -> String {
-        serde_json::to_string(&self.entries()).unwrap_or_else(|_| "[]".into())
+        let saved: Vec<AliasEntry> = self.entries().into_iter().filter(|e| e.source != AliasSource::BuiltIn).collect();
+        serde_json::to_string(&saved).unwrap_or_else(|_| "[]".into())
     }
 }
 
@@ -118,7 +168,8 @@ fn write_lock(session: &Arc<crate::db::Session>) -> Arc<std::sync::Mutex<()>> {
 }
 
 /// Change one twin. Any change aborts that host's twin connections and bumps the policy
-/// generation, never the epoch. `None` removes the twin (and the entry once it has none).
+/// generation, never the epoch. `None` removes the twin (and the entry once it has none, unless
+/// the host has built-in twins). Any change makes a built-in entry the user's own.
 pub fn set(host: &str, kind: Kind, addr: Option<&str>, source: AliasSource) -> Result<Option<AliasEntry>, String> {
     let host = normalize_host(host)?;
     let addr = addr.map(|a| validate_twin(kind, a)).transpose()?;
@@ -146,7 +197,9 @@ pub fn set(host: &str, kind: Kind, addr: Option<&str>, source: AliasSource) -> R
         None => {
             if let Some(e) = map.get_mut(&host) {
                 e.twins.remove(&kind);
-                if e.twins.is_empty() {
+                e.source = source;
+                // Kept empty for a built-in host, so its built-in twins stay removed.
+                if e.twins.is_empty() && !has_built_in(&host) {
                     map.remove(&host);
                 }
             }
