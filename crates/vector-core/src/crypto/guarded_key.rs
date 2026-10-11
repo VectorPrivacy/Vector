@@ -1,40 +1,43 @@
-//! Memory-hardened key storage: 128 indistinguishable arrays with decoy writes.
+//! Memory-hardened key storage: 128 indistinguishable arrays with decoy writes, and a
+//! shielded key.
 //!
-//! The real 32-byte key is XOR-split into 4 shares (16 `usize` values on 64-bit),
-//! scattered across 128 static arrays of 4,096 entries each. 123 arrays are pure
-//! decoys — provably indistinguishable from the 5 real arrays.
+//! The real 32-byte key is never stored. What is stored is the key XORed with
+//! BLAKE3(prekey), XOR-split into 4 shares (16 `usize` values on 64-bit) and scattered
+//! across 128 static arrays of 4,096 entries each. The prekey is 16 KiB of the arrays'
+//! own random fill: the key's lane row in 8 arrays, which `set()` never writes.
 //!
 //! Defense layers:
-//! 1. **Secret splitting**: key XOR-split into 4 shares
-//! 2. **128 indistinguishable arrays**: 5 real + 123 decoy, all same size, all
-//!    randomly initialized, all modified identically during set()/clear()
-//! 3. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
-//! 4. **Scattered positions**: seed, multipliers, and share data each placed at
-//!    (array, slot) positions derived from ASLR instance address. The slot
-//!    dimension is partitioned into LANE_COUNT disjoint lanes; each live key
-//!    owns one lane (chosen at set() to differ from other live keys), so two
-//!    keys can never share a slot — cross-key writes are collision-safe.
-//! 5. **Decoy writes**: during set(), ALL 128 arrays receive ~16 random writes,
-//!    making real writes indistinguishable via snapshot diffing
-//! 6. **Zero side-channel**: `AtomicUsize::load` during get() — zero writes
-//! 7. **Zero searchable constants**: all multipliers derived from ASLR addresses,
-//!    all modular arithmetic uses power-of-2 AND masks. The vault code compiles
-//!    to generic LDR + MUL + AND + EOR + LSR — indistinguishable from the
-//!    thousands of hash/cipher/RNG functions in the binary.
+//! 1. **Shielding**: recovering the key needs every one of the prekey's 131,072 bits
+//!    exactly. Noisy or partial extraction (cold boot, Rowhammer/RAMBleed, speculative
+//!    leaks, torn dumps) yields nothing; one wrong bit gives an unrelated key.
+//! 2. **Secret splitting**: the shielded key is XOR-split into 4 shares
+//! 3. **128 indistinguishable arrays**: all same size, all randomly initialized, all
+//!    modified identically during set()/clear()
+//! 4. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
+//! 5. **Scattered positions**: prekey rows, seed, multipliers and share data each sit at
+//!    (array, slot) positions derived from the ASLR instance address. The slot
+//!    dimension is partitioned into LANE_COUNT disjoint lanes; each live key owns one
+//!    lane (chosen at set() to differ from every live key's, its own included), so two
+//!    keys can never share a slot.
+//! 6. **Decoy writes**: during set()/clear(), ALL arrays receive random writes, prekey
+//!    rows included, so real writes are indistinguishable via snapshot diffing. Every
+//!    live key is re-shielded under its reshuffled prekey in the same write.
+//! 7. **Zero writes on read**: get() only loads.
+//! 8. **Zero searchable constants**: all multipliers and round counts derive from ASLR
+//!    addresses, all modular arithmetic uses power-of-2 AND masks.
 //!
 //! Security tiers:
 //!   **Without source code** (info-stealers, forensic tools): immune.
 //!   Arrays are information-theoretically indistinguishable.
 //!
-//!   **With source code + memory dump**: attacker must brute-force the ASLR
-//!   instance address (~2.5M candidates on macOS, ~268M on Linux).
-//!   Computational hardening makes each attempt ~25 μs.
-//!   Estimated: ~1 min (macOS) to ~2 hrs (Linux), single-core.
+//!   **Noisy or partial memory extraction**: needs the full 16 KiB prekey bit-exact.
 //!
-//!   The vault is the second layer — anti-debug protections (PT_DENY_ATTACH,
-//!   PR_SET_DUMPABLE, DACL) prevent obtaining the dump in the first place.
+//!   **Source code + a clean, complete dump**: recoverable, as any in-process secret is.
+//!   A dump carries the image base, so the layout is one derivation away. The defence
+//!   here is the anti-debug layer (PT_DENY_ATTACH, PR_SET_DUMPABLE, DACL), which stops
+//!   the dump being taken.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicUsize, Ordering};
 use rand::RngCore;
 use zeroize::Zeroize;
 
@@ -51,6 +54,9 @@ const NUM_SHARES: usize = 4;
 const USIZES_PER_SHARE: usize = 32 / std::mem::size_of::<usize>();
 /// Total entries used by one key's share data.
 const SHARE_ENTRIES: usize = NUM_SHARES * USIZES_PER_SHARE;
+/// Lane rows that make up one key's prekey: 16 KiB on 64-bit and on 32-bit alike.
+const PREKEY_ROWS: usize = 16 * 1024 / (LANE_WIDTH * std::mem::size_of::<usize>());
+
 /// Number of disjoint slot-lanes the slot dimension is partitioned into.
 /// Each live key occupies exactly one lane, so two keys in distinct lanes can
 /// never share an (array, slot) — eliminating cross-key write collisions without
@@ -140,13 +146,13 @@ struct VaultPos {
 }
 
 /// Derive the mixing iteration count from ASLR addresses — ZERO constants in the binary.
-/// Range: 4096..8191. Changes every launch. `& 4095` compiles to `AND #0xFFF` (hundreds
-/// of hits in any binary). No fixed loop bound for RE engineers to search for.
+/// Range: 16..31, changing every launch, so there is no fixed loop bound to search for. Not a
+/// work factor: a dump carries the image base, so an attacker runs this derivation once.
 #[inline]
 fn mix_iterations(instance_addr: usize) -> usize {
     let base = VAULTS.as_ptr() as usize;
     let h = (instance_addr ^ base).wrapping_mul(instance_addr | 1);
-    4096 + ((h >> 7) & 4095)
+    16 + ((h >> 7) & 15)
 }
 
 /// Hardened hash mixing — runtime-determined iterations of shift-multiply-XOR.
@@ -173,24 +179,39 @@ fn lane_slot(raw: usize, lane: usize) -> usize {
     (lane << LANE_WIDTH.trailing_zeros()) | (raw & (LANE_WIDTH - 1))
 }
 
-/// Derive the 3 configuration positions (seed, mul1, mul2) from the instance
-/// address. No dependency on stored share values — breaks the chicken-and-egg.
-/// Uses instance address + VAULTS base address (both ASLR'd, both change per launch).
-/// ZERO searchable constants — multipliers derived from the two ASLR addresses.
-/// `lane` confines the slot dimension to one of LANE_COUNT disjoint ranges, so two
-/// keys in different lanes can never collide. Guaranteed collision-free within a key
-/// (rehash on collision).
-fn config_positions(instance_addr: usize, lane: usize) -> (VaultPos, VaultPos, VaultPos) {
-    config_positions_with(instance_addr, lane, mix_iterations(instance_addr))
+/// Where one key lives in one lane: the arrays whose lane row is its prekey, and its 3
+/// configuration positions (seed, mul1, mul2), which never sit in a prekey array.
+struct Layout {
+    prekey: [usize; PREKEY_ROWS],
+    config: (VaultPos, VaultPos, VaultPos),
 }
 
-fn config_positions_with(instance_addr: usize, lane: usize, iters: usize) -> (VaultPos, VaultPos, VaultPos) {
+/// Derive a key's layout from the instance address. No dependency on stored values, which
+/// breaks the chicken-and-egg. Uses instance address + VAULTS base address (both ASLR'd,
+/// both change per launch); multipliers derive from the two, so no searchable constants.
+/// `lane` confines every slot to one of LANE_COUNT disjoint ranges.
+fn layout(instance_addr: usize, lane: usize) -> Layout {
+    layout_with(instance_addr, lane, mix_iterations(instance_addr))
+}
+
+fn layout_with(instance_addr: usize, lane: usize, iters: usize) -> Layout {
     let base = VAULTS.as_ptr() as usize;
     // Derive multipliers from ASLR addresses — forced odd for mixing quality.
-    // These change every launch. No constants in the binary.
     let m1 = (instance_addr as u64) | 1;
     let m2 = (base as u64) | 1;
     let mut h = addr_mix((instance_addr as u64) ^ (base as u64).rotate_left(19), m1, m2, iters);
+
+    let mut prekey = [0usize; PREKEY_ROWS];
+    for i in 0..PREKEY_ROWS {
+        loop {
+            let candidate = ((h >> 32) as usize) & (ARRAY_COUNT - 1);
+            h = addr_mix(h, m1, m2, iters);
+            if !prekey[..i].contains(&candidate) {
+                prekey[i] = candidate;
+                break;
+            }
+        }
+    }
 
     let mut positions = [VaultPos { array: 0, slot: 0 }; 3];
     for i in 0..3 {
@@ -199,16 +220,19 @@ fn config_positions_with(instance_addr: usize, lane: usize, iters: usize) -> (Va
                 array: ((h >> 32) as usize) & (ARRAY_COUNT - 1),
                 slot: lane_slot(h as usize, lane),
             };
-            if !positions[..i].contains(&candidate) {
+            h = addr_mix(h, m1, m2, iters);
+            if !positions[..i].contains(&candidate) && !prekey.contains(&candidate.array) {
                 positions[i] = candidate;
-                h = addr_mix(h, m1, m2, iters);
                 break;
             }
-            h = addr_mix(h, m1, m2, iters);
         }
     }
 
-    (positions[0], positions[1], positions[2])
+    Layout { prekey, config: (positions[0], positions[1], positions[2]) }
+}
+
+fn config_positions(instance_addr: usize, lane: usize) -> (VaultPos, VaultPos, VaultPos) {
+    layout(instance_addr, lane).config
 }
 
 /// Derive share data positions. Uses the seed + multipliers read from the vault
@@ -217,14 +241,11 @@ fn config_positions_with(instance_addr: usize, lane: usize, iters: usize) -> (Va
 /// config positions). Returns SHARE_ENTRIES (array, slot) pairs — each guaranteed
 /// unique and non-overlapping with config positions (rehash on collision).
 fn share_positions(instance_addr: usize, lane: usize) -> [VaultPos; SHARE_ENTRIES] {
-    share_positions_from(instance_addr, lane, config_positions(instance_addr, lane))
+    share_positions_from(instance_addr, lane, &layout(instance_addr, lane))
 }
 
-fn share_positions_from(
-    instance_addr: usize,
-    lane: usize,
-    (seed_pos, mul1_pos, mul2_pos): (VaultPos, VaultPos, VaultPos),
-) -> [VaultPos; SHARE_ENTRIES] {
+fn share_positions_from(instance_addr: usize, lane: usize, layout: &Layout) -> [VaultPos; SHARE_ENTRIES] {
+    let (seed_pos, mul1_pos, mul2_pos) = layout.config;
     let seed = VAULTS[seed_pos.array][seed_pos.slot].load(Ordering::Relaxed) as u64;
     let mul1 = VAULTS[mul1_pos.array][mul1_pos.slot].load(Ordering::Relaxed) as u64;
     let mul2 = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed) as u64;
@@ -244,7 +265,10 @@ fn share_positions_from(
                 array: ((h >> 32) as usize) & (ARRAY_COUNT - 1),
                 slot: lane_slot(h as usize, lane),
             };
-            if !config.contains(&candidate) && !positions[..i].contains(&candidate) {
+            if !config.contains(&candidate)
+                && !positions[..i].contains(&candidate)
+                && !layout.prekey.contains(&candidate.array)
+            {
                 positions[i] = candidate;
                 break;
             }
@@ -253,6 +277,61 @@ fn share_positions_from(
     }
 
     positions
+}
+
+/// BLAKE3 of a key's prekey: its lane row in each of its prekey arrays, 16 KiB in all.
+/// Copied out with atomic loads (a writer may be mid-decoy; the epoch check discards that
+/// read) and wiped after.
+fn shield(lane: usize, prekey: &[usize; PREKEY_ROWS]) -> [u8; 32] {
+    let mut buf = [0usize; PREKEY_ROWS * LANE_WIDTH];
+    for (row, &array) in buf.chunks_exact_mut(LANE_WIDTH).zip(prekey) {
+        let slots = &VAULTS[array][lane * LANE_WIDTH..(lane + 1) * LANE_WIDTH];
+        for (dst, slot) in row.iter_mut().zip(slots) {
+            *dst = slot.load(Ordering::Relaxed);
+        }
+    }
+    // SAFETY: an initialised local [usize] viewed as its bytes, for hashing only.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(buf.as_ptr() as *const u8, std::mem::size_of_val(&buf))
+    };
+    let pad = *blake3::hash(bytes).as_bytes();
+    buf.zeroize();
+    pad
+}
+
+/// Vault-wide seqlock: odd while a set() or clear() is rewriting, bumped past it after. A
+/// read that overlaps one starts again, so it never mixes old and new shares or prekeys.
+static EPOCH: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds the epoch odd for one writer; even again on drop, panics included.
+struct Rewriting(usize);
+
+impl Rewriting {
+    fn begin() -> Self {
+        let epoch = EPOCH.load(Ordering::Relaxed);
+        EPOCH.store(epoch.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::Release);
+        Self(epoch)
+    }
+}
+
+impl Drop for Rewriting {
+    fn drop(&mut self) {
+        EPOCH.store(self.0.wrapping_add(2), Ordering::Release);
+    }
+}
+
+/// The plaintext of every live partner, read before a rewrite and re-shielded after it.
+struct Held<'a> {
+    keys: [(Option<&'a GuardedKey>, [u8; 32]); LANE_COUNT],
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        for (_, key) in self.keys.iter_mut() {
+            key.zeroize();
+        }
+    }
 }
 
 /// Write ~16 random entries to EVERY array (real + decoy), excluding protected positions.
@@ -398,30 +477,23 @@ impl GuardedKey {
         sk_bytes.zeroize();
     }
 
-    /// Store a key. XOR-split into 4 shares scattered across the 128 arrays,
-    /// with decoy writes to ALL arrays so real writes are indistinguishable.
+    /// Store a key: shielded under its new lane's prekey, XOR-split into 4 shares
+    /// scattered across the arrays, with decoy writes to ALL arrays so real writes are
+    /// indistinguishable.
     ///
-    /// `others` is a slice of references to other active GuardedKey instances
-    /// for cross-key protection during decoy writes.
-    ///
-    /// INVARIANT: pass EVERY other live key. A key's lane is chosen by excluding only `others`'
-    /// lanes, so an omitted live key can collide and clobber it.
+    /// INVARIANT: pass EVERY other live key (the standing vaults are always included). Decoys
+    /// reshuffle every prekey, and only the keys named here are re-shielded under theirs.
     pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
         let _writer = writer();
         let mut rng = rand::rngs::OsRng;
         let mut draws = Draws::new();
         ensure_vaults();
 
-        // Choose this key's lane FIRST: a random marker whose lane is free among the
-        // live others. All of this key's positions live in that lane, so they are
-        // physically disjoint from every other-lane key's positions — no real write
-        // can ever land on another key's slot. The marker is committed to `active`
-        // only at the end; until then the old marker still answers get()/lane().
+        // A fresh lane, free of every live key's including our own: new positions and a new
+        // prekey, while readers of the old key keep a consistent copy until the epoch moves.
         let marker = self.pick_marker(others, &mut rng);
         let lane = Self::lane_of(marker);
 
-        // The old key stays readable in its own lane until the commit below; readers check the
-        // marker after reading, so none can return a half-replaced key.
         let old_marker = self.active.load(Ordering::Acquire);
         let old_positions = (old_marker != 0)
             .then(|| share_positions(self.instance_addr(), Self::lane_of(old_marker)));
@@ -437,9 +509,11 @@ impl GuardedKey {
             }
         }
 
-        // Write decoys FIRST — random noise across all 128 arrays.
-        // Excludes other keys' positions. Real writes below overwrite any decoy
-        // that landed on OUR slots, guaranteeing all keys' data survives intact.
+        let held = self.hold_partners(others);
+        let rewriting = Rewriting::begin();
+
+        // Decoys first, prekey rows included. Real writes below overwrite any decoy that
+        // landed on OUR slots; protected slots keep every other key's positions intact.
         write_decoys(&protected[..pcount], &mut draws);
 
         // Force multiplier entries odd (mixing quality).
@@ -450,22 +524,39 @@ impl GuardedKey {
         let v = VAULTS[mul2_pos.array][mul2_pos.slot].load(Ordering::Relaxed);
         VAULTS[mul2_pos.array][mul2_pos.slot].store(v | 1, Ordering::Relaxed);
 
-        // XOR-split the key into NUM_SHARES random shares
+        Self::write_shielded(self.instance_addr(), lane, &mut key, &mut rng);
+
+        // Commit the lane-bearing marker. get() re-derives the same lane from it.
+        self.active.store(marker, Ordering::Release);
+
+        // Scrub the previous key's shares so it never lingers (matches clear()'s scrub).
+        for pos in old_positions.iter().flatten() {
+            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
+        }
+
+        Self::reshield(held, &mut rng);
+        drop(rewriting);
+    }
+
+    /// Shield `key` under `lane`'s prekey and write it as 4 shares. Wipes `key`.
+    fn write_shielded(instance_addr: usize, lane: usize, key: &mut [u8; 32], rng: &mut rand::rngs::OsRng) {
+        let layout = layout(instance_addr, lane);
+        let mut pad = shield(lane, &layout.prekey);
         let mut shares = [[0u8; 32]; NUM_SHARES];
         for share in shares.iter_mut().take(NUM_SHARES - 1) {
             rng.fill_bytes(share);
         }
-        shares[NUM_SHARES - 1] = key;
-        for i in 0..NUM_SHARES - 1 {
-            #[allow(clippy::needless_range_loop)] // reads and writes two rows of one array
-            for j in 0..32 {
-                shares[NUM_SHARES - 1][j] ^= shares[i][j];
+        for j in 0..32 {
+            let mut last = key[j] ^ pad[j];
+            for share in shares.iter().take(NUM_SHARES - 1) {
+                last ^= share[j];
             }
+            shares[NUM_SHARES - 1][j] = last;
         }
         key.zeroize();
+        pad.zeroize();
 
-        // Write share data to derived positions (after decoys, so real data survives)
-        let positions = share_positions(self.instance_addr(), lane);
+        let positions = share_positions_from(instance_addr, lane, &layout);
         for (share_idx, share) in shares.iter().enumerate() {
             for u_idx in 0..USIZES_PER_SHARE {
                 let byte_off = u_idx * std::mem::size_of::<usize>();
@@ -478,77 +569,97 @@ impl GuardedKey {
             }
         }
         for share in shares.iter_mut() { share.zeroize(); }
+    }
 
-        // Commit the lane-bearing marker. share_positions() in get() re-derives the
-        // same lane from this marker, so reads land on exactly these slots.
-        self.active.store(marker, Ordering::Release);
+    /// Read every other live partner's key before a rewrite reshuffles its prekey.
+    fn hold_partners<'a>(&self, others: &'a [&'a GuardedKey]) -> Held<'a> {
+        let mut held = Held { keys: [(None, [0u8; 32]); LANE_COUNT] };
+        let mut n = 0;
+        for key in partners(others) {
+            if std::ptr::eq(key, self) || n == LANE_COUNT { continue; }
+            if let Some(plain) = key.get() {
+                held.keys[n] = (Some(key), plain);
+                n += 1;
+            }
+        }
+        held
+    }
 
-        // Scrub the previous key's shares so it never lingers (matches clear()'s scrub).
-        for pos in old_positions.iter().flatten() {
-            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
+    /// Re-shield every held partner under its prekey as the decoys left it.
+    fn reshield(mut held: Held<'_>, rng: &mut rand::rngs::OsRng) {
+        for (key, plain) in held.keys.iter_mut() {
+            if let Some(key) = key {
+                Self::write_shielded(key.instance_addr(), key.lane(), plain, rng);
+            }
         }
     }
 
     /// Recover the key. Zero writes — invisible to snapshot diffing.
     ///
-    /// The marker doubles as a seqlock: a read that a set() or clear() overlapped sees it change
-    /// and starts again, so a replacement can never hand out a mix of two keys' shares.
+    /// A read that a set() or clear() overlapped sees the epoch (or this key's marker) move
+    /// and starts again, so it never returns a mix of old and new shares or prekeys.
     pub fn get(&self) -> Option<[u8; 32]> {
         loop {
+            let epoch = EPOCH.load(Ordering::Acquire);
+            if epoch & 1 == 1 {
+                std::hint::spin_loop();
+                std::thread::yield_now();
+                continue;
+            }
             let marker = self.active.load(Ordering::Acquire);
             if marker == 0 {
                 return None;
             }
-            let mut key = self.read_shares(marker);
-            if self.active.load(Ordering::Acquire) == marker {
+            let mut key = self.read_shielded(marker);
+            fence(Ordering::Acquire);
+            if EPOCH.load(Ordering::Relaxed) == epoch && self.active.load(Ordering::Relaxed) == marker {
                 return Some(key);
             }
             key.zeroize();
         }
     }
 
-    fn read_shares(&self, marker: usize) -> [u8; 32] {
+    fn read_shielded(&self, marker: usize) -> [u8; 32] {
         // Lane comes from the marker, so reads land on exactly the slots set() wrote.
-        let positions = share_positions(self.instance_addr(), Self::lane_of(marker));
-        let mut key = [0u8; 32];
+        let lane = Self::lane_of(marker);
+        let layout = layout(self.instance_addr(), lane);
+        let positions = share_positions_from(self.instance_addr(), lane, &layout);
+        let mut key = shield(lane, &layout.prekey);
 
-        for share_idx in 0..NUM_SHARES {
-            let mut share = [0u8; 32];
-            for u_idx in 0..USIZES_PER_SHARE {
-                let pos = positions[share_idx * USIZES_PER_SHARE + u_idx];
-                let val = VAULTS[pos.array][pos.slot].load(Ordering::Acquire);
-                let byte_off = u_idx * std::mem::size_of::<usize>();
-                share[byte_off..byte_off + std::mem::size_of::<usize>()]
-                    .copy_from_slice(&val.to_ne_bytes());
+        for (i, pos) in positions.iter().enumerate() {
+            let val = VAULTS[pos.array][pos.slot].load(Ordering::Acquire).to_ne_bytes();
+            let byte_off = (i % USIZES_PER_SHARE) * std::mem::size_of::<usize>();
+            for (a, b) in key[byte_off..byte_off + val.len()].iter_mut().zip(val) {
+                *a ^= b;
             }
-            for (a, b) in key.iter_mut().zip(share.iter()) {
-                *a ^= *b;
-            }
-            share.zeroize();
         }
 
         key
     }
 
-    /// Clear the key. Overwrites shares with random values, writes decoys to all arrays.
-    ///
-    /// `others` is a slice of references to other active GuardedKey instances
-    /// for cross-key protection during decoy writes.
+    /// Clear the key. Overwrites shares with random values, writes decoys to all arrays,
+    /// and re-shields every other live key named in `others`.
     pub fn clear(&self, others: &[&GuardedKey]) {
         let _writer = writer();
-        // Set inactive FIRST — any concurrent get() will return None
-        let old_marker = self.active.swap(0, Ordering::SeqCst);
-        if old_marker != 0 {
-
-            let mut draws = Draws::new();
-            // Scrub the slots we actually wrote: lane from the now-cleared marker.
-            let positions = share_positions(self.instance_addr(), Self::lane_of(old_marker));
-            for pos in &positions {
-                VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
-            }
-            let (protected, pcount) = self.collect_other_protected(others);
-            write_decoys(&protected[..pcount], &mut draws);
+        if self.active.load(Ordering::Acquire) == 0 {
+            return;
         }
+        let mut rng = rand::rngs::OsRng;
+        let mut draws = Draws::new();
+        let held = self.hold_partners(others);
+        let rewriting = Rewriting::begin();
+
+        let old_marker = self.active.swap(0, Ordering::SeqCst);
+        // Scrub the slots we actually wrote: lane from the now-cleared marker.
+        let positions = share_positions(self.instance_addr(), Self::lane_of(old_marker));
+        for pos in &positions {
+            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
+        }
+        let (protected, pcount) = self.collect_other_protected(others);
+        write_decoys(&protected[..pcount], &mut draws);
+
+        Self::reshield(held, &mut rng);
+        drop(rewriting);
     }
 
     pub fn has_key(&self) -> bool {
@@ -963,7 +1074,7 @@ mod tests {
     fn mix_iterations_in_range() {
         for addr in 0..10000usize {
             let n = mix_iterations(addr);
-            assert!((4096..=8191).contains(&n), "mix_iterations({addr}) = {n}");
+            assert!((16..=31).contains(&n), "mix_iterations({addr}) = {n}");
         }
     }
 
@@ -1186,12 +1297,17 @@ mod tests {
         TEST_KEY_A.set(test_key(9), &others_for_a());
         let addr = TEST_KEY_A.instance_addr();
         let lane = TEST_KEY_A.lane();
-        let today = mix_iterations(addr);
-        let few = 16 + (mix_iterations(addr) & 15);
+        // v1's round count (4096..8191), for comparison.
+        let today = {
+            let base = VAULTS.as_ptr() as usize;
+            let h = (addr ^ base).wrapping_mul(addr | 1);
+            4096 + ((h >> 7) & 4095)
+        };
+        let few = mix_iterations(addr);
 
         let read = |iters: usize| -> [u8; 32] {
-            let cfg = config_positions_with(addr, lane, iters);
-            let positions = share_positions_from(addr, lane, cfg);
+            let lay = layout_with(addr, lane, iters);
+            let positions = share_positions_from(addr, lane, &lay);
             let mut key = [0u8; 32];
             for (i, pos) in positions.iter().enumerate() {
                 let v = VAULTS[pos.array][pos.slot].load(Ordering::Acquire).to_ne_bytes();
@@ -1441,6 +1557,87 @@ mod tests {
             corrupted += usize::from(TEST_KEY_B.get() != Some(test_key(!(round ^ 7))));
         }
         assert_eq!(corrupted, 0);
+        TEST_KEY_A.clear(&others_for_a());
+        TEST_KEY_B.clear(&others_for_b());
+    }
+
+    /// Prekey arrays are distinct, and neither config nor share data ever sits in one.
+    #[test]
+    fn prekey_rows_hold_nothing_else() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_vaults();
+        for lane in 0..LANE_COUNT {
+            for addr in (0x6000..0x6100usize).step_by(8) {
+                let lay = layout(addr, lane);
+                let mut arrays = lay.prekey.to_vec();
+                arrays.sort_unstable();
+                arrays.dedup();
+                assert_eq!(arrays.len(), PREKEY_ROWS);
+                let (s, m1, m2) = lay.config;
+                for pos in [s, m1, m2].into_iter().chain(share_positions_from(addr, lane, &lay)) {
+                    assert!(!lay.prekey.contains(&pos.array), "{pos:?} sits in a prekey array");
+                }
+            }
+        }
+    }
+
+    /// The shares hold the shielded key, never the key, and one flipped prekey bit garbles it.
+    #[test]
+    fn the_key_is_stored_shielded_and_needs_every_prekey_bit() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let key = test_key(0x5c);
+        TEST_KEY_A.set(key, &others_for_a());
+        let (addr, lane) = (TEST_KEY_A.instance_addr(), TEST_KEY_A.lane());
+        let lay = layout(addr, lane);
+        let mut unshielded = [0u8; 32];
+        for (i, pos) in share_positions_from(addr, lane, &lay).iter().enumerate() {
+            let val = VAULTS[pos.array][pos.slot].load(Ordering::Relaxed).to_ne_bytes();
+            let off = (i % USIZES_PER_SHARE) * std::mem::size_of::<usize>();
+            for (a, b) in unshielded[off..off + val.len()].iter_mut().zip(val) { *a ^= b; }
+        }
+        assert_ne!(unshielded, key);
+
+        let slot = &VAULTS[lay.prekey[3]][lane * LANE_WIDTH + 77];
+        let original = slot.load(Ordering::Relaxed);
+        slot.store(original ^ (1 << 13), Ordering::Relaxed);
+        let garbled = TEST_KEY_A.get().unwrap();
+        slot.store(original, Ordering::Relaxed);
+        assert_ne!(garbled, key);
+        assert_eq!(TEST_KEY_A.get(), Some(key));
+        TEST_KEY_A.clear(&others_for_a());
+    }
+
+    /// Reads of one key stay whole while another key's set() reshuffles its prekey.
+    #[test]
+    fn reads_of_a_partner_survive_its_reshielding() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let kb = test_key(0xB0);
+        TEST_KEY_B.set(kb, &others_for_b());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reads, wrong) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let reader = {
+            let (stop, reads, wrong) = (stop.clone(), reads.clone(), wrong.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if TEST_KEY_B.get() != Some(kb) {
+                        wrong.fetch_add(1, Ordering::SeqCst);
+                    }
+                    reads.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        for i in 0..300u16 {
+            TEST_KEY_A.set(test_key(i as u8), &others_for_a());
+            if i % 7 == 0 { TEST_KEY_A.clear(&others_for_a()); }
+        }
+        stop.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+        assert!(reads.load(Ordering::SeqCst) > 0);
+        assert_eq!(wrong.load(Ordering::SeqCst), 0);
         TEST_KEY_A.clear(&others_for_a());
         TEST_KEY_B.clear(&others_for_b());
     }

@@ -82,6 +82,8 @@ hkdf = "0.12"
 # encrypt in tests. Both crates are already in the tree transitively.
 hmac = "0.12"
 chacha20 = { version = "0.9", features = ["zeroize"] }
+# The vault's shield: one hash of a 16 KiB prekey per read.
+blake3 = "1.8"
 # Device transfer: SPAKE2 turns a short typed code into a strong shared key (the construction
 # magic-wormhole uses); curve25519-dalek checks the peer's point is not of small order.
 spake2 = "0.4"
@@ -174,8 +176,6 @@ i2p = ["twin-check"]
 twin-check = ["dep:tokio-rustls", "dep:webpki-roots"]
 
 [dev-dependencies]
-# Shielding candidates for the vault bench (`bench_vault_designs`).
-blake3 = "1.8"
 # Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.
 aes-gcm = "0.11"
 chacha20poly1305 = "0.10.1"
