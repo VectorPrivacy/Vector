@@ -427,4 +427,34 @@ async fn main() {
     bench("seal.verify() (schnorr)", 2000, || { black_box(seal.verify().is_ok()); });
     bench("Event::from_json(seal)", 20000, || { black_box(Event::from_json(seal.as_json()).unwrap()); });
     println!("wrap content: {} b64 chars, seal content: {} chars", wrap.content.len(), seal.content.len());
+
+    // Six pooled, unconnected relays: each send fails at the socket, so this prices only the
+    // local work a publish round does before the network.
+    println!("-- community publish fan-out (6 relays, local work per round)");
+    let relays: Vec<String> = (0..6).map(|i| format!("wss://relay{i}.example.invalid")).collect();
+    let client = Client::default();
+    for r in &relays { client.add_relay(r.as_str()).await.unwrap(); }
+    let note = EventBuilder::new(Kind::TextNote, "a typical community message").finalize(&me).unwrap();
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    for _ in 0..7 {
+        let t = Instant::now();
+        for _ in 0..500 {
+            for r in &relays { let _ = client.send_event(&note).to(vec![r.clone()]).await; }
+        }
+        old.push(t.elapsed().as_nanos() as f64 / 500.0 / 1000.0);
+        let t = Instant::now();
+        for _ in 0..500 {
+            note.verify().unwrap();
+            for r in &relays {
+                if let Ok(Some(relay)) = client.relay(r.as_str()).await { let _ = relay.send_event(&note).await; }
+            }
+        }
+        new.push(t.elapsed().as_nanos() as f64 / 500.0 / 1000.0);
+    }
+    old.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    new.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("{:<56} {:>8.2} µs", "Client::send_event per relay (old)", old[3]);
+    println!("{:<56} {:>8.2} µs", "verify once + Relay::send_event per relay (prod)", new[3]);
+    println!("  -> {:.1} µs saved per round ({:.0}%)", old[3] - new[3], 100.0 * (old[3] - new[3]) / old[3]);
 }

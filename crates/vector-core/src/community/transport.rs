@@ -1202,9 +1202,18 @@ impl LiveTransport {
     }
 }
 
+/// Send to one pooled relay, true on its ACK. The per-relay fan-outs verify the event once
+/// up front: `Client::send_event` re-verifies it (~45 µs) for every relay and every round.
+async fn send_to_relay(client: &Client, event: &Event, url: &str) -> bool {
+    let Ok(Some(relay)) = client.relay(url).await else { return false };
+    let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
+    relay.send_event(event).ok_timeout(wait).authentication_timeout(wait).await.is_ok()
+}
+
 #[async_trait::async_trait]
 impl Transport for LiveTransport {
     async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+        event.verify().map_err(|e| e.to_string())?;
         let client = Self::warm_client(relays, self.timeout).await?;
         let timeout = self.timeout;
         let mut targets: Vec<String> = Vec::new();
@@ -1225,8 +1234,8 @@ impl Transport for LiveTransport {
                 // spawn-detached: relay I/O only — no account storage is touched.
                 crate::rt::spawn(async move {
                     matches!(
-                        crate::rt::time::timeout(timeout, crate::transport_aware(client.send_event(&event)).to(vec![r.clone()])).await,
-                        Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false)
+                        crate::rt::time::timeout(timeout, send_to_relay(&client, &event, &r)).await,
+                        Ok(true)
                     )
                 })
             })
@@ -1357,6 +1366,7 @@ impl Transport for LiveTransport {
         // SLOW/ratelimited stragglers (Damus-style 1-event/min) in the BACKGROUND. If NOTHING ACKs in the
         // window we throw — a dead relay set is a failure, not an endless wait. Uses the shared warm client
         // (NEVER shut down here) and targets the community relay set across rounds.
+        event.verify().map_err(|e| e.to_string())?;
         let client = Self::warm_client(relays, self.timeout).await?;
         let timeout = self.timeout;
         let event = event.clone();
@@ -1386,8 +1396,8 @@ impl Transport for LiveTransport {
                     let client = &client;
                     let event = &event;
                     Box::pin(async move {
-                        match crate::rt::time::timeout(timeout, crate::transport_aware(client.send_event(event)).to(vec![r.clone()])).await {
-                            Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false) => Ok(r),
+                        match crate::rt::time::timeout(timeout, send_to_relay(client, event, &r)).await {
+                            Ok(true) => Ok(r),
                             _ => Err(()),
                         }
                     })
