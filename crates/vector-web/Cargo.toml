@@ -29,7 +29,7 @@ rusqlite = { version = "0.38", default-features = false }
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico", "bmp"] }
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
-reqwest = { version = "0.13", default-features = false, features = ["stream", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 futures-util = "0.3"
 async-trait = "0.1"
 bytes = "1"

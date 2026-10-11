@@ -403,11 +403,6 @@ impl Req {
         self
     }
 
-    pub fn query<T: serde::Serialize + ?Sized>(mut self, query: &T) -> Self {
-        self.rb = self.rb.query(query);
-        self
-    }
-
     pub fn bearer_auth<T: std::fmt::Display>(mut self, token: T) -> Self {
         self.rb = self.rb.bearer_auth(token);
         self

@@ -50,9 +50,10 @@ fn off_clearnet() -> bool {
 
 async fn unfurl_via(server: &str, url: &str) -> Result<SiteMetadata, String> {
     let client = vector_core::net::build_http_client(Duration::from_secs(20))?;
+    let endpoint = reqwest::Url::parse_with_params(&format!("{server}/unfurl"), [("url", url)])
+        .map_err(|e| format!("unfurl server address unusable: {e}"))?;
     let response = client
-        .get(format!("{server}/unfurl"))
-        .query(&[("url", url)])
+        .get(endpoint)
         .send()
         .await
         .map_err(|e| format!("unfurl request failed: {e}"))?;

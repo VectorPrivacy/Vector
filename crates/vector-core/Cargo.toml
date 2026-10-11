@@ -138,7 +138,7 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["h
 async-wsocket = { version = "0.17", default-features = false }
 # TLS is handed in preconfigured (`net::tls_config`): ring and the webpki roots. Either
 # 0.13 TLS feature also links rustls-platform-verifier, which goes unused.
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "charset", "socks", "http2", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "charset", "socks", "http2"] }
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 # Twin checks: a TLS handshake for the server's own name through Tor or I2P.
