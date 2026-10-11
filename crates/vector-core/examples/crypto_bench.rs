@@ -410,15 +410,16 @@ async fn main() {
     });
     println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
 
-    println!("-- local signing: with the post-sign re-verify (old) and without (prod)");
+    // Equal while the pinned nostr fork's Keys::sign_event still verifies what it signed.
+    println!("-- local signing: sign + add_signature (verifies) against Keys::sign_event");
     let ephemeral = Keys::generate();
     for (what, keys) in [("own key", &me), ("gift-wrap key", &ephemeral)] {
         let unsigned = EventBuilder::new(Kind::Custom(23311), "").finalize_unsigned(keys.public_key());
-        let old = bench(&format!("{what}: sign + verify (old)"), 2000, || {
+        let old = bench(&format!("{what}: sign + verify"), 2000, || {
             let sig = keys.sign_schnorr(unsigned.clone().id().as_bytes());
             black_box(unsigned.clone().add_signature(sig).unwrap());
         });
-        let new = bench(&format!("{what}: Keys::sign_event (prod)"), 2000, || {
+        let new = bench(&format!("{what}: Keys::sign_event"), 2000, || {
             black_box(keys.sign_event(unsigned.clone()).unwrap());
         });
         println!("  -> {:.1} µs saved per signature ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
@@ -446,7 +447,7 @@ async fn main() {
     // local work a publish round does before the network.
     println!("-- community publish fan-out (6 relays, local work per round)");
     let relays: Vec<String> = (0..6).map(|i| format!("wss://relay{i}.example.invalid")).collect();
-    let client = Client::default();
+    let client = vector_core::nostr_client_builder().build();
     for r in &relays { client.add_relay(r.as_str()).await.unwrap(); }
     let note = EventBuilder::new(Kind::TextNote, "a typical community message").finalize(&me).unwrap();
     let mut old = Vec::new();

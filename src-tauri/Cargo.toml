@@ -358,8 +358,7 @@ tauri-utils = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "774a8
 # Fork: https://github.com/VectorPrivacy/whisper-rs/tree/whisper-1.9.5
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "2d0a0d6e865ef3a08310d3d6cf05abab93d35055" }
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
-# zeroizes with volatile writes, and a signature made with local Keys isn't re-verified (BIP340's
-# fault-attack check is a hardware-wallet defence that costs more than the sign). nostr-sdk: its verification cache re-hashes the event ID, and a
+# zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
 # Fork: https://github.com/VectorPrivacy/nostr/tree/vector-v0.45.1
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
