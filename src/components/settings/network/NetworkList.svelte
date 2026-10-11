@@ -55,9 +55,9 @@
 {/if}
 {#each n.relays as relay (relay.url)}
     {@const g = tag(relay)}
-    <div class="relay-item" class:disabled={!relay.enabled} data-relay-url={relay.url} data-relay-is-default={relay.is_default} data-relay-is-custom={relay.is_custom}>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div class="relay-item-content" onclick={() => h.openRelay(relay)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="relay-item" class:disabled={!relay.enabled} data-relay-url={relay.url} data-relay-is-default={relay.is_default} data-relay-is-custom={relay.is_custom} onclick={() => h.openRelay(relay)}>
+        <div class="relay-item-content">
             {#if relay.is_custom && relay.mode !== 'both'}
                 <span class="relay-mode-badge">{relay.mode === 'read' ? 'R' : 'W'}</span>
             {/if}
@@ -91,9 +91,9 @@
 {/if}
 {#each n.servers as server (server.url)}
     {@const g = tag(server)}
-    <div class="relay-item media-server-item" class:disabled={!server.enabled} data-server-url={server.url}>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div class="relay-item-content" onclick={() => h.openServer(server)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="relay-item media-server-item" class:disabled={!server.enabled} data-server-url={server.url} onclick={() => h.openServer(server)}>
+        <div class="relay-item-content">
             {#if server.is_default}<span class="relay-default-badge">default</span>
             {:else if part}<span class="relay-default-badge relay-custom-badge">custom</span>{/if}
             <span class="relay-url" title={server.url}>{host(server.url)}</span>
