@@ -81,7 +81,7 @@ hkdf = "0.12"
 # same audited RustCrypto primitives and round-tripped against nostr's own
 # encrypt in tests. Both crates are already in the tree transitively.
 hmac = "0.12"
-chacha20 = "0.9"
+chacha20 = { version = "0.9", features = ["zeroize"] }
 # Device transfer: SPAKE2 turns a short typed code into a strong shared key (the construction
 # magic-wormhole uses); curve25519-dalek checks the peer's point is not of small order.
 spake2 = "0.4"

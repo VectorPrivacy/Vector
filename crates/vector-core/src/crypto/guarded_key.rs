@@ -7,7 +7,7 @@
 //! Defense layers:
 //! 1. **Secret splitting**: key XOR-split into 4 shares
 //! 2. **128 indistinguishable arrays**: 5 real + 123 decoy, all same size, all
-//!    OsRng-initialized, all modified identically during set()/clear()
+//!    randomly initialized, all modified identically during set()/clear()
 //! 3. **No heap allocations**: zero pointers, zero fingerprints, zero mlock
 //! 4. **Scattered positions**: seed, multipliers, and share data each placed at
 //!    (array, slot) positions derived from ASLR instance address. The slot
@@ -61,7 +61,7 @@ const LANE_COUNT: usize = 16;
 /// Slots per lane. `ARRAY_SIZE / LANE_COUNT`, power-of-2.
 const LANE_WIDTH: usize = ARRAY_SIZE / LANE_COUNT;
 
-/// 128 vault arrays — all identical, all OsRng-initialized, all modified during set().
+/// 128 vault arrays — all identical, all randomly initialized, all modified during set().
 /// Memory: 128 × 4096 × size_of::<usize>() = 4 MB on 64-bit, 2 MB on 32-bit.
 static VAULTS: [[AtomicUsize; ARRAY_SIZE]; ARRAY_COUNT] = {
     // Array-repeat seeds for this static only; each use is a fresh copy.
@@ -76,15 +76,58 @@ static VAULTS: [[AtomicUsize; ARRAY_SIZE]; ARRAY_COUNT] = {
 /// Every entry across all arrays is filled — real and decoy arrays are identical.
 fn ensure_vaults() {
     if VAULTS[0][0].load(Ordering::Relaxed) == 0 {
+        fill_random(&VAULTS);
+    }
+}
 
-        let mut rng = rand::rngs::OsRng;
-        for row in VAULTS.iter() {
-            for slot in row.iter() {
-                let mut val = rng.next_u64() as usize;
-                if val == 0 { val = 1; }
-                let _ = slot.compare_exchange(0, val, Ordering::SeqCst, Ordering::Relaxed);
-            }
+/// Fill every still-empty entry. Racing fillers keep whichever value lands first.
+fn fill_random(rows: &[[AtomicUsize; ARRAY_SIZE]]) {
+    let mut draws = Draws::new();
+    for row in rows {
+        for slot in row.iter() {
+            let _ = slot.compare_exchange(0, draws.next(), Ordering::SeqCst, Ordering::Relaxed);
         }
+    }
+}
+
+/// Non-zero random words from a ChaCha20 keystream seeded once from the OS. Decoys and fills
+/// take thousands of words, and a syscall each dominated `set()`. Wiped on drop: whoever
+/// recovers this state could tell decoy writes from real ones.
+struct Draws {
+    cipher: chacha20::ChaCha20,
+    buf: [u64; 64],
+    at: usize,
+}
+
+impl Draws {
+    fn new() -> Self {
+        use chacha20::cipher::KeyIvInit;
+        let mut seed = [0u8; 44];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        let cipher = chacha20::ChaCha20::new((&seed[..32]).into(), (&seed[32..]).into());
+        seed.zeroize();
+        Self { cipher, buf: [0; 64], at: 64 }
+    }
+
+    #[inline]
+    fn next(&mut self) -> usize {
+        use chacha20::cipher::StreamCipher;
+        if self.at == self.buf.len() {
+            self.buf = [0; 64];
+            // SAFETY: a [u64; 64] is 512 initialised bytes, viewed as bytes for the keystream.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut u8, 512) };
+            self.cipher.apply_keystream(bytes);
+            self.at = 0;
+        }
+        let v = self.buf[self.at] as usize;
+        self.at += 1;
+        if v == 0 { 1 } else { v }
+    }
+}
+
+impl Drop for Draws {
+    fn drop(&mut self) {
+        self.buf.zeroize();
     }
 }
 
@@ -216,19 +259,15 @@ fn share_positions_from(
 /// Protected positions belong to other active GuardedKey instances — overwriting them would
 /// corrupt the other key's share/config data. Snapshot-diffing still shows identical change
 /// patterns across all 128 arrays (excluded slots are ≤19 out of 524,288 — invisible).
-fn write_decoys(protected: &[VaultPos]) {
-
-    let mut rng = rand::rngs::OsRng;
+fn write_decoys(protected: &[VaultPos], draws: &mut Draws) {
     for (array_idx, row) in VAULTS.iter().enumerate() {
         for _ in 0..SHARE_ENTRIES {
-            let mut slot = (rng.next_u64() as usize) & (ARRAY_SIZE - 1);
+            let mut slot = draws.next() & (ARRAY_SIZE - 1);
             // Reroll if this hits another key's data (~0.004% chance, essentially never)
             while protected.iter().any(|p| p.array == array_idx && p.slot == slot) {
-                slot = (rng.next_u64() as usize) & (ARRAY_SIZE - 1);
+                slot = draws.next() & (ARRAY_SIZE - 1);
             }
-            let mut val = rng.next_u64() as usize;
-            if val == 0 { val = 1; }
-            row[slot].store(val, Ordering::Release);
+            row[slot].store(draws.next(), Ordering::Release);
         }
     }
 }
@@ -362,6 +401,7 @@ impl GuardedKey {
     pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
 
         let mut rng = rand::rngs::OsRng;
+        let mut draws = Draws::new();
         ensure_vaults();
 
         // Choose this key's lane FIRST: a random marker whose lane is free among the
@@ -392,7 +432,7 @@ impl GuardedKey {
         // Write decoys FIRST — random noise across all 128 arrays.
         // Excludes other keys' positions. Real writes below overwrite any decoy
         // that landed on OUR slots, guaranteeing all keys' data survives intact.
-        write_decoys(&protected[..pcount]);
+        write_decoys(&protected[..pcount], &mut draws);
 
         // Force multiplier entries odd (mixing quality).
         // ~50% of all entries are already odd, so this isn't a fingerprint.
@@ -437,9 +477,7 @@ impl GuardedKey {
 
         // Scrub the previous key's shares so it never lingers (matches clear()'s scrub).
         for pos in old_positions.iter().flatten() {
-            let mut val = rng.next_u64() as usize;
-            if val == 0 { val = 1; }
-            VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
+            VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
         }
     }
 
@@ -493,16 +531,14 @@ impl GuardedKey {
         let old_marker = self.active.swap(0, Ordering::SeqCst);
         if old_marker != 0 {
 
-            let mut rng = rand::rngs::OsRng;
+            let mut draws = Draws::new();
             // Scrub the slots we actually wrote: lane from the now-cleared marker.
             let positions = share_positions(self.instance_addr(), Self::lane_of(old_marker));
             for pos in &positions {
-                let mut val = rng.next_u64() as usize;
-                if val == 0 { val = 1; }
-                VAULTS[pos.array][pos.slot].store(val, Ordering::Release);
+                VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
             }
             let (protected, pcount) = self.collect_other_protected(others);
-            write_decoys(&protected[..pcount]);
+            write_decoys(&protected[..pcount], &mut draws);
         }
     }
 
@@ -993,7 +1029,7 @@ mod tests {
             .map(|p| VAULTS[p.array][p.slot].load(Ordering::Relaxed))
             .collect();
         for _ in 0..500 {
-            write_decoys(&protected);
+            write_decoys(&protected, &mut Draws::new());
         }
         for (i, p) in protected.iter().enumerate() {
             assert_eq!(
@@ -1009,7 +1045,7 @@ mod tests {
     fn write_decoys_empty_exclusion_works() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        write_decoys(&[]);
+        write_decoys(&[], &mut Draws::new());
     }
 
     // ================================================================
@@ -1234,10 +1270,8 @@ mod tests {
         for kib in [4, 16, 64] {
             row(&format!("few rounds + BLAKE3 shield {kib} KiB"), time(5000, &|| unshield(read(few), shield_blake3(kib))));
         }
-        for kib in [16] {
-            row(&format!("few rounds + SHA-256 shield {kib} KiB"), time(2000, &|| unshield(read(few), shield_sha256(kib))));
-            row(&format!("few rounds + SHA-512 shield {kib} KiB (OpenSSH)"), time(2000, &|| unshield(read(few), shield_sha512(kib))));
-        }
+        row("few rounds + SHA-256 shield 16 KiB", time(2000, &|| unshield(read(few), shield_sha256(16))));
+        row("few rounds + SHA-512 shield 16 KiB (OpenSSH)", time(2000, &|| unshield(read(few), shield_sha512(16))));
         for kib in [4, 16, 64] {
             row(&format!("  prekey copy + wipe only, {kib} KiB"), time(5000, &|| copy_only(kib)));
             row(&format!("few rounds + BLAKE3 one-shot {kib} KiB"), time(5000, &|| unshield(read(few), flat_blake3(kib))));
@@ -1326,8 +1360,56 @@ mod tests {
         eprintln!("BENCH {:<46} {:>9.3} µs", "  one OsRng draw (one getrandom syscall)", one_os);
 
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = time(200000, &mut || { black_box(LOCK.lock().unwrap_or_else(|e| e.into_inner())); });
+        let lock = time(200000, &mut || { drop(black_box(LOCK.lock().unwrap_or_else(|e| e.into_inner()))); });
         eprintln!("BENCH {:<46} {:>9.3} µs  ({:.4}% of set())", "uncontended writer lock + unlock", lock, lock / set_today * 100.0);
         TEST_KEY_A.clear(&others_for_a());
+    }
+
+    /// Draws never yields zero (an empty marker) and doesn't repeat across its buffer refills.
+    #[test]
+    fn draws_are_nonzero_and_distinct() {
+        let mut d = Draws::new();
+        let words: Vec<usize> = (0..4096).map(|_| d.next()).collect();
+        assert!(words.iter().all(|&w| w != 0));
+        let mut sorted = words.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), words.len());
+        let mut other = Draws::new();
+        assert_ne!(other.next(), words[0], "each Draws is seeded afresh");
+    }
+
+    /// Prices the startup fill of the whole vault: one OS draw per entry against the keystream.
+    /// Run with `--release -- --ignored bench_vault_fill --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_vault_fill() {
+        use rand::RngCore;
+        let fresh = || -> Vec<[AtomicUsize; ARRAY_SIZE]> {
+            (0..ARRAY_COUNT).map(|_| std::array::from_fn(|_| AtomicUsize::new(0))).collect()
+        };
+        let time = |f: &dyn Fn(&[[AtomicUsize; ARRAY_SIZE]])| -> f64 {
+            let mut runs: Vec<f64> = (0..7).map(|_| {
+                let rows = fresh();
+                let t = std::time::Instant::now();
+                f(&rows);
+                t.elapsed().as_secs_f64() * 1000.0
+            }).collect();
+            runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            runs[3]
+        };
+        let os = time(&|rows| {
+            let mut rng = rand::rngs::OsRng;
+            for row in rows {
+                for slot in row.iter() {
+                    let mut val = rng.next_u64() as usize;
+                    if val == 0 { val = 1; }
+                    let _ = slot.compare_exchange(0, val, Ordering::SeqCst, Ordering::Relaxed);
+                }
+            }
+        });
+        let ks = time(&|rows| fill_random(rows));
+        eprintln!("BENCH vault fill ({} KiB): OsRng per entry {os:.2} ms, keystream {ks:.2} ms ({:+.1}%)",
+            ARRAY_COUNT * ARRAY_SIZE * 8 / 1024, (ks / os - 1.0) * 100.0);
     }
 }
