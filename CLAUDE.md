@@ -318,7 +318,8 @@ Files are encrypted (NIP-96/Blossom), uploaded to media servers, and referenced 
 Key crates: `nostr-sdk` 0.45, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.37, `iroh` 1.0, `iroh-gossip` 0.101, `aes-gcm`, `argon2`, `image` 0.25
 
 `[patch.crates-io]` in `src-tauri/Cargo.toml` pins two forks:
-- `nostr` — `SecretKey`'s Drop used `non_secure_erase`, which the compiler can optimise away; the fork zeroizes with volatile writes
+- `nostr` — `SecretKey`'s Drop used `non_secure_erase`, which the compiler can optimise away; the fork zeroizes with volatile writes.
+  `Keys::sign_event` skips the post-sign verify (a hardware-wallet fault defence); `add_signature` still verifies
 - `whisper-rs-sys` — whisper.cpp 1.9.5 plus `scripts/whisper/patches` (shared with Vector Web, applied
   through `WHISPER_PATCHES` in `src-tauri/.cargo/config.toml`); KleidiAI on Android arm64, x86-64-v3
 

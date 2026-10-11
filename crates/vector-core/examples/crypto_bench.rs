@@ -410,6 +410,20 @@ async fn main() {
     });
     println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
 
+    println!("-- local signing: with the post-sign re-verify (old) and without (prod)");
+    let ephemeral = Keys::generate();
+    for (what, keys) in [("own key", &me), ("gift-wrap key", &ephemeral)] {
+        let unsigned = EventBuilder::new(Kind::Custom(23311), "").finalize_unsigned(keys.public_key());
+        let old = bench(&format!("{what}: sign + verify (old)"), 2000, || {
+            let sig = keys.sign_schnorr(unsigned.clone().id().as_bytes());
+            black_box(unsigned.clone().add_signature(sig).unwrap());
+        });
+        let new = bench(&format!("{what}: Keys::sign_event (prod)"), 2000, || {
+            black_box(keys.sign_event(unsigned.clone()).unwrap());
+        });
+        println!("  -> {:.1} µs saved per signature ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+    }
+
     println!("-- unwrap breakdown (raw keys)");
     let seal = Event::from_json(nostr_sdk::prelude::nip44::decrypt(me.secret_key(), &wrap.pubkey, &wrap.content).unwrap()).unwrap();
     bench("wrap.verify() (schnorr, outer)", 2000, || { black_box(wrap.verify().is_ok()); });

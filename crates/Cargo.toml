@@ -28,7 +28,8 @@ opt-level = 1
 
 [patch.crates-io]
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
-# zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
+# zeroizes with volatile writes, and a signature made with local Keys isn't re-verified (BIP340's
+# fault-attack check is a hardware-wallet defence that costs more than the sign). nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
