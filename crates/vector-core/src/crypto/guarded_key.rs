@@ -309,6 +309,12 @@ fn shield(lane: usize, prekey: &[usize; PREKEY_ROWS]) -> [u8; 32] {
 /// read that overlaps one starts again, so it never mixes old and new shares or prekeys.
 static EPOCH: AtomicUsize = AtomicUsize::new(0);
 
+/// The vault's write count: it moves on every set() and clear(), and is odd while one runs.
+/// Something derived from a key read under an even count is current while the count is unchanged.
+pub fn write_count() -> usize {
+    EPOCH.load(Ordering::Acquire)
+}
+
 /// Holds the epoch odd for one writer; even again on drop, panics included.
 struct Rewriting(usize);
 
@@ -358,7 +364,7 @@ impl Retiring {
         Self { pad: shield(lane, &prekey), prekey, lane }
     }
 
-    fn finish(mut self, draws: &mut Draws) {
+    fn finish(self, draws: &mut Draws) {
         let mut now = shield(self.lane, &self.prekey);
         if now == self.pad {
             let slot = self.lane * LANE_WIDTH + (draws.next() & (LANE_WIDTH - 1));

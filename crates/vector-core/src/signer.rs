@@ -304,13 +304,36 @@ pub async fn unwrap_gift_wraps(gift_wraps: &[&Event]) -> Vec<Result<UnwrappedGif
     out
 }
 
+/// Who the local vault key belongs to, remembered against the vault's write count: resolving
+/// the signer checks it with one atomic load, and any set() or clear() makes the next resolve
+/// derive it again. Holds a public key only.
+static LOCAL_KEY_OWNER: std::sync::Mutex<Option<(usize, PublicKey)>> = std::sync::Mutex::new(None);
+
+fn local_key_owner() -> Option<PublicKey> {
+    let count = crate::crypto::guarded_key::write_count();
+    let settled = count & 1 == 0;
+    if settled {
+        if let Some((at, pk)) = *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at == count {
+                return Some(pk);
+            }
+        }
+    }
+    let pk = crate::state::MY_SECRET_KEY.to_keys()?.public_key();
+    // Kept only if no write landed while it was derived, so it is this count's key.
+    if settled && crate::crypto::guarded_key::write_count() == count {
+        *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some((count, pk));
+    }
+    Some(pk)
+}
+
 /// Resolve the active session's signer.
 ///
 /// Fails CLOSED on identity mismatch: a remote-signer account's vault holds its
 /// *client* keypair, whose pubkey is not the identity. Signing with it emits
 /// wrong-identity events that self-reject on every reader (AuthorMismatch). A
-/// local signer refuses that at sign/encrypt time rather than here, so resolving
-/// it costs no vault read.
+/// local signer is checked here against the vault key's cached owner, which costs
+/// no vault read unless the key changed, and again at sign/encrypt time.
 pub fn active_signer() -> Result<ActiveSigner, String> {
     // Tests model a remote-signer account (identity signable, local vault empty),
     // which production resolves from `BUNKER_SIGNER`. There's no such handle to
@@ -341,8 +364,11 @@ pub fn active_signer() -> Result<ActiveSigner, String> {
                 return Err("no signer available (no local key)".to_string());
             }
             if let Some(pk) = crate::state::my_public_key() {
-                // The identity check runs at use: GuardedSigner refuses to sign or encrypt
-                // with a vault key that isn't `pk`, off the read it was going to make anyway.
+                // Refused here, before a caller starts work it can't finish; GuardedSigner
+                // checks again at use, on the key it actually signs with.
+                if local_key_owner() != Some(pk) {
+                    return Err("local key does not match the active identity (remote-signer account with no live signer)".to_string());
+                }
                 return Ok(ActiveSigner::Local(crate::crypto::GuardedSigner::new(pk)));
             }
             // No bound identity: headless/CLI consumers and tests.
@@ -1176,6 +1202,23 @@ pub fn drain_bunker_state() -> Option<NostrConnect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_vault_keys_owner_follows_every_set_and_clear() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (me, other) = (Keys::generate(), Keys::generate());
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        assert_eq!(local_key_owner(), Some(me.public_key()));
+        assert_eq!(local_key_owner(), Some(me.public_key()), "answered again from the cache");
+        crate::state::MY_SECRET_KEY.store_from_keys(&other, &[]);
+        assert_eq!(local_key_owner(), Some(other.public_key()), "a set is never answered from a stale cache");
+        // Another key's write moves the count too, and the owner is derived again, unchanged.
+        crate::state::ENCRYPTION_KEY.set([7u8; 32], &[&crate::state::MY_SECRET_KEY]);
+        assert_eq!(local_key_owner(), Some(other.public_key()));
+        crate::state::ENCRYPTION_KEY.clear(&[&crate::state::MY_SECRET_KEY]);
+        crate::state::MY_SECRET_KEY.clear(&[]);
+        assert_eq!(local_key_owner(), None);
+    }
 
     #[test]
     fn setting_roundtrip() {

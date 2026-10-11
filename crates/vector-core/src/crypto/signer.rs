@@ -52,9 +52,8 @@ impl GuardedSigner {
         key
     }
 
-    /// NIP-59 seal under one vault read. The trait path reads the vault to encrypt and
-    /// again to sign, and `active_signer` a third time for its identity check. The keypair
-    /// signing needs makes that check free, so it stays fail-closed.
+    /// NIP-59 seal under one vault read; the trait path reads it to encrypt and again to
+    /// sign. The identity check rides on the keypair signing derives anyway.
     pub fn seal(identity: &PublicKey, rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Event, SignerError> {
         let keys = Self::new(*identity).temp_keys()?;
         GiftWrapSealBuilder::new(rumor, *receiver).finalize(&keys).map_err(SignerError::backend)
@@ -90,7 +89,7 @@ impl GuardedSigner {
     ///
     /// No identity check against `my_public_key`: a vault key that isn't the identity can
     /// only open wraps sealed to itself, which then authenticate their sender like any
-    /// DM. Signing keeps `active_signer`'s fail-closed check.
+    /// DM. Signing and encrypting check the identity in [`Self::temp_keys`].
     pub fn unwrap_batch(wraps: &[&Event]) -> Vec<Result<UnwrappedGift, SignerError>> {
         let checked: Vec<Result<(), SignerError>> = wraps
             .iter()
