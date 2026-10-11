@@ -272,6 +272,14 @@ fn write_decoys(protected: &[VaultPos], draws: &mut Draws) {
     }
 }
 
+/// Serialises every set() and clear(). Each one reads its partners' lanes once, so two running
+/// together could decoy over each other's fresh slots. Reads never take it.
+static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn writer() -> std::sync::MutexGuard<'static, ()> {
+    WRITER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Memory-hardened key vault backed by 128 indistinguishable static arrays.
 pub struct GuardedKey {
     /// Non-zero when a key is stored. Stores a random non-zero value (not 0/1)
@@ -399,7 +407,7 @@ impl GuardedKey {
     /// INVARIANT: pass EVERY other live key. A key's lane is chosen by excluding only `others`'
     /// lanes, so an omitted live key can collide and clobber it.
     pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
-
+        let _writer = writer();
         let mut rng = rand::rngs::OsRng;
         let mut draws = Draws::new();
         ensure_vaults();
@@ -527,6 +535,7 @@ impl GuardedKey {
     /// `others` is a slice of references to other active GuardedKey instances
     /// for cross-key protection during decoy writes.
     pub fn clear(&self, others: &[&GuardedKey]) {
+        let _writer = writer();
         // Set inactive FIRST — any concurrent get() will return None
         let old_marker = self.active.swap(0, Ordering::SeqCst);
         if old_marker != 0 {
@@ -1411,5 +1420,28 @@ mod tests {
         let ks = time(&|rows| fill_random(rows));
         eprintln!("BENCH vault fill ({} KiB): OsRng per entry {os:.2} ms, keystream {ks:.2} ms ({:+.1}%)",
             ARRAY_COUNT * ARRAY_SIZE * 8 / 1024, (ks / os - 1.0) * 100.0);
+    }
+
+    /// Two keys changed at the same time from two threads both survive intact.
+    #[test]
+    fn concurrent_sets_of_two_keys_both_survive() {
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let mut corrupted = 0;
+        for round in 0..40u8 {
+            let a = std::thread::spawn(move || {
+                for i in 0..8u8 { TEST_KEY_A.set(test_key(round ^ i), &others_for_a()); }
+            });
+            let b = std::thread::spawn(move || {
+                for i in 0..8u8 { TEST_KEY_B.set(test_key(!(round ^ i)), &others_for_b()); }
+            });
+            a.join().unwrap();
+            b.join().unwrap();
+            corrupted += usize::from(TEST_KEY_A.get() != Some(test_key(round ^ 7)));
+            corrupted += usize::from(TEST_KEY_B.get() != Some(test_key(!(round ^ 7))));
+        }
+        assert_eq!(corrupted, 0);
+        TEST_KEY_A.clear(&others_for_a());
+        TEST_KEY_B.clear(&others_for_b());
     }
 }
