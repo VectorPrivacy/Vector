@@ -4,7 +4,8 @@
 //! The real 32-byte key is never stored. What is stored is the key XORed with
 //! BLAKE3(prekey), XOR-split into 4 shares (16 `usize` values on 64-bit) and scattered
 //! across 32 static arrays of 4,096 entries each. The prekey is 16 KiB of the arrays'
-//! own random fill: the key's lane row in 8 arrays, which nothing writes while the key is live.
+//! own random fill: the key's lane row in 8 arrays (16 on 32-bit), which nothing writes while
+//! the key is live.
 //!
 //! Defense layers:
 //! 1. **Shielding**: the vault opens only with every one of the prekey's 131,072 bits
@@ -25,8 +26,8 @@
 //!    live keys' slots and prekey rows, so those rows go untouched in a diff: two snapshots
 //!    around a change show which lane and arrays another live key uses.
 //! 7. **Retire by prekey**: a replaced or cleared key's shares are left in place and its
-//!    prekey changed instead, and each set() draws a fresh seed, so no slot is rewritten
-//!    across two diffs.
+//!    prekey changed instead, and each set() draws a fresh seed, so no share slot is
+//!    rewritten across two diffs. Only a lane's seed slot is, each time a key returns to it.
 //! 8. **Zero writes on read**: get() only loads.
 //! 9. **No fixed layout constants**: multipliers and round counts derive from ASLR
 //!    addresses, and all modular arithmetic uses power-of-2 AND masks.
@@ -827,8 +828,8 @@ mod tests {
 
     // ================================================================
     // Cross-key protection — 500 iterations each.
-    // Two keys live in disjoint lanes, so neither key's writes (decoys, shares,
-    // or multiplier-odd-forcing) can ever land on the other's slots.
+    // Two keys live in disjoint lanes and decoys keep off each other's slots, so
+    // neither key's writes (decoys, seed, shares) can ever land on the other's.
     // ================================================================
 
     #[test]

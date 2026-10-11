@@ -1560,14 +1560,14 @@ mod pool_generation_tests {
         rusqlite::Connection::open_in_memory().unwrap()
     }
 
-    #[tokio::test]
-    async fn a_new_session_wakes_the_idle_profile_processor() {
+    #[test]
+    fn a_new_session_wakes_the_idle_profile_processor() {
         let _guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        let woke = crate::profile::sync::wait_for_wake(std::time::Duration::from_millis(0));
-        let _ = woke.await;
+        let wakes = || crate::profile::sync::SESSION_WAKES.load(std::sync::atomic::Ordering::SeqCst);
+        let before = wakes();
         close_database();
         assert!(
-            crate::profile::sync::wait_for_wake(std::time::Duration::from_millis(200)).await,
+            wakes() > before,
             "a session going live must wake the processor, or queued profiles wait for its next timer"
         );
     }

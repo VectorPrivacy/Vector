@@ -260,14 +260,14 @@ static PROCESSOR_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// Wake the idle processor to look at the live session's queue: entries added before that
 /// session went live woke it against the previous one.
 pub(crate) fn wake_processor() {
+    #[cfg(test)]
+    SESSION_WAKES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     PROCESSOR_WAKE.notify_one();
 }
 
-/// Whether a wake arrives within `within`, consuming it.
+/// Wakes sent by [`wake_processor`], apart from the ones queue adds send.
 #[cfg(test)]
-pub(crate) async fn wait_for_wake(within: Duration) -> bool {
-    crate::rt::time::timeout(within, PROCESSOR_WAKE.notified()).await.is_ok()
-}
+pub(crate) static SESSION_WAKES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 // ============================================================================
 // ProfileSyncHandler — platform-specific callbacks

@@ -2389,6 +2389,9 @@ mod tests {
     // after the test's wait and spuriously fail. (Was a real 1000ms sleep with only a 200ms margin.)
     #[tokio::test(start_paused = true)]
     async fn debounce_coalesces_rapid_calls_into_one() {
+        // Another test installing a session mid-wait makes the debounced task stand down before
+        // it counts; the database tests all take this lock.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Snapshot counters before the burst.
         let gen_before = REPUBLISH_GEN.load(Ordering::SeqCst);
         let pass_before = DEBOUNCE_PASS_COUNT.load(Ordering::SeqCst);

@@ -2123,6 +2123,8 @@ struct PushRelay {
     forget: Arc<tokio::sync::Notify>,
     reqs: Arc<Mutex<Vec<String>>>,
     events: Arc<AtomicUsize>,
+    /// Answer every EVENT with OK false.
+    reject: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn push_relay() -> PushRelay {
@@ -2135,11 +2137,14 @@ async fn push_relay() -> PushRelay {
     let forget = Arc::new(tokio::sync::Notify::new());
     let reqs = Arc::new(Mutex::new(Vec::new()));
     let published = Arc::new(AtomicUsize::new(0));
+    let reject = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reject2 = reject.clone();
     let (push2, forget2, reqs2, published2) = (push.clone(), forget.clone(), reqs.clone(), published.clone());
     tokio::spawn(async move {
         loop {
             let Ok((tcp, _)) = l.accept().await else { return };
             let (mut events, forget, reqs, published) = (push2.subscribe(), forget2.clone(), reqs2.clone(), published2.clone());
+            let reject = reject2.clone();
             tokio::spawn(async move {
                 let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
                 let (mut sink, mut stream) = ws.split();
@@ -2163,7 +2168,8 @@ async fn push_relay() -> PushRelay {
                                 }
                                 Ok(ClientMessage::Event(ev)) => {
                                     published.fetch_add(1, Ordering::SeqCst);
-                                    let _ = sink.send(Ws::Text(RelayMessage::ok(ev.id, true, "").as_json().into())).await;
+                                    let ok = !reject.load(Ordering::SeqCst);
+                                    let _ = sink.send(Ws::Text(RelayMessage::ok(ev.id, ok, if ok { "" } else { "blocked: test" }).as_json().into())).await;
                                 }
                                 _ => {}
                             }
@@ -2181,7 +2187,7 @@ async fn push_relay() -> PushRelay {
             });
         }
     });
-    PushRelay { port, push, forget, reqs, events: published }
+    PushRelay { port, push, forget, reqs, events: published, reject }
 }
 
 /// Publish a fresh note through `relay` and report whether `client` hears it on a live sub.
@@ -2201,6 +2207,42 @@ async fn delivered(client: &nostr_sdk::prelude::Client, relay: &PushRelay) -> bo
     })
     .await
     .unwrap_or(false)
+}
+
+/// Through the community transport: a publish no relay took leaves no mark, one a relay took
+/// keeps it, and an id seen before a failed publish stays seen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publish_no_relay_took_leaves_no_mark() {
+    use crate::community::transport::{LiveTransport, Transport};
+    use nostr_sdk::prelude::*;
+    let _s = scene();
+    let relay = push_relay().await;
+    let url = format!("ws://127.0.0.1:{}", relay.port);
+    let client = crate::nostr_client_builder().build();
+    crate::state::set_nostr_client(client.clone());
+    let transport = LiveTransport::with_timeout(Duration::from_secs(3));
+    let note = |text: &str| EventBuilder::new(nostr_sdk::prelude::Kind::TextNote, text).finalize(&Keys::generate()).unwrap();
+    let status = |ev: &Event| {
+        let client = client.clone();
+        let id = ev.id;
+        async move { client.database().check_id(&id).await.unwrap() }
+    };
+
+    relay.reject.store(true, Ordering::SeqCst);
+    let refused = note("refused");
+    assert!(transport.publish(&refused, std::slice::from_ref(&url)).await.is_err());
+    assert_eq!(status(&refused).await, DatabaseEventStatus::NotExistent, "no relay took it, so no mark is left");
+
+    let seen = note("seen before");
+    client.database().save_event(&seen).await.unwrap();
+    assert!(transport.publish(&seen, std::slice::from_ref(&url)).await.is_err());
+    assert_eq!(status(&seen).await, DatabaseEventStatus::Saved, "a mark this publish didn't make stays");
+
+    relay.reject.store(false, Ordering::SeqCst);
+    let taken = note("taken");
+    transport.publish(&taken, std::slice::from_ref(&url)).await.unwrap();
+    assert_eq!(status(&taken).await, DatabaseEventStatus::Saved, "a relay took it, so its echoes stay silent");
+    client.shutdown().await;
 }
 
 /// Our own publish is marked seen so the relay's echo costs nothing, and unmarked when no
@@ -2239,7 +2281,7 @@ async fn an_own_publish_echo_is_dropped_until_it_is_unmarked() {
             .unwrap_or(false)
         }
     };
-    crate::community::transport::mark_own(&client, &ev).await;
+    assert!(crate::community::transport::mark_own(&client, &ev).await, "the mark is new");
     assert!(!echo(&ev).await, "the echo of our own publish is dropped");
     crate::community::transport::unmark_own(&client, &ev).await;
     assert!(echo(&ev).await, "once unmarked, a copy is handled like anyone else's");

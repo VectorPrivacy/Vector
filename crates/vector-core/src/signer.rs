@@ -305,8 +305,8 @@ pub async fn unwrap_gift_wraps(gift_wraps: &[&Event]) -> Vec<Result<UnwrappedGif
 }
 
 /// Who the local vault key belongs to, remembered against the vault's write count: resolving
-/// the signer checks it with one atomic load, and any set() or clear() makes the next resolve
-/// derive it again. Holds a public key only.
+/// the signer checks it with an atomic load and an uncontended lock, and a set() or clear() of
+/// any vault key makes the next resolve derive it again. Holds a public key only.
 static LOCAL_KEY_OWNER: std::sync::Mutex<Option<(usize, PublicKey)>> = std::sync::Mutex::new(None);
 
 fn local_key_owner() -> Option<PublicKey> {
@@ -319,7 +319,11 @@ fn local_key_owner() -> Option<PublicKey> {
             }
         }
     }
-    let pk = crate::state::MY_SECRET_KEY.to_keys()?.public_key();
+    let Some(keys) = crate::state::MY_SECRET_KEY.to_keys() else {
+        *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        return None;
+    };
+    let pk = keys.public_key();
     // Kept only if no write landed while it was derived, so it is this count's key.
     if settled && crate::crypto::guarded_key::write_count() == count {
         *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some((count, pk));
@@ -1222,6 +1226,22 @@ mod tests {
     }
 
     #[test]
+    fn resolving_a_local_signer_refuses_a_vault_key_that_is_not_the_identity() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        set_signer_kind(SignerKind::Local);
+        let (me, other) = (Keys::generate(), Keys::generate());
+        crate::state::set_my_public_key(me.public_key());
+        crate::state::MY_SECRET_KEY.store_from_keys(&other, &[]);
+        let refused = active_signer().is_err();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        let accepted = matches!(active_signer(), Ok(ActiveSigner::Local(_)));
+        crate::state::MY_SECRET_KEY.clear(&[]);
+        crate::state::clear_my_public_key();
+        assert!(refused, "a key that isn't the identity is refused before any work");
+        assert!(accepted, "the identity's own key resolves");
+    }
+
+    #[test]
     fn the_vault_keys_owner_follows_every_set_and_clear() {
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let (me, other) = (Keys::generate(), Keys::generate());
@@ -1261,6 +1281,8 @@ mod tests {
     // does the same for `MY_PUBLIC_KEY` / `PENDING_INVITE`.
     #[test]
     fn atomic_state_round_trips_and_drains() {
+        // Held so tests that resolve a Local signer never see the kind flipped mid-test.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Defensive cleanup: a previous test panic could have left a non-
         // default value behind.
         set_signer_kind(SignerKind::Local);

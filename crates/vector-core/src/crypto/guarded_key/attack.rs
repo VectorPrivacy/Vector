@@ -522,7 +522,6 @@ fn retired_slots_stay_out_of_two_diffs() {
 /// A slot whose value changed by its lowest bit alone was forced odd, not decoyed: random
 /// decoys almost never do that, so it names a key's multiplier slots.
 #[test]
-#[ignore = "attack demo: run by name with --nocapture"]
 fn low_bit_only_changes_across_sets() {
     let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     setup([0x21; 32]);
@@ -543,7 +542,6 @@ fn low_bit_only_changes_across_sets() {
 /// A key set again into a lane it held before re-derives that lane's positions. Unless they
 /// move, its new shares land on its old slots, which then change in two diffs.
 #[test]
-#[ignore = "attack demo: run by name with --nocapture"]
 fn a_lane_held_again_gets_fresh_slots() {
     let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     setup([0x31; 32]);
