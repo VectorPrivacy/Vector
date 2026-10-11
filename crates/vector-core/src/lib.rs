@@ -73,6 +73,8 @@ pub mod db;
 /// The "every task carries its account" check, run by this crate's suite and
 /// by every crate that spawns per-account work against vector-core.
 pub mod spawn_audit;
+#[cfg(test)]
+mod vault_audit;
 
 // === Network ===
 pub mod net;

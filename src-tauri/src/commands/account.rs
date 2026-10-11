@@ -264,6 +264,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
         // under a fresh, foreign account.
         let session = vector_core::db::current_session();
 
+        // owned-key: the NIP-46 client keypair, which the NostrConnect session owns for its life.
         let client_keys = crate::MY_SECRET_KEY.to_keys()
             .ok_or("No client keypair loaded — please return to the login screen and try again")?;
 

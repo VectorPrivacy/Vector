@@ -337,6 +337,7 @@ async fn start_nostrconnect_session() -> Result<Value, String> {
 /// Re-pair a committed bunker account whose signer dropped its permissions.
 /// The live signer keeps working until the new pairing proves the same identity.
 async fn reauthorize_bunker() -> Result<Value, String> {
+    // owned-key: the NIP-46 client keypair, which the NostrConnect session owns for its life.
     let client_keys = MY_SECRET_KEY
         .to_keys()
         .ok_or("No client keypair loaded. Please return to the login screen and try again.")?;

@@ -139,8 +139,8 @@ pub enum ActiveSigner {
     Nip55(crate::nip55::Nip55Signer),
     /// NIP-07 browser extension in the page hosting a web build.
     Nip07(crate::nip07::Nip07Signer),
-    /// Raw keys — headless/CLI consumers and tests, which have a vault key but
-    /// no notion of signer modes.
+    /// Raw keys a caller holds itself (tests). The vault's own key always resolves to
+    /// `Local`, which reads it per operation.
     Keys(Keys),
 }
 
@@ -319,11 +319,10 @@ fn local_key_owner() -> Option<PublicKey> {
             }
         }
     }
-    let Some(keys) = crate::state::MY_SECRET_KEY.to_keys() else {
+    let Some(pk) = crate::state::MY_SECRET_KEY.with_keys(|keys| keys.public_key()) else {
         *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = None;
         return None;
     };
-    let pk = keys.public_key();
     // Kept only if no write landed while it was derived, so it is this count's key.
     if settled && crate::crypto::guarded_key::write_count() == count {
         *LOCAL_KEY_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some((count, pk));
@@ -375,11 +374,9 @@ pub fn active_signer() -> Result<ActiveSigner, String> {
                 }
                 return Ok(ActiveSigner::Local(crate::crypto::GuardedSigner::new(pk)));
             }
-            // No bound identity: headless/CLI consumers and tests.
-            let keys = crate::state::MY_SECRET_KEY
-                .to_keys()
-                .ok_or("no signer available (no local key)")?;
-            Ok(ActiveSigner::Keys(keys))
+            // No bound identity (headless/CLI consumers and tests): the vault key is the identity.
+            let pk = local_key_owner().ok_or("no signer available (no local key)")?;
+            Ok(ActiveSigner::Local(crate::crypto::GuardedSigner::new(pk)))
         }
     }
 }

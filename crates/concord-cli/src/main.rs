@@ -227,11 +227,10 @@ async fn print_relay(c: &vector_core::community::Community) {
 
     let hex = c.id.to_hex();
     println!("\n  ── RELAY reconstruction ──");
-    let Some(keys) = vector_core::state::MY_SECRET_KEY.to_keys() else {
+    if !vector_core::state::MY_SECRET_KEY.has_key() {
         println!("    (no local key; cannot decrypt)");
         return;
-    };
-    let sk = keys.secret_key();
+    }
     let tx = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
 
     // Per-relay latency, split into the two costs that matter on a high-latency link, measured with a FRESH
@@ -397,7 +396,7 @@ async fn print_relay(c: &vector_core::community::Community) {
         for ev in tx.fetch(&q, &c.relays).await.unwrap_or_default() {
             if let Ok(p) = rekey::open_rekey_event(&ev, prior) {
                 if matches!(p.scope, RekeyScope::ServerRoot) && p.new_epoch.0 == target {
-                    base.entry(target).or_default().push((p.rotator.to_bytes(), peek_key(sk, &p)));
+                    base.entry(target).or_default().push((p.rotator.to_bytes(), peek_key(&p)));
                 }
             }
         }
@@ -437,7 +436,7 @@ async fn print_relay(c: &vector_core::community::Community) {
             for ev in tx.fetch(&q, &c.relays).await.unwrap_or_default() {
                 if let Ok(p) = rekey::open_rekey_event(&ev, root) {
                     if matches!(p.scope, RekeyScope::Channel(id) if id == ch.id) {
-                        by_epoch.entry(p.new_epoch.0).or_default().push((re.0, p.rotator.to_bytes(), peek_key(sk, &p)));
+                        by_epoch.entry(p.new_epoch.0).or_default().push((re.0, p.rotator.to_bytes(), peek_key(&p)));
                     }
                 }
             }
@@ -484,7 +483,7 @@ async fn print_relay(c: &vector_core::community::Community) {
                         RekeyScope::Channel(id) => format!("chan:{}", &id.to_hex()[..6]),
                     };
                     let key: String = p.rotator.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-                    by_author.entry(key).or_default().push((scope, p.new_epoch.0, re.0, peek_key(sk, &p)));
+                    by_author.entry(key).or_default().push((scope, p.new_epoch.0, re.0, peek_key(&p)));
                     opened = true;
                     break;
                 }
@@ -516,12 +515,17 @@ async fn print_relay(c: &vector_core::community::Community) {
 }
 
 /// Open MY blob in a rekey (the key it delivers to this account), or None if I'm not a recipient.
-fn peek_key(sk: &nostr_sdk::prelude::SecretKey, p: &vector_core::community::rekey::ParsedRekey) -> Option<[u8; 32]> {
+fn peek_key(p: &vector_core::community::rekey::ParsedRekey) -> Option<[u8; 32]> {
     use vector_core::community::{derive, rekey};
-    let secret = rekey::rekey_pairwise_secret(sk, &p.rotator).ok()?;
-    let loc = derive::recipient_pseudonym(&secret, p.scope, p.new_epoch).to_hex();
-    let blob = p.blobs.iter().find(|b| b.locator == loc)?;
-    rekey::open_rekey_blob(sk, &p.rotator, p.scope, p.new_epoch, blob).ok()
+    vector_core::state::MY_SECRET_KEY
+        .with_keys(|keys| {
+            let sk = keys.secret_key();
+            let secret = rekey::rekey_pairwise_secret(sk, &p.rotator).ok()?;
+            let loc = derive::recipient_pseudonym(&secret, p.scope, p.new_epoch).to_hex();
+            let blob = p.blobs.iter().find(|b| b.locator == loc)?;
+            rekey::open_rekey_blob(sk, &p.rotator, p.scope, p.new_epoch, blob).ok()
+        })
+        .flatten()
 }
 
 /// Short hex of a pubkey/id (first 5 bytes).
@@ -621,10 +625,10 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
         println!("(no active pubkey)");
         return;
     };
-    let Some(keys) = vector_core::state::MY_SECRET_KEY.to_keys() else {
+    if !vector_core::state::MY_SECRET_KEY.has_key() {
         println!("(no local key; cannot unwrap)");
         return;
-    };
+    }
     let Some(client) = vector_core::state::nostr_client() else {
         println!("(no nostr client)");
         return;
@@ -702,7 +706,7 @@ async fn probe_invites(since_hours: u64, from: Option<&str>) {
     let mut invites_found: Vec<(nostr_sdk::prelude::PublicKey, u64, vector_core::community::invite::CommunityInvite, nostr_sdk::prelude::EventId, u64)> = Vec::new();
     let mut seen_senders: HashSet<nostr_sdk::prelude::PublicKey> = HashSet::new();
     for ev in union.values() {
-        match nostr_sdk::prelude::nip59::UnwrappedGift::from_gift_wrap(&keys, ev) {
+        match vector_core::crypto::GuardedSigner::unwrap_gift_wrap(ev) {
             Ok(g) => {
                 let k = g.rumor.kind.as_u16();
                 *by_kind.entry(k).or_default() += 1;

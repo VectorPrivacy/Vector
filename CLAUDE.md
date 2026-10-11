@@ -232,6 +232,14 @@ never carries another's traffic.
   each in `transport/kinds.rs`; it must `host::notify` every ready flip. Bridge, budgets, routing UI,
   pre-login and status views are shared.
 
+### Vault keys stay in closures
+
+Read `MY_SECRET_KEY` / `ENCRYPTION_KEY` with `with_key`, `with_keys` or `read`: the key is rebuilt
+into one buffer, the closure runs, then the stack it used is zeroed, so no copy outlives the call.
+Do the keyed work inside (sign, seal, open, build every event) and carry the result across an
+`await`, never the key. `get()` is test-only; `to_keys()` is for an object that must own a keypair
+(the NIP-46 client) and needs `// owned-key: <why>` at the site, which `vault_audit` enforces.
+
 ### Adding new Tauri commands
 
 Every new `#[tauri::command]` requires THREE things:

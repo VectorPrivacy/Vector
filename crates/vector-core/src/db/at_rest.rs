@@ -1216,27 +1216,26 @@ pub fn backfill_at_rest() -> Result<(), String> {
         return Ok(());
     }
     let _change = crate::crypto::gate::key_change()?;
-    let mut key = match crate::state::ENCRYPTION_KEY.get() {
-        Some(k) => k,
-        None => return Ok(()), // locked / not yet derived — retry on a later login
-    };
-    let conn = crate::db::get_write_connection_guard_static()?;
-    let tx = conn.unchecked_transaction().map_err(|e| format!("backfill tx: {e}"))?;
-    // Setup used to seal the seed through the vault before encryption counted as on, which
-    // stored it in plaintext; any plaintext seed or bunker URL is wrapped here too.
-    let res = prove_key_in_tx(&tx, &key, true)
-        .and_then(|_| encrypt_setting_in_tx(&tx, "seed", &key, |v| v.contains(' ')))
-        .and_then(|_| encrypt_setting_in_tx(&tx, "bunker_url", &key, |v| v.starts_with("bunker://")))
-        .and_then(|_| encrypt_columns_in_tx(&tx, &key))
-        .and_then(|_| seal_plain_messages_in_tx(&tx, &key).map(|_| ()));
-    key.zeroize();
-    res?;
-    tx.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('community_at_rest_encrypted', ?1)",
-        [BACKFILL_VERSION],
-    )
-    .map_err(|e| format!("backfill flag: {e}"))?;
-    tx.commit().map_err(|e| format!("backfill commit: {e}"))?;
+    let sealed = crate::state::ENCRYPTION_KEY.with_key(|key| -> Result<(), String> {
+        let conn = crate::db::get_write_connection_guard_static()?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("backfill tx: {e}"))?;
+        // Setup used to seal the seed through the vault before encryption counted as on, which
+        // stored it in plaintext; any plaintext seed or bunker URL is wrapped here too.
+        prove_key_in_tx(&tx, key, true)?;
+        encrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
+        encrypt_setting_in_tx(&tx, "bunker_url", key, |v| v.starts_with("bunker://"))?;
+        encrypt_columns_in_tx(&tx, key)?;
+        seal_plain_messages_in_tx(&tx, key)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('community_at_rest_encrypted', ?1)",
+            [BACKFILL_VERSION],
+        )
+        .map_err(|e| format!("backfill flag: {e}"))?;
+        tx.commit().map_err(|e| format!("backfill commit: {e}"))
+    });
+    // An empty vault is locked or not yet derived: retry on a later login.
+    let Some(sealed) = sealed else { return Ok(()) };
+    sealed?;
     crate::log_info!("[Encryption] Community at-rest backfill complete");
     Ok(())
 }
@@ -1475,7 +1474,7 @@ fn rekey_with(
     }
     if upgrade == Upgrade::Legacy {
         // A second unlock may have moved the account while this one derived.
-        let vault_holds_legacy = crate::state::ENCRYPTION_KEY.get().map(zeroize::Zeroizing::new).is_some_and(|k| same_key(&k, old_key));
+        let vault_holds_legacy = crate::state::ENCRYPTION_KEY.with_key(|k| same_key(k, old_key)).unwrap_or(false);
         if !crate::crypto::Kdf::of_account()?.is_legacy() || !vault_holds_legacy {
             return Ok(false);
         }

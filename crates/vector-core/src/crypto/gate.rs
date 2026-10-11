@@ -135,14 +135,13 @@ pub(crate) fn require_held(what: &str) {
 /// The key a seal uses for the account this work writes to: `None` for a plaintext store. The
 /// vault and the flag describe the account on screen; a late task of a swapped-out account asks
 /// its own store, and an encrypted one is refused, since its key left with it.
-pub(crate) fn sealing_key() -> Result<Option<[u8; 32]>, String> {
+pub(crate) fn with_sealing_key<R>(f: impl FnOnce(Option<&[u8; 32]>) -> R) -> Result<R, String> {
     if crate::db::writes_to_live_account() {
         if !crate::state::is_encryption_enabled_fast() {
-            return Ok(None);
+            return Ok(f(None));
         }
         return crate::state::ENCRYPTION_KEY
-            .get()
-            .map(Some)
+            .with_key(|key| f(Some(key)))
             .ok_or_else(|| "encryption enabled but key vault is empty".to_string());
     }
     let enabled = crate::db::get_sql_setting("encryption_enabled".to_string())?;
@@ -150,7 +149,7 @@ pub(crate) fn sealing_key() -> Result<Option<[u8; 32]>, String> {
     if crate::state::resolve_encryption_enabled(enabled.as_deref(), security.as_deref()) {
         Err("The account changed before this write; its key is no longer unlocked".to_string())
     } else {
-        Ok(None)
+        Ok(f(None))
     }
 }
 

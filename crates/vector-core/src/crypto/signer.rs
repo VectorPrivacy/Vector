@@ -9,7 +9,6 @@
 //! the bunker and NIP-55 backends.
 
 use nostr_sdk::prelude::*;
-use zeroize::Zeroize;
 
 use crate::signer::{BoxedFuture, SignerError};
 
@@ -27,36 +26,38 @@ impl GuardedSigner {
         Self { public_key }
     }
 
-    /// The vault key, refused unless it is this signer's identity: the check rides on the
-    /// keypair derivation signing needs anyway, and tests the very key about to be used.
-    fn temp_keys(&self) -> Result<Keys, SignerError> {
-        let keys = crate::state::MY_SECRET_KEY
-            .to_keys()
-            .ok_or_else(|| SignerError::from("no signer available (no local key)"))?;
-        if keys.public_key() != self.public_key {
-            return Err(SignerError::from(
-                "local key does not match the active identity (remote-signer account with no live signer)",
-            ));
-        }
-        Ok(keys)
+    /// Run `f` on the vault keypair, refused unless it is this signer's identity: the check
+    /// rides on the keypair derivation signing needs anyway, and tests the very key about to
+    /// be used. The keypair is wiped when `f` returns.
+    fn with_keys<R>(&self, f: impl FnOnce(&Keys) -> Result<R, SignerError>) -> Result<R, SignerError> {
+        crate::state::MY_SECRET_KEY
+            .with_keys(|keys| {
+                if keys.public_key() != self.public_key {
+                    return Err(SignerError::from(
+                        "local key does not match the active identity (remote-signer account with no live signer)",
+                    ));
+                }
+                f(keys)
+            })
+            .unwrap_or_else(|| Err(SignerError::from("no signer available (no local key)")))
     }
 
-    /// The bare secret key, for operations that never need the public half: a
-    /// `Keys` derives it on construction, an elliptic-curve multiply per call.
-    fn temp_secret_key() -> Result<SecretKey, SignerError> {
-        let mut bytes = crate::state::MY_SECRET_KEY
-            .get()
-            .ok_or_else(|| SignerError::from("Secret key not available"))?;
-        let key = SecretKey::from_slice(&bytes).map_err(SignerError::backend);
-        bytes.zeroize();
-        key
+    /// The bare secret key, for operations that never need the public half: a `Keys` derives
+    /// it on construction, an elliptic-curve multiply per call. `f` always runs once, given
+    /// the key or why there is none.
+    fn with_secret_key<R>(f: impl FnOnce(Result<&SecretKey, SignerError>) -> R) -> R {
+        crate::state::MY_SECRET_KEY.read(|key| match key.map(|k| SecretKey::from_slice(k)) {
+            Some(Ok(key)) => f(Ok(&key)),
+            Some(Err(e)) => f(Err(SignerError::backend(e))),
+            None => f(Err(SignerError::from("Secret key not available"))),
+        })
     }
 
     /// NIP-59 seal under one vault read; the trait path reads it to encrypt and again to
     /// sign. The identity check rides on the keypair signing derives anyway.
     pub fn seal(identity: &PublicKey, rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Event, SignerError> {
-        let keys = Self::new(*identity).temp_keys()?;
-        GiftWrapSealBuilder::new(rumor, *receiver).finalize(&keys).map_err(SignerError::backend)
+        Self::new(*identity)
+            .with_keys(|keys| GiftWrapSealBuilder::new(rumor, *receiver).finalize(keys).map_err(SignerError::backend))
     }
 
     /// [`Self::seal`] plus the ephemeral-key wrap, still one vault read.
@@ -66,11 +67,12 @@ impl GuardedSigner {
         rumor: UnsignedEvent,
         extra_tags: Vec<Tag>,
     ) -> Result<Event, SignerError> {
-        let keys = Self::new(*identity).temp_keys()?;
-        GiftWrapBuilder::new(*receiver, rumor)
-            .extra_tags(extra_tags)
-            .finalize(&keys)
-            .map_err(SignerError::backend)
+        Self::new(*identity).with_keys(|keys| {
+            GiftWrapBuilder::new(*receiver, rumor)
+                .extra_tags(extra_tags)
+                .finalize(keys)
+                .map_err(SignerError::backend)
+        })
     }
 
     /// NIP-59 unwrap under one vault read; see [`Self::unwrap_batch`].
@@ -89,7 +91,7 @@ impl GuardedSigner {
     ///
     /// No identity check against `my_public_key`: a vault key that isn't the identity can
     /// only open wraps sealed to itself, which then authenticate their sender like any
-    /// DM. Signing and encrypting check the identity in [`Self::temp_keys`].
+    /// DM. Signing and encrypting check the identity in [`Self::with_keys`].
     pub fn unwrap_batch(wraps: &[&Event]) -> Vec<Result<UnwrappedGift, SignerError>> {
         let checked: Vec<Result<(), SignerError>> = wraps
             .iter()
@@ -106,24 +108,26 @@ impl GuardedSigner {
             })
             .collect();
 
-        let key = if checked.iter().any(Result::is_ok) { Some(Self::temp_secret_key()) } else { None };
         let mut senders: Vec<(PublicKey, nip44::v2::ConversationKey)> = Vec::new();
-        let opened: Vec<Result<(Event, String), SignerError>> = wraps
-            .iter()
-            .zip(checked)
-            .map(|(wrap, check)| {
-                check?;
-                match &key {
-                    Some(Ok(key)) => open_layers(key, wrap, &mut senders),
-                    Some(Err(e)) => Err(SignerError::from(e.to_string())),
-                    None => Err(SignerError::from("unreachable")),
-                }
-            })
-            .collect();
+        let any_open = checked.iter().any(Result::is_ok);
+        let open_all = |key: Result<&SecretKey, SignerError>| -> Vec<Result<(Event, String), SignerError>> {
+            wraps
+                .iter()
+                .zip(checked)
+                .map(|(wrap, check)| {
+                    check?;
+                    match &key {
+                        Ok(key) => open_layers(key, wrap, &mut senders),
+                        Err(e) => Err(SignerError::from(e.to_string())),
+                    }
+                })
+                .collect()
+        };
+        // No wrap passed its checks: each fails on its own error before the key is asked for.
+        let opened = if any_open { Self::with_secret_key(open_all) } else { open_all(Err(SignerError::from("unreachable"))) };
         for (_, ck) in senders.iter_mut() {
             wipe_conversation_key(ck);
         }
-        drop(key);
 
         opened
             .into_iter()
@@ -201,8 +205,7 @@ impl SignEvent for GuardedSigner {
     type Error = SignerError;
 
     fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event, Self::Error> {
-        let keys = self.temp_keys()?;
-        SignEvent::sign_event(&keys, unsigned).map_err(SignerError::backend)
+        self.with_keys(|keys| SignEvent::sign_event(keys, unsigned).map_err(SignerError::backend))
     }
 }
 
@@ -210,11 +213,11 @@ impl Nip04 for GuardedSigner {
     type Error = SignerError;
 
     fn nip04_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String, Self::Error> {
-        nip04::encrypt(self.temp_keys()?.secret_key(), public_key, content).map_err(SignerError::backend)
+        self.with_keys(|keys| nip04::encrypt(keys.secret_key(), public_key, content).map_err(SignerError::backend))
     }
 
     fn nip04_decrypt(&self, public_key: &PublicKey, payload: &str) -> Result<String, Self::Error> {
-        nip04::decrypt(&Self::temp_secret_key()?, public_key, payload).map_err(SignerError::backend)
+        Self::with_secret_key(|key| nip04::decrypt(key?, public_key, payload).map_err(SignerError::backend))
     }
 }
 
@@ -222,12 +225,13 @@ impl Nip44 for GuardedSigner {
     type Error = SignerError;
 
     fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String, Self::Error> {
-        nip44::encrypt(self.temp_keys()?.secret_key(), public_key, content, nip44::Version::default())
-            .map_err(SignerError::backend)
+        self.with_keys(|keys| {
+            nip44::encrypt(keys.secret_key(), public_key, content, nip44::Version::default()).map_err(SignerError::backend)
+        })
     }
 
     fn nip44_decrypt(&self, public_key: &PublicKey, payload: &str) -> Result<String, Self::Error> {
-        nip44::decrypt(&Self::temp_secret_key()?, public_key, payload).map_err(SignerError::backend)
+        Self::with_secret_key(|key| nip44::decrypt(key?, public_key, payload).map_err(SignerError::backend))
     }
 }
 

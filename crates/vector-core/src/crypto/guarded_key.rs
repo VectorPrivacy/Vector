@@ -10,8 +10,7 @@
 //! Defense layers:
 //! 1. **Shielding**: the vault opens only with every one of the prekey's 131,072 bits
 //!    exact, so a noisy or partial capture of the vault (cold boot, Rowhammer/RAMBleed,
-//!    speculative leaks, torn dumps) gives an unrelated key. Copies a read leaves on its
-//!    own stack are not covered.
+//!    speculative leaks, torn dumps) gives an unrelated key.
 //! 2. **Secret splitting**: the shielded key is XOR-split into 4 shares
 //! 3. **32 alike arrays**: same size, all randomly filled, all receiving the same number of
 //!    decoys per set()/clear(). A single dump shows nothing that singles one out.
@@ -28,9 +27,13 @@
 //! 7. **Retire by prekey**: a replaced or cleared key's shares are left in place and its
 //!    prekey changed instead, and each set() draws a fresh seed, so no share slot is
 //!    rewritten across two diffs. Only a lane's seed slot is, each time a key returns to it.
-//! 8. **Zero writes on read**: get() only loads.
+//! 8. **Zero writes on read**: a read only loads.
 //! 9. **No fixed layout constants**: multipliers and round counts derive from ASLR
 //!    addresses, and all modular arithmetic uses power-of-2 AND masks.
+//! 10. **No stack residue**: `read`, `with_key` and `with_keys` rebuild the key into one
+//!    buffer, run the caller's work on it, then zero the dead stack both used, so no copy
+//!    outlives the call: not a moved-from local, a secp256k1 scalar or BLAKE3's output.
+//!    `to_keys()` hands out an owned keypair, only where one must outlive the call.
 //!
 //! Security tiers:
 //!   **Without source code** (info-stealers, forensic tools): nothing marks the vault or
@@ -299,6 +302,12 @@ fn share_positions_from(instance_addr: usize, lane: usize, layout: &Layout) -> [
 /// Copied out with atomic loads (a writer may be mid-decoy; the epoch check discards that
 /// read) and wiped after.
 fn shield(lane: usize, prekey: &[usize; PREKEY_ROWS]) -> [u8; 32] {
+    let mut pad = [0u8; 32];
+    shield_into(lane, prekey, &mut pad);
+    pad
+}
+
+fn shield_into(lane: usize, prekey: &[usize; PREKEY_ROWS], out: &mut [u8; 32]) {
     let mut buf = [0usize; PREKEY_ROWS * LANE_WIDTH];
     for (row, &array) in buf.chunks_exact_mut(LANE_WIDTH).zip(prekey) {
         let slots = &VAULTS[array][lane * LANE_WIDTH..(lane + 1) * LANE_WIDTH];
@@ -310,9 +319,21 @@ fn shield(lane: usize, prekey: &[usize; PREKEY_ROWS]) -> [u8; 32] {
     let bytes = unsafe {
         std::slice::from_raw_parts(buf.as_ptr() as *const u8, std::mem::size_of_val(&buf))
     };
-    let pad = *blake3::hash(bytes).as_bytes();
+    *out = *blake3::hash(bytes).as_bytes();
     buf.zeroize();
-    pad
+}
+
+/// How far below a read [`scrub_below`] zeroes: past the deepest hot path, the read's 16 KiB
+/// prekey buffer and the closure together (`attack::stack_residue_by_path` measures them).
+const SCRUB_BYTES: usize = 32 * 1024;
+
+/// Zero the dead stack a read and its closure just used.
+#[inline(never)]
+fn scrub_below() {
+    let mut stack = std::mem::MaybeUninit::<[u8; SCRUB_BYTES]>::uninit();
+    // SAFETY: zeroes a local this frame owns; black_box keeps the writes from being elided.
+    unsafe { std::ptr::write_bytes(stack.as_mut_ptr(), 0, 1) };
+    std::hint::black_box(&mut stack);
 }
 
 /// Vault-wide seqlock: odd while a set() or clear() is rewriting, bumped past it after. A
@@ -609,11 +630,46 @@ impl GuardedKey {
         }
     }
 
-    /// Recover the key. Zero writes — invisible to snapshot diffing.
-    ///
-    /// A read that a set() or clear() overlapped sees the epoch (or this key's marker) move
-    /// and starts again, so it never returns a mix of old and new shares or prekeys.
-    pub fn get(&self) -> Option<[u8; 32]> {
+    /// Run `f` on the key, or on `None` when the vault is empty. The key is rebuilt into one
+    /// buffer `f` borrows, which is wiped when it returns, and then the stack both used is
+    /// zeroed: only what `f` returns or stores outlives the call. Zero writes to the vault.
+    pub fn read<R>(&self, f: impl FnOnce(Option<&[u8; 32]>) -> R) -> R {
+        let out = self.read_then(f);
+        scrub_below();
+        out
+    }
+
+    /// Never inlined, so the read and `f` run in frames below the caller's, where
+    /// [`scrub_below`] reaches the copies they leave: moved-from locals, secp256k1 scalars,
+    /// BLAKE3's output.
+    #[inline(never)]
+    fn read_then<R>(&self, f: impl FnOnce(Option<&[u8; 32]>) -> R) -> R {
+        let mut key = zeroize::Zeroizing::new([0u8; 32]);
+        let held = self.read_into(&mut key);
+        f(held.then_some(&*key))
+    }
+
+    /// [`Self::read`] for a vault expected to hold a key: `None` when it is empty.
+    pub fn with_key<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> Option<R> {
+        self.read(|key| key.map(f))
+    }
+
+    /// [`Self::with_key`] as a keypair, dropped (and wiped) when `f` returns.
+    pub fn with_keys<R>(&self, f: impl FnOnce(&nostr_sdk::prelude::Keys) -> R) -> Option<R> {
+        use nostr_sdk::prelude::{Keys, SecretKey};
+        self.with_key(|key| SecretKey::from_slice(key).ok().map(|sk| f(&Keys::new(sk))))?
+    }
+
+    /// A copy of the key, for tests to compare.
+    #[cfg(test)]
+    pub(crate) fn get(&self) -> Option<[u8; 32]> {
+        self.with_key(|key| *key)
+    }
+
+    /// Rebuild the key into `out`; false when the vault is empty. A read that a set() or
+    /// clear() overlapped sees the epoch (or this key's marker) move and starts again, so it
+    /// never returns a mix of old and new shares or prekeys.
+    fn read_into(&self, out: &mut [u8; 32]) -> bool {
         loop {
             let epoch = EPOCH.load(Ordering::Acquire);
             if epoch & 1 == 1 {
@@ -623,23 +679,23 @@ impl GuardedKey {
             }
             let marker = self.active.load(Ordering::Acquire);
             if marker == 0 {
-                return None;
+                return false;
             }
-            let mut key = self.read_shielded(marker);
+            self.read_shielded(marker, out);
             fence(Ordering::Acquire);
             if EPOCH.load(Ordering::Relaxed) == epoch && self.active.load(Ordering::Relaxed) == marker {
-                return Some(key);
+                return true;
             }
-            key.zeroize();
+            out.zeroize();
         }
     }
 
-    fn read_shielded(&self, marker: usize) -> [u8; 32] {
+    fn read_shielded(&self, marker: usize, key: &mut [u8; 32]) {
         // Lane comes from the marker, so reads land on exactly the slots set() wrote.
         let lane = Self::lane_of(marker);
         let layout = layout(self.instance_addr(), lane);
         let positions = share_positions_from(self.instance_addr(), lane, &layout);
-        let mut key = shield(lane, &layout.prekey);
+        shield_into(lane, &layout.prekey, key);
 
         for (i, pos) in positions.iter().enumerate() {
             let val = VAULTS[pos.array][pos.slot].load(Ordering::Acquire).to_ne_bytes();
@@ -648,8 +704,6 @@ impl GuardedKey {
                 *a ^= b;
             }
         }
-
-        key
     }
 
     /// Clear the key: retire its prekey and write decoys to all arrays, keeping off every other
@@ -675,11 +729,12 @@ impl GuardedKey {
         self.active.load(Ordering::Acquire) != 0
     }
 
+    /// An owned keypair, for an object that must keep one past the call (a NIP-46 client).
+    /// Its moves leave copies nothing wipes, so shipping code marks each use `// owned-key:`
+    /// (`vault_audit` enforces it); everything else uses [`Self::with_keys`].
     pub fn to_keys(&self) -> Option<nostr_sdk::prelude::Keys> {
-        let mut bytes = self.get()?;
-        let result = nostr_sdk::prelude::SecretKey::from_slice(&bytes);
-        bytes.zeroize();
-        Some(nostr_sdk::prelude::Keys::new(result.ok()?))
+        use nostr_sdk::prelude::{Keys, SecretKey};
+        self.with_key(|key| SecretKey::from_slice(key).ok().map(Keys::new))?
     }
 }
 

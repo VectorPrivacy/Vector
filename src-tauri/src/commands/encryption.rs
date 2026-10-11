@@ -416,26 +416,25 @@ pub(crate) async fn rekey_from_vault<R: Runtime>(
         new_key.zeroize();
         return Err("Local Encryption is not enabled".to_string());
     }
-    let mut old_key: [u8; 32] = crate::ENCRYPTION_KEY
-        .get()
-        .ok_or("Session is locked, unlock before changing the security mode")?;
-
-    // The old key drives a whole-database re-encrypt, and rows that fail to
-    // decrypt are SKIPPED rather than fatal — so a wrong old key would commit
-    // an account full of orphaned ciphertext. Prove it round-trips first.
-    if !at_rest::key_matches_account(&old_key) {
-        old_key.zeroize();
-        new_key.zeroize();
-        return Err("Session key does not match this account".to_string());
-    }
-
-    close_processing_gate();
-    let result = at_rest::rekey(
-        &old_key, &new_key, &new_kdf, security_type, biometric_wrap.as_deref(), &progress_emitter(&handle),
-    );
-    old_key.zeroize();
+    let rekeyed = crate::ENCRYPTION_KEY.with_key(|old_key| {
+        // The old key drives a whole-database re-encrypt, and rows that fail to
+        // decrypt are SKIPPED rather than fatal — so a wrong old key would commit
+        // an account full of orphaned ciphertext. Prove it round-trips first.
+        if !at_rest::key_matches_account(old_key) {
+            return None;
+        }
+        close_processing_gate();
+        Some(at_rest::rekey(
+            old_key, &new_key, &new_kdf, security_type, biometric_wrap.as_deref(), &progress_emitter(&handle),
+        ))
+    });
     // The vault moved to the new key inside the migration, before the drain below.
     new_key.zeroize();
+    let result = match rekeyed {
+        None => return Err("Session is locked, unlock before changing the security mode".to_string()),
+        Some(None) => return Err("Session key does not match this account".to_string()),
+        Some(Some(result)) => result,
+    };
     drain_pending_events(&handle).await;
 
     match result {

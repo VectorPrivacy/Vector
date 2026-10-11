@@ -139,10 +139,7 @@ fn open_framed_with(cipher: &ChaCha20Poly1305, mut framed: Vec<u8>) -> Option<Ve
 /// A value the vault key didn't open, tried under the key a PIN change just replaced: a read
 /// that straddled the change can hold rows sealed under either.
 fn open_hex_previous(hex_data: &str) -> Option<String> {
-    let mut key = crate::state::PREVIOUS_AT_REST_KEY.get()?;
-    let out = open_hex(hex_data, &key);
-    key.zeroize();
-    out
+    crate::state::PREVIOUS_AT_REST_KEY.with_key(|key| open_hex(hex_data, key)).flatten()
 }
 
 /// How long a replaced at-rest key stays openable: past any read that straddled the change.
@@ -188,10 +185,7 @@ pub(crate) fn forget_previous_key() {
 }
 
 fn open_blob_previous(stored: &[u8]) -> Option<Vec<u8>> {
-    let mut key = crate::state::PREVIOUS_AT_REST_KEY.get()?;
-    let out = decrypt_blob_with_key(stored, &key).ok();
-    key.zeroize();
-    out
+    crate::state::PREVIOUS_AT_REST_KEY.with_key(|key| decrypt_blob_with_key(stored, key).ok()).flatten()
 }
 
 /// Open a hex at-rest string into its plaintext, decrypting inside the decode buffer.
@@ -850,23 +844,16 @@ fn is_all_lowercase_hex(bytes: &[u8]) -> bool {
 /// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext using ENCRYPTION_KEY vault.
 /// If `password` is Some, derives a key from it instead.
 pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -> Result<String, ()> {
-    let mut key: [u8; 32] = if let Some(pass) = password {
+    let opened = if let Some(pass) = password {
         let Ok(kdf) = Kdf::of_account() else { return Err(()) };
-        derive_key(&pass, &kdf).await
-    } else {
-        match crate::state::ENCRYPTION_KEY.get() {
-            Some(k) => k,
-            None => return Err(()),
-        }
-    };
-
-    let Some(plaintext) = open_hex(&ciphertext, &key).or_else(|| open_hex_previous(&ciphertext)) else {
+        let mut key = derive_key(&pass, &kdf).await;
+        let opened = open_hex(&ciphertext, &key);
         key.zeroize();
-        return Err(());
+        opened
+    } else {
+        crate::state::ENCRYPTION_KEY.with_key(|key| open_hex(&ciphertext, key)).ok_or(())?
     };
-
-    key.zeroize();
-    Ok(plaintext)
+    opened.or_else(|| open_hex_previous(&ciphertext)).ok_or(())
 }
 
 /// Conditionally decrypt content. Handles crash recovery — if decryption fails
@@ -884,11 +871,7 @@ pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
 }
 
 fn open_with_vault(hex_data: &str) -> Option<String> {
-    let opened = crate::state::ENCRYPTION_KEY.get().and_then(|mut key| {
-        let out = open_hex(hex_data, &key);
-        key.zeroize();
-        out
-    });
+    let opened = crate::state::ENCRYPTION_KEY.with_key(|key| open_hex(hex_data, key)).flatten();
     opened.or_else(|| open_hex_previous(hex_data))
 }
 
@@ -910,10 +893,7 @@ impl AtRestOpener {
     fn cipher(&mut self) -> Option<&ChaCha20Poly1305> {
         if !self.loaded {
             self.loaded = true;
-            if let Some(mut key) = crate::state::ENCRYPTION_KEY.get() {
-                self.cipher = Some(ChaCha20Poly1305::new(&key));
-                key.zeroize();
-            }
+            crate::state::ENCRYPTION_KEY.with_key(|key| self.cipher = Some(ChaCha20Poly1305::new(key)));
         }
         self.cipher.as_ref()
     }
@@ -972,11 +952,7 @@ impl AtRestSealer {
     /// `maybe_encrypt_text` for one string, sharing the batch's cipher.
     pub fn seal(&mut self, plaintext: &str) -> Result<String, String> {
         if self.cipher.is_none() {
-            self.cipher = Some(gate::sealing_key()?.map(|mut key| {
-                let cipher = ChaCha20Poly1305::new(&key);
-                key.zeroize();
-                cipher
-            }));
+            gate::with_sealing_key(|key| self.cipher = Some(key.map(ChaCha20Poly1305::new)))?;
         }
         let Some(Some(cipher)) = self.cipher.as_ref() else {
             return Ok(plaintext.to_string());
@@ -1019,12 +995,10 @@ pub fn decrypt_blob_with_key(stored: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, S
 /// the vault is empty → Err (never silently persists a secret in plaintext).
 pub fn maybe_encrypt_blob(plaintext: &[u8]) -> Result<Vec<u8>, String> {
     gate::require_held("maybe_encrypt_blob");
-    let Some(mut key) = gate::sealing_key()? else {
-        return Ok(plaintext.to_vec());
-    };
-    let out = encrypt_blob_with_key(plaintext, &key);
-    key.zeroize();
-    out
+    gate::with_sealing_key(|key| match key {
+        Some(key) => encrypt_blob_with_key(plaintext, key),
+        None => Ok(plaintext.to_vec()),
+    })?
 }
 
 /// Decrypt a secret key BLOB. Tolerant of the half-migrated DB: a 32-byte value
@@ -1035,11 +1009,7 @@ pub fn maybe_decrypt_blob(stored: &[u8]) -> Vec<u8> {
     if stored.len() == 32 {
         return stored.to_vec();
     }
-    let opened = crate::state::ENCRYPTION_KEY.get().and_then(|mut key| {
-        let out = decrypt_blob_with_key(stored, &key).ok();
-        key.zeroize();
-        out
-    });
+    let opened = crate::state::ENCRYPTION_KEY.with_key(|key| decrypt_blob_with_key(stored, key).ok()).flatten();
     opened.or_else(|| open_blob_previous(stored)).unwrap_or_else(|| stored.to_vec())
 }
 
@@ -1047,12 +1017,10 @@ pub fn maybe_decrypt_blob(stored: &[u8]) -> Vec<u8> {
 /// vault is empty → Err.
 pub fn maybe_encrypt_text(plaintext: &str) -> Result<String, String> {
     gate::require_held("maybe_encrypt_text");
-    let Some(mut key) = gate::sealing_key()? else {
-        return Ok(plaintext.to_string());
-    };
-    let out = encrypt_with_key(plaintext, &key);
-    key.zeroize();
-    out
+    gate::with_sealing_key(|key| match key {
+        Some(key) => encrypt_with_key(plaintext, key),
+        None => Ok(plaintext.to_string()),
+    })?
 }
 
 /// Decrypt a text field. A value that doesn't look encrypted (or can't be

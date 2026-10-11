@@ -67,8 +67,11 @@ pub async fn create_community<T: Transport + ?Sized>(
         // Use the local vault ONLY if it actually holds the active identity's key — else a stale/mismatched
         // local secret would sign the attestation as the WRONG owner (or break verification). On mismatch,
         // fall through to the client signer, which is the authority that produced `my_public_key()`.
-        let attestation = if let Some(keys) = crate::state::MY_SECRET_KEY.to_keys().filter(|k| k.public_key() == owner_pk) {
-            unsigned.finalize(&keys).map_err(|e| format!("sign owner attestation: {e}"))?
+        let local = crate::state::MY_SECRET_KEY
+            .with_keys(|k| (k.public_key() == owner_pk).then(|| unsigned.clone().finalize(k)))
+            .flatten();
+        let attestation = if let Some(signed) = local {
+            signed.map_err(|e| format!("sign owner attestation: {e}"))?
         } else {
             // No matching local key: sign through the session signer (bunker / NIP-55).
             // `active_signer()` fails closed, so a signer-less session still can't create —
@@ -494,7 +497,7 @@ pub async fn publish_banlist<T: Transport + ?Sized>(
                 crate::db::community::get_community_banlist(&cid).unwrap_or_default().into_iter().collect();
             let adds = banned_hex.iter().any(|n| !prev.contains(n.as_str()));
             let cut_needed = (adds || crate::db::community::get_read_cut_pending(&cid)?) && !is_public(community)?;
-            if cut_needed && crate::state::MY_SECRET_KEY.to_keys().is_none() {
+            if cut_needed && !crate::state::MY_SECRET_KEY.has_key() {
                 return Err("Banning someone from a private community cuts their read access, which needs a key rotation your account can't perform: it signs remotely (a NIP-46 bunker), and a rotation requires a local key. Ask a community admin who holds a local key to carry out the ban.".to_string());
             }
         }
@@ -1741,7 +1744,7 @@ pub async fn revoke_public_invite<T: Transport + ?Sized>(
         let my_after: std::collections::BTreeSet<String> =
             my_before.iter().filter(|l| **l != this_locator).cloned().collect();
         let would_empty_aggregate = others.is_empty() && my_after.is_empty();
-        if would_empty_aggregate && crate::state::MY_SECRET_KEY.to_keys().is_none() {
+        if would_empty_aggregate && !crate::state::MY_SECRET_KEY.has_key() {
             return Err("Revoking this last invite link makes the community private, which re-keys it so link-joined lurkers lose access. Your account signs remotely (a NIP-46 bunker) and can't perform that rotation. Ask a community admin who holds a local key to privatize the community.".to_string());
         }
         // Revoke the bundle by OVERWRITING it with an empty, token-signed revocation tombstone (vsk=9) at its
@@ -2473,17 +2476,9 @@ pub fn apply_channel_rekey(
     }
 
     // Find + open MY blob (compute my own recipient locator, no trial-decryption).
-    let my_keys = crate::state::MY_SECRET_KEY
-        .to_keys()
-        .ok_or("no local identity to open the rekey blob")?;
-    let secret = super::rekey::rekey_pairwise_secret(my_keys.secret_key(), &parsed.rotator)?;
-    let my_locator = super::derive::recipient_pseudonym(&secret, parsed.scope, parsed.new_epoch).to_hex();
-    let mine = match parsed.blobs.iter().find(|b| b.locator == my_locator) {
-        Some(b) => b,
-        None => return Ok(RekeyOutcome::NotARecipient),
+    let Some(new_key) = open_my_rekey_blob(parsed, "no local identity to open the rekey blob")? else {
+        return Ok(RekeyOutcome::NotARecipient);
     };
-    let new_key =
-        super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine)?;
 
     // Commit (N2 dual-write). Re-validate the session straddling the caller's fetch before writing.
     if !session.is_live() {
@@ -2508,31 +2503,42 @@ fn mint_or_reuse_rotation_key(cid: &str, scope_id: &str, epoch: u64) -> Result<z
     Ok(k)
 }
 
-/// Publish a rotation's per-recipient blobs as one OR MORE 3303 events, SPLIT into chunks of
+/// A rotation's per-recipient blobs as one OR MORE 3303 events, SPLIT into chunks of
 /// `MAX_REKEY_BLOBS` so each stays under the relay size limit (e.g. 200 recipients → a 120-blob event +
 /// an 80-blob event). All chunks share the SAME address (the builder derives it from scope/epoch, not
 /// the blobs) and carry the SAME new key, so a recipient finds + recovers their key from whichever chunk
-/// holds their blob. Each chunk is published durably; FAIL-FAST if a chunk reaches no relay (the caller
-/// leaves its head unadvanced; because the key is persisted + reused on retry, re-publishing carries the
-/// SAME key → no same-epoch fork).
-async fn publish_rekey_chunked<T, F>(
-    transport: &T,
-    relays: &[String],
+/// holds their blob.
+fn chunk_rekey_events(
     blobs: &[super::rekey::RekeyBlob],
-    build: F,
-) -> Result<(), String>
-where
-    T: Transport + ?Sized,
-    F: Fn(&[super::rekey::RekeyBlob]) -> Result<Event, String>,
-{
+    build: impl Fn(&[super::rekey::RekeyBlob]) -> Result<Event, String>,
+) -> Result<Vec<Event>, String> {
     if blobs.is_empty() {
         return Err("rekey has no recipients".to_string());
     }
-    for chunk in blobs.chunks(super::rekey::MAX_REKEY_BLOBS) {
-        let event = build(chunk)?;
-        transport.publish_durable(&event, relays).await?;
+    blobs.chunks(super::rekey::MAX_REKEY_BLOBS).map(build).collect()
+}
+
+/// Publish each chunk durably; FAIL-FAST if one reaches no relay (the caller leaves its head unadvanced;
+/// because the key is persisted + reused on retry, re-publishing carries the SAME key → no same-epoch fork).
+async fn publish_rekey_chunked<T: Transport + ?Sized>(transport: &T, relays: &[String], events: &[Event]) -> Result<(), String> {
+    for event in events {
+        transport.publish_durable(event, relays).await?;
     }
     Ok(())
+}
+
+/// Run `f` on the identity keypair, refused unless it is still `me`: a rotation that began under one
+/// account never signs as the next. The rotation's blobs and events are built in one read, so
+/// publishing them needs no key.
+fn with_rotator_keys<R>(me: &nostr_sdk::prelude::PublicKey, f: impl FnOnce(&Keys) -> Result<R, String>) -> Result<R, String> {
+    crate::state::MY_SECRET_KEY
+        .with_keys(|keys| {
+            if keys.public_key() != *me {
+                return Err("the account changed during the rotation".to_string());
+            }
+            f(keys)
+        })
+        .unwrap_or_else(|| Err("the local key was cleared during the rotation".to_string()))
 }
 
 /// Rotate a channel's key (a channel rekey): mint a fresh-random key for `current_epoch + 1`,
@@ -2564,10 +2570,12 @@ pub async fn rotate_channel<T: Transport + ?Sized>(
         // Authority: I must hold MANAGE_CHANNELS (owner supreme). A rekey needs the RAW local key
         // (the blob locator is a ConversationKey ECDH, which NIP-46 can't expose) — so a bunker account can
         // administer via editions but not rekey. Fails clearly here rather than silently.
-        let my_keys = crate::state::MY_SECRET_KEY.to_keys().ok_or("a key rotation requires a local key (bunker/NIP-46 accounts can't rekey)")?;
+        let me = crate::state::MY_SECRET_KEY
+            .with_keys(|k| k.public_key())
+            .ok_or("a key rotation requires a local key (bunker/NIP-46 accounts can't rekey)")?;
         let owner = proven_owner_hex(community);
         let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
-        if !roster.is_authorized(&my_keys.public_key().to_hex(), owner.as_deref(), super::roles::Permissions::MANAGE_CHANNELS) {
+        if !roster.is_authorized(&me.to_hex(), owner.as_deref(), super::roles::Permissions::MANAGE_CHANNELS) {
             return Err("not authorized to rotate this channel (no MANAGE_CHANNELS)".to_string());
         }
 
@@ -2589,25 +2597,27 @@ pub async fn rotate_channel<T: Transport + ?Sized>(
         // Recipient set = the supplied stayers ∪ me (deduped), each wrapped a per-recipient blob. Published
         // SPLIT across ≤MAX_REKEY_BLOBS-blob events so a large channel rotates in multiple 64KB-safe
         // events at one address; a recipient recovers from whichever chunk holds their blob.
-        let mut seen = std::collections::HashSet::new();
-        let mut blobs = Vec::new();
-        for pk in recipients.iter().chain(std::iter::once(&my_keys.public_key())) {
-            if !seen.insert(pk.to_hex()) {
-                continue;
+        let events = with_rotator_keys(&me, |my_keys| {
+            let mut seen = std::collections::HashSet::new();
+            let mut blobs = Vec::new();
+            for pk in recipients.iter().chain(std::iter::once(&me)) {
+                if !seen.insert(pk.to_hex()) {
+                    continue;
+                }
+                blobs.push(super::rekey::build_rekey_blob(
+                    my_keys.secret_key(), pk, super::derive::RekeyScope::Channel(*channel_id), new_epoch, &new_key,
+                )?);
             }
-            blobs.push(super::rekey::build_rekey_blob(
-                my_keys.secret_key(), pk, super::derive::RekeyScope::Channel(*channel_id), new_epoch, &new_key,
-            )?);
-        }
+            chunk_rekey_events(&blobs, |chunk| {
+                super::rekey::build_channel_rekey_event(
+                    &Keys::generate(), my_keys, envelope_root, channel_id,
+                    new_epoch, prev_epoch, &prev_commit, chunk,
+                )
+            })
+        })?;
 
         // Publish FIRST (all chunks) — only advance my own head once peers can actually receive the new key.
-        publish_rekey_chunked(transport, &community.relays, &blobs, |chunk| {
-            super::rekey::build_channel_rekey_event(
-                &Keys::generate(), &my_keys, envelope_root, channel_id,
-                new_epoch, prev_epoch, &prev_commit, chunk,
-            )
-        })
-        .await?;
+        publish_rekey_chunked(transport, &community.relays, &events).await?;
         crate::db::community::advance_channel_epoch(&cid, &channel_id.to_hex(), new_epoch.0, &new_key)?;
         Ok(new_epoch.0)
     })
@@ -2659,10 +2669,12 @@ pub(crate) async fn rotate_server_root<T: Transport + ?Sized>(
         // appointed/trusted and the owner recovers (re-grant the peer + remove the bad admin); it can't steal
         // ownership or leak data. The bulletproof fix (verifiable removal: followers reject a snapshot that drops
         // a member the re-founder doesn't outrank) is deferred. Needs the RAW local key (ECDH), so no bunker.
-        let my_keys = crate::state::MY_SECRET_KEY.to_keys().ok_or("a base rotation (privatize / private-ban read-cut) requires a local key (bunker/NIP-46 accounts can't rekey)")?;
+        let me = crate::state::MY_SECRET_KEY
+            .with_keys(|k| k.public_key())
+            .ok_or("a base rotation (privatize / private-ban read-cut) requires a local key (bunker/NIP-46 accounts can't rekey)")?;
         let owner = proven_owner_hex(community);
         let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
-        if !roster.is_authorized(&my_keys.public_key().to_hex(), owner.as_deref(), super::roles::Permissions::BAN) {
+        if !roster.is_authorized(&me.to_hex(), owner.as_deref(), super::roles::Permissions::BAN) {
             return Err("not authorized to rotate the server root (no BAN)".to_string());
         }
 
@@ -2690,32 +2702,34 @@ pub(crate) async fn rotate_server_root<T: Transport + ?Sized>(
         let sealed = prepare_reanchor_control_plane(transport, community, &new_root, new_epoch).await?;
 
         let total_recipients = (recipients.len() + 1).max(1); // recipients + me (multi-device)
-        let mut seen = std::collections::HashSet::new();
-        let mut blobs = Vec::new();
-        for pk in recipients.iter().chain(std::iter::once(&my_keys.public_key())) {
-            if !seen.insert(pk.to_hex()) {
-                continue;
+        let events = with_rotator_keys(&me, |my_keys| {
+            let mut seen = std::collections::HashSet::new();
+            let mut blobs = Vec::new();
+            for pk in recipients.iter().chain(std::iter::once(&me)) {
+                if !seen.insert(pk.to_hex()) {
+                    continue;
+                }
+                blobs.push(super::rekey::build_rekey_blob(
+                    my_keys.secret_key(), pk, super::derive::RekeyScope::ServerRoot, new_epoch, &new_root,
+                )?);
+                emit_rekey_progress(
+                    &format!("Preparing keys for members ({}/{})...", blobs.len(), total_recipients),
+                    (5 + 35 * blobs.len() / total_recipients) as u8,
+                );
             }
-            blobs.push(super::rekey::build_rekey_blob(
-                my_keys.secret_key(), pk, super::derive::RekeyScope::ServerRoot, new_epoch, &new_root,
-            )?);
-            emit_rekey_progress(
-                &format!("Preparing keys for members ({}/{})...", blobs.len(), total_recipients),
-                (5 + 35 * blobs.len() / total_recipients) as u8,
-            );
-        }
+            chunk_rekey_events(&blobs, |chunk| {
+                super::rekey::build_server_root_rekey_event(
+                    &Keys::generate(), my_keys, community.server_root_key.as_bytes(), &community.id,
+                    new_epoch, prev_epoch, &prev_commit, chunk,
+                )
+            })
+        })?;
 
         // COMMIT phase (publishes only — all fetching is done above). Publish the base rekey (delivers the new
         // root to recipients), SPLIT across ≤MAX_REKEY_BLOBS-blob events so a large recipient set rotates
         // in multiple 64KB-safe events at one address.
         emit_rekey_progress("Sending keys to members...", 42);
-        publish_rekey_chunked(transport, &community.relays, &blobs, |chunk| {
-            super::rekey::build_server_root_rekey_event(
-                &Keys::generate(), &my_keys, community.server_root_key.as_bytes(), &community.id,
-                new_epoch, prev_epoch, &prev_commit, chunk,
-            )
-        })
-        .await?;
+        publish_rekey_chunked(transport, &community.relays, &events).await?;
 
         // RE-FOUND BY COMPACTION: publish the pre-sealed snapshot (the current folded state re-wrapped as
         // editions under the new epoch) so a post-rotation joiner reaches the new root with reachable authority.
@@ -2949,15 +2963,9 @@ pub fn apply_server_root_rekey(
     }
 
     // Find + open MY blob (ServerRoot scope).
-    let my_keys = crate::state::MY_SECRET_KEY.to_keys().ok_or("no local identity to open the base rekey blob")?;
-    let secret = super::rekey::rekey_pairwise_secret(my_keys.secret_key(), &parsed.rotator)?;
-    let my_locator = super::derive::recipient_pseudonym(&secret, parsed.scope, parsed.new_epoch).to_hex();
-    let mine = match parsed.blobs.iter().find(|b| b.locator == my_locator) {
-        Some(b) => b,
-        None => return Ok(RekeyOutcome::NotARecipient),
+    let Some(new_root) = open_my_rekey_blob(parsed, "no local identity to open the base rekey blob")? else {
+        return Ok(RekeyOutcome::NotARecipient);
     };
-    let new_root =
-        super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine)?;
 
     if !session.is_live() {
         return Err("session changed during base rekey apply".to_string());
@@ -3259,25 +3267,29 @@ fn peek_my_server_root(parsed: &super::rekey::ParsedRekey) -> Result<Option<[u8;
     if !matches!(parsed.scope, super::derive::RekeyScope::ServerRoot) {
         return Ok(None);
     }
-    let my_keys = crate::state::MY_SECRET_KEY.to_keys().ok_or("no local key to open a base rekey blob")?;
-    let secret = super::rekey::rekey_pairwise_secret(my_keys.secret_key(), &parsed.rotator)?;
-    let my_locator = super::derive::recipient_pseudonym(&secret, parsed.scope, parsed.new_epoch).to_hex();
-    let mine = match parsed.blobs.iter().find(|b| b.locator == my_locator) {
-        Some(b) => b,
-        None => return Ok(None),
-    };
-    super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine).map(Some)
+    open_my_rekey_blob(parsed, "no local key to open a base rekey blob")
 }
 
 /// Convergence helper: open MY Channel blob in `parsed` WITHOUT committing, to learn which new channel key this
 /// rotation would deliver me. Lets the channel current-head heal pick a deterministic winner (lowest
 /// delivered key) among concurrent same-epoch channel rotations. `None` = not a recipient / can't open.
 fn peek_my_channel_key(parsed: &super::rekey::ParsedRekey) -> Option<[u8; 32]> {
-    let my_keys = crate::state::MY_SECRET_KEY.to_keys()?;
-    let secret = super::rekey::rekey_pairwise_secret(my_keys.secret_key(), &parsed.rotator).ok()?;
-    let my_locator = super::derive::recipient_pseudonym(&secret, parsed.scope, parsed.new_epoch).to_hex();
-    let mine = parsed.blobs.iter().find(|b| b.locator == my_locator)?;
-    super::rekey::open_rekey_blob(my_keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine).ok()
+    open_my_rekey_blob(parsed, "no local key").ok().flatten()
+}
+
+/// Open MY blob in `parsed` under one read of the identity key: `Ok(None)` when I'm not a recipient.
+fn open_my_rekey_blob(parsed: &super::rekey::ParsedRekey, no_key: &str) -> Result<Option<[u8; 32]>, String> {
+    crate::state::MY_SECRET_KEY
+        .with_keys(|keys| {
+            let secret = super::rekey::rekey_pairwise_secret(keys.secret_key(), &parsed.rotator)?;
+            let my_locator = super::derive::recipient_pseudonym(&secret, parsed.scope, parsed.new_epoch).to_hex();
+            let Some(mine) = parsed.blobs.iter().find(|b| b.locator == my_locator) else {
+                return Ok(None);
+            };
+            super::rekey::open_rekey_blob(keys.secret_key(), &parsed.rotator, parsed.scope, parsed.new_epoch, mine)
+                .map(Some)
+        })
+        .unwrap_or_else(|| Err(no_key.to_string()))
 }
 
 pub async fn catch_up_server_root<T: Transport + ?Sized>(

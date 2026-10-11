@@ -291,8 +291,8 @@ async fn main() {
     }
 
     println!("-- vault");
-    bench("GuardedKey::get()", 2000, || { black_box(ENCRYPTION_KEY.get()); });
-    bench("GuardedKey::to_keys() (get + pubkey derive)", 2000, || { black_box(MY_SECRET_KEY.to_keys()); });
+    bench("GuardedKey::with_key()", 2000, || { black_box(ENCRYPTION_KEY.with_key(|k| black_box(k)[0])); });
+    bench("GuardedKey::with_keys() (read + pubkey derive)", 2000, || { black_box(MY_SECRET_KEY.with_keys(|k| k.public_key())); });
     bench("Keys::new(sk) alone", 2000, || { black_box(Keys::new(me.secret_key().clone())); });
     bench("signer::active_signer()", 2000, || { black_box(vector_core::signer::active_signer().ok()); });
 
@@ -391,7 +391,7 @@ async fn main() {
     println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
     let old = bench("nip44 encrypt: identity read + secret read (old)", 2000, || {
         assert_eq!(MY_SECRET_KEY.to_keys().unwrap().public_key(), me.public_key());
-        let sk = SecretKey::from_slice(&MY_SECRET_KEY.get().unwrap()).unwrap();
+        let sk = MY_SECRET_KEY.with_key(|k| SecretKey::from_slice(k).unwrap()).unwrap();
         black_box(nip44::encrypt(&sk, &sender.public_key(), "x", nip44::Version::default()).unwrap());
     });
     let new = bench("nip44 encrypt: active_signer + GuardedSigner (prod)", 2000, || {

@@ -636,13 +636,18 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
 /// (targeted send — the caller decides the reach: login relays, communities,
 /// indexers). Returns how many relays accepted it.
 pub async fn publish_manifest(manifest: &BotManifest, keys: &Keys, relays: &[String]) -> Result<usize, String> {
-    let event = manifest.to_event(keys)?;
+    publish_manifest_event(&manifest.to_event(keys)?, relays).await
+}
+
+/// [`publish_manifest`] for a manifest already signed with [`BotManifest::to_event`], so the
+/// signing key need not live across the publish.
+pub async fn publish_manifest_event(event: &Event, relays: &[String]) -> Result<usize, String> {
     let client = crate::state::nostr_client().ok_or("no client connected")?;
     for r in relays {
         let _ = client.add_managed_relay(r.as_str()).await;
     }
     client.connect().await;
-    let out = crate::transport_aware(client.send_event(&event))
+    let out = crate::transport_aware(client.send_event(event))
         .to(relays.to_vec())
         .await
         .map_err(|e| e.to_string())?;

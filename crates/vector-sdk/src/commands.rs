@@ -246,8 +246,10 @@ impl VectorBot {
             return;
         }
         let manifest = self.commands().manifest();
-        let Some(keys) = vector_core::state::MY_SECRET_KEY.to_keys() else {
-            return; // bunker identities sign remotely — manifest publish is a follow-up there
+        let event = match vector_core::state::MY_SECRET_KEY.with_keys(|keys| manifest.to_event(keys)) {
+            Some(Ok(event)) => event,
+            Some(Err(e)) => return eprintln!("[vector-sdk] manifest signing failed: {e}"),
+            None => return, // bunker identities sign remotely — manifest publish is a follow-up there
         };
         let mut relays: Vec<String> = DISCOVERY_RELAYS.iter().map(|s| s.to_string()).collect();
         if let Some(client) = vector_core::state::nostr_client() {
@@ -264,7 +266,7 @@ impl VectorBot {
         }
         relays.sort();
         relays.dedup();
-        match bot_interface::publish_manifest(&manifest, &keys, &relays).await {
+        match bot_interface::publish_manifest_event(&event, &relays).await {
             Ok(n) => vector_core::log_info!("[vector-sdk] interface manifest ({} command(s)) stored on {n} relay(s)", manifest.commands.len()),
             Err(e) => eprintln!("[vector-sdk] manifest publish failed: {e}"),
         }

@@ -389,42 +389,201 @@ fn aslr_slide_brute_with_a_diff_filter() {
 
 #[inline(never)]
 fn scrub_stack() {
-    let mut buf = [0u8; 80 * 1024];
+    let mut buf = [0u8; 160 * 1024];
     buf.zeroize();
     std::hint::black_box(&buf);
 }
 
-#[inline(never)]
-fn read_and_wipe() {
-    let mut k = PARTNER.get().unwrap();
-    std::hint::black_box(&k);
-    k.zeroize();
+/// What one operation left behind on the dead stack, in each form a scan could look for.
+struct Residue {
+    /// The key's bytes, as a buffer, a cipher's words or a keypair hold them.
+    key: usize,
+    /// A 16-byte half outside any whole copy: a vector register spill.
+    halves: usize,
+    /// The key as a 256-bit little-endian integer: secp256k1's scalar limbs.
+    limbs: usize,
+    /// The pad: XOR it with the shares in the vault and the key falls out.
+    pad: usize,
+    /// How far below the caller the operation wrote, in bytes.
+    depth: usize,
 }
 
-/// After a get() whose caller wipes its copy, does the dead stack still hold the key or the pad?
-/// The pad is key-equivalent: pad XOR the in-vault shares is the key, no prekey needed.
-#[test]
-#[ignore = "attack demo: run by name with --nocapture"]
-fn stack_residue_after_get() {
-    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let key = Box::new([0xC3u8; 32]);
-    setup(*key);
-    let mut snap = vec![0u8; 64 * 1024];
+/// Run `op` over freshly zeroed stack and count what it left below this frame. `key` and `pad`
+/// live on the heap, so the needles are never part of the haystack.
+#[inline(never)]
+fn residue_of(key: &[u8; 32], pad: &[u8; 32], op: &dyn Fn()) -> Residue {
+    const SPAN: usize = 128 * 1024;
+    let mut snap = vec![0u8; SPAN];
     let marker = 0u8;
     let top = std::hint::black_box(&marker) as *const u8 as usize;
     scrub_stack();
-    read_and_wipe();
+    op();
     // SAFETY: reads this thread's own stack below the live frame; the region is mapped.
     unsafe {
         for (i, b) in snap.iter_mut().enumerate() {
-            *b = std::ptr::read_volatile((top - 64 * 1024 + i) as *const u8);
+            *b = std::ptr::read_volatile((top - SPAN + i) as *const u8);
         }
     }
-    let lane = PARTNER.lane();
-    let pad = shield(lane, &layout(PARTNER.instance_addr(), lane).prekey);
     let find = |needle: &[u8]| snap.windows(needle.len()).filter(|w| *w == needle).count();
-    println!("dead stack, 64 KiB below the caller: key copies {}, pad copies {}", find(&key[..]), find(&pad));
-    PARTNER.clear(&[]);
+    let mut limbs = *key;
+    limbs.reverse();
+    let whole = find(key);
+    Residue {
+        key: whole,
+        halves: find(&key[..16]) + find(&key[16..]) - 2 * whole,
+        limbs: find(&limbs),
+        pad: find(pad),
+        depth: SPAN - snap.iter().position(|&b| b != 0).unwrap_or(SPAN),
+    }
+}
+
+fn pad_of(vault: &GuardedKey) -> Box<[u8; 32]> {
+    let lane = vault.lane();
+    Box::new(shield(lane, &layout(vault.instance_addr(), lane).prekey))
+}
+
+/// The same key in PARTNER and both standing vaults, and inputs for every hot path that reads one.
+struct HotPaths {
+    key: Box<[u8; 32]>,
+    peer: nostr_sdk::prelude::Keys,
+    signer: crate::crypto::GuardedSigner,
+    sealed: String,
+    to_me: String,
+    unsigned: nostr_sdk::prelude::UnsignedEvent,
+    wrap: nostr_sdk::prelude::Event,
+}
+
+impl HotPaths {
+    fn new() -> Self {
+        use nostr_sdk::prelude::*;
+        // No repeated bytes, so every match is a copy and never part of a run.
+        let key = Box::new(*blake3::hash(b"stack residue").as_bytes());
+        let me = Keys::new(SecretKey::from_slice(&key[..]).unwrap()).public_key();
+        let peer = Keys::generate();
+        setup(*key);
+        crate::state::ENCRYPTION_KEY.set(*key, &[&PARTNER]);
+        crate::state::MY_SECRET_KEY.set(*key, &[&PARTNER]);
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "probe").finalize_unsigned(peer.public_key());
+        let seal_body = nip44::encrypt(peer.secret_key(), &me, rumor.as_json(), nip44::Version::default()).unwrap();
+        let seal = EventBuilder::new(Kind::Seal, seal_body).finalize(&peer).unwrap();
+        let eph = Keys::generate();
+        let body = nip44::encrypt(eph.secret_key(), &me, seal.as_json(), nip44::Version::default()).unwrap();
+        Self {
+            sealed: crate::crypto::encrypt_with_key("probe", &key).unwrap(),
+            to_me: nip44::encrypt(peer.secret_key(), &me, "probe", nip44::Version::default()).unwrap(),
+            signer: crate::crypto::GuardedSigner::new(me),
+            unsigned: EventBuilder::new(Kind::TextNote, "probe").finalize_unsigned(me),
+            wrap: EventBuilder::new(Kind::GiftWrap, body).tag(Tag::public_key(me)).finalize(&eph).unwrap(),
+            key,
+            peer,
+        }
+    }
+
+    /// Each path by name, and the vault it reads.
+    fn paths(&self) -> Vec<(&'static str, &'static GuardedKey, Box<dyn Fn() + '_>)> {
+        use crate::crypto::chachapoly::ChaCha20Poly1305;
+        use nostr_sdk::prelude::*;
+        let at_rest = &crate::state::ENCRYPTION_KEY;
+        let identity = &crate::state::MY_SECRET_KEY;
+        vec![
+            ("get(), caller wipes", &PARTNER, Box::new(|| {
+                let mut k = PARTNER.get().unwrap();
+                std::hint::black_box(&k);
+                k.zeroize();
+            })),
+            ("get() into a cipher, then dropped", &PARTNER, Box::new(|| {
+                let mut cipher = None;
+                if let Some(mut k) = PARTNER.get() {
+                    cipher = Some(ChaCha20Poly1305::new(&k));
+                    k.zeroize();
+                }
+                std::hint::black_box(&cipher);
+            })),
+            ("to_keys() for its public key", &PARTNER, Box::new(|| {
+                // owned-key: measures what an owned read leaves behind.
+                std::hint::black_box(PARTNER.to_keys().map(|k| k.public_key()));
+            })),
+            ("with_key(), nothing kept", &PARTNER, Box::new(|| {
+                std::hint::black_box(PARTNER.with_key(|k| std::hint::black_box(k)[0]));
+            })),
+            ("with_key() into a cipher, then dropped", &PARTNER, Box::new(|| {
+                let mut cipher = None;
+                PARTNER.with_key(|k| cipher = Some(ChaCha20Poly1305::new(k)));
+                std::hint::black_box(&cipher);
+            })),
+            ("with_keys() for its public key", &PARTNER, Box::new(|| {
+                std::hint::black_box(PARTNER.with_keys(|k| k.public_key()));
+            })),
+            ("at rest: maybe_decrypt_text", at_rest, Box::new(|| {
+                std::hint::black_box(crate::crypto::maybe_decrypt_text(&self.sealed));
+            })),
+            ("at rest: open_batch, two values", at_rest, Box::new(|| {
+                std::hint::black_box(crate::crypto::open_batch(|o| {
+                    (o.open_or_keep(self.sealed.clone()), o.open_or_keep(self.sealed.clone()))
+                }));
+            })),
+            ("signer: sign_event", identity, Box::new(|| {
+                std::hint::black_box(self.signer.sign_event(self.unsigned.clone()).unwrap());
+            })),
+            ("signer: nip44_encrypt", identity, Box::new(|| {
+                std::hint::black_box(self.signer.nip44_encrypt(&self.peer.public_key(), "probe").unwrap());
+            })),
+            ("signer: nip44_decrypt", identity, Box::new(|| {
+                std::hint::black_box(self.signer.nip44_decrypt(&self.peer.public_key(), &self.to_me).unwrap());
+            })),
+            ("signer: unwrap_gift_wrap", identity, Box::new(|| {
+                std::hint::black_box(crate::crypto::GuardedSigner::unwrap_gift_wrap(&self.wrap).unwrap());
+            })),
+        ]
+    }
+}
+
+impl Drop for HotPaths {
+    fn drop(&mut self) {
+        crate::state::MY_SECRET_KEY.clear(&[&PARTNER]);
+        crate::state::ENCRYPTION_KEY.clear(&[&PARTNER]);
+        PARTNER.clear(&[]);
+    }
+}
+
+/// Every hot path that reads a vault, and what each leaves on the dead stack once it returns.
+/// A copy here outlives the operation until something else happens to overwrite it.
+#[test]
+#[ignore = "attack demo: run by name with --nocapture"]
+fn stack_residue_by_path() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let hot = HotPaths::new();
+    for (name, vault, op) in hot.paths() {
+        let pad = pad_of(vault);
+        let r = residue_of(&hot.key, &pad, &*op);
+        println!(
+            "{name:<40} key {:>2}  halves {:>2}  limbs {:>2}  pad {:>2}  depth {:>6}",
+            r.key, r.halves, r.limbs, r.pad, r.depth
+        );
+    }
+}
+
+/// The same hot paths timed, median of 15 batches.
+#[test]
+#[ignore = "benchmark"]
+fn bench_hot_paths() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let hot = HotPaths::new();
+    let mut paths = hot.paths();
+    paths.insert(0, ("scrub_below() alone", &PARTNER, Box::new(scrub_below)));
+    for (name, _, op) in paths {
+        let mut runs: Vec<f64> = (0..15)
+            .map(|_| {
+                let t = Instant::now();
+                for _ in 0..40 {
+                    op();
+                }
+                t.elapsed().as_secs_f64() * 1e6 / 40.0
+            })
+            .collect();
+        runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("BENCH {name:<40} {:>8.2} µs", runs[7]);
+    }
 }
 
 /// The cost of keeping decoys off live prekey rows: those rows go quiet. Counts the 256-slot
