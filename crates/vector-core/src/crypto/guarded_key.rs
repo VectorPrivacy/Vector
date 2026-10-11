@@ -454,10 +454,16 @@ impl GuardedKey {
     }
 
     pub fn to_keys(&self) -> Option<nostr_sdk::prelude::Keys> {
+        Some(nostr_sdk::prelude::Keys::new(self.to_secret_key()?))
+    }
+
+    /// The bare secret, skipping the keypair derivation `to_keys` pays for —
+    /// for ECDH-only work (NIP-04/44) that never needs the public half.
+    pub fn to_secret_key(&self) -> Option<nostr_sdk::prelude::SecretKey> {
         let mut bytes = self.get()?;
         let result = nostr_sdk::prelude::SecretKey::from_slice(&bytes);
         bytes.zeroize();
-        Some(nostr_sdk::prelude::Keys::new(result.ok()?))
+        result.ok()
     }
 }
 

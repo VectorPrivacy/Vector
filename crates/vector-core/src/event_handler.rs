@@ -393,11 +393,14 @@ pub async fn prepare_event(
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
         },
     };
-    let (rumor, sender) = match UnwrappedGift::from_gift_wrap_async(&signer, &event).await {
-        Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
-        Err(_) => return PreparedEvent::ErrorSkip {
+    let unwrapped = match &signer {
+        crate::signer::ActiveSigner::Local(local) => local.unwrap_gift_wrap(&event).ok(),
+        _ => UnwrappedGift::from_gift_wrap_async(&signer, &event).await.ok(),
+    };
+    let Some(UnwrappedGift { rumor, sender }) = unwrapped else {
+        return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-        },
+        };
     };
 
     let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
