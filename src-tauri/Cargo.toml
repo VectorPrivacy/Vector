@@ -219,7 +219,6 @@ cpal = "0.16.0"
 # Calls: libopus built from the bundled source (cmake, as whisper already needs)
 opus = "0.4"
 bytes = "1"
-hound = "3.5.1"
 # opt-simd: AAC/Vorbis IMDCT on rustfft (runtime-dispatched SSE/AVX/NEON), 1.1-1.3x per decode
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
 rustfft = "6.2"

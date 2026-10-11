@@ -74,24 +74,34 @@ pub struct PendingRecording {
 impl PendingRecording {
     /// Encode stashed i16 samples into a WAV byte buffer
     pub fn encode_wav(&self) -> Result<Vec<u8>, String> {
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: TARGET_SAMPLE_RATE,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut buffer: Vec<u8> = Vec::new();
-        {
-            let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec)
-                .map_err(|e| e.to_string())?;
-            for &sample in self.samples.iter() {
-                writer.write_sample(sample).map_err(|e| e.to_string())?;
-            }
-            writer.finalize().map_err(|e| e.to_string())?;
-        }
-        Ok(buffer)
+        encode_wav_mono16(&self.samples, TARGET_SAMPLE_RATE)
     }
+}
+
+/// 16-bit mono PCM in a canonical 44-byte RIFF/WAVE header.
+fn encode_wav_mono16(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, String> {
+    let data_len = u32::try_from(samples.len() * 2)
+        .ok()
+        .filter(|&n| n <= u32::MAX - 36)
+        .ok_or("recording too long for WAV")?;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // channels
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    out.resize(44 + data_len as usize, 0);
+    for (dst, s) in out[44..].chunks_exact_mut(2).zip(samples) {
+        dst.copy_from_slice(&s.to_le_bytes());
+    }
+    Ok(out)
 }
 
 pub struct AudioRecorder {
@@ -311,5 +321,20 @@ impl AudioRecorder {
     /// Take the pending recording (consumes it). Used by send_recording command.
     pub fn take_pending(&self) -> Option<PendingRecording> {
         self.pending.lock().unwrap().take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_is_a_canonical_16_bit_mono_file() {
+        let wav = encode_wav_mono16(&[1, -2, i16::MAX], 22000).unwrap();
+        assert_eq!(
+            wav[..44],
+            *b"RIFF\x2a\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\xf0\x55\0\0\xe0\xab\0\0\x02\0\x10\0data\x06\0\0\0"
+        );
+        assert_eq!(wav[44..], [1, 0, 0xFE, 0xFF, 0xFF, 0x7F]);
     }
 }
