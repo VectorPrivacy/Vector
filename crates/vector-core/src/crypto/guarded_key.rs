@@ -682,6 +682,9 @@ impl GuardedKey {
 // ============================================================================
 
 #[cfg(test)]
+mod attack;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
