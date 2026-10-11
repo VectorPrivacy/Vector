@@ -1412,41 +1412,49 @@ let maintenanceLoopStarted = false;
 function startMaintenanceLoop() {
     if (maintenanceLoopStarted) return;
     maintenanceLoopStarted = true;
-    let maintenanceTick = 0;
-    setInterval(() => {
-        maintenanceTick++;
-
-        // Widescreen keeps the list pane on screen via CSS (`body.ws #chats { display:
-        // flex !important; }`) whatever the tab's inline display says — gate on the
-        // live layout, not the inline style, or the list never ticks in wide mode.
-        const listOnScreen = VectorSvelte.paneShown('chats') || wsActive();
-
-        // Clear expired typing indicators (every tick)
-        const now = Date.now() / 1000;
-        arrChats.forEach(chat => {
-            if (chat.active_typers && chat.active_typers.length > 0) {
-                // Clear the array if we haven't received an update in 30 seconds
-                if (!chat.last_typing_update || now - chat.last_typing_update > 30) {
-                    chat.active_typers = [];
-
-                    // If this is the open chat, refresh the display
-                    if (strOpenChat === chat.id) {
-                        updateChatHeaderSubtext(chat);
-                    }
-
-                    // Refresh chat list (in-place; typing doesn't affect sort order)
-                    if (listOnScreen) {
-                        updateChatlistPreview(chat.id);
-                    }
-                }
-            }
-        });
-
-        // Update chatlist timestamps every 6th tick (~30 seconds)
-        if (maintenanceTick % 6 === 0 && listOnScreen) {
+    // Chatlist relative times re-derive on this tick; a hidden window has nothing to repaint.
+    let listClock = 0;
+    const syncListClock = () => {
+        if (!document.hidden && !listClock) {
             updateChatlistTimestamps();
+            listClock = setInterval(() => {
+                // Widescreen keeps the list pane on screen via CSS whatever the tab's inline display says.
+                if (VectorSvelte.paneShown('chats') || wsActive()) updateChatlistTimestamps();
+            }, 30000);
+        } else if (document.hidden && listClock) {
+            clearInterval(listClock);
+            listClock = 0;
         }
-    }, 5000);
+    };
+    document.addEventListener('visibilitychange', syncListClock);
+    syncListClock();
+    expireTypers();
+}
+
+const TYPING_TTL_SECS = 30;
+let typingTimer = 0;
+/** Typing indicators lapse TYPING_TTL_SECS after their last update; armed only while someone types. */
+function armTypingExpiry(lastUpdate) {
+    if (typingTimer) return;
+    const due = (lastUpdate + TYPING_TTL_SECS) * 1000 - Date.now();
+    typingTimer = setTimeout(() => { typingTimer = 0; expireTypers(); }, Math.max(0, due) + 50);
+}
+function expireTypers() {
+    const now = Date.now() / 1000;
+    const listOnScreen = VectorSvelte.paneShown('chats') || wsActive();
+    let nextLast = Infinity;
+    for (const chat of arrChats) {
+        if (!chat.active_typers?.length) continue;
+        if (!chat.last_typing_update || now - chat.last_typing_update > TYPING_TTL_SECS) {
+            chat.active_typers = [];
+            if (strOpenChat === chat.id) updateChatHeaderSubtext(chat);
+            // In place: typing doesn't affect sort order.
+            if (listOnScreen) updateChatlistPreview(chat.id);
+        } else if (chat.last_typing_update < nextLast) {
+            nextLast = chat.last_typing_update;
+        }
+    }
+    if (nextLast !== Infinity) armTypingExpiry(nextLast);
 }
 
 /**

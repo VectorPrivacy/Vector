@@ -699,6 +699,7 @@ async function setupRustListeners() {
         // Store the typers array and update timestamp
         chat.active_typers = typers || [];
         chat.last_typing_update = Date.now() / 1000;
+        if (chat.active_typers.length) armTypingExpiry(chat.last_typing_update);
 
         // If this chat is currently open, update the chat header subtext
         if (strOpenChat === conversation_id) {
