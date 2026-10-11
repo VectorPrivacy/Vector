@@ -669,7 +669,17 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
 
         // The AUTHORIZED roster (cached by fetch_and_apply_roles, post delegation check), denormalized
         // onto each channel so the inbound delete path can verify a keyless moderation-hide.
-        let roster = get_community_roles(&id_hex).unwrap_or_default();
+        // get_community_roles inlined onto this batch: it would pay its own vault read.
+        let roster: crate::community::roles::CommunityRoles = conn
+            .query_row("SELECT roles FROM communities WHERE community_id = ?1", params![id_hex], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&dt(o, &j)).ok())
+            .unwrap_or_default();
 
         let mut channels = Vec::new();
         for (cid_hex, key_blob, epoch, cname) in raw_channels {
@@ -3275,6 +3285,7 @@ mod tests {
             v1.channels.push(ch);
         }
         save_community(&v1).unwrap();
+        set_community_roles(&v1.id.to_hex(), &crate::community::roles::CommunityRoles::default(), 1).unwrap();
 
         let owner = nostr_sdk::prelude::Keys::generate();
         let g = crate::community::v2::control::genesis(
