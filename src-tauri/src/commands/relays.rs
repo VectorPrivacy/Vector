@@ -1282,20 +1282,32 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
     // spawn-detached: the health probe must probe whichever pool is live.
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        // Bytes each relay had delivered when last checked: a relay that sent anything since
+        // is serving, so it skips the probe.
+        let heard = std::sync::Mutex::new(HashMap::<RelayUrl, usize>::new());
 
         loop {
             let relays = client_health.relays().await;
 
             // Concurrently: a probe may wait its whole Tor budget, and in series one slow relay
             // delays every other relay's check and revival by that much.
-            let (client_health, handle_health) = (&client_health, &handle_health);
+            let (client_health, handle_health, heard) = (&client_health, &handle_health, &heard);
             futures_util::future::join_all(relays.iter().map(|(url, relay)| async move {
                 let status = relay.status();
 
                 if status == RelayStatus::Connected {
-                    let test_filter = Filter::new()
-                        .kinds(vec![Kind::Metadata])
-                        .limit(1);
+                    let received = relay.stats().bytes_received();
+                    let before = heard.lock().unwrap().insert(url.clone(), received);
+                    if before.is_some_and(|b| received > b) {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        update_relay_metrics(&url.to_string(), |m| m.last_check = Some(now_secs));
+                        return;
+                    }
+                    // An id no event can have: the relay answers with a bare EOSE.
+                    let test_filter = Filter::new().id(EventId::from_byte_array([0; 32]));
 
                     let start = std::time::Instant::now();
                     // A false "unhealthy" verdict costs a full disconnect/reconnect cycle,
@@ -1307,6 +1319,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             .timeout(probe)
                     ).await;
 
+                    heard.lock().unwrap().insert(url.clone(), relay.stats().bytes_received());
                     let elapsed = start.elapsed();
                     let url_str = url.to_string();
                     let ping_ms = elapsed.as_millis() as u64;
