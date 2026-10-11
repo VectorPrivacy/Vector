@@ -334,5 +334,5 @@ Key crates: `nostr-sdk` 0.45, `tauri` 2.10, `tokio` 1.49, `rusqlite` 0.37, `iroh
 
 - **macOS**: WKWebView white flash prevented by the window's `backgroundColor` in `tauri.conf.json` plus `macOSPrivateApi`. Metal GPU for Whisper.
 - **Linux**: `WEBKIT_DISABLE_DMABUF_RENDERER=1` set for WebKitGTK compatibility.
-- **Android**: API 26+. Vulkan GPU disabled for Whisper (device freeze). OpenSSL vendored.
+- **Android**: API 26+. Vulkan GPU disabled for Whisper (device freeze).
 - **Feature flag**: `whisper` (default) — enables OpenAI Whisper transcription. Use `--no-default-features` to skip.

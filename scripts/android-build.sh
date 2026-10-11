@@ -23,36 +23,9 @@ fi
 
 echo "Using Android NDK: $ANDROID_NDK_HOME"
 
-# OpenSSL for Android (SQLCipher dependency)
-OPENSSL_ANDROID_DIR="$TAURI_DIR/android-deps/openssl"
-
-if [ ! -d "$OPENSSL_ANDROID_DIR/include/openssl" ]; then
-    echo "Error: OpenSSL headers not found at $OPENSSL_ANDROID_DIR/include/"
-    exit 1
-fi
-
-if [ ! -f "$OPENSSL_ANDROID_DIR/aarch64/lib/libcrypto.a" ]; then
-    echo "Error: OpenSSL aarch64 libs not found at $OPENSSL_ANDROID_DIR/aarch64/lib/"
-    exit 1
-fi
-
-if [ ! -f "$OPENSSL_ANDROID_DIR/armv7/lib/libcrypto.a" ]; then
-    echo "Error: OpenSSL armv7 libs not found at $OPENSSL_ANDROID_DIR/armv7/lib/"
-    echo "Please build or obtain OpenSSL for armv7-linux-androideabi and place libs there."
-    exit 1
-fi
-
-echo "Using OpenSSL: $OPENSSL_ANDROID_DIR"
-
 # Export environment variables for the build
 export ANDROID_NDK_HOME
 export ANDROID_NDK="$ANDROID_NDK_HOME"  # cmake's Platform/Android-Determine.cmake needs this
-export OPENSSL_STATIC=1
-export OPENSSL_INCLUDE_DIR="$OPENSSL_ANDROID_DIR/include"
-
-# Per-target OpenSSL lib directories
-export AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/aarch64/lib"
-export ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR="$OPENSSL_ANDROID_DIR/armv7/lib"
 
 # Build the APK
 cd "$PROJECT_ROOT"

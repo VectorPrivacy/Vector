@@ -257,7 +257,6 @@ bitcoin_hashes = { version = "1.2", default-features = false, features = ["std"]
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
 ndk-context = "0.1.1"
-openssl = { version = "0.10.81", features = ["vendored"] }
 whisper-rs = { version = "0.15.1", optional = true }
 
 # Whisper (with platform-specific GPU acceleration)
