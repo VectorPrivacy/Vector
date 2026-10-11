@@ -177,9 +177,9 @@ async function openProfile(cProfile) {
         // Start periodic refresh while viewing this profile (every 30 seconds)
         clearInterval(profileRefreshInterval);
         profileRefreshInterval = setInterval(() => {
-            // Only refresh if profile tab is still open
+            // Only refresh if profile tab is still open; a hidden window has no one watching.
             if (VectorSvelte.paneShown('profile')) {
-                invoke("refresh_profile_now", { npub: cProfile.id });
+                if (!document.hidden) invoke("refresh_profile_now", { npub: cProfile.id });
             } else {
                 // Profile tab closed, stop refreshing
                 clearInterval(profileRefreshInterval);
