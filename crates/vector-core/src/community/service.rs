@@ -77,7 +77,10 @@ pub async fn create_community<T: Transport + ?Sized>(
                 // Keeps the "identity signer" wording: the owner attestation is mandatory,
                 // so no usable signer means creation must not proceed.
                 .map_err(|e| format!("cannot create a community without an identity signer: {e}"))?;
-            unsigned.finalize_async(&signer).await.map_err(|e| format!("sign owner attestation: {e}"))?
+            unsigned
+                .finalize_async(&signer)
+                .await
+                .map_err(|e| format!("cannot create a community without an identity signer: {e}"))?
         };
         community.owner_attestation = Some(attestation.as_json());
         // Minting + the DB write straddle the (above) signer round-trip, so re-check before persist.

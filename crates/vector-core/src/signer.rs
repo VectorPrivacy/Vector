@@ -282,9 +282,9 @@ pub async fn unwrap_gift_wraps(gift_wraps: &[&Event]) -> Vec<Result<UnwrappedGif
 ///
 /// Fails CLOSED on identity mismatch: a remote-signer account's vault holds its
 /// *client* keypair, whose pubkey is not the identity. Signing with it emits
-/// wrong-identity events that self-reject on every reader (AuthorMismatch), so
-/// erroring here surfaces the misconfiguration instead of a silently
-/// undeliverable send.
+/// wrong-identity events that self-reject on every reader (AuthorMismatch). A
+/// local signer refuses that at sign/encrypt time rather than here, so resolving
+/// it costs no vault read.
 pub fn active_signer() -> Result<ActiveSigner, String> {
     // Tests model a remote-signer account (identity signable, local vault empty),
     // which production resolves from `BUNKER_SIGNER`. There's no such handle to
@@ -311,16 +311,18 @@ pub fn active_signer() -> Result<ActiveSigner, String> {
             Ok(ActiveSigner::Nip07(crate::nip07::Nip07Signer::new(pk)))
         }
         SignerKind::Local => {
-            let keys = crate::state::MY_SECRET_KEY
-                .to_keys()
-                .ok_or("no signer available (no local key)")?;
+            if !crate::state::MY_SECRET_KEY.has_key() {
+                return Err("no signer available (no local key)".to_string());
+            }
             if let Some(pk) = crate::state::my_public_key() {
-                if keys.public_key() != pk {
-                    return Err("local key does not match the active identity (remote-signer account with no live signer)".to_string());
-                }
+                // The identity check runs at use: GuardedSigner refuses to sign or encrypt
+                // with a vault key that isn't `pk`, off the read it was going to make anyway.
                 return Ok(ActiveSigner::Local(crate::crypto::GuardedSigner::new(pk)));
             }
             // No bound identity: headless/CLI consumers and tests.
+            let keys = crate::state::MY_SECRET_KEY
+                .to_keys()
+                .ok_or("no signer available (no local key)")?;
             Ok(ActiveSigner::Keys(keys))
         }
     }

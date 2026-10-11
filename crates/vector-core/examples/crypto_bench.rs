@@ -370,6 +370,38 @@ async fn main() {
     });
     println!("  -> {:.1} µs saved per seal ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
 
+    println!("-- signer ops (every community message, typing ping, reaction, list publish)");
+    let unsigned = EventBuilder::new(Kind::Custom(23311), "").finalize_unsigned(me.public_key());
+    let old = bench("sign: identity read + sign read (old)", 2000, || {
+        assert_eq!(MY_SECRET_KEY.to_keys().unwrap().public_key(), me.public_key());
+        black_box(MY_SECRET_KEY.to_keys().unwrap().sign_event(unsigned.clone()).unwrap());
+    });
+    let new = bench("sign: active_signer + GuardedSigner (prod)", 2000, || {
+        black_box(vector_core::signer::active_signer().unwrap());
+        black_box(SignEvent::sign_event(&guarded, unsigned.clone()).unwrap());
+    });
+    println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+    let old = bench("nip44 encrypt: identity read + secret read (old)", 2000, || {
+        assert_eq!(MY_SECRET_KEY.to_keys().unwrap().public_key(), me.public_key());
+        let sk = SecretKey::from_slice(&MY_SECRET_KEY.get().unwrap()).unwrap();
+        black_box(nip44::encrypt(&sk, &sender.public_key(), "x", nip44::Version::default()).unwrap());
+    });
+    let new = bench("nip44 encrypt: active_signer + GuardedSigner (prod)", 2000, || {
+        black_box(vector_core::signer::active_signer().unwrap());
+        black_box(Nip44::nip44_encrypt(&guarded, &sender.public_key(), "x").unwrap());
+    });
+    println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+    let sealed = sender.nip44_encrypt(&me.public_key(), "x").unwrap();
+    let old = bench("nip44 decrypt: identity read + secret read (old)", 2000, || {
+        assert_eq!(MY_SECRET_KEY.to_keys().unwrap().public_key(), me.public_key());
+        black_box(Nip44::nip44_decrypt(&guarded, &sender.public_key(), &sealed).unwrap());
+    });
+    let new = bench("nip44 decrypt: active_signer + GuardedSigner (prod)", 2000, || {
+        black_box(vector_core::signer::active_signer().unwrap());
+        black_box(Nip44::nip44_decrypt(&guarded, &sender.public_key(), &sealed).unwrap());
+    });
+    println!("  -> {:.1} µs saved ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+
     println!("-- unwrap breakdown (raw keys)");
     let seal = Event::from_json(nostr_sdk::prelude::nip44::decrypt(me.secret_key(), &wrap.pubkey, &wrap.content).unwrap()).unwrap();
     bench("wrap.verify() (schnorr, outer)", 2000, || { black_box(wrap.verify().is_ok()); });

@@ -27,10 +27,18 @@ impl GuardedSigner {
         Self { public_key }
     }
 
+    /// The vault key, refused unless it is this signer's identity: the check rides on the
+    /// keypair derivation signing needs anyway, and tests the very key about to be used.
     fn temp_keys(&self) -> Result<Keys, SignerError> {
-        crate::state::MY_SECRET_KEY
+        let keys = crate::state::MY_SECRET_KEY
             .to_keys()
-            .ok_or_else(|| SignerError::from("Secret key not available"))
+            .ok_or_else(|| SignerError::from("no signer available (no local key)"))?;
+        if keys.public_key() != self.public_key {
+            return Err(SignerError::from(
+                "local key does not match the active identity (remote-signer account with no live signer)",
+            ));
+        }
+        Ok(keys)
     }
 
     /// The bare secret key, for operations that never need the public half: a
@@ -48,14 +56,7 @@ impl GuardedSigner {
     /// again to sign, and `active_signer` a third time for its identity check. The keypair
     /// signing needs makes that check free, so it stays fail-closed.
     pub fn seal(identity: &PublicKey, rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Event, SignerError> {
-        let keys = crate::state::MY_SECRET_KEY
-            .to_keys()
-            .ok_or_else(|| SignerError::from("no signer available (no local key)"))?;
-        if keys.public_key() != *identity {
-            return Err(SignerError::from(
-                "local key does not match the active identity (remote-signer account with no live signer)",
-            ));
-        }
+        let keys = Self::new(*identity).temp_keys()?;
         GiftWrapSealBuilder::new(rumor, *receiver).finalize(&keys).map_err(SignerError::backend)
     }
 
@@ -196,7 +197,7 @@ impl Nip04 for GuardedSigner {
     type Error = SignerError;
 
     fn nip04_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String, Self::Error> {
-        nip04::encrypt(&Self::temp_secret_key()?, public_key, content).map_err(SignerError::backend)
+        nip04::encrypt(self.temp_keys()?.secret_key(), public_key, content).map_err(SignerError::backend)
     }
 
     fn nip04_decrypt(&self, public_key: &PublicKey, payload: &str) -> Result<String, Self::Error> {
@@ -208,7 +209,7 @@ impl Nip44 for GuardedSigner {
     type Error = SignerError;
 
     fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String, Self::Error> {
-        nip44::encrypt(&Self::temp_secret_key()?, public_key, content, nip44::Version::default())
+        nip44::encrypt(self.temp_keys()?.secret_key(), public_key, content, nip44::Version::default())
             .map_err(SignerError::backend)
     }
 
@@ -512,5 +513,26 @@ mod tests {
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         crate::state::MY_SECRET_KEY.clear(&[]);
         assert!(GuardedSigner::seal(&me.public_key(), r, &peer.public_key()).is_err());
+    }
+
+    #[test]
+    fn a_vault_key_that_is_not_the_identity_never_signs_or_encrypts() {
+        let (me, client_key, peer) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let signer = GuardedSigner::new(me.public_key());
+        let from_peer = peer.nip44_encrypt(&client_key.public_key(), "to the vault key").unwrap();
+        with_me(&client_key, || {
+            let note = EventBuilder::new(Kind::TextNote, "x").finalize_unsigned(me.public_key());
+            assert!(SignEvent::sign_event(&signer, note).is_err());
+            assert!(Nip44::nip44_encrypt(&signer, &peer.public_key(), "x").is_err());
+            assert!(Nip04::nip04_encrypt(&signer, &peer.public_key(), "x").is_err());
+            // Opening is harmless: only what was sealed to the vault key opens.
+            assert_eq!(Nip44::nip44_decrypt(&signer, &peer.public_key(), &from_peer).unwrap(), "to the vault key");
+        });
+        with_me(&me, || {
+            let note = EventBuilder::new(Kind::TextNote, "x").finalize_unsigned(me.public_key());
+            let signed = SignEvent::sign_event(&signer, note).unwrap();
+            signed.verify().unwrap();
+            assert_eq!(signed.pubkey, me.public_key());
+        });
     }
 }
