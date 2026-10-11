@@ -370,6 +370,14 @@ async fn main() {
     });
     println!("  -> {:.1} µs saved per seal ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
 
+    let old = bench("gift wrap via GiftWrapBuilder + GuardedSigner (old)", 2000, || {
+        black_box(GiftWrapBuilder::new(sender.public_key(), out_rumor.clone()).finalize(&guarded).unwrap());
+    });
+    let new = bench("gift wrap via GuardedSigner::gift_wrap (prod, local)", 2000, || {
+        black_box(GuardedSigner::gift_wrap(&me.public_key(), &sender.public_key(), out_rumor.clone(), vec![]).unwrap());
+    });
+    println!("  -> {:.1} µs saved per wrap ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+
     println!("-- signer ops (every community message, typing ping, reaction, list publish)");
     let unsigned = EventBuilder::new(Kind::Custom(23311), "").finalize_unsigned(me.public_key());
     let old = bench("sign: identity read + sign read (old)", 2000, || {

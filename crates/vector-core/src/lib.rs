@@ -364,12 +364,7 @@ where
     U: Into<nostr_sdk::prelude::RelayUrlArg<'u>>,
     T: IntoIterator<Item = nostr_sdk::prelude::Tag>,
 {
-    let signer = signer::active_signer()?;
-    let wrap = nostr_sdk::prelude::GiftWrapBuilder::new(*receiver, rumor)
-        .extra_tags(extra_tags)
-        .finalize_async(&signer)
-        .await
-        .map_err(|e| e.to_string())?;
+    let wrap = signer::gift_wrap(receiver, rumor, extra_tags).await?;
     let targets: Vec<nostr_sdk::prelude::RelayUrlArg<'u>> =
         relays.into_iter().map(Into::into).collect();
     if targets.is_empty() {
@@ -1066,12 +1061,9 @@ impl VectorCore {
             .finalize_unsigned_with_id(my_public_key);
 
         // Client no longer wraps: build the wrap, then publish it to the target relays.
-        let signer = signer::active_signer().map_err(VectorError::Other)?;
-        let wrap = nostr_sdk::prelude::GiftWrapBuilder::new(pubkey, rumor.clone())
-            .extra_tags([Tag::expiration(expiry)])
-            .finalize_async(&signer)
+        let wrap = signer::gift_wrap(&pubkey, rumor, [Tag::expiration(expiry)])
             .await
-            .map_err(|e| VectorError::Nostr(e.to_string()))?;
+            .map_err(VectorError::Nostr)?;
         transport_aware(client.send_event(&wrap))
             .to(state::active_trusted_relays().await)
             .await
@@ -1143,12 +1135,7 @@ impl VectorCore {
             let self_wrap_session = crate::db::current_session();
             db::spawn_bound(async move {
                 if !self_wrap_session.is_live() { return; }
-                let Ok(signer) = signer::active_signer() else { return };
-                if let Ok(wrap) = nostr_sdk::prelude::GiftWrapBuilder::new(my_public_key, rumor)
-                    .extra_tags(expiry_tags)
-                    .finalize_async(&signer)
-                    .await
-                {
+                if let Ok(wrap) = signer::gift_wrap(&my_public_key, rumor, expiry_tags).await {
                     let _ = crate::transport_aware(self_wrap_client.send_event(&wrap)).await;
                 }
             });

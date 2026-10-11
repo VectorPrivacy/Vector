@@ -258,6 +258,32 @@ pub async fn seal_rumor(rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Ev
         .map_err(|e| e.to_string())
 }
 
+/// Seal and gift-wrap a rumor for `receiver` with the active session's signer. A local
+/// key does both under one vault read.
+pub async fn gift_wrap(
+    receiver: &PublicKey,
+    rumor: UnsignedEvent,
+    extra_tags: impl IntoIterator<Item = Tag>,
+) -> Result<Event, String> {
+    #[cfg(test)]
+    let overridden = TEST_SIGNER.read().is_ok_and(|g| g.is_some());
+    #[cfg(not(test))]
+    let overridden = false;
+    let extra_tags: Vec<Tag> = extra_tags.into_iter().collect();
+    if !overridden && signer_kind() == SignerKind::Local {
+        if let Some(identity) = crate::state::my_public_key() {
+            return crate::crypto::GuardedSigner::gift_wrap(&identity, receiver, rumor, extra_tags)
+                .map_err(|e| e.to_string());
+        }
+    }
+    let signer = active_signer()?;
+    GiftWrapBuilder::new(*receiver, rumor)
+        .extra_tags(extra_tags)
+        .finalize_async(&signer)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// [`unwrap_gift_wrap`] for many wraps, one result per wrap in order. A local key opens
 /// the whole batch under one vault read.
 pub async fn unwrap_gift_wraps(gift_wraps: &[&Event]) -> Vec<Result<UnwrappedGift, String>> {

@@ -60,6 +60,20 @@ impl GuardedSigner {
         GiftWrapSealBuilder::new(rumor, *receiver).finalize(&keys).map_err(SignerError::backend)
     }
 
+    /// [`Self::seal`] plus the ephemeral-key wrap, still one vault read.
+    pub fn gift_wrap(
+        identity: &PublicKey,
+        receiver: &PublicKey,
+        rumor: UnsignedEvent,
+        extra_tags: Vec<Tag>,
+    ) -> Result<Event, SignerError> {
+        let keys = Self::new(*identity).temp_keys()?;
+        GiftWrapBuilder::new(*receiver, rumor)
+            .extra_tags(extra_tags)
+            .finalize(&keys)
+            .map_err(SignerError::backend)
+    }
+
     /// NIP-59 unwrap under one vault read; see [`Self::unwrap_batch`].
     pub fn unwrap_gift_wrap(gift_wrap: &Event) -> Result<UnwrappedGift, SignerError> {
         Self::unwrap_batch(&[gift_wrap]).pop().unwrap_or_else(|| Err(SignerError::from("empty batch")))
@@ -534,5 +548,23 @@ mod tests {
             signed.verify().unwrap();
             assert_eq!(signed.pubkey, me.public_key());
         });
+    }
+
+    #[test]
+    fn gift_wrap_opens_for_the_receiver_with_its_extra_tags() {
+        let (me, peer) = (Keys::generate(), Keys::generate());
+        let r = rumor(&me.public_key(), &peer.public_key());
+        let expiry = Tag::expiration(Timestamp::from_secs(Timestamp::now().as_secs() + 30));
+        let gift = with_me(&me, || {
+            GuardedSigner::gift_wrap(&me.public_key(), &peer.public_key(), r.clone(), vec![expiry.clone()])
+        })
+        .unwrap();
+        assert_eq!(gift.kind, Kind::GiftWrap);
+        assert!(gift.tags.iter().any(|t| *t == expiry));
+        let opened = UnwrappedGift::from_gift_wrap(&peer, &gift).unwrap();
+        assert_eq!((opened.sender, opened.rumor.as_json()), (me.public_key(), r.as_json()));
+
+        let client_key = Keys::generate();
+        assert!(with_me(&client_key, || GuardedSigner::gift_wrap(&me.public_key(), &peer.public_key(), r, vec![])).is_err());
     }
 }
