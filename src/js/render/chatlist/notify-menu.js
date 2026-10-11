@@ -78,10 +78,12 @@ function notifyLevelItems(view, communityView, onChange) {
             onClick: () => onChange(null),
         });
     }
+    // A community or chat nobody has set still has a level: the one its kind starts at.
+    const ticked = view.level ?? (isChannel ? null : view.effective_level);
     for (const level of NOTIFY_LEVELS) {
         items.push({
             label: level.label,
-            checked: view.level === level.value,
+            checked: ticked === level.value,
             onClick: () => onChange(level.value),
         });
     }

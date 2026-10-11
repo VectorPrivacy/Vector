@@ -145,6 +145,8 @@ pub fn save_community(community: &Community) -> Result<(), String> {
         store_epoch_key_tx(&tx, &community_id, &channel.id.to_hex(), channel.epoch.0, channel.key.as_bytes())?;
     }
     tx.commit().map_err(|e| format!("save community commit: {e}"))?;
+    // A new channel is listed now, and may make a group chat a community.
+    crate::notify::invalidate_communities();
     Ok(())
 }
 
@@ -811,7 +813,7 @@ static CHANNEL_COMMUNITY_CACHE: std::sync::LazyLock<
 /// Drop every cached channel→community mapping (account swap).
 pub fn clear_channel_community_cache() {
     CHANNEL_COMMUNITY_CACHE.write().unwrap().clear();
-    crate::notify::invalidate_live_channels();
+    crate::notify::invalidate_communities();
 }
 
 /// Forget a community's channel mappings — its rows were dropped or rewritten, so any
@@ -820,7 +822,7 @@ fn forget_community_channels(community_id: &str) {
     CHANNEL_COMMUNITY_CACHE.write().unwrap().retain(|_, cid| cid != community_id);
     // A prune here is how a channel stops being openable, which is what decides
     // whether its unread may still badge.
-    crate::notify::invalidate_live_channels();
+    crate::notify::invalidate_communities();
 }
 
 pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {
@@ -2331,7 +2333,34 @@ pub fn set_community_invite_registry(community_id: &str, link_locators: &[String
         params![json, community_id],
     )
     .map_err(|e| format!("set invite registry: {e}"))?;
+    // A first link or a last revoke turns a group chat into a community or back.
+    crate::notify::invalidate_communities();
     Ok(())
+}
+
+/// Every Concord group that is a community rather than a group chat: more than one
+/// channel we hold, or a live invite link. See [`crate::notify::is_community`].
+pub fn community_ids_beyond_group_chat() -> Result<std::collections::HashSet<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.community_id, c.invite_registry,
+                    (SELECT COUNT(*) FROM community_channels ch WHERE ch.community_id = c.community_id)
+               FROM communities c",
+        )
+        .map_err(|e| format!("prepare community kinds: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+        .map_err(|e| format!("query community kinds: {e}"))?;
+    let mut out = std::collections::HashSet::new();
+    for row in rows {
+        let (id, registry, channels) = row.map_err(|e| format!("read community kinds: {e}"))?;
+        let links: Vec<String> = serde_json::from_str(&dec_txt(&registry)).unwrap_or_default();
+        if channels > 1 || !links.is_empty() {
+            out.insert(id);
+        }
+    }
+    Ok(out)
 }
 
 /// A Community's current invite-link registry (active link locators, hex). Empty for an unknown
@@ -4390,6 +4419,35 @@ mod tests {
     /// Every encrypting writer, on the real schema, through a PIN change and a disable. The
     /// sweep list alone must leave nothing on the old key, so a writer whose column it misses
     /// fails here. A new writer that encrypts a column belongs in this test.
+    #[test]
+    fn a_group_chat_becomes_a_community_with_a_second_channel_or_an_invite_link() {
+        let (_tmp, _guard) = init_test_db();
+        let is = |c: &Community| crate::notify::is_community(&c.id.to_hex());
+
+        let mut chat = Community::create("Friends", "general", vec!["wss://r".into()]);
+        save_community(&chat).unwrap();
+        assert!(!is(&chat), "one channel, no link: a group chat");
+        assert_eq!(crate::notify::default_level(Some(&chat.id.to_hex())), crate::notify::NotifyLevel::All);
+
+        let mut second = chat.channels[0].clone();
+        second.id = crate::community::ChannelId([0x42; 32]);
+        second.name = "random".into();
+        chat.channels.push(second);
+        save_community(&chat).unwrap();
+        assert!(is(&chat), "a second channel makes it a community");
+        assert_eq!(crate::notify::default_level(Some(&chat.id.to_hex())), crate::notify::NotifyLevel::Mentions);
+
+        let open = Community::create("Open", "general", vec!["wss://r".into()]);
+        save_community(&open).unwrap();
+        assert!(!is(&open));
+        set_community_invite_registry(&open.id.to_hex(), &["loc1".into()]).unwrap();
+        assert!(is(&open), "an invite link makes it a community");
+        set_community_invite_registry(&open.id.to_hex(), &[]).unwrap();
+        assert!(!is(&open), "revoking the last link makes it a group chat again");
+
+        assert_eq!(crate::notify::default_level(None), crate::notify::NotifyLevel::All, "a DM rings for everything");
+    }
+
     #[test]
     fn every_encrypting_writer_is_covered_by_the_at_rest_sweep() {
         use crate::db::at_rest;

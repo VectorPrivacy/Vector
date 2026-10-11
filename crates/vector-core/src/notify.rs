@@ -7,8 +7,8 @@
 //!
 //! Level resolves down the chain Community → Channel, most specific opinion
 //! winning. Mute unions down it: muting a community mutes every channel in it.
-//! A scope with no stored row inherits everything, so an untouched account
-//! behaves exactly as it did before any of this existed.
+//! With no opinion stored anywhere, what the conversation IS picks the level: a
+//! DM or a group chat rings for everything, a community only for your name.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -134,6 +134,9 @@ struct Store {
     /// chat row and its history, so "has a `community_id`" is not the same
     /// question as "has a row you can open and clear".
     live_channels: Option<std::collections::HashSet<String>>,
+    /// Concord groups that are communities rather than group chats: more than one
+    /// channel, or a live invite link anyone can join by.
+    communities: Option<std::collections::HashSet<String>>,
 }
 
 struct NotifyStore;
@@ -177,14 +180,46 @@ pub fn invalidate() {
         g.loaded = false;
         g.scopes.clear();
         g.live_channels = None;
+        g.communities = None;
     }
 }
 
-/// Forget which channels are listed; their community's set was rewritten.
-pub fn invalidate_live_channels() {
+/// Forget what was read off the communities: a channel set or an invite-link
+/// registry was rewritten, which can change both what is listed and whether a
+/// group is a group chat or a community.
+pub fn invalidate_communities() {
     if let Ok(mut g) = store().write() {
         g.live_channels = None;
+        g.communities = None;
     }
+}
+
+/// Whether `community_id` is a community rather than a group chat. A group chat
+/// is one channel behind no invite link; anything bigger or open to strangers
+/// is a community, and a busy one can't ring for every message.
+pub fn is_community(community_id: &str) -> bool {
+    let cell = store();
+    if let Ok(g) = cell.read() {
+        if let Some(set) = g.communities.as_ref() {
+            return set.contains(community_id);
+        }
+    }
+    // Unknown keeps the louder default: a missed ping costs more than an extra one.
+    let ids = match crate::db::community::community_ids_beyond_group_chat() {
+        Ok(ids) => ids,
+        Err(_) => return false,
+    };
+    let found = ids.contains(community_id);
+    if let Ok(mut g) = cell.write() {
+        g.communities = Some(ids);
+    }
+    found
+}
+
+/// The level a scope starts at when nothing on its chain says otherwise.
+/// `group_id` is the Concord group the scope belongs to (or is), if any.
+pub fn default_level(group_id: Option<&str>) -> NotifyLevel {
+    if group_id.is_some_and(is_community) { NotifyLevel::Mentions } else { NotifyLevel::All }
 }
 
 /// Whether `channel_id` is one its community still lists. A channel nobody
@@ -283,13 +318,14 @@ pub fn resolve(scope_id: &str, community_id: Option<&str>, now_ms: i64) -> Resol
         .filter(|cid| *cid != scope_id)
         .map(prefs)
         .unwrap_or_default();
-    resolve_from(own, parent, now_ms)
+    let fallback = default_level(Some(community_id.unwrap_or(scope_id)));
+    resolve_from(own, parent, fallback, now_ms)
 }
 
 /// The chain arithmetic on its own: level takes the most specific opinion,
-/// mute takes either, and the mute clamps the level it hands back.
-pub fn resolve_from(own: ScopePrefs, parent: ScopePrefs, now_ms: i64) -> Resolved {
-    let level = own.level.or(parent.level).unwrap_or(NotifyLevel::All);
+/// then `fallback`; mute takes either, and the mute clamps the level it hands back.
+pub fn resolve_from(own: ScopePrefs, parent: ScopePrefs, fallback: NotifyLevel, now_ms: i64) -> Resolved {
+    let level = own.level.or(parent.level).unwrap_or(fallback);
     let muted = own.muted_at(now_ms) || parent.muted_at(now_ms);
     let ring = level.quieter_of(if muted { NotifyLevel::Mentions } else { NotifyLevel::All });
     Resolved { level, muted, ring }
@@ -338,7 +374,7 @@ pub fn community_muted_for_chat(chat: &crate::chat::Chat) -> bool {
 /// a timed mute in it comes back as a mute with no end, and the expiry that
 /// should have corrected it happens at boot, where publishing is not allowed.
 pub fn in_legacy_mute_list(own: ScopePrefs, parent: ScopePrefs, now_ms: i64) -> bool {
-    resolve_from(own, parent, now_ms).muted
+    (own.muted_at(now_ms) || parent.muted_at(now_ms))
         && (own.mute_until == MUTE_FOREVER || parent.mute_until == MUTE_FOREVER)
 }
 
@@ -351,7 +387,7 @@ pub fn legacy_muted_for_chat(chat: &crate::chat::Chat) -> bool {
         .unwrap_or_default();
     in_legacy_mute_list(own, parent, now_ms())
         // A mute that only exists as the legacy mirror is indefinite by nature.
-        || (chat.muted && !resolve_from(own, parent, now_ms()).muted)
+        || (chat.muted && !own.muted_at(now_ms()) && !parent.muted_at(now_ms()))
 }
 
 /// Whether an @everyone in this chat still counts as someone calling your name.
@@ -1094,28 +1130,38 @@ mod tests {
 
     #[test]
     fn a_channel_opinion_beats_its_community() {
-        let r = resolve_from(at(Some(NotifyLevel::All), 0), at(Some(NotifyLevel::Nothing), 0), 0);
+        let r = resolve_from(at(Some(NotifyLevel::All), 0), at(Some(NotifyLevel::Nothing), 0), NotifyLevel::All, 0);
         assert_eq!(r.level, NotifyLevel::All);
         assert_eq!(r.ring, NotifyLevel::All);
     }
 
     #[test]
     fn a_channel_with_no_opinion_takes_its_community() {
-        let r = resolve_from(at(None, 0), at(Some(NotifyLevel::Mentions), 0), 0);
+        let r = resolve_from(at(None, 0), at(Some(NotifyLevel::Mentions), 0), NotifyLevel::All, 0);
         assert_eq!(r.level, NotifyLevel::Mentions);
     }
 
     #[test]
-    fn nothing_stored_anywhere_rings_for_everything() {
-        let r = resolve_from(ScopePrefs::default(), ScopePrefs::default(), 0);
-        assert_eq!(r.level, NotifyLevel::All);
-        assert!(!r.muted);
+    fn nothing_stored_anywhere_takes_what_the_conversation_is() {
+        let chat = resolve_from(ScopePrefs::default(), ScopePrefs::default(), NotifyLevel::All, 0);
+        assert_eq!(chat.level, NotifyLevel::All);
+        assert!(!chat.muted);
+        let community = resolve_from(ScopePrefs::default(), ScopePrefs::default(), NotifyLevel::Mentions, 0);
+        assert_eq!(community.ring, NotifyLevel::Mentions);
+    }
+
+    #[test]
+    fn any_stored_opinion_beats_the_default() {
+        let own = resolve_from(at(Some(NotifyLevel::All), 0), ScopePrefs::default(), NotifyLevel::Mentions, 0);
+        assert_eq!(own.level, NotifyLevel::All);
+        let inherited = resolve_from(ScopePrefs::default(), at(Some(NotifyLevel::All), 0), NotifyLevel::Mentions, 0);
+        assert_eq!(inherited.level, NotifyLevel::All, "a community set to All keeps its channels loud");
     }
 
     #[test]
     fn a_community_mute_reaches_a_channel_that_set_none_itself() {
         // Mute unions downward, unlike level: the channel cannot opt out of it.
-        let r = resolve_from(at(Some(NotifyLevel::All), MUTE_OFF), at(None, MUTE_FOREVER), 0);
+        let r = resolve_from(at(Some(NotifyLevel::All), MUTE_OFF), at(None, MUTE_FOREVER), NotifyLevel::All, 0);
         assert!(r.muted);
         assert_eq!(r.level, NotifyLevel::All, "the level underneath is untouched");
         assert_eq!(r.ring, NotifyLevel::Mentions, "but the mute clamps what rings");
@@ -1123,15 +1169,15 @@ mod tests {
 
     #[test]
     fn a_mute_never_makes_a_quiet_channel_louder() {
-        let r = resolve_from(at(Some(NotifyLevel::Nothing), MUTE_FOREVER), ScopePrefs::default(), 0);
+        let r = resolve_from(at(Some(NotifyLevel::Nothing), MUTE_FOREVER), ScopePrefs::default(), NotifyLevel::All, 0);
         assert_eq!(r.ring, NotifyLevel::Nothing);
     }
 
     #[test]
     fn a_lapsed_timer_stops_muting_without_anything_being_written() {
         let prefs = at(None, 5_000);
-        assert!(resolve_from(prefs, ScopePrefs::default(), 4_999).muted);
-        assert!(!resolve_from(prefs, ScopePrefs::default(), 5_000).muted);
+        assert!(resolve_from(prefs, ScopePrefs::default(), NotifyLevel::All, 4_999).muted);
+        assert!(!resolve_from(prefs, ScopePrefs::default(), NotifyLevel::All, 5_000).muted);
     }
 
     #[test]
