@@ -24,8 +24,8 @@ use crate::traits::emit_event;
 // SyncPriority
 // ============================================================================
 
-/// Priority levels for profile syncing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// Priority levels for profile syncing, most urgent first (`Critical < Low`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SyncPriority {
     Critical,  // No metadata OR user clicked — fetch immediately
     High,      // Active chats — fetch soon
@@ -88,9 +88,9 @@ pub struct ProfileSyncQueue {
     high_queue: VecDeque<QueueEntry>,
     medium_queue: VecDeque<QueueEntry>,
     low_queue: VecDeque<QueueEntry>,
-    /// Each waiting npub's live entry generation. Superseded entries stay in their lane
-    /// and are dropped when they reach its front.
-    queued: HashMap<String, u64>,
+    /// Each waiting npub's live entry generation and lane. Superseded entries stay in their
+    /// lane and are dropped when they reach its front.
+    queued: HashMap<String, (u64, SyncPriority)>,
     next_gen: u64,
     processing: HashSet<String>,
     last_fetched: HashMap<String, Instant>,
@@ -117,23 +117,30 @@ impl ProfileSyncQueue {
     }
 
     /// Add a profile to the sync queue.
-    pub fn add(&mut self, npub: String, priority: SyncPriority, force_refresh: bool) {
-        if self.processing.contains(&npub) {
+    pub fn add(&mut self, npub: impl AsRef<str> + Into<String>, priority: SyncPriority, force_refresh: bool) {
+        let key = npub.as_ref();
+        if self.processing.contains(key) {
+            return;
+        }
+        // An entry already waiting at this priority or higher keeps its place and age: a
+        // periodic re-add would otherwise restart the delay and never let a Low entry ripen.
+        if self.queued.get(key).is_some_and(|&(_, waiting)| waiting <= priority) {
             return;
         }
 
         // Check cache window (unless force_refresh)
         if !force_refresh {
-            if let Some(last_fetch) = self.last_fetched.get(&npub) {
+            if let Some(last_fetch) = self.last_fetched.get(key) {
                 if last_fetch.elapsed() < priority.cache_window() {
                     return;
                 }
             }
         }
 
+        let npub: String = npub.into();
         self.next_gen += 1;
         let gen = self.next_gen;
-        self.queued.insert(npub.clone(), gen);
+        self.queued.insert(npub.clone(), (gen, priority));
 
         let entry = QueueEntry { npub, added_at: Instant::now(), gen };
         // Re-adds while the processor is stalled (offline) would otherwise grow the lanes
@@ -167,8 +174,8 @@ impl ProfileSyncQueue {
         .find_map(|(lane, p)| lane.front().map(|e| p.processing_delay().saturating_sub(e.added_at.elapsed())))
     }
 
-    fn is_live(queued: &HashMap<String, u64>, e: &QueueEntry) -> bool {
-        queued.get(&e.npub) == Some(&e.gen)
+    fn is_live(queued: &HashMap<String, (u64, SyncPriority)>, e: &QueueEntry) -> bool {
+        queued.get(&e.npub).is_some_and(|&(gen, _)| gen == e.gen)
     }
 
     /// Drop superseded entries from the front of every lane, so a non-empty lane has a
@@ -1041,36 +1048,21 @@ pub fn refresh_profile_now(npub: String) {
     queue.add(npub, SyncPriority::Critical, true);
 }
 
-/// Sync all profiles in the system.
+/// Queue every profile that has never been fetched. Known profiles refresh when their chat
+/// opens; `last_updated` is not persisted, so a Low sweep would refetch every contact per launch.
 pub async fn sync_all_profiles() {
     let state = STATE.lock().await;
-
-    let mut profiles_to_queue = Vec::new();
-
-    for profile in &state.profiles {
-        let npub = match state.interner.resolve(profile.id) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
-        let has_metadata = !profile.name.is_empty() || !profile.display_name.is_empty() || !profile.avatar.is_empty();
-        let was_fetched = profile.last_updated > 0;
-
-        let priority = if !has_metadata && !was_fetched {
-            SyncPriority::Critical
-        } else {
-            SyncPriority::Low
-        };
-
-        profiles_to_queue.push((npub, priority));
-    }
-
-    drop(state);
-
     let owner = profile_sync_queue();
     let mut queue = owner.lock().unwrap();
-    for (npub, priority) in profiles_to_queue {
-        queue.add(npub, priority, false);
+
+    for profile in &state.profiles {
+        let has_metadata = !profile.name.is_empty() || !profile.display_name.is_empty() || !profile.avatar.is_empty();
+        if has_metadata || profile.last_updated > 0 {
+            continue;
+        }
+        if let Some(npub) = state.interner.resolve(profile.id) {
+            queue.add(npub, SyncPriority::Critical, false);
+        }
     }
 }
 
@@ -1120,7 +1112,7 @@ mod tests {
     impl ProfileSyncQueue {
         fn push_raw(&mut self, priority: SyncPriority, npub: &str, added_at: Instant) {
             self.next_gen += 1;
-            self.queued.insert(npub.to_string(), self.next_gen);
+            self.queued.insert(npub.to_string(), (self.next_gen, priority));
             let entry = QueueEntry { npub: npub.to_string(), added_at, gen: self.next_gen };
             match priority {
                 SyncPriority::Critical => self.critical_queue.push_back(entry),
@@ -1146,7 +1138,7 @@ mod tests {
         let wait = queue.next_ready_in().unwrap();
         assert!(wait > Duration::from_secs(4) && wait <= Duration::from_secs(5), "a waiting high entry holds the low lane back: {wait:?}");
         assert!(queue.get_next_batch().is_empty());
-        queue.add("npub1high".into(), SyncPriority::Critical, true);
+        queue.add("npub1high", SyncPriority::Critical, true);
         assert_eq!(queue.next_ready_in(), Some(Duration::ZERO), "the superseded high entry no longer counts");
     }
 
@@ -1166,8 +1158,8 @@ mod tests {
     fn queue_add_and_dedup() {
         let mut queue = ProfileSyncQueue::new();
 
-        queue.add("npub1alice".to_string(), SyncPriority::Low, false);
-        queue.add("npub1alice".to_string(), SyncPriority::High, false);
+        queue.add("npub1alice", SyncPriority::Low, false);
+        queue.add("npub1alice", SyncPriority::High, false);
 
         // Should be in High queue only (deduped from Low)
         assert!(queue.live(&queue.low_queue).is_empty());
@@ -1179,7 +1171,7 @@ mod tests {
         let mut queue = ProfileSyncQueue::new();
         queue.mark_processing("npub1bob");
 
-        queue.add("npub1bob".to_string(), SyncPriority::Critical, false);
+        queue.add("npub1bob", SyncPriority::Critical, false);
         assert!(queue.critical_queue.is_empty(), "should skip profiles being processed");
     }
 
@@ -1191,11 +1183,11 @@ mod tests {
         queue.mark_done("npub1carol");
 
         // Try to add with Low priority (24h cache window) — should skip
-        queue.add("npub1carol".to_string(), SyncPriority::Low, false);
+        queue.add("npub1carol", SyncPriority::Low, false);
         assert!(queue.low_queue.is_empty(), "should skip within cache window");
 
         // Force refresh should bypass cache
-        queue.add("npub1carol".to_string(), SyncPriority::Low, true);
+        queue.add("npub1carol", SyncPriority::Low, true);
         assert_eq!(queue.low_queue.len(), 1, "force_refresh should bypass cache");
     }
 
@@ -1205,16 +1197,16 @@ mod tests {
 
         // Critical has 0s cache window — always fetches
         queue.mark_done("npub1dave");
-        queue.add("npub1dave".to_string(), SyncPriority::Critical, false);
+        queue.add("npub1dave", SyncPriority::Critical, false);
         assert_eq!(queue.critical_queue.len(), 1, "Critical should always fetch");
     }
 
     #[test]
     fn re_adding_moves_an_entry_between_lanes() {
         let mut queue = ProfileSyncQueue::new();
-        queue.add("npub1a".into(), SyncPriority::Low, true);
-        queue.add("npub1b".into(), SyncPriority::Low, true);
-        queue.add("npub1a".into(), SyncPriority::Critical, true);
+        queue.add("npub1a", SyncPriority::Low, true);
+        queue.add("npub1b", SyncPriority::Low, true);
+        queue.add("npub1a", SyncPriority::Critical, true);
         assert_eq!(queue.live(&queue.low_queue), ["npub1b"]);
         assert_eq!(queue.live(&queue.critical_queue), ["npub1a"]);
         let batch = queue.get_next_batch();
@@ -1222,8 +1214,22 @@ mod tests {
         assert_eq!(batch[0].npub, "npub1a");
         // Its superseded Low entry never surfaces, even once the Low lane's delay passes.
         queue.critical_queue.clear();
-        queue.add("npub1c".into(), SyncPriority::Low, true);
+        queue.add("npub1c", SyncPriority::Low, true);
         assert_eq!(queue.live(&queue.low_queue), ["npub1b", "npub1c"]);
+    }
+
+    #[test]
+    fn a_periodic_re_add_keeps_the_waiting_entry() {
+        let mut queue = ProfileSyncQueue::new();
+        queue.push_raw(SyncPriority::Low, "npub1low", Instant::now() - Duration::from_secs(10 * 60));
+        queue.push_raw(SyncPriority::High, "npub1high", Instant::now() - Duration::from_secs(10));
+        queue.add("npub1low", SyncPriority::Low, false);
+        queue.add("npub1high", SyncPriority::Low, false);
+        assert_eq!(queue.live(&queue.high_queue), ["npub1high"], "a lower re-add never demotes");
+        assert_eq!(queue.get_next_batch().len(), 1);
+        let batch = queue.get_next_batch();
+        assert_eq!(batch.len(), 1, "the ripe Low entry keeps its age");
+        assert_eq!(batch[0].npub, "npub1low");
     }
 
     #[test]
