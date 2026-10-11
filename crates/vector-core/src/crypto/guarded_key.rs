@@ -4,7 +4,7 @@
 //! The real 32-byte key is never stored. What is stored is the key XORed with
 //! BLAKE3(prekey), XOR-split into 4 shares (16 `usize` values on 64-bit) and scattered
 //! across 32 static arrays of 4,096 entries each. The prekey is 16 KiB of the arrays'
-//! own random fill: the key's lane row in 8 arrays, which `set()` never writes.
+//! own random fill: the key's lane row in 8 arrays, which nothing writes while the key is live.
 //!
 //! Defense layers:
 //! 1. **Shielding**: recovering the key needs every one of the prekey's 131,072 bits
@@ -19,9 +19,10 @@
 //!    dimension is partitioned into LANE_COUNT disjoint lanes; each live key owns one
 //!    lane (chosen at set() to differ from every live key's, its own included), so two
 //!    keys can never share a slot.
-//! 6. **Decoy writes**: during set()/clear(), ALL arrays receive random writes, prekey
-//!    rows included, so real writes are indistinguishable via snapshot diffing. Every
-//!    live key is re-shielded under its reshuffled prekey in the same write.
+//! 6. **Decoy writes**: during set()/clear(), ALL arrays receive random writes, so real
+//!    writes are indistinguishable via snapshot diffing. Decoys keep off other live keys'
+//!    slots and prekey rows: a key rewritten in place would sit in a diff under two pads,
+//!    and pad1 ^ pad2 then singles out its slots.
 //! 7. **Zero writes on read**: get() only loads.
 //! 8. **Zero searchable constants**: all multipliers and round counts derive from ASLR
 //!    addresses, all modular arithmetic uses power-of-2 AND masks.
@@ -324,29 +325,15 @@ impl Drop for Rewriting {
     }
 }
 
-/// The plaintext of every live partner, read before a rewrite and re-shielded after it.
-struct Held<'a> {
-    keys: [(Option<&'a GuardedKey>, [u8; 32]); LANE_COUNT],
-}
-
-impl Drop for Held<'_> {
-    fn drop(&mut self) {
-        for (_, key) in self.keys.iter_mut() {
-            key.zeroize();
-        }
-    }
-}
-
-/// Write DECOYS_PER_ARRAY random entries to EVERY array (real + decoy), excluding protected positions.
-/// Protected positions belong to other active GuardedKey instances — overwriting them would
-/// corrupt the other key's share/config data. Snapshot-diffing still shows identical change
-/// patterns across all arrays (excluded slots are a few dozen out of 131,072 — invisible).
-fn write_decoys(protected: &[VaultPos], draws: &mut Draws) {
+/// Write DECOYS_PER_ARRAY random entries to EVERY array (real + decoy), excluding protected positions
+/// and the lane rows set in `rows` (bit `lane` of `rows[array]`). Both belong to other live keys.
+fn write_decoys(protected: &[VaultPos], rows: &[u16; ARRAY_COUNT], draws: &mut Draws) {
     for (array_idx, row) in VAULTS.iter().enumerate() {
         for _ in 0..DECOYS_PER_ARRAY {
             let mut slot = draws.next() & (ARRAY_SIZE - 1);
-            // Reroll if this hits another key's data (~0.004% chance, essentially never)
-            while protected.iter().any(|p| p.array == array_idx && p.slot == slot) {
+            while rows[array_idx] >> (slot / LANE_WIDTH) & 1 == 1
+                || protected.iter().any(|p| p.array == array_idx && p.slot == slot)
+            {
                 slot = draws.next() & (ARRAY_SIZE - 1);
             }
             row[slot].store(draws.next(), Ordering::Release);
@@ -467,6 +454,19 @@ impl GuardedKey {
         (buf, n)
     }
 
+    /// Lane rows holding another live key's prekey, as a lane bitmask per array.
+    fn other_prekey_rows(&self, others: &[&GuardedKey]) -> [u16; ARRAY_COUNT] {
+        let mut rows = [0u16; ARRAY_COUNT];
+        for key in partners(others) {
+            if std::ptr::eq(key, self) || !key.has_key() { continue; }
+            let lane = key.lane();
+            for array in layout(key.instance_addr(), lane).prekey {
+                rows[array] |= 1 << lane;
+            }
+        }
+        rows
+    }
+
     /// Extract the secret key from a `Keys` struct, store it in the vault,
     /// and zeroize the intermediate bytes. One-liner replacement for the
     /// repeated extract -> set -> zeroize pattern across login paths.
@@ -485,7 +485,7 @@ impl GuardedKey {
     /// indistinguishable.
     ///
     /// INVARIANT: pass EVERY other live key (the standing vaults are always included). Decoys
-    /// reshuffle every prekey, and only the keys named here are re-shielded under theirs.
+    /// keep off only the slots and prekey rows of the keys named here.
     pub fn set(&self, mut key: [u8; 32], others: &[&GuardedKey]) {
         let _writer = writer();
         let mut rng = rand::rngs::OsRng;
@@ -512,12 +512,12 @@ impl GuardedKey {
             }
         }
 
-        let held = self.hold_partners(others);
+        let rows = self.other_prekey_rows(others);
         let rewriting = Rewriting::begin();
 
-        // Decoys first, prekey rows included. Real writes below overwrite any decoy that
-        // landed on OUR slots; protected slots keep every other key's positions intact.
-        write_decoys(&protected[..pcount], &mut draws);
+        // Decoys first, our new prekey rows included. Real writes below overwrite any decoy
+        // that landed on OUR slots; every other key's slots and prekey rows are left alone.
+        write_decoys(&protected[..pcount], &rows, &mut draws);
 
         // Force multiplier entries odd (mixing quality).
         // ~50% of all entries are already odd, so this isn't a fingerprint.
@@ -537,7 +537,6 @@ impl GuardedKey {
             VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
         }
 
-        Self::reshield(held, &mut rng);
         drop(rewriting);
     }
 
@@ -572,29 +571,6 @@ impl GuardedKey {
             }
         }
         for share in shares.iter_mut() { share.zeroize(); }
-    }
-
-    /// Read every other live partner's key before a rewrite reshuffles its prekey.
-    fn hold_partners<'a>(&self, others: &'a [&'a GuardedKey]) -> Held<'a> {
-        let mut held = Held { keys: [(None, [0u8; 32]); LANE_COUNT] };
-        let mut n = 0;
-        for key in partners(others) {
-            if std::ptr::eq(key, self) || n == LANE_COUNT { continue; }
-            if let Some(plain) = key.get() {
-                held.keys[n] = (Some(key), plain);
-                n += 1;
-            }
-        }
-        held
-    }
-
-    /// Re-shield every held partner under its prekey as the decoys left it.
-    fn reshield(mut held: Held<'_>, rng: &mut rand::rngs::OsRng) {
-        for (key, plain) in held.keys.iter_mut() {
-            if let Some(key) = key {
-                Self::write_shielded(key.instance_addr(), key.lane(), plain, rng);
-            }
-        }
     }
 
     /// Recover the key. Zero writes — invisible to snapshot diffing.
@@ -640,16 +616,15 @@ impl GuardedKey {
         key
     }
 
-    /// Clear the key. Overwrites shares with random values, writes decoys to all arrays,
-    /// and re-shields every other live key named in `others`.
+    /// Clear the key. Overwrites shares with random values and writes decoys to all arrays,
+    /// keeping off every other live key named in `others`.
     pub fn clear(&self, others: &[&GuardedKey]) {
         let _writer = writer();
         if self.active.load(Ordering::Acquire) == 0 {
             return;
         }
-        let mut rng = rand::rngs::OsRng;
         let mut draws = Draws::new();
-        let held = self.hold_partners(others);
+        let rows = self.other_prekey_rows(others);
         let rewriting = Rewriting::begin();
 
         let old_marker = self.active.swap(0, Ordering::SeqCst);
@@ -659,9 +634,7 @@ impl GuardedKey {
             VAULTS[pos.array][pos.slot].store(draws.next(), Ordering::Release);
         }
         let (protected, pcount) = self.collect_other_protected(others);
-        write_decoys(&protected[..pcount], &mut draws);
-
-        Self::reshield(held, &mut rng);
+        write_decoys(&protected[..pcount], &rows, &mut draws);
         drop(rewriting);
     }
 
@@ -1155,7 +1128,7 @@ mod tests {
             .map(|p| VAULTS[p.array][p.slot].load(Ordering::Relaxed))
             .collect();
         for _ in 0..500 {
-            write_decoys(&protected, &mut Draws::new());
+            write_decoys(&protected, &[0; ARRAY_COUNT], &mut Draws::new());
         }
         for (i, p) in protected.iter().enumerate() {
             assert_eq!(
@@ -1171,7 +1144,7 @@ mod tests {
     fn write_decoys_empty_exclusion_works() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
-        write_decoys(&[], &mut Draws::new());
+        write_decoys(&[], &[0; ARRAY_COUNT], &mut Draws::new());
     }
 
     // ================================================================
@@ -1614,9 +1587,9 @@ mod tests {
         TEST_KEY_A.clear(&others_for_a());
     }
 
-    /// Reads of one key stay whole while another key's set() reshuffles its prekey.
+    /// Reads of one key stay whole while another key's set() and clear() run.
     #[test]
-    fn reads_of_a_partner_survive_its_reshielding() {
+    fn reads_of_a_partner_survive_other_writes() {
         use std::sync::atomic::{AtomicBool, AtomicU64};
         use std::sync::Arc;
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());

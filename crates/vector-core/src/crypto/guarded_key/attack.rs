@@ -125,10 +125,10 @@ fn setup(partner_key: [u8; 32]) {
     PARTNER.set(partner_key, &[&SETTER]);
 }
 
-/// A partner re-shielded by someone else's set() appears in a single diff with both its old and
-/// new copies. For the right prekey ordering, pad1 ^ pad2 picks out the partner's 4 slots per word
-/// among the lane's changed slots; for a wrong ordering nothing matches. The search is therefore
-/// lanes × ordered prekeys, with a 64-bit filter and no curve operation per candidate.
+/// A partner rewritten in place by someone else's set() would sit in one diff under two pads.
+/// For the right prekey ordering, pad1 ^ pad2 picks out its 4 slots per word among the lane's
+/// changed slots, and for a wrong one nothing matches: lanes × ordered prekeys, a 64-bit filter
+/// and no curve operation per candidate. The partner must stay out of the diff entirely.
 #[test]
 #[ignore = "attack demo: run by name with --nocapture"]
 fn partner_reshield_two_dump_attack() {
@@ -151,60 +151,11 @@ fn partner_reshield_two_dump_attack() {
     let in_diff = truth.iter().filter(|p| diff.contains(p)).count();
     println!("changed slots: {}  per lane: {:?}", diff.len(), per_lane);
     println!("partner lane {lane}: {in_diff}/{} of its share slots are in the diff", truth.len());
-    assert_eq!(in_diff, SHARE_ENTRIES, "every partner share slot changes in one diff");
-
-    let cands: Vec<VaultPos> = diff.iter().copied().filter(|p| slot_lane(p.slot) == lane).collect();
-    let t = Instant::now();
-    let index = PairIndex::new(&cands, &d1, &d2);
-    println!("candidates in lane: {}  pair index built in {:?}", cands.len(), t.elapsed());
-
-    let prekey = layout(PARTNER.instance_addr(), lane).prekey;
-    let (p1, p2) = (pad_from(&d1, lane, &prekey), pad_from(&d2, lane, &prekey));
-    let mut recovered = [0u8; 32];
-    for u in 0..USIZES_PER_SHARE {
-        let sols = index.find4(word(&p1, u) ^ word(&p2, u));
-        assert_eq!(sols.len(), 1, "word {u}: the true prekey ordering yields exactly one 4-subset");
-        let mut w = word(&p2, u);
-        for &i in &sols[0] {
-            w ^= d2[cands[i].array][cands[i].slot];
-        }
-        recovered[u * 8..u * 8 + 8].copy_from_slice(&w.to_ne_bytes());
+    if in_diff == SHARE_ENTRIES {
+        recover_partner(&diff, &d1, &d2, lane, partner_key);
     }
-    assert_eq!(recovered, partner_key, "partner key recovered from two VAULTS snapshots");
-    println!("recovered the partner key from the diff with the true ordering");
+    assert_eq!(in_diff, 0, "a partner never appears in another key's diff");
 
-    let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
-    let trials = 20_000;
-    let mut false_hits = 0;
-    let t = Instant::now();
-    for _ in 0..trials {
-        let guess = rng.ordering();
-        if guess == prekey {
-            continue;
-        }
-        let (g1, g2) = (pad_from(&d1, lane, &guess), pad_from(&d2, lane, &guess));
-        if !index.find4(word(&g1, 0) ^ word(&g2, 0)).is_empty() {
-            false_hits += 1;
-        }
-    }
-    let per = t.elapsed() / trials;
-    let t = Instant::now();
-    for _ in 0..trials {
-        let guess = rng.ordering();
-        std::hint::black_box((pad_from(&d1, lane, &guess), pad_from(&d2, lane, &guess)));
-    }
-    let pads = t.elapsed() / trials;
-    println!("wrong orderings: {false_hits}/{trials} false hits; {per:?} per guess with pair MITM, {pads:?} for the two pads alone");
-    assert_eq!(false_hits, 0);
-
-    let orderings: f64 = (0..PREKEY_ROWS).map(|i| (ARRAY_COUNT - i) as f64).product();
-    let space = orderings * LANE_COUNT as f64;
-    println!(
-        "search space: {LANE_COUNT} lanes × {orderings:.3e} ordered prekeys = 2^{:.1}; \
-         at the two-pad cost that is {:.1} core-years (a 4-subset table per lane makes the lookup O(1))",
-        space.log2(),
-        space * pads.as_secs_f64() / 3.156e7
-    );
 
     // The key just set has no old copy in D1, so the same filter finds nothing for it.
     let sl = SETTER.lane();
@@ -219,8 +170,8 @@ fn partner_reshield_two_dump_attack() {
     SETTER.clear(&[&PARTNER]);
 }
 
-/// Over two diffs, decoys rarely land on the same slot twice, but a partner's share slots are
-/// rewritten in both. The intersection is the partner's slots plus a little noise.
+/// Over two diffs, decoys rarely land on the same slot twice, so anything rewritten in both
+/// stands out. A partner's slots must not be among them.
 #[test]
 #[ignore = "attack demo: run by name with --nocapture"]
 fn partner_slots_fall_out_of_two_diffs() {
@@ -253,9 +204,67 @@ fn partner_slots_fall_out_of_two_diffs() {
             truth.len(),
             per_lane
         );
-        assert_eq!(hit, SHARE_ENTRIES);
+        assert_eq!(hit, 0, "a partner's slots never change under another key's writes");
     }
     PARTNER.clear(&[]);
+}
+
+
+/// The one-diff attack on a partner rewritten in place.
+fn recover_partner(diff: &[VaultPos], d1: &Dump, d2: &Dump, lane: usize, partner_key: [u8; 32]) {
+    let cands: Vec<VaultPos> = diff.iter().copied().filter(|p| slot_lane(p.slot) == lane).collect();
+    let t = Instant::now();
+    let index = PairIndex::new(&cands, d1, d2);
+    println!("candidates in lane: {}  pair index built in {:?}", cands.len(), t.elapsed());
+
+    let prekey = layout(PARTNER.instance_addr(), lane).prekey;
+    let (p1, p2) = (pad_from(d1, lane, &prekey), pad_from(d2, lane, &prekey));
+    let mut recovered = [0u8; 32];
+    for u in 0..USIZES_PER_SHARE {
+        let sols = index.find4(word(&p1, u) ^ word(&p2, u));
+        assert_eq!(sols.len(), 1, "word {u}: the true prekey ordering yields exactly one 4-subset");
+        let mut w = word(&p2, u);
+        for &i in &sols[0] {
+            w ^= d2[cands[i].array][cands[i].slot];
+        }
+        recovered[u * 8..u * 8 + 8].copy_from_slice(&w.to_ne_bytes());
+    }
+    assert_eq!(recovered, partner_key, "partner key recovered from two VAULTS snapshots");
+    println!("recovered the partner key from the diff with the true ordering");
+
+    let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+    let trials = 20_000;
+    let mut false_hits = 0;
+    let t = Instant::now();
+    for _ in 0..trials {
+        let guess = rng.ordering();
+        if guess == prekey {
+            continue;
+        }
+        let (g1, g2) = (pad_from(d1, lane, &guess), pad_from(d2, lane, &guess));
+        if !index.find4(word(&g1, 0) ^ word(&g2, 0)).is_empty() {
+            false_hits += 1;
+        }
+    }
+    let per = t.elapsed() / trials;
+    let t = Instant::now();
+    for _ in 0..trials {
+        let guess = rng.ordering();
+        std::hint::black_box((pad_from(d1, lane, &guess), pad_from(d2, lane, &guess)));
+    }
+    let pads = t.elapsed() / trials;
+    println!("wrong orderings: {false_hits}/{trials} false hits; {per:?} per guess with pair MITM, {pads:?} for the two pads alone");
+    assert_eq!(false_hits, 0);
+
+    let orderings: f64 = (0..PREKEY_ROWS).map(|i| (ARRAY_COUNT - i) as f64).product();
+    let space = orderings * LANE_COUNT as f64;
+    println!(
+        "search space: {LANE_COUNT} lanes × {orderings:.3e} ordered prekeys = 2^{:.1}; \
+         at the two-pad cost that is {:.1} core-years (a 4-subset table per lane makes the lookup O(1))",
+        space.log2(),
+        space * pads.as_secs_f64() / 3.156e7
+    );
+
 }
 
 /// `layout_with` for a hypothetical VAULTS base, as an attacker brute-forcing the slide runs it.
@@ -317,7 +326,8 @@ fn shares_at(d: &Dump, instance: usize, lane: usize, layout: &Layout) -> [VaultP
 }
 
 /// Brute-forcing the ASLR slide against two VAULTS snapshots, with the build's static offsets
-/// known: a candidate (slide, lane) survives only if all its share slots changed. Times a
+/// known: a candidate (slide, lane) for the key just set survives only if all its share slots
+/// changed. Times a
 /// candidate under v2's 16–31 rounds and under v1's 4096–8191.
 #[test]
 #[ignore = "attack demo: run by name with --nocapture"]
@@ -333,9 +343,9 @@ fn aslr_slide_brute_with_a_diff_filter() {
     }
 
     let base = VAULTS.as_ptr() as usize;
-    let offset = PARTNER.instance_addr().wrapping_sub(base);
-    let real = layout(PARTNER.instance_addr(), PARTNER.lane());
-    let mine = layout_at(PARTNER.instance_addr(), base, PARTNER.lane());
+    let offset = SETTER.instance_addr().wrapping_sub(base);
+    let real = layout(SETTER.instance_addr(), SETTER.lane());
+    let mine = layout_at(SETTER.instance_addr(), base, SETTER.lane());
     assert!(real.prekey == mine.prekey && real.config == mine.config, "replica matches the vault");
 
     let span = 1usize << 16;
@@ -353,8 +363,8 @@ fn aslr_slide_brute_with_a_diff_filter() {
         }
     }
     let per = t.elapsed() / (span * LANE_COUNT) as u32;
-    println!("{} candidates, survivors {:?} (true: k={}, lane {}), {per:?} each", span * LANE_COUNT, survivors, span / 2, PARTNER.lane());
-    assert_eq!(survivors, vec![(span / 2, PARTNER.lane())]);
+    println!("{} candidates, survivors {:?} (true: k={}, lane {}), {per:?} each", span * LANE_COUNT, survivors, span / 2, SETTER.lane());
+    assert_eq!(survivors, vec![(span / 2, SETTER.lane())]);
 
     // v1 cost per candidate: config positions alone took 3+ addr_mix calls at 4096–8191 rounds.
     let n = 2_000u32;
@@ -414,5 +424,55 @@ fn stack_residue_after_get() {
     let pad = shield(lane, &layout(PARTNER.instance_addr(), lane).prekey);
     let find = |needle: &[u8]| snap.windows(needle.len()).filter(|w| *w == needle).count();
     println!("dead stack, 64 KiB below the caller: key copies {}, pad copies {}", find(&key[..]), find(&pad));
+    PARTNER.clear(&[]);
+}
+
+/// The cost of keeping decoys off live prekey rows: those rows go quiet. Counts the 256-slot
+/// rows that no decoy touched across N diffs, and how many of them are the partner's prekey.
+#[test]
+#[ignore = "attack demo: run by name with --nocapture"]
+fn quiet_prekey_rows_by_diff_count() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x66; 32]);
+    let lane = PARTNER.lane();
+    let prekey = layout(PARTNER.instance_addr(), lane).prekey;
+    let mut touched = vec![false; ARRAY_COUNT * LANE_COUNT];
+    let mut prev = dump();
+    for n in 1..=4u8 {
+        if n % 2 == 1 { SETTER.set([n; 32], &[&PARTNER]) } else { SETTER.clear(&[&PARTNER]) }
+        let next = dump();
+        for p in changed(&prev, &next) {
+            touched[p.array * LANE_COUNT + slot_lane(p.slot)] = true;
+        }
+        let quiet: Vec<(usize, usize)> = (0..ARRAY_COUNT * LANE_COUNT)
+            .filter(|&i| !touched[i])
+            .map(|i| (i / LANE_COUNT, i % LANE_COUNT))
+            .collect();
+        let real = quiet.iter().filter(|(a, l)| *l == lane && prekey.contains(a)).count();
+        println!("{n} diff(s): {} quiet rows, {real}/{PREKEY_ROWS} of them the partner's prekey", quiet.len());
+        prev = next;
+    }
+    SETTER.clear(&[&PARTNER]);
+    PARTNER.clear(&[]);
+}
+
+/// set() and clear() with one live partner, median of 15 batches.
+#[test]
+#[ignore = "benchmark"]
+fn bench_set_with_a_live_partner() {
+    let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    setup([0x12; 32]);
+    let mut runs: Vec<f64> = (0..15)
+        .map(|i| {
+            let t = Instant::now();
+            for j in 0..40u8 {
+                SETTER.set([i as u8 ^ j; 32], &[&PARTNER]);
+            }
+            t.elapsed().as_secs_f64() * 1e6 / 40.0
+        })
+        .collect();
+    runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("BENCH set() with a live partner: {:.1} µs", runs[7]);
+    SETTER.clear(&[&PARTNER]);
     PARTNER.clear(&[]);
 }
