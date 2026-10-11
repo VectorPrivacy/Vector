@@ -548,9 +548,10 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // this, one dropped socket leaves bg-sync deaf until the service restarts,
         // and mobile drops sockets constantly (doze, cell handoff, Tor circuit death).
         //
-        // Polls the stop flag rather than awaiting STOP_NOTIFY: `notify_one` wakes a
+        // Checks the stop flag rather than awaiting STOP_NOTIFY: `notify_one` wakes a
         // single waiter, so awaiting it here could steal the signal from the
-        // stop-checker above and leave the client connected forever.
+        // stop-checker above and leave the client connected forever. The stop-checker's
+        // disconnect is itself a status change, so a stop still ends the wait promptly.
         // Covers BOTH clients. In full-app mode this standalone client replaced the
         // foreground one as the global, but the foreground client is what still holds
         // the Concord subscriptions: those match by author on the community planes,
@@ -562,7 +563,6 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // spawn-detached: resolves the live global client by design; see the comment above.
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
                     return;
                 }
@@ -570,8 +570,10 @@ fn run_standalone_sync_loop(data_dir: &str) {
                 let stashed = PRESWAP_FOREGROUND_CLIENT.lock().ok().and_then(|g| g.clone());
                 let mut pools = vec![client_for_reconnect.clone()];
                 pools.extend(stashed);
+                // Subscribed before the pass, so a drop during it still ends the wait below.
+                let mut changes: Vec<_> = pools.iter().filter_map(|p| p.monitor().map(|m| m.subscribe())).collect();
 
-                for pool in pools {
+                for pool in &pools {
                     for (url, relay) in pool.relays().all().await {
                         if !matches!(relay.status(), RelayStatus::Terminated | RelayStatus::Sleeping) {
                             continue;
@@ -589,6 +591,19 @@ fn run_standalone_sync_loop(data_dir: &str) {
                             ))
                             .await;
                     }
+                }
+
+                let mut dropped = false;
+                for pool in &pools {
+                    dropped |= pool.relays().all().await.values()
+                        .any(|r| matches!(r.status(), RelayStatus::Terminated | RelayStatus::Sleeping));
+                }
+                if dropped || changes.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                } else {
+                    // All connected: wait for one to drop, with a 60 s sweep as a backstop.
+                    let any_change = futures_util::future::select_all(changes.iter_mut().map(|rx| Box::pin(rx.recv())));
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), any_change).await;
                 }
             }
         });
@@ -904,6 +919,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
             &npub_name[..20.min(npub_name.len())]));
 
         let client = vector_core::nostr_client_builder()
+            .monitor(Monitor::new(64))
             .build();
         bg_connect_single_relay(&client, data_dir).await?;
 
@@ -950,6 +966,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
                 &npub_name[..20.min(npub_name.len())]));
 
             let client = vector_core::nostr_client_builder()
+                .monitor(Monitor::new(64))
                 .build();
             bg_connect_single_relay(&client, data_dir).await?;
 
@@ -978,6 +995,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
 
         let client = vector_core::nostr_client_builder()
+            .monitor(Monitor::new(64))
             .build();
 
         bg_connect_single_relay(&client, data_dir).await?;
