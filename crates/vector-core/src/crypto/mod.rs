@@ -907,12 +907,7 @@ pub struct AtRestOpener {
 }
 
 impl AtRestOpener {
-    /// `maybe_decrypt_text` for one string, sharing the batch's cipher: the plaintext, or the
-    /// value unchanged when it is not ciphertext under the vault key.
-    pub fn open_or_keep(&mut self, input: String) -> String {
-        if !looks_encrypted(&input) {
-            return input;
-        }
+    fn cipher(&mut self) -> Option<&ChaCha20Poly1305> {
         if !self.loaded {
             self.loaded = true;
             if let Some(mut key) = crate::state::ENCRYPTION_KEY.get() {
@@ -920,7 +915,29 @@ impl AtRestOpener {
                 key.zeroize();
             }
         }
-        self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)).unwrap_or(input)
+        self.cipher.as_ref()
+    }
+
+    /// `maybe_decrypt_text` for one string, sharing the batch's cipher: the plaintext, or the
+    /// value unchanged when it is not ciphertext under the vault key.
+    pub fn open_or_keep(&mut self, input: String) -> String {
+        if !looks_encrypted(&input) {
+            return input;
+        }
+        self.cipher().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)).unwrap_or(input)
+    }
+
+    /// `maybe_decrypt_blob` for one value, sharing the batch's cipher.
+    pub fn open_blob_or_keep(&mut self, stored: &[u8]) -> Vec<u8> {
+        if stored.len() == 32 {
+            return stored.to_vec();
+        }
+        if stored.len() >= NONCE_LEN + TAG_LEN {
+            if let Some(opened) = self.cipher().and_then(|c| open_framed_with(c, stored.to_vec())) {
+                return opened;
+            }
+        }
+        maybe_decrypt_blob(stored)
     }
 
     /// `maybe_decrypt` for one string, sharing the batch's cipher.
@@ -929,16 +946,9 @@ impl AtRestOpener {
         if !looks_encrypted(&input) {
             return Ok(input);
         }
-        if !self.loaded {
-            self.loaded = true;
-            if let Some(mut key) = crate::state::ENCRYPTION_KEY.get() {
-                self.cipher = Some(ChaCha20Poly1305::new(&key));
-                key.zeroize();
-            }
-        }
         // The batch's cipher came from the vault at its first ciphertext; a PIN change since
         // can leave rows under the fresh key or the one it replaced.
-        if let Some(plaintext) = self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)) {
+        if let Some(plaintext) = self.cipher().and_then(|c| open_hex_with(c, &input)).or_else(|| open_with_vault(&input)) {
             return Ok(plaintext);
         }
         if crate::state::is_encryption_enabled_fast() { Err(()) } else { Ok(input) }
@@ -1094,6 +1104,25 @@ mod at_rest_batch_tests {
                 let expected: Vec<_> = rows.iter().map(|r| maybe_decrypt(r.clone()).now_or_never().unwrap()).collect();
                 let batched = open_batch(|at_rest| rows.iter().map(|r| at_rest.open(r.clone())).collect::<Vec<_>>());
                 assert_eq!(batched, expected, "encryption enabled: {enabled}");
+            });
+        }
+    }
+
+    #[test]
+    fn a_batch_answers_every_blob_as_maybe_decrypt_blob_does() {
+        let key = [0x55u8; 32];
+        let blobs = vec![
+            encrypt_blob_with_key(&[1u8; 32], &key).unwrap(),
+            vec![2u8; 32],
+            encrypt_blob_with_key(&[3u8; 32], &[9u8; 32]).unwrap(),
+            vec![4u8; 10],
+            encrypt_blob_with_key(b"", &key).unwrap(),
+        ];
+        for vault in [Some(key), None] {
+            with_vault(vault, true, || {
+                let expected: Vec<_> = blobs.iter().map(|b| maybe_decrypt_blob(b)).collect();
+                let batched = open_batch(|at_rest| blobs.iter().map(|b| at_rest.open_blob_or_keep(b)).collect::<Vec<_>>());
+                assert_eq!(batched, expected, "vault holds the key: {}", vault.is_some());
             });
         }
     }

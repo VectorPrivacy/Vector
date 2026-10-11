@@ -584,139 +584,144 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
     let dissolved = dissolved_int != 0;
 
     // Unwrap at-rest encryption before parsing (no-op when off, or for not-yet-wrapped rows).
-    let name = dec_txt(&name);
-    let relays_json = dec_txt(&relays_json);
-    let description = description.map(|s| dec_txt(&s));
-    let icon_json = icon_json.map(|s| dec_txt(&s));
-    let banner_json = banner_json.map(|s| dec_txt(&s));
-    let banlist_json = dec_txt(&banlist_json);
-    let owner_attestation = owner_attestation.map(|s| dec_txt(&s));
+    // One vault read for the whole row set, where per-field opens paid one each.
+    let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
+    let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
+    crate::crypto::open_batch(|o| {
+        let name = dt(o, &name);
+        let relays_json = dt(o, &relays_json);
+        let description = description.map(|s| dt(o, &s));
+        let icon_json = icon_json.map(|s| dt(o, &s));
+        let banner_json = banner_json.map(|s| dt(o, &s));
+        let banlist_json = dt(o, &banlist_json);
+        let owner_attestation = owner_attestation.map(|s| dt(o, &s));
 
-    // Banlist from `community_bans`, denormalized onto every channel so the inbound
-    // path can drop banned authors. The legacy blob is read ONLY as a fallback for a
-    // row this account has not touched since migration 90 — it is not a second store,
-    // and `get_community_banlist` retires it on first read. Malformed entries are
-    // skipped; an empty result degrades to "no bans", never an error.
-    let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
-    let mut banned_hex: Vec<String> = conn
-        .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
-        .and_then(|mut st| {
-            st.query_map(params![id_hex], |r| r.get::<_, String>(0))
-                .map(|rows| crate::crypto::open_batch(|at_rest| rows.flatten().map(|b| at_rest.open_or_keep(b)).collect::<Vec<String>>()))
-        })
-        .unwrap_or_default();
-    if banned_hex.is_empty() {
-        banned_hex = serde_json::from_str::<Vec<String>>(&banlist_json).unwrap_or_default();
-    }
-    let banned: Vec<PublicKey> = banned_hex
-        .iter()
-        // The table holds bech32, the legacy blob hex — `parse` takes either.
-        .filter_map(|h| PublicKey::parse(h).ok())
-        .collect();
-
-    let icon = icon_json
-        .map(|j| serde_json::from_str(&j))
-        .transpose()
-        .map_err(|e| format!("icon json: {e}"))?;
-    let banner = banner_json
-        .map(|j| serde_json::from_str(&j))
-        .transpose()
-        .map_err(|e| format!("banner json: {e}"))?;
-
-    let server_root_key = ServerRootKey(dec_key(&root_blob)?);
-    let relays: Vec<String> = serde_json::from_str(&relays_json).map_err(|e| e.to_string())?;
-
-    // hierarchy invariant (apply-time): the OWNER is the uppermost role and can never be
-    // effectively banned or hidden — by anyone. Everyone knows the owner from the attestation, so
-    // ALL members enforce this (the owner is filtered out of `banned` and protected from hides).
-    // Admins are NOT absolutely protected: the owner outranks them and CAN ban/hide an admin.
-    // (Admin-vs-admin peer protection — a lower rank can't act on an equal — is a later
-    // position-relative refinement gated on the author proof; the owner protection is the invariant.)
-    let mut protected: Vec<PublicKey> = Vec::new();
-    if let Some(owner) = owner_attestation
-        .as_ref()
-        .and_then(|att| crate::community::owner::verify_owner_attestation(att, &id_hex))
-    {
-        protected.push(owner);
-    }
-    let banned: Vec<PublicKey> = banned.into_iter().filter(|pk| !protected.contains(pk)).collect();
-
-    // Collect the channel head rows FIRST (drops the borrow on `conn`) so we can then query each
-    // channel's full epoch-key archive on the same connection without a borrow conflict.
-    let raw_channels: Vec<(String, Vec<u8>, i64, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT channel_id, channel_key, epoch, name
-                   FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![id_hex], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
+        // Banlist from `community_bans`, denormalized onto every channel so the inbound
+        // path can drop banned authors. The legacy blob is read ONLY as a fallback for a
+        // row this account has not touched since migration 90 — it is not a second store,
+        // and `get_community_banlist` retires it on first read. Malformed entries are
+        // skipped; an empty result degrades to "no bans", never an error.
+        let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+        let mut banned_hex: Vec<String> = conn
+            .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
+            .and_then(|mut st| {
+                st.query_map(params![id_hex], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.flatten().map(|b| o.open_or_keep(b)).collect::<Vec<String>>())
             })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
-    };
+            .unwrap_or_default();
+        if banned_hex.is_empty() {
+            banned_hex = serde_json::from_str::<Vec<String>>(&banlist_json).unwrap_or_default();
+        }
+        let banned: Vec<PublicKey> = banned_hex
+            .iter()
+            // The table holds bech32, the legacy blob hex — `parse` takes either.
+            .filter_map(|h| PublicKey::parse(h).ok())
+            .collect();
 
-    // The AUTHORIZED roster (cached by fetch_and_apply_roles, post delegation check), denormalized
-    // onto each channel so the inbound delete path can verify a keyless moderation-hide.
-    let roster = get_community_roles(&id_hex).unwrap_or_default();
+        let icon = icon_json
+            .map(|j| serde_json::from_str(&j))
+            .transpose()
+            .map_err(|e| format!("icon json: {e}"))?;
+        let banner = banner_json
+            .map(|j| serde_json::from_str(&j))
+            .transpose()
+            .map_err(|e| format!("banner json: {e}"))?;
 
-    let mut channels = Vec::new();
-    for (cid_hex, key_blob, epoch, cname) in raw_channels {
-        // Every retained epoch key for this channel (multi-held archive), so the read path can fetch +
-        // decrypt across rekeys. Best-effort: a read hiccup degrades to the head epoch (read_epoch_keys
-        // falls back), never an error.
-        let epoch_keys: Vec<(Epoch, crate::community::ChannelKey)> = {
-            let mut ek_stmt = conn
-                .prepare("SELECT epoch, key FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2")
+        let server_root_key = ServerRootKey(dk(o, &root_blob)?);
+        let relays: Vec<String> = serde_json::from_str(&relays_json).map_err(|e| e.to_string())?;
+
+        // hierarchy invariant (apply-time): the OWNER is the uppermost role and can never be
+        // effectively banned or hidden — by anyone. Everyone knows the owner from the attestation, so
+        // ALL members enforce this (the owner is filtered out of `banned` and protected from hides).
+        // Admins are NOT absolutely protected: the owner outranks them and CAN ban/hide an admin.
+        // (Admin-vs-admin peer protection — a lower rank can't act on an equal — is a later
+        // position-relative refinement gated on the author proof; the owner protection is the invariant.)
+        let mut protected: Vec<PublicKey> = Vec::new();
+        if let Some(owner) = owner_attestation
+            .as_ref()
+            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &id_hex))
+        {
+            protected.push(owner);
+        }
+        let banned: Vec<PublicKey> = banned.into_iter().filter(|pk| !protected.contains(pk)).collect();
+
+        // Collect the channel head rows FIRST (drops the borrow on `conn`) so we can then query each
+        // channel's full epoch-key archive on the same connection without a borrow conflict.
+        let raw_channels: Vec<(String, Vec<u8>, i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT channel_id, channel_key, epoch, name
+                       FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
+                )
                 .map_err(|e| e.to_string())?;
-            let rows = ek_stmt
-                .query_map(params![id_hex, cid_hex], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            let rows = stmt
+                .query_map(params![id_hex], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
                 .map_err(|e| e.to_string())?;
-            let mut out = Vec::new();
-            for row in rows {
-                let (e, blob) = row.map_err(|e| e.to_string())?;
-                if let Ok(k) = dec_key(&blob) {
-                    out.push((Epoch(e as u64), crate::community::ChannelKey(k)));
-                }
-            }
-            out
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
         };
-        channels.push(Channel {
-            id: ChannelId(hex_id_to_32(&cid_hex)?),
-            key: ChannelKey(dec_key(&key_blob)?),
-            // Stored as i64; reinterpreted back to u64 (two's-complement is exact,
-            // so the bit pattern round-trips losslessly even for epoch >= 2^63).
-            epoch: Epoch(epoch as u64),
-            name: dec_txt(&cname),
-            banned: banned.clone(),
-            protected: protected.clone(),
-            roster: roster.clone(),
-            epoch_keys,
-            dissolved,
-        });
-    }
 
-    Ok(Some(Community {
-        id: *id,
-        server_root_key,
-        // Stored as i64; reinterpreted to u64 (two's-complement is exact), same as channel epochs.
-        server_root_epoch: Epoch(server_root_epoch as u64),
-        name,
-        description,
-        icon,
-        banner,
-        relays,
-        channels,
-        owner_attestation,
-        dissolved,
-    }))
+        // The AUTHORIZED roster (cached by fetch_and_apply_roles, post delegation check), denormalized
+        // onto each channel so the inbound delete path can verify a keyless moderation-hide.
+        let roster = get_community_roles(&id_hex).unwrap_or_default();
+
+        let mut channels = Vec::new();
+        for (cid_hex, key_blob, epoch, cname) in raw_channels {
+            // Every retained epoch key for this channel (multi-held archive), so the read path can fetch +
+            // decrypt across rekeys. Best-effort: a read hiccup degrades to the head epoch (read_epoch_keys
+            // falls back), never an error.
+            let epoch_keys: Vec<(Epoch, crate::community::ChannelKey)> = {
+                let mut ek_stmt = conn
+                    .prepare("SELECT epoch, key FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2")
+                    .map_err(|e| e.to_string())?;
+                let rows = ek_stmt
+                    .query_map(params![id_hex, cid_hex], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let (e, blob) = row.map_err(|e| e.to_string())?;
+                    if let Ok(k) = dk(o, &blob) {
+                        out.push((Epoch(e as u64), crate::community::ChannelKey(k)));
+                    }
+                }
+                out
+            };
+            channels.push(Channel {
+                id: ChannelId(hex_id_to_32(&cid_hex)?),
+                key: ChannelKey(dk(o, &key_blob)?),
+                // Stored as i64; reinterpreted back to u64 (two's-complement is exact,
+                // so the bit pattern round-trips losslessly even for epoch >= 2^63).
+                epoch: Epoch(epoch as u64),
+                name: dt(o, &cname),
+                banned: banned.clone(),
+                protected: protected.clone(),
+                roster: roster.clone(),
+                epoch_keys,
+                dissolved,
+            });
+        }
+
+        Ok(Some(Community {
+            id: *id,
+            server_root_key,
+            // Stored as i64; reinterpreted to u64 (two's-complement is exact), same as channel epochs.
+            server_root_epoch: Epoch(server_root_epoch as u64),
+            name,
+            description,
+            icon,
+            banner,
+            relays,
+            channels,
+            owner_attestation,
+            dissolved,
+        }))
+    })
 }
 
 /// Retain the ephemeral signing key of a message I published, so I can later
@@ -3062,107 +3067,111 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         return Err("v2 community row is missing its owner commitment".to_string());
     };
 
-    let community_root = dec_key(&root_blob)?;
-    let owner_xonly = parse_hex32(&dec_txt(&owner_pk_e))?;
-    let owner_salt = parse_hex32(&dec_txt(&owner_salt_e))?;
-    let identity = CommunityIdentity { community_id: *id, owner_xonly, owner_salt };
-    let relays: Vec<String> = serde_json::from_str(&dec_txt(&relays_e)).unwrap_or_default();
+    // One vault read for the whole row set, where per-field opens paid one each.
+    let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
+    let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
+    crate::crypto::open_batch(|o| {
+        let community_root = dk(o, &root_blob)?;
+        let owner_xonly = parse_hex32(&dt(o, &owner_pk_e))?;
+        let owner_salt = parse_hex32(&dt(o, &owner_salt_e))?;
+        let identity = CommunityIdentity { community_id: *id, owner_xonly, owner_salt };
+        let relays: Vec<String> = serde_json::from_str(&dt(o, &relays_e)).unwrap_or_default();
 
-    let mut channels = Vec::new();
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT channel_id, channel_key, epoch, name, private, meta_extra
-                 FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![id_hex], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (ch_hex, key_blob, epoch, name_e, private, ch_stash_e) = row.map_err(|e| e.to_string())?;
-            let private = private != 0;
-            let key = dec_key(&key_blob)?;
-            // Unparseable stash degrades to empty — the fold re-persists the
-            // authoritative value on its next pass.
-            let ch_stash: ChannelMetaStash = ch_stash_e
-                .map(|s| dec_txt(&s))
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
-            channels.push(ChannelV2 {
-                id: ChannelId(hex_id_to_32(&ch_hex)?),
-                name: dec_txt(&name_e),
-                private,
-                // A public channel derives from the root — drop the placeholder. A
-                // PRIVATE channel stored with the root value is the KEYLESS placeholder
-                // (key not yet delivered over the rekey plane): a real private key is
-                // independently random (CORD-03 §1), never the root, so reconstruct
-                // None and keep every read/send path behind the keyless guards instead
-                // of silently addressing the public plane.
-                key: (private && key != community_root).then_some(key),
-                epoch: Epoch(epoch as u64),
-                voice: ch_stash.voice,
-                meta_custom: ch_stash.custom,
-                meta_extra: ch_stash.extra,
-            });
+        let mut channels = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT channel_id, channel_key, epoch, name, private, meta_extra
+                     FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![id_hex], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (ch_hex, key_blob, epoch, name_e, private, ch_stash_e) = row.map_err(|e| e.to_string())?;
+                let private = private != 0;
+                let key = dk(o, &key_blob)?;
+                // Unparseable stash degrades to empty — the fold re-persists the
+                // authoritative value on its next pass.
+                let ch_stash: ChannelMetaStash = ch_stash_e
+                    .map(|s| dt(o, &s))
+                    .and_then(|j| serde_json::from_str(&j).ok())
+                    .unwrap_or_default();
+                channels.push(ChannelV2 {
+                    id: ChannelId(hex_id_to_32(&ch_hex)?),
+                    name: dt(o, &name_e),
+                    private,
+                    // A public channel derives from the root — drop the placeholder. A
+                    // PRIVATE channel stored with the root value is the KEYLESS placeholder
+                    // (key not yet delivered over the rekey plane): a real private key is
+                    // independently random (CORD-03 §1), never the root, so reconstruct
+                    // None and keep every read/send path behind the keyless guards instead
+                    // of silently addressing the public plane.
+                    key: (private && key != community_root).then_some(key),
+                    epoch: Epoch(epoch as u64),
+                    voice: ch_stash.voice,
+                    meta_custom: ch_stash.custom,
+                    meta_extra: ch_stash.extra,
+                });
+            }
         }
-    }
 
-    // Unparseable image JSON degrades to no-image rather than failing the load —
-    // the fold re-persists the authoritative value on its next pass.
-    let icon = icon_e
-        .map(|s| dec_txt(&s))
-        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
-    let banner = banner_e
-        .map(|s| dec_txt(&s))
-        .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
-    let stash: CommunityMetaStash = stash_e
-        .map(|s| dec_txt(&s))
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
+        // Unparseable image JSON degrades to no-image rather than failing the load —
+        // the fold re-persists the authoritative value on its next pass.
+        let icon = icon_e
+            .map(|s| dt(o, &s))
+            .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+        let banner = banner_e
+            .map(|s| dt(o, &s))
+            .and_then(|j| serde_json::from_str::<crate::community::v2::control::ImageRef>(&j).ok());
+        let stash: CommunityMetaStash = stash_e
+            .map(|s| dt(o, &s))
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default();
 
-    // The split pair (CORD-02 §2). Fail closed on corruption: an unparseable
-    // address degrades to the legacy view, and a secret that no longer derives
-    // to the held address is dropped to read-only rather than signing at an
-    // address nobody reads.
-    let control_pk = control_pk_e
-        .as_deref()
-        .and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dec_txt(e)).ok());
-    let control_root = match (control_pk, control_root_b) {
-        (Some(pk), Some(blob)) => dec_key(&blob).ok().filter(|cr| {
-            crate::community::v2::derive::control_signer_group_key(cr, id, Epoch(root_epoch as u64)).pk() == pk
-        }),
-        _ => None,
-    };
+        // The split pair (CORD-02 §2). Fail closed on corruption: an unparseable
+        // address degrades to the legacy view, and a secret that no longer derives
+        // to the held address is dropped to read-only rather than signing at an
+        // address nobody reads.
+        let control_pk = control_pk_e
+            .as_deref()
+            .and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dt(o, e)).ok());
+        let control_root = match (control_pk, control_root_b) {
+            (Some(pk), Some(blob)) => dk(o, &blob).ok().filter(|cr| {
+                crate::community::v2::derive::control_signer_group_key(cr, id, Epoch(root_epoch as u64)).pk() == pk
+            }),
+            _ => None,
+        };
 
-    Ok(Some(CommunityV2 {
-        identity,
-        community_root,
-        root_epoch: Epoch(root_epoch as u64),
-        control_pk,
-        control_root,
-        name: dec_txt(&name_e),
-        description: desc_e.map(|d| dec_txt(&d)),
-        icon,
-        banner,
-        meta_custom: stash.custom,
-        meta_extra: stash.extra,
-        relays,
-        channels,
-        dissolved: dissolved != 0,
-        created_at_ms: (created as u64).saturating_mul(1000),
-    }))
+        Ok(Some(CommunityV2 {
+            identity,
+            community_root,
+            root_epoch: Epoch(root_epoch as u64),
+            control_pk,
+            control_root,
+            name: dt(o, &name_e),
+            description: desc_e.map(|d| dt(o, &d)),
+            icon,
+            banner,
+            meta_custom: stash.custom,
+            meta_extra: stash.extra,
+            relays,
+            channels,
+            dissolved: dissolved != 0,
+            created_at_ms: (created as u64).saturating_mul(1000),
+        }))
+    })
 }
-
 fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("stored value is not 32-byte hex".to_string());
@@ -3248,6 +3257,63 @@ mod tests {
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
+    }
+
+    /// `cargo test --release -p vector-core --lib bench_load_community -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark, not an assertion"]
+    fn bench_load_community_encrypted() {
+        let (_tmp, _guard) = init_test_db();
+        crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+
+        let mut v1 = Community::create("HQ", "general", vec!["wss://r.one".into()]);
+        v1.description = Some("about".into());
+        for i in 0..7 {
+            let mut ch = v1.channels[0].clone();
+            ch.id = ChannelId([i as u8 + 1; 32]);
+            ch.name = format!("channel {i}");
+            v1.channels.push(ch);
+        }
+        save_community(&v1).unwrap();
+
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "V2".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let mut v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "V2", Some("about".into()), vec!["wss://r".into()], 1_000);
+        for i in 0..7 {
+            let mut ch = v2.channels[0].clone();
+            ch.id = ChannelId([i as u8 + 0x40; 32]);
+            ch.name = format!("channel {i}");
+            v2.channels.push(ch);
+        }
+        save_community_v2(&v2).unwrap();
+
+        let time = |name: &str, f: &mut dyn FnMut()| {
+            for _ in 0..20 { f(); }
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                for _ in 0..200 { f(); }
+                best = best.min(t.elapsed().as_nanos() as f64 / 200.0);
+            }
+            println!("{name:<44} {:>9.1} µs", best / 1000.0);
+        };
+        let mut get = || { std::hint::black_box(crate::state::ENCRYPTION_KEY.get()); };
+        time("vault get()", &mut get);
+        time("load_community, 8 channels, encrypted", &mut || {
+            std::hint::black_box(load_community(&v1.id).unwrap().unwrap());
+        });
+        time("load_community_v2, 8 channels, encrypted", &mut || {
+            std::hint::black_box(load_community_v2(v2.id()).unwrap().unwrap());
+        });
+
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
     }
 
     #[test]
