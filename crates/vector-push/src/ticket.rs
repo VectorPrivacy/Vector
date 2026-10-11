@@ -135,7 +135,7 @@ mod tests {
         let pusher = Keys::generate();
         let device = p256::SecretKey::random(&mut rand::rngs::OsRng);
         let auth = crate::random::<16>();
-        let (vapid, _) = crate::vapid::generate();
+        let vapid = crate::b64url(&crate::random::<32>());
         let cap = Capability { endpoint: "https://web.push.apple.com/abc".into(), vapid, cap: "c1".into() };
         let t = Ticket {
             id: "dev".into(),

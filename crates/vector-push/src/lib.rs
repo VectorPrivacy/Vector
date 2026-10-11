@@ -15,6 +15,7 @@
 pub mod payload;
 pub mod request;
 pub mod ticket;
+#[cfg(feature = "vapid")]
 pub mod vapid;
 pub mod webpush;
 
