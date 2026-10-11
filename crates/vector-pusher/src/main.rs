@@ -87,7 +87,7 @@ async fn main() {
     let pusher = Arc::new(Pusher {
         keys: keys.clone(),
         subject,
-        http: reqwest::Client::builder().timeout(Duration::from_secs(15)).build().expect("http client"),
+        http: reqwest::Client::builder().tls_backend_preconfigured(tls_config()).timeout(Duration::from_secs(15)).build().expect("http client"),
         stats: Stats::default(),
         seen: Mutex::new((HashSet::new(), VecDeque::new())),
         buckets: Mutex::new(HashMap::new()),
@@ -366,6 +366,18 @@ fn load_keys(path: &str) -> Keys {
 
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Ring with the webpki roots, offering h2 before HTTP/1.1.
+fn tls_config() -> rustls::ClientConfig {
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports TLS 1.2 and 1.3")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    cfg
 }
 
 #[cfg(test)]

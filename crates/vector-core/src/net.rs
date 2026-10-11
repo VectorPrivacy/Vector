@@ -210,10 +210,34 @@ pub fn rebuild_shared_http_client() -> Result<(), String> {
 }
 
 /// Only builds requests: `Req::send` executes on the client the current egress gives.
-#[allow(clippy::disallowed_methods)]
 fn template() -> &'static reqwest::Client {
     static T: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    T.get_or_init(|| reqwest::Client::builder().build().expect("a plain reqwest client always builds"))
+    T.get_or_init(|| client_builder().build().expect("a plain reqwest client always builds"))
+}
+
+/// Ring with the webpki roots, offering h2 before HTTP/1.1.
+#[cfg(not(target_arch = "wasm32"))]
+fn tls_config() -> rustls::ClientConfig {
+    static CFG: std::sync::OnceLock<rustls::ClientConfig> = std::sync::OnceLock::new();
+    CFG.get_or_init(|| {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports TLS 1.2 and 1.3")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        cfg
+    })
+    .clone()
+}
+
+#[allow(clippy::disallowed_methods)]
+fn client_builder() -> reqwest::ClientBuilder {
+    #[cfg(not(target_arch = "wasm32"))]
+    return reqwest::Client::builder().tls_backend_preconfigured(tls_config());
+    #[cfg(target_arch = "wasm32")]
+    return reqwest::Client::builder();
 }
 
 impl HttpClient {
@@ -264,10 +288,9 @@ impl HttpClient {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::disallowed_methods)]
 fn build_pooled(opts: ClientOptions, proxy: Option<String>) -> Result<reqwest::Client, String> {
     use crate::transport::{budget, Op};
-    let mut builder = reqwest::Client::builder()
+    let mut builder = client_builder()
         // Kept connections: idle ones stay a while so a burst of small
         // fetches to one host (an edge, a Blossom server) rides one or a
         // few connections, and HTTP/2 multiplexes on them where offered.
@@ -317,9 +340,8 @@ fn build_pooled(opts: ClientOptions, proxy: Option<String>) -> Result<reqwest::C
 }
 
 #[cfg(target_arch = "wasm32")]
-#[allow(clippy::disallowed_methods)]
 fn build_pooled(_opts: ClientOptions, _proxy: Option<String>) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
+    client_builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
 }
 
 /// The pooled client for this decision, built and cached unless the epoch moved meanwhile.
@@ -1259,6 +1281,20 @@ mod fd_limit_tests {
         let ceiling: libc::rlim_t = 1 << 20;
         assert!(after.rlim_cur >= before.rlim_cur);
         assert!(after.rlim_cur >= after.rlim_max.min(ceiling));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tls_tests {
+    use super::*;
+
+    #[test]
+    fn clients_build_on_ring_with_h2_offered_first() {
+        let cfg = tls_config();
+        assert_eq!(cfg.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
+        let opts = ClientOptions { timeout: None, read_timeout: None, follow_redirects: true, no_direct: false };
+        build_pooled(opts, None).expect("a pooled client builds");
+        template();
     }
 }
 

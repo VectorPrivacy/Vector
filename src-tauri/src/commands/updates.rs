@@ -364,13 +364,13 @@ static PENDING_CHANNEL_UPDATE: std::sync::Mutex<Option<tauri_plugin_updater::Upd
 /// No total timeout, so a slow but steady installer download finishes; every redirect hop passes
 /// the pre-router.
 #[cfg(desktop)]
-fn apply_transport_013(builder: reqwest013::ClientBuilder, owner: u64, host: &str) -> reqwest013::ClientBuilder {
+fn updater_transport(builder: reqwest::ClientBuilder, owner: u64, host: &str) -> reqwest::ClientBuilder {
     use vector_core::transport::{self, Egress, Lane, Op};
     let builder = builder
         .user_agent(vector_core::net::user_agent())
         .connect_timeout(transport::budget(Op::HttpConnect, std::time::Duration::from_secs(15)))
         .read_timeout(transport::budget(Op::HttpRead, std::time::Duration::from_secs(60)))
-        .redirect(reqwest013::redirect::Policy::custom(|attempt| {
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
             }
@@ -388,9 +388,9 @@ fn apply_transport_013(builder: reqwest013::ClientBuilder, owner: u64, host: &st
         Egress::Refuse(_) => None,
     };
     let url = proxy.unwrap_or_else(|| format!("socks5h://{}", transport::bridge::NOWHERE));
-    match reqwest013::Proxy::all(url) {
+    match reqwest::Proxy::all(url) {
         Ok(p) => builder.proxy(p),
-        Err(_) => builder.no_proxy().proxy(reqwest013::Proxy::all("socks5h://127.0.0.1:0").expect("a literal proxy URL")),
+        Err(_) => builder.no_proxy().proxy(reqwest::Proxy::all("socks5h://127.0.0.1:0").expect("a literal proxy URL")),
     }
 }
 
@@ -455,7 +455,7 @@ pub async fn check_channel_update<R: Runtime>(
         // The manifest check alone keeps a total cap; the plugin drops it for the download.
         let updater = builder
             .timeout(vector_core::transport::budget(vector_core::transport::Op::HttpTotal, std::time::Duration::from_secs(120)))
-            .configure_client(move |b| apply_transport_013(b, owner, &host))
+            .configure_client(move |b| updater_transport(b, owner, &host))
             .build()
             .map_err(|e| format!("Update check failed: {e}"))?;
         let found = on_this_network(async { updater.check().await.map_err(|e| format!("Update check failed: {e}")) }).await?;

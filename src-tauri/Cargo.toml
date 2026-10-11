@@ -183,12 +183,11 @@ serde_json = "1.0.145"
 # Same crate Tauri parses `package_info().version` with, so the Android update
 # beacon orders preview builds identically to the desktop updater plugin.
 semver = "1"
-# default-features=false drops `http2`, `default-tls`, and `macos-system-configuration` —
-# none of which Vector actually uses (rustls-tls is explicit; HTTP/1.1 is fine for
-# all relay/Blossom traffic). `charset` is kept for text-response decoding (link
-# previews fetching HTML). `socks` is required for the Tor proxy — without it
-# reqwest accepts a `socks5://` Proxy URL but silently does nothing.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "socks", "http2"] }
+# The same reqwest as the updater plugin and iroh, so the app links one copy. TLS is handed in
+# preconfigured (vector-core's `net::tls_config`, ring only). `charset` is kept for text-response
+# decoding (link previews fetching HTML). `socks` is required for the Tor proxy and carries update
+# checks — without it reqwest accepts a `socks5://` Proxy URL but silently does nothing.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream", "charset", "socks", "http2"] }
 sha2 = "0.10.9"
 argon2 = "0.5.3"
 tauri-plugin-opener = "2.5.3"
@@ -319,9 +318,6 @@ whisper-rs = { version = "0.15.1", optional = true }
 # Desktop-only dependencies (deep link single-instance support)
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.0"
-# The updater plugin's own reqwest: `socks` so the account's network can carry update checks and
-# downloads (features unify onto the plugin's copy).
-reqwest013 = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
 tauri-plugin-single-instance = { version = "2.4.0", features = ["deep-link"] }
 tauri-plugin-window-state = "2.4.1"
 
