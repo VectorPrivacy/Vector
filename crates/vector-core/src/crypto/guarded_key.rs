@@ -1249,4 +1249,85 @@ mod tests {
         row("today's rounds + BLAKE3 shield 16 KiB", time(300, &|| unshield(read(today), shield_blake3(16))));
         TEST_KEY_A.clear(&others_for_a());
     }
+
+    /// Prices set()'s randomness sources and a vault-wide writer lock.
+    /// Run with `--release -- --ignored bench_vault_set --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_vault_set() {
+        use rand::{RngCore, SeedableRng};
+        use std::hint::black_box;
+        let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let time = |n: usize, f: &mut dyn FnMut()| -> f64 {
+            let mut runs: Vec<f64> = (0..15).map(|_| {
+                let t = std::time::Instant::now();
+                for _ in 0..n { f(); }
+                t.elapsed().as_nanos() as f64 / n as f64 / 1000.0
+            }).collect();
+            runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            runs[7]
+        };
+        fn decoys_with(rng: &mut impl RngCore, protected: &[VaultPos]) {
+            for (array_idx, row) in VAULTS.iter().enumerate() {
+                for _ in 0..SHARE_ENTRIES {
+                    let mut slot = (rng.next_u64() as usize) & (ARRAY_SIZE - 1);
+                    while protected.iter().any(|p| p.array == array_idx && p.slot == slot) {
+                        slot = (rng.next_u64() as usize) & (ARRAY_SIZE - 1);
+                    }
+                    let mut val = rng.next_u64() as usize;
+                    if val == 0 { val = 1; }
+                    row[slot].store(val, Ordering::Release);
+                }
+            }
+        }
+        // All decoy randomness as one ChaCha20 keystream block, wiped after.
+        fn decoys_keystream(protected: &[VaultPos]) {
+            use chacha20::cipher::{KeyIvInit, StreamCipher};
+            let mut seed = [0u8; 44];
+            rand::rngs::OsRng.fill_bytes(&mut seed);
+            let mut cipher = chacha20::ChaCha20::new((&seed[..32]).into(), (&seed[32..]).into());
+            seed.zeroize();
+            let mut buf = [0u64; ARRAY_COUNT * SHARE_ENTRIES * 2];
+            cipher.apply_keystream(bytemuck_u64(&mut buf));
+            let mut it = buf.iter().copied();
+            for (array_idx, row) in VAULTS.iter().enumerate() {
+                for _ in 0..SHARE_ENTRIES {
+                    let mut slot = (it.next().unwrap() as usize) & (ARRAY_SIZE - 1);
+                    while protected.iter().any(|p| p.array == array_idx && p.slot == slot) {
+                        slot = (rand::rngs::OsRng.next_u64() as usize) & (ARRAY_SIZE - 1);
+                    }
+                    let mut val = it.next().unwrap() as usize;
+                    if val == 0 { val = 1; }
+                    row[slot].store(val, Ordering::Release);
+                }
+            }
+            buf.zeroize();
+        }
+        fn bytemuck_u64(b: &mut [u64]) -> &mut [u8] {
+            unsafe { std::slice::from_raw_parts_mut(b.as_mut_ptr() as *mut u8, b.len() * 8) }
+        }
+
+        let (prot, pn) = TEST_KEY_A.collect_other_protected(&others_for_a());
+        let protected = &prot[..pn];
+        let mut k = 0u8;
+        let set_today = time(30, &mut || { k = k.wrapping_add(1); TEST_KEY_A.set(test_key(k), &others_for_a()); });
+        eprintln!("BENCH {:<46} {:>9.2} µs", "set() today", set_today);
+        let os = time(30, &mut || decoys_with(&mut rand::rngs::OsRng, protected));
+        eprintln!("BENCH {:<46} {:>9.2} µs  ({:.0}% of set())", "  decoy pass, OsRng per draw (today)", os, os / set_today * 100.0);
+        let std_rng = time(300, &mut || {
+            let mut r = rand::rngs::StdRng::from_rng(rand::rngs::OsRng).unwrap();
+            decoys_with(&mut r, protected);
+        });
+        eprintln!("BENCH {:<46} {:>9.2} µs  ({:+.1}% vs OsRng)", "  decoy pass, StdRng seeded once", std_rng, (std_rng / os - 1.0) * 100.0);
+        let ks = time(300, &mut || decoys_keystream(protected));
+        eprintln!("BENCH {:<46} {:>9.2} µs  ({:+.1}% vs OsRng)", "  decoy pass, ChaCha20 keystream, wiped", ks, (ks / os - 1.0) * 100.0);
+        let one_os = time(20000, &mut || { black_box(rand::rngs::OsRng.next_u64()); });
+        eprintln!("BENCH {:<46} {:>9.3} µs", "  one OsRng draw (one getrandom syscall)", one_os);
+
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = time(200000, &mut || { black_box(LOCK.lock().unwrap_or_else(|e| e.into_inner())); });
+        eprintln!("BENCH {:<46} {:>9.3} µs  ({:.4}% of set())", "uncontended writer lock + unlock", lock, lock / set_today * 100.0);
+        TEST_KEY_A.clear(&others_for_a());
+    }
 }
