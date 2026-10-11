@@ -356,6 +356,20 @@ async fn main() {
         println!("{:<52} {:>10.2} µs", format!("batch of {}, {} sender(s), per wrap", refs.len(), senders), per / 1000.0);
     }
 
+    println!("-- seal (NIP-59, every DM send seals twice: recipient + self copy)");
+    let out_rumor = EventBuilder::new(Kind::PrivateDirectMessage, msg.clone())
+        .tag(Tag::public_key(sender.public_key()))
+        .finalize_unsigned(me.public_key());
+    let old = bench("seal via active_signer + GuardedSigner (old)", 2000, || {
+        // active_signer's identity read, then the trait path's encrypt read and sign read.
+        assert_eq!(MY_SECRET_KEY.to_keys().unwrap().public_key(), me.public_key());
+        black_box(GiftWrapSealBuilder::new(out_rumor.clone(), sender.public_key()).finalize(&guarded).unwrap());
+    });
+    let new = bench("seal via GuardedSigner::seal (prod, local)", 2000, || {
+        black_box(GuardedSigner::seal(&me.public_key(), out_rumor.clone(), &sender.public_key()).unwrap());
+    });
+    println!("  -> {:.1} µs saved per seal ({:.0}%)", (old - new) / 1000.0, 100.0 * (old - new) / old);
+
     println!("-- unwrap breakdown (raw keys)");
     let seal = Event::from_json(nostr_sdk::prelude::nip44::decrypt(me.secret_key(), &wrap.pubkey, &wrap.content).unwrap()).unwrap();
     bench("wrap.verify() (schnorr, outer)", 2000, || { black_box(wrap.verify().is_ok()); });

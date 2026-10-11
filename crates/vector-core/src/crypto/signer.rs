@@ -44,6 +44,21 @@ impl GuardedSigner {
         key
     }
 
+    /// NIP-59 seal under one vault read. The trait path reads the vault to encrypt and
+    /// again to sign, and `active_signer` a third time for its identity check. The keypair
+    /// signing needs makes that check free, so it stays fail-closed.
+    pub fn seal(identity: &PublicKey, rumor: UnsignedEvent, receiver: &PublicKey) -> Result<Event, SignerError> {
+        let keys = crate::state::MY_SECRET_KEY
+            .to_keys()
+            .ok_or_else(|| SignerError::from("no signer available (no local key)"))?;
+        if keys.public_key() != *identity {
+            return Err(SignerError::from(
+                "local key does not match the active identity (remote-signer account with no live signer)",
+            ));
+        }
+        GiftWrapSealBuilder::new(rumor, *receiver).finalize(&keys).map_err(SignerError::backend)
+    }
+
     /// NIP-59 unwrap under one vault read; see [`Self::unwrap_batch`].
     pub fn unwrap_gift_wrap(gift_wrap: &Event) -> Result<UnwrappedGift, SignerError> {
         Self::unwrap_batch(&[gift_wrap]).pop().unwrap_or_else(|| Err(SignerError::from("empty batch")))
@@ -471,5 +486,31 @@ mod tests {
             let from_peer = peer.nip04_encrypt(&me.public_key(), "school").unwrap();
             assert_eq!(Nip04::nip04_decrypt(&signer, &peer.public_key(), &from_peer).unwrap(), "school");
         });
+    }
+
+    #[test]
+    fn seal_opens_like_the_trait_paths_seal() {
+        let (me, peer) = (Keys::generate(), Keys::generate());
+        let r = rumor(&me.public_key(), &peer.public_key());
+        let ours = with_me(&me, || GuardedSigner::seal(&me.public_key(), r.clone(), &peer.public_key())).unwrap();
+        let reference = GiftWrapSealBuilder::new(r.clone(), peer.public_key()).finalize(&me).unwrap();
+        for s in [&ours, &reference] {
+            s.verify().unwrap();
+            assert_eq!((s.kind, s.pubkey), (Kind::Seal, me.public_key()));
+            assert_eq!(peer.nip44_decrypt(&me.public_key(), &s.content).unwrap(), r.as_json());
+        }
+        let gift = wrap(&ours, &peer.public_key());
+        let opened = UnwrappedGift::from_gift_wrap(&peer, &gift).unwrap();
+        assert_eq!((opened.sender, opened.rumor.as_json()), (me.public_key(), r.as_json()));
+    }
+
+    #[test]
+    fn seal_refuses_a_vault_key_that_is_not_the_identity() {
+        let (me, client_key, peer) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let r = rumor(&me.public_key(), &peer.public_key());
+        assert!(with_me(&client_key, || GuardedSigner::seal(&me.public_key(), r.clone(), &peer.public_key())).is_err());
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::state::MY_SECRET_KEY.clear(&[]);
+        assert!(GuardedSigner::seal(&me.public_key(), r, &peer.public_key()).is_err());
     }
 }

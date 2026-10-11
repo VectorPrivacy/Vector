@@ -874,11 +874,7 @@ pub async fn build_gift_wrap_retained(
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<BuiltGiftWrap, String> {
-    let signer = crate::signer::active_signer().map_err(|e| e.to_string())?;
-    let seal: Event = nostr_sdk::prelude::GiftWrapSealBuilder::new(rumor, *recipient)
-        .finalize_async(&signer)
-        .await
-        .map_err(|e| e.to_string())?;
+    let seal = crate::signer::seal_rumor(rumor, recipient).await?;
     let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
     Ok(BuiltGiftWrap { event, secret })
 }
