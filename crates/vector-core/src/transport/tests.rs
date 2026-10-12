@@ -2249,13 +2249,14 @@ async fn a_publish_no_relay_took_leaves_no_mark() {
 /// relay took it, so a copy arriving later is handled again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_own_publish_echo_is_dropped_until_it_is_unmarked() {
+    use crate::ClientRelayExt;
     use futures_util::StreamExt;
     use nostr_sdk::prelude::*;
     let _s = scene();
     let relay = push_relay().await;
     let url = format!("ws://127.0.0.1:{}", relay.port);
     let client = crate::nostr_client_builder().build();
-    client.add_relay(url.as_str()).await.unwrap();
+    client.add_managed_relay(url.as_str()).await.unwrap();
     client.connect().await;
     let r = client.relay(url.as_str()).await.unwrap().unwrap();
     settle("connected", || r.status() == RelayStatus::Connected).await;
