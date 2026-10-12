@@ -12410,7 +12410,10 @@ select:disabled:hover {
 }
 
 #chat-new-input {
-  width: -webkit-fill-available;
+  /* Flex sizing: `-webkit-fill-available` is unknown to older Firefox (Tor Browser),
+     which then falls back to the input's ~20-character default. */
+  flex: 1;
+  min-width: 0;
   height: 20px;
   padding: 10px;
   padding-left: 14px;
