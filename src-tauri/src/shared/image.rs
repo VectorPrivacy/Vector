@@ -158,7 +158,23 @@ fn simd_resize(img: &DynamicImage, width: u32, height: u32, alg: fast_image_resi
         _ => return None,
     };
     let (sw, sh) = (img.width(), img.height());
-    let src = fr::images::ImageRef::new(sw, sh, raw, pixel).ok()?;
+    // Filters resample alpha premultiplied. Left to the resizer, every band premultiplies a copy of
+    // the whole source, so it happens once here, and not at all when nothing is translucent.
+    let alpha_at = match pixel {
+        fr::PixelType::U8x4 => Some(3),
+        fr::PixelType::U8x2 => Some(1),
+        _ => None,
+    };
+    let translucent = !matches!(alg, fr::ResizeAlg::Nearest)
+        && alpha_at.is_some_and(|a| raw.iter().skip(a).step_by(pixel.size()).any(|&v| v != 255));
+    let premultiplied = if translucent {
+        let mut pre = fr::images::Image::new(sw, sh, pixel);
+        fr::MulDiv::default().multiply_alpha(&fr::images::ImageRef::new(sw, sh, raw, pixel).ok()?, &mut pre).ok()?;
+        Some(pre)
+    } else {
+        None
+    };
+    let src = fr::images::ImageRef::new(sw, sh, premultiplied.as_ref().map_or(raw, |p| p.buffer()), pixel).ok()?;
     let row_bytes = width as usize * pixel.size();
     let mut out = vec![0u8; row_bytes * height as usize];
     // Horizontal bands on rayon, each resized from its own source window. The filter still reads
@@ -173,12 +189,16 @@ fn simd_resize(img: &DynamicImage, width: u32, height: u32, alg: fast_image_resi
     let resize_band = |(i, band): (usize, &mut [u8])| {
         let rows = (band.len() / row_bytes) as u32;
         let mut dst = fr::images::Image::from_slice_u8(width, rows, band, pixel).ok()?;
-        let mut opts = fr::ResizeOptions::new().resize_alg(alg);
+        let mut opts = fr::ResizeOptions::new().resize_alg(alg).use_alpha(false);
         if bands > 1 {
             let top = (i * band_rows) as f64 * scale;
             opts = opts.crop(0.0, top, f64::from(sw), (f64::from(rows) * scale).min(f64::from(sh) - top));
         }
-        fr::Resizer::new().resize(&src, &mut dst, &opts).ok()
+        fr::Resizer::new().resize(&src, &mut dst, &opts).ok()?;
+        if translucent {
+            fr::MulDiv::default().divide_alpha_inplace(&mut dst).ok()?;
+        }
+        Some(())
     };
     let resized: Option<Vec<()>> = if bands > 1 {
         use rayon::prelude::*;
@@ -2348,6 +2368,42 @@ mod simd_resize_tests {
                 assert!(p > 45.0, "{:?} to {w}x{h}: {p:.1} dB", src.color());
             }
         }
+    }
+
+    /// The resizer premultiplying a whole image in one call, as every band used to.
+    fn resizer_alone(src: &image::RgbaImage, w: u32, h: u32, alg: fast_image_resize::ResizeAlg) -> Vec<u8> {
+        use fast_image_resize as fr;
+        let s = fr::images::ImageRef::new(src.width(), src.height(), src.as_raw(), fr::PixelType::U8x4).unwrap();
+        let mut d = fr::images::Image::new(w, h, fr::PixelType::U8x4);
+        fr::Resizer::new().resize(&s, &mut d, &fr::ResizeOptions::new().resize_alg(alg)).unwrap();
+        d.into_vec()
+    }
+
+    #[test]
+    fn premultiplying_once_matches_the_resizer_doing_it() {
+        use fast_image_resize::{FilterType as R, ResizeAlg};
+        let base = photo(1000, 1000);
+        let translucent = image::RgbaImage::from_fn(1000, 1000, |x, y| {
+            let p = base.get_pixel(x, y).0;
+            image::Rgba([p[0], p[1], p[2], ((x * 7 + y * 3) % 256) as u8])
+        });
+        let opaque = DynamicImage::ImageRgb8(base).to_rgba8();
+        // Under 1 MP: one band, so only the alpha handling differs.
+        for src in [translucent, opaque] {
+            let ours = resize_exact(&DynamicImage::ImageRgba8(src.clone()), 600, 450, FilterType::Lanczos3);
+            assert_eq!(ours.as_bytes(), resizer_alone(&src, 600, 450, ResizeAlg::Convolution(R::Lanczos3)));
+            let ours = resize_exact(&DynamicImage::ImageRgba8(src.clone()), 600, 450, FilterType::Nearest);
+            assert_eq!(ours.as_bytes(), resizer_alone(&src, 600, 450, ResizeAlg::Nearest));
+        }
+        // Banded and translucent: each band still matches the whole-image resize.
+        let big = photo(1600, 1200);
+        let big = image::RgbaImage::from_fn(1600, 1200, |x, y| {
+            let p = big.get_pixel(x, y).0;
+            image::Rgba([p[0], p[1], p[2], (x % 256) as u8 | 1])
+        });
+        let ours = resize_exact(&DynamicImage::ImageRgba8(big.clone()), 1000, 750, FilterType::Lanczos3);
+        let p = psnr(ours.as_bytes(), &resizer_alone(&big, 1000, 750, ResizeAlg::Convolution(R::Lanczos3)));
+        assert!(p > 45.0, "{p:.1} dB");
     }
 
     #[test]

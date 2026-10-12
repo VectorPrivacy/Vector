@@ -46,6 +46,73 @@ pub struct MiniAppPackage {
     pub manifest: MiniAppManifest,
     /// SHA-256 hash of the .xdc file (used for permission identification)
     pub file_hash: String,
+    /// Whether the app calls the realtime (Iroh) API.
+    pub uses_realtime: bool,
+}
+
+/// What one read of a package finds, stored by its content hash.
+#[derive(Serialize, Deserialize)]
+struct PackageMeta {
+    #[serde(default)]
+    v: u32,
+    /// None when the package ships no manifest.toml: the name then comes from its file name.
+    manifest: Option<MiniAppManifest>,
+    uses_realtime: bool,
+}
+
+/// Bumped when a read would find more than the stored metadata holds, so it's read again.
+const PACKAGE_META_VERSION: u32 = 1;
+const ICON_CAP: u64 = 8 * 1024 * 1024;
+
+/// Modification time in nanoseconds since the epoch, 0 when the platform can't say.
+fn modified_nanos(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+}
+
+/// SHA-256 of a file, streamed: a package can be hundreds of MB.
+pub(crate) fn hash_file(path: &std::path::Path) -> Result<String, Error> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(bytes_to_hex_string(&hasher.finalize()))
+}
+
+/// Whether `needle` occurs in the first `cap` bytes of `reader`, read in chunks.
+fn stream_contains(reader: impl Read, needle: &[u8], cap: u64) -> bool {
+    let finder = memchr::memmem::Finder::new(needle);
+    let mut reader = reader.take(cap);
+    let mut buf = vec![0u8; 64 * 1024 + needle.len()];
+    let mut kept = 0;
+    loop {
+        let n = match reader.read(&mut buf[kept..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => n,
+        };
+        let filled = kept + n;
+        if finder.find(&buf[..filled]).is_some() {
+            return true;
+        }
+        // A match can straddle two reads.
+        kept = (needle.len() - 1).min(filled);
+        buf.copy_within(filled - kept..filled, 0);
+    }
+}
+
+/// An entry path with empty segments dropped (e.g. "maps//ui.map"), or None when it climbs out.
+fn normalize_entry_path(path: &str) -> Option<String> {
+    let normalized = path.split('/').filter(|seg| !seg.is_empty()).collect::<Vec<_>>().join("/");
+    (!normalized.contains("..")).then_some(normalized)
 }
 
 /// Resolve an archive entry name case-insensitively (lenience for authors who mis-case files, e.g. an
@@ -66,7 +133,9 @@ fn resolve_entry_ci<R: std::io::Read + std::io::Seek>(
 }
 
 impl MiniAppPackage {
-    /// Load a Mini App package from a .xdc file
+    /// Load a Mini App package from a .xdc file. A known file costs a stat and a lookup; a new
+    /// one is hashed and read once, both streamed from disk, and what the read found is stored
+    /// by hash for every later load.
     pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
         // Pre-check: reject 0-byte or missing files without opening them
         // (macOS can hang on open() for corrupted files with 0 logical bytes
@@ -84,14 +153,47 @@ impl MiniAppPackage {
                 "File too large ({} MB): {}", file_len / (1024 * 1024), path.display()
             )));
         }
-        let file_data = std::fs::read(&path)?;
+        let modified = modified_nanos(&meta);
+        let path_key = path.to_string_lossy().into_owned();
 
-        let file_hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&file_data));
-        use std::io::Cursor;
-        let cursor = Cursor::new(&file_data);
-        let mut archive = zip::ZipArchive::new(cursor)?;
+        let known = vector_core::db::miniapps::miniapp_file_hash(&path_key, file_len, modified).ok().flatten();
+        if let Some((file_hash, stored)) = known.and_then(|h| Self::stored_meta(&h).map(|m| (h, m))) {
+            return Ok(Self::from_meta(id, path, file_hash, stored));
+        }
 
-        // Try to read manifest.toml (case-insensitive lookup — lenient for a mis-cased entry).
+        let file_hash = hash_file(&path)?;
+        let package_meta = match Self::stored_meta(&file_hash) {
+            Some(stored) => stored,
+            None => {
+                let (read, icon) = Self::read_package(&path)?;
+                if let Ok(data) = serde_json::to_string(&read) {
+                    let _ = vector_core::db::miniapps::set_miniapp_meta(&file_hash, &data, icon.as_deref());
+                }
+                read
+            }
+        };
+        let _ = vector_core::db::miniapps::set_miniapp_file_hash(&path_key, file_len, modified, &file_hash);
+        Ok(Self::from_meta(id, path, file_hash, package_meta))
+    }
+
+    fn stored_meta(file_hash: &str) -> Option<PackageMeta> {
+        let data = vector_core::db::miniapps::miniapp_meta(file_hash).ok().flatten()?;
+        serde_json::from_str::<PackageMeta>(&data).ok().filter(|m| m.v == PACKAGE_META_VERSION)
+    }
+
+    fn from_meta(id: String, path: PathBuf, file_hash: String, meta: PackageMeta) -> Self {
+        let manifest = meta.manifest.unwrap_or_else(|| MiniAppManifest {
+            name: path.file_stem().and_then(|s| s.to_str()).unwrap_or("Mini App").to_string(),
+            ..Default::default()
+        });
+        Self { id, path, manifest, file_hash, uses_realtime: meta.uses_realtime }
+    }
+
+    /// Everything a listing or an open needs from the archive, read from disk without loading
+    /// it whole. The icon comes back as the pixels a listing shows: an SVG is rendered.
+    fn read_package(path: &std::path::Path) -> Result<(PackageMeta, Option<Vec<u8>>), Error> {
+        let file = std::io::BufReader::new(std::fs::File::open(path)?);
+        let mut archive = zip::ZipArchive::new(file)?;
         let manifest = match resolve_entry_ci(&archive, "manifest.toml")
             .and_then(|n| archive.by_name(&n).ok())
         {
@@ -99,29 +201,60 @@ impl MiniAppPackage {
                 let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
                 let contents = String::from_utf8(bytes)
                     .map_err(|e| Error::ManifestParse(e.to_string()))?;
-                toml::from_str(&contents)
-                    .map_err(|e| Error::ManifestParse(e.to_string()))?
+                Some(toml::from_str::<MiniAppManifest>(&contents)
+                    .map_err(|e| Error::ManifestParse(e.to_string()))?)
             }
-            None => {
-                let name = path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Mini App")
-                    .to_string();
-                MiniAppManifest {
-                    name,
-                    ..Default::default()
-                }
-            }
+            None => None,
         };
-
         // Entry point required, but accept a mis-cased "Index.html" (served via the same CI lookup).
         if resolve_entry_ci(&archive, "index.html").is_none() {
             return Err(Error::InvalidPackage("Missing index.html".to_string()));
         }
-
-        Ok(Self { id, path, manifest, file_hash })
+        let icon = Self::icon_from(&mut archive, manifest.as_ref().map_or("", |m| m.icon.as_str()))
+            .map(|bytes| {
+                if vector_core::svg::looks_like_svg(&bytes) {
+                    vector_core::svg::rasterize_png(&bytes, 256).unwrap_or_default()
+                } else {
+                    bytes
+                }
+            })
+            .filter(|bytes| !bytes.is_empty());
+        let uses_realtime = Self::archive_uses_realtime(&mut archive);
+        Ok((PackageMeta { v: PACKAGE_META_VERSION, manifest, uses_realtime }, icon))
     }
-    
+
+    /// The manifest's icon, else the first of the common icon names.
+    fn icon_from<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>, manifest_icon: &str) -> Option<Vec<u8>> {
+        let mut read = |name: &str| {
+            let name = resolve_entry_ci(archive, &normalize_entry_path(name)?)?;
+            let mut file = archive.by_name(&name).ok()?;
+            Self::read_entry_capped(&mut file, ICON_CAP).ok()
+        };
+        if !manifest_icon.is_empty() {
+            return read(manifest_icon);
+        }
+        ["icon.png", "icon.jpg", "icon.svg"].into_iter().find_map(read)
+    }
+
+    /// Whether any HTML or JS entry mentions `joinRealtimeChannel`.
+    fn archive_uses_realtime<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> bool {
+        const NEEDLE: &[u8] = b"joinRealtimeChannel";
+        for i in 0..archive.len() {
+            let Ok(entry) = archive.by_index(i) else { continue };
+            let name = entry.name().to_lowercase();
+            if !(name.ends_with(".html") || name.ends_with(".htm")
+                || name.ends_with(".js") || name.ends_with(".mjs"))
+            {
+                continue;
+            }
+            // Generous: real bundles run to tens of MB. Only a deflate bomb reaches the cap.
+            if stream_contains(entry, NEEDLE, 128 * 1024 * 1024) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Read a zip entry with a hard decompressed-size cap. The archive itself
     /// is size-capped, but deflate expands ~1000:1 — entry headers can't be
     /// trusted, so bound the actual bytes read.
@@ -180,29 +313,8 @@ impl MiniAppPackage {
             }
         };
 
-        const ICON_CAP: u64 = 8 * 1024 * 1024;
-        // Try to get icon
-        let icon = if !manifest.icon.is_empty() {
-            // Use icon from manifest (case-insensitive lookup).
-            resolve_entry_ci(&archive, &manifest.icon)
-                .and_then(|n| archive.by_name(&n).ok())
-                .and_then(|mut file| Self::read_entry_capped(&mut file, ICON_CAP).ok())
-        } else {
-            // Try common icon names (case-insensitive).
-            let mut icon_data = None;
-            for icon_name in &["icon.png", "icon.jpg", "icon.svg"] {
-                if let Some(name) = resolve_entry_ci(&archive, icon_name) {
-                    if let Ok(mut file) = archive.by_name(&name) {
-                        if let Ok(data) = Self::read_entry_capped(&mut file, ICON_CAP) {
-                            icon_data = Some(data);
-                            break;
-                        }
-                    }
-                }
-            }
-            icon_data
-        };
-        
+        let icon = Self::icon_from(&mut archive, &manifest.icon);
+
         Ok((manifest, icon))
     }
     
@@ -211,17 +323,11 @@ impl MiniAppPackage {
         let file = std::fs::File::open(&self.path)?;
         let mut archive = zip::ZipArchive::new(file)?;
 
-        // Normalize path (drop empty segments, e.g. "maps//ui.map") and prevent path traversal
-        let normalized = path.split('/').filter(|seg| !seg.is_empty()).collect::<Vec<_>>().join("/");
-        let normalized_path = normalized.as_str();
+        let normalized = normalize_entry_path(path)
+            .ok_or_else(|| Error::FileNotFound(format!("Invalid path: {}", path)))?;
 
-        // Reject paths containing directory traversal sequences
-        if normalized_path.contains("..") || normalized_path.contains("\\..") {
-            return Err(Error::FileNotFound(format!("Invalid path: {}", path)));
-        }
-        
         // Case-insensitive resolve so a mis-cased entry (e.g. "Index.html") still serves.
-        let actual_name = resolve_entry_ci(&archive, normalized_path)
+        let actual_name = resolve_entry_ci(&archive, &normalized)
             .ok_or_else(|| Error::FileNotFound(path.to_string()))?;
         let mut zip_file = archive.by_name(&actual_name)
             .map_err(|_| Error::FileNotFound(path.to_string()))?;
@@ -233,49 +339,15 @@ impl MiniAppPackage {
         Self::read_entry_capped(&mut zip_file, 512 * 1024 * 1024)
     }
     
-    /// Get the icon as bytes, if available
-    pub fn get_icon(&self) -> Option<Vec<u8>> {
-        if self.manifest.icon.is_empty() {
-            // Try common icon names
-            for icon_name in &["icon.png", "icon.jpg", "icon.svg"] {
-                if let Ok(data) = self.get_file(icon_name) {
-                    return Some(data);
-                }
-            }
-            None
-        } else {
-            self.get_file(&self.manifest.icon).ok()
-        }
-    }
-
-    /// Check if an XDC package's source uses the WebXDC realtime channel API.
-    /// Scans HTML/JS files for `joinRealtimeChannel`. Designed for `spawn_blocking`.
-    pub fn scan_for_realtime_api(path: &std::path::Path) -> bool {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        let mut archive = match zip::ZipArchive::new(file) {
-            Ok(a) => a,
-            Err(_) => return false,
-        };
-        const NEEDLE: &[u8] = b"joinRealtimeChannel";
-        for i in 0..archive.len() {
-            let Ok(mut entry) = archive.by_index(i) else { continue };
-            let name = entry.name().to_lowercase();
-            if !(name.ends_with(".html") || name.ends_with(".htm")
-                || name.ends_with(".js") || name.ends_with(".mjs"))
-            {
-                continue;
-            }
-            // Generous: a skipped oversize bundle.js would silently break
-            // realtime detection (preconnect never fires) for that game.
-            let Ok(buf) = Self::read_entry_capped(&mut entry, 128 * 1024 * 1024) else { continue };
-            if buf.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
-                return true;
+    /// The icon a listing shows: the stored copy, else read from the archive.
+    pub fn icon(&self) -> Option<Vec<u8>> {
+        match vector_core::db::miniapps::miniapp_icon(&self.file_hash) {
+            Ok(Some(stored)) => stored,
+            _ => {
+                let file = std::io::BufReader::new(std::fs::File::open(&self.path).ok()?);
+                Self::icon_from(&mut zip::ZipArchive::new(file).ok()?, &self.manifest.icon)
             }
         }
-        false
     }
 }
 
@@ -539,5 +611,113 @@ impl MiniAppsState {
 impl Default for MiniAppsState {
     fn default() -> Self {
         Self::new()
+    }
+}
+#[cfg(test)]
+mod package_meta_tests {
+    use super::*;
+    use std::io::Write;
+
+    const NEEDLE: &[u8] = b"joinRealtimeChannel";
+
+    /// A fresh account database, held under the lock every test that moves the session takes.
+    fn open_test_db() -> tokio::sync::MutexGuard<'static, ()> {
+        static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let guard = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
+        use nostr_sdk::prelude::ToBech32;
+        let root = ROOT.get_or_init(|| tempfile::tempdir().unwrap()).path();
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(root.join(&account)).unwrap();
+        vector_core::db::close_database();
+        vector_core::db::set_app_data_dir(root.to_path_buf());
+        vector_core::db::set_current_account(account.clone()).unwrap();
+        vector_core::db::init_database(&account).unwrap();
+        guard
+    }
+
+    fn xdc(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut out);
+        for (name, data) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        out.into_inner()
+    }
+
+    fn set_modified(path: &std::path::Path, at: std::time::SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn a_needle_split_across_reads_is_found() {
+        /// Hands out a few bytes per read, so every match straddles reads.
+        struct Trickle<'a>(&'a [u8]);
+        impl Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(7).min(self.0.len());
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let mut data = vec![b'x'; 64 * 1024 - 5];
+        data.extend_from_slice(NEEDLE);
+        data.extend_from_slice(&[b'y'; 100]);
+        assert!(stream_contains(&data[..], NEEDLE, u64::MAX));
+        assert!(stream_contains(Trickle(&data), NEEDLE, u64::MAX));
+        assert!(!stream_contains(&data[..], NEEDLE, (data.len() - 110) as u64), "past the cap");
+        assert!(!stream_contains(&NEEDLE[1..], NEEDLE, u64::MAX));
+    }
+
+    #[test]
+    fn a_package_is_read_once_then_known_by_its_file() {
+        let _db = open_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chess.xdc");
+        let icon = b"\x89PNG\r\n\x1a\nnot really".to_vec();
+        let mut script = vec![b' '; 200_000];
+        script.extend_from_slice(b"webxdc.joinRealtimeChannel()");
+        let bytes = xdc(&[
+            ("index.html", b"<script src=app.js></script>"),
+            ("app.js", &script),
+            ("manifest.toml", b"name = \"Chess\"\nicon = \"art//logo.png\"\n"),
+            ("art/logo.png", &icon),
+        ]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let first = MiniAppPackage::load("a".into(), path.clone()).unwrap();
+        assert_eq!(first.manifest.name, "Chess");
+        assert!(first.uses_realtime);
+        assert_eq!(first.file_hash, bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes)));
+        assert_eq!(first.icon(), Some(icon));
+
+        // Same size and time over other bytes: the second load trusts what it stored.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, vec![0u8; bytes.len()]).unwrap();
+        set_modified(&path, modified);
+        let again = MiniAppPackage::load("b".into(), path.clone()).unwrap();
+        assert_eq!((&again.file_hash, &again.manifest.name, again.uses_realtime), (&first.file_hash, &first.manifest.name, true));
+
+        // A file that changed is read again: this one is no package any more.
+        set_modified(&path, modified + std::time::Duration::from_secs(1));
+        assert!(MiniAppPackage::load("c".into(), path).is_err());
+    }
+
+    #[test]
+    fn a_package_without_a_manifest_is_named_by_each_file() {
+        let _db = open_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = xdc(&[("Index.html", b"<p>hi</p>"), ("icon.png", b"\x89PNG\r\n\x1a\n")]);
+        let (one, two) = (dir.path().join("puzzle.xdc"), dir.path().join("riddle.xdc"));
+        std::fs::write(&one, &bytes).unwrap();
+        std::fs::write(&two, &bytes).unwrap();
+        let a = MiniAppPackage::load("a".into(), one).unwrap();
+        let b = MiniAppPackage::load("b".into(), two).unwrap();
+        assert_eq!(a.file_hash, b.file_hash);
+        assert_eq!((a.manifest.name.as_str(), b.manifest.name.as_str()), ("puzzle", "riddle"));
+        assert!(!a.uses_realtime);
+        assert!(a.icon().is_some());
     }
 }

@@ -5,6 +5,7 @@
 //! - Mini App favorites
 //! - Mini App permissions (per-app permission grants)
 //! - Marketplace app version tracking
+//! - Package metadata by content hash, and the hash of each package file
 
 use serde::{Deserialize, Serialize};
 
@@ -207,6 +208,23 @@ pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
         removed += 1;
     }
 
+    // The same for package metadata: a file gone from disk, then whatever no file holds.
+    let files: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT path FROM miniapp_files")
+            .map_err(|e| format!("Failed to query Mini App files: {}", e))?;
+        let mapped = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to iterate Mini App files: {}", e))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for path in files {
+        if matches!(std::path::Path::new(&path).try_exists(), Ok(false)) {
+            conn.execute("DELETE FROM miniapp_files WHERE path = ?1", rusqlite::params![path])
+                .map_err(|e| format!("Failed to prune Mini App file: {}", e))?;
+        }
+    }
+    conn.execute("DELETE FROM miniapp_meta WHERE file_hash NOT IN (SELECT file_hash FROM miniapp_files)", [])
+        .map_err(|e| format!("Failed to prune Mini App metadata: {}", e))?;
+
     Ok(removed)
 }
 
@@ -214,6 +232,75 @@ pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
 #[cfg(target_arch = "wasm32")]
 pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
     Ok(0)
+}
+
+// ============================================================================
+// Mini App Package Metadata
+// ============================================================================
+
+/// The content hash recorded for the package at `path`, while its size and modification time
+/// (nanoseconds since the epoch) are still the ones it was hashed at.
+pub fn miniapp_file_hash(path: &str, size: u64, modified: i64) -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let result = conn.query_row(
+        "SELECT file_hash FROM miniapp_files WHERE path = ?1 AND size = ?2 AND modified = ?3",
+        rusqlite::params![path, size as i64, modified],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(hash) => Ok(Some(hash)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Failed to read Mini App file hash: {}", e)),
+    }
+}
+
+pub fn set_miniapp_file_hash(path: &str, size: u64, modified: i64, file_hash: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR REPLACE INTO miniapp_files (path, size, modified, file_hash) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![path, size as i64, modified, file_hash],
+    ).map_err(|e| format!("Failed to record Mini App file hash: {}", e))?;
+    Ok(())
+}
+
+/// A package's metadata, as the reader that stored it serialised it.
+pub fn miniapp_meta(file_hash: &str) -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let result = conn.query_row(
+        "SELECT data FROM miniapp_meta WHERE file_hash = ?1",
+        rusqlite::params![file_hash],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(data) => Ok(Some(data)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Failed to read Mini App metadata: {}", e)),
+    }
+}
+
+/// A package's icon, kept apart from its metadata so a listing reads it only when it shows it.
+/// None when nothing is stored for the hash; `Some(None)` for a package without an icon.
+pub fn miniapp_icon(file_hash: &str) -> Result<Option<Option<Vec<u8>>>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let result = conn.query_row(
+        "SELECT icon FROM miniapp_meta WHERE file_hash = ?1",
+        rusqlite::params![file_hash],
+        |row| row.get::<_, Option<Vec<u8>>>(0),
+    );
+    match result {
+        Ok(icon) => Ok(Some(icon)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Failed to read Mini App icon: {}", e)),
+    }
+}
+
+pub fn set_miniapp_meta(file_hash: &str, data: &str, icon: Option<&[u8]>) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR REPLACE INTO miniapp_meta (file_hash, data, icon) VALUES (?1, ?2, ?3)",
+        rusqlite::params![file_hash, data, icon],
+    ).map_err(|e| format!("Failed to store Mini App metadata: {}", e))?;
+    Ok(())
 }
 
 /// Update the installed version for a marketplace app

@@ -618,13 +618,8 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 
     // Compute the old file's hash before we replace it (for permission migration)
     let old_file_hash = if file_path.exists() {
-        match std::fs::read(&file_path) {
-            Ok(old_data) => {
-                use sha2::{Sha256, Digest};
-                let mut hasher = Sha256::new();
-                hasher.update(&old_data);
-                Some(bytes_to_hex_string(&hasher.finalize()))
-            }
+        match super::state::hash_file(&file_path) {
+            Ok(hash) => Some(hash),
             Err(e) => {
                 log_warn!("Failed to read old app file for hash: {}", e);
                 None

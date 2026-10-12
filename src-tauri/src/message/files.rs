@@ -70,25 +70,27 @@ fn preview_cache_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
     Ok(dir)
 }
 
-/// Write a downscaled copy of an image into the preview cache and return its path.
+/// Write a downscaled copy of an image into the preview cache and return its path. `for_send`
+/// draws it from the image a compressed send encodes and keeps that for the compression.
 /// Blocking CPU work: call from `spawn_blocking`, never inline in a command.
-pub(crate) fn write_preview_file(app: &tauri::AppHandle, bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn write_preview_file(app: &tauri::AppHandle, bytes: &[u8], for_send: bool) -> Result<String, String> {
     let dir = preview_cache_dir(app)?;
     // The directory stays a handful of files, so sweeping it on every write is cheaper
     // than letting cancelled previews sit until the next boot.
     prune_dir(&dir);
-    write_preview_into(&dir, bytes).map(|p| p.to_string_lossy().into_owned())
+    write_preview_into(&dir, bytes, for_send).map(|p| p.to_string_lossy().into_owned())
 }
 
 /// The preview itself: a small GIF is copied verbatim so it animates; an SVG is rendered to
 /// pixels (its markup never reaches the webview); everything else is bounded to
 /// `PREVIEW_MAX_DIM` and re-encoded (PNG when transparent, JPEG otherwise).
 /// Keyed by content hash, so re-previewing the same bytes is a stat, not a decode.
-fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+fn write_preview_into(dir: &std::path::Path, bytes: &[u8], for_send: bool) -> Result<std::path::PathBuf, String> {
     use crate::shared::image::{animated_dims, encode_rgba_auto};
     use sha2::{Digest, Sha256};
 
-    let key = crate::util::bytes_to_hex_string(&Sha256::digest(bytes)[..16]);
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let key = crate::util::bytes_to_hex_string(&digest[..16]);
     let verbatim_gif = crate::util::mime_from_magic_bytes(bytes) == "image/gif"
         && bytes.len() <= PREVIEW_GIF_VERBATIM_MAX
         && animated_dims(bytes).is_some_and(|(w, h)| w.max(h) <= PREVIEW_MAX_DIM);
@@ -111,12 +113,21 @@ fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::
         // Always PNG: JPEG would soften the hard edges and text an SVG is drawn with.
         ("png", std::borrow::Cow::Owned(vector_core::svg::rasterize_png(bytes, PREVIEW_MAX_DIM)?))
     } else {
-        let img = crate::shared::image::decode_image(bytes, PREVIEW_MAX_DIM)?;
+        // An animation compresses frame by frame, so only a still's fit is worth keeping.
+        let keep = for_send && crate::shared::image::animated_format(bytes).is_none();
+        let img = if keep {
+            super::compression::fit_for_send(bytes)?
+        } else {
+            crate::shared::image::decode_image(bytes, PREVIEW_MAX_DIM)?
+        };
         let (w, h) = (img.width(), img.height());
         let scale = (PREVIEW_MAX_DIM as f32 / w.max(h) as f32).min(1.0);
         let (nw, nh) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
         let (rgba, ow, oh) = crate::simd::image::fast_resize_to_rgba(&img, nw, nh);
         let encoded = encode_rgba_auto(&rgba, ow, oh, PREVIEW_JPEG_QUALITY)?;
+        if keep {
+            super::compression::keep_fitted(digest, img);
+        }
         (encoded.extension, std::borrow::Cow::Owned(encoded.bytes))
     };
 
@@ -161,7 +172,7 @@ fn prune_dir(dir: &std::path::Path) -> usize {
 /// `file_path` is empty, else the Android pick cached under that content URI. Separate
 /// from the caching commands so the decode runs off the IPC thread.
 #[tauri::command]
-pub async fn preview_cached_file(app: tauri::AppHandle, file_path: String) -> Result<Option<String>, String> {
+pub async fn preview_cached_file(app: tauri::AppHandle, file_path: String, send: Option<bool>) -> Result<Option<String>, String> {
     let cached: Option<(Arc<Vec<u8>>, String)> = if file_path.is_empty() {
         JS_FILE_CACHE.lock().unwrap().as_ref().map(|(b, _, ext)| (b.clone(), ext.clone()))
     } else {
@@ -171,7 +182,8 @@ pub async fn preview_cached_file(app: tauri::AppHandle, file_path: String) -> Re
     if !is_previewable_extension(&ext) {
         return Ok(None);
     }
-    tokio::task::spawn_blocking(move || write_preview_file(&app, &bytes).map(Some))
+    let for_send = send.unwrap_or(false);
+    tokio::task::spawn_blocking(move || write_preview_file(&app, &bytes, for_send).map(Some))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -357,6 +369,7 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
         ))
         .await
         .map_err(|e| e.to_string())??;
+        super::compression::forget_fitted();
         AttachmentFile {
             bytes: processed.bytes,
             extension: processed.extension,
@@ -383,6 +396,7 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
 #[tauri::command]
 pub async fn clear_cached_file() -> Result<(), String> {
     *JS_FILE_CACHE.lock().unwrap() = None;
+    super::compression::forget_fitted();
     *JS_COMPRESSION_CACHE.lock().await = None;
     Ok(())
 }
@@ -392,6 +406,7 @@ pub async fn clear_cached_file() -> Result<(), String> {
 #[tauri::command]
 pub fn clear_android_file_cache(file_path: String) -> Result<(), String> {
     ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
+    super::compression::forget_fitted();
     super::types::discard_picked_file(&file_path);
     Ok(())
 }
@@ -401,6 +416,7 @@ pub fn clear_android_file_cache(file_path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn clear_all_android_file_cache() -> Result<(), String> {
     ANDROID_FILE_CACHE.lock().unwrap().clear();
+    super::compression::forget_fitted();
     if let Ok(mut picked) = super::types::ANDROID_PICKED_FILES.lock() {
         for (_, (path, ..)) in picked.drain() {
             let _ = std::fs::remove_file(path);
@@ -521,6 +537,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         attachment_file.bytes = processed.bytes;
         attachment_file.extension = processed.extension;
         attachment_file.img_meta = processed.img_meta;
+        super::compression::forget_fitted();
     }
 
     // Apply user-edited name override (if any)
@@ -802,6 +819,7 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
         slot.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     super::video_compression::cancel(&file_path);
+    super::compression::forget_fitted();
     
     // Also clear Android file cache
     ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
@@ -872,7 +890,7 @@ pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<S
         {
             return Err("not an image".to_string());
         }
-        write_preview_file(&app, &bytes)
+        write_preview_file(&app, &bytes, false)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1460,12 +1478,12 @@ mod preview_tests {
     fn a_large_photo_is_bounded_and_a_hit_keeps_its_spelling() {
         let dir = scratch_dir("photo");
         let bytes = jpeg(2000, 1500);
-        let first = write_preview_into(&dir, &bytes).unwrap();
+        let first = write_preview_into(&dir, &bytes, false).unwrap();
         assert_eq!(first.extension().unwrap(), "jpg");
         let dims = image::image_dimensions(&first).unwrap();
         assert!(dims.0 <= PREVIEW_MAX_DIM && dims.1 <= PREVIEW_MAX_DIM, "not bounded: {dims:?}");
         assert_eq!(dims.0, 1024, "longest side lands exactly on the cap");
-        let again = write_preview_into(&dir, &bytes).unwrap();
+        let again = write_preview_into(&dir, &bytes, false).unwrap();
         assert_eq!(first, again, "the second call is a hit, not a fresh file");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no tmp litter, no duplicate");
     }
@@ -1474,21 +1492,21 @@ mod preview_tests {
     fn a_transparent_image_stays_png_and_hits_as_png() {
         let dir = scratch_dir("png");
         let bytes = transparent_png();
-        let first = write_preview_into(&dir, &bytes).unwrap();
+        let first = write_preview_into(&dir, &bytes, false).unwrap();
         assert_eq!(first.extension().unwrap(), "png");
-        assert_eq!(write_preview_into(&dir, &bytes).unwrap(), first);
+        assert_eq!(write_preview_into(&dir, &bytes, false).unwrap(), first);
     }
 
     #[test]
     fn a_small_gif_is_kept_verbatim_and_a_huge_one_is_not() {
         let dir = scratch_dir("gif");
         let small = gif(64, 48);
-        let path = write_preview_into(&dir, &small).unwrap();
+        let path = write_preview_into(&dir, &small, false).unwrap();
         assert_eq!(path.extension().unwrap(), "gif");
         assert_eq!(std::fs::read(&path).unwrap(), small, "the animation must survive untouched");
 
         let wide = gif(PREVIEW_MAX_DIM + 1, 8);
-        let path = write_preview_into(&dir, &wide).unwrap();
+        let path = write_preview_into(&dir, &wide, false).unwrap();
         assert_ne!(path.extension().unwrap(), "gif", "over the cap it is decoded like a photo");
         let dims = image::image_dimensions(&path).unwrap();
         assert!(dims.0 <= PREVIEW_MAX_DIM);

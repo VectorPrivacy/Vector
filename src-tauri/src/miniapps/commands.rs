@@ -52,7 +52,7 @@ fn icon_data_uri(bytes: &[u8]) -> Option<String> {
 
 impl MiniAppInfo {
     pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
-        let icon_data = pkg.get_icon().and_then(|bytes| icon_data_uri(&bytes));
+        let icon_data = pkg.icon().and_then(|bytes| icon_data_uri(&bytes));
 
         Self {
             id: pkg.id.clone(),
@@ -63,7 +63,7 @@ impl MiniAppInfo {
             icon_data,
             source_code_url: pkg.manifest.source_code_url.clone(),
             file_hash: Some(pkg.file_hash.clone()),
-            uses_realtime: super::state::MiniAppPackage::scan_for_realtime_api(&pkg.path),
+            uses_realtime: pkg.uses_realtime,
         }
     }
 }
@@ -774,7 +774,7 @@ pub async fn miniapp_load_info(
         let state = app.state::<MiniAppsState>();
         let package = state.get_or_load_package(&id, path).await?;
 
-        // Build MiniAppInfo on blocking thread (get_icon() does sync file I/O)
+        // Build MiniAppInfo on blocking thread (icon() can read the archive)
         let info = tokio::task::spawn_blocking(move || {
             MiniAppInfo::from_package(&package)
         }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("{}", e)))?;
@@ -981,14 +981,10 @@ pub async fn miniapp_open(
         state.set_preconnect_signal(&window_label, pc_rx).await;
         {
             let app_pc = app.clone();
-            let pkg_path = package.path.clone();
+            let uses_rt = package.uses_realtime;
             let pkg_name = package.manifest.name.clone();
             let instance_pc = instance.clone();
             vector_core::db::spawn_bound(async move {
-                let uses_rt = tokio::task::spawn_blocking(move || {
-                    MiniAppPackage::scan_for_realtime_api(&pkg_path)
-                }).await.unwrap_or(false);
-
                 if !uses_rt {
                     log_info!("[WEBXDC] Preconnect: '{}' does NOT use realtime API, skipping", pkg_name);
                     drop(pc_tx);

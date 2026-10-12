@@ -303,7 +303,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     if (filePreviewGeneration !== myGeneration) return;
     if (isAndroid && (SUPPORTED_IMAGE_EXTENSIONS.includes(ext) || ext === 'svg')) {
         // The pick is cached under its URI; the downscaled preview file is a second call.
-        const previewPath = await invoke('preview_cached_file', { filePath: filepath }).catch(() => null);
+        const previewPath = await invoke('preview_cached_file', { filePath: filepath, send: true }).catch(() => null);
         if (filePreviewGeneration !== myGeneration) return;
         if (previewPath) { androidPreview = convertFileSrc(previewPath); androidPreviewPath = previewPath; }
     }
@@ -528,7 +528,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     }
     if (filePreviewGeneration !== myGeneration) return;
     if (isImage || isSvg) {
-        previewPath = await invoke('preview_cached_file', { filePath: '' }).catch(() => null);
+        previewPath = await invoke('preview_cached_file', { filePath: '', send: true }).catch(() => null);
         if (filePreviewGeneration !== myGeneration) return;
         if (previewPath) preview = convertFileSrc(previewPath);
     }

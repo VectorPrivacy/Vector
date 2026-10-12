@@ -15,6 +15,54 @@ use super::types::ANDROID_FILE_CACHE;
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
 
+/// Decoded (EXIF orientation baked into the pixels) and fitted within `MAX_DIMENSION`: the image
+/// a compressed send encodes.
+pub(crate) fn fit_for_send(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
+    use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION};
+    let img = crate::shared::image::decode_image(bytes, MAX_DIMENSION)?;
+    crate::shared::cancel::check()?;
+    let (w, h) = (img.width(), img.height());
+    let (nw, nh) = calculate_resize_dimensions(w, h, MAX_DIMENSION);
+    if (nw, nh) == (w, h) {
+        return Ok(img);
+    }
+    Ok(crate::shared::image::resize_fit(&img, nw, nh, ::image::imageops::FilterType::Lanczos3))
+}
+
+/// The composer preview's `fit_for_send`, kept for the compression that follows so the image is
+/// decoded and resized once. One entry, keyed by the SHA-256 of the image's bytes.
+static FITTED: std::sync::Mutex<Option<([u8; 32], ::image::DynamicImage)>> = std::sync::Mutex::new(None);
+
+pub(crate) fn keep_fitted(digest: [u8; 32], img: ::image::DynamicImage) {
+    *FITTED.lock().unwrap_or_else(|e| e.into_inner()) = Some((digest, img));
+}
+
+pub(crate) fn forget_fitted() {
+    *FITTED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// `fit_for_send`, taking the preview's copy when it made one of these bytes.
+fn fitted(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
+    if FITTED.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        let key = vector_core::crypto::sha256::digest(bytes);
+        let mut slot = FITTED.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|(k, _)| *k == key) {
+            if let Some((_, img)) = slot.take() {
+                return Ok(img);
+            }
+        }
+    }
+    fit_for_send(bytes)
+}
+
+/// A fitted image as the compressed send (PNG or JPEG by content) with its preview metadata.
+fn encode_for_send(img: &::image::DynamicImage) -> Result<(Vec<u8>, &'static str, Option<ImageMetadata>), String> {
+    let img_meta = crate::util::generate_thumbhash_from_image(img)
+        .map(|thumbhash| ImageMetadata { thumbhash, width: img.width(), height: img.height() });
+    let encoded = crate::shared::image::encode_decoded_auto(img, crate::shared::image::JPEG_QUALITY_STANDARD)?;
+    Ok((encoded.bytes, encoded.extension, img_meta))
+}
+
 /// Prepare an image for sending, honouring the compress + keep-metadata choices.
 ///
 /// The 2x2 of behaviours:
@@ -37,10 +85,7 @@ pub(crate) fn prepare_outbound_image(
     keep_metadata: bool,
     thumbhash_hint: Option<&str>,
 ) -> Result<CachedCompressedImage, String> {
-    use crate::shared::image::{
-        calculate_resize_dimensions, reattach_exif_jpeg,
-        MAX_DIMENSION, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH,
-    };
+    use crate::shared::image::{reattach_exif_jpeg, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH};
 
     let original_size = bytes.len() as u64;
 
@@ -111,17 +156,10 @@ pub(crate) fn prepare_outbound_image(
     }
 
     // Re-encode paths. Decoding bakes EXIF orientation into pixels.
-    let img = crate::shared::image::decode_image(&bytes, if compress { MAX_DIMENSION } else { 0 })?;
-    let (w, h) = (img.width(), img.height());
-    let (nw, nh) = if compress {
-        calculate_resize_dimensions(w, h, MAX_DIMENSION)
+    let resized = if compress {
+        fitted(&bytes)?
     } else {
-        (w, h)
-    };
-    let resized = if nw != w || nh != h {
-        crate::shared::image::resize_fit(&img, nw, nh, ::image::imageops::FilterType::Lanczos3)
-    } else {
-        img
+        crate::shared::image::decode_image(&bytes, 0)?
     };
     let (aw, ah) = (resized.width(), resized.height());
     let img_meta = meta_from(&resized);
@@ -187,40 +225,10 @@ pub(super) fn compress_bytes_internal(
         return Ok(compress_animation(bytes, extension));
     }
 
-    // Determine target dimensions (max 1920px on longest side)
-    use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION};
-
-    // Load and decode the image (EXIF orientation baked into pixels)
-    let img = crate::shared::image::decode_image(&bytes, MAX_DIMENSION)?;
-    let (width, height) = (img.width(), img.height());
-    let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
-
-    // Resize if needed
-    let resized_img = if new_width != width || new_height != height {
-        crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
-
-    let actual_width = resized_img.width();
-    let actual_height = resized_img.height();
-
-    // Generate metadata from final image only (avoid redundant thumbhash generation)
-    let final_meta = crate::util::generate_thumbhash_from_image(&resized_img)
-        .map(|thumbhash| ImageMetadata {
-            thumbhash,
-            width: actual_width,
-            height: actual_height,
-        });
+    let (compressed_bytes, new_extension, final_meta) = encode_for_send(&fitted(&bytes)?)?;
 
     // Keep reference to original metadata for fallback path
     let img_meta = final_meta.clone();
-
-    // Encode as PNG (alpha/small) or JPEG (standard)
-    use crate::shared::image::JPEG_QUALITY_STANDARD;
-    let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
-    let compressed_bytes = encoded.bytes;
-    let new_extension = encoded.extension;
 
     let compressed_size = compressed_bytes.len() as u64;
 
@@ -279,8 +287,7 @@ pub(crate) fn process_image_for_send(
 /// Internal function to compress an image and return cached data
 pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompressedImage, String> {
     #[cfg(not(target_os = "android"))]
-    {
-        // Get extension early to check if it's a GIF
+    let (bytes, extension) = {
         let extension = file_path
             .rsplit('.')
             .next()
@@ -291,117 +298,40 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             return super::video_compression::compress_file(file_path);
         }
 
-        // Read the file into memory
         let file_data = std::fs::read(file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
-
-        let original_size = file_data.len() as u64;
-
-        if crate::shared::image::animated_format(&file_data).is_some() {
-            return Ok(compress_animation(Arc::new(file_data), &extension));
-        }
-
-        // Try to load and decode the image (EXIF orientation baked into pixels)
-        let img = crate::shared::image::decode_image(&file_data, crate::shared::image::MAX_DIMENSION)?;
-        crate::shared::cancel::check()?;
-
-        // Determine target dimensions (max 1920px on longest side)
-        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
-        let (width, height) = (img.width(), img.height());
-        let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
-
-        // Resize if needed
-        let resized_img = if new_width != width || new_height != height {
-            crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
-        } else {
-            img
-        };
-
-        crate::shared::cancel::check()?;
-        let actual_width = resized_img.width();
-        let actual_height = resized_img.height();
-
-        let img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
-            .map(|thumbhash| ImageMetadata {
-                thumbhash,
-                width: actual_width,
-                height: actual_height,
-            });
-
-        let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
-        let compressed_bytes = encoded.bytes;
-        let extension = encoded.extension;
-
-        let compressed_size = compressed_bytes.len() as u64;
-
-        Ok(CachedCompressedImage {
-            bytes: Arc::new(compressed_bytes),
-            extension: extension.to_string(),
-            img_meta,
-            original_size,
-            compressed_size,
-        })
-    }
+        (Arc::new(file_data), extension)
+    };
     #[cfg(target_os = "android")]
-    {
-        // Check if we have cached bytes for this URI
-        let (bytes, extension) = {
-            let cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((cached_bytes, ext, _, _)) = cache.get(file_path) {
-                (cached_bytes.clone(), ext.clone())
-            } else {
-                drop(cache);
-                // Fall back to reading directly (may fail if permission expired)
-                let (raw_bytes, ext) = filesystem::read_android_uri_bytes(file_path.to_string())?;
-                (Arc::new(raw_bytes), ext)
-            }
-        };
-        let original_size = bytes.len() as u64;
-
-        if crate::shared::image::animated_format(&bytes).is_some() {
-            return Ok(compress_animation(bytes, &extension));
-        }
-
-        // Try to load and decode the image (EXIF orientation baked into pixels)
-        let img = crate::shared::image::decode_image(&bytes, crate::shared::image::MAX_DIMENSION)?;
-
-        // Determine target dimensions (max 1920px on longest side)
-        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
-        let (width, height) = (img.width(), img.height());
-        let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
-
-        // Resize if needed
-        let resized_img = if new_width != width || new_height != height {
-            crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
+    let (bytes, extension) = {
+        let cache = ANDROID_FILE_CACHE.lock().unwrap();
+        if let Some((cached_bytes, ext, _, _)) = cache.get(file_path) {
+            (cached_bytes.clone(), ext.clone())
         } else {
-            img
-        };
+            drop(cache);
+            // Fall back to reading directly (may fail if permission expired)
+            let (raw_bytes, ext) = filesystem::read_android_uri_bytes(file_path.to_string())?;
+            (Arc::new(raw_bytes), ext)
+        }
+    };
+    let original_size = bytes.len() as u64;
 
-        crate::shared::cancel::check()?;
-        let actual_width = resized_img.width();
-        let actual_height = resized_img.height();
-
-        let img_meta = crate::util::generate_thumbhash_from_image(&resized_img)
-            .map(|thumbhash| ImageMetadata {
-                thumbhash,
-                width: actual_width,
-                height: actual_height,
-            });
-
-        let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
-        let compressed_bytes = encoded.bytes;
-        let extension = encoded.extension;
-
-        let compressed_size = compressed_bytes.len() as u64;
-
-        Ok(CachedCompressedImage {
-            bytes: Arc::new(compressed_bytes),
-            extension: extension.to_string(),
-            img_meta,
-            original_size,
-            compressed_size,
-        })
+    if crate::shared::image::animated_format(&bytes).is_some() {
+        return Ok(compress_animation(bytes, &extension));
     }
+
+    let resized_img = fitted(&bytes)?;
+    crate::shared::cancel::check()?;
+    let (compressed_bytes, extension, img_meta) = encode_for_send(&resized_img)?;
+    let compressed_size = compressed_bytes.len() as u64;
+
+    Ok(CachedCompressedImage {
+        bytes: Arc::new(compressed_bytes),
+        extension: extension.to_string(),
+        img_meta,
+        original_size,
+        compressed_size,
+    })
 }
 
 #[cfg(test)]
@@ -475,5 +405,31 @@ mod gif_send_tests {
             assert_eq!(sent.compressed_size, sent.original_size);
         }
         assert_eq!(*compress_bytes_internal(Arc::new(src.clone()), "gif", None).unwrap().bytes, src);
+    }
+}
+
+#[cfg(test)]
+mod fitted_tests {
+    use super::*;
+
+    fn screenshot_png(w: u32, h: u32, shade: u8) -> Vec<u8> {
+        let img = ::image::RgbaImage::from_fn(w, h, |x, y| ::image::Rgba([(x % 256) as u8, (y % 256) as u8, shade, 255]));
+        crate::shared::image::encode_png(img.as_raw(), w, h).unwrap()
+    }
+
+    #[test]
+    fn a_kept_fit_is_taken_once_and_compresses_identically() {
+        let png = screenshot_png(2400, 1600, 7);
+        let other = screenshot_png(2400, 1600, 9);
+        let plain = compress_bytes_internal(Arc::new(png.clone()), "png", None).unwrap();
+
+        keep_fitted(vector_core::crypto::sha256::digest(&png), fit_for_send(&png).unwrap());
+        // Another image's compression leaves it alone.
+        compress_bytes_internal(Arc::new(other), "png", None).unwrap();
+        assert!(FITTED.lock().unwrap().is_some());
+
+        let reused = compress_bytes_internal(Arc::new(png), "png", None).unwrap();
+        assert!(FITTED.lock().unwrap().is_none(), "the compression took it");
+        assert_eq!((reused.bytes, reused.extension), (plain.bytes, plain.extension));
     }
 }
