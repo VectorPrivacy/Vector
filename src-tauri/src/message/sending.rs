@@ -488,8 +488,14 @@ pub async fn delete_own_message(message_id: String) -> Result<vector_core::Delet
 
 /// Delete a failed message from state and database.
 /// Only allows deletion of messages with `failed == true` (security guard).
+/// `keep_files` leaves its saved copies in place: a retry sends them again.
 #[tauri::command]
-pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
+pub async fn delete_failed_message(message_id: String, keep_files: Option<bool>) -> Result<(), String> {
+    remove_failed_message(&message_id, !keep_files.unwrap_or(false)).await
+}
+
+async fn remove_failed_message(message_id: &str, drop_files: bool) -> Result<(), String> {
+    let message_id = message_id.to_string();
     // Verify failed flag and remove in a single lock to prevent TOCTOU races
     let removed = {
         let mut state = STATE.lock().await;
@@ -506,7 +512,7 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
     if let Some((chat_id, msg)) = removed {
         // Best-effort: drop the staged preview copy. Canonicalize both sides
         // so a stale or symlinked `att.path` can't follow out of download_dir.
-        if let Ok(canonical_dl_dir) = std::fs::canonicalize(vector_core::db::get_download_dir()) {
+        if let (true, Ok(canonical_dl_dir)) = (drop_files, std::fs::canonicalize(vector_core::db::get_download_dir())) {
             for att in &msg.attachments {
                 if att.path.is_empty() { continue; }
                 if let Ok(canonical_att) = std::fs::canonicalize(&att.path) {
@@ -577,8 +583,33 @@ pub async fn retry_failed_dm(receiver: String, message_id: String) -> Result<boo
     }
     let config = SendConfig::gui();
     let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
-    vector_core::sending::resend_failed_dm(&receiver, &message_id, &config, callback).await
+    if vector_core::sending::resend_failed_dm(&receiver, &message_id, &config, callback.clone()).await? {
+        return Ok(true);
+    }
+    // Nothing was wrapped: the upload failed first. A file goes again from the copy this
+    // message saved, as it is: the first send already processed it.
+    let failed = {
+        let state = STATE.lock().await;
+        state.find_message(&message_id).map(|(_, m)| (m.attachments.first().cloned(), m.replied_to.clone()))
+    };
+    let Some((Some(att), replied_to)) = failed else {
+        return Ok(false);
+    };
+    let path = std::path::PathBuf::from(&att.path);
+    if att.path.is_empty() || !path.is_file() {
+        return Err(RETRY_FILE_MISSING.to_string());
+    }
+    remove_failed_message(&message_id, false).await?;
+    vector_core::sending::send_file_dm_from(
+        &receiver, vector_core::sending::FileSource::Saved(path), &att.name, &att.extension, att.img_meta.clone(), None,
+        if replied_to.is_empty() { None } else { Some(&replied_to) },
+        &file_send_config(&receiver), callback,
+    ).await?;
+    Ok(true)
 }
+
+/// A retried file whose saved copy is gone: only attaching it again can send it.
+const RETRY_FILE_MISSING: &str = "This file is no longer on this device. Attach it again to send it.";
 
 /// Cancel an in-progress file upload by setting its cancel flag.
 /// Removes the pending message from state and emits `message_removed`.

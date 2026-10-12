@@ -25,7 +25,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
         "edit_message" => edit_message(a).await?,
         "delete_own_message" => delete_own_message(a.str("messageId")?).await?,
         "delete_failed_message" => {
-            delete_failed_message(a.str("messageId")?).await?;
+            delete_failed_message(a.str("messageId")?, a.de::<Option<bool>>("keepFiles")?.unwrap_or(false)).await?;
             Value::Null
         }
         "retry_failed_dm" => Value::Bool(retry_failed_dm(a.str("receiver")?, a.str("messageId")?).await?),
@@ -133,7 +133,8 @@ async fn delete_own_message(message_id: String) -> Result<Value, String> {
     to_value(outcome)
 }
 
-async fn delete_failed_message(message_id: String) -> Result<(), String> {
+/// `keep_files` leaves its saved copies in place: a retry sends them again.
+async fn delete_failed_message(message_id: String, keep_files: bool) -> Result<(), String> {
     let removed = {
         let mut state = STATE.lock().await;
         match state.find_message(&message_id) {
@@ -152,7 +153,7 @@ async fn delete_failed_message(message_id: String) -> Result<(), String> {
 
     // Web blobs are content-addressed and shared, so only an unshared copy in the download dir goes.
     let download_dir = db::get_download_dir();
-    for att in &msg.attachments {
+    for att in msg.attachments.iter().filter(|_| !keep_files) {
         if att.path.is_empty() || !Path::new(&att.path).starts_with(&download_dir) {
             continue;
         }

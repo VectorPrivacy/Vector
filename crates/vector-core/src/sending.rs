@@ -887,6 +887,62 @@ pub enum FileSource {
     /// On disk, read a chunk at a time: a file of any size costs one chunk of memory.
     /// Its preview metadata is the caller's to give; nothing here decodes it.
     Path(std::path::PathBuf),
+    /// A copy this app already saved in the download folder (a failed send's, retried):
+    /// sent from where it is, since copying it again would only leave a duplicate.
+    Saved(std::path::PathBuf),
+}
+
+/// Hash a send's file and give it its copy in the download folder: (hash, path, preview
+/// metadata, plaintext length). A saved file is already that copy.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_local_copy(
+    source: &FileSource,
+    filename: &str,
+    extension: &str,
+    download_dir: &std::path::Path,
+    img_meta: Option<crate::types::ImageMetadata>,
+    tmp_tag: &str,
+) -> Result<(String, String, Option<crate::types::ImageMetadata>, u64), String> {
+    let (file_hash, plain_len) = match source {
+        FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
+        FileSource::Path(path) | FileSource::Saved(path) => crypto::stream::hash_file(path)?,
+    };
+    if let FileSource::Saved(path) = source {
+        return Ok((file_hash, path.to_string_lossy().to_string(), img_meta, plain_len));
+    }
+    let _ = std::fs::create_dir_all(download_dir);
+    // Save with an extension matching the actual content. The caller's
+    // `extension` is post-compression (e.g. JPEG when an original PNG was
+    // compressed), but `filename` may still carry the pre-compression one;
+    // JPEG bytes saved as `.png` would poison a later re-upload with a
+    // MIP-04 mismatch.
+    let local_name = if filename.is_empty() {
+        format!("{}.{}", &file_hash, extension)
+    } else {
+        let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+        format!("{}.{}", stem, extension)
+    };
+    // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
+    let local_path = crypto::resolve_unique_filename(download_dir, &local_name);
+    // Atomic write: temp file then rename. A file source copies file to file
+    // (a clone where the filesystem has them), never through memory.
+    // Named for this send: two sends of the same file must not share one.
+    let tmp = download_dir.join(format!(".{}.{}.tmp", &file_hash, tmp_tag));
+    let img_meta = match source {
+        FileSource::Bytes(bytes) => {
+            std::fs::write(&tmp, &***bytes).map_err(|e| format!("Failed to save the file: {e}"))?;
+            img_meta.or_else(|| crypto::generate_image_metadata(bytes))
+        }
+        FileSource::Path(path) | FileSource::Saved(path) => {
+            std::fs::copy(path, &tmp).map_err(|e| format!("Failed to save the file: {e}"))?;
+            img_meta
+        }
+    };
+    if let Err(e) = std::fs::rename(&tmp, &local_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to save the file: {e}"));
+    }
+    Ok((file_hash, local_path.to_string_lossy().to_string(), img_meta, plain_len))
 }
 
 /// Removes a file when dropped: the ciphertext of an upload that ended either way.
@@ -932,7 +988,7 @@ pub async fn seal_or_reuse(
         .map(|d| d.join("outgoing"))
         .unwrap_or_else(|_| std::env::temp_dir());
     // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
-    callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_)).then_some(0));
+    callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_) | FileSource::Saved(_)).then_some(0));
     let sealed = match plain {
         FileSource::Bytes(bytes) => {
             let sealed = crate::rt::spawn_blocking(move || {
@@ -942,7 +998,7 @@ pub async fn seal_or_reuse(
             .map_err(|e| format!("Encryption failed: {}", e))??;
             Sealed::Body(crate::blossom::UploadBody::Memory(Arc::new(sealed)), None)
         }
-        FileSource::Path(path) => {
+        FileSource::Path(path) | FileSource::Saved(path) => {
             let _ = std::fs::create_dir_all(&outgoing);
             let out = outgoing.join(format!("{}-{}.enc", hash, pending_id));
             let guard = TempFile(out.clone());
@@ -1049,48 +1105,11 @@ pub async fn send_file_dm_from(
         let source = match &source {
             FileSource::Bytes(bytes) => FileSource::Bytes(Arc::clone(bytes)),
             FileSource::Path(path) => FileSource::Path(path.clone()),
+            FileSource::Saved(path) => FileSource::Saved(path.clone()),
         };
         let (filename, extension) = (filename.to_string(), extension.to_string());
         let tmp_tag = pending_id.clone();
-        crate::rt::spawn_blocking(move || -> Result<_, String> {
-            let (file_hash, plain_len) = match &source {
-                FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
-                FileSource::Path(path) => crypto::stream::hash_file(path)?,
-            };
-            let _ = std::fs::create_dir_all(&download_dir);
-            // Save with an extension matching the actual content. The caller's
-            // `extension` is post-compression (e.g. JPEG when an original PNG was
-            // compressed), but `filename` may still carry the pre-compression one;
-            // JPEG bytes saved as `.png` would poison a later re-upload with a
-            // MIP-04 mismatch.
-            let local_name = if filename.is_empty() {
-                format!("{}.{}", &file_hash, extension)
-            } else {
-                let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(&filename);
-                format!("{}.{}", stem, extension)
-            };
-            // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
-            let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
-            // Atomic write: temp file then rename. A file source copies file to file
-            // (a clone where the filesystem has them), never through memory.
-            // Named for this send: two sends of the same file must not share one.
-            let tmp = download_dir.join(format!(".{}.{}.tmp", &file_hash, &tmp_tag));
-            let img_meta = match &source {
-                FileSource::Bytes(bytes) => {
-                    std::fs::write(&tmp, &**bytes).map_err(|e| format!("Failed to save the file: {e}"))?;
-                    img_meta.or_else(|| crypto::generate_image_metadata(bytes))
-                }
-                FileSource::Path(path) => {
-                    std::fs::copy(path, &tmp).map_err(|e| format!("Failed to save the file: {e}"))?;
-                    img_meta
-                }
-            };
-            if let Err(e) = std::fs::rename(&tmp, &local_path) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(format!("Failed to save the file: {e}"));
-            }
-            Ok((file_hash, local_path.to_string_lossy().to_string(), img_meta, plain_len))
-        })
+        crate::rt::spawn_blocking(move || save_local_copy(&source, &filename, &extension, &download_dir, img_meta, &tmp_tag))
         .await
         .map_err(|e| format!("Attachment prep failed: {}", e))??
     };
@@ -1134,7 +1153,7 @@ pub async fn send_file_dm_from(
     // A file seals from the local copy made above, not the source the caller may still change.
     let plain = match source {
         FileSource::Bytes(bytes) => FileSource::Bytes(bytes),
-        FileSource::Path(_) => FileSource::Path(std::path::PathBuf::from(&local_path_str)),
+        FileSource::Path(_) | FileSource::Saved(_) => FileSource::Path(std::path::PathBuf::from(&local_path_str)),
     };
     let sealed = match seal_or_reuse(plain, &file_hash, &params.key, &params.nonce, &pending_id, callback.clone(), cancel.clone()).await {
         Ok(sealed) => sealed,
@@ -1686,6 +1705,21 @@ mod seal_tests {
             }
         }
         let _ = std::fs::remove_file(&src);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_saved_file_is_sent_from_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("photo.jpg");
+        std::fs::write(&saved, b"jpeg bytes").unwrap();
+        // A picked file gets its own copy beside whatever is there...
+        let (hash, copy, _, len) = save_local_copy(&FileSource::Path(saved.clone()), "photo.jpg", "jpg", dir.path(), None, "a").unwrap();
+        assert_eq!(copy, dir.path().join("photo-1.jpg").to_string_lossy());
+        // ...while a retry's saved file is already that copy.
+        let again = save_local_copy(&FileSource::Saved(saved.clone()), "photo.jpg", "jpg", dir.path(), None, "b").unwrap();
+        assert_eq!((again.0, again.1, again.3), (hash, saved.to_string_lossy().to_string(), len));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "no further copy");
     }
 
     #[tokio::test]

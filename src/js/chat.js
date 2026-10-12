@@ -698,14 +698,17 @@ async function retryFailedMessage(msg) {
             // the user can tap Retry again.
             console.error('Idempotent retry failed:', e);
             setSendState(true, false);
+            if (String(e).includes('no longer on this device')) {
+                popupConfirm('Cannot retry', String(e), true, '', 'vector_warning.svg');
+            }
             return;
         }
     }
 
     // Fallback (community always; DM only when nothing was retained): drop the
-    // failed row and send fresh.
+    // failed row and send fresh. Its saved files stay: they are what gets sent.
     try {
-        await invoke('delete_failed_message', { messageId: msg.id });
+        await invoke('delete_failed_message', { messageId: msg.id, keepFiles: !!msg.attachments?.length });
     } catch (e) {
         console.error('Failed to delete failed message for retry:', e);
         return;
