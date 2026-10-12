@@ -207,6 +207,24 @@ async fn delete_community(a: &Args) -> Result<Value, String> {
     .await
 }
 
+/// Tear down a community we no longer belong to: kicked, banned, rotated out, or left on
+/// another device. A rotation exclusion has already dropped the row, so its channels are
+/// found through their chats.
+pub(crate) async fn self_remove(id: &str) {
+    let mut channels = channel_ids(id);
+    if channels.is_empty() {
+        let state = STATE.lock().await;
+        channels = state
+            .chats
+            .iter()
+            .filter(|c| c.metadata().custom_fields.get("community_id").map(String::as_str) == Some(id))
+            .map(|c| c.id.clone())
+            .collect();
+    }
+    let relays = load_v2(id).map(|c| c.relays).unwrap_or_default();
+    teardown_local(id, &channels, &relays).await;
+}
+
 /// Forget a community on this device, keeping its keys for any rejoin.
 pub(crate) async fn teardown_local(id: &str, channels: &[String], relays: &[String]) {
     let _ = db::community::delete_community_retain_keys(id);

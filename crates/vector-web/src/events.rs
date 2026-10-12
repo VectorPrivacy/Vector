@@ -163,7 +163,11 @@ impl InboundEventHandler for WebEventHandler {
     }
 
     fn on_community_self_removed(&self, community_id: &str) {
-        vector_core::emit_event("community_kicked", &json!({ "community_id": community_id }));
+        let community_id = community_id.to_string();
+        db::spawn_bound(async move {
+            crate::community_ops::self_remove(&community_id).await;
+            vector_core::emit_event("community_kicked", &json!({ "community_id": community_id }));
+        });
     }
 
     fn on_community_refreshed(&self, community_id: &str) {
