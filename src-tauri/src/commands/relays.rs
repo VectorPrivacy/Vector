@@ -1269,7 +1269,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                     .iter()
                                     .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
                             if !discovery_only {
-                                crate::commands::community::trigger_community_reconnect_resync();
+                                crate::commands::community::trigger_community_reconnect_resync(url_str.clone(), has_read);
                             }
                         }
                     }

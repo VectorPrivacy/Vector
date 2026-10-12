@@ -2646,34 +2646,117 @@ pub async fn debug_v2_probe_rekey_planes(community_id: String) -> Result<serde_j
     Ok(serde_json::json!({ "community_id": cid_hex, "root_epoch": c.root_epoch.0, "probe": report }))
 }
 
-/// Coalesce a burst of relay reconnections into a single Community re-sync. `sync_communities_boot`
-/// already fans every fetch to each Community's full relay set, so one sweep re-syncs everything a
-/// just-reconnected relay might hold — N concurrent reconnects need exactly ONE sweep, not N. An
-/// in-flight guard drops overlapping triggers; a short coalescing delay lets a reconnect burst settle
-/// before the sweep fires. Mirrors the DM reconnect re-sync, debounced for the all-relays fan-out.
-pub fn trigger_community_reconnect_resync() {
+/// Coalesce a burst of relay reconnections into one Community catch-up, scoped to the
+/// Communities that use those relays. `ours` marks a relay we read from: one that also carries
+/// the cross-device Community List. A reconnect that lands while a catch-up runs is queued for
+/// the next pass, not dropped.
+pub fn trigger_community_reconnect_resync(relay: String, ours: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-    if IN_FLIGHT.swap(true, Ordering::AcqRel) {
-        return; // a sweep is already pending/running — it covers this reconnect too
+    static PENDING: std::sync::Mutex<(Vec<String>, bool)> = std::sync::Mutex::new((Vec::new(), false));
+    {
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.0.contains(&relay) {
+            pending.0.push(relay);
+        }
+        pending.1 |= ours;
     }
-    // Capture the session BEFORE the spawn (std::sync::Arc<crate::db::Session> convention): if the account swaps during the
-    // debounce, bail — the swapped-in account already gets a full boot sweep at selection, so a stale
-    // reconnect trigger must not drive its sync. `sync_communities_boot` also re-guards each per-account
-    // write, but capturing here keeps the whole detached task scoped to the account that reconnected.
+    if IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Bound to the account that reconnected: a swap mid-debounce ends the loop, and the new
+    // account's own reconnects start their own.
     vector_core::db::spawn_bound(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        // RE-ARM the live Community subscription FIRST. On reconnect the pool re-applies the
-        // pool-wide DM subscription but NOT our targeted `subscribe_to` Community sub, so realtime
-        // community delivery silently dies after any reconnect (notably Android's bg-sync, which
-        // disconnects the shared pool on every foreground transition). The 1500ms debounce lets the
-        // reconnect burst settle so this re-subscribes against live connections, not mid-connect ones.
-        crate::services::subscription_handler::refresh_community_subscription().await;
-        // Then sweep the fetch to catch anything published during the disconnect gap (the live sub
-        // is limit(0) and only streams events published after it re-arms).
-        let _ = sync_communities_boot().await;
-        IN_FLIGHT.store(false, Ordering::Release);
+        loop {
+            // Lets a reconnect burst settle, so this re-subscribes against live connections.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let (relays, ours) = {
+                let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+                (std::mem::take(&mut pending.0), std::mem::take(&mut pending.1))
+            };
+            if !relays.is_empty() && vector_core::db::session_is_live() {
+                // RE-ARM the live Community subscription FIRST: the pool re-applies the pool-wide
+                // DM sub on reconnect but not our targeted Community sub, so realtime delivery
+                // would stay dead after any reconnect (notably Android's bg-sync).
+                crate::services::subscription_handler::refresh_community_subscription().await;
+                let _ = sync_communities_on_reconnect(relays, ours).await;
+            }
+            IN_FLIGHT.store(false, Ordering::Release);
+            let queued = !PENDING.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty();
+            if !queued || !vector_core::db::session_is_live() || IN_FLIGHT.swap(true, Ordering::AcqRel) {
+                break;
+            }
+        }
     });
+}
+
+/// Catch up after `relays` came back: only the Communities that use them, and only their gap
+/// (each channel's latest page is already floored at its newest cursor). The boot-only work
+/// (paint volley, probes, migration upkeep) stays at boot.
+async fn sync_communities_on_reconnect(relays: Vec<String>, ours: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        let t = std::time::Instant::now();
+        let back: std::collections::HashSet<String> =
+            relays.iter().map(|r| vector_core::inbox_relays::normalize_relay_url(r)).collect();
+        let uses = |list: &[String]| list.iter().any(|r| back.contains(&vector_core::inbox_relays::normalize_relay_url(r)));
+
+        let mut channels: Vec<String> = Vec::new();
+        let mut communities = 0usize;
+        for id in vector_core::db::community::list_community_ids()? {
+            match vector_core::db::community::community_protocol(&id).ok().flatten() {
+                Some(vector_core::community::ConcordProtocol::V2) => {
+                    let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) else { continue };
+                    if !uses(&c.relays) {
+                        continue;
+                    }
+                    communities += 1;
+                    // Its control, guestbook and rekeys may have moved in the gap too.
+                    vector_core::community::v2::realtime::enqueue_follow(c.id());
+                    channels.extend(c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)));
+                }
+                _ => {
+                    let Ok(Some(c)) = vector_core::db::community::load_community(&id) else { continue };
+                    if !uses(&c.relays) {
+                        continue;
+                    }
+                    communities += 1;
+                    channels.extend(c.channels.iter().map(|ch| ch.id.to_hex()));
+                }
+            }
+        }
+
+        // One of our own relays also holds the Community List: other devices' joins and
+        // leaves in the gap land there.
+        if ours {
+            vector_core::db::spawn_bound(async move {
+                reconcile_community_list_boot().await;
+                ingest_v2_community_list_update().await;
+            });
+        }
+
+        const RECONNECT_SYNC_WINDOW: usize = 6;
+        use futures_util::stream::StreamExt;
+        let channel_count = channels.len();
+        futures_util::stream::iter(channels)
+            .map(|cid| async move {
+                if vector_core::db::session_stopped() {
+                    return;
+                }
+                let _ = sync_community_channel(cid, None, None).await;
+            })
+            .buffer_unordered(RECONNECT_SYNC_WINDOW)
+            .collect::<Vec<()>>()
+            .await;
+        println!(
+            "[Reconnect] {} relay(s) back: {} community(ies), {} channel(s) caught up in {:?}",
+            back.len(),
+            communities,
+            channel_count,
+            t.elapsed()
+        );
+        Ok(())
+    })
+    .await
 }
 
 /// boot reconcile: fetch the cross-device Community List, fold the relay copy into ours and
