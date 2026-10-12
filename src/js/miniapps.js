@@ -19,6 +19,17 @@ async function loadMiniAppInfo(filePath) {
 }
 
 /**
+ * A Mini App's icon as an image src: its cached file over the asset protocol, or the data URL
+ * a package read from memory carries.
+ * @param {MiniAppInfo|null} info
+ * @returns {string|null}
+ */
+function miniAppIconSrc(info) {
+    if (info?.icon_path) return convertFileSrc(info.icon_path);
+    return info?.icon_data || null;
+}
+
+/**
  * Load information about the Mini App whose bytes the composer just cached
  * (`cache_file_bytes`), so the archive never crosses IPC a second time.
  * @returns {Promise<MiniAppInfo>} Information about the Mini App

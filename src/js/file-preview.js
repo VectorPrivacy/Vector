@@ -211,7 +211,7 @@ function isMiniAppExtension(ext) {
 
 /** The Mini App preview's content model: its icon when the manifest carries one. */
 function miniAppPreviewContent(miniAppInfo) {
-    const validatedIcon = miniAppInfo ? validateImageSrc(miniAppInfo.icon_data) : null;
+    const validatedIcon = miniAppInfo ? validateImageSrc(miniAppIconSrc(miniAppInfo)) : null;
     return { kind: 'miniapp', icon: validatedIcon, name: miniAppInfo?.name || 'Mini App' };
 }
 

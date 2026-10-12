@@ -574,7 +574,7 @@ async fn handle(ctx: &HostContext, req: Request<Incoming>) -> Response<Full<Byte
     let Some(instance) = state.get_instance(&ctx.window_label).await else {
         return error(StatusCode::NOT_FOUND, "Mini App not found");
     };
-    let granted = crate::db::get_miniapp_granted_permissions(&instance.package.file_hash).unwrap_or_default();
+    let granted = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex()).unwrap_or_default();
 
     if path == "/webxdc.js" {
         let (npub, name) = super::scheme::get_user_info().await;

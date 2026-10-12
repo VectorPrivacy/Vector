@@ -1446,15 +1446,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 102, "Mini App package metadata", |tx| {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS miniapp_meta (
-                file_hash TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                icon BLOB
+                file_hash BLOB PRIMARY KEY,
+                data TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS miniapp_files (
                 path TEXT PRIMARY KEY,
                 size INTEGER NOT NULL,
                 modified INTEGER NOT NULL,
-                file_hash TEXT NOT NULL
+                file_hash BLOB NOT NULL
             );",
         )
         .map_err(|e| format!("create miniapp_meta: {e}"))

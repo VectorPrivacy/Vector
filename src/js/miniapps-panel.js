@@ -18,6 +18,11 @@ function showAttachmentPanelMain() {
     VectorSvelte.attachmentPulse('main');
 }
 
+/** Whether the Mini Apps grid is on screen: its packages load only then. */
+function miniAppsGridOpen() {
+    return VectorSvelte.attachmentVisible() && VectorSvelte.attachmentState().view === 'miniapps';
+}
+
 /** The Mini Apps list view. */
 async function showAttachmentPanelMiniApps() {
     pushBack('attachment-mini-apps', showAttachmentPanelMain);
@@ -340,10 +345,10 @@ function bindMiniAppsGrid(grid) {
 /** Resolve an app's icon from its bundle and paint it onto its tile. */
 async function loadMiniAppIcon(app) {
     try {
-        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
-        if (info && info.icon_data) {
-            miniAppIconCache.set(app.src_url, info.icon_data);
-            VectorSvelte.gridPatch(miniAppKey(app), { icon: info.icon_data });
+        const icon = miniAppIconSrc(await invoke('miniapp_load_info', { filePath: app.src_url }));
+        if (icon) {
+            miniAppIconCache.set(app.src_url, icon);
+            VectorSvelte.gridPatch(miniAppKey(app), { icon });
         }
     } catch (e) {
         console.debug('Failed to load Mini App icon:', e);
@@ -394,8 +399,7 @@ async function showMiniAppLaunchDialog(app) {
     // The icon comes from the .xdc manifest; a missing or unreadable one shows the play glyph.
     let icon = null;
     try {
-        const info = await invoke('miniapp_load_info', { filePath: app.src_url });
-        icon = info?.icon_data || null;
+        icon = miniAppIconSrc(await invoke('miniapp_load_info', { filePath: app.src_url }));
     } catch (e) {
         icon = null;
     }

@@ -28,8 +28,11 @@ pub struct MiniAppInfo {
     pub description: String,
     pub version: String,
     pub has_icon: bool,
-    /// Base64-encoded icon data URL (e.g., "data:image/png;base64,...")
+    /// The icon as a data URL, for a package read from memory (a paste, an Android share).
     pub icon_data: Option<String>,
+    /// The cached listing icon on disk, for the asset protocol: everything else.
+    #[serde(default)]
+    pub icon_path: Option<String>,
     /// Optional source code URL from manifest
     pub source_code_url: Option<String>,
     /// SHA-256 hash of the .xdc file (used for permission identification)
@@ -51,21 +54,26 @@ fn icon_data_uri(bytes: &[u8]) -> Option<String> {
 }
 
 impl MiniAppInfo {
-    pub fn from_package(pkg: &super::state::MiniAppPackage) -> Self {
-        let icon_data = pkg.icon().and_then(|bytes| icon_data_uri(&bytes));
-
+    pub fn from_package(id: String, pkg: &super::state::MiniAppPackage, icon_dir: Option<&std::path::Path>) -> Self {
+        let icon_path = icon_dir.and_then(|d| pkg.icon_path(d)).map(|p| p.to_string_lossy().into_owned());
         Self {
-            id: pkg.id.clone(),
-            name: pkg.manifest.name.clone(),
-            description: pkg.manifest.description.clone(),
-            version: pkg.manifest.version.clone(),
-            has_icon: icon_data.is_some(),
-            icon_data,
-            source_code_url: pkg.manifest.source_code_url.clone(),
-            file_hash: Some(pkg.file_hash.clone()),
+            id,
+            name: pkg.name.to_string(),
+            description: pkg.description.to_string(),
+            version: pkg.version.to_string(),
+            has_icon: icon_path.is_some(),
+            icon_data: None,
+            icon_path,
+            source_code_url: pkg.source_code_url.as_deref().map(str::to_string),
+            file_hash: Some(pkg.hash_hex()),
             uses_realtime: pkg.uses_realtime,
         }
     }
+}
+
+/// Where package listing icons are cached; None leaves them uncached rather than misplaced.
+fn miniapp_icon_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    crate::image_cache::get_cache_dir(app, crate::image_cache::ImageType::MiniAppIcon).ok()
 }
 
 /// Initialization script - runs in all frames
@@ -772,11 +780,12 @@ pub async fn miniapp_load_info(
         let id = format!("miniapp_{:x}", md5_hash(&file_path));
 
         let state = app.state::<MiniAppsState>();
-        let package = state.get_or_load_package(&id, path).await?;
+        let icon_dir = miniapp_icon_dir(&app);
+        let package = state.get_or_load_package(&id, path, icon_dir.clone()).await?;
 
-        // Build MiniAppInfo on blocking thread (icon() can read the archive)
+        // Blocking: the icon is a stat, or a rewrite after the image cache was cleared.
         let info = tokio::task::spawn_blocking(move || {
-            MiniAppInfo::from_package(&package)
+            MiniAppInfo::from_package(id, &package, icon_dir.as_deref())
         }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("{}", e)))?;
 
         Ok(info)
@@ -827,6 +836,7 @@ fn load_info_from_bytes(bytes: &[u8], file_name: &str) -> Result<MiniAppInfo, Er
         version: manifest.version,
         has_icon: icon_data.is_some(),
         icon_data,
+        icon_path: None,
         source_code_url: manifest.source_code_url,
         file_hash: Some(file_hash),
         // Bytes-only preview (publish dialog) — never a launch path, so the
@@ -921,25 +931,25 @@ pub async fn miniapp_open(
         log_trace!("[MiniApp] Loading package for {}...", window_label);
         let package = tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            state.get_or_load_package(&id, path)
+            state.get_or_load_package(&id, path, miniapp_icon_dir(&app))
         ).await
         .map_err(|_| {
             log_error!("[MiniApp] Package load TIMED OUT after 15s for: {}", file_path);
             Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
         })??;
-        log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
+        log_trace!("[MiniApp] Package loaded successfully: {}", package.name);
 
         #[cfg(target_os = "android")]
-        if package.manifest.cross_origin_isolated && !crate::android::miniapp::THREADED_MINIAPPS {
-            let msg = format!("{} needs the Vector app on a computer for now", package.manifest.name);
+        if package.cross_origin_isolated && !crate::android::miniapp::THREADED_MINIAPPS {
+            let msg = format!("{} needs the Vector app on a computer for now", package.name);
             vector_core::traits::emit_event("show_toast", &msg);
             return Err(Error::Anyhow(anyhow::anyhow!(msg)));
         }
 
         // One window per isolated app: two would share (and fight over) one data store.
         #[cfg(not(target_os = "android"))]
-        if package.manifest.cross_origin_isolated {
-            let partition = miniapp_storage_partition(&package.file_hash).await;
+        if package.cross_origin_isolated {
+            let partition = miniapp_storage_partition(&package.hash_hex()).await;
             if let Some(other) = super::isolated::window_for_partition(&partition, &window_label) {
                 if let Some(window) = app.get_webview_window(&other) {
                     window.show()?;
@@ -964,7 +974,7 @@ pub async fn miniapp_open(
     
         // Create the instance
         let instance = MiniAppInstance {
-            package: (*package).clone(),
+            package: std::sync::Arc::clone(&package),
             chat_id: chat_id.clone(),
             message_id: message_id.clone(),
             window_label: window_label.clone(),
@@ -982,7 +992,7 @@ pub async fn miniapp_open(
         {
             let app_pc = app.clone();
             let uses_rt = package.uses_realtime;
-            let pkg_name = package.manifest.name.clone();
+            let pkg_name = package.name.clone();
             let instance_pc = instance.clone();
             vector_core::db::spawn_bound(async move {
                 if !uses_rt {
@@ -1004,7 +1014,7 @@ pub async fn miniapp_open(
         // ========================================
         #[cfg(target_os = "android")]
         {
-            log_info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
+            log_info!("Opening Mini App on Android: {} in overlay", package.name);
 
             // Its port goes into the app's CSP, so it must exist before the page loads.
             state.realtime.ensure_ws_started();
@@ -1016,14 +1026,14 @@ pub async fn miniapp_open(
                 &chat_id,
                 &message_id,
                 href.as_deref(),
-                &miniapp_storage_partition(&package.file_hash).await,
-                package.manifest.cross_origin_isolated,
+                &miniapp_storage_partition(&package.hash_hex()).await,
+                package.cross_origin_isolated,
             ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
 
             // Record to Mini Apps history
             let attachment_ref = file_path.clone();
             if let Err(e) = crate::db::record_miniapp_opened(
-                package.manifest.name.clone(),
+                package.name.to_string(),
                 file_path.clone(),
                 attachment_ref,
             ) {
@@ -1038,8 +1048,8 @@ pub async fn miniapp_open(
         // ========================================
         #[cfg(not(target_os = "android"))]
         {
-        let partition = miniapp_storage_partition(&package.file_hash).await;
-        let isolated = package.manifest.cross_origin_isolated;
+        let partition = miniapp_storage_partition(&package.hash_hex()).await;
+        let isolated = package.cross_origin_isolated;
 
         // Apps that opt into cross-origin isolation are served from a loopback
         // origin of their own (isolated.rs); everything else keeps the custom scheme.
@@ -1109,7 +1119,7 @@ pub async fn miniapp_open(
             &window_label,
             first_url,
         )
-        .title(&package.manifest.name)
+        .title(&*package.name)
         .inner_size(480.0, 640.0)
         .min_inner_size(320.0, 480.0)
         .resizable(true)
@@ -1303,13 +1313,13 @@ pub async fn miniapp_open(
             }
         });
     
-        log_info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
+        log_info!("Opened Mini App: {} in window {}", package.name, window_label);
     
         // Record to Mini Apps history
         // Use file_path as attachment_ref since it uniquely identifies the Mini App
         let attachment_ref = file_path.clone();
         if let Err(e) = crate::db::record_miniapp_opened(
-            package.manifest.name.clone(),
+            package.name.to_string(),
             file_path.clone(),
             attachment_ref,
         ) {
@@ -1394,7 +1404,7 @@ pub async fn miniapp_send_update(
     
     log_info!(
         "Mini App {} sending update: {} ({})",
-        instance.package.manifest.name,
+        instance.package.name,
         description,
         serde_json::to_string(&update).unwrap_or_default()
     );
@@ -1501,7 +1511,7 @@ pub(crate) async fn start_realtime(app: &AppHandle, instance: &MiniAppInstance, 
         return Err("the Mini App closed before joining".into());
     }
     let topic = instance.realtime_topic.unwrap_or_else(|| {
-        super::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
+        super::realtime::derive_topic_id(&instance.package.name, &instance.chat_id, &instance.message_id)
     });
     let window = super::realtime::WindowSession {
         label: &instance.window_label,
@@ -2023,7 +2033,7 @@ pub async fn miniapp_get_granted_permissions_for_window(
     let state = app.state::<MiniAppsState>();
     if let Some(instance) = state.get_instance(label).await {
         // Use the file hash for permission lookup - this is secure and content-based
-        crate::db::get_miniapp_granted_permissions(&instance.package.file_hash)
+        crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex())
             .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
     } else {
         Err(Error::Anyhow(anyhow::anyhow!("Could not find Mini App instance")))

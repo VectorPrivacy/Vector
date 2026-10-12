@@ -35,19 +35,23 @@ pub struct MiniAppManifest {
     pub cross_origin_isolated: bool,
 }
 
-/// Represents a Mini App package (a .xdc file which is a ZIP archive)
-#[derive(Debug, Clone)]
+/// A Mini App package (a .xdc ZIP archive) as the app keeps it: what a listing or an open needs.
+#[derive(Debug)]
 pub struct MiniAppPackage {
-    /// Unique identifier (typically the message ID or file hash)
-    pub id: String,
-    /// Path to the .xdc file
-    pub path: PathBuf,
-    /// Cached manifest data
-    pub manifest: MiniAppManifest,
-    /// SHA-256 hash of the .xdc file (used for permission identification)
-    pub file_hash: String,
+    pub path: Box<std::path::Path>,
+    pub name: Box<str>,
+    pub description: Box<str>,
+    pub version: Box<str>,
+    pub source_code_url: Option<Box<str>>,
+    /// SHA-256 of the .xdc file: its identity for permissions and storage.
+    pub file_hash: [u8; 32],
+    /// Opted in to cross-origin isolation (see `MiniAppManifest`).
+    pub cross_origin_isolated: bool,
     /// Whether the app calls the realtime (Iroh) API.
     pub uses_realtime: bool,
+    pub has_icon: bool,
+    /// The size and modification time it was read at: a file replaced in place is read again.
+    stamp: (u64, i64),
 }
 
 /// What one read of a package finds, stored by its content hash.
@@ -58,11 +62,48 @@ struct PackageMeta {
     /// None when the package ships no manifest.toml: the name then comes from its file name.
     manifest: Option<MiniAppManifest>,
     uses_realtime: bool,
+    #[serde(default)]
+    has_icon: bool,
 }
 
 /// Bumped when a read would find more than the stored metadata holds, so it's read again.
-const PACKAGE_META_VERSION: u32 = 1;
+const PACKAGE_META_VERSION: u32 = 2;
 const ICON_CAP: u64 = 8 * 1024 * 1024;
+/// Longest side of a cached listing icon: the largest tile, at up to 3x density.
+const LISTING_ICON_PX: u32 = 256;
+static ICON_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where a package's listing icon is cached, by content hash.
+pub fn icon_file(icon_dir: &std::path::Path, file_hash: &[u8; 32]) -> PathBuf {
+    icon_dir.join(format!("xdc-{}.png", bytes_to_hex_string(file_hash)))
+}
+
+/// An icon as a listing shows it: at most `LISTING_ICON_PX` a side, re-encoded as PNG, an SVG
+/// drawn to pixels.
+fn listing_icon(bytes: &[u8]) -> Option<Vec<u8>> {
+    if vector_core::svg::looks_like_svg(bytes) {
+        return vector_core::svg::rasterize_png(bytes, LISTING_ICON_PX).ok();
+    }
+    let img = crate::shared::image::decode_image(bytes, LISTING_ICON_PX).ok()?;
+    let img = if img.width().max(img.height()) > LISTING_ICON_PX {
+        crate::shared::image::resize_fit(&img, LISTING_ICON_PX, LISTING_ICON_PX, ::image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    crate::shared::image::encode_png(rgba.as_raw(), rgba.width(), rgba.height()).ok()
+}
+
+/// Write a cached icon whole or not at all; a concurrent writer of the same hash counts.
+fn write_icon(file: &std::path::Path, png: &[u8]) -> bool {
+    let seq = ICON_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = file.with_extension(format!("tmp-{}-{seq}", std::process::id()));
+    if std::fs::write(&tmp, png).and_then(|_| std::fs::rename(&tmp, file)).is_ok() {
+        return true;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    file.is_file()
+}
 
 /// Modification time in nanoseconds since the epoch, 0 when the platform can't say.
 fn modified_nanos(meta: &std::fs::Metadata) -> i64 {
@@ -73,7 +114,7 @@ fn modified_nanos(meta: &std::fs::Metadata) -> i64 {
 }
 
 /// SHA-256 of a file, streamed: a package can be hundreds of MB.
-pub(crate) fn hash_file(path: &std::path::Path) -> Result<String, Error> {
+pub(crate) fn hash_file(path: &std::path::Path) -> Result<[u8; 32], Error> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -85,7 +126,7 @@ pub(crate) fn hash_file(path: &std::path::Path) -> Result<String, Error> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(bytes_to_hex_string(&hasher.finalize()))
+    Ok(hasher.finalize().into())
 }
 
 /// Whether `needle` occurs in the first `cap` bytes of `reader`, read in chunks.
@@ -135,12 +176,37 @@ fn resolve_entry_ci<R: std::io::Read + std::io::Seek>(
 impl MiniAppPackage {
     /// Load a Mini App package from a .xdc file. A known file costs a stat and a lookup; a new
     /// one is hashed and read once, both streamed from disk, and what the read found is stored
-    /// by hash for every later load.
-    pub fn load(id: String, path: PathBuf) -> Result<Self, Error> {
+    /// by hash for every later load. Its listing icon is cached into `icon_dir`.
+    pub fn load(path: PathBuf, icon_dir: Option<&std::path::Path>) -> Result<Self, Error> {
+        let stamp = Self::stamp_of(&path)?;
+        let path_key = path.to_string_lossy().into_owned();
+
+        let known = vector_core::db::miniapps::miniapp_file_hash(&path_key, stamp.0, stamp.1).ok().flatten();
+        if let Some((file_hash, stored)) = known.and_then(|h| Self::stored_meta(&h).map(|m| (h, m))) {
+            return Ok(Self::from_meta(path, file_hash, stored, stamp));
+        }
+
+        let file_hash = hash_file(&path)?;
+        let package_meta = match Self::stored_meta(&file_hash) {
+            Some(stored) => stored,
+            None => {
+                let read = Self::read_package(&path, icon_dir.map(|d| icon_file(d, &file_hash)).as_deref())?;
+                if let Ok(data) = serde_json::to_string(&read) {
+                    let _ = vector_core::db::miniapps::set_miniapp_meta(&file_hash, &data);
+                }
+                read
+            }
+        };
+        let _ = vector_core::db::miniapps::set_miniapp_file_hash(&path_key, stamp.0, stamp.1, &file_hash);
+        Ok(Self::from_meta(path, file_hash, package_meta, stamp))
+    }
+
+    /// Size and modification time, refusing what no package can be.
+    fn stamp_of(path: &std::path::Path) -> Result<(u64, i64), Error> {
         // Pre-check: reject 0-byte or missing files without opening them
         // (macOS can hang on open() for corrupted files with 0 logical bytes
         // but non-zero physical blocks)
-        let meta = std::fs::metadata(&path)?;
+        let meta = std::fs::metadata(path)?;
         let file_len = meta.len();
         if file_len == 0 {
             return Err(Error::InvalidPackage(format!(
@@ -153,45 +219,45 @@ impl MiniAppPackage {
                 "File too large ({} MB): {}", file_len / (1024 * 1024), path.display()
             )));
         }
-        let modified = modified_nanos(&meta);
-        let path_key = path.to_string_lossy().into_owned();
-
-        let known = vector_core::db::miniapps::miniapp_file_hash(&path_key, file_len, modified).ok().flatten();
-        if let Some((file_hash, stored)) = known.and_then(|h| Self::stored_meta(&h).map(|m| (h, m))) {
-            return Ok(Self::from_meta(id, path, file_hash, stored));
-        }
-
-        let file_hash = hash_file(&path)?;
-        let package_meta = match Self::stored_meta(&file_hash) {
-            Some(stored) => stored,
-            None => {
-                let (read, icon) = Self::read_package(&path)?;
-                if let Ok(data) = serde_json::to_string(&read) {
-                    let _ = vector_core::db::miniapps::set_miniapp_meta(&file_hash, &data, icon.as_deref());
-                }
-                read
-            }
-        };
-        let _ = vector_core::db::miniapps::set_miniapp_file_hash(&path_key, file_len, modified, &file_hash);
-        Ok(Self::from_meta(id, path, file_hash, package_meta))
+        Ok((file_len, modified_nanos(&meta)))
     }
 
-    fn stored_meta(file_hash: &str) -> Option<PackageMeta> {
+    /// Whether the file is still the one this was read from.
+    pub fn is_current(&self) -> bool {
+        Self::stamp_of(&self.path).ok() == Some(self.stamp)
+    }
+
+    pub fn hash_hex(&self) -> String {
+        bytes_to_hex_string(&self.file_hash)
+    }
+
+    fn stored_meta(file_hash: &[u8; 32]) -> Option<PackageMeta> {
         let data = vector_core::db::miniapps::miniapp_meta(file_hash).ok().flatten()?;
         serde_json::from_str::<PackageMeta>(&data).ok().filter(|m| m.v == PACKAGE_META_VERSION)
     }
 
-    fn from_meta(id: String, path: PathBuf, file_hash: String, meta: PackageMeta) -> Self {
+    fn from_meta(path: PathBuf, file_hash: [u8; 32], meta: PackageMeta, stamp: (u64, i64)) -> Self {
         let manifest = meta.manifest.unwrap_or_else(|| MiniAppManifest {
             name: path.file_stem().and_then(|s| s.to_str()).unwrap_or("Mini App").to_string(),
             ..Default::default()
         });
-        Self { id, path, manifest, file_hash, uses_realtime: meta.uses_realtime }
+        Self {
+            path: path.into_boxed_path(),
+            name: manifest.name.into_boxed_str(),
+            description: manifest.description.into_boxed_str(),
+            version: manifest.version.into_boxed_str(),
+            source_code_url: manifest.source_code_url.map(String::into_boxed_str),
+            file_hash,
+            cross_origin_isolated: manifest.cross_origin_isolated,
+            uses_realtime: meta.uses_realtime,
+            has_icon: meta.has_icon,
+            stamp,
+        }
     }
 
     /// Everything a listing or an open needs from the archive, read from disk without loading
-    /// it whole. The icon comes back as the pixels a listing shows: an SVG is rendered.
-    fn read_package(path: &std::path::Path) -> Result<(PackageMeta, Option<Vec<u8>>), Error> {
+    /// it whole. The listing icon goes to `icon_out` rather than into the record.
+    fn read_package(path: &std::path::Path, icon_out: Option<&std::path::Path>) -> Result<PackageMeta, Error> {
         let file = std::io::BufReader::new(std::fs::File::open(path)?);
         let mut archive = zip::ZipArchive::new(file)?;
         let manifest = match resolve_entry_ci(&archive, "manifest.toml")
@@ -211,16 +277,30 @@ impl MiniAppPackage {
             return Err(Error::InvalidPackage("Missing index.html".to_string()));
         }
         let icon = Self::icon_from(&mut archive, manifest.as_ref().map_or("", |m| m.icon.as_str()))
-            .map(|bytes| {
-                if vector_core::svg::looks_like_svg(&bytes) {
-                    vector_core::svg::rasterize_png(&bytes, 256).unwrap_or_default()
-                } else {
-                    bytes
-                }
-            })
-            .filter(|bytes| !bytes.is_empty());
+            .and_then(|bytes| listing_icon(&bytes));
+        if let (Some(png), Some(out)) = (&icon, icon_out) {
+            write_icon(out, png);
+        }
         let uses_realtime = Self::archive_uses_realtime(&mut archive);
-        Ok((PackageMeta { v: PACKAGE_META_VERSION, manifest, uses_realtime }, icon))
+        Ok(PackageMeta { v: PACKAGE_META_VERSION, manifest, uses_realtime, has_icon: icon.is_some() })
+    }
+
+    /// The cached listing icon, written again from the archive when the image cache was cleared.
+    pub fn icon_path(&self, icon_dir: &std::path::Path) -> Option<PathBuf> {
+        if !self.has_icon {
+            return None;
+        }
+        let file = icon_file(icon_dir, &self.file_hash);
+        if file.is_file() {
+            return Some(file);
+        }
+        let manifest_icon = Self::stored_meta(&self.file_hash)
+            .and_then(|m| m.manifest)
+            .map(|m| m.icon)
+            .unwrap_or_default();
+        let archive = std::io::BufReader::new(std::fs::File::open(&self.path).ok()?);
+        let bytes = Self::icon_from(&mut zip::ZipArchive::new(archive).ok()?, &manifest_icon)?;
+        write_icon(&file, &listing_icon(&bytes)?).then_some(file)
     }
 
     /// The manifest's icon, else the first of the common icon names.
@@ -338,24 +418,13 @@ impl MiniAppPackage {
         // the 500 MB whole-archive cap handles that.
         Self::read_entry_capped(&mut zip_file, 512 * 1024 * 1024)
     }
-    
-    /// The icon a listing shows: the stored copy, else read from the archive.
-    pub fn icon(&self) -> Option<Vec<u8>> {
-        match vector_core::db::miniapps::miniapp_icon(&self.file_hash) {
-            Ok(Some(stored)) => stored,
-            _ => {
-                let file = std::io::BufReader::new(std::fs::File::open(&self.path).ok()?);
-                Self::icon_from(&mut zip::ZipArchive::new(file).ok()?, &self.manifest.icon)
-            }
-        }
-    }
 }
 
 /// Represents a running Mini App instance
 #[derive(Debug, Clone)]
 pub struct MiniAppInstance {
     /// The package this instance is running
-    pub package: MiniAppPackage,
+    pub package: Arc<MiniAppPackage>,
     /// The chat ID this Mini App is associated with
     pub chat_id: String,
     /// The message ID that contains this Mini App
@@ -571,40 +640,21 @@ impl MiniAppsState {
         None
     }
     
-    /// Load or get cached package
-    pub async fn get_or_load_package(&self, id: &str, path: PathBuf) -> Result<Arc<MiniAppPackage>, Error> {
-        // Check cache first
-        {
-            let packages = self.packages.read().await;
-            if let Some(pkg) = packages.get(id) {
-                return Ok(Arc::clone(pkg));
-            }
-        }
-
-        // Load on a blocking thread so sync I/O doesn't starve the async runtime.
-        // No per-step trace logs — boot already preloads every installed app,
-        // which spams 4× lines per app for no actionable signal.
-        let id_owned = id.to_string();
+    /// The package at `path`, loaded on first use and again only when the file has changed.
+    pub async fn get_or_load_package(&self, id: &str, path: PathBuf, icon_dir: Option<PathBuf>) -> Result<Arc<MiniAppPackage>, Error> {
+        let cached = self.packages.read().await.get(id).cloned();
         let path_display = path.display().to_string();
-        let package = tokio::task::spawn_blocking(move || {
-            MiniAppPackage::load(id_owned, path)
-        }).await.map_err(|e| Error::Anyhow(anyhow::anyhow!("Package load task failed for {}: {}", path_display, e)))??;
-
-        let package = Arc::new(package);
-
-        {
-            let mut packages = self.packages.write().await;
-            packages.insert(id.to_string(), Arc::clone(&package));
+        // Blocking: a stat for a known package, the first read for a new one.
+        let (package, fresh) = tokio::task::spawn_blocking(move || match cached {
+            Some(pkg) if pkg.is_current() => Ok((pkg, false)),
+            _ => MiniAppPackage::load(path, icon_dir.as_deref()).map(|p| (Arc::new(p), true)),
+        })
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("Package load task failed for {}: {}", path_display, e)))??;
+        if fresh {
+            self.packages.write().await.insert(id.to_string(), Arc::clone(&package));
         }
-
         Ok(package)
-    }
-    
-    /// Clear package cache
-    #[allow(dead_code)]
-    pub async fn clear_package_cache(&self, id: &str) {
-        let mut packages = self.packages.write().await;
-        packages.remove(id);
     }
 }
 
@@ -671,53 +721,81 @@ mod package_meta_tests {
         assert!(!stream_contains(&NEEDLE[1..], NEEDLE, u64::MAX));
     }
 
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = ::image::RgbaImage::from_fn(w, h, |x, y| ::image::Rgba([(x % 256) as u8, (y % 256) as u8, 9, 255]));
+        crate::shared::image::encode_png(img.as_raw(), w, h).unwrap()
+    }
+
+    fn png_dims(bytes: &[u8]) -> (u32, u32) {
+        let img = ::image::load_from_memory(bytes).unwrap();
+        (img.width(), img.height())
+    }
+
     #[test]
     fn a_package_is_read_once_then_known_by_its_file() {
         let _db = open_test_db();
         let dir = tempfile::tempdir().unwrap();
+        let icons = tempfile::tempdir().unwrap();
         let path = dir.path().join("chess.xdc");
-        let icon = b"\x89PNG\r\n\x1a\nnot really".to_vec();
         let mut script = vec![b' '; 200_000];
         script.extend_from_slice(b"webxdc.joinRealtimeChannel()");
         let bytes = xdc(&[
             ("index.html", b"<script src=app.js></script>"),
             ("app.js", &script),
             ("manifest.toml", b"name = \"Chess\"\nicon = \"art//logo.png\"\n"),
-            ("art/logo.png", &icon),
+            ("art/logo.png", &png(1024, 512)),
         ]);
         std::fs::write(&path, &bytes).unwrap();
 
-        let first = MiniAppPackage::load("a".into(), path.clone()).unwrap();
-        assert_eq!(first.manifest.name, "Chess");
+        let first = MiniAppPackage::load(path.clone(), Some(icons.path())).unwrap();
+        assert_eq!(&*first.name, "Chess");
         assert!(first.uses_realtime);
-        assert_eq!(first.file_hash, bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes)));
-        assert_eq!(first.icon(), Some(icon));
+        assert_eq!(first.file_hash, vector_core::crypto::sha256::digest(&bytes));
+        // The icon lives on disk, downscaled for a listing, never in the record.
+        let icon = first.icon_path(icons.path()).unwrap();
+        assert_eq!(png_dims(&std::fs::read(&icon).unwrap()), (256, 128));
 
         // Same size and time over other bytes: the second load trusts what it stored.
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, vec![0u8; bytes.len()]).unwrap();
         set_modified(&path, modified);
-        let again = MiniAppPackage::load("b".into(), path.clone()).unwrap();
-        assert_eq!((&again.file_hash, &again.manifest.name, again.uses_realtime), (&first.file_hash, &first.manifest.name, true));
+        assert!(first.is_current());
+        let again = MiniAppPackage::load(path.clone(), Some(icons.path())).unwrap();
+        assert_eq!((again.file_hash, &*again.name, again.uses_realtime), (first.file_hash, "Chess", true));
 
         // A file that changed is read again: this one is no package any more.
         set_modified(&path, modified + std::time::Duration::from_secs(1));
-        assert!(MiniAppPackage::load("c".into(), path).is_err());
+        assert!(!first.is_current());
+        assert!(MiniAppPackage::load(path, Some(icons.path())).is_err());
+    }
+
+    #[test]
+    fn a_cleared_icon_is_written_again_from_the_archive() {
+        let _db = open_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let icons = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draw.xdc");
+        std::fs::write(&path, xdc(&[("index.html", b"<p>hi</p>"), ("ICON.PNG", &png(64, 64))])).unwrap();
+
+        let pkg = MiniAppPackage::load(path, Some(icons.path())).unwrap();
+        let icon = pkg.icon_path(icons.path()).unwrap();
+        std::fs::remove_file(&icon).unwrap();
+        assert_eq!(pkg.icon_path(icons.path()), Some(icon.clone()));
+        assert_eq!(png_dims(&std::fs::read(icon).unwrap()), (64, 64));
     }
 
     #[test]
     fn a_package_without_a_manifest_is_named_by_each_file() {
         let _db = open_test_db();
         let dir = tempfile::tempdir().unwrap();
-        let bytes = xdc(&[("Index.html", b"<p>hi</p>"), ("icon.png", b"\x89PNG\r\n\x1a\n")]);
+        let bytes = xdc(&[("Index.html", b"<p>hi</p>")]);
         let (one, two) = (dir.path().join("puzzle.xdc"), dir.path().join("riddle.xdc"));
         std::fs::write(&one, &bytes).unwrap();
         std::fs::write(&two, &bytes).unwrap();
-        let a = MiniAppPackage::load("a".into(), one).unwrap();
-        let b = MiniAppPackage::load("b".into(), two).unwrap();
+        let a = MiniAppPackage::load(one, None).unwrap();
+        let b = MiniAppPackage::load(two, None).unwrap();
         assert_eq!(a.file_hash, b.file_hash);
-        assert_eq!((a.manifest.name.as_str(), b.manifest.name.as_str()), ("puzzle", "riddle"));
-        assert!(!a.uses_realtime);
-        assert!(a.icon().is_some());
+        assert_eq!((&*a.name, &*b.name), ("puzzle", "riddle"));
+        assert!(!a.uses_realtime && !a.has_icon);
     }
 }

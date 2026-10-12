@@ -619,7 +619,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     // Compute the old file's hash before we replace it (for permission migration)
     let old_file_hash = if file_path.exists() {
         match super::state::hash_file(&file_path) {
-            Ok(hash) => Some(hash),
+            Ok(hash) => Some(bytes_to_hex_string(&hash)),
             Err(e) => {
                 log_warn!("Failed to read old app file for hash: {}", e);
                 None

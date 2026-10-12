@@ -51,7 +51,7 @@
     $effect(() => {
         if (!isMiniApp) return;
         if (phase === 'downloaded' && att.path) {
-            h.loadMiniAppInfo(att.path).then((i) => { if (i) { title = i.name || 'Mini App'; if (i.icon_data) iconSrc = i.icon_data; } }).catch(() => {});
+            h.loadMiniAppInfo(att.path).then((i) => { if (i) { title = i.name || 'Mini App'; iconSrc = h.miniAppIconSrc(i) || iconSrc; } }).catch(() => {});
         } else if (phase !== 'downloaded') {
             h.marketplaceApp(att.id).then((app) => {
                 if (!app) return;

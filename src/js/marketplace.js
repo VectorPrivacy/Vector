@@ -731,7 +731,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
             id: defaultAppId, name: miniAppInfo?.name || '', description: miniAppInfo?.description || '',
             version: miniAppInfo?.version || '1.0.0', isGame: true, categories: '', developer: '',
             source: miniAppInfo?.source_code_url || '', changelog: '',
-        }, miniAppInfo?.icon_data || '', {
+        }, miniAppIconSrc(miniAppInfo) || '', {
             cancel: () => { close(); resolve(false); },
             idInput: () => {
                 VectorSvelte.setPublishHint('Unique identifier (lowercase, no spaces)', false);
@@ -816,8 +816,8 @@ setupMarketplaceProgressListener();
 window.__TAURI__.event.listen('marketplace_apps_updated', (event) => {
     const hadData = marketplaceApps.length > 0;
     syncMarketplaceApps(event.payload);
-    // Refresh mini apps grid to pick up update badges if this is the first load
-    if (!hadData && marketplaceApps.length > 0) {
+    // Update badges for a grid already open; a closed one reads them when it opens.
+    if (!hadData && marketplaceApps.length > 0 && miniAppsGridOpen()) {
         loadMiniAppsHistory();
     }
 });

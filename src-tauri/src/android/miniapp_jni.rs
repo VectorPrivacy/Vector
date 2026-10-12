@@ -337,7 +337,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
             }
         };
         let topic = instance.realtime_topic.unwrap_or_else(|| {
-            crate::miniapps::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
+            crate::miniapps::realtime::derive_topic_id(&instance.package.name, &instance.chat_id, &instance.message_id)
         });
         let topic_encoded = crate::miniapps::realtime::encode_topic_id(&topic);
 
