@@ -2121,10 +2121,7 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
         // Tombstone the membership across devices (CORD-02 §8) BEFORE the local delete.
         // Best-effort, but never silent: an unpublished tombstone is what lets a stale
         // copy of the list rejoin this community on a later boot.
-        if let Err(e) = tombstone_community_list(transport, community.id(), &community.relays, at_ms).await {
-            crate::log_net_fail!("[CommunityList] leave tombstone failed ({}) — retrying in the background", e);
-            tombstone_community_list_durable(*community.id(), community.relays.clone(), at_ms);
-        }
+        record_leave(transport, community.id(), &community.relays, at_ms).await;
         crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
         Ok(())
     })
@@ -3008,10 +3005,7 @@ pub async fn dissolve_community<T: Transport + ?Sized>(transport: &T, community:
         // dissolved husk that had to be removed by hand. Best-effort with a durable
         // retry, never failing the dissolve: the grave is already published, and an
         // unrecorded leave only costs the husk lingering until the retry lands.
-        if let Err(e) = tombstone_community_list(transport, community.id(), &community.relays, at_ms).await {
-            crate::log_net_fail!("[CommunityList] dissolve tombstone failed ({}) — retrying in the background", e);
-            tombstone_community_list_durable(*community.id(), community.relays.clone(), at_ms);
-        }
+        record_leave(transport, community.id(), &community.relays, at_ms).await;
         Ok(())
     })
     .await
@@ -3923,6 +3917,9 @@ pub struct FragSet {
     /// The winning parsed fragment per index — what the relays currently hold,
     /// so a rewrite can skip publishing byte-identical fragments.
     pub read_frags: std::collections::BTreeMap<usize, super::list_frag::FragList>,
+    /// The winning signed event per index and the relays that returned it, so an unchanged
+    /// fragment still reaches a relay that lacks it.
+    pub on_relays: std::collections::BTreeMap<usize, (Event, Vec<String>)>,
 }
 
 impl FragSet {
@@ -3933,9 +3930,29 @@ impl FragSet {
     }
 }
 
+/// One read of the list: what it found, and which relays actually answered it.
+struct FragRead {
+    set: Option<FragSet>,
+    /// Relays that answered (EOSE). A write goes only here: a relay we didn't hear from may
+    /// hold a newer copy, and a newer `created_at` would replace it unseen.
+    answered: Vec<String>,
+    /// A fragment that wouldn't open: it may be the newest copy, so no write may build on
+    /// this read.
+    unreadable: bool,
+}
+
 /// Fetch the account's 33302 fragments and union them. Newest wins PER INDEX —
 /// each fragment is its own addressable coordinate, so they age independently.
 async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Result<Option<FragSet>, String> {
+    read_fragments(transport, relays).await.map(|r| r.set)
+}
+
+/// Read the list from every relay, each asked on its own and waited for: a read that stops at
+/// the first answer can be a relay holding nothing, or a stale copy, and a write built on it
+/// replaces the real list everywhere. Every readable version is merged (the List is a CRDT:
+/// a stale copy can't revive what a newer one removed), so one relay's copy never hides
+/// another's tombstone.
+async fn read_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> Result<FragRead, String> {
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     let query = Query {
@@ -3944,17 +3961,47 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
         limit: Some(64),
         ..Default::default()
     };
-    let events = transport.fetch(&query, relays).await?;
+    let per_relay = futures_util::future::join_all(
+        relays.iter().map(|r| async { (r.clone(), transport.fetch(&query, std::slice::from_ref(r)).await) }),
+    )
+    .await;
+    let mut answered = Vec::new();
+    let mut holders: std::collections::HashMap<nostr_sdk::prelude::EventId, Vec<String>> = Default::default();
+    let mut events = Vec::new();
+    for (relay, res) in per_relay {
+        if let Ok(evs) = res {
+            for e in evs {
+                let held_by = holders.entry(e.id).or_default();
+                if held_by.is_empty() {
+                    events.push(e);
+                }
+                held_by.push(relay.clone());
+            }
+            answered.push(relay);
+        }
+    }
+    // Folded oldest first, so where versions disagree on an unmerged field the newest
+    // has the last word whatever order the relays answered in.
+    events.sort_by(|a, b| (a.created_at, a.id).cmp(&(b.created_at, b.id)));
+    if answered.is_empty() {
+        return Err(format!("no relay answered the list read (0/{})", relays.len()));
+    }
     if events.is_empty() {
-        return Ok(None);
+        return Ok(FragRead { set: None, answered, unreadable: false });
     }
     let mut newest: std::collections::BTreeMap<usize, (u64, [u8; 32], super::list_frag::FragList)> = Default::default();
-    let mut undecryptable = 0usize;
+    let mut newest_event: std::collections::BTreeMap<usize, Event> = Default::default();
+    let mut list = super::list::CommunityList::default();
+    // Unreadable versions by index: they matter only if one could be the newest.
+    let mut unopened: Vec<(usize, u64)> = Vec::new();
     for e in events {
         let at = e.created_at.as_secs();
         let id = *e.id.as_bytes();
+        // Not one of our fragment coordinates: nothing we read or write, so nothing to block.
+        let Some(index) = e.tags.identifier().and_then(|d| d.parse::<usize>().ok()) else { continue };
         match super::list_frag::parse_fragment_event(&signer, my_pk, &e).await {
             Ok((index, frag)) => {
+                list = list.merge(&super::list_frag::defragment(std::slice::from_ref(&frag)));
                 // Mirror relay resolution (CORD-02 §8): newest created_at holds the
                 // coordinate, an age tie falls to the LOWEST event id.
                 let wins = match newest.get(&index) {
@@ -3963,14 +4010,20 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
                 };
                 if wins {
                     newest.insert(index, (at, id, frag));
+                    newest_event.insert(index, e);
                 }
             }
-            Err(_) => undecryptable += 1,
+            Err(_) => unopened.push((index, at)),
         }
     }
+    // An older copy that won't open is history; one at or past the newest we read may be the
+    // current list, and writing over it unseen is the loss this read exists to prevent.
+    let blocking = unopened.iter().filter(|(i, at)| newest.get(i).is_none_or(|(n, _, _)| at >= n)).count();
+    if blocking > 0 {
+        crate::log_warn!("[CommunityList] {} current fragment(s) would not open — reading what did, refusing to write", blocking);
+    }
     if newest.is_empty() {
-        crate::log_warn!("[CommunityList] {} fragment(s) fetched, none readable — treating as no news", undecryptable);
-        return Ok(None);
+        return Ok(FragRead { set: None, answered, unreadable: blocking > 0 });
     }
     // The newest fragment governs `frags`; an age tie resolves to the LARGER count
     // (CORD-02 §8) — too large reads an index that turns out empty, too small sends
@@ -3983,12 +4036,19 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
         .max(1);
     let read_frags: std::collections::BTreeMap<usize, super::list_frag::FragList> =
         newest.iter().map(|(i, (_, _, f))| (*i, f.clone())).collect();
-    let frags: Vec<_> = read_frags.values().cloned().collect();
+    let on_relays = newest_event
+        .into_iter()
+        .map(|(i, e)| {
+            let held_by = holders.remove(&e.id).unwrap_or_default();
+            (i, (e, held_by))
+        })
+        .collect();
     let set = FragSet {
-        list: super::list_frag::defragment(&frags),
+        list,
         created_at: newest.iter().map(|(i, (at, _, _))| (*i, *at)).collect(),
         declared,
         read_frags,
+        on_relays,
     };
     if !set.is_complete() {
         crate::log_warn!(
@@ -3997,7 +4057,7 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
             declared
         );
     }
-    Ok(Some(set))
+    Ok(FragRead { set: Some(set), answered, unreadable: blocking > 0 })
 }
 
 /// Publish a list as fragments. Each fragment's `created_at` must exceed that
@@ -4009,7 +4069,8 @@ async fn publish_fragments<T: Transport + ?Sized>(
     list: &super::list::CommunityList,
     prev: &std::collections::BTreeMap<usize, u64>,
     read: &std::collections::BTreeMap<usize, super::list_frag::FragList>,
-    own: &[String],
+    on_relays: &std::collections::BTreeMap<usize, (Event, Vec<String>)>,
+    targets: &ListTargets,
 ) -> Result<usize, String> {
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
@@ -4038,11 +4099,12 @@ async fn publish_fragments<T: Transport + ?Sized>(
     for (index, frag) in frags.iter().enumerate() {
         if unchanged(index, frag) {
             skipped += 1;
+            spread_unchanged(transport, on_relays.get(&index), targets).await;
             continue;
         }
         let created_at = now.max(prev.get(&index).copied().unwrap_or(0) + 1);
         let event = super::list_frag::build_fragment_event(&signer, my_pk, frag, index, created_at).await?;
-        publish_list_event(transport, &event, own).await?;
+        publish_list_event(transport, &event, targets).await?;
     }
     // A shrunk set leaves the fragments above it in place; empty them so a later
     // growth into that index cannot re-read stale memberships.
@@ -4055,11 +4117,12 @@ async fn publish_fragments<T: Transport + ?Sized>(
         };
         if unchanged(index, &empty) {
             skipped += 1;
+            spread_unchanged(transport, on_relays.get(&index), targets).await;
             continue;
         }
         let created_at = now.max(prev.get(&index).copied().unwrap_or(0) + 1);
         let event = super::list_frag::build_fragment_event(&signer, my_pk, &empty, index, created_at).await?;
-        publish_list_event(transport, &event, own).await?;
+        publish_list_event(transport, &event, targets).await?;
     }
     if skipped > 0 {
         crate::log_net_info!("[CommunityList] {} fragment(s) skipped — byte-identical to the relay copy", skipped);
@@ -4070,14 +4133,76 @@ async fn publish_fragments<T: Transport + ?Sized>(
 /// Publish an account-level list, falling back to the stock CORD relays when our
 /// own reject it — 33302 is a custom kind, and a relay with a kind whitelist drops
 /// it silently. The list is the vault: it has to land somewhere every client reads.
-async fn publish_list_event<T: Transport + ?Sized>(transport: &T, event: &Event, own: &[String]) -> Result<(), String> {
-    if !own.is_empty() {
-        match transport.publish(event, own).await {
-            Ok(()) => return Ok(()),
-            Err(e) => crate::log_warn!("[CommunityList] own relays refused the list ({}) — falling back to the stock set", e),
+/// Held across a list write's whole read, merge and publish. Two overlapping writes read the
+/// same version and publish in the same second, and a relay keeps only one of them.
+static LIST_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The list write lock, waited for (a background retry) or only if free (a user action,
+/// which hands off to the background rather than queue behind someone else's write).
+async fn list_write_turn(wait: bool) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    if wait { Some(LIST_WRITE.lock().await) } else { LIST_WRITE.try_lock().ok() }
+}
+
+const LIST_BUSY: &str = "another list write is in flight";
+
+/// Our own leaves still on their way, as tombstones a write carries along: one write lands
+/// every leave queued behind it.
+fn pending_tombstones() -> super::list::CommunityList {
+    let tombstones = load_pending()
+        .tombstones
+        .into_iter()
+        .map(|t| super::list::Tombstone { community_id: t.community_id, removed_at: t.removed_at, extra: Default::default() })
+        .collect();
+    super::list::CommunityList { tombstones, ..Default::default() }
+}
+
+/// Drop every pending leave and join the relays now show.
+fn settle_pending(landed: &super::list::CommunityList) {
+    edit_pending(|p| {
+        p.tombstones.retain(|t| !landed.tombstones.iter().any(|l| l.community_id == t.community_id && l.removed_at >= t.removed_at));
+        p.joins.retain(|j| !landed.entries.iter().any(|e| e.community_id == j.community_id && e.added_at >= j.joined_at));
+    });
+}
+
+/// Where a list write goes: our own relays and the stock set, each only if it answered the
+/// read the write was built on (a relay we didn't hear from may hold a newer copy, and a newer
+/// `created_at` would replace it unseen). Both, always: the stock set is in every device's read
+/// set where our own relays may not be, and a relay can accept a kind it then discards.
+struct ListTargets {
+    own: Vec<String>,
+    fallback: Vec<String>,
+}
+
+impl ListTargets {
+    fn new(own: Vec<String>, answered: &[String]) -> Self {
+        let pick = |set: Vec<String>| -> Vec<String> { set.into_iter().filter(|r| answered.contains(r)).collect() };
+        ListTargets { own: pick(own), fallback: pick(invite::stock_relays()) }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.own.is_empty() && self.fallback.is_empty()
+    }
+}
+
+async fn publish_list_event<T: Transport + ?Sized>(transport: &T, event: &Event, targets: &ListTargets) -> Result<(), String> {
+    let mut all = targets.own.clone();
+    all.extend(targets.fallback.iter().filter(|r| !targets.own.contains(r)).cloned());
+    if all.is_empty() {
+        return Err("no relay that answered the read took the list".to_string());
+    }
+    transport.publish(event, &all).await
+}
+
+/// An unchanged fragment needs no new version, but a target relay that lacks the current one
+/// (it held nothing, or a stale copy) still gets it, as signed.
+async fn spread_unchanged<T: Transport + ?Sized>(transport: &T, current: Option<&(Event, Vec<String>)>, targets: &ListTargets) {
+    let Some((event, held_by)) = current else { return };
+    let lacking: Vec<String> = targets.own.iter().chain(&targets.fallback).filter(|r| !held_by.contains(r)).cloned().collect();
+    if !lacking.is_empty() {
+        if let Err(e) = transport.publish(event, &lacking).await {
+            crate::log_warn!("[CommunityList] could not copy the current fragment to {} relay(s): {e}", lacking.len());
         }
     }
-    transport.publish(event, &invite::stock_relays()).await
 }
 
 /// The union of every held v2 community's relays — a fallback write target, and
@@ -4108,7 +4233,21 @@ fn held_v2_relays() -> Vec<String> {
 /// skipped without failing the caller (a failed remote fetch — see below). Callers that
 /// need the membership to actually land use [`republish_community_list_durable`].
 pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just_joined: Option<&crate::community::CommunityId>) -> Result<bool, String> {
+    republish_community_list_at(transport, just_joined.map(|id| (id, now_ms())), false).await
+}
+
+/// [`republish_community_list`] with the join's own time: a retry stamps when the join
+/// happened, not when the retry ran.
+async fn republish_community_list_at<T: Transport + ?Sized>(
+    transport: &T,
+    joined: Option<(&crate::community::CommunityId, u64)>,
+    wait: bool,
+) -> Result<bool, String> {
+    let just_joined = joined.map(|(id, _)| id);
     crate::db::scoped(async move {
+        // A user action never queues behind another write: it reports a skip and the caller
+        // hands it to the durable retry, which waits its turn.
+        let Some(_write) = list_write_turn(wait).await else { return Ok(false) };
         let held = held_v2_relays();
         if held.is_empty() {
             return Ok(false); // nothing held → nothing to sync
@@ -4122,19 +4261,8 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
         // A FAILED remote fetch must not drive this replaceable-event write: publishing
         // a list built without the remote seeds would drop older-epoch backfill anchors
         // and re-stamp add-times (the W2 seed-regression + a resurrection window).
-        let (remote, prev_created, read_frags) = match fetch_fragments(transport, &relays).await {
-            // No fragments yet: this is the first write under §8, and local state
-            // is the source. Nothing to merge, nothing to lose.
-            Ok(None) => (super::list::CommunityList::default(), Default::default(), Default::default()),
-            Ok(Some(set)) if !set.is_complete() => {
-                crate::log_net_fail!(
-                    "[CommunityList] republish SKIPPED — hold {} of {} fragments; rewriting a set we haven't fully read would drop the memberships in the ones we're missing",
-                    set.created_at.len(),
-                    set.declared
-                );
-                return Ok(false);
-            }
-            Ok(Some(set)) => (set.list, set.created_at, set.read_frags),
+        let read = match read_fragments(transport, &relays).await {
+            Ok(read) => read,
             Err(e) => {
                 // SILENT-SKIP HAZARD: bailing is correct (publishing a list built without the
                 // remote seeds drops backfill anchors), but the membership this call was meant
@@ -4150,6 +4278,29 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
                 );
                 return Ok(false);
             }
+        };
+        if read.unreadable {
+            crate::log_warn!("[CommunityList] republish SKIPPED — a fragment would not open, and it may be the newest copy");
+            return Ok(false);
+        }
+        let targets = ListTargets::new(write_relays, &read.answered);
+        if targets.is_empty() {
+            crate::log_warn!("[CommunityList] republish SKIPPED — no relay we write to answered the read");
+            return Ok(false);
+        }
+        let (remote, prev_created, read_frags, on_relays) = match read.set {
+            Some(set) if !set.is_complete() => {
+                crate::log_net_fail!(
+                    "[CommunityList] republish SKIPPED — hold {} of {} fragments; rewriting a set we haven't fully read would drop the memberships in the ones we're missing",
+                    set.created_at.len(),
+                    set.declared
+                );
+                return Ok(false);
+            }
+            Some(set) => (set.list, set.created_at, set.read_frags, set.on_relays),
+            // No fragment on any relay that answered, and we write only to those: nothing
+            // there to lose, and local state is the source.
+            None => Default::default(),
         };
         let just_joined_hex = just_joined.map(|c| crate::simd::hex::bytes_to_hex_32(&c.0));
         let now = now_ms();
@@ -4192,22 +4343,35 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
             // already newer than the removal.
             let added_at = if remote.is_live(&cid_hex) && !is_join {
                 remote.entries.iter().find(|e| e.community_id == cid_hex).map(|e| e.added_at).unwrap_or(now)
-            } else if !is_join && tombstoned_at > 0 {
-                held_since
+            } else if is_join {
+                joined.map_or(now, |(_, at)| at)
             } else {
-                now
+                // Recorded at its own hold time: `now` would out-date a removal this read missed.
+                held_since
             };
             let jm = join_material(&c);
             local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed: jm.clone(), current: jm, added_at, extra: Default::default() });
         }
-        let merged = remote.merge(&local);
+        let merged = remote.merge(&local).merge(&pending_tombstones());
         // No whole-list cap: fragmentation is what keeps each event publishable,
         // and the count limit is gone (CORD-02 §8).
-        match publish_fragments(transport, &merged, &prev_created, &read_frags, &write_relays).await {
+        match publish_fragments(transport, &merged, &prev_created, &read_frags, &on_relays, &targets).await {
             Ok(_) => {}
             Err(e) => {
                 crate::log_net_fail!("[CommunityList] publish FAILED ({}) — memberships stay local-only until the next edit", e);
                 return Err(e);
+            }
+        }
+        // A join counts as recorded only once the relays show it: a write from another device
+        // in the same second can win the coordinate, and an accepted publish says nothing of that.
+        let shown = fetch_fragments(transport, &relays).await.ok().flatten().map(|set| set.list).unwrap_or_default();
+        settle_pending(&shown);
+        if let Some(hex) = just_joined_hex.as_deref().filter(|h| local.entries.iter().any(|e| e.community_id == *h)) {
+            let at = joined.map_or(now, |(_, at)| at);
+            let landed = shown.entries.iter().any(|e| e.community_id == hex && e.added_at >= at);
+            if !landed {
+                crate::log_warn!("[CommunityList] the join of {} was published but isn't on the relays — retrying", &hex[..8]);
+                return Ok(false);
             }
         }
         Ok(true)
@@ -4234,26 +4398,48 @@ const LIST_REPUBLISH_BACKOFF_SECS: [u64; 6] = [2, 5, 15, 45, 120, 300];
 /// generic fn directly). Bound to its account, so a swap mid-backoff leaves it
 /// publishing A's list from A's client rather than from B's.
 pub fn republish_community_list_durable(just_joined: Option<crate::community::CommunityId>) {
+    match just_joined {
+        Some(id) => record_join_durable(id, now_ms()),
+        None => retry_republish(None),
+    }
+}
+
+/// Record a join made at `joined_at`, kept until it lands.
+fn record_join_durable(id: crate::community::CommunityId, joined_at: u64) {
+    let hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+    edit_pending(|p| {
+        if !p.joins.iter().any(|j| j.community_id == hex) {
+            p.joins.push(PendingJoin { community_id: hex.clone(), joined_at });
+        }
+    });
+    retry_republish(Some((id, joined_at)));
+}
+
+fn retry_republish(join: Option<(crate::community::CommunityId, u64)>) {
     if crate::state::nostr_client().is_none() {
         return;
     }
     crate::db::spawn_bound(async move {
         for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            match republish_community_list(&transport, just_joined.as_ref()).await {
+            match republish_community_list_at(&transport, join.as_ref().map(|(id, at)| (id, *at)), true).await {
                 Ok(true) => {
+                    if let Some((id, _)) = &join {
+                        let hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+                        edit_pending(|p| p.joins.retain(|j| j.community_id != hex));
+                    }
                     if attempt > 0 {
                         crate::log_info!("[CommunityList] membership recorded on retry #{}", attempt);
                     }
                     return;
                 }
-                Ok(false) => {} // skipped (remote fetch failed) — already logged; retry
+                Ok(false) => {} // skipped — already logged; retry
                 Err(e) => crate::log_warn!("[CommunityList] republish attempt #{} failed: {}", attempt, e),
             }
             crate::rt::time::sleep(std::time::Duration::from_secs(*wait)).await;
         }
         crate::log_warn!(
-            "[CommunityList] gave up recording membership after {} attempts — it will re-record on the next join/leave",
+            "[CommunityList] membership not recorded after {} attempts — kept, retried on the next boot",
             LIST_REPUBLISH_BACKOFF_SECS.len()
         );
     });
@@ -4268,7 +4454,9 @@ async fn tombstone_community_list<T: Transport + ?Sized>(
     community_id: &crate::community::CommunityId,
     relays: &[String],
     removed_at: u64,
+    wait: bool,
 ) -> Result<(), String> {
+    let Some(_write) = list_write_turn(wait).await else { return Err(LIST_BUSY.to_string()) };
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
     let read_relays = list_read_relays(relays).await;
     let own = own_list_relays().await;
@@ -4276,20 +4464,39 @@ async fn tombstone_community_list<T: Transport + ?Sized>(
     // A failed fetch here would drop other communities' entries (only the
     // tombstone would survive); preserve them by bailing — the leave re-records
     // on the next attempt, and the local teardown already happened.
-    let (mut doc, prev_created, read_frags) = match fetch_fragments(transport, &read_relays).await {
-        Ok(Some(set)) if !set.is_complete() => {
+    let read = read_fragments(transport, &read_relays).await?;
+    if read.unreadable {
+        return Err("a fragment would not open, and it may be the newest copy — refusing to write".to_string());
+    }
+    let targets = ListTargets::new(write_relays, &read.answered);
+    if targets.is_empty() {
+        return Err("no relay we write to answered the read".to_string());
+    }
+    let (mut doc, prev_created, read_frags, on_relays) = match read.set {
+        Some(set) if !set.is_complete() => {
             return Err(format!("hold {} of {} fragments — refusing to rewrite a set we haven't fully read", set.created_at.len(), set.declared));
         }
-        Ok(Some(set)) => (set.list, set.created_at, set.read_frags),
-        Ok(None) => (super::list::CommunityList::default(), Default::default(), Default::default()),
-        Err(e) => return Err(e),
+        Some(set) => (set.list, set.created_at, set.read_frags, set.on_relays),
+        None => Default::default(),
     };
+    // A late retry must never replace a newer removal with its own older one.
+    let removed_at = doc.tombstones.iter().filter(|t| t.community_id == cid_hex).map(|t| t.removed_at).fold(removed_at, u64::max);
     doc.tombstones.retain(|t| t.community_id != cid_hex);
-    doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at, extra: Default::default() });
+    doc.tombstones.push(super::list::Tombstone { community_id: cid_hex.clone(), removed_at, extra: Default::default() });
+    let doc = doc.merge(&pending_tombstones());
     // No size gate on the way out: a tombstone strictly shrinks the live set, and
     // a guard that blocks the only operation able to restore compliance is a
     // deadlock, not a guard (CORD-02 §8).
-    publish_fragments(transport, &doc, &prev_created, &read_frags, &write_relays).await.map(|_| ())
+    publish_fragments(transport, &doc, &prev_created, &read_frags, &on_relays, &targets).await?;
+    // Landed only once the relays show it: a write from another device in the same second can
+    // win the coordinate, and an accepted publish says nothing of that.
+    let shown = fetch_fragments(transport, &read_relays).await?.map(|set| set.list).unwrap_or_default();
+    settle_pending(&shown);
+    if shown.tombstones.iter().any(|t| t.community_id == cid_hex && t.removed_at >= removed_at) {
+        Ok(())
+    } else {
+        Err("the tombstone was published but isn't on the relays".to_string())
+    }
 }
 
 /// Retry a leave tombstone until it lands, on the same budget a join gets. A leave
@@ -4300,18 +4507,53 @@ async fn tombstone_community_list<T: Transport + ?Sized>(
 /// `removed_at` is the caller's, not `now` — re-stamping it here would let a retry
 /// that fires after a genuine rejoin bury that rejoin.
 pub fn tombstone_community_list_durable(community_id: crate::community::CommunityId, relays: Vec<String>, removed_at: u64) {
+    retry_pending_tombstone(add_pending_tombstone(&community_id, removed_at), relays);
+}
+
+fn add_pending_tombstone(community_id: &crate::community::CommunityId, removed_at: u64) -> PendingTombstone {
+    let pending = PendingTombstone { community_id: crate::simd::hex::bytes_to_hex_32(&community_id.0), removed_at };
+    edit_pending(|p| {
+        p.tombstones.retain(|t| t.community_id != pending.community_id || t.removed_at > pending.removed_at);
+        if !p.tombstones.iter().any(|t| t.community_id == pending.community_id) {
+            p.tombstones.push(pending.clone());
+        }
+    });
+    pending
+}
+
+/// Record a leave in the List: kept as pending first, written now when no other list write
+/// is running, else left to the background queue (which carries every pending leave).
+async fn record_leave<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, relays: &[String], removed_at: u64) {
+    let pending = add_pending_tombstone(community_id, removed_at);
+    match tombstone_community_list(transport, community_id, relays, removed_at, false).await {
+        Ok(()) => {}
+        Err(e) => {
+            if e != LIST_BUSY {
+                crate::log_net_fail!("[CommunityList] leave tombstone failed ({}) — retrying in the background", e);
+            }
+            retry_pending_tombstone(pending, relays.to_vec());
+        }
+    }
+}
+
+fn retry_pending_tombstone(pending: PendingTombstone, relays: Vec<String>) {
     if crate::state::nostr_client().is_none() {
         return;
     }
+    let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(&pending.community_id).map(crate::community::CommunityId) else { return };
     crate::db::spawn_bound(async move {
         for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
             crate::rt::time::sleep(std::time::Duration::from_secs(*wait)).await;
+            // Another write may have carried it already.
+            if !load_pending().tombstones.iter().any(|t| t.community_id == pending.community_id) {
+                return;
+            }
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            match tombstone_community_list(&transport, &community_id, &relays, removed_at).await {
+            match tombstone_community_list(&transport, &id, &relays, pending.removed_at, true).await {
                 Ok(()) => {
                     crate::log_net_info!(
                         "[CommunityList] leave tombstone for {} landed on retry #{}",
-                        &crate::simd::hex::bytes_to_hex_32(&community_id.0)[..8],
+                        &pending.community_id[..8],
                         attempt + 1
                     );
                     return;
@@ -4320,11 +4562,90 @@ pub fn tombstone_community_list_durable(community_id: crate::community::Communit
             }
         }
         crate::log_net_fail!(
-            "[CommunityList] leave tombstone for {} NEVER landed after {} attempts — it will come back on another device",
-            &crate::simd::hex::bytes_to_hex_32(&community_id.0)[..8],
+            "[CommunityList] leave tombstone for {} not landed after {} attempts — kept, retried on the next boot",
+            &pending.community_id[..8],
             LIST_REPUBLISH_BACKOFF_SECS.len()
         );
     });
+}
+
+/// List writes that haven't landed yet, kept in the account's DB: a leave or a join whose
+/// retries die with the app (closed, killed, offline) is otherwise lost for good, and the
+/// other devices never hear of it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PendingListWrites {
+    #[serde(default)]
+    tombstones: Vec<PendingTombstone>,
+    #[serde(default)]
+    joins: Vec<PendingJoin>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PendingTombstone {
+    community_id: String,
+    removed_at: u64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PendingJoin {
+    community_id: String,
+    /// When the join happened: a retry days later must not out-date a leave made since.
+    joined_at: u64,
+}
+
+const LIST_PENDING_KEY: &str = "community_list_pending_writes";
+
+fn load_pending() -> PendingListWrites {
+    let raw = crate::db::settings::get_sql_setting(LIST_PENDING_KEY.to_string()).ok().flatten();
+    raw.map_or_else(PendingListWrites::default, |s| {
+        serde_json::from_str(&s).unwrap_or_else(|e| {
+            // Kept aside rather than overwritten by the next edit: it may hold a leave.
+            crate::log_warn!("[CommunityList] pending list writes unreadable ({e}) — set aside");
+            let _ = crate::db::settings::set_sql_setting(format!("{LIST_PENDING_KEY}_unread"), s);
+            PendingListWrites::default()
+        })
+    })
+}
+
+fn edit_pending(f: impl FnOnce(&mut PendingListWrites)) {
+    // Process-wide: a task from an earlier session of the same account writes the same row.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = load_pending();
+    f(&mut pending);
+    if let Ok(json) = serde_json::to_string(&pending) {
+        if let Err(e) = crate::db::settings::set_sql_setting(LIST_PENDING_KEY.to_string(), json) {
+            crate::log_warn!("[CommunityList] could not persist pending list writes: {e}");
+        }
+    }
+}
+
+/// Resume every list write a previous run left unfinished. Once per session.
+fn resume_pending_list_writes() {
+    struct Resumed;
+    if crate::state::nostr_client().is_none() {
+        return;
+    }
+    let flag = crate::db::current_session().scoped::<Resumed, std::sync::atomic::AtomicBool>();
+    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let pending = load_pending();
+    if !pending.tombstones.is_empty() || !pending.joins.is_empty() {
+        crate::log_net_info!(
+            "[CommunityList] resuming {} unlanded leave(s) and {} unrecorded join(s)",
+            pending.tombstones.len(),
+            pending.joins.len()
+        );
+    }
+    for t in pending.tombstones {
+        retry_pending_tombstone(t, Vec::new());
+    }
+    for j in pending.joins {
+        if let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&j.community_id) {
+            record_join_durable(crate::community::CommunityId(cid), j.joined_at);
+        }
+    }
 }
 
 /// Sync memberships from the Community List across devices: fetch this account's list from
@@ -4362,11 +4683,7 @@ pub async fn retire_dead_invite<T: Transport + ?Sized>(transport: &T, community_
     if let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(community_id_hex) {
         let id = crate::community::CommunityId(cid);
         let at = now_ms();
-        if tombstone_community_list(transport, &id, relays, at).await.is_err() {
-            // The row is already gone locally; make sure the suppression still
-            // reaches sibling devices once the relays cooperate.
-            tombstone_community_list_durable(id, relays.to_vec(), at);
-        }
+        record_leave(transport, &id, relays, at).await;
     }
     crate::emit_event("community_invites_purged", &serde_json::json!({}));
 }
@@ -4429,6 +4746,7 @@ async fn seed_community_list<T: Transport + ?Sized>(transport: &T) {
 
 pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap_relays: &[String]) -> Result<ListSyncOutcome, String> {
     crate::db::scoped(async move {
+        resume_pending_list_writes();
         let relays = list_read_relays(bootstrap_relays).await;
         if relays.is_empty() {
             return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
@@ -4461,6 +4779,14 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
                 return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
             }
         };
+        // Our own removals still on their way to the relays count already: without them
+        // this pass would re-adopt a community we left before its tombstone landed.
+        let pending: Vec<super::list::Tombstone> = load_pending()
+            .tombstones
+            .into_iter()
+            .map(|t| super::list::Tombstone { community_id: t.community_id, removed_at: t.removed_at, extra: Default::default() })
+            .collect();
+        let list = list.merge(&super::list::CommunityList { tombstones: pending, ..Default::default() });
         // Receive-side teardown (the counterpart to the republish tombstone guard):
         // a community this device still holds but the synced list shows TOMBSTONED (a
         // sibling device left it) and NOT live gets torn down here, so a leave on one
@@ -13168,13 +13494,13 @@ mod tests {
 
         // The leave stamps its own removal time, and its publish fails.
         let left_at = now_ms() - 1000;
-        tombstone_community_list(&relay, community.id(), &relays, left_at).await.unwrap();
+        tombstone_community_list(&relay, community.id(), &relays, left_at, true).await.unwrap();
         // The user rejoins before the retry gets through.
         republish_community_list(&relay, Some(community.id())).await.unwrap();
         assert!(fetch_fragments(&relay, &relays).await.unwrap().unwrap().list.is_live(&cid));
 
         // The retry lands late, carrying the ORIGINAL stamp — which the rejoin outranks.
-        tombstone_community_list(&relay, community.id(), &relays, left_at).await.unwrap();
+        tombstone_community_list(&relay, community.id(), &relays, left_at, true).await.unwrap();
         let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
         assert!(set.list.is_live(&cid), "a retry re-stamping `now` would have buried the rejoin");
     }
@@ -13261,13 +13587,13 @@ mod tests {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
 
         // An OLD tombstone (a past leave) must not kill an invite received after it.
-        tombstone_community_list(&relay, &cid, &relays, now_ms() - 600_000).await.unwrap();
+        tombstone_community_list(&relay, &cid, &relays, now_ms() - 600_000, true).await.unwrap();
         crate::db::community::save_pending_invite(&cid_hex, "{}", "inviter", i64::MAX).unwrap();
         sync_community_list(&relay, &relays).await.unwrap();
         assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_some(), "a re-invite supersedes a past leave");
 
         // A tombstone NEWER than the invite is a verdict on it: purged on sync.
-        tombstone_community_list(&relay, &cid, &relays, now_ms() + 10_000).await.unwrap();
+        tombstone_community_list(&relay, &cid, &relays, now_ms() + 10_000, true).await.unwrap();
         sync_community_list(&relay, &relays).await.unwrap();
         assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_none(), "the sibling's removal clears the parked copy");
     }
@@ -13330,6 +13656,187 @@ mod tests {
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.0.publish_durable(e, r).await
         }
+    }
+
+    /// A relay too slow for an aggregate read (it answers after the rest have), and
+    /// silent when asked alone; it still takes writes.
+    struct Slow<'a>(&'a MemoryRelay, &'static str);
+    #[async_trait::async_trait]
+    impl Transport for Slow<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            let quick: Vec<String> = relays.iter().filter(|r| *r != self.1).cloned().collect();
+            if quick.is_empty() {
+                return Err("relay did not answer the fetch".to_string());
+            }
+            self.0.fetch(query, &quick).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    /// Publishes reach only `to`, as when the other relays drop the write.
+    struct WritesOnly<'a>(&'a MemoryRelay, &'static str);
+    #[async_trait::async_trait]
+    impl Transport for WritesOnly<'_> {
+        async fn publish(&self, e: &Event, _r: &[String]) -> Result<(), String> {
+            self.0.publish(e, &[self.1.to_string()]).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, _r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, &[self.1.to_string()]).await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unlanded_leave_is_kept_for_the_next_boot() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let id = crate::community::CommunityId([7; 32]);
+        tombstone_community_list_durable(id, vec!["wss://r".into()], 2_000);
+        tombstone_community_list_durable(id, vec!["wss://r".into()], 1_000);
+        let pending = load_pending();
+        assert_eq!(pending.tombstones.len(), 1, "one pending removal per community");
+        assert_eq!(pending.tombstones[0].removed_at, 2_000, "an older retry never replaces a newer removal");
+        republish_community_list_durable(Some(id));
+        assert_eq!(load_pending().joins.len(), 1, "a join waits for a client rather than being dropped");
+    }
+
+    #[tokio::test]
+    async fn a_leave_still_on_its_way_is_not_undone_by_the_next_sync() {
+        // The leave's tombstone never reached the relays (the app closed mid-retry), so
+        // the List still lists the community live. The next sync must not re-adopt it.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Leaving", relays.clone(), None).await.unwrap();
+        let hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        tombstone_community_list_durable(*community.id(), relays.clone(), now_ms());
+        crate::db::community::delete_community(&hex).unwrap();
+        assert!(fetch_fragments(&relay, &relays).await.unwrap().unwrap().list.is_live(&hex), "the relays never heard");
+
+        let outcome = sync_community_list(&relay, &relays).await.unwrap();
+        assert!(outcome.joined.is_empty(), "a pending leave is not re-adopted");
+        assert!(!crate::db::community::community_exists(community.id()).unwrap());
+    }
+
+    /// Yields mid-read, so overlapping writes really interleave as they do on a network.
+    struct Yielding<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for Yielding<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            tokio::task::yield_now().await;
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            tokio::task::yield_now().await;
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn ten_leaves_at_once_all_land() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let mut held = Vec::new();
+        for i in 0..10 {
+            held.push(create_community(&relay, &format!("C{i}"), relays.clone(), None).await.unwrap());
+        }
+        let net = Yielding(&relay);
+        let started = std::time::Instant::now();
+        for left in futures_util::future::join_all(held.iter().map(|c| leave_community(&net, c))).await {
+            left.unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "no leave waits behind another");
+        // One background write carries every leave still pending.
+        if let Some(t) = load_pending().tombstones.first().cloned() {
+            let id = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&t.community_id));
+            tombstone_community_list(&net, &id, &relays, t.removed_at, true).await.unwrap();
+        }
+        assert!(load_pending().tombstones.is_empty(), "the first queued write landed them all");
+        let list = fetch_fragments(&relay, &relays).await.unwrap().unwrap().list;
+        for c in &held {
+            assert!(!list.is_live(&crate::simd::hex::bytes_to_hex_32(&c.id().0)), "every leave landed");
+        }
+    }
+
+    #[tokio::test]
+    async fn rapid_leaves_and_joins_all_land() {
+        // Overlapping writes read the same version and publish in the same second; a relay
+        // keeps one per coordinate, so unserialized, all but one change is lost.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let a = create_community(&relay, "A", relays.clone(), None).await.unwrap();
+        let b = create_community(&relay, "B", relays.clone(), None).await.unwrap();
+        let c = create_community(&relay, "C", relays.clone(), None).await.unwrap();
+        let net = Yielding(&relay);
+        let (left_a, left_b, d) = tokio::join!(
+            leave_community(&net, &a),
+            leave_community(&net, &b),
+            create_community(&net, "D", relays.clone(), None),
+        );
+        left_a.unwrap();
+        left_b.unwrap();
+        let d = d.unwrap();
+        // What the background queue does: each pending write, waiting its turn.
+        for t in load_pending().tombstones {
+            let id = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&t.community_id));
+            if load_pending().tombstones.iter().any(|p| p.community_id == t.community_id) {
+                tombstone_community_list(&net, &id, &relays, t.removed_at, true).await.unwrap();
+            }
+        }
+        for j in load_pending().joins {
+            let id = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&j.community_id));
+            assert!(republish_community_list_at(&net, Some((&id, j.joined_at)), true).await.unwrap());
+        }
+        assert!(load_pending().tombstones.is_empty() && load_pending().joins.is_empty(), "everything landed");
+        let list = fetch_fragments(&relay, &relays).await.unwrap().unwrap().list;
+        let hex = |c: &CommunityV2| crate::simd::hex::bytes_to_hex_32(&c.id().0);
+        assert!(!list.is_live(&hex(&a)), "A's leave landed");
+        assert!(!list.is_live(&hex(&b)), "B's leave landed");
+        assert!(list.is_live(&hex(&c)), "C untouched");
+        assert!(list.is_live(&hex(&d)), "D's join landed");
+    }
+
+    #[tokio::test]
+    async fn a_write_never_replaces_a_copy_it_did_not_read() {
+        // A sibling's leave lives only on a relay too slow to answer this device's read,
+        // which sees an older copy elsewhere. Writing that stale view back out with a newer
+        // created_at would replace the tombstone on every relay and revive the community.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://own".to_string(), "wss://slow".to_string()];
+        let left = create_community(&relay, "Left", relays.clone(), None).await.unwrap();
+        let left_hex = crate::simd::hex::bytes_to_hex_32(&left.id().0);
+        leave_community(&WritesOnly(&relay, "wss://slow"), &left).await.unwrap();
+        let slow = vec!["wss://slow".to_string()];
+        assert!(!fetch_fragments(&relay, &slow).await.unwrap().unwrap().list.is_live(&left_hex), "the leave reached the slow relay");
+
+        create_community(&Slow(&relay, "wss://slow"), "Other", relays.clone(), None).await.unwrap();
+        let after = fetch_fragments(&relay, &slow).await.unwrap().unwrap().list;
+        assert!(!after.is_live(&left_hex), "the unread tombstone survives this device's write");
+
+        // A read that does reach every relay merges both copies: the leave wins.
+        let all = fetch_fragments(&relay, &relays).await.unwrap().unwrap().list;
+        assert!(!all.is_live(&left_hex), "a full read keeps the newest removal");
     }
 
     #[tokio::test]
