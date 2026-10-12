@@ -17,6 +17,13 @@
 
     let faviconHidden = $state(false);
     let imageHidden = $state(false);
+    // Why YouTube refused to play it here, by its error code: the card then opens it on YouTube.
+    let refused = $state('');
+    function refusal(code) {
+        if (code === 101 || code === 150 || code === 152) return 'Its owner only allows it on YouTube';
+        if (code === 100) return 'Removed or made private on YouTube';
+        return 'YouTube won\'t play it in other apps';
+    }
 
     // The player lives in lib/framehost.js, laid over this card: leaving the chat hands it to the
     // floating player still playing, and coming back takes it back, so it never reloads.
@@ -47,12 +54,15 @@
 
     async function play(e) {
         e.stopPropagation();
-        if (!canPlay) return h.openUrl(data.url);
+        if (!canPlay || refused) return h.openUrl(data.url);
         const token = Symbol();
         reservePlayer(token);
         const url = await h.playerUrl(data.video);
         if (!url || players.playing !== token) return;
-        const key = createFrame(url, data.title, owner);
+        const key = createFrame(url, data.title, owner, () => stopPlayer(key), (code) => {
+            refused = refusal(code);
+            stopPlayer(key);
+        });
         frameKey = key;
         startPlayer(key);
     }
@@ -103,9 +113,9 @@
                          onload={(e) => onLoad(e.currentTarget)} onerror={() => { imageHidden = true; }}>
                 {/if}
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <div class="dmsg-preview-play" class:external={!canPlay} onclick={play}>
-                    <div class="dmsg-preview-play-btn"><div class="icon {canPlay ? 'icon-play' : 'icon-external'}"></div></div>
-                    <div class="dmsg-preview-play-label">{canPlay ? 'Plays from YouTube' : 'Opens in your browser'}</div>
+                <div class="dmsg-preview-play" class:external={!canPlay || refused} onclick={play}>
+                    <div class="dmsg-preview-play-btn"><div class="icon {canPlay && !refused ? 'icon-play' : 'icon-external'}"></div></div>
+                    <div class="dmsg-preview-play-label">{refused || (canPlay ? 'Plays from YouTube' : 'Opens in your browser')}</div>
                 </div>
             {/if}
         </div>

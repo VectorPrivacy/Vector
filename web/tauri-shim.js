@@ -190,7 +190,7 @@
         const settings = await backend('get_synced_settings').catch(() => null);
         if (!settings || settings.players === false) throw 'Video players are switched off in Settings';
         const at = Number.isInteger(start) && start > 0 ? `&start=${start}` : '';
-        return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1${at}`;
+        return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}${at}`;
     });
 
     // A Vector link opened into this tab (`/#go/<payload>`, from vectorapp.io/go): taken once,

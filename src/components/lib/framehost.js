@@ -17,8 +17,11 @@ let raf = 0;
 // fullscreen. Never navigate Vector itself. The nested player inherits it.
 const SANDBOX = 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation';
 
-/** A new player loading `url`, owned by `owner`, out of sight until placed. */
-export function createFrame(url, title, owner) {
+const YOUTUBE = 'https://www.youtube-nocookie.com';
+
+/** A new player loading `url`, owned by `owner`, out of sight until placed. `onEnded` runs when
+ *  its video finishes, `onError(code)` when YouTube refuses to play it. */
+export function createFrame(url, title, owner, onEnded, onError) {
     const key = `f${++seq}`;
     const el = document.createElement('iframe');
     // Set before it loads: a cross-origin isolated page (Vector Web) frames only credentialless.
@@ -30,10 +33,60 @@ export function createFrame(url, title, owner) {
     el.title = title || 'Video';
     el.className = 'player-frame';
     el.src = url;
+    // Framed directly (Vector Web), the player is asked for its state here; framed through
+    // the desktop's loopback page, that page asks and relays.
+    if (url.startsWith(YOUTUBE + '/')) el.addEventListener('load', () => listen(el));
     document.body.append(el);
-    frames.set(key, { el, owner, place: null, shape: '' });
+    frames.set(key, { el, owner, place: null, shape: '', onEnded, onError });
     return key;
 }
+
+/** YouTube's widget protocol: a player reports its state once told someone is listening. */
+function listen(el) {
+    let tries = 0;
+    const hello = () => {
+        if (el.dataset.heard || !el.isConnected || tries++ > 40) return;
+        el.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), YOUTUBE);
+        setTimeout(hello, 250);
+    };
+    hello();
+}
+
+/** What a player's message says: `{ ended }`, `{ error: code }`, or nothing we act on. */
+function playerNews(e) {
+    if (e.data?.vectorPlayer === 'ended') return { ended: true };
+    if (e.data?.vectorPlayer === 'error') return { error: e.data.code | 0 };
+    if (e.origin !== YOUTUBE || typeof e.data !== 'string') return null;
+    let m;
+    try { m = JSON.parse(e.data); } catch { return null; }
+    if ((m.event === 'onStateChange' && m.info === 0) || (m.event === 'infoDelivery' && m.info?.playerState === 0)) return { ended: true };
+    if (m.event === 'onError') return { error: m.info | 0 };
+    return null;
+}
+
+/** Captions off as playback starts (YouTube switches them on by itself), then left to the viewer. */
+function captionsOff(f, e) {
+    let m;
+    try { m = JSON.parse(e.data); } catch { return; }
+    const off = () => e.source.postMessage(JSON.stringify({ event: 'command', func: 'unloadModule', args: ['captions'], id: 1, channel: 'widget' }), YOUTUBE);
+    const playing = (m.event === 'onStateChange' && m.info === 1) || (m.event === 'infoDelivery' && m.info?.playerState === 1);
+    if (playing && !f.started) { f.started = Date.now(); off(); }
+    if (m.event === 'onApiChange' && (!f.started || Date.now() - f.started < 3000)) off();
+}
+
+window.addEventListener('message', (e) => {
+    for (const f of frames.values()) {
+        if (e.source !== f.el.contentWindow) continue;
+        if (e.origin === YOUTUBE) {
+            f.el.dataset.heard = '1';
+            if (typeof e.data === 'string') captionsOff(f, e);
+        }
+        const news = playerNews(e);
+        if (news?.ended) f.onEnded?.();
+        else if (news && 'error' in news) f.onError?.(news.error);
+        return;
+    }
+});
 
 /** Take over player `key` from whoever held it; false when it is gone. */
 export function adoptFrame(key, owner) {

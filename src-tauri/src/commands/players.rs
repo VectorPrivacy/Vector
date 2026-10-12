@@ -13,6 +13,30 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OnceCell, Semaphore};
 
 const YOUTUBE_EMBED: &str = "https://www.youtube-nocookie.com/embed/";
+
+/// Asks the player for its state (YouTube's widget protocol, the one its iframe API speaks)
+/// and tells the app when the video ends or won't play, so the card and the floating player
+/// can close or explain. Captions start off: YouTube switches them on by itself (a language it
+/// guesses differs), so they are unloaded as playback starts, and left alone once the viewer
+/// has had time to ask for them.
+/// Static, so the page's CSP admits it by hash alone.
+const RELAY: &str = "const f=document.querySelector('iframe'),Y='https://www.youtube-nocookie.com';let heard=false,n=0,t0=0;\
+const off=()=>f.contentWindow.postMessage(JSON.stringify({event:'command',func:'unloadModule',args:['captions'],id:1,channel:'widget'}),Y);\
+const hi=()=>{if(heard||n++>40)return;f.contentWindow.postMessage(JSON.stringify({event:'listening',id:1,channel:'widget'}),Y);setTimeout(hi,250)};\
+f.addEventListener('load',hi);\
+addEventListener('message',e=>{if(e.origin!==Y||e.source!==f.contentWindow)return;heard=true;let m;try{m=JSON.parse(e.data)}catch(_){return}\
+if(((m.event==='onStateChange'&&m.info===1)||(m.event==='infoDelivery'&&m.info&&m.info.playerState===1))&&!t0){t0=Date.now();off()}\
+if(m.event==='onApiChange'&&(!t0||Date.now()-t0<3000))off();\
+if((m.event==='onStateChange'&&m.info===0)||(m.event==='infoDelivery'&&m.info&&m.info.playerState===0))parent.postMessage({vectorPlayer:'ended'},'*');\
+else if(m.event==='onError')parent.postMessage({vectorPlayer:'error',code:+m.info||0},'*')});";
+
+fn relay_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        use sha2::Digest;
+        vector_core::simd::base64::STANDARD.encode_to_string(sha2::Sha256::digest(RELAY.as_bytes()))
+    })
+}
 /// A webview's GET for the host page is well under this; anything longer is not the webview.
 const MAX_REQUEST: usize = 4096;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -123,8 +147,8 @@ fn page(request: &str, port: u16) -> Option<String> {
     Some(format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Player</title>\
 <style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe{{border:0;width:100%;height:100%}}</style>\
-<iframe src=\"{YOUTUBE_EMBED}{id}?autoplay=1&playsinline=1{start}\" referrerpolicy=\"strict-origin-when-cross-origin\" \
-allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" allowfullscreen></iframe>"
+<iframe src=\"{YOUTUBE_EMBED}{id}?autoplay=1&playsinline=1&enablejsapi=1&origin=http://localhost:{port}{start}\" referrerpolicy=\"strict-origin-when-cross-origin\" \
+allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" allowfullscreen></iframe><script>{RELAY}</script>"
     ))
 }
 
@@ -136,9 +160,10 @@ Content-Length: {}\r\n\
 Cache-Control: no-store\r\n\
 Referrer-Policy: strict-origin-when-cross-origin\r\n\
 X-Content-Type-Options: nosniff\r\n\
-Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-src https://www.youtube-nocookie.com; frame-ancestors {FRAME_ANCESTORS}\r\n\
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{}'; frame-src https://www.youtube-nocookie.com; frame-ancestors {FRAME_ANCESTORS}\r\n\
 Connection: close\r\n\r\n{body}",
-        body.len()
+        body.len(),
+        relay_hash()
     )
 }
 
@@ -151,11 +176,11 @@ mod tests {
     #[test]
     fn the_host_page_frames_only_a_well_formed_video() {
         let html = page(REQ, 4000).unwrap();
-        assert!(html.contains("youtube-nocookie.com/embed/aqz-KE-bpKQ?autoplay=1&playsinline=1&start=90\""));
+        assert!(html.contains("youtube-nocookie.com/embed/aqz-KE-bpKQ?autoplay=1&playsinline=1&enablejsapi=1&origin=http://localhost:4000&start=90\""));
         assert!(page(&REQ.replace("4000", "4001"), 4000).is_none(), "another Host is refused");
         assert!(page(&REQ.replace("aqz-KE-bpKQ", "aqz-KE-bpK\""), 4000).is_none());
         assert!(page(&REQ.replace("/youtube/", "/vimeo/"), 4000).is_none());
-        assert!(page(&REQ.replace("start=90", "start=9\"0"), 4000).unwrap().ends_with("playsinline=1\" referrerpolicy=\"strict-origin-when-cross-origin\" allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" allowfullscreen></iframe>"));
+        assert!(page(&REQ.replace("start=90", "start=9\"0"), 4000).unwrap().contains("origin=http://localhost:4000\" referrerpolicy=\"strict-origin-when-cross-origin\" allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" allowfullscreen></iframe>"));
         assert!(page(&REQ.replace("GET", "POST"), 4000).is_none());
     }
 
