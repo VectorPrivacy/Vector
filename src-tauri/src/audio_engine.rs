@@ -92,7 +92,15 @@ pub struct AudioEngine {
     /// The microphone is followed only once something has opened it: asking which one it is
     /// counts as using it on macOS, whose permission prompt would otherwise greet the login screen.
     input_watched: std::sync::atomic::AtomicBool,
+    /// The output is paused while nothing plays: a running stream keeps the audio thread
+    /// mixing silence and the system's audio engine awake. The watchdog owns both flips.
+    output_paused: std::sync::atomic::AtomicBool,
+    /// Asked by a play that found the output paused.
+    resume_wanted: std::sync::atomic::AtomicBool,
 }
+
+/// Seconds of nothing to play before the output pauses.
+const IDLE_PAUSE_SECS: u32 = 5;
 
 // SAFETY: cpal::Stream stores a boxed callback that is !Send+!Sync. The stream
 // is only ever created, replaced or dropped from init and the watchdog thread,
@@ -409,6 +417,8 @@ impl AudioEngine {
             wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
             input_generation: AtomicU64::new(0),
             input_watched: std::sync::atomic::AtomicBool::new(false),
+            output_paused: std::sync::atomic::AtomicBool::new(false),
+            resume_wanted: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -423,15 +433,19 @@ impl AudioEngine {
             .name("audio-devices".into())
             .spawn(move || {
                 let _rt = rt.inner().enter();
+                let mut silent_secs = 0u32;
                 loop {
                     let kicked = {
                         let (lock, cv) = &self.wake;
                         let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
                         let (mut guard, _) = cv
-                            .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| !*k)
+                            .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| {
+                                !*k && !self.resume_wanted.load(Ordering::Acquire)
+                            })
                             .unwrap_or_else(|e| e.into_inner());
                         std::mem::replace(&mut *guard, false)
                     };
+                    self.follow_silence(&mut silent_secs);
                     let output_now = crate::audio_devices::resolved_output_name();
                     let input_now = if self.input_watched.load(Ordering::Relaxed) {
                         crate::audio_devices::resolved_input_name()
@@ -484,6 +498,48 @@ impl AudioEngine {
             .ok();
     }
 
+    /// Pause the output once nothing has played for a while; play it again the moment
+    /// something wants it. Watchdog thread only, as every other touch of the stream is.
+    fn follow_silence(&self, silent_secs: &mut u32) {
+        let wanted = self.resume_wanted.swap(false, Ordering::AcqRel);
+        let audible = self.shared.live.read().map_or(true, |l| l.is_some())
+            || self.shared.sources.lock().map_or(true, |s| s.values().any(|src| src.playing));
+        let paused = self.output_paused.load(Ordering::Acquire);
+        if wanted || audible {
+            *silent_secs = 0;
+            if paused {
+                if let Some(stream) = self.stream.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    match stream.play() {
+                        Ok(()) => self.output_paused.store(false, Ordering::Release),
+                        Err(e) => eprintln!("[AudioEngine] Could not resume the output: {e}"),
+                    }
+                }
+            }
+            return;
+        }
+        if paused {
+            return;
+        }
+        *silent_secs += 1;
+        if *silent_secs >= IDLE_PAUSE_SECS {
+            if let Some(stream) = self.stream.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                if stream.pause().is_ok() {
+                    self.output_paused.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    /// Something is about to play: wake a paused output now, not at the next tick.
+    fn want_output(&self) {
+        if self.output_paused.load(Ordering::Acquire) {
+            let (lock, cv) = &self.wake;
+            let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            self.resume_wanted.store(true, Ordering::Release);
+            cv.notify_all();
+        }
+    }
+
     /// Reopens the output on the current default device and rebases every
     /// source's rate ratio on the new rate.
     fn rebuild_output(&self) -> Result<(), String> {
@@ -497,6 +553,8 @@ impl AudioEngine {
         }
         let old = self.stream.lock().unwrap_or_else(|e| e.into_inner()).replace(stream);
         drop(old);
+        // A new stream starts playing; the silence count pauses it again if nothing does.
+        self.output_paused.store(false, Ordering::Release);
         // Only desktop keeps a sample-rate cache to invalidate.
         #[cfg(desktop)]
         crate::audio::invalidate_device_sample_rate_cache();
@@ -515,6 +573,8 @@ impl AudioEngine {
             return Err("A call is already on the mixer".into());
         }
         *slot = Some(link);
+        drop(slot);
+        self.want_output();
         Ok(())
     }
 
@@ -749,6 +809,8 @@ impl AudioEngine {
         source.playing = true;
         source.idle_since = None;
         let pos_ms = (source.position / source.source_sample_rate as f64 * 1000.0) as u64;
+        drop(sources);
+        self.want_output();
         Ok(pos_ms)
     }
 
@@ -859,6 +921,7 @@ impl AudioEngine {
             .lock()
             .map_err(|_| "Lock poisoned")?
             .insert(id, source);
+        self.want_output();
 
         Ok(())
     }

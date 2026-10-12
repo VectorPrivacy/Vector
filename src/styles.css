@@ -24301,11 +24301,15 @@ body.profile-switcher-editing .profile-switcher-add {
   -webkit-backdrop-filter: blur(6px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.18s ease;
+  /* Hidden once faded out: an invisible full-screen blur is still composited. */
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0s linear 0.18s;
 }
 .processing-overlay.visible {
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
+  transition: opacity 0.18s ease, visibility 0s;
 }
 .processing-overlay-card {
   display: flex;
@@ -24327,6 +24331,11 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 @keyframes processing-overlay-spin {
   to { transform: rotate(360deg); }
+}
+/* A spinner in a closed panel still asks for a frame every tick. */
+.processing-overlay:not(.visible) .processing-overlay-spinner,
+.command-selector:not(.visible) .command-spinner {
+  animation-play-state: paused;
 }
 .processing-overlay-text {
   color: #e8e8ea;
