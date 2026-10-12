@@ -51,11 +51,8 @@ jobs:
         shell: msys2 {0}
         run: scripts/build-ffmpeg.sh "$FFMPEG_TARGET"
 
-      - name: OpenSSL and fixtures
+      - name: Fixtures
         run: |
-          vcpkg install openssl:x64-windows-static
-          echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows-static" >> $env:GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
           echo "FFMPEG_DIR=$env:GITHUB_WORKSPACE\src-tauri\native-deps\ffmpeg\$env:FFMPEG_TARGET" >> $env:GITHUB_ENV
           echo "VIDEO_FIXTURES=$env:RUNNER_TEMP\vid" >> $env:GITHUB_ENV
           choco install ffmpeg -y --no-progress

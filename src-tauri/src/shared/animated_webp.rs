@@ -198,7 +198,7 @@ pub fn encode_still(rgba: &[u8], width: u32, height: u32, quality: f32) -> Resul
     // SAFETY: config and picture are initialised by libwebp; the picture imports a copy of
     // `rgba`, the memory writer collects the output, and both are freed before returning.
     unsafe {
-        let mut config = ffi::WebPConfig::new_with_preset(ffi::WebPPreset::WEBP_PRESET_DEFAULT, quality)
+        let config = ffi::WebPConfig::new_with_preset(ffi::WebPPreset::WEBP_PRESET_DEFAULT, quality)
             .map_err(|_| String::from("webp encode: bad config"))?;
         if ffi::WebPValidateConfig(&config) == 0 {
             return Err("webp encode: bad config".into());
@@ -216,7 +216,11 @@ pub fn encode_still(rgba: &[u8], width: u32, height: u32, quality: f32) -> Resul
             && ffi::WebPEncode(&config, &mut pic) != 0;
         let code = pic.error_code;
         ffi::WebPPictureFree(&mut pic);
-        let out = if ok { Ok(std::slice::from_raw_parts(writer.mem, writer.size).to_vec()) } else { Err(format!("webp encode: {code:?}")) };
+        let out = match ok {
+            true if writer.size == 0 => Ok(Vec::new()),
+            true => Ok(std::slice::from_raw_parts(writer.mem, writer.size).to_vec()),
+            false => Err(format!("webp encode: {code:?}")),
+        };
         ffi::WebPMemoryWriterClear(&mut writer);
         out
     }

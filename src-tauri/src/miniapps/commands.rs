@@ -553,8 +553,8 @@ try {
             }
         }
 
-        // The MCP debug bridge's own commands pass in debug builds only; release also
-        // grants them no capability.
+        // The MCP debug bridge's own commands pass only in a debug build that has it; release
+        // also grants them no capability.
         const debugBridge = __VECTOR_DEBUG_BRIDGE__;
         wrappedCore.invoke = async (cmd, args) => {
             if (allowedCommands.includes(cmd) || (debugBridge && cmd.startsWith('plugin:mcp-bridge|'))) {
@@ -1101,7 +1101,7 @@ pub async fn miniapp_open(
     
         let init_script = INIT_SCRIPT.replace(
             "__VECTOR_DEBUG_BRIDGE__",
-            if cfg!(debug_assertions) { "true" } else { "false" },
+            if cfg!(all(debug_assertions, feature = "mcp-bridge")) { "true" } else { "false" },
         );
         #[cfg(target_os = "macos")]
         super::pointer_lock::install(&app).await;

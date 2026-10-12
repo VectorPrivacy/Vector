@@ -987,11 +987,13 @@ fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
     // `image-webp` 0.2.x leaves transparent regions holding the prior frame.
     if let Ok(anim) = crate::shared::animated_webp::Decoder::new(bytes) {
         if anim.frame_count() > 1 {
-            return anim.map(|f| f.map(|(rgba, ms)| (rgba, ms.max(20)))).collect();
+            if let Ok(frames) = anim.map(|f| f.map(|(rgba, ms)| (rgba, ms.max(20)))).collect() {
+                return Ok(frames);
+            }
         }
     }
 
-    // Still WebP — image-webp handles single-frame decoding correctly.
+    // Still WebP (or an animation libwebp could not finish, as its first frame): image-webp.
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::WebP);
     reader.limits(vector_core::crypto::bounded_image_limits());
     let img = reader

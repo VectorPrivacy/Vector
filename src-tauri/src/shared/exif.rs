@@ -65,10 +65,10 @@ fn png_exif(b: &[u8]) -> Option<Cow<'_, [u8]>> {
         let data = b.get(i + 8..(i + 8).checked_add(len)?)?;
         match ty {
             b"eXIf" => return Some(Cow::Borrowed(data)),
-            b"tEXt" | b"zTXt" | b"iTXt" => {
-                if let Some(tiff) = raw_profile_exif(ty, data) {
-                    return Some(Cow::Owned(tiff));
-                }
+            // The first such chunk decides: inflating every one would let a file of many small
+            // zlib bombs cost far more than a real image.
+            b"tEXt" | b"zTXt" | b"iTXt" if data.starts_with(RAW_PROFILE) => {
+                return raw_profile_exif(ty, data).map(Cow::Owned);
             }
             b"IEND" => return None,
             _ => {}
@@ -77,13 +77,15 @@ fn png_exif(b: &[u8]) -> Option<Cow<'_, [u8]>> {
     }
 }
 
+const RAW_PROFILE: &[u8] = b"Raw profile type exif\0";
+
 /// Upper bound on an inflated text chunk; an APP1 caps EXIF at 64 KiB, hex doubles it.
 const MAX_TEXT: u64 = 1 << 20;
 
 /// ImageMagick's and exiftool's pre-`eXIf` form: a "Raw profile type exif" text chunk holding
 /// `\nexif\n<decimal length>\n<hex lines>` over an `Exif\0\0`-prefixed block.
 fn raw_profile_exif(ty: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    let text = data.strip_prefix(b"Raw profile type exif\0")?;
+    let text = data.strip_prefix(RAW_PROFILE)?;
     let (compressed, text) = match ty {
         b"tEXt" => (false, text),
         b"zTXt" => (true, text.strip_prefix(&[0])?),
@@ -164,7 +166,8 @@ const EXIF_DROPPED: &[u16] = &[0x927C, 0xA002, 0xA003];
 
 /// Caps that keep a hostile block from costing more than a real one.
 const MAX_ENTRIES: usize = 1024;
-const MAX_OUT: usize = 64 * 1024;
+/// What one APP1 can carry after its length field and `Exif\0\0`.
+const MAX_OUT: usize = 65535 - 2 - 6;
 
 #[derive(Clone, Copy)]
 struct Order {
@@ -173,11 +176,11 @@ struct Order {
 
 impl Order {
     fn u16(self, b: &[u8], at: usize) -> Option<u16> {
-        let v: [u8; 2] = b.get(at..at + 2)?.try_into().ok()?;
+        let v: [u8; 2] = b.get(at..at.checked_add(2)?)?.try_into().ok()?;
         Some(if self.le { u16::from_le_bytes(v) } else { u16::from_be_bytes(v) })
     }
     fn u32(self, b: &[u8], at: usize) -> Option<u32> {
-        let v: [u8; 4] = b.get(at..at + 4)?.try_into().ok()?;
+        let v: [u8; 4] = b.get(at..at.checked_add(4)?)?.try_into().ok()?;
         Some(if self.le { u32::from_le_bytes(v) } else { u32::from_be_bytes(v) })
     }
     fn put16(self, v: u16) -> [u8; 2] {
@@ -256,13 +259,16 @@ fn write_ifd(src: &[u8], order: Order, at: usize, kind: Ifd, orientation: Option
         if dropped || (kind == Ifd::Zero && tag == TAG_ORIENTATION) {
             continue;
         }
-        let len = size.checked_mul(n as usize)?;
-        let value = if len <= 4 {
-            src.get(e + 8..e + 8 + len)?
-        } else {
-            let off = order.u32(src, e + 8)? as usize;
-            src.get(off..off.checked_add(len)?)?
-        };
+        // An entry whose value lies outside the block is skipped, not the whole block.
+        let value = size.checked_mul(n as usize).and_then(|len| {
+            if len <= 4 {
+                src.get(e + 8..e + 8 + len)
+            } else {
+                let off = order.u32(src, e + 8)? as usize;
+                src.get(off..off.checked_add(len)?)
+            }
+        });
+        let Some(value) = value else { continue };
         if sub.is_some() && (ty != 4 && ty != 13 || n != 1) {
             continue;
         }
