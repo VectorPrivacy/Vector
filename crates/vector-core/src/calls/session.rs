@@ -637,21 +637,49 @@ async fn on_link_closed(id: &str) {
     }
 }
 
-/// Reopens the call's audio, on whatever devices are now the defaults.
+/// Reopens the call's audio, on whatever devices are now the defaults. One at a time: an
+/// unplugged headset changes the default input and output together, and two overlapping
+/// reopens fight over the devices and the mixer.
 pub async fn restart_audio() {
-    let Some((id, Some(conn))) = with_call(|c| (c.id.clone(), c.conn.clone())) else { return };
-    let Ok(platform) = platform::get() else { return };
+    static RESTART: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _turn = RESTART.lock().await;
+    // Devices settle over a few seconds after a change; a reopen that fails meanwhile is
+    // retried rather than ending the call, inside the peer's silence window.
+    let mut stats = None;
+    for wait in [0u64, 500, 1500, 3000] {
+        crate::rt::time::sleep(Duration::from_millis(wait)).await;
+        match reopen_audio(&mut stats).await {
+            Reopen::Done => return,
+            Reopen::Failed(e) => log_warn!("[CALLS] Could not reopen audio after a device change: {e}"),
+        }
+    }
+    if let Some(id) = with_call(|c| c.media.is_none().then(|| c.id.clone())).flatten() {
+        end(&id, "audio_failed");
+    }
+}
+
+enum Reopen {
+    Done,
+    Failed(String),
+}
+
+/// `stats` carries the counters from the engine the first attempt dropped to every retry.
+async fn reopen_audio(stats: &mut Option<Arc<super::stats::MediaStats>>) -> Reopen {
+    let Some((id, Some(conn))) = with_call(|c| (c.id.clone(), c.conn.clone())) else { return Reopen::Done };
+    let Ok(platform) = platform::get() else { return Reopen::Done };
     // Drop the old engine first: it holds the devices.
     let Some((old, muted, volume, share, share_volume)) =
         with_call_id(&id, |c| (c.media.take(), c.muted, c.volume, Arc::clone(&c.share), c.share_volume))
     else {
-        return;
+        return Reopen::Done;
     };
     // The counters outlive the engine: the liveness check reads them for the
     // call's life, and a reset reads as the peer having gone quiet.
-    let stats = old.as_ref().map(|m| m.stats());
+    if let Some(m) = old.as_ref() {
+        *stats = Some(m.stats());
+    }
     drop(old);
-    match platform.start_audio(conn, AudioStart { volume, share_volume, stats, share }).await {
+    match platform.start_audio(conn, AudioStart { volume, share_volume, stats: stats.clone(), share }).await {
         Ok(m) => {
             m.set_muted(muted);
             let mic_off = !m.has_mic();
@@ -666,11 +694,9 @@ pub async fn restart_audio() {
                     emit_state(&s);
                 }
             }
+            Reopen::Done
         }
-        Err(e) => {
-            log_warn!("[CALLS] Could not reopen audio after a device change: {e}");
-            end(&id, "audio_failed");
-        }
+        Err(e) => Reopen::Failed(e),
     }
 }
 

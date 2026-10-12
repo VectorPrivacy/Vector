@@ -101,8 +101,8 @@ impl MediaEngine {
         let share_jitter = Arc::new(Mutex::new(Jitter::default()));
 
         // Capture: the thread owns the cpal stream (it is not Send) and runs the encode loop.
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        let capture = {
+        let spawn_capture = |mic_wanted: bool, abandoned: Arc<AtomicBool>| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
             let stop = Arc::clone(&stop);
             let muted = Arc::clone(&muted);
             let mic = Arc::clone(&mic);
@@ -111,26 +111,39 @@ impl MediaEngine {
             let conn = conn.clone();
             std::thread::Builder::new()
                 .name("calls-capture".into())
-                .spawn(move || capture_thread(conn, link, out_rate, stop, muted, mic, stats, ready_tx))
-                .map_err(|e| e.to_string())?
+                .spawn(move || capture_thread(conn, link, out_rate, stop, muted, mic, stats, ready_tx, mic_wanted, abandoned))
+                .map(|t| (t, ready_rx))
+                .map_err(|e| e.to_string())
         };
+        let fail = |e: String| {
+            if on_mixer {
+                mixer.detach_live();
+            }
+            stop.store(true, Ordering::SeqCst);
+            Err(e)
+        };
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let (mut capture, ready_rx) = spawn_capture(true, Arc::clone(&abandoned))?;
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                if on_mixer {
-                    mixer.detach_live();
-                }
-                stop.store(true, Ordering::SeqCst);
                 let _ = capture.join();
-                return Err(e);
+                return fail(e);
             }
-            Err(_) => {
-                if on_mixer {
-                    mixer.detach_live();
+            // A microphone stuck opening (a device mid-unplug) never ends a call: that attempt
+            // is left to exit when it returns, and the call goes on muted.
+            Err(_) if conn.is_some() => {
+                abandoned.store(true, Ordering::SeqCst);
+                vector_core::log_warn!("[Calls] the microphone did not open in time, the call goes on muted");
+                mic.store(false, Ordering::Relaxed);
+                let (silent, ready_rx) = spawn_capture(false, Arc::new(AtomicBool::new(false)))?;
+                match ready_rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Ok(())) => capture = silent,
+                    Ok(Err(e)) => return fail(e),
+                    Err(_) => return fail("audio did not start".into()),
                 }
-                stop.store(true, Ordering::SeqCst);
-                return Err("microphone did not start".into());
             }
+            Err(_) => return fail("microphone did not start".into()),
         }
 
         let Some(conn) = conn else {
@@ -299,6 +312,8 @@ fn capture_thread(
     mic: Arc<AtomicBool>,
     stats: Arc<MediaStats>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    mic_wanted: bool,
+    abandoned: Arc<AtomicBool>,
 ) {
     let dead = Arc::new(AtomicBool::new(false));
     let setup = || -> Result<(cpal::Stream, Arc<SpscRing>, u32), String> {
@@ -338,7 +353,17 @@ fn capture_thread(
         Ok((stream, ring, in_rate))
     };
 
-    let opened = if crate::mic_access::granted() { setup() } else { Err(crate::mic_access::DENIED.to_string()) };
+    let opened = if !mic_wanted {
+        Err("the microphone did not open in time".to_string())
+    } else if crate::mic_access::granted() {
+        setup()
+    } else {
+        Err(crate::mic_access::DENIED.to_string())
+    };
+    // Gave up on while it was opening: a replacement already runs the call.
+    if abandoned.load(Ordering::SeqCst) {
+        return;
+    }
     let (_stream, cap_ring, in_rate) = match opened {
         Ok((stream, ring, rate)) => (Some(stream), ring, rate),
         // A call goes on without a microphone: muted, but still hearing the peer and still
