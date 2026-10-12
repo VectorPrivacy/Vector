@@ -1216,8 +1216,18 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             let state = crate::STATE.lock().await;
                             state.is_syncing
                         };
+                        // What this relay is to us decides what it can have missed: DMs only
+                        // where we read, Community planes only on a Community relay. Someone
+                        // else's inbox, connected for one send, is neither.
+                        let (has_read, has_gossip) = match vector_core::state::nostr_client() {
+                            Some(client) => match client.relay(&url_str).await {
+                                Ok(Some(r)) => (r.capabilities().has_read(), r.capabilities().has_gossip()),
+                                _ => (false, false),
+                            },
+                            None => (false, false),
+                        };
                         let reconnect = !seen_connected().lock().unwrap_or_else(|e| e.into_inner()).insert(url_str.clone());
-                        if is_syncing && reconnect && catchup_after_sync().lock().unwrap_or_else(|e| e.into_inner()).insert(url_str.clone()) {
+                        if has_read && is_syncing && reconnect && catchup_after_sync().lock().unwrap_or_else(|e| e.into_inner()).insert(url_str.clone()) {
                             // The resent live sub misses what landed while this socket was down, and
                             // the sync may already have passed the relay: catch it up when it ends.
                             let (handle_inner, url_string) = (handle_clone.clone(), url_str.clone());
@@ -1235,13 +1245,15 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 }
                             });
                         }
-                        if !is_syncing {
+                        if !is_syncing && has_read {
                             let handle_inner = handle_clone.clone();
                             let url_string = url_str.clone();
                             // spawn-detached: one relay's status toast.
                             tokio::spawn(async move {
                                 crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
                             });
+                        }
+                        if !is_syncing && (has_read || has_gossip) {
                             // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
                             // sweep — coalesces a multi-relay reconnect burst into one sweep.
                             // Discovery-MODE relays (kind-10050 indexers that are not also
@@ -1250,14 +1262,6 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             // whose pooled flags include READ is a real user/default relay
                             // regardless of list membership and keeps its resync.
                             let norm = vector_core::inbox_relays::normalize_relay_url(&url_str);
-                            let has_read = if let Some(client) = vector_core::state::nostr_client() {
-                                matches!(
-                                    client.relay(&url_str).await,
-                                    Ok(Some(r)) if r.capabilities().has_read()
-                                )
-                            } else {
-                                false
-                            };
                             let discovery_only = !has_read
                                 && vector_core::state::discovery_relay_iter()
                                     .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm)

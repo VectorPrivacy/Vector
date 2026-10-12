@@ -1069,7 +1069,9 @@ pub async fn resolve_gift_wrap_targets(
             let already_added = transient_added.iter()
                 .any(|u| normalize_url_for_match(&u.to_string()) == norm);
             if in_pool || already_added { continue; }
-            if pool.add_managed_relay(s.as_str()).await.is_ok() {
+            // Write-only: someone else's inbox carries this send and nothing else. Read
+            // capability would put our own subscriptions on it, and count it as ours.
+            if pool.add_managed_relay(s.as_str()).capabilities(nostr_sdk::prelude::RelayCapabilities::WRITE).await.is_ok() {
                 if let Ok(Some(relay)) = pool.relay(s.as_str()).await {
                     relay.connect();
                     transient_added.push(relay.url().clone());
