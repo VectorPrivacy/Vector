@@ -11,7 +11,7 @@
 //! (both `#p=me`) stay on the DM subscription — the author-set here never
 //! includes an identity key, so the two never collide.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId, Timestamp};
@@ -184,26 +184,33 @@ pub async fn clear() {
 /// (each subscribed author has its `dispatch_wrap` arm — never one without the
 /// other).
 pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
-    let mut out = Vec::new();
-    for c in communities {
-        out.push(derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk());
-        out.push(control_author(c));
-        // The dissolved plane (CORD-02 §9) — so a mid-session dissolution seals live.
-        out.push(super::derive::dissolved_group_key(c.id()).pk());
-        for ch in &c.channels {
-            // A KEYLESS private channel has no readable chat plane — channel_secret's
-            // root fallback would subscribe the PUBLIC plane for it. Its rekey plane
-            // (below) is still watched, which is how its key arrives.
-            if ch.private && ch.key.is_none() {
-                continue;
-            }
-            let (secret, epoch) = c.channel_secret(ch);
-            out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
-        }
-        out.extend(rekey_authors(c));
-    }
-    out.sort_by_key(|p| p.to_hex());
+    let mut out: Vec<PublicKey> = communities.iter().flat_map(community_addresses).collect();
+    // Byte order is the hex order, without a String per comparison.
+    out.sort_unstable_by_key(|p| p.to_bytes());
     out.dedup();
+    out
+}
+
+/// One community's plane addresses: the subscription's author set and the dispatch routes are
+/// both built from this, so what is subscribed and what is recognized can't drift.
+fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
+    let mut out = vec![
+        derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk(),
+        control_author(c),
+        // The dissolved plane (CORD-02 §9) — so a mid-session dissolution seals live.
+        super::derive::dissolved_group_key(c.id()).pk(),
+    ];
+    for ch in &c.channels {
+        // A KEYLESS private channel has no readable chat plane — channel_secret's
+        // root fallback would subscribe the PUBLIC plane for it. Its rekey plane
+        // (below) is still watched, which is how its key arrives.
+        if ch.private && ch.key.is_none() {
+            continue;
+        }
+        let (secret, epoch) = c.channel_secret(ch);
+        out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
+    }
+    out.extend(rekey_authors(c));
     out
 }
 
@@ -278,12 +285,37 @@ async fn stamp_dissolved_chats(id: &CommunityId) {
 /// write, and the TTL only backstops a missed writer; it adds nothing to
 /// rotation propagation, which already waits on the follow worker's write.
 struct HeldV2Cache;
-type HeldV2Slot = std::sync::Mutex<Option<(web_time::Instant, Arc<Vec<CommunityV2>>)>>;
+type HeldV2Slot = std::sync::Mutex<Option<(web_time::Instant, Arc<HeldV2>)>>;
 fn held_v2_cache() -> Arc<HeldV2Slot> {
     crate::db::current_session().scoped::<HeldV2Cache, HeldV2Slot>()
 }
 
-pub fn load_held_v2_cached() -> Arc<Vec<CommunityV2>> {
+/// The held communities, and which of them each plane address belongs to: a wrap's author is
+/// its plane's address, so it routes straight to its community instead of being tried against
+/// every one held.
+pub struct HeldV2 {
+    communities: Vec<CommunityV2>,
+    /// Built on the first route, from the same snapshot, so it can't disagree with it.
+    routes: std::sync::OnceLock<HashMap<[u8; 32], usize>>,
+}
+
+impl HeldV2 {
+    /// The held community whose plane `author` addresses.
+    pub fn route(&self, author: &PublicKey) -> Option<&CommunityV2> {
+        let routes = self.routes.get_or_init(|| {
+            let mut map = HashMap::new();
+            for (i, c) in self.communities.iter().enumerate() {
+                for pk in community_addresses(c) {
+                    map.entry(pk.to_bytes()).or_insert(i);
+                }
+            }
+            map
+        });
+        routes.get(&author.to_bytes()).map(|&i| &self.communities[i])
+    }
+}
+
+pub fn load_held_v2_cached() -> Arc<HeldV2> {
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let cache = held_v2_cache();
     {
@@ -294,7 +326,7 @@ pub fn load_held_v2_cached() -> Arc<Vec<CommunityV2>> {
             }
         }
     }
-    let fresh = Arc::new(load_held_v2());
+    let fresh = Arc::new(HeldV2 { communities: load_held_v2(), routes: std::sync::OnceLock::new() });
     *cache.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((web_time::Instant::now(), Arc::clone(&fresh)));
     fresh
@@ -559,10 +591,29 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 seen.insert(keep);
             }
         }
-        let communities = load_held_v2_cached();
-        for c in communities.iter() {
+        // Handled in an earlier session (the Concord ledger), or a message stored under this
+        // outer id before v2 kept the ledger: opening it again would find nothing new.
+        let (wrap_id, wrap_at) = (event.id.to_bytes(), event.created_at.as_secs());
+        let durable = event.kind.as_u16() == stream::KIND_WRAP;
+        if durable
+            && (crate::db::wrappers::processed_wrapper_exists(&wrap_id)
+                || crate::db::events::wrapper_event_exists(&event.id.to_hex()).unwrap_or(false))
+        {
+            return;
+        }
+        // Handled for good: every later session skips it before opening it.
+        let remember = || {
+            if durable {
+                let _ = crate::db::wrappers::save_processed_wrapper(&wrap_id, wrap_at, crate::db::wrappers::TRANSPORT_CONCORD);
+            }
+        };
+        let held = load_held_v2_cached();
+        let Some(c) = held.route(&event.pubkey) else {
+            return;
+        };
+        {
             match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
-                inbound::DispatchedV2::NotOurs => continue,
+                inbound::DispatchedV2::NotOurs => return,
                 // A control OR a rekey wrap: just enqueue a follow for this community.
                 // Non-blocking + coalesced — the single follow worker serializes control
                 // and rekey per community (no concurrent whole-row clobber) off this hot
@@ -592,7 +643,12 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // own send, or a forged edit/delete yields no outcome and re-fires
                 // nothing.
                 inbound::DispatchedV2::Chat { channel_id, event } => {
-                    match inbound::persist_chat_event(&event, &channel_id, &my_pk).await {
+                    let outcome = inbound::persist_chat_event(&event, &channel_id, &my_pk).await;
+                    // A reaction or edit whose message hasn't arrived stays retryable.
+                    if outcome.is_some() || !inbound::awaits_target(&event).await {
+                        remember();
+                    }
+                    match outcome {
                         // "New" = first ingest, which a relay-backfill replay of a month-old
                         // event also satisfies — is_new comes from the inner send time so
                         // stale replays persist + surface without ringing anything.
@@ -628,6 +684,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
                         if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
                             let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
+                            remember();
                             if changed {
                                 handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
                             }
@@ -673,7 +730,11 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
-                _ => return, // typing (and non-surfaced guestbook kinds) handled inline by the dispatcher.
+                // Typing (never stored) and what the dispatcher handled inline or found to be noise.
+                _ => {
+                    remember();
+                    return;
+                }
             }
         }
     })
@@ -1213,17 +1274,57 @@ mod tests {
         // persist outcome (the callbacks-from-persist model).
         let rec = Arc::new(Recorder::default());
         crate::community::v2::realtime::clear().await; // fresh seen-set for the test
+        let first_id = wrap.id;
         dispatch_event(wrap.clone(), rec.clone()).await;
         dispatch_event(wrap, rec.clone()).await;
 
-        let got = rec.got.lock().unwrap();
-        assert_eq!(got.len(), 1, "a re-delivered wrap fires the handler exactly once");
-        assert_eq!(got[0].1, "live ping");
-        assert_eq!(got[0].0, crate::simd::hex::bytes_to_hex_32(&general.0));
+        {
+            let got = rec.got.lock().unwrap();
+            assert_eq!(got.len(), 1, "a re-delivered wrap fires the handler exactly once");
+            assert_eq!(got[0].1, "live ping");
+            assert_eq!(got[0].0, crate::simd::hex::bytes_to_hex_32(&general.0));
+        }
+        assert!(crate::db::wrappers::processed_wrapper_exists(&first_id.to_bytes()), "a handled wrap joins the ledger");
+
+        // A reaction to a message we don't hold yet stays retryable: no ledger entry.
+        let unseen = "ab".repeat(32);
+        let reaction = super::super::chat::build_reaction_rumor(
+            member.public_key(), &general, community.root_epoch, &unseen, &member.public_key().to_hex(), 14, "+", None, 7_000,
+        );
+        let (early, _) = super::super::chat::seal_chat_rumor(&reaction, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(7), false).unwrap();
+        let early_id = early.id;
+        dispatch_event(early, rec.clone()).await;
+        assert!(!crate::db::wrappers::processed_wrapper_exists(&early_id.to_bytes()), "an early reaction is not ledgered");
+
+        // A wrap already stored under its outer id is dropped before it's opened. The stored
+        // row is made to claim a second message's wrap, so only that skip keeps it silent.
+        let rumor2 = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "second", None, &[], vec![], 6_000);
+        let (wrap2, _) = super::super::chat::seal_chat_rumor(&rumor2, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(6), false).unwrap();
+        let moved = crate::db::get_write_connection_guard_static().unwrap().execute(
+            "UPDATE events SET wrapper_event_id = ?1 WHERE wrapper_event_id = ?2",
+            rusqlite::params![wrap2.id.to_hex(), first_id.to_hex()],
+        ).unwrap();
+        assert_eq!(moved, 1, "the first message was stored under its outer id");
+        dispatch_event(wrap2, rec.clone()).await;
+        assert_eq!(rec.got.lock().unwrap().len(), 1, "a stored outer id never reaches the handler");
+    }
+
+    #[test]
+    fn every_plane_address_routes_to_its_own_community() {
+        let (a, b) = (a_community("A"), a_community("B"));
+        let held = HeldV2 { communities: vec![a.clone(), b.clone()], routes: Default::default() };
+        for c in [&a, &b] {
+            for pk in community_addresses(c) {
+                assert_eq!(held.route(&pk).map(|r| r.id().0), Some(c.id().0));
+            }
+        }
+        assert!(held.route(&Keys::generate().public_key()).is_none(), "a stranger's wrap routes nowhere");
     }
 
     #[tokio::test]
     async fn follow_queue_coalesces_a_burst_and_re_enqueues_after_processing() {
+        // The queue is process-wide: every test that installs or clears it holds this guard.
+        let _serial = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Install a test channel in place of the worker's, so we can observe what the
         // queue delivers without a live client.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
@@ -1279,6 +1380,7 @@ mod tests {
 
     #[test]
     fn urgency_promotes_an_id_already_queued() {
+        let _serial = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
         *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
         V2_FOLLOW_PENDING.lock().unwrap().clear();

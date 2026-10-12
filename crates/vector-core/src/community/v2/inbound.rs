@@ -294,6 +294,20 @@ pub async fn hydrate_target(event: &ChatEvent, channel_id: &str) {
     }
 }
 
+/// Whether `event` targets a message (or, for a delete, a reaction) not held yet: applying it
+/// waits for the target, so its wrap must stay retryable. Run after [`persist_chat_event`],
+/// whose hydration has already loaded any stored target.
+pub async fn awaits_target(event: &ChatEvent) -> bool {
+    let target = match event {
+        ChatEvent::Reaction { target, .. } | ChatEvent::Edit { target, .. } | ChatEvent::Delete { target, .. } => {
+            crate::simd::hex::bytes_to_hex_32(target)
+        }
+        _ => return false,
+    };
+    let st = crate::state::STATE.lock().await;
+    st.find_message(&target).is_none() && st.find_reaction(&target).is_none()
+}
+
 /// Apply an already-opened chat event to STATE + the shared store — the LIVE
 /// counterpart of [`crate::VectorCore::v2_backfill_channel`]'s catch-up persistence.
 /// The dispatcher opened the wrap (so nothing decrypts twice); the returned outcome

@@ -584,6 +584,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     vector_core::db::spawn_bound(async move {
         let mut flood_count: u64 = 0;
         let mut flood_micros: u64 = 0;
+        // The v1 share of the fold, so the probe says which protocol the time goes to.
+        let (mut v1_count, mut v1_micros) = (0u64, 0u64);
         loop {
             let (event, fresh) = tokio::select! {
                 biased;
@@ -594,13 +596,19 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             let k = event.kind.as_u16();
             let id8 = if fresh { event.id.to_hex()[..8].to_string() } else { String::new() };
             let t = std::time::Instant::now();
-            if (3300..=3311).contains(&k) {
+            let v1 = (3300..=3311).contains(&k);
+            if v1 {
                 handle_community_event(event).await;
             } else {
                 handle_community_v2_event(event).await;
             }
+            let spent = t.elapsed().as_micros() as u64;
             flood_count += 1;
-            flood_micros += t.elapsed().as_micros() as u64;
+            flood_micros += spent;
+            if v1 {
+                v1_count += 1;
+                v1_micros += spent;
+            }
             if fresh {
                 println!(
                     "[lag-probe] community lane handled kind={k} id={id8} in {:?} ({flood_count} events, {}ms folded so far)",
@@ -609,8 +617,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                 );
             } else if flood_count.is_multiple_of(500) {
                 println!(
-                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative",
-                    flood_micros / 1000
+                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative (v1: {v1_count} in {}ms)",
+                    flood_micros / 1000,
+                    v1_micros / 1000
                 );
             }
         }

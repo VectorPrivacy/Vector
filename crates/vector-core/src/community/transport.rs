@@ -491,11 +491,56 @@ struct PooledPlane {
 static PLANE_POOL: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashMap<String, PooledPlane>)>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashMap::new())));
 
-/// A pooled connection unused for this long is closed on the next sweep — long
-/// enough to span a community's whole backfill, short enough not to hoard sockets.
-const PLANE_POOL_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+/// A pooled connection unused for this long is closed — long enough to span a
+/// community's whole backfill, short enough not to hoard sockets.
+const PLANE_POOL_IDLE_TTL: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(200)
+} else {
+    std::time::Duration::from_secs(90)
+};
 /// Hard cap on simultaneously-pooled plane connections (LRU-evicted).
 const PLANE_POOL_MAX: usize = 24;
+/// Whether a sweep is waiting on the pool's next expiry: one at a time, none for an empty pool.
+static PLANE_SWEEP_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Remove the entries idle past the TTL, returning their clients to disconnect.
+fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant) -> Vec<Client> {
+    let expired: Vec<String> = pool.iter()
+        .filter(|(_, p)| now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
+        .map(|(k, _)| k.clone())
+        .collect();
+    expired.into_iter().filter_map(|k| pool.remove(&k)).map(|p| p.client).collect()
+}
+
+/// Close pooled connections as they pass the idle TTL, without waiting for another fetch to
+/// notice: after a catch-up nothing fetches, and every connection would stay open all session.
+fn arm_plane_sweep() {
+    if PLANE_SWEEP_ARMED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    // spawn-detached: drains the process-wide pool; touches no account state.
+    crate::rt::spawn(async move {
+        loop {
+            let next = {
+                let g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+                g.1.values().map(|p| p.last_used).min()
+            };
+            let Some(oldest) = next else { break };
+            let due = PLANE_POOL_IDLE_TTL.saturating_sub(web_time::Instant::now().duration_since(oldest));
+            crate::rt::time::sleep(due).await;
+            let expired = {
+                let mut g = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+                take_expired(&mut g.1, web_time::Instant::now())
+            };
+            disconnect_clients(expired);
+        }
+        PLANE_SWEEP_ARMED.store(false, std::sync::atomic::Ordering::Release);
+        // An insert that saw the sweep still armed, just before it stood down.
+        if !PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner()).1.is_empty() {
+            arm_plane_sweep();
+        }
+    });
+}
 
 fn plane_pool_key(plane_pk: &str, relays: &[String]) -> String {
     let mut rs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
@@ -552,17 +597,8 @@ fn plane_pool_take(generation: u64, key: &str) -> (Option<Client>, Vec<Client>) 
         evicted.extend(g.1.drain().map(|(_, p)| p.client));
         g.0 = generation;
     }
-    // Sweep idle-expired entries.
     let now = web_time::Instant::now();
-    let expired: Vec<String> = g.1.iter()
-        .filter(|(_, p)| now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
-        .map(|(k, _)| k.clone())
-        .collect();
-    for k in expired {
-        if let Some(p) = g.1.remove(&k) {
-            evicted.push(p.client);
-        }
-    }
+    evicted.extend(take_expired(&mut g.1, now));
     let hit = g.1.get_mut(key).map(|p| {
         p.last_used = now;
         p.client.clone()
@@ -592,6 +628,8 @@ fn plane_pool_insert(generation: u64, key: String, client: Client) -> Vec<Client
         }
     }
     g.1.insert(key, PooledPlane { client, last_used: web_time::Instant::now() });
+    drop(g);
+    arm_plane_sweep();
     evicted
 }
 
@@ -1819,6 +1857,30 @@ pub(crate) mod adversarial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Plane pool ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn an_idle_plane_connection_closes_without_another_fetch() {
+        let in_pool = |key: &str| PLANE_POOL.lock().unwrap().1.contains_key(key);
+        let generation = PLANE_POOL.lock().unwrap().0;
+        let (kept, idle) = ("plane-kept|wss://a", "plane-idle|wss://a");
+        plane_pool_insert(generation, idle.into(), crate::nostr_client_builder().build());
+        plane_pool_insert(generation, kept.into(), crate::nostr_client_builder().build());
+        assert!(in_pool(idle) && in_pool(kept));
+
+        // One stays in use: only the idle one goes, and nothing fetched to notice it.
+        for _ in 0..6 {
+            tokio::time::sleep(PLANE_POOL_IDLE_TTL / 2).await;
+            let _ = plane_pool_take(generation, kept);
+        }
+        assert!(!in_pool(idle), "the idle connection was swept");
+        assert!(in_pool(kept), "the one in use stays warm");
+
+        tokio::time::sleep(PLANE_POOL_IDLE_TTL * 3).await;
+        assert!(!in_pool(kept), "and goes once it idles too");
+        assert!(!PLANE_SWEEP_ARMED.load(std::sync::atomic::Ordering::Acquire), "an empty pool runs no sweep");
+    }
 
     // ── Dead-socket target filtering ──────────────────────────────────────────
 
