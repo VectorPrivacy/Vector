@@ -1702,11 +1702,20 @@ async function refreshUnreadCounts() {
 }
 
 let _unreadRefreshTimer = null;
-function scheduleUnreadRefresh() {
+let _unreadRefreshBadge = false;
+/** `withBadge` also recounts the OS badge once the fresh counts are in. */
+function scheduleUnreadRefresh(withBadge = false) {
     if (_unreadRefreshTimer) clearTimeout(_unreadRefreshTimer);
+    _unreadRefreshBadge ||= withBadge;
     // Trailing debounce: run AFTER the burst settles so the DB reflects every just-persisted
     // message/read, avoiding a stale snapshot mid-flight.
-    _unreadRefreshTimer = setTimeout(() => { _unreadRefreshTimer = null; refreshUnreadCounts(); }, 200);
+    _unreadRefreshTimer = setTimeout(async () => {
+        _unreadRefreshTimer = null;
+        const badge = _unreadRefreshBadge;
+        _unreadRefreshBadge = false;
+        await refreshUnreadCounts();
+        if (badge) invoke('update_unread_counter').catch(() => {});
+    }, 200);
 }
 
 /**

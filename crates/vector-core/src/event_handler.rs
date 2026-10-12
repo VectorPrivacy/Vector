@@ -267,7 +267,13 @@ impl<'a> BatchingPersist<'a> {
                 }
             }
             match crate::db::events::save_messages_batch_multi(&groups).await {
-                Ok(n) => Ok(n),
+                Ok(n) => {
+                    // The arrivals were announced as they were processed, before this commit, so
+                    // any unread count read meanwhile missed them: have it read again now.
+                    let chats: Vec<&str> = groups.iter().map(|(c, _)| c.as_str()).collect();
+                    crate::emit_event("unread_counts_stale", &serde_json::json!({ "chats": chats }));
+                    Ok(n)
+                }
                 Err(e) => {
                     crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
                     Err(e)

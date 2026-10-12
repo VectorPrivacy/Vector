@@ -1117,6 +1117,10 @@ async function setupRustListeners() {
         }
     });
 
+    // A sync committed a batch of messages it had already announced: counts read before the
+    // commit missed them.
+    _on('unread_counts_stale', () => scheduleUnreadRefresh(true));
+
     // Listen for headless mark-as-read (e.g., notification "Mark Read" action while app backgrounded)
     _on('chat_mark_read', (evt) => {
         const { chat_id, last_read } = evt.payload;
