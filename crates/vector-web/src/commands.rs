@@ -180,6 +180,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             profile_sync::queue_chat_profiles(a.str("chatId")?, a.bool("isOpening").unwrap_or(false)).await;
             Ok(Value::Null)
         }
+        "queue_visible_profiles" => {
+            let npubs: Vec<String> = a.get("npubs").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+            profile_sync::queue_visible_profiles(npubs).await;
+            Ok(Value::Null)
+        }
         "refresh_profile_now" => {
             profile_sync::refresh_profile_now(a.str("npub")?);
             Ok(Value::Null)

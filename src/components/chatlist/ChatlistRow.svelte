@@ -12,6 +12,7 @@
 
     import ChannelList from './ChannelList.svelte';
     import Avatar from '../ui/Avatar.svelte';
+    import { watchProfile } from '../lib/profilewatch.js';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import { transfer } from '../lib/attachments.svelte.js';
 
@@ -128,6 +129,7 @@
     class:ws-active={shellState().ws && markedChatId() === vm.chat.id}
     id="chatlist-{vm.chat.id}"
     use:rowMenu={vm}
+    use:watchProfile={vm.isGroup ? null : vm.chat.id}
     onclick={() => h.rowClick(vm)}
 >
     <div style:position="relative">

@@ -53,6 +53,13 @@ pub async fn queue_chat_profiles_sync(chat_id: String, is_opening: bool) -> Resu
     Ok(())
 }
 
+/// Queue the on-screen profiles whose last check has gone stale.
+#[tauri::command]
+pub async fn queue_visible_profiles(npubs: Vec<String>) -> Result<(), String> {
+    profile_sync::queue_visible_profiles(npubs).await;
+    Ok(())
+}
+
 /// Immediately refresh a specific profile.
 #[tauri::command]
 pub async fn refresh_profile_now(npub: String) -> Result<(), String> {
@@ -1520,6 +1527,7 @@ pub async fn fetch_messages<R: Runtime>(
 // Handler list for this module (for reference):
 // - queue_profile_sync
 // - queue_chat_profiles_sync
+// - queue_visible_profiles
 // - refresh_profile_now
 // - sync_all_profiles
 // - is_scanning

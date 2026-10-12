@@ -9,7 +9,7 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
     let mut stmt = conn.prepare(
         "SELECT npub, name, display_name, nickname, lud06, lud16, banner, avatar, \
          about, website, nip05, status_content, status_url, bot, avatar_cached, \
-         banner_cached, is_blocked, status_emoji_tags, stream_consent FROM profiles"
+         banner_cached, is_blocked, status_emoji_tags, stream_consent, checked_at FROM profiles"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
     let profiles = stmt.query_map([], |row| {
@@ -35,7 +35,7 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
                     else { serde_json::from_str(&json).unwrap_or_default() }
                 },
             },
-            last_updated: 0,
+            last_updated: row.get::<_, i64>(19)?.max(0) as u64,
             mine: false,
             bot: row.get::<_, i32>(13)? != 0,
             avatar_cached: {
@@ -72,8 +72,8 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
     conn.execute(
         "INSERT INTO profiles (npub, name, display_name, nickname, lud06, lud16, banner, avatar, \
          about, website, nip05, status_content, status_url, bot, avatar_cached, banner_cached, is_blocked, \
-         status_emoji_tags, stream_consent) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
+         status_emoji_tags, stream_consent, checked_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
          ON CONFLICT(npub) DO UPDATE SET \
             name = excluded.name, display_name = excluded.display_name, \
             nickname = excluded.nickname, lud06 = excluded.lud06, lud16 = excluded.lud16, \
@@ -82,7 +82,8 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
             status_content = excluded.status_content, status_url = excluded.status_url, \
             bot = excluded.bot, avatar_cached = excluded.avatar_cached, \
             banner_cached = excluded.banner_cached, is_blocked = excluded.is_blocked, \
-            status_emoji_tags = excluded.status_emoji_tags, stream_consent = excluded.stream_consent",
+            status_emoji_tags = excluded.status_emoji_tags, stream_consent = excluded.stream_consent, \
+            checked_at = MAX(checked_at, excluded.checked_at)",
         rusqlite::params![
             profile.id,
             profile.name,
@@ -103,9 +104,21 @@ pub fn set_profile(profile: &SlimProfile) -> Result<(), String> {
             profile.is_blocked as i32,
             status_emoji_tags,
             profile.stream_consent as i32,
+            profile.last_updated as i64,
         ],
     ).map_err(|e| format!("Failed to insert profile: {}", e))?;
 
+    Ok(())
+}
+
+/// Record that the relays were asked for this profile at `secs`, whether or not it changed.
+pub fn mark_profile_checked(npub: &str, secs: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE profiles SET checked_at = MAX(checked_at, ?2) WHERE npub = ?1",
+        rusqlite::params![npub, secs as i64],
+    )
+    .map_err(|e| format!("Failed to mark profile checked: {e}"))?;
     Ok(())
 }
 

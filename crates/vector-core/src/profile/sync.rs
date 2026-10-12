@@ -15,7 +15,7 @@ use web_time::Instant;
 
 use nostr_sdk::prelude::*;
 
-use crate::compact::secs_to_compact;
+use crate::compact::{secs_from_compact, secs_to_compact};
 use crate::profile::Profile;
 use crate::state::{nostr_client, my_public_key, STATE};
 use crate::traits::emit_event;
@@ -403,6 +403,9 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     };
 
     let fetch_result = fetch_newest_metadata(&client, profile_pubkey).await;
+    if fetch_result.is_ok() {
+        let _ = crate::db::profiles::mark_profile_checked(&npub, now_secs());
+    }
 
     match fetch_result {
         Ok(meta) => {
@@ -992,7 +995,54 @@ pub fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: b
     queue.add(npub, priority, force_refresh);
 }
 
-/// Queue all profiles for a chat.
+fn now_secs() -> u64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// How long a profile's last check stays good enough for one that is merely on screen.
+const ON_SCREEN_FRESH: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// What a profile on screen needs: a fetch now when we know nothing of it, a slow refresh when
+/// its last check is older than [`ON_SCREEN_FRESH`], otherwise nothing.
+fn on_screen_need(profile: Option<&Profile>, now: u64) -> Option<SyncPriority> {
+    let Some(p) = profile else { return Some(SyncPriority::Critical) };
+    if p.flags.is_mine() {
+        return None;
+    }
+    let checked = secs_from_compact(p.last_updated);
+    if checked == 0 {
+        let known = !p.name.is_empty() || !p.display_name.is_empty() || !p.avatar.is_empty();
+        return Some(if known { SyncPriority::Medium } else { SyncPriority::Critical });
+    }
+    (now.saturating_sub(checked) >= ON_SCREEN_FRESH.as_secs()).then_some(SyncPriority::Medium)
+}
+
+/// Queue the profiles the UI has on screen (or nearly) whose last check has gone stale. Called
+/// on every view, so it costs a lookup per npub and a fetch only for those that need one.
+pub async fn queue_visible_profiles(npubs: Vec<String>) {
+    const MAX_PER_CALL: usize = 200;
+    let now = now_secs();
+    let picks: Vec<(String, SyncPriority)> = {
+        let state = STATE.lock().await;
+        npubs
+            .into_iter()
+            .take(MAX_PER_CALL)
+            .filter(|n| n.starts_with("npub1"))
+            .filter_map(|npub| on_screen_need(state.get_profile(&npub), now).map(|p| (npub, p)))
+            .collect()
+    };
+    if picks.is_empty() {
+        return;
+    }
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
+    for (npub, priority) in picks {
+        queue.add(npub, priority, false);
+    }
+}
+
+/// Queue all profiles for a chat. A community's members refresh as they come on screen
+/// ([`queue_visible_profiles`]), so here a community only fetches the ones we know nothing of.
 pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
     let state = STATE.lock().await;
 
@@ -1001,6 +1051,7 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
         None => return,
     };
 
+    let is_community = chat.is_community();
     let base_priority = if is_opening {
         SyncPriority::High
     } else {
@@ -1025,6 +1076,8 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
         let priority = if !has_metadata {
             SyncPriority::Critical
+        } else if is_community {
+            continue;
         } else {
             base_priority
         };
@@ -1049,7 +1102,7 @@ pub fn refresh_profile_now(npub: String) {
 }
 
 /// Queue every profile that has never been fetched. Known profiles refresh when their chat
-/// opens; `last_updated` is not persisted, so a Low sweep would refetch every contact per launch.
+/// opens or they come on screen ([`queue_visible_profiles`]).
 pub async fn sync_all_profiles() {
     let state = STATE.lock().await;
     let owner = profile_sync_queue();
@@ -1086,6 +1139,27 @@ mod status_clamp_tests {
         let clamped = clamp_status(format!("{emoji}overflow"));
         assert_eq!(clamped.chars().count(), STATUS_MAX_CHARS);
         assert_eq!(clamped, emoji, "truncation lands on a character boundary");
+    }
+}
+
+#[cfg(test)]
+mod on_screen_tests {
+    use super::*;
+
+    #[test]
+    fn an_on_screen_profile_is_fetched_only_when_unknown_or_stale() {
+        let now = 1_900_000_000;
+        assert_eq!(on_screen_need(None, now), Some(SyncPriority::Critical));
+        let mut p = Profile::new();
+        assert_eq!(on_screen_need(Some(&p), now), Some(SyncPriority::Critical));
+        p.name = "kitty".into();
+        assert_eq!(on_screen_need(Some(&p), now), Some(SyncPriority::Medium), "named but never checked");
+        p.last_updated = secs_to_compact(now - 60);
+        assert_eq!(on_screen_need(Some(&p), now), None, "checked a minute ago");
+        p.last_updated = secs_to_compact(now - ON_SCREEN_FRESH.as_secs());
+        assert_eq!(on_screen_need(Some(&p), now), Some(SyncPriority::Medium), "stale");
+        p.flags.set_mine(true);
+        assert_eq!(on_screen_need(Some(&p), now), None, "our own syncs on its own clock");
     }
 }
 

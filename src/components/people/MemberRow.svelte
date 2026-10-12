@@ -4,6 +4,7 @@
     // row with different snippets in the two slots.
     import Avatar from '../ui/Avatar.svelte';
     import MemberName from './MemberName.svelte';
+    import { watchProfile } from '../lib/profilewatch.js';
 
     let {
         npub,
@@ -38,6 +39,7 @@
     class="member-pick-row"
     class:is-acting={acting}
     data-npub={npub}
+    use:watchProfile={npub}
     role={onactivate ? 'button' : null}
     tabindex={onactivate ? 0 : null}
     style:cursor={onactivate ? 'pointer' : null}

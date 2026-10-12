@@ -306,6 +306,7 @@
     "allow-transfer-finish",
     "allow-queue-profile-sync",
     "allow-queue-chat-profiles-sync",
+    "allow-queue-visible-profiles",
     "allow-refresh-profile-now",
     "allow-sync-all-profiles",
     "allow-get-pending-deep-link",

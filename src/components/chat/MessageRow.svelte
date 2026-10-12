@@ -21,6 +21,7 @@
     import ReactionChip from './ReactionChip.svelte';
     import PivxBubble from './PivxBubble.svelte';
     import { avatarFallback } from '../lib/avatar.js';
+    import { watchProfile } from '../lib/profilewatch.js';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -169,6 +170,7 @@
     class:new-anim={arrival.id === current.id}
     onanimationend={() => { if (arrival.id === current.id) setArrival(null); }}
     use:expando={current}
+    use:watchProfile={current.mine ? null : authorFullId}
 >
     <div class="dmsg-gutter">
         {#if avatarSrc && !avatarFailed}

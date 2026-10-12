@@ -1148,6 +1148,7 @@ pub fn run() {
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,
             commands::sync::queue_chat_profiles_sync,
+            commands::sync::queue_visible_profiles,
             commands::sync::refresh_profile_now,
             commands::sync::sync_all_profiles,
             // System commands (commands/system.rs)
