@@ -509,7 +509,7 @@ async fn cache_image_uncached<R: Runtime>(
     // Statics stay verbatim — a still costs one decode, keep its quality.
     let mut bytes = bytes;
     if let Some((target, budget, label)) = animated_display_target(image_type) {
-        if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, target) {
+        if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, bytes.len(), target, budget) {
             // Blocking pool: a monster GIF costs up to a second or two of CPU,
             // which must not stall the async workers serving everything else.
             let owned = bytes;
@@ -524,7 +524,7 @@ async fn cache_image_uncached<R: Runtime>(
             };
             bytes = returned;
             match result {
-                Ok(re) if re.bytes.len() < bytes.len() => {
+                Ok(re) if keep_transcode(&bytes, &re.bytes, target, budget) => {
                     log_info!(
                         "[ImageCache] {} animation normalized: {} KB -> {} KB at ≤{target}px",
                         label, bytes.len() / 1024, re.bytes.len() / 1024
@@ -532,9 +532,9 @@ async fn cache_image_uncached<R: Runtime>(
                     bytes = re.bytes;
                     extension = re.extension;
                 }
-                // A transcode that GREW (tiny-dims, huge-frame-count inputs
-                // re-quantized) or failed keeps the original — fail open to
-                // today's behavior, never lose the image over an optimization.
+                // A transcode that grew without shrinking the display size (tiny-dims,
+                // huge-frame-count inputs re-quantized) or failed keeps the original —
+                // never lose the image over an optimization.
                 Ok(_) => {}
                 Err(e) => log_debug!("[ImageCache] animation transcode skipped for {}: {}", url, e),
             }
@@ -689,13 +689,31 @@ fn animated_display_target(image_type: ImageType) -> Option<(u32, usize, &'stati
 }
 
 /// Whether an animated file is worth re-encoding: dimensions above the display
-/// target, or heavy despite small dimensions (a frame-count bomb).
-fn needs_animated_transcode(bytes: &[u8], target: u32) -> bool {
+/// target, or heavy despite small dimensions (a frame-count bomb). Never heavier
+/// than the type's own budget allows, or the sweep would redo its own output every boot.
+/// `head` is the file or its first bytes: a GIF's size is in its header, so the boot sweep
+/// decides without reading the file.
+fn needs_animated_transcode(head: &[u8], len: usize, target: u32, budget: usize) -> bool {
     const ANIMATED_BYTE_THRESHOLD: usize = 768 * 1024;
-    match crate::shared::image::animated_dims(bytes) {
-        Some((w, h)) => w > target || h > target || bytes.len() > ANIMATED_BYTE_THRESHOLD,
-        None => bytes.len() > ANIMATED_BYTE_THRESHOLD,
+    let heavy = len > budget.max(ANIMATED_BYTE_THRESHOLD);
+    let dims = match head {
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', w0, w1, h0, h1, ..] => {
+            Some((u32::from(u16::from_le_bytes([*w0, *w1])), u32::from(u16::from_le_bytes([*h0, *h1]))))
+        }
+        _ => crate::shared::image::animated_dims(head),
+    };
+    match dims {
+        Some((w, h)) => w > target || h > target || heavy,
+        None => heavy,
     }
+}
+
+/// Whether a transcode replaces its source: lighter, or down to the display size within the
+/// budget. The size is what the webview pays per decode, so a few re-quantized bytes are worth
+/// it, and the result then passes `needs_animated_transcode`, so it is never redone.
+fn keep_transcode(src: &[u8], out: &[u8], target: u32, budget: usize) -> bool {
+    let oversized = crate::shared::image::animated_dims(src).is_some_and(|(w, h)| w > target || h > target);
+    out.len() < src.len() || (oversized && out.len() <= budget)
 }
 
 /// One-time sweep of the existing avatar/banner cache: re-encode any oversized
@@ -728,15 +746,17 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
             .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (m.len(), p)))
             .collect();
         paths.sort_by_key(|p| std::cmp::Reverse(p.0));
-        for (_, path) in paths {
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            if crate::shared::image::animated_format(&bytes).is_none()
-                || !needs_animated_transcode(&bytes, target)
+        for (len, path) in paths {
+            let mut head = Vec::with_capacity(16);
+            if std::fs::File::open(&path).and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 16), &mut head)).is_err()
+                || crate::shared::image::animated_format(&head).is_none()
+                || !needs_animated_transcode(&head, len as usize, target, budget)
             {
                 continue;
             }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
             match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
-                Ok(re) if re.bytes.len() < bytes.len() => {
+                Ok(re) if keep_transcode(&bytes, &re.bytes, target, budget) => {
                     // Temp + rename: the webview's asset protocol can read this
                     // exact path mid-rewrite, and a truncate-then-write window
                     // would serve it half a GIF.
@@ -1234,6 +1254,54 @@ pub async fn cache_url_image<R: Runtime>(
 }
 
 #[cfg(test)]
+mod animated_threshold_tests {
+    /// A GIF header of the given size, padded out to `len` bytes.
+    fn gif(w: u16, h: u16, len: usize) -> Vec<u8> {
+        let mut b = b"GIF89a".to_vec();
+        b.extend_from_slice(&w.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+        b.resize(len, 0);
+        b
+    }
+
+    #[test]
+    fn the_sweep_leaves_its_own_output_alone() {
+        // As the sweep sees a file: its first 16 bytes and its length.
+        let needs = |b: &[u8], t, bud| super::needs_animated_transcode(&b[..16], b.len(), t, bud);
+        let (b_target, b_budget, _) = super::animated_display_target(super::ImageType::Banner).unwrap();
+        let (a_target, a_budget, _) = super::animated_display_target(super::ImageType::Avatar).unwrap();
+        // A banner the ladder fit inside its budget is done, however far past 768 KB.
+        assert!(!needs(&gif(500, 267, 1469 * 1024), b_target, b_budget));
+        assert!(needs(&gif(500, 267, b_budget + 1), b_target, b_budget));
+        assert!(needs(&gif(800, 300, 200 * 1024), b_target, b_budget));
+        // An avatar keeps the 768 KB frame-bomb floor above its smaller budget.
+        assert!(!needs(&gif(160, 160, 700 * 1024), a_target, a_budget));
+        assert!(needs(&gif(160, 160, 769 * 1024), a_target, a_budget));
+        assert!(needs(&gif(352, 296, 87 * 1024), a_target, a_budget));
+    }
+
+    #[test]
+    fn an_oversized_animation_is_kept_at_display_size_and_never_redone() {
+        let (target, budget, _) = super::animated_display_target(super::ImageType::Avatar).unwrap();
+        let mut src = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut src);
+            for i in 0..4u32 {
+                let img = image::RgbaImage::from_fn(352, 296, |x, y| image::Rgba([((x + i * 40) % 256) as u8, (y % 256) as u8, 90, 255]));
+                enc.encode_frame(image::Frame::new(img)).unwrap();
+            }
+        }
+        assert!(super::needs_animated_transcode(&src, src.len(), target, budget));
+        let out = crate::shared::image::transcode_animated_budgeted(&src, target, budget).unwrap().bytes;
+        // Smaller in pixels, whatever the bytes did.
+        assert!(super::keep_transcode(&src, &out, target, budget));
+        assert!(!super::needs_animated_transcode(&out[..16], out.len(), target, budget), "the kept output is done");
+        // At display size already, a heavier re-encode is not kept.
+        assert!(!super::keep_transcode(&out, &[0; 1 << 20], target, budget));
+    }
+}
+
+#[cfg(test)]
 mod backfill_probe {
     /// Manual probe: run the backfill's per-file decision loop against a real
     /// cache directory named by CACHE_DIR and say what each file decides.
@@ -1254,12 +1322,12 @@ mod backfill_probe {
                 println!("{name}: not detected as animated");
                 continue;
             }
-            if !super::needs_animated_transcode(&bytes, target) {
+            if !super::needs_animated_transcode(&bytes, bytes.len(), target, budget) {
                 println!("{name}: under thresholds, skipped");
                 continue;
             }
             match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
-                Ok(re) if re.bytes.len() < bytes.len() => println!("{name}: WOULD REWRITE {} -> {} KB", bytes.len()/1024, re.bytes.len()/1024),
+                Ok(re) if super::keep_transcode(&bytes, &re.bytes, target, budget) => println!("{name}: WOULD REWRITE {} -> {} KB", bytes.len()/1024, re.bytes.len()/1024),
                 Ok(re) => println!("{name}: transcode grew ({} -> {} KB), kept", bytes.len()/1024, re.bytes.len()/1024),
                 Err(e) => println!("{name}: transcode failed: {e}"),
             }
