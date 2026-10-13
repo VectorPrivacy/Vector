@@ -60,14 +60,52 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     marked
 }
 
-/// Update the unread cache for `chat_id` after a live inbound message: the active chat was just
-/// marked read (clear, no DB), otherwise reconcile the one chat from the DB.
-async fn refresh_chat_unread(chat_id: &str, was_marked_active: bool) {
-    if was_marked_active {
-        STATE.lock().await.unread_clear(chat_id);
+/// Update the unread cache after an inbound message. A live one is newer than any read point, so
+/// it counts in RAM (and our own resets the chat); one in the chat being watched was just read.
+/// Anything older is backfill that may land below the read point: the DB recounts it, once per burst.
+async fn refresh_chat_unread(chat_id: &str, was_marked_active: bool, at: u64, mine: bool, author: Option<&str>) {
+    let live = vector_core::community::is_realtime_fresh(at);
+    let mut state = STATE.lock().await;
+    if was_marked_active || (live && mine) {
+        state.unread_clear(chat_id);
+    } else if live {
+        state.unread_bump(chat_id, author);
     } else {
-        commands::messaging::reconcile_chat_unread(chat_id).await;
+        drop(state);
+        queue_unread_reconcile(chat_id.to_string());
     }
+}
+
+/// Chats waiting on an unread recount. A backfill persists messages in bursts, and one recount per
+/// chat covers the whole burst.
+struct PendingUnread;
+
+fn pending_unread() -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+    vector_core::db::current_session().scoped::<PendingUnread, _>()
+}
+
+/// Recount `chat_id` and the badge once the current burst settles.
+fn queue_unread_reconcile(chat_id: String) {
+    let pending = pending_unread();
+    let first = {
+        let mut chats = pending.lock().unwrap_or_else(|e| e.into_inner());
+        let first = chats.is_empty();
+        chats.insert(chat_id);
+        first
+    };
+    if !first {
+        return;
+    }
+    vector_core::db::spawn_bound(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let chats = std::mem::take(&mut *pending.lock().unwrap_or_else(|e| e.into_inner()));
+        for chat in &chats {
+            commands::messaging::reconcile_chat_unread(chat).await;
+        }
+        if let Some(handle) = TAURI_APP.get() {
+            let _ = commands::messaging::update_unread_counter(handle.clone()).await;
+        }
+    });
 }
 
 // ============================================================================
@@ -97,6 +135,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
         let msg_id = msg.id.clone();
+        let (at, author) = (msg.at, msg.npub.clone());
         let expires = msg.expiration;
         vector_core::db::spawn_bound(async move {
             // If the user is actively watching this chat, advance last_read
@@ -104,7 +143,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // The FE's own markAsRead still runs on the message_new event for
             // DB persistence, but this avoids the racey badge bump in between.
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
-            refresh_chat_unread(&chat_id, marked).await;
+            refresh_chat_unread(&chat_id, marked, at, false, author.as_deref()).await;
             // A DM has no mention tier to fall back to, so anything short of "ring for
             // everything" is silence.
             let rings = {
@@ -147,10 +186,11 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             .map(|att| att.extension.clone())
             .unwrap_or_else(|| String::from("file"));
         let msg_id = msg.id.clone();
+        let (at, author) = (msg.at, msg.npub.clone());
         let expires = msg.expiration;
         vector_core::db::spawn_bound(async move {
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
-            refresh_chat_unread(&chat_id, marked).await;
+            refresh_chat_unread(&chat_id, marked, at, false, author.as_deref()).await;
             // A DM has no mention tier to fall back to, so anything short of "ring for
             // everything" is silence.
             let rings = {
@@ -204,9 +244,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // in the open community never counts as unread on the badge recount below (mirrors the DM
             // path; without it the badge bumps to 1 and races the FE's markAsRead, leaving it stuck).
             let marked = auto_mark_if_active(&chat_id, &msg.id).await;
-            // Reconcile (not a blind +1): this handler also sees stale re-deliveries and bulk
-            // back-sync, so the one-chat DB recount is the only correct update.
-            refresh_chat_unread(&chat_id, marked).await;
+            refresh_chat_unread(&chat_id, marked, msg.at, msg.mine, msg.npub.as_deref()).await;
             // Ping only for genuinely-live messages. A bulk back-sync (jump-to-unread) or a relay
             // re-delivering already-saved history pushes OLD events through this handler; by inner
             // timestamp they're stale, so skip the notification. They still surface + count via the

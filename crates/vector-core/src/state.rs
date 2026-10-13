@@ -1251,6 +1251,17 @@ impl ChatState {
         self.unread_cache.remove(chat_id);
     }
 
+    /// A live message landed: it is newer than any read point, so it counts here without a DB
+    /// recount. An author the user blocked or muted counts for nothing, as in the seed.
+    pub fn unread_bump(&mut self, chat_id: &str, author: Option<&str>) {
+        if let Some(npub) = author {
+            if self.get_profile(npub).is_some_and(|p| p.flags.is_blocked()) || self.get_chat(npub).is_some_and(|c| c.muted) {
+                return;
+            }
+        }
+        *self.unread_cache.entry(chat_id.to_string()).or_insert(0) += 1;
+    }
+
     /// Reconcile a chat to an exact DB-computed count (delete / retreat / backfill). A zero drops the
     /// entry so the map stays small and `unwrap_or(0)` reads it as caught-up.
     pub fn unread_set(&mut self, chat_id: &str, count: u32) {
@@ -2097,6 +2108,23 @@ mod tests {
         state.add_message_to_chat("npub1blocked", &msg);
 
         assert_eq!(state.count_unread_messages(), 0, "blocked user DM should not count");
+    }
+
+    #[test]
+    fn a_live_message_counts_in_ram_unless_its_author_is_blocked_or_muted() {
+        let mut state = ChatState::new();
+        state.create_dm_chat("npub1room");
+        let mut blocked = Profile::new();
+        blocked.flags.set_blocked(true);
+        state.insert_or_replace_profile("npub1blocked", blocked);
+        state.create_dm_chat("npub1muted");
+        state.get_chat_mut("npub1muted").unwrap().muted = true;
+
+        state.unread_bump("npub1room", Some("npub1friend"));
+        state.unread_bump("npub1room", None);
+        state.unread_bump("npub1room", Some("npub1blocked"));
+        state.unread_bump("npub1room", Some("npub1muted"));
+        assert_eq!(state.unread_cache.get("npub1room"), Some(&2));
     }
 
     #[test]
