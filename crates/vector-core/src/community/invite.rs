@@ -196,23 +196,6 @@ pub fn build_invite_rumor(
     )
 }
 
-/// How long a Direct Invite stays valid. A bundle hands out live key material for a
-/// community that keeps evolving (rotations, renames, bans), so an invite that never
-/// expires is both stale key material and clutter in the recipient's list. The sender
-/// stamps NIP-40 on the rumor AND (mirrored by the send path) on the outer gift wrap, so
-/// relays drop it on schedule; recipients enforce it themselves too, since relay support
-/// for NIP-40 is optional.
-pub const DIRECT_INVITE_EXPIRY_SECS: u64 = 24 * 60 * 60;
-
-/// Read a NIP-40 `expiration` tag (unix seconds) off an invite rumor's tags. `None` =
-/// no expiry declared (a pre-expiry sender), which callers treat as permanent.
-pub fn expiration_secs(tags: &nostr_sdk::prelude::Tags) -> Option<u64> {
-    tags.iter()
-        .find(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
-        .and_then(|t| t.as_slice().get(1))
-        .and_then(|v| v.parse::<u64>().ok())
-}
-
 /// Parse an inbound rumor as a Community invite. Returns `None` unless the rumor is an
 /// invite (kind 3304) carrying a well-formed bundle — a non-invite DM or corrupt
 /// content yields `None`, never an error, so the inbound dispatcher can fall through.
@@ -222,6 +205,8 @@ pub fn parse_invite_rumor(kind: Kind, content: &str) -> Option<CommunityInvite> 
     }
     CommunityInvite::from_json(content).ok()
 }
+
+pub use super::v2::invite::{expiration_secs, DIRECT_INVITE_EXPIRY_SECS};
 
 #[cfg(test)]
 mod tests {

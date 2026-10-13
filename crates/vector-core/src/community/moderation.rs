@@ -28,6 +28,13 @@ pub fn owner_hex(community_id: &str) -> Option<String> {
     }
 }
 
+/// Whether `member_hex` is the owner or holds an admin grant: the bar for @everyone.
+/// A lookup failure answers false.
+pub fn is_owner_or_admin(community_id: &str, member_hex: &str) -> bool {
+    owner_hex(community_id).is_some_and(|o| o == member_hex)
+        || crate::db::community::get_community_roles(community_id).is_ok_and(|r| r.is_admin(member_hex))
+}
+
 /// May `actor_hex` remove a message authored by `author_hex`? The actor needs
 /// `MANAGE_MESSAGES` and a strict outrank; the owner is supreme and is never a
 /// valid target, so owner-protection falls out of the algebra with no carve-out.

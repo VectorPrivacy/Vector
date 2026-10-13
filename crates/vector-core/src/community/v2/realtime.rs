@@ -1309,6 +1309,71 @@ mod tests {
         assert_eq!(rec.got.lock().unwrap().len(), 1, "a stored outer id never reaches the handler");
     }
 
+    #[tokio::test]
+    async fn a_stale_straggler_folds_like_a_live_event_without_ringing() {
+        use crate::community::transport::memory::MemoryRelay;
+        use crate::types::Message;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            got: StdMutex<Vec<(String, bool)>>,
+        }
+        impl InboundEventHandler for Recorder {
+            fn on_community_message(&self, _chat_id: &str, msg: &Message, new: bool) {
+                self.got.lock().unwrap().push((msg.content.clone(), new));
+            }
+        }
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 11 + 5) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = MemoryRelay::new();
+        let community = super::super::service::create_community(&relay, "Late", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let member = Keys::generate();
+        let group = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "old news", None, &[], vec![], 5_000);
+        let (wrap, _) = super::super::chat::seal_chat_rumor(&rumor, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(5), false).unwrap();
+
+        let rec = Arc::new(Recorder::default());
+        crate::community::v2::realtime::clear().await;
+        crate::community::dispatch_inbound(wrap.clone(), rec.clone()).await;
+        crate::community::dispatch_inbound(wrap.clone(), rec.clone()).await;
+        assert_eq!(*rec.got.lock().unwrap(), vec![("old news".to_string(), false)], "folded once, never as new");
+        assert!(crate::db::wrappers::processed_wrapper_exists(&wrap.id.to_bytes()));
+        let channel_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(&channel_hex).unwrap();
+        assert_eq!(crate::db::events::get_chat_message_count(chat_id).unwrap(), 1);
+
+        // What a fetch for our own documents returns rides the same sink, and opens nowhere.
+        use nostr_sdk::prelude::FinalizeEvent;
+        let own = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(super::super::kind::COMMUNITY_LIST_FRAG), "x")
+            .finalize(&me)
+            .unwrap();
+        crate::community::dispatch_inbound(own, rec.clone()).await;
+        assert_eq!(rec.got.lock().unwrap().len(), 1);
+        assert_eq!(crate::db::events::get_chat_message_count(chat_id).unwrap(), 1);
+    }
+
     #[test]
     fn every_plane_address_routes_to_its_own_community() {
         let (a, b) = (a_community("A"), a_community("B"));

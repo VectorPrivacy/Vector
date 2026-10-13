@@ -25,6 +25,7 @@ pub mod chats;
 pub mod wrappers;
 pub mod nip17_keys;
 pub mod community;
+pub mod v1_purge;
 pub mod bots;
 pub mod notify;
 #[cfg(target_arch = "wasm32")]

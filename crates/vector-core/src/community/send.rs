@@ -21,7 +21,7 @@ use crate::stored_event::event_kind;
 ///
 /// Returns the published outer event AND its **retained ephemeral signing key**.
 /// The key is one-time on the wire (no persistent author↔channel linkage), but
-/// the sender keeps it so they can later [`delete_own_message`] their own message
+/// the sender keeps it so they can later [`delete_own_message`](super::message_delete::delete_own_message) their own message
 /// Persist it (see `db::community::store_message_key`) — exactly like Vector's
 /// `nip17_wrap_keys` for DMs. Discarding it just means that message can't be deleted.
 pub async fn publish_message<T: Transport + ?Sized>(
@@ -64,22 +64,6 @@ pub async fn publish_signed_message<T: Transport + ?Sized>(
         transport.publish(&outer, &community.relays).await?;
     }
     Ok((outer, ephemeral))
-}
-
-/// Delete a message the sender previously published, via its retained ephemeral key
-/// (NIP-09 — the deletion must be signed by the same key that signed the event, so
-/// only the original sender can delete their own message).
-pub async fn delete_own_message<T: Transport + ?Sized>(
-    transport: &T,
-    relays: &[String],
-    ephemeral: &Keys,
-    outer_event_id: EventId,
-) -> Result<(), String> {
-    let deletion = EventDeletionRequest::new()
-        .ids([outer_event_id])
-        .finalize(ephemeral)
-        .map_err(|e| e.to_string())?;
-    transport.publish_durable(&deletion, relays).await
 }
 
 /// Every epoch pseudonym the member can derive for a channel (one per retained `(epoch, key)`), so a
@@ -562,73 +546,6 @@ mod tests {
         let msgs = fetch_channel_messages(&relay, &reader, &reader.channels[0]).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "valid");
-    }
-
-    #[tokio::test]
-    async fn publish_retains_key_and_owner_can_delete() {
-        let relay = MemoryRelay::new();
-        let community = community();
-        let channel = community.channels[0].clone();
-        let alice = Keys::generate();
-
-        let (outer, ephemeral) =
-            publish_message(&relay, &community, &channel, &alice, "deletable", 1).await.unwrap();
-        // The retained key is exactly the one that signed the outer event.
-        assert_eq!(ephemeral.public_key(), outer.pubkey);
-
-        let before = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert_eq!(before.len(), 1);
-
-        // Delete via the retained ephemeral key → gone (MemoryRelay honors NIP-09).
-        delete_own_message(&relay, &community.relays, &ephemeral, outer.id).await.unwrap();
-        let after = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert!(after.is_empty(), "owner's deletion should remove the message");
-    }
-
-    #[tokio::test]
-    async fn deletion_by_a_different_key_is_ignored() {
-        // NIP-09 same-pubkey rule: only the original (ephemeral) signer can delete.
-        let relay = MemoryRelay::new();
-        let community = community();
-        let channel = community.channels[0].clone();
-        let alice = Keys::generate();
-        let (outer, ephemeral) =
-            publish_message(&relay, &community, &channel, &alice, "mine", 1).await.unwrap();
-
-        let attacker = Keys::generate();
-        delete_own_message(&relay, &community.relays, &attacker, outer.id).await.unwrap();
-        let after = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert_eq!(after.len(), 1, "a foreign key must not delete someone else's message");
-
-        // Prove the deletion machinery actually works (so the assert above isn't
-        // passing merely because deletion is a no-op): the real key DOES delete it.
-        delete_own_message(&relay, &community.relays, &ephemeral, outer.id).await.unwrap();
-        let gone = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert!(gone.is_empty(), "the original signer's key must delete it");
-    }
-
-    #[tokio::test]
-    async fn deletion_must_reach_all_relays_to_take_effect() {
-        // NIP-09 deletion is not magically global: if the delete lands on only one of
-        // a redundant relay set, the event survives on the others (redundancy cuts
-        // both ways). Documents that a real delete must be sent to every server relay.
-        let relay = MemoryRelay::new();
-        let community = community(); // relays r1, r2, r3
-        let channel = community.channels[0].clone();
-        let alice = Keys::generate();
-        let (outer, ephemeral) =
-            publish_message(&relay, &community, &channel, &alice, "sticky", 1).await.unwrap();
-
-        // Delete on ONLY r1.
-        delete_own_message(&relay, &["r1".to_string()], &ephemeral, outer.id).await.unwrap();
-        // Still fetchable across the full set (lives on r2/r3).
-        let still = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert_eq!(still.len(), 1, "deletion on a subset must not remove it everywhere");
-
-        // Delete on all relays → finally gone.
-        delete_own_message(&relay, &community.relays, &ephemeral, outer.id).await.unwrap();
-        let gone = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert!(gone.is_empty());
     }
 
     /// LIVE on-relay end-to-end test against jskitty.com (the user's strfry).

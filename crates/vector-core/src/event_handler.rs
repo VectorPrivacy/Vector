@@ -563,7 +563,7 @@ fn finish_prepare(
         return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
             Some(invite) => PreparedEvent::CommunityInvite {
                 invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at,
-                expires_at: crate::community::invite::expiration_secs(&rumor.tags).unwrap_or(0),
+                expires_at: crate::community::v2::invite::expiration_secs(&rumor.tags).unwrap_or(0),
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -584,7 +584,7 @@ fn finish_prepare(
                 wrapper_event_id_bytes,
                 wrapper_created_at,
                 rumor_created_at,
-                expires_at: crate::community::invite::expiration_secs(&rumor.tags).unwrap_or(0),
+                expires_at: crate::community::v2::invite::expiration_secs(&rumor.tags).unwrap_or(0),
             },
             None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
         };
@@ -1060,11 +1060,13 @@ pub async fn commit_prepared_event(
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
                 return false;
             }
-            // Supersession: a decline/leave tombstone (protocol-agnostic, keyed on
-            // community_id) suppresses a re-wrapped invite no newer than the decision,
-            // so a declined/left community can't be re-nagged by a fresh ephemeral wrap.
-            // Ordered on the inner rumor time, not the NIP-59-backdated wrapper.
-            if crate::community::list::tombstone_suppresses(&community_id, rumor_created_at) {
+            // Supersession: a decline/leave tombstone suppresses a re-wrapped invite no newer
+            // than the decision, so a declined/left community can't be re-nagged by a fresh
+            // ephemeral wrap. Ordered on the inner rumor time, not the NIP-59-backdated wrapper.
+            // The v1 list still holds v2 removals recorded before the v2 mirror existed.
+            if crate::community::v2::service::tombstone_suppresses(&community_id, rumor_created_at)
+                || crate::community::list::tombstone_suppresses(&community_id, rumor_created_at)
+            {
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.

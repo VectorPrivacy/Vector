@@ -908,16 +908,7 @@ pub async fn prune_unneeded_community_relays(candidates: &[String]) {
     }
     let Some(client) = crate::state::nostr_client() else { return };
 
-    let mut still_needed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(ids) = crate::db::community::list_community_ids() {
-        for id in ids {
-            if let Ok(Some(c)) = crate::db::community::load_community(&id) {
-                for r in &c.relays {
-                    still_needed.insert(r.clone());
-                }
-            }
-        }
-    }
+    let still_needed = crate::db::community::held_community_relays().unwrap_or_default();
 
     let pool = client;
     // all_relays(): community relays carry GOSSIP, so they're absent from `relays()` (READ/WRITE only).

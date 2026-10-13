@@ -639,6 +639,63 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
     }
 }
 
+/// Persist an inbound WebXDC peer signal as a kind-30078 event row — the SAME shape the DM
+/// peer-advertisement handler writes (content `peer-advertisement`/`peer-left`, `reference_id`
+/// = topic, `webxdc-topic`/`webxdc-node-addr` tags) — so the miniapp layer's
+/// `get_active_peer_advertisements` (latest-per-npub, left-tombstone-aware) reads both
+/// transports identically. This is what lets a member who closed Vector mid-session rediscover
+/// the active players on reopen. Idempotent via `event_exists`.
+pub async fn persist_webxdc_signal(
+    channel_hex: &str,
+    npub: &str,
+    topic_id: &str,
+    node_addr: Option<&str>,
+    event_id: &str,
+    created_at: u64,
+) {
+    if crate::db::events::event_exists(event_id).unwrap_or(true) {
+        return;
+    }
+    // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
+    // can't outrank every later genuine peer-left in the latest-per-npub read.
+    let now_secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = created_at.min(now_secs + 300);
+    let Ok(chat_id) = crate::db::id_cache::get_or_create_chat_id(channel_hex) else { return };
+    let mut tags = vec![
+        vec!["webxdc-topic".to_string(), topic_id.to_string()],
+        vec!["d".to_string(), "vector-webxdc-peer".to_string()],
+    ];
+    if let Some(addr) = node_addr {
+        tags.push(vec!["webxdc-node-addr".to_string(), addr.to_string()]);
+    }
+    let event = crate::stored_event::StoredEvent {
+        id: event_id.to_string(),
+        kind: crate::stored_event::event_kind::APPLICATION_SPECIFIC,
+        chat_id,
+        user_id: None,
+        content: if node_addr.is_some() { "peer-advertisement" } else { "peer-left" }.to_string(),
+        tags,
+        reference_id: Some(topic_id.to_string()),
+        created_at,
+        received_at: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        mine: false,
+        pending: false,
+        failed: false,
+        wrapper_event_id: None,
+        npub: Some(npub.to_string()),
+        preview_metadata: None,
+    };
+    if let Err(e) = crate::db::events::save_event(&event).await {
+        crate::log_warn!("[community] failed to persist webxdc peer signal: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

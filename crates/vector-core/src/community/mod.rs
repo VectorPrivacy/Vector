@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod inbound;
 pub mod invite;
 pub mod invite_list;
+pub mod message_delete;
 pub mod list;
 pub mod metadata;
 pub mod policy;
@@ -56,6 +57,24 @@ pub fn is_realtime_fresh(at_ms: u64) -> bool {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     at_ms.saturating_add(REALTIME_FRESH_WINDOW_MS) >= now_ms
+}
+
+/// Whether an event kind is a Concord v1 one (3300..=3311); every v2 event rides a wrap.
+pub fn is_v1_kind(kind: u16) -> bool {
+    (3300..=3311).contains(&kind)
+}
+
+/// Route an inbound Community event, live or a slow relay's straggler, to its protocol's
+/// dispatcher.
+pub async fn dispatch_inbound(
+    event: nostr_sdk::prelude::Event,
+    handler: std::sync::Arc<dyn crate::InboundEventHandler>,
+) {
+    if is_v1_kind(event.kind.as_u16()) {
+        realtime::dispatch_event(event, handler).await;
+    } else {
+        v2::realtime::dispatch_event(event, handler).await;
+    }
 }
 
 /// Which Concord protocol a community runs. Vector carries both for a migration
@@ -366,6 +385,19 @@ impl Community {
             // signer); a freshly-minted in-memory Community has none yet.
             owner_attestation: None,
             dissolved: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    #[test]
+    fn only_the_v1_kinds_route_to_v1() {
+        for k in [3300, 3305, 3311] {
+            assert!(super::is_v1_kind(k), "{k}");
+        }
+        for k in [3299, 3312, 1059, 21059, 33302] {
+            assert!(!super::is_v1_kind(k), "{k}");
         }
     }
 }

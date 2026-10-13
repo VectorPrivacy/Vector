@@ -8,13 +8,13 @@
 //! the wrong account's DB.
 
 use nostr_sdk::prelude::{FinalizeEvent, FinalizeEventAsync};
-use nostr_sdk::prelude::{Event, EventId, Keys, Tag, ToBech32};
+use nostr_sdk::prelude::{Event, Keys, Tag, ToBech32};
 
 use super::invite::CommunityInvite;
 use super::public_invite::{
     self, build_public_invite_event, locator_hex, parse_public_invite_event, PublicInviteBundle,
 };
-use super::send::{delete_own_message, publish_signed_message};
+use super::send::publish_signed_message;
 use super::transport::{Evidence, Query, Transport};
 use super::{Channel, Community};
 use crate::stored_event::event_kind;
@@ -311,63 +311,6 @@ pub async fn publish_typing_signal<T: Transport + ?Sized>(
     Ok(())
 }
 
-/// Persist an inbound WebXDC peer signal as a kind-30078 event row — the SAME shape the DM
-/// peer-advertisement handler writes (content `peer-advertisement`/`peer-left`, `reference_id`
-/// = topic, `webxdc-topic`/`webxdc-node-addr` tags) — so the miniapp layer's
-/// `get_active_peer_advertisements` (latest-per-npub, left-tombstone-aware) reads both
-/// transports identically. This is what lets a member who closed Vector mid-session rediscover
-/// the active players on reopen. Idempotent via `event_exists`.
-pub async fn persist_webxdc_signal(
-    channel_hex: &str,
-    npub: &str,
-    topic_id: &str,
-    node_addr: Option<&str>,
-    event_id: &str,
-    created_at: u64,
-) {
-    if crate::db::events::event_exists(event_id).unwrap_or(true) {
-        return;
-    }
-    // Sender-claimed timestamp: clamp into the near future so a forged far-future ad
-    // can't outrank every later genuine peer-left in the latest-per-npub read.
-    let now_secs = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let created_at = created_at.min(now_secs + 300);
-    let Ok(chat_id) = crate::db::id_cache::get_or_create_chat_id(channel_hex) else { return };
-    let mut tags = vec![
-        vec!["webxdc-topic".to_string(), topic_id.to_string()],
-        vec!["d".to_string(), "vector-webxdc-peer".to_string()],
-    ];
-    if let Some(addr) = node_addr {
-        tags.push(vec!["webxdc-node-addr".to_string(), addr.to_string()]);
-    }
-    let event = crate::stored_event::StoredEvent {
-        id: event_id.to_string(),
-        kind: crate::stored_event::event_kind::APPLICATION_SPECIFIC,
-        chat_id,
-        user_id: None,
-        content: if node_addr.is_some() { "peer-advertisement" } else { "peer-left" }.to_string(),
-        tags,
-        reference_id: Some(topic_id.to_string()),
-        created_at,
-        received_at: web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-        mine: false,
-        pending: false,
-        failed: false,
-        wrapper_event_id: None,
-        npub: Some(npub.to_string()),
-        preview_metadata: None,
-    };
-    if let Err(e) = crate::db::events::save_event(&event).await {
-        crate::log_warn!("[community] failed to persist webxdc peer signal: {e}");
-    }
-}
-
 /// Publish a cooperative kick (3309) of `target_hex` into `channel`: a real-npub-signed inner directive
 /// (content = the target's hex pubkey) carrying the actor's `vac` authority citation. NOT a rekey and NOT
 /// folded — the kicked client self-removes on receipt (drops the community keys + wipes local chat data);
@@ -450,7 +393,6 @@ pub async fn publish_kick<T: Transport + ?Sized>(
     // Return the inner id so the caller can record a local "Member Left" that dedups with the relay echo.
     Ok(inner.id.to_hex())
 }
-
 
 /// Replace the Community banlist and publish it as a real-npub-signed 3308 EDITION (vsk=4) at the
 /// community-scoped banlist locator (keyless; foldable + re-anchorable). `banned_hex`
@@ -1286,37 +1228,6 @@ pub async fn publish_owner_hide<T: Transport + ?Sized>(
     Ok(())
 }
 
-/// Delete a message the local user previously sent, by its INNER message id (what the UI
-/// holds). Loads the retained ephemeral key + the outer event id it points at, then
-/// NIP-09-deletes that outer event. Errors if no key is retained (not ours, or already
-/// deleted).
-pub async fn delete_message<T: Transport + ?Sized>(
-    transport: &T,
-    message_id: &str,
-) -> Result<(), String> {
-    crate::db::scoped(async move {
-        let session = crate::db::current_session();
-        if !session.is_live() {
-            return Err("account changed; aborting delete".to_string());
-        }
-        // PEEK the key (don't consume it yet): the NIP-09 publish below is fallible, and the
-        // key is single-use — consuming it before a failed publish would leave the message
-        // permanently undeletable. Remove it only after the deletion actually goes out.
-        let (ephemeral, outer_event_id_hex, relays) = match crate::db::community::get_message_key(message_id)? {
-            Some(v) => v,
-            None => {
-                return Err("no retained key for this message (not yours, or already deleted)".to_string())
-            }
-        };
-        let id = EventId::from_hex(&outer_event_id_hex).map_err(|e| e.to_string())?;
-        delete_own_message(transport, &relays, &ephemeral, id).await?;
-        // Published — now it's safe to consume the key.
-        crate::db::community::delete_message_key(message_id)?;
-        Ok(())
-    })
-    .await
-}
-
 /// Accept a parked invite and persist the member-view Community (the user-consented
 /// half of the carrier — the inbound handler only *parks* invites; this is reached
 /// from an explicit accept command). Guards against id-collision overwrites:
@@ -1523,43 +1434,7 @@ pub async fn republish_channel_metadata<T: Transport + ?Sized>(
 /// locally (for list/revoke), and return `(hex token, shareable URL)`.
 ///
 /// Owner-only: the bundle grants the @everyone base (server-root) key, and minting the
-/// canonical link is an owner action. `std::sync::Arc<crate::db::Session>`-gated around the token persist.
-/// A short, human-typable label for an unlabeled invite link. Crockford-ish base32 (no 0/1/I/O)
-/// so it's unambiguous to read and share aloud; 6 chars ≈ 1B combinations (collision-improbable).
-/// Every link gets a label: the one provided, else a random 6-char handle. A stable label makes
-/// the link identifiable in the UI and keys per-link join attribution off (creator, label), so it
-/// must be unique among THIS creator's links in the community (else two links share a join bucket).
-pub(crate) fn resolve_invite_label(community_id: &str, label: Option<String>) -> Result<String, String> {
-    let existing = crate::db::community::list_public_invites(community_id).unwrap_or_default();
-    let label_taken = |cand: &str| {
-        existing.iter().any(|r| r.label.as_deref().map(|e| e.eq_ignore_ascii_case(cand)).unwrap_or(false))
-    };
-    match label {
-        Some(l) if !l.trim().is_empty() => {
-            let l = l.trim().to_string();
-            if label_taken(&l) {
-                return Err(format!("You already have an invite link labeled \u{201c}{l}\u{201d}. Pick a different label."));
-            }
-            Ok(l)
-        }
-        // Random handle — regenerate on the (astronomically unlikely) collision.
-        _ => {
-            let mut l = generate_invite_label();
-            while label_taken(&l) {
-                l = generate_invite_label();
-            }
-            Ok(l)
-        }
-    }
-}
-
-fn generate_invite_label() -> String {
-    use rand::Rng;
-    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::thread_rng();
-    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
-}
-
+/// canonical link is an owner action. Session-guarded around the token persist.
 pub async fn create_public_invite<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
@@ -1571,7 +1446,7 @@ pub async fn create_public_invite<T: Transport + ?Sized>(
             return Err("you need the create-invite permission to mint a public invite".to_string());
         }
 
-        let label = Some(resolve_invite_label(&community.id.to_hex(), label)?);
+        let label = Some(super::v2::invite::resolve_invite_label(&community.id.to_hex(), label)?);
 
         // Attribution (metrics): stamp the bundle with who minted it (my npub) + the creator's label, so
         // a joiner's Presence can announce "invited by me via <label>".
@@ -2234,7 +2109,7 @@ async fn observe_channel_activity<T: Transport + ?Sized>(
                         let _ = crate::db::events::save_system_event_at(event_id, &ch_hex, et, npub, note.as_deref(), *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
                     }
                     super::inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
-                        persist_webxdc_signal(&ch_hex, npub, topic_id, node_addr.as_deref(), event_id, *created_at).await;
+                        super::v2::inbound::persist_webxdc_signal(&ch_hex, npub, topic_id, node_addr.as_deref(), event_id, *created_at).await;
                     }
                     _ => {}
                 }
@@ -3485,12 +3360,9 @@ pub struct BaseCatchup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::community::send::fetch_channel_messages;
     use crate::community::transport::{memory::MemoryRelay, Query, Transport};
-    use nostr_sdk::prelude::{EventBuilder, Kind};
 
-    /// A transport whose publish always fails (fetch returns nothing) — for testing that
-    /// a failed deletion publish doesn't strand the single-use key.
+    /// A transport whose publish always fails (fetch returns nothing).
     struct FailingRelay;
     #[async_trait::async_trait]
     impl Transport for FailingRelay {
@@ -7300,61 +7172,6 @@ mod tests {
         assert!(republish_community_metadata(&FailingRelay, &community).await.is_err());
         let loaded = crate::db::community::load_community(&community.id).unwrap().unwrap();
         assert_eq!(loaded.name, "HQ", "a failed metadata publish leaves the local name unchanged");
-    }
-
-    #[tokio::test]
-    async fn send_persists_key_then_delete_round_trip() {
-        let (_tmp, _guard) = init_test_db();
-        let relay = MemoryRelay::new();
-        let community = Community::create("HQ", "general", vec!["r1".into()]);
-        let channel = community.channels[0].clone();
-        let alice = Keys::generate();
-
-        // send_message persists the ephemeral key keyed by the INNER message id...
-        let _outer = send_message(&relay, &community, &channel, &alice, "deletable", 1).await.unwrap();
-        let before = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert_eq!(before.len(), 1);
-        let message_id = before[0].message_id.to_hex();
-
-        // ...so delete_message (by inner message id, what the UI holds) removes it.
-        delete_message(&relay, &message_id).await.unwrap();
-        let after = fetch_channel_messages(&relay, &community, &channel).await.unwrap();
-        assert!(after.is_empty(), "message should be deleted after delete_message");
-
-        // The key is single-use: a second delete finds nothing retained.
-        assert!(delete_message(&relay, &message_id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn failed_delete_publish_preserves_key() {
-        // B2: the deletion key is single-use, so a FAILED NIP-09 publish must NOT consume
-        // it — otherwise the message is permanently undeletable.
-        let (_tmp, _guard) = init_test_db();
-        let relay = MemoryRelay::new();
-        let community = Community::create("HQ", "general", vec!["r1".into()]);
-        let channel = community.channels[0].clone();
-        let alice = Keys::generate();
-        send_message(&relay, &community, &channel, &alice, "delete me", 1).await.unwrap();
-        let message_id = fetch_channel_messages(&relay, &community, &channel).await.unwrap()[0]
-            .message_id
-            .to_hex();
-
-        // Delete via a transport whose publish fails → error, key retained.
-        assert!(delete_message(&FailingRelay, &message_id).await.is_err());
-
-        // The key survived, so a retry over a working relay succeeds.
-        delete_message(&relay, &message_id).await.unwrap();
-        assert!(fetch_channel_messages(&relay, &community, &channel).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_unknown_message_errors() {
-        let (_tmp, _guard) = init_test_db();
-        let relay = MemoryRelay::new();
-        // A message id we never sent → no retained key → error, no panic.
-        let fake = Keys::generate();
-        let bogus = EventBuilder::new(Kind::Custom(1), "x").finalize(&fake).unwrap().id;
-        assert!(delete_message(&relay, &bogus.to_hex()).await.is_err());
     }
 
     #[tokio::test]

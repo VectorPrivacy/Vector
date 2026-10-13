@@ -42,6 +42,15 @@ pub(crate) async fn refresh_community_subscription() {
     }
 }
 
+/// [`refresh_community_subscription`] for both protocols: a teardown can't tell which one
+/// it ended, since a v2 leave has already deleted the row it would ask.
+pub(crate) async fn refresh_all_community_subscriptions() {
+    if let Some(client) = nostr_client() {
+        vector_core::community::realtime::refresh_subscription(&client).await;
+        vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    }
+}
+
 /// (Re)subscribe to our own replaceable self-sync lists (Community List + emoji list). Open subscriptions
 /// (no `limit(0)`): the relay replays the current stored event on connect AND on every reconnect, then
 /// streams edits live — so this one mechanism covers boot sync, reconnect re-sync, AND instant cross-device.
@@ -155,48 +164,26 @@ async fn handle_self_sync_event(event: Event) {
     }
 }
 
-/// Route an arriving Community (kind-3300) event: find the channel its `z` pseudonym
-/// maps to, open + verify + ingest it into STATE, then persist + emit if it is new.
-/// Events that fail to open (wrong key, splice, forged sig) are dropped inside
-/// `process_incoming`. (The notification loop's `session.is_live()` gate above guards
-/// against account-swap before dispatch.)
-/// Route an arriving Community event through `vector_core::community::realtime`, which opens +
-/// verifies + ingests + persists it and dispatches the typed outcome to the Tauri handler (UI +
-/// notifications + presence/teardown). Thin wrapper — the realtime pipeline now lives in core.
-async fn handle_community_event(
-    event: Event,
-) {
+/// Route an arriving Community event to its protocol's dispatcher; the Tauri handler
+/// renders and notifies either the same way.
+async fn handle_community_event(event: Event) {
     let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
         std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::realtime::dispatch_event(event, handler).await;
+    vector_core::community::dispatch_inbound(event, handler).await;
 }
 
-/// v2 twin of [`handle_community_event`]: the same Tauri handler surface fed by
-/// the v2 dispatcher (authors-addressed 1059/21059 wraps → open → route →
-/// persist-gated callbacks), so a v2 message emits to the frontend identically
-/// to a v1 one.
-async fn handle_community_v2_event(
-    event: Event,
-) {
-    let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
-        std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::v2::realtime::dispatch_event(event, handler).await;
-}
-
-/// Routes "straggler" community events — ones a slower relay returned after a racing
-/// `LiveTransport::fetch` already handed the caller the fast relay's batch — back through the SAME
-/// realtime ingest path. So a historical message, control edition, or rekey that only a slow relay
-/// held is never lost; it's folded a beat late by the deterministic convergence engine (`process_incoming`
-/// for content, `refresh_community_control` for authority — both via `handle_community_event`).
+/// Feeds "straggler" Community events, the ones a slower relay returned after a racing
+/// `LiveTransport::fetch` had already answered, through the live lane's router.
 pub struct CommunityStragglerSink;
 
 impl vector_core::community::transport::CommunityIngestSink for CommunityStragglerSink {
     fn ingest_stragglers(&self, events: Vec<Event>) {
-        // Called from inside the transport's background drain task (always within the tokio runtime).
-        // std::sync::Arc<crate::db::Session> captured BEFORE the spawn boundary (a capture inside the task would validate
-        // against whatever generation is current by then) — re-checked per event across the fold loop.
+        // Bound to the drain's account, which a swap mid-fold can retire.
         vector_core::db::spawn_bound(async move {
             for event in events {
+                if !vector_core::db::current_session().is_live() {
+                    return;
+                }
                 handle_community_event(event).await;
             }
         });
@@ -279,11 +266,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
         vector_core::db::community::community_id_for_channel(chat_id)
             .ok()
             .flatten()
-            .and_then(|cid| {
-                let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&cid));
-                vector_core::db::community::load_community(&id).ok().flatten()
-            })
-            .and_then(|c| c.icon)
+            .and_then(|cid| vector_core::db::community::community_image(&cid, false).ok().flatten())
             .and_then(|icon| crate::image_cache::get_cached_path(handle, &icon.url, crate::image_cache::ImageType::Avatar))
     });
 
@@ -302,25 +285,7 @@ fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
     let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
         return false;
     };
-    // Owner (verified attestation) outranks all.
-    let owner_is_sender = vector_core::db::community::load_community(
-        &vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id)),
-    )
-    .ok()
-    .flatten()
-    .and_then(|c| {
-        c.owner_attestation
-            .as_ref()
-            .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
-    })
-    .is_some_and(|pk| pk.to_hex() == sender_hex);
-    if owner_is_sender {
-        return true;
-    }
-    // Otherwise a non-owner admin grant-holder.
-    vector_core::db::community::get_community_roles(&community_id)
-        .map(|roles| roles.is_admin(&sender_hex))
-        .unwrap_or(false)
+    vector_core::community::moderation::is_owner_or_admin(&community_id, &sender_hex)
 }
 
 /// Called once after login to begin receiving real-time events.
@@ -555,7 +520,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             while let Some(n) = tap.next().await {
                 if let ClientNotification::Event { event, subscription_id, .. } = n {
                     let k = event.kind.as_u16();
-                    if (3300..=3311).contains(&k) || k == 1059 || k == 21059 {
+                    if vector_core::community::is_v1_kind(k) || k == 1059 || k == 21059 {
                         let age = nostr_sdk::prelude::Timestamp::now()
                             .as_secs()
                             .saturating_sub(event.created_at.as_secs());
@@ -596,12 +561,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             let k = event.kind.as_u16();
             let id8 = if fresh { event.id.to_hex()[..8].to_string() } else { String::new() };
             let t = std::time::Instant::now();
-            let v1 = (3300..=3311).contains(&k);
-            if v1 {
-                handle_community_event(event).await;
-            } else {
-                handle_community_v2_event(event).await;
-            }
+            let v1 = vector_core::community::is_v1_kind(k);
+            handle_community_event(event).await;
             let spent = t.elapsed().as_micros() as u64;
             flood_count += 1;
             flood_micros += spent;
@@ -650,7 +611,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // here too would race it to the dedup ledger for every
                         // wrap. This loop's job is everything else.
                         continue;
-                    } else if (3300..=3311).contains(&k) || k == 1059 || k == 21059 {
+                    } else if vector_core::community::is_v1_kind(k) || k == 1059 || k == 21059 {
                         // Route Community events by KIND, not by subscription id: an event can arrive on the
                         // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
                         // id would drop the rest. dispatch resolves the channel from the event itself and

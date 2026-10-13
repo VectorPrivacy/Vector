@@ -682,28 +682,13 @@ pub async fn fetch_messages<R: Runtime>(
                     // if this ever fires, the log is the signal to fix the source (or to offer a
                     // user-initiated removal, which can't be triggered by a boot-time misread).
                     {
-                        let mut held = std::collections::HashSet::new();
-                        let mut trustworthy = true;
-                        match vector_core::db::community::list_community_ids() {
-                            Ok(ids) => {
-                                for id in ids {
-                                    match vector_core::db::community::load_community(&id) {
-                                        // Ok(None) is a legitimate "not held" — only Err is unsafe.
-                                        Ok(Some(c)) => held.extend(c.channels.iter().map(|ch| ch.id.to_hex())),
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            eprintln!("[Boot] orphan sweep: community read failed ({e}) — skipping the sweep");
-                                            trustworthy = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                        let (held, trustworthy) = match vector_core::db::community::held_channel_ids() {
+                            Ok(held) => (held, true),
                             Err(e) => {
-                                eprintln!("[Boot] orphan sweep: community list failed ({e}) — skipping the sweep");
-                                trustworthy = false;
+                                eprintln!("[Boot] orphan sweep: community read failed ({e}) — skipping the sweep");
+                                (std::collections::HashSet::new(), false)
                             }
-                        }
+                        };
                         let orphans: Vec<String> = if trustworthy {
                             state
                                 .chats

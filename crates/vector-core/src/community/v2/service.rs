@@ -4512,6 +4512,7 @@ pub fn tombstone_community_list_durable(community_id: crate::community::Communit
 
 fn add_pending_tombstone(community_id: &crate::community::CommunityId, removed_at: u64) -> PendingTombstone {
     let pending = PendingTombstone { community_id: crate::simd::hex::bytes_to_hex_32(&community_id.0), removed_at };
+    mirror_tombstones([(pending.community_id.as_str(), removed_at)]);
     edit_pending(|p| {
         p.tombstones.retain(|t| t.community_id != pending.community_id || t.removed_at > pending.removed_at);
         if !p.tombstones.iter().any(|t| t.community_id == pending.community_id) {
@@ -4618,6 +4619,66 @@ fn edit_pending(f: impl FnOnce(&mut PendingListWrites)) {
             crate::log_warn!("[CommunityList] could not persist pending list writes: {e}");
         }
     }
+}
+
+/// Every removal this device has read from the List or written to it: `community_id` →
+/// newest `removed_at` (ms). Merge-only, so an invite arriving between syncs still meets
+/// the decision that answered it.
+const LIST_TOMBSTONES_KEY: &str = "community_list_tombstones";
+
+fn load_tombstone_mirror() -> Result<std::collections::HashMap<String, u64>, String> {
+    let raw = crate::db::settings::get_sql_setting_strict(LIST_TOMBSTONES_KEY)?;
+    Ok(raw.map_or_else(Default::default, |s| {
+        serde_json::from_str(&s).unwrap_or_else(|e| {
+            crate::log_warn!("[CommunityList] tombstone mirror unreadable ({e}) — set aside");
+            let _ = crate::db::settings::set_sql_setting(format!("{LIST_TOMBSTONES_KEY}_unread"), s);
+            Default::default()
+        })
+    }))
+}
+
+fn mirror_tombstones<'a>(tombstones: impl IntoIterator<Item = (&'a str, u64)>) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // A failed read must not become an empty map that replaces the row.
+    let mut mirror = match load_tombstone_mirror() {
+        Ok(m) => m,
+        Err(e) => {
+            crate::log_warn!("[CommunityList] tombstone mirror not read ({e}) — removals not mirrored");
+            return;
+        }
+    };
+    let mut changed = false;
+    for (id, at) in tombstones {
+        let id = id.to_ascii_lowercase();
+        if mirror.get(&id).is_none_or(|&held| held < at) {
+            mirror.insert(id, at);
+            changed = true;
+        }
+    }
+    if !changed {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(&mirror) {
+        if let Err(e) = crate::db::settings::set_sql_setting(LIST_TOMBSTONES_KEY.to_string(), json) {
+            crate::log_warn!("[CommunityList] could not persist the tombstone mirror: {e}");
+        }
+    }
+}
+
+/// Record a removal this device made without a List write (a kick, a rekey exclusion), so a
+/// re-delivered invite no newer than it stays answered.
+pub fn note_local_removal(community_id: &str, removed_at: u64) {
+    mirror_tombstones([(community_id, removed_at)]);
+}
+
+/// Whether a leave or decline at least as new as an invite (its inner rumor time,
+/// in seconds) has already answered it, here or on a sibling device.
+pub fn tombstone_suppresses(community_id: &str, invite_created_at_secs: u64) -> bool {
+    let invite_ms = invite_created_at_secs.saturating_mul(1000);
+    let id = community_id.to_ascii_lowercase();
+    load_tombstone_mirror().unwrap_or_default().get(&id).is_some_and(|&at| at >= invite_ms)
+        || load_pending().tombstones.iter().any(|t| t.community_id.eq_ignore_ascii_case(&id) && t.removed_at >= invite_ms)
 }
 
 /// Resume every list write a previous run left unfinished. Once per session.
@@ -4787,6 +4848,7 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             .map(|t| super::list::Tombstone { community_id: t.community_id, removed_at: t.removed_at, extra: Default::default() })
             .collect();
         let list = list.merge(&super::list::CommunityList { tombstones: pending, ..Default::default() });
+        mirror_tombstones(list.tombstones.iter().map(|t| (t.community_id.as_str(), t.removed_at)));
         // Receive-side teardown (the counterpart to the republish tombstone guard):
         // a community this device still holds but the synced list shows TOMBSTONED (a
         // sibling device left it) and NOT live gets torn down here, so a leave on one
@@ -4934,11 +4996,11 @@ pub(super) fn citation_is_synced(
         &crate::community::CommunityId(cid_bytes),
         &actor_bytes,
     ));
-    let head: Vec<crate::community::roster::EntityHead> =
+    let head: Vec<crate::community::edition::EntityHead> =
         crate::db::community::get_edition_head(cid_hex, &grant_hex)
             .ok()
             .flatten()
-            .map(|(version, self_hash)| crate::community::roster::EntityHead {
+            .map(|(version, self_hash)| crate::community::edition::EntityHead {
                 entity_hex: grant_hex.clone(),
                 version,
                 self_hash,
@@ -4947,7 +5009,7 @@ pub(super) fn citation_is_synced(
             })
             .into_iter()
             .collect();
-    crate::community::roster::authority_citation_satisfied(&head, Some(owner_hex), actor_hex, &grant_hex, citation)
+    crate::community::edition::authority_citation_satisfied(&head, Some(owner_hex), actor_hex, &grant_hex, citation)
 }
 
 /// [`my_authority_citation`], but refusing to emit an action every reader will
@@ -8058,9 +8120,9 @@ fn citation_ok_in_fold(
         return true;
     }
     let grant_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(cid, &author.to_bytes()));
-    let as_entity: Vec<crate::community::roster::EntityHead> = heads
+    let as_entity: Vec<crate::community::edition::EntityHead> = heads
         .iter()
-        .map(|h| crate::community::roster::EntityHead {
+        .map(|h| crate::community::edition::EntityHead {
             entity_hex: h.entity_hex.clone(),
             version: h.version,
             self_hash: h.self_hash,
@@ -8068,7 +8130,7 @@ fn citation_ok_in_fold(
             citation: None,
         })
         .collect();
-    crate::community::roster::authority_citation_satisfied(&as_entity, owner_hex, &actor_hex, &grant_hex, citation)
+    crate::community::edition::authority_citation_satisfied(&as_entity, owner_hex, &actor_hex, &grant_hex, citation)
 }
 
 thread_local! {
@@ -12292,6 +12354,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stored_members_fold_observed_authors_grants_and_bans() {
+        use nostr_sdk::prelude::ToBech32;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Observed", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let channel_hex = crate::simd::hex::bytes_to_hex_32(&community.channels[0].id.0);
+        let [talker, banned, staff, revoked] = std::array::from_fn(|_| Keys::generate().public_key());
+
+        for (i, pk) in [talker, banned, revoked].iter().enumerate() {
+            let mut m = crate::types::Message::default();
+            m.id = format!("{:02x}", i + 1).repeat(32);
+            m.npub = Some(pk.to_bech32().unwrap());
+            m.at = 1_000_000;
+            crate::db::events::save_message(&channel_hex, &m).await.unwrap();
+        }
+        crate::db::community::set_community_banlist(&cid_hex, &[banned.to_hex()], 1).unwrap();
+        let roles = crate::community::roles::CommunityRoles {
+            roles: Vec::new(),
+            grants: vec![
+                MemberGrant { member: staff.to_hex(), role_ids: vec!["ab".repeat(32)] },
+                MemberGrant { member: revoked.to_hex(), role_ids: Vec::new() },
+            ],
+        };
+        crate::db::community::set_community_roles(&cid_hex, &roles, 1).unwrap();
+
+        let activity: std::collections::HashMap<String, u64> =
+            crate::db::community::community_member_activity(&cid_hex).unwrap().into_iter().collect();
+        let at = |pk: &PublicKey| activity.get(&pk.to_bech32().unwrap()).copied();
+        assert!(at(&talker).is_some_and(|t| t < 1_000_000_000), "an author keeps the time they spoke");
+        assert!(at(&revoked).is_some_and(|t| t < 1_000_000_000), "an empty grant is not re-asserted");
+        assert!(at(&staff).is_some(), "a grant holder counts without a word");
+        assert_eq!(at(&banned), None);
+
+        let members = stored_memberlist(&community).unwrap();
+        for pk in [community.owner().unwrap(), talker, staff, revoked] {
+            assert!(members.contains(&pk));
+        }
+        assert!(!members.contains(&banned));
+        assert!(crate::db::community::community_member_activity(&"cd".repeat(32)).unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_refound_keeps_a_quiet_member_the_network_fold_forgot() {
         // The network fold only sees the current guestbook + the recent posting window,
         // so a quiet member whose Join lives on a buried epoch vanishes from it — and a
@@ -13596,6 +13701,83 @@ mod tests {
         tombstone_community_list(&relay, &cid, &relays, now_ms() + 10_000, true).await.unwrap();
         sync_community_list(&relay, &relays).await.unwrap();
         assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_none(), "the sibling's removal clears the parked copy");
+    }
+
+    #[tokio::test]
+    async fn a_removal_answers_every_invite_no_newer_than_it() {
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let sibling = "5b".repeat(32);
+        let ours = crate::community::CommunityId([0x5C; 32]);
+        let ours_hex = crate::simd::hex::bytes_to_hex_32(&ours.0);
+
+        publish_remote_tombstone(&relay, &me, &relays, &sibling, 5_000_000).await;
+        assert!(!tombstone_suppresses(&sibling, 1), "unknown until a sync reads it");
+        sync_community_list(&relay, &relays).await.unwrap();
+        assert!(tombstone_suppresses(&sibling, 5_000), "a same-time re-delivery");
+        assert!(tombstone_suppresses(&sibling, 4_999));
+        assert!(tombstone_suppresses(&sibling.to_ascii_uppercase(), 4_999));
+        assert!(!tombstone_suppresses(&sibling, 5_001), "a newer re-invite resurfaces");
+        assert!(!tombstone_suppresses(&ours_hex, 1));
+
+        // Our own removal counts before it lands, and after it has.
+        add_pending_tombstone(&ours, 7_000_000);
+        assert!(tombstone_suppresses(&ours_hex, 7_000));
+        let landed = super::super::list::Tombstone { community_id: ours_hex.clone(), removed_at: 7_000_000, extra: Default::default() };
+        settle_pending(&super::super::list::CommunityList { tombstones: vec![landed], ..Default::default() });
+        assert!(load_pending().tombstones.is_empty());
+        assert!(tombstone_suppresses(&ours_hex, 7_000));
+
+        mirror_tombstones([(sibling.as_str(), 1_000)]);
+        assert!(tombstone_suppresses(&sibling, 5_000), "an older removal never lowers the bar");
+
+        let kicked = "5f".repeat(32);
+        note_local_removal(&kicked, 8_000_000);
+        assert!(tombstone_suppresses(&kicked, 8_000), "a kick answers the invites before it");
+
+        let queued = "5e".repeat(32);
+        edit_pending(|p| p.tombstones.push(PendingTombstone { community_id: queued.clone(), removed_at: 9_000_000 }));
+        assert!(tombstone_suppresses(&queued, 9_000), "a leave queued before the mirror existed");
+
+        crate::db::settings::set_sql_setting(LIST_TOMBSTONES_KEY.to_string(), "not json".into()).unwrap();
+        assert!(!tombstone_suppresses(&sibling, 1));
+        let aside = crate::db::settings::get_sql_setting(format!("{LIST_TOMBSTONES_KEY}_unread")).unwrap();
+        assert_eq!(aside.as_deref(), Some("not json"), "an unreadable mirror is set aside, not overwritten");
+    }
+
+    #[tokio::test]
+    async fn a_left_community_cannot_reinvite_with_an_older_wrap() {
+        #[derive(Default)]
+        struct Invites(std::sync::Mutex<Vec<String>>);
+        impl crate::InboundEventHandler for Invites {
+            fn on_community_invite(&self, community_id: &str) {
+                self.0.lock().unwrap().push(community_id.to_string());
+            }
+        }
+        let (_tmp, _guard, _me) = init_test_db();
+        let cid = crate::community::CommunityId([0x5D; 32]);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+        let now = now_ms() / 1000;
+        let invite = |sent_at: u64, wrap: u8| crate::event_handler::PreparedEvent::CommunityInviteV2 {
+            bundle_json: "{}".into(),
+            community_id: cid_hex.clone(),
+            inviter: Keys::generate().public_key().to_hex(),
+            is_mine: false,
+            wrapper_event_id_bytes: [wrap; 32],
+            wrapper_created_at: sent_at,
+            rumor_created_at: sent_at,
+            expires_at: 0,
+        };
+        add_pending_tombstone(&cid, now * 1000);
+        let parked = Invites::default();
+
+        crate::event_handler::commit_prepared_event(invite(now - 60, 1), true, &parked).await;
+        assert!(parked.0.lock().unwrap().is_empty(), "the leave already answered it");
+        assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_none());
+
+        crate::event_handler::commit_prepared_event(invite(now + 1, 2), true, &parked).await;
+        assert_eq!(*parked.0.lock().unwrap(), vec![cid_hex.clone()], "a re-invite after the leave parks");
     }
 
     #[tokio::test]
@@ -19311,7 +19493,7 @@ mod tests {
 
         // The shared v1 delete path (Layer 1 of delete_community_message / revoke_reaction)
         // scrubs the wrap off the relay via the retained key, then consumes the row.
-        crate::community::service::delete_message(&bed.relay, &id).await.unwrap();
+        crate::community::message_delete::delete_message(&bed.relay, &id).await.unwrap();
         assert!(crate::db::community::get_message_key(&id).unwrap().is_none(), "key consumed after the scrub");
         let after = bed.relay.fetch(&wrap_query, &community.relays).await.unwrap();
         assert!(!after.iter().any(|w| w.id.to_hex() == outer_hex), "wrap scrubbed from the relay");
@@ -19349,7 +19531,7 @@ mod tests {
         assert!(crate::db::community::get_message_key(&foreign_id).unwrap().is_none());
 
         // The healed row is a working full delete: the shared path scrubs the wrap.
-        crate::community::service::delete_message(&bed.relay, &id).await.unwrap();
+        crate::community::message_delete::delete_message(&bed.relay, &id).await.unwrap();
         let left = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
         assert!(
             !left.iter().any(|f| f.event.opened().rumor_id.to_hex() == id),

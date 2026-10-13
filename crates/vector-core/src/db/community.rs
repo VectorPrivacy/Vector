@@ -1306,27 +1306,24 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
     const COMMUNITY_MEMBER_CAP: usize = 500;
     use std::collections::HashMap;
 
-    let community = match load_community(&CommunityId(hex_id_to_32(community_id)?))? {
-        Some(c) => c,
-        None => return Ok(Vec::new()),
-    };
+    let id = CommunityId(hex_id_to_32(community_id)?);
     // The proven owner is ALWAYS a member of their own community. Seed them so a freshly-created
     // community (no message/presence events yet) still shows its creator instead of an empty roster.
-    // `now_secs()` is just a presence baseline; real activity below overwrites it, and the UI re-sorts
-    // by role tier regardless.
-    let owner_b32: Option<String> = community
-        .owner_attestation
-        .as_deref()
-        .and_then(|att| crate::community::owner::verify_owner_attestation(att, community_id))
-        .and_then(|pk| pk.to_bech32().ok());
+    // A v2 owner is derived from the community id by `fold_members`, so only v1 proves one here.
+    let owner_b32: Option<String> = match community_protocol(&id)? {
+        None => return Ok(Vec::new()),
+        Some(crate::community::ConcordProtocol::V2) => None,
+        Some(crate::community::ConcordProtocol::V1) => match load_community(&id)? {
+            Some(c) => c
+                .owner_attestation
+                .as_deref()
+                .and_then(|att| crate::community::owner::verify_owner_attestation(att, community_id))
+                .and_then(|pk| pk.to_bech32().ok()),
+            None => return Ok(Vec::new()),
+        },
+    };
 
-    // Map each channel's hex id → its integer chat row id (skip channels with no events yet).
-    let mut chat_ints: Vec<i64> = Vec::new();
-    for ch in &community.channels {
-        if let Ok(cid) = super::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
-            chat_ints.push(cid);
-        }
-    }
+    let chat_ints = community_chat_row_ids(community_id)?;
 
     // APPLICATION_SPECIFIC (30078) is the kind for presence/system events; everything else in a
     // community channel is real message activity. Inlined as a constant integer (no injection).
@@ -1403,13 +1400,13 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
     }
     }
 
-    // Exclude banned (banlist is hex; events store bech32 — compare on bech32). Denormalized
-    // identically onto every channel at load, so reading channels[0] is sufficient.
-    let banned: std::collections::HashSet<String> = community
-        .channels
-        .first()
-        .map(|c| c.banned.iter().filter_map(|pk| pk.to_bech32().ok()).collect())
-        .unwrap_or_default();
+    // Events store bech32, so compare on bech32. The owner can never be effectively banned.
+    let banned: std::collections::HashSet<String> = banned_set(community_id)
+        .iter()
+        .filter_map(|b| PublicKey::from_slice(b).ok())
+        .filter_map(|pk| pk.to_bech32().ok())
+        .filter(|npub| owner_b32.as_ref() != Some(npub))
+        .collect();
 
     // Member iff active, not banned, and last activity is at-or-after the last leave.
     let mut out: Vec<(String, u64)> = active
@@ -2865,6 +2862,52 @@ pub fn list_community_ids() -> Result<Vec<CommunityId>, String> {
     Ok(ids)
 }
 
+/// Every channel id held under a community we still hold, either protocol.
+pub fn held_channel_ids() -> Result<std::collections::HashSet<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT ch.channel_id FROM community_channels ch JOIN communities c ON c.community_id = ch.community_id")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+/// Every relay a held community lists, either protocol, without opening any key.
+pub fn held_community_relays() -> Result<std::collections::HashSet<String>, String> {
+    let sealed: Vec<String> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn.prepare("SELECT relays FROM communities").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    Ok(crate::crypto::open_batch(|o| {
+        sealed
+            .into_iter()
+            .filter_map(|s| serde_json::from_str::<Vec<String>>(&o.open_or_keep(s)).ok())
+            .flatten()
+            .collect()
+    }))
+}
+
+/// A community's icon or banner, either protocol: both store the same JSON shape.
+pub fn community_image(community_id: &str, banner: bool) -> Result<Option<crate::community::CommunityImage>, String> {
+    let sql = if banner {
+        "SELECT banner FROM communities WHERE community_id = ?1"
+    } else {
+        "SELECT icon FROM communities WHERE community_id = ?1"
+    };
+    let sealed: Option<String> = {
+        let conn = super::get_db_connection_guard_static()?;
+        conn.query_row(sql, params![community_id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten()
+    };
+    let Some(sealed) = sealed else { return Ok(None) };
+    let json = crate::crypto::open_batch(|o| o.open_or_keep(sealed));
+    serde_json::from_str(&json).map(Some).map_err(|e| format!("community image json: {e}"))
+}
+
 // ── Concord v2 storage (dual-stack) ──────────────────────────────────────────
 //
 // v2 communities reuse the shared community tables (migration 65 added the
@@ -3448,7 +3491,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_images_round_trip_and_read_as_v1_community_images() {
+    fn v2_images_round_trip_and_read_as_community_images() {
         let (_tmp, _guard) = init_test_db();
         let owner = nostr_sdk::prelude::Keys::generate();
         let g = crate::community::v2::control::genesis(
@@ -3485,14 +3528,69 @@ mod tests {
         assert_eq!(re.channels[0].voice, Some(true));
         assert_eq!(re.channels[0].meta_extra.get("vnd"), Some(&serde_json::Value::from(7)));
 
-        // Dual-reader guarantee: the SAME stored JSON parses as a v1 CommunityImage
-        // (`ext` from the flattened extra), so cache_community_image serves a v2
-        // icon with no v2-awareness.
-        let v1 = load_community(c.id()).unwrap().unwrap();
-        let img = v1.icon.expect("v1 reader sees the v2 icon");
+        // The stored JSON parses as a CommunityImage (`ext` from the flattened extra),
+        // so `community_image` serves either protocol from the column alone.
+        let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+        let img = community_image(&cid, false).unwrap().expect("the v2 icon reads as a CommunityImage");
         assert_eq!(img.url, "https://blossom.example/abc");
         assert_eq!(img.ext, "webp");
         assert_eq!(img.hash, "a".repeat(64));
+        assert_eq!(community_image(&cid, true).unwrap(), None);
+        assert_eq!(community_image(&"cd".repeat(32), false).unwrap(), None);
+    }
+
+    #[test]
+    fn column_reads_and_the_owner_check_serve_either_protocol() {
+        use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role, RoleScope};
+        use crate::community::moderation::is_owner_or_admin;
+        let (_tmp, _guard) = init_test_db();
+        let owner = nostr_sdk::prelude::Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: "Two".into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Two", None, vec!["wss://two".into()], 1_000);
+        save_community_v2(&v2).unwrap();
+        let v1 = Community::create("One", "general", vec!["wss://one".into()]);
+        save_community(&v1).unwrap();
+
+        crate::db::get_write_connection_guard_static()
+            .unwrap()
+            .execute(
+                "INSERT INTO community_channels (channel_id, community_id, channel_key, epoch, name, created_at)
+                 VALUES (?1, ?2, x'00', 0, 'c', 1)",
+                params!["ee".repeat(32), "ff".repeat(32)],
+            )
+            .unwrap();
+        let channels = held_channel_ids().unwrap();
+        assert!(!channels.contains(&"ee".repeat(32)), "a channel whose community is gone is not held");
+        assert!(channels.contains(&crate::simd::hex::bytes_to_hex_32(&v2.channels[0].id.0)));
+        assert!(channels.contains(&v1.channels[0].id.to_hex()));
+        assert_eq!(channels.len(), v1.channels.len() + v2.channels.len());
+        let relays = held_community_relays().unwrap();
+        assert!(relays.contains("wss://two") && relays.contains("wss://one"));
+
+        let cid = crate::simd::hex::bytes_to_hex_32(&v2.id().0);
+        let (admin, social, stranger) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        let role = |id: &str, perms: u64| Role {
+            role_id: id.repeat(32), name: id.into(), position: 1, permissions: Permissions(perms),
+            scope: RoleScope::Server, color: 0, extra: Default::default(),
+        };
+        let roles = CommunityRoles {
+            roles: vec![role("aa", Permissions::ADMIN_ALL), role("bb", 0)],
+            grants: vec![
+                MemberGrant { member: admin.to_hex(), role_ids: vec!["aa".repeat(32)] },
+                MemberGrant { member: social.to_hex(), role_ids: vec!["bb".repeat(32)] },
+            ],
+        };
+        set_community_roles(&cid, &roles, 1).unwrap();
+        assert!(is_owner_or_admin(&cid, &owner.public_key().to_hex()), "a v2 owner proves itself from the id");
+        assert!(is_owner_or_admin(&cid, &admin.to_hex()));
+        assert!(!is_owner_or_admin(&cid, &social.to_hex()), "a role without management is not admin");
+        assert!(!is_owner_or_admin(&cid, &stranger.to_hex()));
+        assert!(!is_owner_or_admin(&"cd".repeat(32), &owner.public_key().to_hex()));
     }
 
     #[test]

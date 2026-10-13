@@ -198,7 +198,7 @@ async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
     if is_community {
         if db::community::get_message_key(&reaction_id).is_ok_and(|k| k.is_some()) {
             let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            if let Err(e) = vector_core::community::service::delete_message(&transport, &reaction_id).await {
+            if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &reaction_id).await {
                 vector_core::log_warn!("[Web] community reaction relay delete failed, tombstone only: {e}");
             }
         }

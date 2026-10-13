@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use nostr_sdk::prelude::ToBech32;
 use vector_core::community::invite::{build_invite_rumor, CommunityInvite};
-use vector_core::community::public_invite::{parse_invite_url, PublicInvitePreview};
+use vector_core::community::public_invite::parse_invite_url;
+use vector_core::community::v2::invite::PublicInvitePreview;
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::{service, CommunityId};
 use vector_core::sending::{send_rumor_dm, FileSource, NoOpSendCallback, Sealed, SendCallback, SendConfig};
@@ -758,45 +759,48 @@ pub(crate) async fn teardown_community_local_at(
     // Capture this community's relays BEFORE deletion so we can drop any that no remaining community
     // needs — and that aren't the user's own relays — from the pool after the routes refresh.
     let left_relays: Vec<String> = community_relays_of(community_id);
-    // The protocol too: `is_v2_community` reads the `communities` row, and the delete below
-    // removes it — asked afterwards, every community answers "not v2" and the v1-only guards
-    // on the list writers stop guarding. (Callers whose service already deleted the row —
-    // the v2 leave — still read false here, which is the correct answer for a list the
-    // service has already tombstoned itself.)
-    let was_v2 = is_v2_community(community_id);
+    // Read before the delete below, and positively: a v2 service may already have deleted
+    // the row, and an absent row must never reach the v1 list writers.
+    let was_v1 = hex_to_id32(community_id).ok().is_some_and(|b| {
+        vector_core::db::community::community_protocol(&CommunityId(b)).ok().flatten()
+            == Some(vector_core::community::ConcordProtocol::V1)
+    });
+    // A row deleted before teardown takes its channel rows with it; the rooms still name it.
+    let mut channel_ids = channel_ids.to_vec();
+    for chat in vector_core::state::STATE.lock().await.chats.iter() {
+        if chat.metadata.custom_fields.get("community_id").map(String::as_str) == Some(community_id)
+            && !channel_ids.contains(&chat.id)
+        {
+            channel_ids.push(chat.id.clone());
+        }
+    }
 
     let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     // tombstone it out of the cross-device list. A LOCAL trigger (leave / observed-ban / kick)
     // republishes so our other devices tear it down too; the RECEIVE path (a sibling already published the
     // removal) tombstones locally only — republishing there would re-echo our own event over the live sub.
-    if republish_list {
-        // v1 ONLY, same rule as the receive path below: a v2 community's removal is
-        // recorded in its kind-33302 List by the SERVICE that triggered this teardown
-        // (`leave_community` / `dissolve_community` both publish the §8 tombstone with
-        // a durable retry) — writing here as well deposits v2 tombstones into the v1
-        // (30078) mirror, which can never gain a matching v2 entry.
-        if !was_v2 {
-            vector_core::community::list::remove_membership(community_id);
-        }
+    // A v2 community owns its membership in the kind-33302 List, written by the service that
+    // triggered this teardown; a v2 tombstone in the v1 (30078) list can never gain a matching
+    // entry, so that list would read "removed" for it forever.
+    if !was_v1 {
+        let at = removed_at.unwrap_or_else(|| {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+        });
+        vector_core::community::v2::service::note_local_removal(community_id, at);
+    } else if republish_list {
+        vector_core::community::list::remove_membership(community_id);
     } else {
-        // v1 ONLY. A v2 community owns its membership in the kind-33302 list: the leave path
-        // publishes its own tombstone there and `sync_community_list` tears it down on the
-        // other devices. Writing here as well deposited v2 tombstones into the v1 (30078)
-        // mirror, which can never gain a matching v2 entry — so that document read "removed"
-        // for every v2 community, permanently, and the boot sweep acted on it.
-        if !was_v2 {
-            match removed_at {
-                Some(at) => vector_core::community::list::tombstone_local_only_at(community_id, at),
-                None => vector_core::community::list::tombstone_local_only(community_id),
-            }
+        match removed_at {
+            Some(at) => vector_core::community::list::tombstone_local_only_at(community_id, at),
+            None => vector_core::community::list::tombstone_local_only(community_id),
         }
     }
-    crate::services::subscription_handler::refresh_community_subscription().await;
+    crate::services::subscription_handler::refresh_all_community_subscriptions().await;
     {
         let mut state = vector_core::state::STATE.lock().await;
         state.chats.retain(|c| !channel_ids.contains(&c.id));
     }
-    for cid in channel_ids {
+    for cid in &channel_ids {
         let _ = vector_core::db::chats::delete_chat(cid);
         // Reset the RAM sync state to cold — a surviving `since` cursor would make a
         // same-session rejoin fetch only "new since I left" (empty chat despite history).
@@ -3668,7 +3672,7 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
             .map(|k| k.is_some())
             .unwrap_or(false);
         if has_key {
-            if let Err(e) = vector_core::community::service::delete_message(&transport, &message_id).await {
+            if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &message_id).await {
                 log_error!("Community relay delete failed, using cooperative tombstone only: {e}");
             }
         }
@@ -3759,7 +3763,7 @@ pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
                 .map(|k| k.is_some())
                 .unwrap_or(false);
             if has_key {
-                if let Err(e) = vector_core::community::service::delete_message(&transport, &reaction_id).await {
+                if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &reaction_id).await {
                     log_error!("Community reaction relay delete failed, tombstone only: {e}");
                 }
             }
@@ -4493,12 +4497,9 @@ pub async fn cache_community_image(
     is_banner: bool,
 ) -> Result<Option<String>, String> {
     let handle = crate::TAURI_APP.get().ok_or("App handle not initialized")?.clone();
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let image = match if is_banner { community.banner } else { community.icon } {
-        Some(img) => img,
-        None => return Ok(None),
+    let id = vector_core::simd::hex::bytes_to_hex_32(&hex_to_id32(&community_id)?);
+    let Some(image) = vector_core::db::community::community_image(&id, is_banner)? else {
+        return Ok(None);
     };
     let kind = if is_banner { crate::image_cache::ImageType::Banner } else { crate::image_cache::ImageType::Avatar };
     download_decrypt_cache_image(&handle, &image, kind).await.map(Some)

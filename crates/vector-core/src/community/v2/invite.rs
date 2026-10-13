@@ -802,6 +802,76 @@ fn signer_from_naddr(naddr: &str) -> Result<PublicKey, InviteError> {
     }
 }
 
+/// Default invite URL base. The path is irrelevant to the protocol (the fragment is read
+/// client-side and never sent to the server); only the fragment matters.
+pub const INVITE_URL_BASE: &str = "https://vectorapp.io/invite";
+
+/// How long a Direct Invite stays valid. A bundle hands out live key material for a
+/// community that keeps evolving (rotations, renames, bans), so an invite that never
+/// expires is both stale key material and clutter in the recipient's list. The sender
+/// stamps NIP-40 on the rumor AND (mirrored by the send path) on the outer gift wrap, so
+/// relays drop it on schedule; recipients enforce it themselves too, since relay support
+/// for NIP-40 is optional.
+pub const DIRECT_INVITE_EXPIRY_SECS: u64 = 24 * 60 * 60;
+
+/// Read a NIP-40 `expiration` tag (unix seconds) off an invite rumor's tags. `None` =
+/// no expiry declared (a pre-expiry sender), which callers treat as permanent.
+pub fn expiration_secs(tags: &nostr_sdk::prelude::Tags) -> Option<u64> {
+    tags.iter()
+        .find(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
+        .and_then(|t| t.as_slice().get(1))
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+/// The non-secret community details shown before joining (no member count — the protocol
+/// hides membership, so any count would be a fiction).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublicInvitePreview {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Logo (encrypted blob ref). The per-image key rides here; the joiner also receives
+    /// the server-root key via `join`, so this exposes nothing they aren't already given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<crate::community::CommunityImage>,
+}
+
+/// A short, human-typable label for an unlabeled invite link. Crockford-ish base32 (no 0/1/I/O)
+/// so it's unambiguous to read and share aloud; 6 chars ≈ 1B combinations (collision-improbable).
+/// Every link gets a label: the one provided, else a random 6-char handle. A stable label makes
+/// the link identifiable in the UI and keys per-link join attribution off (creator, label), so it
+/// must be unique among THIS creator's links in the community (else two links share a join bucket).
+pub(crate) fn resolve_invite_label(community_id: &str, label: Option<String>) -> Result<String, String> {
+    let existing = crate::db::community::list_public_invites(community_id).unwrap_or_default();
+    let label_taken = |cand: &str| {
+        existing.iter().any(|r| r.label.as_deref().map(|e| e.eq_ignore_ascii_case(cand)).unwrap_or(false))
+    };
+    match label {
+        Some(l) if !l.trim().is_empty() => {
+            let l = l.trim().to_string();
+            if label_taken(&l) {
+                return Err(format!("You already have an invite link labeled \u{201c}{l}\u{201d}. Pick a different label."));
+            }
+            Ok(l)
+        }
+        // Random handle — regenerate on the (astronomically unlikely) collision.
+        _ => {
+            let mut l = generate_invite_label();
+            while label_taken(&l) {
+                l = generate_invite_label();
+            }
+            Ok(l)
+        }
+    }
+}
+
+fn generate_invite_label() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::control::CommunityIdentity;

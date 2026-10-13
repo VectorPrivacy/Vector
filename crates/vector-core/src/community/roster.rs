@@ -448,25 +448,6 @@ pub fn dissolved_tombstone_open(outer: &Event, community_id: &CommunityId) -> Op
     )
 }
 
-/// The folded current head of one control entity — what the caller persists via `set_edition_head`
-/// (the monotonic refuse-downgrade floor) and the send side reads to emit the next version.
-#[derive(Clone)]
-pub struct EntityHead {
-    /// The entity coordinate (role_id for roles, grant_locator for grants), lowercase hex.
-    pub entity_hex: String,
-    pub version: u64,
-    pub self_hash: [u8; 32],
-    /// The head edition's deterministic tiebreak key (the inner edition id). Used to resolve a
-    /// same-version concurrent fork: every client converges on the lower `inner_id` among authorized
-    /// editions, and the persisted head ranks by it so a same-version adopt only moves toward the min.
-    pub inner_id: [u8; 32],
-    /// The authority citation the head edition carried, if any — the actor's pinned proof of
-    /// the authority they claimed for this edit. `None` for an owner-signed edition (supreme, cites
-    /// nothing) or an uncited one. Verifiers resolve the actor's standing at the cited grant version
-    /// via [`authority_citation_satisfied`].
-    pub citation: Option<edition::AuthorityCitation>,
-}
-
 /// The outcome of folding the control plane.
 #[derive(Clone)]
 pub struct FoldedRoster {
@@ -963,59 +944,7 @@ pub fn authorize_delegation(folded: &FoldedRoster, owner_hex: Option<&str>) -> r
     accepted
 }
 
-/// version-pinned authority **completeness** check for an action that carries an
-/// [`edition::AuthorityCitation`] (a ban, a hide, a delegated grant). The action names the authorizing
-/// grant edition it claims authority under; this confirms we have folded a COMPLETE, un-forked view of
-/// that grant — synced to AT LEAST the cited version, with the cited hash matching ours at equality.
-///
-/// It does NOT decide the permission/outrank — that stays with the caller's `can_act_on_member` against
-/// the CURRENT authorized roster, so a since-demoted actor is refused there (refuse-superseded falls out:
-/// we hold a later head of their grant that dropped the role). This check is the orthogonal half: it
-/// guarantees the verdict is computed over the same authority view the actor cited, not a stale or
-/// partial one.
-///
-/// `heads` is the fold's per-entity head set ([`FoldedRoster::heads`]) — the haystack the cited grant
-/// must appear in. `actor_grant_hex` is the entity coordinate of the ACTOR's OWN authorizing grant
-/// (`grant_locator(community_id, actor)`, lowercase hex): the citation MUST name it, so an actor can't
-/// borrow completeness by citing some other synced edition. Returns true iff:
-///   - the actor is the proven owner (supreme — cites nothing), OR
-///   - the citation names the actor's own grant AND we surfaced it at version ≥ the cited version, and —
-///     when our head is EXACTLY the cited version — the cited hash equals ours (a cited fork is rejected).
-///
-/// A non-owner who cited nothing, cited a foreign entity, or whose cited grant we have NOT folded up to
-/// the cited version (a withholding relay, or we are simply behind), returns false: FAIL CLOSED — never
-/// act on an incomplete authority view (the §"never act on a partial view" tenet). The block-until-synced
-/// re-fetch escalation across a relay quorum is deferred (one signature suffices, per the MVP directive);
-/// MVP fails closed here and self-heals on the next sync once the cited grant arrives.
-pub fn authority_citation_satisfied(
-    heads: &[EntityHead],
-    owner_hex: Option<&str>,
-    actor_hex: &str,
-    actor_grant_hex: &str,
-    citation: Option<&edition::AuthorityCitation>,
-) -> bool {
-    if owner_hex == Some(actor_hex) {
-        return true;
-    }
-    let Some(c) = citation else { return false };
-    let entity_hex = crate::simd::hex::bytes_to_hex_32(&c.entity_id);
-    // The citation must name the ACTOR's OWN authorizing grant — citing a foreign synced edition can't
-    // borrow completeness (the permission check keys on the actor, but pinning to their grant keeps the
-    // sync-floor honest and is the coordinate the delegation verifier will resolve rank at).
-    if entity_hex != actor_grant_hex {
-        return false;
-    }
-    match heads.iter().find(|h| h.entity_hex == entity_hex) {
-        // We hold a LATER edition of the actor's grant than they cited — synced past it. Whether the
-        // actor is STILL authorized is the caller's roster check (which reflects this later head).
-        Some(h) if h.version > c.version => true,
-        // Synced to exactly the cited version: the cited hash must be the one that won our fold (else
-        // the actor cited a non-canonical fork of their own grant).
-        Some(h) if h.version == c.version => h.self_hash == c.edition_hash,
-        // Not surfaced, or our head is BEHIND the cited version → we cannot confirm the authority.
-        _ => false,
-    }
-}
+pub use super::edition::{authority_citation_satisfied, EntityHead};
 
 #[cfg(test)]
 mod tests {
@@ -1026,36 +955,6 @@ mod tests {
         ServerRootKey([0x07; 32])
     }
 
-    #[test]
-    fn authority_citation_satisfied_pins_to_a_synced_complete_grant() {
-        let owner = "ow".repeat(32);
-        let actor = "ac".repeat(32);
-        let entity = [0x55u8; 32];
-        let hash = [0x66u8; 32];
-        let eh = crate::simd::hex::bytes_to_hex_32(&entity); // the actor's own grant locator
-        let head = |v: u64, h: [u8; 32]| {
-            vec![EntityHead { entity_hex: eh.clone(), version: v, self_hash: h, inner_id: [0u8; 32], citation: None }]
-        };
-        let cite = edition::AuthorityCitation { entity_id: entity, version: 3, edition_hash: hash };
-
-        // Owner is supreme and cites nothing.
-        assert!(authority_citation_satisfied(&[], Some(&owner), &owner, &eh, None));
-        // A non-owner with no citation fails closed.
-        assert!(!authority_citation_satisfied(&head(3, hash), Some(&owner), &actor, &eh, None));
-        // Synced to exactly the cited version with the matching hash → satisfied.
-        assert!(authority_citation_satisfied(&head(3, hash), Some(&owner), &actor, &eh, Some(&cite)));
-        // Same version, wrong hash (a cited fork at the tip) → rejected.
-        assert!(!authority_citation_satisfied(&head(3, [0xEE; 32]), Some(&owner), &actor, &eh, Some(&cite)));
-        // We hold a LATER head of the actor's grant → synced past it (the roster check handles supersession).
-        assert!(authority_citation_satisfied(&head(4, [0x77; 32]), Some(&owner), &actor, &eh, Some(&cite)));
-        // We are BEHIND the cited version → fail closed.
-        assert!(!authority_citation_satisfied(&head(2, hash), Some(&owner), &actor, &eh, Some(&cite)));
-        // The cited grant isn't surfaced at all → fail closed.
-        assert!(!authority_citation_satisfied(&[], Some(&owner), &actor, &eh, Some(&cite)));
-        // The citation names a FOREIGN entity (not the actor's grant) → rejected even if surfaced.
-        let foreign = "ff".repeat(32);
-        assert!(!authority_citation_satisfied(&head(3, hash), Some(&owner), &actor, &foreign, Some(&cite)));
-    }
     // The community id binds grant coordinates (stable across rotation); fold + grant builders take it.
     fn cid() -> CommunityId {
         CommunityId([0x09; 32])

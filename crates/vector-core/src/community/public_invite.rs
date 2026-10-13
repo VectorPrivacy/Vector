@@ -21,12 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use super::derive::{public_invite_key, public_invite_locator, public_invite_signer};
 use super::invite::{build_invite, CommunityInvite};
-use super::{cipher, Community, CommunityImage};
+use super::{cipher, Community};
 use crate::stored_event::event_kind;
-
-/// Default invite URL base. The path is irrelevant to the protocol (the fragment is read
-/// client-side and never sent to the server); only the fragment matters.
-pub const INVITE_URL_BASE: &str = "https://vectorapp.io/invite";
 
 /// Cap on relays embedded in an invite URL. The URL is attacker-controlled (anyone can
 /// craft one and share it), and its relays feed straight into the connect loop on
@@ -43,19 +39,6 @@ const VSK_PUBLIC_INVITE: &str = "6";
 /// its coordinate (append-only). A self-describing marker so a fetcher (the invite preview page, a
 /// joining client) reads "this invite was revoked" instantly, instead of choking on an empty decrypt.
 const VSK_PUBLIC_INVITE_REVOKED: &str = "9";
-
-/// The non-secret community details shown before joining (no member count — the protocol
-/// hides membership, so any count would be a fiction).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicInvitePreview {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Logo (encrypted blob ref). The per-image key rides here; the joiner also receives
-    /// the server-root key via `join`, so this exposes nothing they aren't already given.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<CommunityImage>,
-}
 
 /// The full decrypted bundle: a preview + the join material + an optional expiry + attribution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,6 +386,8 @@ fn parse_v2_fragment(raw: &[u8]) -> Result<(Vec<String>, [u8; 32]), PublicInvite
     token.copy_from_slice(token_bytes);
     Ok((relays, token))
 }
+
+pub use super::v2::invite::{PublicInvitePreview, INVITE_URL_BASE};
 
 #[cfg(test)]
 mod tests {

@@ -2019,8 +2019,8 @@ impl VectorCore {
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             // v2 `build_invite_url` appends its own `/invite/<naddr>`, so pass the
             // bare domain (strip the `/invite` the v1 constant carries).
-            let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
-            let label = Some(service::resolve_invite_label(community_id, label).map_err(VectorError::Other)?);
+            let base = crate::community::v2::invite::INVITE_URL_BASE.trim_end_matches("/invite");
+            let label = Some(crate::community::v2::invite::resolve_invite_label(community_id, label).map_err(VectorError::Other)?);
             let minted =
                 crate::community::v2::service::mint_public_link(&transport, &community, base, expires_at_ms, label)
                     .await
@@ -2089,7 +2089,7 @@ impl VectorCore {
                 // Same 24h NIP-40 expiry as v1 (invite::DIRECT_INVITE_EXPIRY_SECS): a bundle is
                 // live key material for a community that keeps rotating, so it must not linger.
                 let expires_at = nostr_sdk::prelude::Timestamp::now().as_secs()
-                    + crate::community::invite::DIRECT_INVITE_EXPIRY_SECS;
+                    + crate::community::v2::invite::DIRECT_INVITE_EXPIRY_SECS;
                 let expiry_tag = nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(expires_at));
                 let rumor = nostr_sdk::prelude::EventBuilder::new(
                     nostr_sdk::prelude::Kind::Custom(crate::community::v2::kind::DIRECT_INVITE),
@@ -2573,7 +2573,7 @@ impl VectorCore {
     /// per-message key is held (v1) or the in-plane kind-5 (v2), plus a cooperative tombstone so
     /// peers hide it, plus best-effort attachment cleanup.
     pub async fn delete_community_message_in(&self, channel_id: &str, message_id: &str) -> Result<()> {
-        use crate::community::{service, transport::LiveTransport};
+        use crate::community::transport::LiveTransport;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
         // Attachment URLs come from local state when held (a headless v2 consumer
@@ -2603,7 +2603,7 @@ impl VectorCore {
         } else {
             // Layer 1 — relay nuke against the retained per-message key (best-effort).
             if crate::db::community::get_message_key(message_id).map(|k| k.is_some()).unwrap_or(false) {
-                let _ = service::delete_message(&transport, message_id).await;
+                let _ = crate::community::message_delete::delete_message(&transport, message_id).await;
             }
             // Layer 2 — cooperative tombstone so peers hide it.
             self.publish_community_control(
@@ -2970,7 +2970,7 @@ impl VectorCore {
                     inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
                         // Persist only (DM-parity row) — the miniapp layer bootstraps from the DB at
                         // game-open. Live gossip-feed pokes are the realtime subscription's job.
-                        community::service::persist_webxdc_signal(
+                        community::v2::inbound::persist_webxdc_signal(
                             channel_id, npub, topic_id, node_addr.as_deref(), event_id, *created_at,
                         ).await;
                     }
@@ -4182,7 +4182,7 @@ impl VectorCore {
                     if opened.author != my_pk {
                         if let Some((topic, addr)) = crate::webxdc::parse_peer_signal(&opened.rumor.content) {
                             let Ok(npub) = ToBech32::to_bech32(&opened.author);
-                            crate::community::service::persist_webxdc_signal(
+                            crate::community::v2::inbound::persist_webxdc_signal(
                                 channel_id,
                                 &npub,
                                 &topic,
@@ -6018,7 +6018,7 @@ mod facade_tests {
         use crate::community::v2::derive::TOKEN_LEN;
         use crate::community::v2::invite::{build_invite_url, parse_invite_link};
         use nostr_sdk::prelude::Keys;
-        let base = crate::community::public_invite::INVITE_URL_BASE.trim_end_matches("/invite");
+        let base = crate::community::v2::invite::INVITE_URL_BASE.trim_end_matches("/invite");
         assert!(!base.ends_with("/invite"), "the bare domain must not carry /invite");
         let signer = Keys::generate();
         let token = [0x07u8; TOKEN_LEN];
