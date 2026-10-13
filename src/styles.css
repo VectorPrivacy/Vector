@@ -5244,6 +5244,14 @@ textarea#chat-input {
   background: transparent !important;
 }
 
+/* Older Firefox (Tor Browser) lacks fill-available, and a textarea's auto width is its
+   ~20-column default, not the row. */
+@supports not (width: -webkit-fill-available) {
+  textarea#chat-input {
+    width: -moz-available;
+  }
+}
+
 textarea#chat-input::placeholder {
   -webkit-user-select: none;
   user-select: none;
