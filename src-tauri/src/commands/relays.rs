@@ -1253,9 +1253,9 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                                 crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
                             });
                         }
-                        if !is_syncing && (has_read || has_gossip) {
-                            // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
-                            // sweep — coalesces a multi-relay reconnect burst into one sweep.
+                        if !is_syncing && reconnect && (has_read || has_gossip) {
+                            // Communities catch up on a REconnect only: plane fetches dial their
+                            // relays themselves, so the boot sync never waited on this socket.
                             // Discovery-MODE relays (kind-10050 indexers that are not also
                             // default relays — mirrors the pool-add rule) hold no community
                             // planes: their reconnects must not queue a full sweep. A relay

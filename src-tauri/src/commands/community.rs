@@ -2747,7 +2747,7 @@ async fn sync_communities_on_reconnect(relays: Vec<String>, ours: bool) -> Resul
             .buffer_unordered(RECONNECT_SYNC_WINDOW)
             .collect::<Vec<()>>()
             .await;
-        println!(
+        log_info!(
             "[Reconnect] {} relay(s) back: {} community(ies), {} channel(s) caught up in {:?}",
             back.len(),
             communities,
