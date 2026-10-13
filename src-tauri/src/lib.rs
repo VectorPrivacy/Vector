@@ -140,6 +140,8 @@ const MAIN_WINDOW_STATE: tauri_plugin_window_state::StateFlags = tauri_plugin_wi
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The UI thread runs every synchronous command: a database wait there freezes the window.
+    vector_core::db::never_wait_on_this_thread();
     // Before any session exists: every session starts blocked until its network is loaded.
     vector_core::transport::strict_boot();
     // Before any HTTP client exists: the user agent every request carries is

@@ -37,6 +37,7 @@ pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {
 }
 
 /// Get a READ connection guard (delegates to vector-core pool).
+#[track_caller]
 pub fn get_db_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<ConnectionGuard, String> {
     vector_core::db::get_db_connection_guard_static()
 }
@@ -48,6 +49,7 @@ pub fn get_write_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<
 }
 
 /// Get a READ connection guard using static path (delegates to vector-core pool).
+#[track_caller]
 pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
     vector_core::db::get_db_connection_guard_static()
 }

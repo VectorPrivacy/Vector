@@ -628,7 +628,11 @@ pub struct Session {
     /// `None` only before an account is bound, where there is nothing better
     /// than the ambient lookup to fall back to.
     db_path: Option<PathBuf>,
-    read_pool: Mutex<Vec<IdleReader>>,
+    read_pool: Mutex<Vec<rusqlite::Connection>>,
+    /// Signalled when a reader comes home, for a read waiting on one.
+    reader_free: std::sync::Condvar,
+    /// Pooled readers out right now; with the idle ones, never past [`MAX_READERS`].
+    readers_out: std::sync::atomic::AtomicUsize,
     write_conn: Mutex<Option<rusqlite::Connection>>,
     /// Signalled when the writer comes home, for a write waiting on it.
     writer_free: std::sync::Condvar,
@@ -657,6 +661,8 @@ impl Session {
             id: next_session_id(),
             db_path: None,
             read_pool: Mutex::new(Vec::new()),
+            reader_free: std::sync::Condvar::new(),
+            readers_out: std::sync::atomic::AtomicUsize::new(0),
             write_conn: Mutex::new(None),
             writer_free: std::sync::Condvar::new(),
             writers_out: std::sync::atomic::AtomicUsize::new(0),
@@ -675,6 +681,8 @@ impl Session {
             id: next_session_id(),
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
+            reader_free: std::sync::Condvar::new(),
+            readers_out: std::sync::atomic::AtomicUsize::new(0),
             write_conn: Mutex::new(None),
             writer_free: std::sync::Condvar::new(),
             writers_out: std::sync::atomic::AtomicUsize::new(0),
@@ -701,6 +709,8 @@ impl Session {
             id: self.id,
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
+            reader_free: std::sync::Condvar::new(),
+            readers_out: std::sync::atomic::AtomicUsize::new(0),
             write_conn: Mutex::new(None),
             writer_free: std::sync::Condvar::new(),
             writers_out: std::sync::atomic::AtomicUsize::new(0),
@@ -819,24 +829,61 @@ impl Session {
 
     /// Take a READ connection from this session, opening one against this
     /// session's own database if the pool is empty.
+    ///
+    /// The pool grows to [`MAX_READERS`] and stays: a reader closed later would free its
+    /// schema and caches into pages shared with long-lived data, holes the system never
+    /// takes back. Past the cap a read waits for one to come home (queries take micro- to
+    /// milliseconds); a nested read on this thread, or a wait past [`READER_WAIT`], opens a
+    /// passing connection that closes on return.
+    #[track_caller]
     pub fn acquire_read(self: &Arc<Self>) -> Result<ConnectionGuard, String> {
-        if let Ok(mut pool) = self.read_pool.lock() {
-            // The most recently used: a burst's extras sit unused at the bottom and retire.
-            if let Some(idle) = pool.pop() {
-                return Ok(ConnectionGuard::new(idle.conn, self.clone()));
+        use std::sync::atomic::Ordering;
+        let nested = READERS_HERE.with(|n| n.get() > 0) || NEVER_WAIT.with(std::cell::Cell::get);
+        let deadline = web_time::Instant::now() + READER_WAIT;
+        let mut pool = self.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let pooled = loop {
+            // The most recently used: the rest stay cold.
+            if let Some(conn) = pool.pop() {
+                self.readers_out.fetch_add(1, Ordering::Relaxed);
+                return Ok(ConnectionGuard::new(conn, self.clone(), true));
+            }
+            if self.readers_out.load(Ordering::Relaxed) < MAX_READERS {
+                break true;
+            }
+            if nested {
+                break false;
+            }
+            // One thread on the web: nothing else could bring a reader back.
+            #[cfg(target_arch = "wasm32")]
+            break false;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let left = deadline.saturating_duration_since(web_time::Instant::now());
+                if left.is_zero() {
+                    break false;
+                }
+                pool = self.reader_free.wait_timeout(pool, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = deadline;
+        // Counted before the lock goes, so the cap holds against a read arriving meanwhile.
+        let path = self.path()?;
+        if pooled {
+            self.readers_out.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(pool);
+        match create_connection(&path) {
+            Ok(conn) => Ok(ConnectionGuard::new(conn, self.clone(), pooled)),
+            Err(e) => {
+                if pooled {
+                    let _held = self.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+                    self.readers_out.fetch_sub(1, Ordering::Relaxed);
+                    self.reader_free.notify_all();
+                }
+                Err(e)
             }
         }
-        let conn = create_connection(&self.path()?)?;
-        Ok(ConnectionGuard::new(conn, self.clone()))
-    }
-
-    /// Closes the readers past [`MIN_IDLE_READERS`] that a burst left idle past
-    /// [`READER_IDLE_TTL`]. Returns them, to be dropped outside the pool's lock.
-    fn retire_idle_readers(&self, now: web_time::Instant) -> Vec<IdleReader> {
-        let Ok(mut pool) = self.read_pool.lock() else { return Vec::new() };
-        let stale = pool.len().saturating_sub(MIN_IDLE_READERS);
-        let stale = pool.iter().take(stale).take_while(|r| now.duration_since(r.since) >= READER_IDLE_TTL).count();
-        pool.drain(..stale).collect()
     }
 
     /// Take THE write connection from this session, opening one against this
@@ -849,7 +896,7 @@ impl Session {
     #[track_caller]
     pub fn acquire_write(self: &Arc<Self>) -> Result<WriteConnectionGuard, String> {
         use std::sync::atomic::Ordering;
-        let nested = WRITERS_HERE.with(|n| n.get() > 0);
+        let nested = WRITERS_HERE.with(|n| n.get() > 0) || NEVER_WAIT.with(std::cell::Cell::get);
         let deadline = web_time::Instant::now() + WRITER_WAIT;
         let mut slot = self.write_conn.lock().unwrap_or_else(|e| e.into_inner());
         loop {
@@ -1083,14 +1130,31 @@ fn install(next: Arc<Session>) {
 /// where it came from, so a guard outstanding across an account swap can never
 /// hand account A's connection to account B. When that older session has no
 /// references left, its pool closes with it.
+/// Not `Send`, like the writer's: a reader stays on its thread, so a nested read on that
+/// thread is always seen as one.
 pub struct ConnectionGuard {
     conn: Option<rusqlite::Connection>,
     session: Arc<Session>,
+    /// A pool member, rather than a passing connection that closes on return.
+    pooled: bool,
+    _not_send: std::marker::PhantomData<*const ()>,
+    /// When and where it was taken, to name a holder that keeps other reads waiting.
+    #[cfg(debug_assertions)]
+    taken: (web_time::Instant, &'static std::panic::Location<'static>),
 }
 
 impl ConnectionGuard {
-    fn new(conn: rusqlite::Connection, session: Arc<Session>) -> Self {
-        Self { conn: Some(conn), session }
+    #[track_caller]
+    fn new(conn: rusqlite::Connection, session: Arc<Session>, pooled: bool) -> Self {
+        READERS_HERE.with(|n| n.set(n.get() + 1));
+        Self {
+            conn: Some(conn),
+            session,
+            pooled,
+            _not_send: std::marker::PhantomData,
+            #[cfg(debug_assertions)]
+            taken: (web_time::Instant::now(), std::panic::Location::caller()),
+        }
     }
 }
 
@@ -1103,25 +1167,27 @@ impl DerefMut for ConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target { self.conn.as_mut().expect("Connection already taken") }
 }
 
-/// An idle reader, and when it was last handed back.
-struct IdleReader {
-    conn: rusqlite::Connection,
-    since: web_time::Instant,
-}
-
-/// Readers a session keeps however long it idles.
-const MIN_IDLE_READERS: usize = 4;
-/// A burst's extra readers stay this long after their last use, so a burst opens each
-/// once instead of opening and closing per query (each open allocates its own schema).
-const READER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-/// Never more idle readers than this, whatever a burst asked for.
-const MAX_IDLE_READERS: usize = 16;
+/// Readers a session pools. The boot burst asks for more at once; they wait their turn.
+const MAX_READERS: usize = 8;
+/// How long a read waits for a pooled reader before opening a passing one.
+const READER_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// How long a write waits for the writer before opening a connection of its own.
 const WRITER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 thread_local! {
     /// Writer guards this thread holds: a nested write must not wait on itself.
     static WRITERS_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Reader guards this thread holds: a nested read must not wait on its own pool.
+    static READERS_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// A thread that must never block on the pools (the UI's): it opens a passing
+    /// connection rather than wait.
+    static NEVER_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the calling thread as one that never waits on a pool. A host calls it from its UI
+/// thread, where synchronous commands run: a wait there freezes the window.
+pub fn never_wait_on_this_thread() {
+    NEVER_WAIT.with(|f| f.set(true));
 }
 
 /// Homes a session's writer. A write may already be waiting on it (the session goes live
@@ -1132,12 +1198,6 @@ fn install_writer(session: &Session, conn: rusqlite::Connection) {
         *slot = Some(conn);
         session.writer_free.notify_all();
     }
-}
-
-/// Closes the readers a finished burst left behind; the maintenance tick calls it for a
-/// session that has gone quiet.
-pub fn retire_idle_readers() {
-    drop(current_session().retire_idle_readers(web_time::Instant::now()));
 }
 
 /// Page cache a connection keeps once it goes idle. A burst (an archival sync, a re-encryption
@@ -1168,16 +1228,27 @@ fn trim_for_idle(conn: &rusqlite::Connection) {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            trim_for_idle(&conn);
-            let now = web_time::Instant::now();
-            if let Ok(mut pool) = self.session.read_pool.lock() {
-                if pool.len() < MAX_IDLE_READERS {
-                    pool.push(IdleReader { conn, since: now });
-                }
+        READERS_HERE.with(|n| n.set(n.get().saturating_sub(1)));
+        #[cfg(debug_assertions)]
+        {
+            let held = self.taken.0.elapsed();
+            if held >= READER_WAIT {
+                crate::log_warn!("[DB] reader held {} ms from {}", held.as_millis(), self.taken.1);
             }
-            drop(self.session.retire_idle_readers(now));
         }
+        let Some(conn) = self.conn.take() else { return };
+        if !self.pooled {
+            return;
+        }
+        trim_for_idle(&conn);
+        let mut pool = self.session.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.session.readers_out.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| n.checked_sub(1),
+        );
+        pool.push(conn);
+        self.session.reader_free.notify_one();
     }
 }
 
@@ -1367,6 +1438,7 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
 }
 
 /// Get a READ connection (headless-safe — no AppHandle).
+#[track_caller]
 pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
     current_session().acquire_read()
 }
@@ -1562,13 +1634,17 @@ pub fn init_database(npub: &str) -> Result<(), String> {
         next
     };
 
-    // Pre-warm read pool
-    if let Ok(mut pool) = session.read_pool.lock() {
-        for _ in 0..4 {
-            if let Ok(c) = create_connection(&db_path) {
-                pool.push(IdleReader { conn: c, since: web_time::Instant::now() });
+    // Pre-warm readers, opened outside the pool's lock and only up to its cap: the session
+    // is live already, and a read may have opened one meanwhile.
+    let warm: Vec<_> = (0..4).filter_map(|_| create_connection(&db_path).ok()).collect();
+    {
+        let mut pool = session.read_pool.lock().unwrap_or_else(|e| e.into_inner());
+        for c in warm {
+            if pool.len() + session.readers_out.load(std::sync::atomic::Ordering::Relaxed) < MAX_READERS {
+                pool.push(c);
             }
         }
+        session.reader_free.notify_all();
     }
 
     // Set write connection
@@ -1738,29 +1814,15 @@ mod pool_generation_tests {
     #[test]
     fn a_guard_returns_its_connection_to_its_own_session() {
         let session = Session::empty();
-        drop(ConnectionGuard::new(fake_conn(), session.clone()));
+        drop(ConnectionGuard::new(fake_conn(), session.clone(), true));
         assert_eq!(session.read_pool.lock().unwrap().len(), 1, "the connection goes home");
-    }
-
-    #[test]
-    fn a_burst_keeps_its_readers_until_it_has_been_quiet_a_while() {
-        let session = Session::empty();
-        let burst: Vec<_> = (0..MIN_IDLE_READERS + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
-        drop(burst);
-        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS + 5, "reused for the rest of the burst, not reopened");
-
-        let soon = web_time::Instant::now() + READER_IDLE_TTL / 2;
-        assert!(session.retire_idle_readers(soon).is_empty());
-        let later = web_time::Instant::now() + READER_IDLE_TTL;
-        assert_eq!(session.retire_idle_readers(later).len(), 5);
-        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS);
     }
 
     #[test]
     fn the_burst_reuses_the_reader_it_just_returned() {
         let session = Session::empty();
-        let a = ConnectionGuard::new(fake_conn(), session.clone());
-        let b = ConnectionGuard::new(fake_conn(), session.clone());
+        let a = ConnectionGuard::new(fake_conn(), session.clone(), true);
+        let b = ConnectionGuard::new(fake_conn(), session.clone(), true);
         // SAFETY: only compared, never dereferenced.
         let b_handle = unsafe { b.handle() } as usize;
         drop(a);
@@ -1830,32 +1892,110 @@ mod pool_generation_tests {
     }
 
     #[test]
-    fn retiring_keeps_the_most_recently_used_readers() {
-        let session = Session::empty();
-        let guards: Vec<_> = (0..MIN_IDLE_READERS + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
-        // SAFETY: only compared, never dereferenced.
-        let handles: Vec<usize> = guards.iter().map(|g| unsafe { g.handle() } as usize).collect();
-        for g in guards {
-            drop(g);
-        }
-        session.retire_idle_readers(web_time::Instant::now() + READER_IDLE_TTL);
-        let kept: Vec<usize> = session.read_pool.lock().unwrap().iter().map(|r| unsafe { r.conn.handle() } as usize).collect();
-        assert_eq!(kept, handles[5..]);
+    fn the_pool_stops_at_its_cap_and_a_read_waits_for_one_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let s2 = session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let held: Vec<_> = (0..MAX_READERS).map(|_| s2.acquire_read().unwrap()).collect();
+            // SAFETY: only compared, never dereferenced.
+            tx.send(held.iter().map(|g| unsafe { g.handle() } as usize).collect::<Vec<_>>()).unwrap();
+            wait.recv().unwrap();
+            drop(held);
+        });
+        let held = rx.recv().unwrap();
+        let s3 = session.clone();
+        let reader = std::thread::spawn(move || {
+            let t = web_time::Instant::now();
+            let r = s3.acquire_read().unwrap();
+            (unsafe { r.handle() } as usize, t.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        go.send(()).unwrap();
+        holder.join().unwrap();
+        let (got, waited) = reader.join().unwrap();
+        assert!(held.contains(&got), "one of the pool's own, not a new connection");
+        assert!(waited < READER_WAIT, "woken by the return: {waited:?}");
+        assert_eq!(session.read_pool.lock().unwrap().len(), MAX_READERS, "the pool never grew past its cap");
+        assert_eq!(session.readers_out.load(std::sync::atomic::Ordering::Relaxed), 0, "every reader counted home");
     }
 
     #[test]
-    fn a_return_retires_a_quiet_burst_and_the_pool_never_passes_its_cap() {
-        let session = Session::empty();
-        let burst: Vec<_> = (0..MAX_IDLE_READERS + 4).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
-        drop(burst);
-        assert_eq!(session.read_pool.lock().unwrap().len(), MAX_IDLE_READERS);
+    fn a_nested_read_never_waits_and_its_passing_connection_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let held: Vec<_> = (0..MAX_READERS).map(|_| session.acquire_read().unwrap()).collect();
+        let t = web_time::Instant::now();
+        let passing = session.acquire_read().unwrap();
+        assert!(t.elapsed() < READER_WAIT / 2, "{:?}", t.elapsed());
+        drop(passing);
+        drop(held);
+        assert_eq!(session.read_pool.lock().unwrap().len(), MAX_READERS, "the passing one closed instead of joining");
+        assert_eq!(session.readers_out.load(std::sync::atomic::Ordering::Relaxed), 0, "every reader counted home");
+    }
 
-        let long_ago = web_time::Instant::now() - READER_IDLE_TTL;
-        for r in session.read_pool.lock().unwrap().iter_mut() {
-            r.since = long_ago;
-        }
-        drop(session.acquire_read().unwrap());
-        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS, "the next return retires the quiet extras");
+    #[test]
+    fn a_read_kept_waiting_past_the_bound_opens_a_passing_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let s2 = session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let held: Vec<_> = (0..MAX_READERS).map(|_| s2.acquire_read().unwrap()).collect();
+            tx.send(()).unwrap();
+            wait.recv().unwrap();
+            drop(held);
+        });
+        rx.recv().unwrap();
+        let t = web_time::Instant::now();
+        let r = session.acquire_read().unwrap();
+        assert!(t.elapsed() >= READER_WAIT, "{:?}", t.elapsed());
+        drop(r);
+        go.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(session.read_pool.lock().unwrap().len(), MAX_READERS);
+    }
+
+    #[test]
+    fn the_ui_thread_never_waits_on_a_full_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let s2 = session.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let r: Vec<_> = (0..MAX_READERS).map(|_| s2.acquire_read().unwrap()).collect();
+            let w = s2.acquire_write().unwrap();
+            tx.send(()).unwrap();
+            wait.recv().unwrap();
+            drop((r, w));
+        });
+        rx.recv().unwrap();
+        let ui = std::thread::spawn(move || {
+            never_wait_on_this_thread();
+            let t = web_time::Instant::now();
+            let r = session.acquire_read().unwrap();
+            let w = session.acquire_write().unwrap();
+            drop((r, w));
+            t.elapsed()
+        });
+        let took = ui.join().unwrap();
+        go.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(took < READER_WAIT / 2, "{took:?}");
+    }
+
+    #[test]
+    fn a_failed_open_gives_its_place_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::bound(dir.path().join("missing").join("vector.db"));
+        assert!(session.acquire_read().is_err());
+        assert!(session.acquire_write().is_err());
+        assert_eq!(session.readers_out.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(session.writers_out.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1927,13 +2067,13 @@ mod pool_generation_tests {
         let session = Session::empty();
         file_conn(&dir).execute_batch(BURST).unwrap();
 
-        let r = ConnectionGuard::new(file_conn(&dir), session.clone());
+        let r = ConnectionGuard::new(file_conn(&dir), session.clone(), true);
         // Unmapped, so every page it scans lands in its own cache.
         r.execute_batch("PRAGMA mmap_size=0;").unwrap();
         let _: i64 = r.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0)).unwrap();
         assert!(page_cache_bytes(&r) > IDLE_CACHE_BYTES);
         drop(r);
-        assert!(page_cache_bytes(&session.read_pool.lock().unwrap()[0].conn) < IDLE_CACHE_BYTES);
+        assert!(page_cache_bytes(&session.read_pool.lock().unwrap()[0]) < IDLE_CACHE_BYTES);
     }
 
     #[test]
@@ -1946,7 +2086,7 @@ mod pool_generation_tests {
         let old = Session::empty();
         let new_session = Session::empty();
 
-        let guard = ConnectionGuard::new(fake_conn(), old.clone());
+        let guard = ConnectionGuard::new(fake_conn(), old.clone(), true);
         // ...the account switches while the guard is still in flight...
         drop(guard);
 
@@ -2172,7 +2312,7 @@ mod pool_generation_tests {
     fn a_dropped_session_closes_its_pool() {
         // Teardown IS the drop: no clearing step to forget.
         let session = Session::empty();
-        drop(ConnectionGuard::new(fake_conn(), session.clone()));
+        drop(ConnectionGuard::new(fake_conn(), session.clone(), true));
         assert_eq!(Arc::strong_count(&session), 1, "the guard released its reference");
         drop(session); // pool + connections close here
     }
