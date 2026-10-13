@@ -1290,6 +1290,29 @@ async fn ws_upgrade_request_matches_default() {
 }
 
 #[tokio::test]
+async fn ws_a_frame_past_the_read_buffer_arrives_whole() {
+    use futures_util::{SinkExt, StreamExt};
+    use nostr_sdk::transport::websocket::WebSocketTransport;
+    let _s = scene();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = url::Url::parse(&format!("ws://{}/", l.local_addr().unwrap())).unwrap();
+    // Twelve times the 16 KiB read buffer.
+    let big: String = (0..192 * 1024).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let sent = big.clone();
+    tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(sent.into())).await.unwrap();
+        let _ = ws.next().await;
+    });
+    let (_sink, mut stream) = ws::VectorWs::new(live(), Lane::Account).connect(&url, None).await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap() {
+        Some(Ok(async_wsocket::Message::Text(t))) => assert!(t == big, "{} bytes arrived", t.len()),
+        other => panic!("expected the text frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn ws_refuses_before_any_socket() {
     use nostr_sdk::transport::websocket::WebSocketTransport;
     let _s = scene();

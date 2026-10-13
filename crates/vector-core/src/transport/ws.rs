@@ -180,7 +180,7 @@ pub(crate) mod native {
             }
         };
         let request = upgrade_request(url).map_err(Error::transport)?;
-        let (ws, _) = Box::pin(tokio_tungstenite::client_async_tls(request, stream)).await.map_err(Error::transport)?;
+        let (ws, _) = Box::pin(tokio_tungstenite::client_async_tls_with_config(request, stream, Some(relay_socket_config()), None)).await.map_err(Error::transport)?;
         let (tx, rx) = ws.split();
         let sink: WebSocketSink = Box::pin(VectorSink(tx));
         let stream: WebSocketStream = Box::pin(rx.filter_map(|m| async move {
@@ -255,5 +255,11 @@ pub(crate) mod native {
         fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Pin::new(&mut self.0).poll_close_unpin(cx).map_err(nostr_sdk::prelude::Error::transport)
         }
+    }
+
+    /// Relay frames are small JSON and a relay socket mostly idles, so tungstenite's 128 KiB read
+    /// buffer per socket is waste; a larger frame still grows its own.
+    fn relay_socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().read_buffer_size(16 * 1024)
     }
 }
