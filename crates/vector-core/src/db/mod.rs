@@ -1055,9 +1055,36 @@ fn max_idle_readers() -> usize {
     *N
 }
 
+/// Page cache a connection keeps once it goes idle. A burst (an archival sync, a re-encryption
+/// sweep) has the full `cache_size` while it runs; what it leaves behind goes on return. The
+/// bundled build's page cache is one pool per process, so a trim hands back every idle page.
+const IDLE_CACHE_BYTES: i32 = 2 << 20;
+
+fn page_cache_bytes(conn: &rusqlite::Connection) -> i32 {
+    let (mut used, mut peak) = (0, 0);
+    // SAFETY: the handle lives as long as the borrow, and CACHE_USED only reads pager stats.
+    unsafe {
+        rusqlite::ffi::sqlite3_db_status(
+            conn.handle(),
+            rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
+            &mut used,
+            &mut peak,
+            0,
+        );
+    }
+    used
+}
+
+fn trim_for_idle(conn: &rusqlite::Connection) {
+    if page_cache_bytes(conn) > IDLE_CACHE_BYTES {
+        let _ = conn.release_memory();
+    }
+}
+
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            trim_for_idle(&conn);
             if let Ok(mut pool) = self.session.read_pool.lock() {
                 if pool.len() < max_idle_readers() {
                     pool.push(conn);
@@ -1091,6 +1118,7 @@ impl DerefMut for WriteConnectionGuard {
 impl Drop for WriteConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            trim_for_idle(&conn);
             // Slot-empty check remains: a fresh write connection may already
             // have been installed for this same session.
             if let Ok(mut slot) = self.session.write_conn.lock() {
@@ -1198,9 +1226,9 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     conn.execute_batch("PRAGMA busy_timeout=5000;")
         .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
 
-    // WAL for concurrent reads. cache_size negative = KiB (16 MiB page cache) to keep hot
-    // pages resident on a large DB; temp_store=MEMORY keeps GROUP BY / sort scratch in
-    // memory instead of spilling to disk.
+    // WAL for concurrent reads. cache_size negative = KiB: 16 MiB is a burst's ceiling, so a
+    // big transaction never spills mid-write (an idle connection is trimmed, see
+    // IDLE_CACHE_BYTES); temp_store=MEMORY keeps GROUP BY / sort scratch off disk.
     conn.execute_batch(&format!(
         "{} PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;",
         durability_pragmas()
@@ -1600,6 +1628,55 @@ mod pool_generation_tests {
         let burst: Vec<_> = (0..max_idle_readers() + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
         drop(burst);
         assert_eq!(session.read_pool.lock().unwrap().len(), max_idle_readers());
+    }
+
+    /// A real file database: an in-memory one's pages ARE its storage and never trim.
+    fn file_conn(dir: &tempfile::TempDir) -> rusqlite::Connection {
+        let conn = open_connection(&dir.path().join("vector.db")).unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS t(k BLOB PRIMARY KEY, v BLOB);").unwrap();
+        conn
+    }
+
+    /// One transaction of ~6 MiB: past the idle cap, inside `cache_size`.
+    const BURST: &str = "BEGIN; WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) \
+                         INSERT INTO t SELECT randomblob(16), randomblob(3000) FROM n; COMMIT;";
+
+    #[test]
+    fn the_writer_keeps_a_small_cache_warm_and_hands_back_a_burst() {
+        // One page cache per process: a parallel trim or close would empty this test's.
+        let _guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::empty();
+        let parked = |s: &Arc<Session>| s.write_conn.lock().unwrap().as_ref().map(page_cache_bytes).unwrap();
+
+        let w = WriteConnectionGuard::new(file_conn(&dir), session.clone());
+        w.execute("INSERT INTO t VALUES (randomblob(16), randomblob(100))", []).unwrap();
+        let small = page_cache_bytes(&w);
+        assert!(small > 0);
+        drop(w);
+        assert_eq!(parked(&session), small, "everyday use stays warm");
+
+        let w = WriteConnectionGuard::new(session.write_conn.lock().unwrap().take().unwrap(), session.clone());
+        w.execute_batch(BURST).unwrap();
+        assert!(page_cache_bytes(&w) > IDLE_CACHE_BYTES, "the burst had its headroom");
+        drop(w);
+        assert!(parked(&session) < IDLE_CACHE_BYTES);
+    }
+
+    #[test]
+    fn a_reader_hands_back_a_burst_when_it_goes_idle() {
+        let _guard = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::empty();
+        file_conn(&dir).execute_batch(BURST).unwrap();
+
+        let r = ConnectionGuard::new(file_conn(&dir), session.clone());
+        // Unmapped, so every page it scans lands in its own cache.
+        r.execute_batch("PRAGMA mmap_size=0;").unwrap();
+        let _: i64 = r.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0)).unwrap();
+        assert!(page_cache_bytes(&r) > IDLE_CACHE_BYTES);
+        drop(r);
+        assert!(page_cache_bytes(&session.read_pool.lock().unwrap()[0]) < IDLE_CACHE_BYTES);
     }
 
     #[test]
