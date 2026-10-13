@@ -42,6 +42,10 @@ strip = false
 # which is paid on every dev-loop login with Local Encryption on. These crates
 # are dependencies, so optimizing them leaves our own build times and debug
 # info untouched — same code, same output, just not interpreted at a crawl.
+# SQLite's C at -O0 runs queries several times slower than shipped builds, which skews
+# every timing taken in dev.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]

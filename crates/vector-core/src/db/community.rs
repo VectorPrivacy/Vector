@@ -1373,9 +1373,13 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
             .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, String>(2)?))
             })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (npub, at, tags_json) = row.map_err(|e| e.to_string())?;
+        // The reader goes back before every presence event's tags are parsed.
+        drop(stmt);
+        drop(conn);
+        for (npub, at, tags_json) in rows {
             // SystemEventType: 1 = MemberJoined, 0 = MemberLeft (carried in an ["event-type", n] tag).
             let etype = serde_json::from_str::<Vec<Vec<String>>>(&tags_json)
                 .ok()
@@ -2385,10 +2389,14 @@ pub fn community_ids_beyond_group_chat() -> Result<std::collections::HashSet<Str
         .map_err(|e| format!("prepare community kinds: {e}"))?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
-        .map_err(|e| format!("query community kinds: {e}"))?;
+        .map_err(|e| format!("query community kinds: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read community kinds: {e}"))?;
+    // The reader goes back before every registry is decrypted and parsed.
+    drop(stmt);
+    drop(conn);
     let mut out = std::collections::HashSet::new();
-    for row in rows {
-        let (id, registry, channels) = row.map_err(|e| format!("read community kinds: {e}"))?;
+    for (id, registry, channels) in rows {
         let links: Vec<String> = serde_json::from_str(&dec_txt(&registry)).unwrap_or_default();
         if channels > 1 || !links.is_empty() {
             out.insert(id);
@@ -3187,8 +3195,8 @@ fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
 /// newest-seen cursor (relay seconds). `([], 0)` when never synced; unparseable
 /// stored JSON degrades the same way (the next sync re-seeds from zero).
 pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guestbook::GuestbookEvent>, u64), String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let row = conn
+    // The reader goes back before the decrypt and parse, which outlast the read by far.
+    let row = super::get_db_connection_guard_static()?
         .query_row(
             "SELECT events, cursor_secs FROM community_guestbook WHERE community_id = ?1",
             params![community_id],
