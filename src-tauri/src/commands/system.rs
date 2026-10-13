@@ -107,6 +107,7 @@ pub async fn run_maintenance() {
 
     freed |= crate::message::files::sweep_compression_cache().await > 0;
     freed |= STATE.lock().await.trim_unheld_chats() > 0;
+    vector_core::db::retire_idle_readers();
 
     image_cache::cleanup_stale_downloads().await;
 

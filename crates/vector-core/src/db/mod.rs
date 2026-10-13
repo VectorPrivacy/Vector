@@ -628,8 +628,12 @@ pub struct Session {
     /// `None` only before an account is bound, where there is nothing better
     /// than the ambient lookup to fall back to.
     db_path: Option<PathBuf>,
-    read_pool: Mutex<Vec<rusqlite::Connection>>,
+    read_pool: Mutex<Vec<IdleReader>>,
     write_conn: Mutex<Option<rusqlite::Connection>>,
+    /// Signalled when the writer comes home, for a write waiting on it.
+    writer_free: std::sync::Condvar,
+    /// Writer guards out right now: none out and none home means nothing to wait for.
+    writers_out: std::sync::atomic::AtomicUsize,
     /// This account's chats and profiles in memory — the DB's read-through
     /// cache, and so bound to the same account for the same reason.
     chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>,
@@ -654,6 +658,8 @@ impl Session {
             db_path: None,
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
+            writer_free: std::sync::Condvar::new(),
+            writers_out: std::sync::atomic::AtomicUsize::new(0),
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
             stopped: SessionStop::default(),
@@ -670,6 +676,8 @@ impl Session {
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
+            writer_free: std::sync::Condvar::new(),
+            writers_out: std::sync::atomic::AtomicUsize::new(0),
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
             stopped: SessionStop::default(),
@@ -694,6 +702,8 @@ impl Session {
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
+            writer_free: std::sync::Condvar::new(),
+            writers_out: std::sync::atomic::AtomicUsize::new(0),
             chat_state: self.chat_state.clone(),
             scoped: RwLock::new(self.scoped.read().unwrap_or_else(|e| e.into_inner()).clone()),
             stopped: SessionStop::default(),
@@ -811,25 +821,72 @@ impl Session {
     /// session's own database if the pool is empty.
     pub fn acquire_read(self: &Arc<Self>) -> Result<ConnectionGuard, String> {
         if let Ok(mut pool) = self.read_pool.lock() {
-            if let Some(conn) = pool.pop() {
-                return Ok(ConnectionGuard::new(conn, self.clone()));
+            // The most recently used: a burst's extras sit unused at the bottom and retire.
+            if let Some(idle) = pool.pop() {
+                return Ok(ConnectionGuard::new(idle.conn, self.clone()));
             }
         }
         let conn = create_connection(&self.path()?)?;
         Ok(ConnectionGuard::new(conn, self.clone()))
     }
 
+    /// Closes the readers past [`MIN_IDLE_READERS`] that a burst left idle past
+    /// [`READER_IDLE_TTL`]. Returns them, to be dropped outside the pool's lock.
+    fn retire_idle_readers(&self, now: web_time::Instant) -> Vec<IdleReader> {
+        let Ok(mut pool) = self.read_pool.lock() else { return Vec::new() };
+        let stale = pool.len().saturating_sub(MIN_IDLE_READERS);
+        let stale = pool.iter().take(stale).take_while(|r| now.duration_since(r.since) >= READER_IDLE_TTL).count();
+        pool.drain(..stale).collect()
+    }
+
     /// Take THE write connection from this session, opening one against this
     /// session's own database if the slot is empty.
+    ///
+    /// SQLite takes one writer at a time, so a second connection gains nothing: it parses
+    /// the schema, then sleeps in SQLite's busy poll. Waiting here wakes the moment the
+    /// writer returns. A nested write on this thread, or a holder past [`WRITER_WAIT`],
+    /// opens its own.
+    #[track_caller]
     pub fn acquire_write(self: &Arc<Self>) -> Result<WriteConnectionGuard, String> {
-        {
-            let mut slot = self.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+        use std::sync::atomic::Ordering;
+        let nested = WRITERS_HERE.with(|n| n.get() > 0);
+        let deadline = web_time::Instant::now() + WRITER_WAIT;
+        let mut slot = self.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
             if let Some(conn) = slot.take() {
+                self.writers_out.fetch_add(1, Ordering::Relaxed);
                 return Ok(WriteConnectionGuard::new(conn, self.clone()));
             }
+            if nested || self.writers_out.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            // One thread on the web: nothing else could bring the writer back.
+            #[cfg(target_arch = "wasm32")]
+            break;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let left = deadline.saturating_duration_since(web_time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                slot = self.writer_free.wait_timeout(slot, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
         }
-        let conn = create_connection(&self.path()?)?;
-        Ok(WriteConnectionGuard::new(conn, self.clone()))
+        #[cfg(target_arch = "wasm32")]
+        let _ = deadline;
+        // Counted before the lock goes, so a write arriving meanwhile waits for this one.
+        let path = self.path()?;
+        self.writers_out.fetch_add(1, Ordering::Relaxed);
+        drop(slot);
+        match create_connection(&path) {
+            Ok(conn) => Ok(WriteConnectionGuard::new(conn, self.clone())),
+            Err(e) => {
+                let _held = self.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+                self.writers_out.fetch_sub(1, Ordering::Relaxed);
+                self.writer_free.notify_all();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -1046,13 +1103,41 @@ impl DerefMut for ConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target { self.conn.as_mut().expect("Connection already taken") }
 }
 
-/// Read connections kept idle per session. A burst past it opens extras that close on
-/// return, so the pool never stays at its peak (each holds its own page and statement cache).
-fn max_idle_readers() -> usize {
-    static N: LazyLock<usize> = LazyLock::new(|| {
-        std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(4, 8)
-    });
-    *N
+/// An idle reader, and when it was last handed back.
+struct IdleReader {
+    conn: rusqlite::Connection,
+    since: web_time::Instant,
+}
+
+/// Readers a session keeps however long it idles.
+const MIN_IDLE_READERS: usize = 4;
+/// A burst's extra readers stay this long after their last use, so a burst opens each
+/// once instead of opening and closing per query (each open allocates its own schema).
+const READER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Never more idle readers than this, whatever a burst asked for.
+const MAX_IDLE_READERS: usize = 16;
+/// How long a write waits for the writer before opening a connection of its own.
+const WRITER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+thread_local! {
+    /// Writer guards this thread holds: a nested write must not wait on itself.
+    static WRITERS_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Homes a session's writer. A write may already be waiting on it (the session goes live
+/// before its writer does), and one already returned is kept.
+fn install_writer(session: &Session, conn: rusqlite::Connection) {
+    let mut slot = session.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(conn);
+        session.writer_free.notify_all();
+    }
+}
+
+/// Closes the readers a finished burst left behind; the maintenance tick calls it for a
+/// session that has gone quiet.
+pub fn retire_idle_readers() {
+    drop(current_session().retire_idle_readers(web_time::Instant::now()));
 }
 
 /// Page cache a connection keeps once it goes idle. A burst (an archival sync, a re-encryption
@@ -1085,24 +1170,40 @@ impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             trim_for_idle(&conn);
+            let now = web_time::Instant::now();
             if let Ok(mut pool) = self.session.read_pool.lock() {
-                if pool.len() < max_idle_readers() {
-                    pool.push(conn);
+                if pool.len() < MAX_IDLE_READERS {
+                    pool.push(IdleReader { conn, since: now });
                 }
             }
+            drop(self.session.retire_idle_readers(now));
         }
     }
 }
 
 /// RAII guard for the WRITE connection — auto-returns on drop.
+/// Not `Send`: a writer stays on its thread, so it is never held across an `.await` and a
+/// nested write on that thread is always seen as one.
 pub struct WriteConnectionGuard {
     conn: Option<rusqlite::Connection>,
     session: Arc<Session>,
+    _not_send: std::marker::PhantomData<*const ()>,
+    /// When and where it was taken, to name a holder that makes other writes wait.
+    #[cfg(debug_assertions)]
+    taken: (web_time::Instant, &'static std::panic::Location<'static>),
 }
 
 impl WriteConnectionGuard {
+    #[track_caller]
     fn new(conn: rusqlite::Connection, session: Arc<Session>) -> Self {
-        Self { conn: Some(conn), session }
+        WRITERS_HERE.with(|n| n.set(n.get() + 1));
+        Self {
+            conn: Some(conn),
+            session,
+            _not_send: std::marker::PhantomData,
+            #[cfg(debug_assertions)]
+            taken: (web_time::Instant::now(), std::panic::Location::caller()),
+        }
     }
 }
 
@@ -1117,15 +1218,34 @@ impl DerefMut for WriteConnectionGuard {
 
 impl Drop for WriteConnectionGuard {
     fn drop(&mut self) {
+        WRITERS_HERE.with(|n| n.set(n.get().saturating_sub(1)));
+        #[cfg(debug_assertions)]
+        {
+            let held = self.taken.0.elapsed();
+            if held >= WRITER_WAIT {
+                crate::log_warn!("[DB] writer held {} ms from {}", held.as_millis(), self.taken.1);
+            }
+        }
         if let Some(conn) = self.conn.take() {
             trim_for_idle(&conn);
-            // Slot-empty check remains: a fresh write connection may already
-            // have been installed for this same session.
-            if let Ok(mut slot) = self.session.write_conn.lock() {
+            let mut spare = None;
+            {
+                let mut slot = self.session.write_conn.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = self.session.writers_out.fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |n| n.checked_sub(1),
+                );
+                // The slot may already hold a connection installed meanwhile.
                 if slot.is_none() {
                     *slot = Some(conn);
+                    self.session.writer_free.notify_one();
+                } else {
+                    spare = Some(conn);
                 }
             }
+            // Closed outside the lock.
+            drop(spare);
         }
     }
 }
@@ -1260,6 +1380,7 @@ pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
 pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Get the WRITE connection (headless-safe — no AppHandle).
+#[track_caller]
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
     current_session().acquire_write()
 }
@@ -1445,14 +1566,13 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     if let Ok(mut pool) = session.read_pool.lock() {
         for _ in 0..4 {
             if let Ok(c) = create_connection(&db_path) {
-                pool.push(c);
+                pool.push(IdleReader { conn: c, since: web_time::Instant::now() });
             }
         }
     }
 
     // Set write connection
-    let write_conn = create_connection(&db_path)?;
-    *session.write_conn.lock().unwrap_or_else(|e| e.into_inner()) = Some(write_conn);
+    install_writer(&session, create_connection(&db_path)?);
 
     // Straight from `db_path` into `session`: switch_account opens the database before it
     // marks the account current, and the task may be bound to the previous session.
@@ -1623,11 +1743,148 @@ mod pool_generation_tests {
     }
 
     #[test]
-    fn a_burst_of_readers_settles_back_to_the_idle_cap() {
+    fn a_burst_keeps_its_readers_until_it_has_been_quiet_a_while() {
         let session = Session::empty();
-        let burst: Vec<_> = (0..max_idle_readers() + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
+        let burst: Vec<_> = (0..MIN_IDLE_READERS + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
         drop(burst);
-        assert_eq!(session.read_pool.lock().unwrap().len(), max_idle_readers());
+        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS + 5, "reused for the rest of the burst, not reopened");
+
+        let soon = web_time::Instant::now() + READER_IDLE_TTL / 2;
+        assert!(session.retire_idle_readers(soon).is_empty());
+        let later = web_time::Instant::now() + READER_IDLE_TTL;
+        assert_eq!(session.retire_idle_readers(later).len(), 5);
+        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS);
+    }
+
+    #[test]
+    fn the_burst_reuses_the_reader_it_just_returned() {
+        let session = Session::empty();
+        let a = ConnectionGuard::new(fake_conn(), session.clone());
+        let b = ConnectionGuard::new(fake_conn(), session.clone());
+        // SAFETY: only compared, never dereferenced.
+        let b_handle = unsafe { b.handle() } as usize;
+        drop(a);
+        drop(b);
+        let next = session.acquire_read().unwrap();
+        assert_eq!(unsafe { next.handle() } as usize, b_handle, "most recently used first, so the oldest can age out");
+    }
+
+    fn writer_session(dir: &tempfile::TempDir) -> Arc<Session> {
+        let path = dir.path().join("vector.db");
+        drop(open_connection(&path).unwrap());
+        Session::bound(path)
+    }
+
+    fn handle_of(w: &WriteConnectionGuard) -> usize {
+        // SAFETY: only compared, never dereferenced.
+        unsafe { w.handle() as usize }
+    }
+
+    #[test]
+    fn a_write_waits_for_the_writer_instead_of_opening_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let first = session.acquire_write().unwrap();
+        let held = handle_of(&first);
+        let s2 = session.clone();
+        let waiter = std::thread::spawn(move || {
+            let t = web_time::Instant::now();
+            let w = s2.acquire_write().unwrap();
+            (handle_of(&w), t.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        drop(first);
+        let (got, waited) = waiter.join().unwrap();
+        assert_eq!(got, held, "the same writer, handed over");
+        assert!(waited < WRITER_WAIT, "woken by the return, not the timeout: {waited:?}");
+    }
+
+    #[test]
+    fn a_first_write_with_nothing_out_opens_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = web_time::Instant::now();
+        let _w = writer_session(&dir).acquire_write().unwrap();
+        assert!(t.elapsed() < WRITER_WAIT / 2, "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_write_waiting_at_login_wakes_when_the_writer_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let early = session.acquire_write().unwrap();
+        let s2 = session.clone();
+        let waiter = std::thread::spawn(move || {
+            let t = web_time::Instant::now();
+            let w = s2.acquire_write().unwrap();
+            (handle_of(&w), t.elapsed())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let installed = open_connection(&dir.path().join("vector.db")).unwrap();
+        // SAFETY: only compared, never dereferenced.
+        let installed_handle = unsafe { installed.handle() } as usize;
+        install_writer(&session, installed);
+        let (got, waited) = waiter.join().unwrap();
+        assert_eq!(got, installed_handle);
+        assert!(waited < WRITER_WAIT, "woken by the install: {waited:?}");
+        drop(early);
+    }
+
+    #[test]
+    fn retiring_keeps_the_most_recently_used_readers() {
+        let session = Session::empty();
+        let guards: Vec<_> = (0..MIN_IDLE_READERS + 5).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
+        // SAFETY: only compared, never dereferenced.
+        let handles: Vec<usize> = guards.iter().map(|g| unsafe { g.handle() } as usize).collect();
+        for g in guards {
+            drop(g);
+        }
+        session.retire_idle_readers(web_time::Instant::now() + READER_IDLE_TTL);
+        let kept: Vec<usize> = session.read_pool.lock().unwrap().iter().map(|r| unsafe { r.conn.handle() } as usize).collect();
+        assert_eq!(kept, handles[5..]);
+    }
+
+    #[test]
+    fn a_return_retires_a_quiet_burst_and_the_pool_never_passes_its_cap() {
+        let session = Session::empty();
+        let burst: Vec<_> = (0..MAX_IDLE_READERS + 4).map(|_| ConnectionGuard::new(fake_conn(), session.clone())).collect();
+        drop(burst);
+        assert_eq!(session.read_pool.lock().unwrap().len(), MAX_IDLE_READERS);
+
+        let long_ago = web_time::Instant::now() - READER_IDLE_TTL;
+        for r in session.read_pool.lock().unwrap().iter_mut() {
+            r.since = long_ago;
+        }
+        drop(session.acquire_read().unwrap());
+        assert_eq!(session.read_pool.lock().unwrap().len(), MIN_IDLE_READERS, "the next return retires the quiet extras");
+    }
+
+    #[test]
+    fn a_nested_write_never_waits_on_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let outer = session.acquire_write().unwrap();
+        let t = web_time::Instant::now();
+        let inner = session.acquire_write().unwrap();
+        assert!(t.elapsed() < WRITER_WAIT / 2, "{:?}", t.elapsed());
+        assert_ne!(handle_of(&inner), handle_of(&outer));
+    }
+
+    #[test]
+    fn a_writer_held_past_the_wait_lets_another_write_open_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = writer_session(&dir);
+        let first = session.acquire_write().unwrap();
+        let held = handle_of(&first);
+        let s2 = session.clone();
+        let waiter = std::thread::spawn(move || {
+            let t = web_time::Instant::now();
+            let w = s2.acquire_write().unwrap();
+            (handle_of(&w), t.elapsed())
+        });
+        let (got, waited) = waiter.join().unwrap();
+        assert_ne!(got, held);
+        assert!(waited >= WRITER_WAIT, "{waited:?}");
+        drop(first);
     }
 
     /// A real file database: an in-memory one's pages ARE its storage and never trim.
@@ -1676,7 +1933,7 @@ mod pool_generation_tests {
         let _: i64 = r.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0)).unwrap();
         assert!(page_cache_bytes(&r) > IDLE_CACHE_BYTES);
         drop(r);
-        assert!(page_cache_bytes(&session.read_pool.lock().unwrap()[0]) < IDLE_CACHE_BYTES);
+        assert!(page_cache_bytes(&session.read_pool.lock().unwrap()[0].conn) < IDLE_CACHE_BYTES);
     }
 
     #[test]

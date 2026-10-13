@@ -42,6 +42,7 @@ pub fn get_db_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<Con
 }
 
 /// Get the WRITE connection guard (delegates to vector-core pool).
+#[track_caller]
 pub fn get_write_connection_guard<R: Runtime>(_handle: &AppHandle<R>) -> Result<WriteConnectionGuard, String> {
     vector_core::db::get_write_connection_guard_static()
 }
@@ -52,6 +53,7 @@ pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
 }
 
 /// Get the WRITE connection guard using static path (delegates to vector-core pool).
+#[track_caller]
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
     vector_core::db::get_write_connection_guard_static()
 }
