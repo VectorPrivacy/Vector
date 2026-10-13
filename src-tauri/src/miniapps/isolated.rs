@@ -574,20 +574,24 @@ async fn handle(ctx: &HostContext, req: Request<Incoming>) -> Response<Full<Byte
     let Some(instance) = state.get_instance(&ctx.window_label).await else {
         return error(StatusCode::NOT_FOUND, "Mini App not found");
     };
-    let granted = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex()).unwrap_or_default();
-
     if path == "/webxdc.js" {
         let (npub, name) = super::scheme::get_user_info().await;
         let js = super::scheme::generate_webxdc_bridge_js(&npub, &name);
-        return ok(js.into_bytes(), "text/javascript", &granted, head_only);
+        return ok(js.into_bytes(), "text/javascript", "", head_only);
     }
 
     let file = if path == "/" { "index.html".to_string() } else { path.trim_start_matches('/').to_string() };
-    let package = instance.package.clone();
+    let reading = instance.clone();
     // Zip reads are blocking file I/O on a multi-megabyte archive.
-    let loaded = tokio::task::spawn_blocking(move || match package.get_file(&file) {
-        Ok(data) => Some((file, data)),
-        Err(_) => package.get_file(&format!("{file}.html")).ok().map(|d| (format!("{file}.html"), d)),
+    let loaded = tokio::task::spawn_blocking(move || {
+        let archive = reading.archive().ok()?;
+        match archive.read(&file) {
+            Ok(data) => Some((file, data)),
+            Err(_) => {
+                let html = format!("{file}.html");
+                archive.read(&html).ok().map(|data| (html, data))
+            }
+        }
     })
     .await
     .ok()
@@ -598,11 +602,13 @@ async fn handle(ctx: &HostContext, req: Request<Incoming>) -> Response<Full<Byte
 
     let mime = super::scheme::get_mime_type(&served);
     if mime == "text/html" {
+        // A Permissions Policy binds to the document, so grants are read once per page load.
+        let granted = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex()).unwrap_or_default();
         let (npub, name) = super::scheme::get_user_info().await;
         let html = super::scheme::inject_webxdc_script(&data, &npub, &name);
         return ok(html, &mime, &granted, head_only);
     }
-    ok(data, &mime, &granted, head_only)
+    ok(data, &mime, "", head_only)
 }
 
 fn ok(body: Vec<u8>, mime: &str, granted: &str, head_only: bool) -> Response<Full<Bytes>> {

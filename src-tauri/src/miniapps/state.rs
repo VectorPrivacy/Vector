@@ -398,25 +398,93 @@ impl MiniAppPackage {
         Ok((manifest, icon))
     }
     
-    /// Get a file from the package
-    pub fn get_file(&self, path: &str) -> Result<Vec<u8>, Error> {
-        let file = std::fs::File::open(&self.path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
+}
 
+/// Generous: real .xdc games ship single packed assets (a Godot .pck, a wasm bundle) past
+/// 100 MB. It only stops a small archive deflating to gigabytes; `load` caps the archive.
+const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
+/// One open file read at explicit offsets, so each clone keeps its own cursor over one handle.
+#[derive(Clone)]
+struct SharedFile {
+    file: Arc<std::fs::File>,
+    len: u64,
+    pos: u64,
+}
+
+impl Read for SharedFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.pos)?;
+        // Windows queues I/O on a synchronous handle, so a big stored asset in one read would
+        // hold every other request behind it.
+        #[cfg(windows)]
+        let n = {
+            let len = buf.len().min(1 << 20);
+            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..len], self.pos)?
+        };
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for SharedFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let pos = match to {
+            std::io::SeekFrom::Start(p) => Some(p),
+            std::io::SeekFrom::End(d) => self.len.checked_add_signed(d),
+            std::io::SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"))?;
+        Ok(self.pos)
+    }
+}
+
+/// A running app's archive. Its directory is read once; every read clones it, which shares
+/// that directory and the handle but not the cursor, so parallel asset loads don't wait on a lock.
+#[derive(Clone)]
+pub struct PackageArchive {
+    zip: zip::ZipArchive<SharedFile>,
+    folded: Arc<std::sync::OnceLock<HashMap<Box<str>, usize>>>,
+}
+
+impl std::fmt::Debug for PackageArchive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackageArchive").field("entries", &self.zip.len()).finish()
+    }
+}
+
+impl PackageArchive {
+    pub fn open(path: &std::path::Path) -> Result<Self, Error> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let zip = zip::ZipArchive::new(SharedFile { file: Arc::new(file), len, pos: 0 })?;
+        Ok(Self { zip, folded: Default::default() })
+    }
+
+    /// Read one entry. A mis-cased request still finds its file, as `resolve_entry_ci` allows.
+    pub fn read(&self, path: &str) -> Result<Vec<u8>, Error> {
         let normalized = normalize_entry_path(path)
             .ok_or_else(|| Error::FileNotFound(format!("Invalid path: {}", path)))?;
-
-        // Case-insensitive resolve so a mis-cased entry (e.g. "Index.html") still serves.
-        let actual_name = resolve_entry_ci(&archive, &normalized)
+        let index = self
+            .zip
+            .index_for_name(&normalized)
+            .or_else(|| self.folded().get(normalized.to_ascii_lowercase().as_str()).copied())
             .ok_or_else(|| Error::FileNotFound(path.to_string()))?;
-        let mut zip_file = archive.by_name(&actual_name)
-            .map_err(|_| Error::FileNotFound(path.to_string()))?;
+        let mut zip = self.zip.clone();
+        let mut entry = zip.by_index(index).map_err(|_| Error::FileNotFound(path.to_string()))?;
+        MiniAppPackage::read_entry_capped(&mut entry, MAX_ENTRY_BYTES)
+    }
 
-        // Generous: real .xdc games ship single packed assets (e.g. a Godot
-        // .pck / wasm bundle) well past 100 MB. The cap only exists to stop
-        // a small archive deflating to multi-GB, not to police app size —
-        // the 500 MB whole-archive cap handles that.
-        Self::read_entry_capped(&mut zip_file, 512 * 1024 * 1024)
+    /// Lowercased names, built on the first mis-cased request; the first entry of a name wins.
+    fn folded(&self) -> &HashMap<Box<str>, usize> {
+        self.folded.get_or_init(|| {
+            let mut map = HashMap::new();
+            for (index, name) in self.zip.file_names().enumerate() {
+                map.entry(name.to_ascii_lowercase().into_boxed_str()).or_insert(index);
+            }
+            map
+        })
     }
 }
 
@@ -437,6 +505,18 @@ pub struct MiniAppInstance {
     /// re-registers the SAME label with a new instance; the old close's async
     /// teardown must only remove the instance it was started for.
     pub instance_id: u64,
+    /// The package's archive, opened by the first request and closed with the window.
+    pub archive: Arc<std::sync::OnceLock<PackageArchive>>,
+}
+
+impl MiniAppInstance {
+    pub fn archive(&self) -> Result<PackageArchive, Error> {
+        if let Some(open) = self.archive.get() {
+            return Ok(open.clone());
+        }
+        let open = PackageArchive::open(&self.package.path)?;
+        Ok(self.archive.get_or_init(|| open).clone())
+    }
 }
 
 /// Monotonic id for [`MiniAppInstance::instance_id`].
@@ -698,6 +778,45 @@ mod package_meta_tests {
 
     fn set_modified(path: &std::path::Path, at: std::time::SystemTime) {
         std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn a_held_archive_serves_parallel_reads_from_one_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("game.xdc");
+        let big: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+        let files: Vec<(String, Vec<u8>)> = (0..64).map(|i| (format!("assets/{i}.bin"), vec![i as u8; 4096 + i])).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![
+            ("index.html", b"<html></html>"),
+            ("Data/Level.JSON", b"{}"),
+            ("big.bin", &big),
+            ("A.js", b"upper"),
+            ("a.js", b"lower"),
+        ];
+        entries.extend(files.iter().map(|(n, d)| (n.as_str(), d.as_slice())));
+        std::fs::write(&path, xdc(&entries)).unwrap();
+
+        let archive = PackageArchive::open(&path).unwrap();
+        assert_eq!(archive.read("/index.html").unwrap(), b"<html></html>");
+        assert_eq!(archive.read("data/level.json").unwrap(), b"{}");
+        assert_eq!(archive.read("a.js").unwrap(), b"lower");
+        assert_eq!(archive.read("A.JS").unwrap(), b"upper", "the first entry of a folded name wins");
+        assert!(archive.read("missing.js").is_err());
+        assert!(archive.read("../index.html").is_err());
+
+        std::thread::scope(|scope| {
+            for round in 0..8 {
+                let (archive, big, files) = (&archive, &big, &files);
+                scope.spawn(move || {
+                    for (i, (name, data)) in files.iter().enumerate().skip(round) {
+                        assert_eq!(&archive.read(name).unwrap(), data, "{name}");
+                        if i % 16 == 0 {
+                            assert_eq!(&archive.read("big.bin").unwrap(), big);
+                        }
+                    }
+                });
+            }
+        });
     }
 
     #[test]

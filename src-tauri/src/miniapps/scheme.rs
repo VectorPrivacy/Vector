@@ -211,51 +211,44 @@ async fn handle_miniapp_request<R: tauri::Runtime>(
         }
     };
 
-    // Look up granted permissions for this app using the file hash (content-based security)
-    let granted_permissions = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex())
-        .unwrap_or_default();
-
     let path = request.uri().path();
 
     // Handle special paths - serve webxdc.js bridge script
     if path == "/webxdc.js" {
         // Get user's npub and display name for selfAddr and selfName
         let (user_npub, user_display_name) = get_user_info().await;
-        return serve_webxdc_js(&instance, &user_npub, &user_display_name, &granted_permissions);
+        return serve_webxdc_js(&user_npub, &user_display_name);
     }
 
-    // Serve file from the package
-    let file_path = if path == "/" || path.is_empty() {
-        "index.html"
-    } else {
-        path.trim_start_matches('/')
+    let file = if path == "/" || path.is_empty() { "index.html".to_string() } else { path.trim_start_matches('/').to_string() };
+    // Blocking file I/O: a large asset would hold a runtime worker while it inflates.
+    let reading = instance.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        let archive = reading.archive().ok()?;
+        match archive.read(&file) {
+            Ok(data) => Some((file, data)),
+            Err(_) => {
+                let html = format!("{file}.html");
+                archive.read(&html).ok().map(|data| (html, data))
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((served, data)) = loaded else {
+        return make_error_response(http::StatusCode::NOT_FOUND, "File not found", "");
     };
 
-    match instance.package.get_file(file_path) {
-        Ok(data) => {
-            let mime_type = get_mime_type(file_path);
-            // For HTML files, inject the webxdc.js script automatically
-            if mime_type == "text/html" {
-                let (user_npub, user_display_name) = get_user_info().await;
-                let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
-                make_success_response(injected, &mime_type, &granted_permissions)
-            } else {
-                make_success_response(data, &mime_type, &granted_permissions)
-            }
-        }
-        Err(_) => {
-            // Try with .html extension
-            let html_path = format!("{}.html", file_path);
-            match instance.package.get_file(&html_path) {
-                Ok(data) => {
-                    let (user_npub, user_display_name) = get_user_info().await;
-                    let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
-                    make_success_response(injected, "text/html", &granted_permissions)
-                }
-                Err(_) => make_error_response(http::StatusCode::NOT_FOUND, "File not found", &granted_permissions),
-            }
-        }
+    let mime_type = get_mime_type(&served);
+    if mime_type == "text/html" {
+        // A Permissions Policy binds to the document, so grants are read once per page load.
+        let granted = crate::db::get_miniapp_granted_permissions(&instance.package.hash_hex()).unwrap_or_default();
+        let (user_npub, user_display_name) = get_user_info().await;
+        let injected = inject_webxdc_script(&data, &user_npub, &user_display_name);
+        return make_success_response(injected, &mime_type, &granted);
     }
+    make_success_response(data, &mime_type, "")
 }
 
 /// Get the current user's npub and display name
@@ -300,14 +293,9 @@ pub(super) async fn get_user_info() -> (String, String) {
 
 /// Serve the webxdc.js bridge script
 /// Delegates to the canonical `generate_webxdc_bridge_js` to avoid maintaining two copies.
-fn serve_webxdc_js(
-    _instance: &super::state::MiniAppInstance,
-    user_npub: &str,
-    user_display_name: &str,
-    granted_permissions: &str,
-) -> http::Response<Cow<'static, [u8]>> {
+fn serve_webxdc_js(user_npub: &str, user_display_name: &str) -> http::Response<Cow<'static, [u8]>> {
     let js = generate_webxdc_bridge_js(user_npub, user_display_name);
-    make_success_response(js.into_bytes(), "text/javascript", granted_permissions)
+    make_success_response(js.into_bytes(), "text/javascript", "")
 }
 
 /// Inject the webxdc.js script inline into HTML content
@@ -605,4 +593,17 @@ pub(super) fn get_mime_type(path: &str) -> String {
         "pdf" => "application/octet-stream",
         _ => "application/octet-stream",
     }.to_string()
+}
+#[cfg(test)]
+mod tests {
+    /// Grants and the bridge go to responses typed exactly "text/html", and only to those.
+    #[test]
+    fn only_pages_are_served_as_documents() {
+        for page in ["index.html", "Game.HTM", "levels/one.html"] {
+            assert_eq!(super::get_mime_type(page), "text/html", "{page}");
+        }
+        for asset in ["app.js", "icon.svg", "data.xml", "level.json", "game"] {
+            assert_ne!(super::get_mime_type(asset), "text/html", "{asset}");
+        }
+    }
 }

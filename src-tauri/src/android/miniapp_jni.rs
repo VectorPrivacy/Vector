@@ -7,9 +7,7 @@
 use jni::objects::{JClass, JString};
 use jni::sys::{jint, jstring, jobject};
 use jni::JNIEnv;
-use std::io::Read;
 use tauri::{Emitter, Manager};
-use crate::util::bytes_to_hex_string;
 use crate::TAURI_APP;
 
 // ============================================================================
@@ -33,28 +31,13 @@ fn csp_header(host: &str) -> String {
     format!("default-src 'self' {o}; style-src 'self' {o} 'unsafe-inline' blob:; font-src 'self' {o} data: blob:; script-src 'self' {o} 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' {o}{ws} ipc: data: blob:; img-src 'self' {o} data: blob:; media-src 'self' {o} data: blob:; webrtc 'block'")
 }
 
-/// Whether the package opts into cross-origin isolation, read once per package.
-fn package_is_isolated(package_path: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
-    static CACHE: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
-    if let Some(known) = CACHE.lock().ok().and_then(|c| c.get(package_path).copied()) {
-        return known;
-    }
-    let isolated = std::fs::File::open(package_path)
-        .ok()
-        .and_then(|f| zip::ZipArchive::new(f).ok())
-        .and_then(|mut archive| {
-            let mut entry = archive.by_name("manifest.toml").ok()?;
-            let mut text = String::new();
-            std::io::Read::take(&mut entry, 1024 * 1024).read_to_string(&mut text).ok()?;
-            toml::from_str::<crate::miniapps::state::MiniAppManifest>(&text).ok()
-        })
-        .is_some_and(|m| m.cross_origin_isolated);
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.insert(package_path.to_string(), isolated);
-    }
-    isolated
+/// The instance `miniapp_open` registered for this window: the package it checked, and the
+/// archive its requests share until teardown.
+fn running(miniapp_id: &str) -> Result<crate::miniapps::state::MiniAppInstance, String> {
+    let app = TAURI_APP.get().ok_or("App not ready")?;
+    let state = app.state::<crate::miniapps::state::MiniAppsState>();
+    tauri::async_runtime::block_on(state.get_instance(miniapp_id))
+        .ok_or_else(|| format!("Mini App not running: {miniapp_id}"))
 }
 
 /// Permissions Policy for Mini Apps (Android document responses).
@@ -179,7 +162,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
     mut env: JNIEnv,
     _class: JClass,
     miniapp_id: JString,
-    package_path: JString,
+    _package_path: JString,
     command: JString,
     args: JString,
 ) -> jstring {
@@ -187,11 +170,6 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
         let miniapp_id: String = match env.get_string(&miniapp_id) {
             Ok(s) => s.into(),
             Err(e) => return create_error_string(&mut env, &format!("Failed to get miniapp_id: {:?}", e)),
-        };
-
-        let package_path: String = match env.get_string(&package_path) {
-            Ok(s) => s.into(),
-            Err(e) => return create_error_string(&mut env, &format!("Failed to get package_path: {:?}", e)),
         };
 
         let command: String = match env.get_string(&command) {
@@ -210,7 +188,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_invokeNative(
         let result = match command.as_str() {
             "get_granted_permissions" => {
                 // Return granted permissions for this Mini App
-                match get_granted_permissions_for_package(&package_path) {
+                match granted_permissions(&miniapp_id) {
                     Ok(perms) => perms,
                     Err(e) => format!(r#"{{"error":"{}"}}"#, e),
                 }
@@ -499,19 +477,19 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getSelfNameNative(
 pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_getGrantedPermissionsNative(
     mut env: JNIEnv,
     _class: JClass,
-    _miniapp_id: JString,
-    package_path: JString,
+    miniapp_id: JString,
+    _package_path: JString,
 ) -> jstring {
     crate::android::utils::jni_fence("Java_io_vectorapp_miniapp_MiniAppIpc_getGrantedPermissionsNative", || std::ptr::null_mut(), move || {
-        let package_path: String = match env.get_string(&package_path) {
+        let miniapp_id: String = match env.get_string(&miniapp_id) {
             Ok(s) => s.into(),
             Err(e) => {
-                log_error!("Failed to get package_path: {:?}", e);
+                log_error!("Failed to get miniapp_id: {:?}", e);
                 return std::ptr::null_mut();
             }
         };
 
-        let perms = get_granted_permissions_for_package(&package_path).unwrap_or_default();
+        let perms = granted_permissions(&miniapp_id).unwrap_or_default();
 
         match env.new_string(&perms) {
             Ok(s) => s.into_raw(),
@@ -530,7 +508,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     mut env: JNIEnv,
     _class: JClass,
     miniapp_id: JString,
-    package_path: JString,
+    _package_path: JString,
     path: JString,
     host: JString,
 ) -> jobject {
@@ -539,14 +517,6 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
             Ok(s) => s.into(),
             Err(e) => {
                 log_error!("Failed to get miniapp_id: {:?}", e);
-                return std::ptr::null_mut();
-            }
-        };
-
-        let package_path: String = match env.get_string(&package_path) {
-            Ok(s) => s.into(),
-            Err(e) => {
-                log_error!("Failed to get package_path: {:?}", e);
                 return std::ptr::null_mut();
             }
         };
@@ -572,7 +542,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
         // Serve file from .xdc package. A miss is a plain 404 to the game's WebView —
         // browsers probe paths the package never shipped (/favicon.ico on every load),
         // and log_error would toast "Something went wrong" at the user for each one.
-        match serve_file_from_package(&mut env, &package_path, &path, &host) {
+        match serve_file_from_package(&mut env, &miniapp_id, &path, &host) {
             Ok(response) => response,
             Err(e) => {
                 log_warn!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
@@ -642,49 +612,27 @@ fn get_user_display_name() -> String {
     "Unknown".to_string()
 }
 
-fn get_granted_permissions_for_package(package_path: &str) -> Result<String, String> {
-    // Compute file hash for permission lookup
-    let bytes = std::fs::read(package_path).map_err(|e| format!("Failed to read package: {}", e))?;
-
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let file_hash = bytes_to_hex_string(&hasher.finalize());
-
-    // Look up permissions from database using file_hash
-    crate::db::get_miniapp_granted_permissions(&file_hash)
+fn granted_permissions(miniapp_id: &str) -> Result<String, String> {
+    crate::db::get_miniapp_granted_permissions(&running(miniapp_id)?.package.hash_hex())
 }
 
 fn serve_file_from_package(
     env: &mut JNIEnv,
-    package_path: &str,
+    miniapp_id: &str,
     path: &str,
     host: &str,
 ) -> Result<jobject, String> {
-    let file = std::fs::File::open(package_path).map_err(|e| format!("Failed to open package: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {}", e))?;
+    let instance = running(miniapp_id)?;
 
     // Normalize path; empty segments collapse ("maps//ui.map"), as on desktop
     let normalized = path.split('/').filter(|seg| !seg.is_empty()).collect::<Vec<_>>().join("/");
     let file_path = if normalized.is_empty() { "index.html" } else { normalized.as_str() };
 
-    // Security: Block path traversal attempts
-    // A malicious .xdc could try paths like "../../../etc/passwd" or "foo/../../../sensitive"
-    if file_path.contains("..") {
-        return Err("Path traversal not allowed".to_string());
-    }
-
-    // Try to find the file in the archive
-    let mut zip_file = archive
-        .by_name(file_path)
-        .map_err(|_| format!("File not found in package: {}", file_path))?;
-
-    // Read contents
-    let mut contents = Vec::new();
-    zip_file
-        .read_to_end(&mut contents)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    // Rejects traversal ("../"), and matches a mis-cased name as desktop does.
+    let mut contents = instance
+        .archive()
+        .and_then(|archive| archive.read(file_path))
+        .map_err(|e| format!("File not found in package: {}: {}", file_path, e))?;
 
     // Determine MIME type
     let mime_type = get_mime_type(file_path);
@@ -725,7 +673,7 @@ fn serve_file_from_package(
     }
 
     // Create WebResourceResponse with security headers
-    create_web_resource_response(env, &mime_type, &contents, &csp_header(host), package_is_isolated(package_path))
+    create_web_resource_response(env, &mime_type, &contents, &csp_header(host), instance.package.cross_origin_isolated)
 }
 
 /// Case-insensitive byte search for ASCII HTML tags.

@@ -980,6 +980,7 @@ pub async fn miniapp_open(
             window_label: window_label.clone(),
             realtime_topic,
             instance_id: super::state::next_instance_id(),
+            archive: Default::default(),
         };
     
         // Register the instance before creating the window

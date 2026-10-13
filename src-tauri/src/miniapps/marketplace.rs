@@ -432,9 +432,14 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         return Err("Hash mismatch - file may be corrupted".to_string());
     }
 
-    // Write the file
-    std::fs::write(&file_path, &bytes)
-        .map_err(|e| format!("Failed to write app file: {}", e))?;
+    // Through a rename: a running copy holds the old file open and must keep reading it whole.
+    let temp_path = file_path.with_extension("xdc.tmp");
+    std::fs::write(&temp_path, &bytes)
+        .and_then(|_| std::fs::rename(&temp_path, &file_path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("Failed to write app file: {}", e)
+        })?;
 
     let path_str = file_path.to_string_lossy().to_string();
 
