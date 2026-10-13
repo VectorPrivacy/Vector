@@ -5451,7 +5451,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.45.1"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#81624d0b7ba36ba60c6859c7226d0a5bf6947cd7"
 dependencies = [
  "aes 0.8.4",
  "base64 0.22.1",
@@ -5491,7 +5491,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.45.1"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#81624d0b7ba36ba60c6859c7226d0a5bf6947cd7"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -5500,7 +5500,7 @@ dependencies = [
 [[package]]
 name = "nostr-gossip"
 version = "0.45.0"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#81624d0b7ba36ba60c6859c7226d0a5bf6947cd7"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -5509,7 +5509,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.45.1"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#81624d0b7ba36ba60c6859c7226d0a5bf6947cd7"
 dependencies = [
  "async-utility",
  "async-wsocket",

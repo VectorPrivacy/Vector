@@ -1344,9 +1344,11 @@ impl Transport for LiveTransport {
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
             let client = crate::apply_transport(
-                nostr_sdk::prelude::Client::builder().authenticator(
-                    nostr_sdk::prelude::SignerAuthenticator::new(plane.clone()),
-                ),
+                nostr_sdk::prelude::Client::builder()
+                    .authenticator(nostr_sdk::prelude::SignerAuthenticator::new(plane.clone()))
+                    // Nothing reads a plane client's pool notifications; the default
+                    // channel allocates 4096 of them up front.
+                    .notification_channel_size(std::num::NonZeroUsize::MIN),
                 crate::transport::Lane::Shared,
             )
             .build();
