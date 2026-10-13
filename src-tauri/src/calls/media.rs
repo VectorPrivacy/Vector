@@ -78,7 +78,7 @@ impl MediaEngine {
         share_volume: f32,
     ) -> Result<Self, String> {
         let mixer = AudioEngine::get()?;
-        let out_rate = mixer.device_sample_rate();
+        let out_rate = mixer.device_sample_rate()?;
         let link = Arc::new(LiveLink {
             play: SpscRing::new(out_rate as usize),
             tap: SpscRing::new(out_rate as usize),

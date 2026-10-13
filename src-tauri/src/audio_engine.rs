@@ -2,7 +2,7 @@
 //! streaming decode, and precomputed FFT waveform data.
 //!
 //! Architecture:
-//! - Single cpal output stream created once, lives for app lifetime
+//! - One cpal output stream, opened by the first sound and paused while silent
 //! - Mixer callback sums all active sources per buffer with on-the-fly rate conversion
 //! - Sources: voice message playback + notification oneshots (desktop)
 //! - Non-WAV files stream-decode in background (playback starts immediately)
@@ -77,8 +77,8 @@ static ENGINE: OnceLock<AudioEngine> = OnceLock::new();
 
 pub struct AudioEngine {
     shared: Arc<SharedState>,
-    /// The output stream, held so it keeps playing; replaced when the default
-    /// device changes. Touched only by init and the device watchdog thread.
+    /// The output stream, opened by the first thing that plays and replaced when the
+    /// device changes. Touched only by the device watchdog thread.
     stream: std::sync::Mutex<Option<cpal::Stream>>,
     /// Names of the default devices the streams were opened on, for the watchdog.
     output_name: std::sync::Mutex<String>,
@@ -95,15 +95,43 @@ pub struct AudioEngine {
     /// The output is paused while nothing plays: a running stream keeps the audio thread
     /// mixing silence and the system's audio engine awake. The watchdog owns both flips.
     output_paused: std::sync::atomic::AtomicBool,
-    /// Asked by a play that found the output paused.
+    /// Asked by anything about to play.
     resume_wanted: std::sync::atomic::AtomicBool,
+    /// The watchdog's thread, the one that may open the output itself.
+    watchdog: OnceLock<std::thread::ThreadId>,
+    /// Bumped by every open attempt, so a waiter hears a failure as fast as a success.
+    open_attempts: AtomicU64,
+    open_failed_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Bumped by every resume however it ends, for `device_sample_rate` to wait on.
+    resumes: AtomicU64,
 }
 
 /// Seconds of nothing to play before the output pauses.
 const IDLE_PAUSE_SECS: u32 = 5;
 
+/// After a failed open, plays fail at once for this long instead of each retrying.
+const OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+const NO_OUTPUT: &str = "No audio output device could be opened";
+
+/// What a resume does with the held stream.
+#[derive(Debug, PartialEq, Eq)]
+enum Resume {
+    Play,
+    Reopen,
+}
+
+/// Reopen when nothing is held or the device in use now is another one; an empty name is
+/// a failed lookup, not a move.
+fn resume_plan(opened: bool, held: &str, resolved: &str) -> Resume {
+    if !opened || (!resolved.is_empty() && resolved != held) {
+        Resume::Reopen
+    } else {
+        Resume::Play
+    }
+}
+
 // SAFETY: cpal::Stream stores a boxed callback that is !Send+!Sync. The stream
-// is only ever created, replaced or dropped from init and the watchdog thread,
+// is only ever created, replaced or dropped from the watchdog thread,
 // never concurrently; the mixer callback runs on cpal's audio thread using only
 // the Arc<SharedState> (which is Send+Sync). All other methods operate on SharedState.
 unsafe impl Send for AudioEngine {}
@@ -285,7 +313,8 @@ fn get_hann_window() -> &'static Vec<f32> {
 // ============================================================================
 
 impl AudioEngine {
-    /// Initialize the audio engine. Call once during app setup.
+    /// Initialize the audio engine. Call once during app setup: no device is opened until
+    /// something plays, so a session that never sounds never loads the system's audio stack.
     pub fn init() {
         if ENGINE.get().is_some() {
             return; // Already initialized
@@ -370,6 +399,10 @@ impl AudioEngine {
         let Some(engine) = ENGINE.get() else { return };
         if !engine.input_watched.swap(true, Ordering::Relaxed) {
             *engine.input_name.lock().unwrap_or_else(|e| e.into_inner()) = crate::audio_devices::resolved_input_name();
+            // A watchdog parked on silence starts following the microphone now.
+            let (lock, cv) = &engine.wake;
+            drop(lock.lock().unwrap_or_else(|e| e.into_inner()));
+            cv.notify_all();
         }
     }
 
@@ -405,54 +438,110 @@ impl AudioEngine {
             ended_tx,
         });
 
-        let (stream, rate, output_name) = Self::open_output(&shared)?;
-        shared.device_sample_rate.store(rate, Ordering::Relaxed);
-
         Ok(AudioEngine {
             shared,
-            stream: std::sync::Mutex::new(Some(stream)),
-            output_name: std::sync::Mutex::new(output_name),
+            stream: std::sync::Mutex::new(None),
+            output_name: std::sync::Mutex::new(String::new()),
             input_name: std::sync::Mutex::new(String::new()),
             device_listeners: std::sync::Mutex::new(Vec::new()),
             wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
             input_generation: AtomicU64::new(0),
             input_watched: std::sync::atomic::AtomicBool::new(false),
-            output_paused: std::sync::atomic::AtomicBool::new(false),
+            output_paused: std::sync::atomic::AtomicBool::new(true),
             resume_wanted: std::sync::atomic::AtomicBool::new(false),
+            watchdog: OnceLock::new(),
+            open_attempts: AtomicU64::new(0),
+            open_failed_at: std::sync::Mutex::new(None),
+            resumes: AtomicU64::new(0),
         })
+    }
+
+    /// The device's rate, opening the output first if nothing has played yet. The watchdog
+    /// opens it, as it does every touch of the stream; the caller waits the ~20 ms that takes.
+    fn ensure_output(&self) -> Result<u32, String> {
+        let rate = self.shared.device_sample_rate.load(Ordering::Acquire);
+        if rate != 0 {
+            return Ok(rate);
+        }
+        if self.watchdog.get() == Some(&std::thread::current().id()) {
+            self.rebuild_output()?;
+            return Ok(self.shared.device_sample_rate.load(Ordering::Acquire));
+        }
+        // A burst of sounds with no device fails at once rather than waiting out each attempt.
+        if self.open_failed_at.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|t| t.elapsed() < OPEN_RETRY) {
+            return Err(NO_OUTPUT.to_string());
+        }
+        let (lock, cv) = &self.wake;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let attempts = self.open_attempts.load(Ordering::Acquire);
+        self.resume_wanted.store(true, Ordering::Release);
+        cv.notify_all();
+        // Until an attempt lands either way: a waking Bluetooth sink may take seconds.
+        let _ = cv
+            .wait_timeout_while(guard, std::time::Duration::from_secs(8), |_| {
+                self.shared.device_sample_rate.load(Ordering::Acquire) == 0
+                    && self.open_attempts.load(Ordering::Acquire) == attempts
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        match self.shared.device_sample_rate.load(Ordering::Acquire) {
+            0 => Err(NO_OUTPUT.to_string()),
+            rate => Ok(rate),
+        }
     }
 
     /// Watches the resolved devices: the OS does not tell cpal when the user picks
     /// another output or microphone, and a stream opened on the old one plays to
-    /// nothing. It polls every second and wakes at once when a stream dies or a
-    /// preference changes; on a change the output is reopened and the listeners told.
+    /// nothing. While anything plays (or a microphone is open) it polls every second;
+    /// while silent it sleeps until a play, a kick or a microphone wakes it, and a
+    /// resume checks the device before playing. A stream that dies, or a preference
+    /// change, wakes it at once; on a change the output is reopened and the listeners told.
     fn start_device_watchdog(&'static self) {
         // The listeners spawn tasks, and a plain thread carries no runtime.
         let rt = tauri::async_runtime::handle();
         std::thread::Builder::new()
             .name("audio-devices".into())
             .spawn(move || {
+                let _ = self.watchdog.set(std::thread::current().id());
                 let _rt = rt.inner().enter();
                 let mut silent_secs = 0u32;
                 loop {
                     let kicked = {
                         let (lock, cv) = &self.wake;
                         let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        let (mut guard, _) = cv
-                            .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| {
-                                !*k && !self.resume_wanted.load(Ordering::Acquire)
-                            })
-                            .unwrap_or_else(|e| e.into_inner());
+                        let idle = self.idle();
+                        let waiting = |k: &mut bool| {
+                            !*k && !self.resume_wanted.load(Ordering::Acquire) && (!idle || self.idle())
+                        };
+                        let mut guard = if idle {
+                            cv.wait_while(guard, waiting).unwrap_or_else(|e| e.into_inner())
+                        } else {
+                            cv.wait_timeout_while(guard, std::time::Duration::from_secs(1), waiting)
+                                .unwrap_or_else(|e| e.into_inner())
+                                .0
+                        };
                         std::mem::replace(&mut *guard, false)
                     };
                     self.follow_silence(&mut silent_secs);
+                    if self.idle() {
+                        if kicked {
+                            // A dying stream or a preference change: whatever is held may be
+                            // dead, so the next play opens afresh on the device in use then.
+                            drop(self.stream.lock().unwrap_or_else(|e| e.into_inner()).take());
+                            if let Some(app) = TAURI_APP.get() {
+                                let _ = app.emit("audio_devices_changed", ());
+                            }
+                        }
+                        continue;
+                    }
                     let output_now = crate::audio_devices::resolved_output_name();
                     let input_now = if self.input_watched.load(Ordering::Relaxed) {
                         crate::audio_devices::resolved_input_name()
                     } else {
                         String::new()
                     };
-                    let output_changed = {
+                    // Nothing held is nothing to move: the first play resolves the device itself.
+                    let opened = self.stream.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                    let output_changed = opened && {
                         let mut held = self.output_name.lock().unwrap_or_else(|e| e.into_inner());
                         if *held != output_now && !output_now.is_empty() {
                             *held = output_now.clone();
@@ -471,10 +560,9 @@ impl AudioEngine {
                         }
                     };
                     // A kick with no visible change still means a stream died: reopen anyway.
-                    if output_changed || kicked {
-                        match self.rebuild_output() {
-                            Ok(()) => println!("[AudioEngine] Output on {output_now}"),
-                            Err(e) => eprintln!("[AudioEngine] Could not open the output device: {e}"),
+                    if (output_changed || kicked) && opened {
+                        if let Err(e) = self.rebuild_output() {
+                            eprintln!("[AudioEngine] Could not open the output device: {e}");
                         }
                     }
                     if input_changed || kicked {
@@ -482,20 +570,30 @@ impl AudioEngine {
                         println!("[AudioEngine] Input on {input_now}");
                     }
                     if output_changed || input_changed || kicked {
-                        for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                            // A panicking listener must not take the watchdog with it:
-                            // the thread dying ends device following for the process.
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-                                eprintln!("[AudioEngine] A device listener panicked");
-                            }
-                        }
-                        if let Some(app) = TAURI_APP.get() {
-                            let _ = app.emit("audio_devices_changed", ());
-                        }
+                        self.notify_device_change();
                     }
                 }
             })
             .ok();
+    }
+
+    /// Nothing playing and no microphone to follow: the watchdog has nothing to poll.
+    fn idle(&self) -> bool {
+        self.output_paused.load(Ordering::Acquire) && !self.input_watched.load(Ordering::Relaxed)
+    }
+
+    /// Tells the device listeners (a call restarting its audio) and the UI.
+    fn notify_device_change(&self) {
+        for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            // A panicking listener must not take the watchdog with it:
+            // the thread dying ends device following for the process.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+                eprintln!("[AudioEngine] A device listener panicked");
+            }
+        }
+        if let Some(app) = TAURI_APP.get() {
+            let _ = app.emit("audio_devices_changed", ());
+        }
     }
 
     /// Pause the output once nothing has played for a while; play it again the moment
@@ -508,12 +606,7 @@ impl AudioEngine {
         if wanted || audible {
             *silent_secs = 0;
             if paused {
-                if let Some(stream) = self.stream.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                    match stream.play() {
-                        Ok(()) => self.output_paused.store(false, Ordering::Release),
-                        Err(e) => eprintln!("[AudioEngine] Could not resume the output: {e}"),
-                    }
-                }
+                self.resume();
             }
             return;
         }
@@ -530,35 +623,84 @@ impl AudioEngine {
         }
     }
 
-    /// Something is about to play: wake a paused output now, not at the next tick.
-    fn want_output(&self) {
-        if self.output_paused.load(Ordering::Acquire) {
-            let (lock, cv) = &self.wake;
-            let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.resume_wanted.store(true, Ordering::Release);
-            cv.notify_all();
+    /// Plays the paused output, or opens one on the device in use now when nothing is
+    /// held or the device moved while nothing polled.
+    fn resume(&self) {
+        self.resume_inner();
+        self.resumes.fetch_add(1, Ordering::Release);
+        drop(self.wake.0.lock().unwrap_or_else(|e| e.into_inner()));
+        self.wake.1.notify_all();
+    }
+
+    fn resume_inner(&self) {
+        let opened = self.stream.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let held = self.output_name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let play_held = || {
+            let guard = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().map(|s| s.play())
+        };
+        if resume_plan(opened, &held, &crate::audio_devices::resolved_output_name()) == Resume::Play {
+            match play_held() {
+                Some(Ok(())) => {
+                    self.output_paused.store(false, Ordering::Release);
+                    return;
+                }
+                // The held stream refuses (a disconnected AAudio stream must be reopened).
+                Some(Err(e)) => eprintln!("[AudioEngine] Could not resume the output, reopening: {e}"),
+                None => {}
+            }
+        }
+        match self.rebuild_output() {
+            Ok(true) => self.notify_device_change(),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("[AudioEngine] Could not open the output device: {e}");
+                // A held stream on the old device beats silence.
+                if opened && matches!(play_held(), Some(Ok(()))) {
+                    self.output_paused.store(false, Ordering::Release);
+                }
+            }
         }
     }
 
-    /// Reopens the output on the current default device and rebases every
-    /// source's rate ratio on the new rate.
-    fn rebuild_output(&self) -> Result<(), String> {
-        let (stream, rate, _) = Self::open_output(&self.shared)?;
-        {
-            let mut sources = self.shared.sources.lock().unwrap_or_else(|e| e.into_inner());
-            for src in sources.values_mut() {
-                src.rate_ratio = src.source_sample_rate as f64 / rate as f64;
+    /// Something is about to play. Always signalled, even when the output looks live: a
+    /// pause landing between this and the play would otherwise leave it asleep.
+    fn want_output(&self) {
+        let (lock, cv) = &self.wake;
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.resume_wanted.store(true, Ordering::Release);
+        cv.notify_all();
+    }
+
+    /// Reopens the output on the current device and rebases every source's rate ratio on
+    /// the new rate. `Ok(true)` when it moved from an earlier device or rate, which a call
+    /// sized for the old one must hear about.
+    fn rebuild_output(&self) -> Result<bool, String> {
+        let result = Self::open_output(&self.shared).map(|(stream, rate, name)| {
+            println!("[AudioEngine] Output on {name}");
+            let old_rate = self.shared.device_sample_rate.load(Ordering::Acquire);
+            let old_name = std::mem::replace(&mut *self.output_name.lock().unwrap_or_else(|e| e.into_inner()), name.clone());
+            {
+                let mut sources = self.shared.sources.lock().unwrap_or_else(|e| e.into_inner());
+                for src in sources.values_mut() {
+                    src.rate_ratio = src.source_sample_rate as f64 / rate as f64;
+                }
+                self.shared.device_sample_rate.store(rate, Ordering::Release);
             }
-            self.shared.device_sample_rate.store(rate, Ordering::Relaxed);
-        }
-        let old = self.stream.lock().unwrap_or_else(|e| e.into_inner()).replace(stream);
-        drop(old);
-        // A new stream starts playing; the silence count pauses it again if nothing does.
-        self.output_paused.store(false, Ordering::Release);
-        // Only desktop keeps a sample-rate cache to invalidate.
-        #[cfg(desktop)]
-        crate::audio::invalidate_device_sample_rate_cache();
-        Ok(())
+            drop(self.stream.lock().unwrap_or_else(|e| e.into_inner()).replace(stream));
+            // A new stream starts playing; the silence count pauses it again if nothing does.
+            self.output_paused.store(false, Ordering::Release);
+            // Only desktop keeps a sample-rate cache to invalidate.
+            #[cfg(desktop)]
+            crate::audio::invalidate_device_sample_rate_cache();
+            old_rate != 0 && (old_rate != rate || old_name != name)
+        });
+        *self.open_failed_at.lock().unwrap_or_else(|e| e.into_inner()) = result.is_err().then(std::time::Instant::now);
+        // A caller in `ensure_output` waits on this for an attempt to land, either way.
+        self.open_attempts.fetch_add(1, Ordering::Release);
+        drop(self.wake.0.lock().unwrap_or_else(|e| e.into_inner()));
+        self.wake.1.notify_all();
+        result
     }
 
     /// Registers a callback for default device changes.
@@ -606,12 +748,11 @@ impl AudioEngine {
     fn load_streaming(&self, path: &std::path::Path) -> Result<AudioLoadResult, String> {
         // Probe metadata from file (re-opens from disk, already in page cache — <1ms)
         let (sample_rate, channels, est_frames) = probe_audio_metadata(path)?;
-        if sample_rate == 0 || self.shared.device_sample_rate.load(Ordering::Relaxed) == 0 {
+        if sample_rate == 0 {
             return Err("Invalid sample rate".to_string());
         }
 
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let rate_ratio = sample_rate as f64 / self.shared.device_sample_rate.load(Ordering::Relaxed) as f64;
         let duration_ms = if sample_rate > 0 { est_frames * 1000 / sample_rate as u64 } else { 0 };
         // Music keeps its stereo field; >2ch sources carry front L/R.
         let src_channels = channels.clamp(1, 2);
@@ -619,7 +760,7 @@ impl AudioEngine {
         self.evict_if_needed();
 
         if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
-            return self.load_windowed(id, path, sample_rate, channels, src_channels, rate_ratio, duration_ms);
+            return self.load_windowed(id, path, sample_rate, channels, src_channels, duration_ms);
         }
 
         let source = AudioSource {
@@ -627,7 +768,7 @@ impl AudioEngine {
             samples: Vec::with_capacity(est_frames as usize * src_channels),
             src_channels,
             source_sample_rate: sample_rate,
-            rate_ratio,
+            rate_ratio: 1.0, // set by insert_source
             position: 0.0,
             playing: false,
             volume: 1.0,
@@ -642,11 +783,7 @@ impl AudioEngine {
             idle_since: None,
         };
 
-        self.shared
-            .sources
-            .lock()
-            .map_err(|_| "Lock poisoned")?
-            .insert(id, source);
+        self.insert_source(id, source)?;
 
         // Spawn background decode thread
         let shared = Arc::clone(&self.shared);
@@ -677,7 +814,6 @@ impl AudioEngine {
         sample_rate: u32,
         channels: usize,
         src_channels: usize,
-        rate_ratio: f64,
         duration_ms: u64,
     ) -> Result<AudioLoadResult, String> {
         let ctl = Arc::new(StreamCtl {
@@ -689,7 +825,7 @@ impl AudioEngine {
             samples: Vec::with_capacity(window_capacity(sample_rate, src_channels)),
             src_channels,
             source_sample_rate: sample_rate,
-            rate_ratio,
+            rate_ratio: 1.0, // set by insert_source
             position: 0.0,
             playing: false,
             volume: 1.0,
@@ -703,7 +839,7 @@ impl AudioEngine {
             pending_seek: None,
             idle_since: None,
         };
-        self.shared.sources.lock().map_err(|_| "Lock poisoned")?.insert(id, source);
+        self.insert_source(id, source)?;
 
         {
             let (path, shared) = (path.to_path_buf(), Arc::clone(&self.shared));
@@ -734,12 +870,11 @@ impl AudioEngine {
         if samples.is_empty() {
             return Err("No audio data".to_string());
         }
-        if sample_rate == 0 || self.shared.device_sample_rate.load(Ordering::Relaxed) == 0 {
+        if sample_rate == 0 {
             return Err("Invalid sample rate".to_string());
         }
 
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let rate_ratio = sample_rate as f64 / self.shared.device_sample_rate.load(Ordering::Relaxed) as f64;
         let duration_ms = (samples.len() as u64 * 1000) / sample_rate as u64;
 
         // Compute waveform in background — playback can start immediately
@@ -762,7 +897,7 @@ impl AudioEngine {
             samples,
             src_channels: 1,
             source_sample_rate: sample_rate,
-            rate_ratio,
+            rate_ratio: 1.0, // set by insert_source
             position: 0.0,
             playing: false,
             volume: 1.0,
@@ -777,11 +912,7 @@ impl AudioEngine {
             idle_since: None,
         };
 
-        self.shared
-            .sources
-            .lock()
-            .map_err(|_| "Lock poisoned")?
-            .insert(id, source);
+        self.insert_source(id, source)?;
 
         Ok(AudioLoadResult {
             id,
@@ -890,18 +1021,22 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Play a oneshot sound (notifications, call chimes). Auto-removes when finished.
-    /// Expects samples pre-resampled to device sample rate (rate_ratio = 1.0).
-    pub fn play_oneshot(&self, samples: Vec<f32>) -> Result<(), String> {
+    /// Play a oneshot sound (notifications, call chimes) recorded at `sample_rate`, normally
+    /// pre-resampled to the device's. Auto-removes when finished.
+    pub fn play_oneshot(&self, samples: Vec<f32>, sample_rate: u32) -> Result<(), String> {
+        self.ensure_output()?;
+        if sample_rate == 0 {
+            return Err("Invalid sample rate".to_string());
+        }
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let duration_ms = (samples.len() as u64 * 1000) / self.shared.device_sample_rate.load(Ordering::Relaxed) as u64;
+        let duration_ms = (samples.len() as u64 * 1000) / sample_rate as u64;
 
         let source = AudioSource {
             id,
             samples,
             src_channels: 1,
-            source_sample_rate: self.shared.device_sample_rate.load(Ordering::Relaxed),
-            rate_ratio: 1.0, // already at device rate
+            source_sample_rate: sample_rate,
+            rate_ratio: 1.0, // set by insert_source
             position: 0.0,
             playing: true, // start immediately
             volume: 1.0,
@@ -916,11 +1051,7 @@ impl AudioEngine {
             idle_since: None,
         };
 
-        self.shared
-            .sources
-            .lock()
-            .map_err(|_| "Lock poisoned")?
-            .insert(id, source);
+        self.insert_source(id, source)?;
         self.want_output();
 
         Ok(())
@@ -935,9 +1066,47 @@ impl AudioEngine {
         Ok(pos_ms)
     }
 
-    /// Get the device sample rate
-    pub fn device_sample_rate(&self) -> u32 {
-        self.shared.device_sample_rate.load(Ordering::Relaxed)
+    /// A source's step per output frame. Unopened, 1.0 stands in: the first open rebases
+    /// every source on the device's real rate, so loading never waits on a device.
+    fn rate_ratio(&self, sample_rate: u32) -> f64 {
+        match self.shared.device_sample_rate.load(Ordering::Acquire) {
+            0 => 1.0,
+            device => sample_rate as f64 / device as f64,
+        }
+    }
+
+    /// Adds a source, its rate ratio set under the lock the open's rebase takes, so one
+    /// loaded as the first open lands is never left at the stand-in.
+    fn insert_source(&self, id: u32, mut source: AudioSource) -> Result<(), String> {
+        let mut sources = self.shared.sources.lock().map_err(|_| "Lock poisoned")?;
+        source.rate_ratio = self.rate_ratio(source.source_sample_rate);
+        sources.insert(id, source);
+        Ok(())
+    }
+
+    /// The output device's sample rate, opening the output if nothing has played yet.
+    /// The device's rate without waiting on a paused output: right for a oneshot, which is
+    /// rebased if the device moves under it.
+    pub fn output_rate(&self) -> Result<u32, String> {
+        self.ensure_output()
+    }
+
+    /// A paused output resumes first, so a call sizing its buffers by this sees the device
+    /// it will actually play on, not the one that was held when the output went quiet.
+    pub fn device_sample_rate(&self) -> Result<u32, String> {
+        if self.output_paused.load(Ordering::Acquire) && self.watchdog.get() != Some(&std::thread::current().id()) {
+            let (lock, cv) = &self.wake;
+            let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let resumes = self.resumes.load(Ordering::Acquire);
+            self.resume_wanted.store(true, Ordering::Release);
+            cv.notify_all();
+            let _ = cv
+                .wait_timeout_while(guard, std::time::Duration::from_secs(8), |_| {
+                    self.output_paused.load(Ordering::Acquire) && self.resumes.load(Ordering::Acquire) == resumes
+                })
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        self.ensure_output()
     }
 
     /// Drop decoded sources that have sat stopped past `IDLE_SOURCE_TTL`.
@@ -2444,5 +2613,18 @@ mod waveform_payload_tests {
         let p = AudioWaveformPayload::new(7, vec![1, 2, 3, 4].repeat(WAVEFORM_BINS));
         assert_eq!(vector_core::simd::base64::STANDARD.decode_to_vec(&p.waveform).unwrap().len(), 4 * WAVEFORM_BINS);
         assert_eq!(p.waveform_fps, WAVEFORM_FPS as f32);
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::{resume_plan, Resume};
+
+    #[test]
+    fn a_resume_reopens_only_when_nothing_is_held_or_the_device_moved() {
+        assert_eq!(resume_plan(false, "", "Speakers"), Resume::Reopen, "the first sound opens the output");
+        assert_eq!(resume_plan(true, "Speakers", "Speakers"), Resume::Play);
+        assert_eq!(resume_plan(true, "Speakers", "Headphones"), Resume::Reopen, "moved while nothing polled");
+        assert_eq!(resume_plan(true, "Speakers", ""), Resume::Play, "a failed lookup is not a move");
     }
 }

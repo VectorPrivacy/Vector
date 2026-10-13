@@ -772,8 +772,8 @@ fn wav_channel_count(bytes: &[u8]) -> Option<u16> {
 #[cfg(desktop)]
 /// Play pre-resampled audio samples through the unified audio engine.
 /// Routes notification sounds as oneshots through the persistent cpal stream.
-fn play_samples_cached(samples: Arc<Vec<f32>>, _device_sample_rate: u32) -> Result<(), String> {
-    crate::audio_engine::AudioEngine::get()?.play_oneshot((*samples).clone())
+fn play_samples_cached(samples: Arc<Vec<f32>>, sample_rate: u32) -> Result<(), String> {
+    crate::audio_engine::AudioEngine::get()?.play_oneshot((*samples).clone(), sample_rate)
 }
 
 #[cfg(desktop)]

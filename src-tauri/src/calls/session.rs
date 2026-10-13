@@ -111,8 +111,9 @@ static ENDED_WAV: &[u8] = include_bytes!("ended.wav");
 fn play_ended_chime() {
     let Ok(engine) = crate::audio_engine::AudioEngine::get() else { return };
     let Some((samples, rate)) = crate::audio::wav_fast_decode_for_engine(ENDED_WAV) else { return };
-    let played = crate::audio::resample_mono_f32(samples, rate, engine.device_sample_rate())
-        .and_then(|s| engine.play_oneshot(s));
+    let played = engine
+        .output_rate()
+        .and_then(|out| crate::audio::resample_mono_f32(samples, rate, out).and_then(|s| engine.play_oneshot(s, out)));
     if let Err(e) = played {
         log_warn!("[CALLS] Ended chime failed: {e}");
     }
