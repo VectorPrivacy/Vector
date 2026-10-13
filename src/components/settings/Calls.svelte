@@ -15,7 +15,17 @@
     const hasDevices = $derived(dev.inputs.length > 0 || dev.outputs.length > 0);
     // Leaving the screen stops the test.
     $effect(() => () => { if (a.micTest) h.micTestStop(); });
-    $effect(() => { h.loadDevices(); });
+    // Listing devices wakes the system's audio stack: Settings is mounted from launch, so
+    // list them once this section is actually seen, not on mount.
+    function listWhenSeen(node) {
+        const io = new IntersectionObserver((entries) => {
+            if (!entries.some((e) => e.isIntersecting)) return;
+            io.disconnect();
+            h.loadDevices();
+        });
+        io.observe(node);
+        return { destroy: () => io.disconnect() };
+    }
     // '' is the system default: it follows the OS rather than naming a device.
     const byDefault = (name) => name ? `System Default - ${name}` : 'System Default';
     const inputs = $derived([{ value: '', label: byDefault(dev.defaultInput) },
@@ -67,7 +77,7 @@
     </div>
 {/if}
 
-<div class="calls-pair">
+<div class="calls-pair" use:listWhenSeen>
     {#each VOLUMES as v (v.key)}
         <label class="calls-field">
             <span class="calls-field-label">{v.label}</span>
