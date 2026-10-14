@@ -255,7 +255,7 @@ try {
 
         try {
             // Get granted permissions from backend
-            const granted = await window.__TAURI__.core.invoke('miniapp_get_granted_permissions_for_window');
+            const granted = await window.__TAURI__.core.invoke('miniapp_call', { call: { op: 'granted_permissions' } });
             permissionCache = granted ? granted.split(',').map(p => p.trim()) : [];
             permissionCacheTime = now;
             return permissionCache.includes(permissionName);
@@ -516,14 +516,7 @@ try {
 (function() {
     'use strict';
 
-    const allowedCommands = [
-        'miniapp_get_updates',
-        'miniapp_send_update',
-        'miniapp_join_realtime_channel',
-        'miniapp_leave_realtime_channel',
-        'miniapp_send_realtime_data',
-        'miniapp_get_granted_permissions_for_window'
-    ];
+    const allowedCommands = ['miniapp_call'];
 
     function wrapTauriApi(tauriObj) {
         if (!tauriObj || !tauriObj.core) return tauriObj;
@@ -662,15 +655,10 @@ fn grant_miniapp_ipc(app: &AppHandle) -> Result<(), Error> {
 /// so it needs its own capability: this window, this exact origin, and the
 /// same commands as `capabilities-lazy/miniapp.json`.
 #[cfg(not(target_os = "android"))]
-const ISOLATED_IPC_PERMISSIONS: [&str; 7] = [
+const ISOLATED_IPC_PERMISSIONS: [&str; 2] = [
     // No core:event permissions: Vector broadcasts app events (decrypted messages
     // among them) to every webview, and the bridge needs none of them.
-    "allow-miniapp-get-updates",
-    "allow-miniapp-send-update",
-    "allow-miniapp-join-realtime-channel",
-    "allow-miniapp-leave-realtime-channel",
-    "allow-miniapp-send-realtime-data",
-    "allow-miniapp-get-granted-permissions-for-window",
+    "allow-miniapp-call",
     "notification:allow-is-permission-granted",
 ];
 
@@ -1400,8 +1388,45 @@ pub async fn miniapp_close(
     Ok(())
 }
 
-/// Get updates for a Mini App (called from the Mini App itself)
+/// Everything a Mini App window may ask of the backend. One command rather than six: Tauri
+/// compiles a URL matcher per command for each window it grants (~150 KB apiece, never freed).
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum MiniAppCall {
+    GetUpdates { last_known_serial: u32 },
+    SendUpdate { update: serde_json::Value, description: String },
+    JoinRealtimeChannel,
+    LeaveRealtimeChannel,
+    SendRealtimeData { data: Vec<u8> },
+    GrantedPermissions,
+}
+
 #[tauri::command]
+pub async fn miniapp_call(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, MiniAppsState>,
+    call: MiniAppCall,
+    channel: Option<tauri::ipc::JavaScriptChannelId>,
+) -> Result<serde_json::Value, Error> {
+    fn json<T: Serialize>(v: Result<T, Error>) -> Result<serde_json::Value, Error> {
+        v.and_then(|v| serde_json::to_value(v).map_err(|e| Error::Anyhow(e.into())))
+    }
+    match call {
+        MiniAppCall::GetUpdates { last_known_serial } => json(miniapp_get_updates(window, state, last_known_serial).await),
+        MiniAppCall::SendUpdate { update, description } => json(miniapp_send_update(window, app, state, update, description).await),
+        MiniAppCall::JoinRealtimeChannel => {
+            let channel = channel.ok_or_else(|| Error::Anyhow(anyhow::anyhow!("joining needs a channel")))?;
+            let channel = channel.channel_on(window.as_ref().clone());
+            json(miniapp_join_realtime_channel(window, app, state, channel).await)
+        }
+        MiniAppCall::LeaveRealtimeChannel => json(miniapp_leave_realtime_channel(window, state).await),
+        MiniAppCall::SendRealtimeData { data } => json(miniapp_send_realtime_data(window, state, data).await),
+        MiniAppCall::GrantedPermissions => json(miniapp_get_granted_permissions_for_window(app, window).await),
+    }
+}
+
+/// Get updates for a Mini App (called from the Mini App itself)
 pub async fn miniapp_get_updates(
     window: WebviewWindow,
     _state: State<'_, MiniAppsState>,
@@ -1421,7 +1446,6 @@ pub async fn miniapp_get_updates(
 }
 
 /// Send an update from a Mini App
-#[tauri::command]
 pub async fn miniapp_send_update(
     window: WebviewWindow,
     app: AppHandle,
@@ -1495,7 +1519,6 @@ pub struct JoinRealtimeResult {
 /// The app joins its realtime channel: the window's session (usually joined
 /// already by the open's preconnect) delivers to `channel` from now on,
 /// starting with what it held while the app loaded.
-#[tauri::command]
 pub async fn miniapp_join_realtime_channel(
     window: WebviewWindow,
     app: AppHandle,
@@ -1654,7 +1677,6 @@ pub(crate) fn emit_lobby(topic_encoded: &str, peers: Vec<String>, is_active: boo
 
 /// Send realtime data via invoke fallback (used when WS fast-path isn't available).
 /// Accepts raw bytes (Array.from(Uint8Array)) to avoid base91 encode/decode overhead.
-#[tauri::command]
 pub async fn miniapp_send_realtime_data(
     window: WebviewWindow,
     state: State<'_, MiniAppsState>,
@@ -1669,7 +1691,6 @@ pub async fn miniapp_send_realtime_data(
 
 /// The app left the channel. Its window keeps the session (the departure goes out
 /// when the window closes), so a rejoin needs no new advertisement.
-#[tauri::command]
 pub async fn miniapp_leave_realtime_channel(
     window: WebviewWindow,
     state: State<'_, MiniAppsState>,
@@ -2054,7 +2075,6 @@ pub async fn miniapp_revoke_all_permissions(
 /// Get granted permissions for the Mini App calling this command
 /// This is called from within the Mini App's JS context to check permissions
 /// Uses the file hash from the loaded package for permission lookup
-#[tauri::command]
 pub async fn miniapp_get_granted_permissions_for_window(
     app: AppHandle,
     webview_window: WebviewWindow,
@@ -2273,4 +2293,35 @@ async fn fetch_url_validator(url: &str) -> Option<String> {
         .to_str()
         .ok()
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod miniapp_call_tests {
+    use super::MiniAppCall;
+
+    fn parse(json: &str) -> Result<MiniAppCall, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// The shapes the bridge sends (scheme.rs, the permissions shim) reach their handler.
+    #[test]
+    fn every_bridge_call_parses_to_its_op() {
+        assert!(matches!(parse(r#"{"op":"get_updates","last_known_serial":7}"#), Ok(MiniAppCall::GetUpdates { last_known_serial: 7 })));
+        assert!(matches!(
+            parse(r#"{"op":"send_update","update":{"payload":1},"description":"moved"}"#),
+            Ok(MiniAppCall::SendUpdate { ref description, .. }) if description == "moved"
+        ));
+        assert!(matches!(parse(r#"{"op":"join_realtime_channel"}"#), Ok(MiniAppCall::JoinRealtimeChannel)));
+        assert!(matches!(parse(r#"{"op":"leave_realtime_channel"}"#), Ok(MiniAppCall::LeaveRealtimeChannel)));
+        assert!(matches!(parse(r#"{"op":"send_realtime_data","data":[1,2,255]}"#), Ok(MiniAppCall::SendRealtimeData { ref data }) if data == &[1, 2, 255]));
+        assert!(matches!(parse(r#"{"op":"granted_permissions"}"#), Ok(MiniAppCall::GrantedPermissions)));
+    }
+
+    #[test]
+    fn an_unknown_op_or_a_missing_field_is_refused() {
+        assert!(parse(r#"{"op":"open_window"}"#).is_err());
+        assert!(parse(r#"{"op":"get_updates"}"#).is_err());
+        assert!(parse(r#"{"op":"send_realtime_data","data":[256]}"#).is_err());
+        assert!(parse(r#"{"last_known_serial":1}"#).is_err());
+    }
 }

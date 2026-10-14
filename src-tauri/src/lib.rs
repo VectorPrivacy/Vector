@@ -826,13 +826,9 @@ pub fn run() {
             miniapps::commands::miniapp_resolve_url_xdc,
             miniapps::commands::miniapp_open,
             miniapps::commands::miniapp_close,
-            miniapps::commands::miniapp_get_updates,
-            miniapps::commands::miniapp_send_update,
+            miniapps::commands::miniapp_call,
             miniapps::commands::miniapp_list_open,
             // Mini Apps realtime channel commands (Iroh P2P)
-            miniapps::commands::miniapp_join_realtime_channel,
-            miniapps::commands::miniapp_leave_realtime_channel,
-            miniapps::commands::miniapp_send_realtime_data,
             miniapps::commands::miniapp_get_realtime_status,
             // Mini Apps history commands
             miniapps::commands::miniapp_record_opened,
@@ -858,7 +854,6 @@ pub fn run() {
             // Mini App permissions commands
             miniapps::commands::miniapp_get_available_permissions,
             miniapps::commands::miniapp_get_granted_permissions,
-            miniapps::commands::miniapp_get_granted_permissions_for_window,
             miniapps::commands::miniapp_set_permission,
             miniapps::commands::miniapp_set_permissions,
             miniapps::commands::miniapp_has_permission_prompt,

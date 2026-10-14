@@ -386,8 +386,8 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
             updateListener = listener;
             lastKnownSerial = serial || 0;
             waitForTauri(function() {{
-                window.__TAURI__.core.invoke('miniapp_get_updates', {{
-                    lastKnownSerial: lastKnownSerial
+                window.__TAURI__.core.invoke('miniapp_call', {{
+                    call: {{ op: 'get_updates', last_known_serial: lastKnownSerial }}
                 }}).then(function(updates) {{
                     if (updates && updateListener) {{
                         var parsed = JSON.parse(updates);
@@ -403,9 +403,8 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
         sendUpdate: function(update, description) {{
             return new Promise(function(resolve, reject) {{
                 waitForTauri(function() {{
-                    window.__TAURI__.core.invoke('miniapp_send_update', {{
-                        update: update,
-                        description: description || ''
+                    window.__TAURI__.core.invoke('miniapp_call', {{
+                        call: {{ op: 'send_update', update: update, description: description || '' }}
                     }}).then(resolve).catch(reject);
                 }});
             }});
@@ -439,8 +438,8 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
                         // Fallback: Tauri invoke via waitForTauri (queues until __TAURI__ is injected).
                         // On Android, __TAURI__ is injected asynchronously — direct checks fail.
                         waitForTauri(function() {{
-                            window.__TAURI__.core.invoke('miniapp_send_realtime_data', {{
-                                data: Array.from(buf)
+                            window.__TAURI__.core.invoke('miniapp_call', {{
+                                call: {{ op: 'send_realtime_data', data: Array.from(buf) }}
                             }});
                         }});
                     }}
@@ -451,7 +450,7 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
                     realtimeChannel = null;
                     if (rtWs) {{ try {{ rtWs.close(); }} catch(e) {{}} rtWs = null; }}
                     waitForTauri(function() {{
-                        window.__TAURI__.core.invoke('miniapp_leave_realtime_channel', {{}}).catch(function(err) {{
+                        window.__TAURI__.core.invoke('miniapp_call', {{ call: {{ op: 'leave_realtime_channel' }} }}).catch(function(err) {{
                             console.error('[webxdc] Failed to leave realtime channel:', err);
                         }});
                     }});
@@ -465,7 +464,8 @@ pub(super) fn generate_webxdc_bridge_js(user_npub: &str, user_display_name: &str
                         realtimeListener(b91d(event.data));
                     }}
                 }};
-                window.__TAURI__.core.invoke('miniapp_join_realtime_channel', {{
+                window.__TAURI__.core.invoke('miniapp_call', {{
+                    call: {{ op: 'join_realtime_channel' }},
                     channel: tauriChannel
                 }}).then(function(result) {{
                     // Open WebSocket fast-path if backend returned a URL

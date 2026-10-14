@@ -11,12 +11,7 @@
     ]
   },
   "permissions": [
-    "allow-miniapp-get-updates",
-    "allow-miniapp-send-update",
-    "allow-miniapp-join-realtime-channel",
-    "allow-miniapp-leave-realtime-channel",
-    "allow-miniapp-send-realtime-data",
-    "allow-miniapp-get-granted-permissions-for-window",
+    "allow-miniapp-call",
     "notification:allow-is-permission-granted"
   ],
   "platforms": ["linux", "windows", "macOS"]

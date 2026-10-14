@@ -170,8 +170,7 @@ fn main() {
             "miniapp_load_info_from_cached_file",
             "miniapp_open",
             "miniapp_close",
-            "miniapp_get_updates",
-            "miniapp_send_update",
+            "miniapp_call",
             "miniapp_list_open",
             // Mini Apps history commands
             "miniapp_record_opened",
@@ -180,9 +179,6 @@ fn main() {
             "miniapp_toggle_favorite",
             "miniapp_set_favorite",
             // Mini Apps realtime channel commands (Iroh P2P)
-            "miniapp_join_realtime_channel",
-            "miniapp_send_realtime_data",
-            "miniapp_leave_realtime_channel",
             "miniapp_get_realtime_status",
             // Marketplace commands
             "marketplace_fetch_apps",
@@ -202,7 +198,6 @@ fn main() {
             // Mini Apps permissions commands
             "miniapp_get_available_permissions",
             "miniapp_get_granted_permissions",
-            "miniapp_get_granted_permissions_for_window",
             "miniapp_set_permission",
             "miniapp_set_permissions",
             "miniapp_has_permission_prompt",
