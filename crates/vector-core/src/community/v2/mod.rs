@@ -1,15 +1,10 @@
 //! Concord v2 (the upstream CORD specs — `github.com/concord-protocol/concord`).
 //!
-//! Vector's second-generation community protocol, carried ALONGSIDE v1 (the
-//! sibling `community::` modules) for a migration window. v2 keeps v1's control
-//! plane engine verbatim — the edition hash, fold, roster, and authority algebra
-//! are shared by import, not copied — and replaces the envelope (CORD-01 Private
-//! Streams: group-key-signed kind-1059 wraps addressed by `authors`), the owner
-//! anchor (a self-certifying `community_id`), the invite system (CORD-05), and
-//! adds the Guestbook plane (CORD-02 §5).
-//!
-//! Nothing in here touches v1 state: a `Community` is one protocol or the other
-//! (`protocol` discriminator), and the two stacks share only pure logic.
+//! Vector's community protocol. The control-plane engine (the edition hash, fold,
+//! roster, and authority algebra) lives in the sibling `community::` modules; this
+//! one carries the envelope (CORD-01 Private Streams: group-key-signed kind-1059
+//! wraps addressed by `authors`), the owner anchor (a self-certifying
+//! `community_id`), the invite system (CORD-05), and the Guestbook plane (CORD-02 §5).
 //!
 //! Frozen wire constants live in two places: the derivation labels in
 //! [`derive`], and the kind registry below (CORD-02 Appendix B). A retired
@@ -56,7 +51,7 @@ pub mod kind {
     pub const REKEY: u16 = 3303;
     /// Guestbook join/leave (content = the verb).
     pub const JOIN_LEAVE: u16 = 3306;
-    /// Control edition, sub-kinded by `vsk` (shared grammar with v1 — `community::edition`).
+    /// Control edition, sub-kinded by `vsk` (grammar in `community::edition`).
     pub const CONTROL: u16 = 3308;
     /// Guestbook kick (admin-signed, `p` target, `vac` citation).
     pub const KICK: u16 = 3309;
@@ -86,11 +81,8 @@ pub mod kind {
     pub const INVITE_LIST: u16 = 13303;
 }
 
-/// Control-plane `vsk` sub-kinds (CORD-02 Appendix B). Identical numbering to
-/// v1 (`community::roster`) — that is deliberate, the registry is shared. 7 is
-/// retired upstream (the v1 owner attestation, obsoleted by the self-certifying
-/// community id); 11 is claimed by Vector for the v1-side migration pointer and
-/// never appears on the v2 wire.
+/// Control-plane `vsk` sub-kinds (CORD-02 Appendix B). 7 is retired upstream (an
+/// owner attestation, obsoleted by the self-certifying community id).
 pub mod vsk {
     pub const COMMUNITY_METADATA: &str = "0";
     pub const ROLE: &str = "1";

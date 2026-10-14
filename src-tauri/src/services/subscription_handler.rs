@@ -2,7 +2,7 @@
 //!
 //! This module handles:
 //! - GiftWrap subscription (DMs, files)
-//! - Community (kind-3300) message subscription
+//! - Community plane subscription (authors-addressed wraps)
 
 use nostr_sdk::prelude::*;
 
@@ -24,29 +24,15 @@ pub(crate) static SELFSYNC_SUB_IDS: LazyLock<Mutex<Vec<SubscriptionId>>> =
 /// Last self-sync event id processed per kind. A replaceable event stored on N relays is delivered N times
 /// with the SAME id; without this every copy would kick a full ingest/rehydrate sweep (N× the work). A
 /// genuine update has a new id and passes through.
-// Keyed by a per-list string (the `d`-tag for kind-30078 lists, else the kind) so the Community List and
-// Invite List — both kind 30078 — don't share a dedup slot and clobber each other's last-id.
+// Keyed by a per-list string (the `d`-tag for kind-30078 lists, else the kind) so lists sharing kind
+// 30078 don't share a dedup slot and clobber each other's last-id.
 static SELFSYNC_LAST_EVENT: LazyLock<Mutex<HashMap<String, EventId>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-// `rebuild_community_routes` + `refresh_community_subscription` route state now lives in
-// `vector_core::community::realtime`; `refresh_community_subscription` below stays as a thin wrapper
-// for the call sites that trigger a resubscribe (join/leave/ban/etc.).
-
-/// Rebuild the Community subscription: scope it to the epoch pseudonyms of every
-/// channel in every Community we hold, and rebuild the pseudonym→channel routing
-/// table. Called at boot and whenever Communities/channels change.
+/// Rebuild the Community subscription over every held plane. Called at boot and whenever
+/// Communities/channels change.
 pub(crate) async fn refresh_community_subscription() {
     if let Some(client) = nostr_client() {
-        vector_core::community::realtime::refresh_subscription(&client).await;
-    }
-}
-
-/// [`refresh_community_subscription`] for both protocols: a teardown can't tell which one
-/// it ended, since a v2 leave has already deleted the row it would ask.
-pub(crate) async fn refresh_all_community_subscriptions() {
-    if let Some(client) = nostr_client() {
-        vector_core::community::realtime::refresh_subscription(&client).await;
         vector_core::community::v2::realtime::refresh_subscription(&client).await;
     }
 }
@@ -63,14 +49,12 @@ pub(crate) async fn subscribe_self_sync() {
     // unsubscribe whatever it displaced — so two concurrent calls (start racing a swap re-entry) can't leak
     // an orphaned subscription or leave the routing set momentarily empty.
     let mut new_ids = Vec::new();
-    // Community List + Invite List — both parameterized-replaceable kind-30078, d-tag scoped so they never
-    // alias a wallpaper/badge 30078. One filter (both d-tags) keeps the live sub as wire-efficient as boot.
+    // Our synced lists: parameterized-replaceable kind-30078, d-tag scoped so they never alias a
+    // wallpaper/badge 30078. One filter (every d-tag) keeps the live sub as wire-efficient as boot.
     let self_lists_filter = Filter::new()
         .author(my_pk)
         .kind(Kind::Custom(vector_core::stored_event::event_kind::APPLICATION_SPECIFIC))
         .identifiers([
-            vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
-            vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
             vector_core::pinned_chats::PINNED_D_TAG.to_string(),
             vector_core::synced_prefs::BLOCKS_D_TAG.to_string(),
             vector_core::synced_prefs::MUTES_D_TAG.to_string(),
@@ -85,10 +69,8 @@ pub(crate) async fn subscribe_self_sync() {
         Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
-    // v2 Community List (addressable kind 33302, CORD-02 §8 — one event per fragment).
-    // Its own kind, so it needs its own filter — v1's list is a d-tagged 30078 above.
-    // Without this a v2 join/leave only reached the other devices on their next BOOT,
-    // while v1 had been instant since it shipped.
+    // Community List (addressable kind 33302, CORD-02 §8 — one event per fragment), so a join
+    // or leave reaches the other devices live rather than on their next boot.
     let v2_list_filter = Filter::new()
         .author(my_pk)
         .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
@@ -137,14 +119,10 @@ async fn handle_self_sync_event(event: Event) {
             // whichever ingest happens to be the else-branch.
             let d = event.tags.identifier().unwrap_or_default().to_string();
             vector_core::db::spawn_bound(async move {
-                if d == vector_core::community::invite_list::INVITE_LIST_D_TAG {
-                    crate::commands::community::ingest_invite_list_update(event).await;
-                } else if d == vector_core::pinned_chats::PINNED_D_TAG {
+                if d == vector_core::pinned_chats::PINNED_D_TAG {
                     crate::commands::pinned::ingest_pinned_chats_update(event).await;
                 } else if vector_core::synced_prefs::Pref::from_d_tag(&d).is_some() {
                     crate::commands::prefs::ingest_prefs_update(event).await;
-                } else if d == vector_core::community::list::COMMUNITY_LIST_D_TAG {
-                    crate::commands::community::ingest_community_list_update(event).await;
                 }
             });
         }
@@ -291,7 +269,7 @@ fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
 /// Called once after login to begin receiving real-time events.
 ///
 /// Uses vector-core's `subscribe_dms()` for the GiftWrap subscription,
-/// then layers on the Community (kind-3300) subscription.
+/// then layers on the Community plane subscription.
 /// The boot sweep waits on this gate so the LIVE pipe wins the relay race.
 ///
 /// At boot three things once hit the relays at the same moment: the community
@@ -419,15 +397,11 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     *DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(gift_sub_id.clone());
     stage!("dm subscribe: LIVE");
 
-    // Community (kind-3300) subscription — scoped to our channels' epoch pseudonyms.
-    refresh_community_subscription().await;
-    stage!("v1 community sub: LIVE");
-
-    // v2 plane subscription (authors-addressed wraps) + boot catch-up: enqueue a
-    // refold per held v2 community so anything missed offline (rotations, control
-    // edits, messages) folds in — coalesced, drained by the worker off this path.
+    // Community plane subscription (authors-addressed wraps) + boot catch-up: enqueue a
+    // refold per held community so anything missed offline (rotations, control edits,
+    // messages) folds in — coalesced, drained by the worker off this path.
     vector_core::community::v2::realtime::refresh_subscription(&client).await;
-    stage!("v2 plane sub: LIVE");
+    stage!("community plane sub: LIVE");
     for c in vector_core::community::v2::realtime::load_held_v2() {
         vector_core::community::v2::realtime::enqueue_follow(c.id());
     }
@@ -451,8 +425,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
     // v2 reconnect catch-up: a `limit(0)` sub never replays what a relay missed
     // while down, so each Connected transition enqueues a refold + re-tracks the
-    // subs at the current epochs (debounced across a reconnect burst). v1 leans
-    // on open-sub replay; v2's consensus planes need the explicit fold.
+    // subs at the current epochs (debounced across a reconnect burst).
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();
         vector_core::db::spawn_bound(async move {
@@ -520,7 +493,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             while let Some(n) = tap.next().await {
                 if let ClientNotification::Event { event, subscription_id, .. } = n {
                     let k = event.kind.as_u16();
-                    if vector_core::community::is_v1_kind(k) || k == 1059 || k == 21059 {
+                    if k == 1059 || k == 21059 {
                         let age = nostr_sdk::prelude::Timestamp::now()
                             .as_secs()
                             .saturating_sub(event.created_at.as_secs());
@@ -549,8 +522,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     vector_core::db::spawn_bound(async move {
         let mut flood_count: u64 = 0;
         let mut flood_micros: u64 = 0;
-        // The v1 share of the fold, so the probe says which protocol the time goes to.
-        let (mut v1_count, mut v1_micros) = (0u64, 0u64);
         loop {
             let (event, fresh) = tokio::select! {
                 biased;
@@ -561,15 +532,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
             let k = event.kind.as_u16();
             let id8 = if fresh { event.id.to_hex()[..8].to_string() } else { String::new() };
             let t = std::time::Instant::now();
-            let v1 = vector_core::community::is_v1_kind(k);
             handle_community_event(event).await;
-            let spent = t.elapsed().as_micros() as u64;
             flood_count += 1;
-            flood_micros += spent;
-            if v1 {
-                v1_count += 1;
-                v1_micros += spent;
-            }
+            flood_micros += t.elapsed().as_micros() as u64;
             if fresh {
                 println!(
                     "[lag-probe] community lane handled kind={k} id={id8} in {:?} ({flood_count} events, {}ms folded so far)",
@@ -578,9 +543,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                 );
             } else if flood_count.is_multiple_of(500) {
                 println!(
-                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative (v1: {v1_count} in {}ms)",
-                    flood_micros / 1000,
-                    v1_micros / 1000
+                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative",
+                    flood_micros / 1000
                 );
             }
         }
@@ -611,7 +575,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // here too would race it to the dedup ledger for every
                         // wrap. This loop's job is everything else.
                         continue;
-                    } else if vector_core::community::is_v1_kind(k) || k == 1059 || k == 21059 {
+                    } else if k == 1059 || k == 21059 {
                         // Route Community events by KIND, not by subscription id: an event can arrive on the
                         // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
                         // id would drop the rest. dispatch resolves the channel from the event itself and

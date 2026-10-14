@@ -1063,6 +1063,11 @@ pub(crate) fn publish_projection(pref: Pref) {
                 for c in state.chats.iter().filter(|c| notify::legacy_muted_for_chat(c)) {
                     let _ = list.add(&c.id);
                 }
+                drop(state);
+                // Retired rooms this device dropped stay muted for a sibling that still holds them.
+                for id in vector_core::db::v1_purge::purged_muted_chats() {
+                    let _ = list.add(&id);
+                }
                 list.to_json()
             }
             _ => return,

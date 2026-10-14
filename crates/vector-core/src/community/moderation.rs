@@ -1,31 +1,19 @@
 //! Moderation authority: who may remove whose message (CORD-04 §3/§5).
-//!
-//! One algebra for both protocols. The wire differs — v1 proves its owner with a
-//! signed attestation, v2's identity self-certifies against the community id — so
-//! the owner lookup branches and everything downstream does not.
 
 use super::roles::{CommunityRoles, Permissions};
-use super::{CommunityId, ConcordProtocol};
+use super::CommunityId;
 
-/// The community's proven owner as lowercase hex, whichever protocol it speaks.
+/// The community's proven owner as lowercase hex (self-certified by the community id).
 ///
-/// Resolving this through the v1 loader alone returns `None` for a v2 community
-/// (v2 stores no attestation), and a `None` owner is not a safe default here: it
-/// costs the owner their supremacy AND drops the protection that makes them an
+/// A `None` owner is not a safe default: it costs the owner their supremacy AND drops the protection that makes them an
 /// invalid target, so an admin outranks the roleless owner in both directions.
 pub fn owner_hex(community_id: &str) -> Option<String> {
     let id = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
-    match crate::db::community::community_protocol(&id).ok().flatten() {
-        Some(ConcordProtocol::V2) => crate::db::community::load_community_v2(&id)
-            .ok()
-            .flatten()
-            .and_then(|c| c.owner().ok())
-            .map(|pk| pk.to_hex()),
-        _ => crate::db::community::load_community(&id)
-            .ok()
-            .flatten()
-            .and_then(|c| super::service::proven_owner_hex(&c)),
-    }
+    crate::db::community::load_community_v2(&id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.owner().ok())
+        .map(|pk| pk.to_hex())
 }
 
 /// Whether `member_hex` is the owner or holds an admin grant: the bar for @everyone.

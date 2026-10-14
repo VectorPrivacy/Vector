@@ -95,8 +95,5 @@
 {#if notices.dissolved}
     <p class="msg-inline-timestamp" style="margin-bottom: 20px;">{notices.dissolved} was dissolved by the owner.</p>
 {/if}
-{#if notices.migrated}
-    <p class="msg-inline-timestamp" style="margin-bottom: 20px;">This community has upgraded to Concord v2.</p>
-{/if}
 
 <!-- No <style>: the global rules cascade; the DOM is the vanilla list's, flat. -->

@@ -1436,12 +1436,10 @@ async function jumpToUnread(lastReadId) {
     // now→last_read gap into the DB. This fills holes the local DB has from offline periods — which
     // offset-paging (Step 2) would otherwise silently skip. DMs skip this; negentropy fills the DB.
     if (isCommunity && chat.messages.length > 0 && !reachedBoundary()) {
-        // Re-arm: a middle-gap fill must re-page even if a prior walk hit history-start. The first
-        // page resets the backend floor so the walk pages from the recent window DOWN through the
-        // gap (a hole newer than the bottom cursor that strict older-than-bottom paging can't reach).
+        // Re-arm: a middle-gap fill must re-page even if a prior walk hit history-start.
         _communityOlderExhausted.delete(chatId);
         let cursor = oldestLoaded();
-        let synced = 0, guard = 0, firstSync = true;
+        let synced = 0, guard = 0;
         while (cursor > boundaryAt && guard++ < 400) {
             if (strOpenChat !== chatId) return;
             if (_communityOlderExhausted.has(chatId)) break;
@@ -1456,8 +1454,7 @@ async function jumpToUnread(lastReadId) {
                 synced = 0;
             }
             let res = null;
-            try { res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: cursor, resetCursor: firstSync }); } catch (e) { if (strOpenChat === chatId) console.warn('[unread-jump] sync threw', e); break; }
-            firstSync = false;
+            try { res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: cursor }); } catch (e) { if (strOpenChat === chatId) console.warn('[unread-jump] sync threw', e); break; }
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
             synced += (res && res.new_messages) || 0;
             const next = res && res.oldest_ms;

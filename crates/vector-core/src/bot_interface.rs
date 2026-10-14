@@ -2,7 +2,7 @@
 //!
 //! Transport-agnostic by design: everything here is CONTENT-level (structured
 //! tags on ordinary chat rumors, plus one plain replaceable discovery event),
-//! so the same commands work in NIP-17 DMs and Concord v1/v2 channels — the
+//! so the same commands work in NIP-17 DMs and Concord channels — the
 //! envelope is whatever the conversation already uses.
 //!
 //! Two pieces:

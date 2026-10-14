@@ -49,6 +49,10 @@ pub fn publish_projection(pref: Pref) {
                     let _ = l.add(&c.id);
                 }
                 drop(state);
+                // Retired rooms this device dropped stay muted for a sibling that still holds them.
+                for id in vector_core::db::v1_purge::purged_muted_chats() {
+                    let _ = l.add(&id);
+                }
                 l.to_json()
             }
             Pref::Notify => notify::to_wire().to_json(),
@@ -154,6 +158,7 @@ async fn apply_blocks(list: IdList) {
 /// Mirror the mute list onto chat rows, persisting and surfacing only the ones
 /// that actually flipped.
 async fn apply_mutes(list: IdList) {
+    vector_core::db::v1_purge::retain_purged_mutes(|id| list.contains(id));
     let chat_ids: Vec<(String, bool, bool)> = {
         let mut state = vector_core::state::STATE.lock().await;
         // A sibling device can mute someone this device has never DM'd: create

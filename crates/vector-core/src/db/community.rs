@@ -15,7 +15,7 @@ use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
 use nostr_sdk::prelude::ToBech32;
 use rusqlite::{params, OptionalExtension};
 
-use crate::community::{Channel, ChannelId, ChannelKey, Community, CommunityId, Epoch, ServerRootKey};
+use crate::community::{ChannelId, CommunityId, Epoch};
 
 fn now_secs() -> i64 {
     web_time::SystemTime::now()
@@ -46,108 +46,6 @@ fn enc_txt_opt(s: &Option<String>) -> Result<Option<String>, String> {
 pub(crate) fn hex_id_to_32(hex: &str) -> Result<[u8; 32], String> {
     crate::simd::hex::hex_to_bytes_32_checked(hex)
         .ok_or_else(|| format!("corrupt or wrong-length 64-char hex id ({} chars)", hex.len()))
-}
-
-/// Persist a Community and all its channels (upsert). Secrets are stored as raw
-/// blobs in the account-scoped DB.
-pub fn save_community(community: &Community) -> Result<(), String> {
-    let _seal = crate::crypto::gate::sealing();
-    crate::community::v2::realtime::invalidate_held_v2_cache();
-    let conn = super::get_write_connection_guard_static()?;
-    let relays_json = serde_json::to_string(&community.relays).map_err(|e| e.to_string())?;
-    let community_id = community.id.to_hex();
-
-    // icon/banner persisted as the CommunityImage JSON ref (None → NULL).
-    let icon_json = community
-        .icon
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    let banner_json = community
-        .banner
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    // Atomic: the community row + all its channel rows commit together, so a crash mid-save
-    // can't leave a Community with a partial channel set.
-    let tx = conn.unchecked_transaction().map_err(|e| format!("save community tx: {e}"))?;
-    // UPSERT (not INSERT OR REPLACE): a metadata re-save must NOT reset `banlist` (managed
-    // separately via set_community_banlist) or `created_at` to their defaults — REPLACE deletes
-    // the row first, so omitted columns would revert.
-    // Wrap secrets + identifying metadata before they touch disk (no-op when encryption is off).
-    let enc_root = enc_key(community.server_root_key.as_bytes())?;
-    let enc_name = enc_txt(&community.name)?;
-    let enc_relays = enc_txt(&relays_json)?;
-    let enc_desc = enc_txt_opt(&community.description)?;
-    let enc_icon = enc_txt_opt(&icon_json)?;
-    let enc_banner = enc_txt_opt(&banner_json)?;
-    let enc_owner = enc_txt_opt(&community.owner_attestation)?;
-    tx.execute(
-        "INSERT INTO communities
-            (community_id, server_root_key, name, relays, created_at,
-             description, icon, banner, owner_attestation, server_root_epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(community_id) DO UPDATE SET
-            server_root_key=excluded.server_root_key, name=excluded.name, relays=excluded.relays,
-            description=excluded.description, icon=excluded.icon, banner=excluded.banner,
-            owner_attestation=excluded.owner_attestation, server_root_epoch=excluded.server_root_epoch",
-        params![
-            community_id,
-            &enc_root[..],
-            enc_name,
-            enc_relays,
-            now_secs(),
-            enc_desc,
-            enc_icon,
-            enc_banner,
-            enc_owner,
-            community.server_root_epoch.0 as i64,
-        ],
-    )
-    .map_err(|e| format!("save community: {e}"))?;
-
-    // Archive the base key at its epoch so a future rotation can't clobber it (multi-held keys).
-    store_epoch_key_tx(&tx, &community_id, crate::community::SERVER_ROOT_SCOPE_HEX,
-        community.server_root_epoch.0, community.server_root_key.as_bytes())?;
-
-    for channel in &community.channels {
-        let enc_chan_key = enc_key(channel.key.as_bytes())?;
-        let enc_chan_name = enc_txt(&channel.name)?;
-        // UPSERT (not INSERT OR REPLACE): a re-save must preserve `created_at` (channel ordering) and
-        // `rekeyed_at_server_epoch` (read-cut resume progress) — REPLACE would reset both to defaults.
-        tx.execute(
-            "INSERT INTO community_channels
-                (channel_id, community_id, channel_key, epoch, name, created_at, rekeyed_at_server_epoch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(channel_id) DO UPDATE SET
-                community_id=excluded.community_id, channel_key=excluded.channel_key,
-                epoch=excluded.epoch, name=excluded.name",
-            params![
-                channel.id.to_hex(),
-                community_id,
-                &enc_chan_key[..],
-                // SQLite INTEGER is i64; reinterpret the u64 epoch bit-for-bit
-                // (lossless two's-complement). NOTE: a signed SQL comparison would
-                // mis-order epochs >= 2^63 — don't ORDER BY / range-filter `epoch`.
-                channel.epoch.0 as i64,
-                enc_chan_name,
-                now_secs(),
-                // A newly-inserted channel is current as of the community's base epoch (no cut owed for it).
-                community.server_root_epoch.0 as i64,
-            ],
-        )
-        .map_err(|e| format!("save channel: {e}"))?;
-        // Mirror the channel's current-epoch key into the multi-held archive. The
-        // `community_channels` row above is just the head pointer (REPLACE clobbers it); the archive
-        // (PK includes epoch) retains EVERY epoch key so cross-epoch history stays readable post-rekey.
-        store_epoch_key_tx(&tx, &community_id, &channel.id.to_hex(), channel.epoch.0, channel.key.as_bytes())?;
-    }
-    tx.commit().map_err(|e| format!("save community commit: {e}"))?;
-    // A new channel is listed now, and may make a group chat a community.
-    crate::notify::invalidate_communities();
-    Ok(())
 }
 
 // ── Parked Private-Channel key vends (CORD-03 "delivered on grant") ──────────
@@ -473,27 +371,6 @@ pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8
     Ok(switched)
 }
 
-/// SAME-EPOCH convergence for a channel key (concurrent re-founding heal) — the channel counterpart to
-/// [`converge_server_root_epoch`]. Adopts the winning re-founding's channel key at `epoch` (the rekey
-/// addressed under the converged server root), replacing the one we minted in our own losing fork. Switches
-/// only while the channel is still AT `epoch`. Returns whether it switched.
-pub fn converge_channel_epoch(community_id: &str, channel_id: &str, epoch: u64, new_key: &[u8; 32]) -> Result<bool, String> {
-    let _seal = crate::crypto::gate::sealing();
-    let conn = super::get_write_connection_guard_static()?;
-    let tx = conn.unchecked_transaction().map_err(|e| format!("converge channel tx: {e}"))?;
-    store_epoch_key_tx(&tx, community_id, channel_id, epoch, new_key)?;
-    let enc = enc_key(new_key)?;
-    let switched = tx
-        .execute(
-            "UPDATE community_channels SET channel_key = ?1 WHERE community_id = ?2 AND channel_id = ?3 AND epoch = ?4",
-            params![&enc[..], community_id, channel_id, epoch as i64],
-        )
-        .map_err(|e| format!("converge channel head: {e}"))?
-        > 0;
-    tx.commit().map_err(|e| format!("converge channel commit: {e}"))?;
-    Ok(switched)
-}
-
 /// Every held `(epoch, key)` for a scope, ascending by epoch. The read paths derive a pseudonym per
 /// returned epoch (`#z` OR-set) so cross-epoch history isn't stranded. Sorted in Rust (not SQL):
 /// epoch is a u64 stored as i64, so a SQL `ORDER BY` would mis-order epochs >= 2^63.
@@ -529,200 +406,6 @@ pub fn held_epoch_key(community_id: &str, scope_id: &str, epoch: u64) -> Result<
         .optional()
         .map_err(|e| format!("held epoch key: {e}"))?;
     blob.map(|b| dec_key(&b)).transpose()
-}
-
-/// Local first-save time of a community (≈ when this account joined or created it), in ms.
-/// `created_at` is set on the first save and preserved across metadata re-saves, so it tracks
-/// the join moment. Used to sort a not-yet-active community by join time. `None` if unknown.
-pub fn community_created_at_ms(id: &CommunityId) -> Option<u64> {
-    let conn = super::get_db_connection_guard_static().ok()?;
-    conn.query_row(
-        "SELECT created_at FROM communities WHERE community_id = ?1",
-        params![id.to_hex()],
-        |r| r.get::<_, i64>(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .map(|secs| (secs.max(0) as u64) * 1000)
-}
-
-/// Load a Community and its channels by id. Returns `None` if not stored locally.
-pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let id_hex = id.to_hex();
-
-    let row = conn
-        .query_row(
-            "SELECT server_root_key, name, relays,
-                    description, icon, banner, banlist, owner_attestation, server_root_epoch, dissolved
-               FROM communities WHERE community_id = ?1",
-            params![id_hex],
-            |r| {
-                Ok((
-                    r.get::<_, Vec<u8>>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, Option<String>>(7)?,
-                    r.get::<_, i64>(8)?,
-                    r.get::<_, i64>(9)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|e| format!("load community: {e}"))?;
-
-    let (root_blob, name, relays_json, description, icon_json, banner_json, banlist_json, owner_attestation, server_root_epoch, dissolved_int) =
-        match row {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-    let dissolved = dissolved_int != 0;
-
-    // Unwrap at-rest encryption before parsing (no-op when off, or for not-yet-wrapped rows).
-    // One vault read for the whole row set.
-    let dk = |o: &mut crate::crypto::AtRestOpener, b: &[u8]| to_32(&o.open_blob_or_keep(b));
-    let dt = |o: &mut crate::crypto::AtRestOpener, s: &str| o.open_or_keep(s.to_string());
-    crate::crypto::open_batch(|o| {
-        let name = dt(o, &name);
-        let relays_json = dt(o, &relays_json);
-        let description = description.map(|s| dt(o, &s));
-        let icon_json = icon_json.map(|s| dt(o, &s));
-        let banner_json = banner_json.map(|s| dt(o, &s));
-        let banlist_json = dt(o, &banlist_json);
-        let owner_attestation = owner_attestation.map(|s| dt(o, &s));
-
-        // Banlist from `community_bans`, denormalized onto every channel so the inbound
-        // path can drop banned authors. The legacy blob is read ONLY as a fallback for a
-        // row this account has not touched since migration 90 — it is not a second store,
-        // and `get_community_banlist` retires it on first read. Malformed entries are
-        // skipped; an empty result degrades to "no bans", never an error.
-        let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
-        let mut banned_hex: Vec<String> = conn
-            .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
-            .and_then(|mut st| {
-                st.query_map(params![id_hex], |r| r.get::<_, String>(0))
-                    .map(|rows| rows.flatten().map(|b| o.open_or_keep(b)).collect::<Vec<String>>())
-            })
-            .unwrap_or_default();
-        if banned_hex.is_empty() {
-            banned_hex = serde_json::from_str::<Vec<String>>(&banlist_json).unwrap_or_default();
-        }
-        let banned: Vec<PublicKey> = banned_hex
-            .iter()
-            // The table holds bech32, the legacy blob hex — `parse` takes either.
-            .filter_map(|h| PublicKey::parse(h).ok())
-            .collect();
-
-        let icon = icon_json
-            .map(|j| serde_json::from_str(&j))
-            .transpose()
-            .map_err(|e| format!("icon json: {e}"))?;
-        let banner = banner_json
-            .map(|j| serde_json::from_str(&j))
-            .transpose()
-            .map_err(|e| format!("banner json: {e}"))?;
-
-        let server_root_key = ServerRootKey(dk(o, &root_blob)?);
-        let relays: Vec<String> = serde_json::from_str(&relays_json).map_err(|e| e.to_string())?;
-
-        // hierarchy invariant (apply-time): the OWNER is the uppermost role and can never be
-        // effectively banned or hidden — by anyone. Everyone knows the owner from the attestation, so
-        // ALL members enforce this (the owner is filtered out of `banned` and protected from hides).
-        // Admins are NOT absolutely protected: the owner outranks them and CAN ban/hide an admin.
-        // (Admin-vs-admin peer protection — a lower rank can't act on an equal — is a later
-        // position-relative refinement gated on the author proof; the owner protection is the invariant.)
-        let mut protected: Vec<PublicKey> = Vec::new();
-        if let Some(owner) = owner_attestation
-            .as_ref()
-            .and_then(|att| crate::community::owner::verify_owner_attestation(att, &id_hex))
-        {
-            protected.push(owner);
-        }
-        let banned: Vec<PublicKey> = banned.into_iter().filter(|pk| !protected.contains(pk)).collect();
-
-        // Collect the channel head rows FIRST (drops the borrow on `conn`) so we can then query each
-        // channel's full epoch-key archive on the same connection without a borrow conflict.
-        let raw_channels: Vec<(String, Vec<u8>, i64, String)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT channel_id, channel_key, epoch, name
-                       FROM community_channels WHERE community_id = ?1 ORDER BY created_at",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(params![id_hex], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Vec<u8>>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
-        };
-
-        // The AUTHORIZED roster (cached by fetch_and_apply_roles, post delegation check), denormalized
-        // onto each channel so the inbound delete path can verify a keyless moderation-hide.
-        // Opened on this batch: get_community_roles would pay its own vault read.
-        let roster = parse_roles(stored_roles(&conn, &id_hex).ok().flatten(), |j| dt(o, j));
-
-        let mut channels = Vec::new();
-        for (cid_hex, key_blob, epoch, cname) in raw_channels {
-            // Every retained epoch key for this channel (multi-held archive), so the read path can fetch +
-            // decrypt across rekeys. Best-effort: a read hiccup degrades to the head epoch (read_epoch_keys
-            // falls back), never an error.
-            let epoch_keys: Vec<(Epoch, crate::community::ChannelKey)> = {
-                let mut ek_stmt = conn
-                    .prepare("SELECT epoch, key FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2")
-                    .map_err(|e| e.to_string())?;
-                let rows = ek_stmt
-                    .query_map(params![id_hex, cid_hex], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-                    .map_err(|e| e.to_string())?;
-                let mut out = Vec::new();
-                for row in rows {
-                    let (e, blob) = row.map_err(|e| e.to_string())?;
-                    if let Ok(k) = dk(o, &blob) {
-                        out.push((Epoch(e as u64), crate::community::ChannelKey(k)));
-                    }
-                }
-                out
-            };
-            channels.push(Channel {
-                id: ChannelId(hex_id_to_32(&cid_hex)?),
-                key: ChannelKey(dk(o, &key_blob)?),
-                // Stored as i64; reinterpreted back to u64 (two's-complement is exact,
-                // so the bit pattern round-trips losslessly even for epoch >= 2^63).
-                epoch: Epoch(epoch as u64),
-                name: dt(o, &cname),
-                banned: banned.clone(),
-                protected: protected.clone(),
-                roster: roster.clone(),
-                epoch_keys,
-                dissolved,
-            });
-        }
-
-        Ok(Some(Community {
-            id: *id,
-            server_root_key,
-            // Stored as i64; reinterpreted to u64 (two's-complement is exact), same as channel epochs.
-            server_root_epoch: Epoch(server_root_epoch as u64),
-            name,
-            description,
-            icon,
-            banner,
-            relays,
-            channels,
-            owner_attestation,
-            dissolved,
-        }))
-    })
 }
 
 /// Retain the ephemeral signing key of a message I published, so I can later
@@ -960,33 +643,35 @@ pub fn purge_expired_pending_invites() -> Result<usize, String> {
 
 /// All parked invites, newest first.
 pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
-               FROM pending_community_invites
-              WHERE (expires_at = 0 OR expires_at > ?1)
-                AND received_at > ?2
-              ORDER BY received_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
     let now = now_secs();
-    let rows = stmt
-        .query_map(params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64], |r| {
-            Ok(PendingCommunityInvite {
-                community_id: r.get(0)?,
-                bundle_json: dec_txt(&r.get::<_, String>(1)?),
-                inviter_npub: dec_txt(&r.get::<_, String>(2)?),
-                received_at: r.get(3)?,
-                expires_at: r.get(4)?,
+    let raw: Vec<(String, String, String, i64, i64)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
+                   FROM pending_community_invites
+                  WHERE (expires_at = 0 OR expires_at > ?1)
+                    AND received_at > ?2
+                  ORDER BY received_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    Ok(raw
+        .into_iter()
+        .map(|(community_id, bundle, inviter, received_at, expires_at)| PendingCommunityInvite {
+            community_id,
+            bundle_json: dec_txt(&bundle),
+            inviter_npub: dec_txt(&inviter),
+            received_at,
+            expires_at,
         })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+        .collect())
 }
 
 /// Read a parked invite's bundle WITHOUT removing it. Accept is fallible (caps,
@@ -1183,47 +868,6 @@ pub fn list_all_public_invites() -> Result<Vec<PublicInviteRecord>, String> {
     Ok(out)
 }
 
-/// Insert a public-invite row only if its (decrypted) token isn't already present — idempotent hydration
-/// from the synced Invite List, PRESERVING the original `created_at` (unlike `save_public_invite`, which
-/// stamps now). Returns true if a row was inserted. Tokens are stored encrypted with a random nonce, so SQL
-/// equality can't dedup; scan + decrypt (few rows per community, owner-only).
-pub fn upsert_public_invite(
-    token: &str,
-    community_id: &str,
-    url: &str,
-    expires_at: Option<i64>,
-    created_at: i64,
-    label: Option<&str>,
-) -> Result<bool, String> {
-    let _seal = crate::crypto::gate::sealing();
-    let conn = super::get_write_connection_guard_static()?;
-    let already = {
-        let mut stmt = conn
-            .prepare("SELECT token FROM community_public_invites WHERE community_id = ?1")
-            .map_err(|e| e.to_string())?;
-        let stored: Vec<String> = stmt
-            .query_map(params![community_id], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect();
-        stored.iter().any(|s| dec_txt(s) == token)
-    };
-    if already {
-        return Ok(false);
-    }
-    let enc_token = enc_txt(token)?;
-    let enc_url = enc_txt(url)?;
-    let enc_label = label.map(enc_txt).transpose()?;
-    conn.execute(
-        "INSERT INTO community_public_invites
-            (token, community_id, url, expires_at, created_at, label)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![enc_token, community_id, enc_url, expires_at, created_at, enc_label],
-    )
-    .map_err(|e| format!("upsert public invite: {e}"))?;
-    Ok(true)
-}
-
 /// Remove a Community and all its local state (channels, retained message keys, parked
 /// invites, minted public-invite tokens). Used when the user leaves a Community — there
 /// is no protocol "leave" (membership is key possession), so leaving is purely local:
@@ -1295,33 +939,20 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
     community_member_activity_capped(community_id, true)
 }
 
-/// [`community_member_activity`] with the anti-flood display cap OPTIONAL. The migration
-/// roster seed passes `capped = false` so a >500-member v1 community seeds EVERY member
-/// — a silent truncation there would permanently strand the dropped members (absent from the
-/// snapshot → absent from `memberlist()` → excluded from every future v2 rotation). Every
-/// other caller keeps the cap.
+/// [`community_member_activity`] with the anti-flood display cap OPTIONAL. A roster seed
+/// passes `capped = false` so EVERY member seeds — a silent truncation there would permanently
+/// strand the dropped members (absent from the snapshot → absent from `memberlist()` → excluded
+/// from every future rotation). Every other caller keeps the cap.
 pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Result<Vec<(String, u64)>, String> {
     /// Cap on rendered members — bounds a presence-flood (fresh-identity 3306 spam) from
     /// growing the list / profile-fetch fan-out without limit.
     const COMMUNITY_MEMBER_CAP: usize = 500;
     use std::collections::HashMap;
 
-    let id = CommunityId(hex_id_to_32(community_id)?);
-    // The proven owner is ALWAYS a member of their own community. Seed them so a freshly-created
-    // community (no message/presence events yet) still shows its creator instead of an empty roster.
-    // A v2 owner is derived from the community id by `fold_members`, so only v1 proves one here.
-    let owner_b32: Option<String> = match community_protocol(&id)? {
-        None => return Ok(Vec::new()),
-        Some(crate::community::ConcordProtocol::V2) => None,
-        Some(crate::community::ConcordProtocol::V1) => match load_community(&id)? {
-            Some(c) => c
-                .owner_attestation
-                .as_deref()
-                .and_then(|att| crate::community::owner::verify_owner_attestation(att, community_id))
-                .and_then(|pk| pk.to_bech32().ok()),
-            None => return Ok(Vec::new()),
-        },
-    };
+    // The owner is seeded by `fold_members`, which derives it from the community id.
+    if !community_held(&CommunityId(hex_id_to_32(community_id)?))? {
+        return Ok(Vec::new());
+    }
 
     let chat_ints = community_chat_row_ids(community_id)?;
 
@@ -1400,12 +1031,11 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
     }
     }
 
-    // Events store bech32, so compare on bech32. The owner can never be effectively banned.
+    // Events store bech32, so compare on bech32.
     let banned: std::collections::HashSet<String> = banned_set(community_id)
         .iter()
         .filter_map(|b| PublicKey::from_slice(b).ok())
         .filter_map(|pk| pk.to_bech32().ok())
-        .filter(|npub| owner_b32.as_ref() != Some(npub))
         .collect();
 
     // Member iff active, not banned, and last activity is at-or-after the last leave.
@@ -1427,9 +1057,6 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
                 out.push((npub, now_secs() as u64));
             }
         };
-        if let Some(o) = owner_b32 {
-            reassert(o);
-        }
         if let Ok(roles) = get_community_roles(community_id) {
             for g in &roles.grants {
                 if g.role_ids.is_empty() {
@@ -1452,79 +1079,23 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
 /// via a link minted by `inviter`. Distinct by joiner so a rejoin isn't double-counted. Labels are
 /// unique per creator (random fallback ensures it), so (inviter, label) keys a single link.
 ///
-/// v1 reads the `invited-by` / `invited-label` tags on MemberJoined system events; v2 reads the
-/// attribution each joiner echoes into their Guestbook Join.
+/// Reads the attribution each joiner echoes into their Guestbook Join.
 pub fn community_invite_join_counts(
     community_id: &str,
     inviter: &PublicKey,
 ) -> Result<std::collections::HashMap<String, u64>, String> {
     use std::collections::{HashMap, HashSet};
-    let id = CommunityId(hex_id_to_32(community_id)?);
-    if let Some(crate::community::ConcordProtocol::V2) = community_protocol(&id)? {
-        // Bundles name their creator in hex; older ones in bech32.
-        let (hex, npub) = (inviter.to_hex(), inviter.to_bech32().unwrap_or_default());
-        let (events, _) = get_guestbook(community_id)?;
-        let mut per_label: HashMap<String, HashSet<PublicKey>> = HashMap::new();
-        for e in &events {
-            let crate::community::v2::guestbook::GuestbookEntry::Join { member, invited_by: Some((by, label)), .. } = &e.entry else {
-                continue;
-            };
-            if by.eq_ignore_ascii_case(&hex) || *by == npub {
-                per_label.entry(label.clone()).or_default().insert(*member);
-            }
-        }
-        return Ok(per_label.into_iter().map(|(k, v)| (k, v.len() as u64)).collect());
-    }
-    let Ok(inviter_npub) = inviter.to_bech32();
-    let inviter_npub = inviter_npub.as_str();
-    let community = match load_community(&id)? {
-        Some(c) => c,
-        None => return Ok(HashMap::new()),
-    };
-    let mut chat_ints: Vec<i64> = Vec::new();
-    for ch in &community.channels {
-        if let Ok(cid) = super::id_cache::get_chat_id_by_identifier(&ch.id.to_hex()) {
-            chat_ints.push(cid);
-        }
-    }
-    if chat_ints.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
-    let conn = super::get_db_connection_guard_static()?;
-    let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "SELECT npub, tags FROM events \
-         WHERE chat_id IN ({placeholders}) AND kind = {sys} AND npub IS NOT NULL AND npub != ''"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .map_err(|e| e.to_string())?;
-    // label -> set of distinct joiner npubs
-    let mut per_label: HashMap<String, HashSet<String>> = HashMap::new();
-    for row in rows {
-        let (joiner, tags_json) = row.map_err(|e| e.to_string())?;
-        let tags = match serde_json::from_str::<Vec<Vec<String>>>(&tags_json) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let tag_val = |key: &str| -> Option<String> {
-            tags.iter()
-                .find(|t| t.first().map(|s| s == key).unwrap_or(false))
-                .and_then(|t| t.get(1).cloned())
-        };
-        // MemberJoined (event-type "1") attributed to THIS owner's link, with a label.
-        if tag_val("event-type").as_deref() != Some("1") {
+    hex_id_to_32(community_id)?;
+    // Bundles name their creator in hex; older ones in bech32.
+    let (hex, npub) = (inviter.to_hex(), inviter.to_bech32().unwrap_or_default());
+    let (events, _) = get_guestbook(community_id)?;
+    let mut per_label: HashMap<String, HashSet<PublicKey>> = HashMap::new();
+    for e in &events {
+        let crate::community::v2::guestbook::GuestbookEntry::Join { member, invited_by: Some((by, label)), .. } = &e.entry else {
             continue;
-        }
-        if tag_val("invited-by").as_deref() != Some(inviter_npub) {
-            continue;
-        }
-        if let Some(label) = tag_val("invited-label") {
-            per_label.entry(label).or_default().insert(joiner);
+        };
+        if by.eq_ignore_ascii_case(&hex) || *by == npub {
+            per_label.entry(label.clone()).or_default().insert(*member);
         }
     }
     Ok(per_label.into_iter().map(|(k, v)| (k, v.len() as u64)).collect())
@@ -1545,17 +1116,20 @@ pub struct AuthorFootprint {
 /// that decrypts every channel key and every retained epoch key, and all this needs is
 /// the ids. A channel with no events yet has no row and is simply absent.
 pub fn community_chat_row_ids(community_id: &str) -> Result<Vec<i64>, String> {
-    let channel_ids: Vec<String> = {
-        let conn = super::get_db_connection_guard_static()?;
-        let mut stmt = conn
-            .prepare("SELECT channel_id FROM community_channels WHERE community_id = ?1")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![community_id], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
-    };
+    let channel_ids = community_channel_ids(community_id)?;
     Ok(channel_ids.iter().filter_map(|c| super::id_cache::get_chat_id_by_identifier(c).ok()).collect())
+}
+
+/// A community's channel ids, read from the rows alone (no key opened).
+pub fn community_channel_ids(community_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT channel_id FROM community_channels WHERE community_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 /// A stored policy: the exact bytes a community declared, plus what the engine
@@ -2195,33 +1769,6 @@ pub fn edition_head_entity_ids(community_id: &str) -> Result<std::collections::H
 }
 
 
-/// Every tracked control entity's persisted head `(entity_id hex → (version, self_hash))`. This is the
-/// per-entity refuse-downgrade FLOOR: the fold seeds each entity's chain from its held head, so a
-/// withholding relay serving editions BELOW what we already hold can't roll an authority chain back
-/// (e.g. resurrecting a since-revoked admin's old grant). An empty map = a bootstrapping joiner (folds
-/// from genesis, floor 0).
-pub fn get_all_edition_heads(community_id: &str) -> Result<std::collections::HashMap<String, (u64, [u8; 32])>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let mut stmt = conn
-        .prepare("SELECT entity_id, version, self_hash FROM community_edition_heads WHERE community_id = ?1")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![community_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = std::collections::HashMap::new();
-    for row in rows {
-        let (entity, version, hash) = row.map_err(|e| e.to_string())?;
-        if hash.len() == 32 {
-            let mut h = [0u8; 32];
-            h.copy_from_slice(&hash);
-            out.insert(entity, (version as u64, h));
-        }
-    }
-    Ok(out)
-}
-
 /// Every tracked head as `entity_hex → (epoch, version, self_hash)` — the epoch-primary floor.
 /// The caller seeds the fold with ONLY the entities at the community's CURRENT epoch (a head recorded
 /// at a PRIOR epoch belongs to a superseded founding, so its entity folds fresh from the new epoch's v1
@@ -2467,57 +2014,6 @@ pub fn replace_invite_link_sets(community_id: &str, sets: &[InviteLinkSetRow]) -
     Ok(())
 }
 
-/// Upsert ONE creator's invite-link set (optimistic local update after the local user mints/revokes their
-/// own links, mirroring the flat-registry merge). An empty set removes the row.
-pub fn upsert_invite_link_set(community_id: &str, creator_hex: &str, locators: &[String]) -> Result<(), String> {
-    let _seal = crate::crypto::gate::sealing();
-    let conn = super::get_write_connection_guard_static()?;
-    // `creator` is encrypted (random nonce), so locate any existing row by decrypting + matching.
-    let existing_rowid: Option<i64> = {
-        let mut stmt = conn
-            .prepare("SELECT rowid, creator FROM community_invite_link_sets WHERE community_id = ?1")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![community_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?;
-        let mut found = None;
-        for row in rows {
-            let (rowid, stored) = row.map_err(|e| e.to_string())?;
-            if dec_txt(&stored) == creator_hex {
-                found = Some(rowid);
-                break;
-            }
-        }
-        found
-    };
-    if locators.is_empty() {
-        if let Some(rowid) = existing_rowid {
-            conn.execute("DELETE FROM community_invite_link_sets WHERE rowid = ?1", params![rowid])
-                .map_err(|e| format!("delete invite-link-set: {e}"))?;
-        }
-        return Ok(());
-    }
-    let enc_locators = enc_txt(&serde_json::to_string(locators).map_err(|e| e.to_string())?)?;
-    match existing_rowid {
-        Some(rowid) => {
-            conn.execute(
-                "UPDATE community_invite_link_sets SET locators = ?1 WHERE rowid = ?2",
-                params![enc_locators, rowid],
-            )
-            .map_err(|e| format!("upsert invite-link-set: {e}"))?;
-        }
-        None => {
-            let enc_creator = enc_txt(creator_hex)?;
-            conn.execute(
-                "INSERT INTO community_invite_link_sets (community_id, creator, locators) VALUES (?1, ?2, ?3)",
-                params![community_id, enc_creator, enc_locators],
-            )
-            .map_err(|e| format!("upsert invite-link-set: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
 /// Every creator's active invite-link set for a Community (creator hex + locators). Empty for a Private
 /// community (or one not yet re-folded since this table was added).
 pub fn get_invite_link_sets(community_id: &str) -> Result<Vec<InviteLinkSetRow>, String> {
@@ -2541,19 +2037,6 @@ pub fn get_invite_link_sets(community_id: &str) -> Result<Vec<InviteLinkSetRow>,
     Ok(out)
 }
 
-/// Mark (or clear) that a PRIVATE-community ban's base re-seal (read-cut) is OUTSTANDING — set when
-/// the re-seal is attempted and cleared only when it succeeds, so a transient failure is retried later
-/// instead of silently leaving a banned member with read access.
-pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET read_cut_pending = ?1 WHERE community_id = ?2",
-        params![pending as i64, community_id],
-    )
-    .map_err(|e| format!("set read_cut_pending: {e}"))?;
-    Ok(())
-}
-
 /// Set the owner-dissolution SEAL on a community — PERMANENT + irreversible (no clear path; there
 /// is no un-dissolve). Idempotent: re-setting an already-dissolved community is a harmless no-op. Once
 /// set, the control fold stops advancing and the inbound path drops every subsequent event.
@@ -2573,192 +2056,6 @@ pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
     Ok(changed > 0)
 }
 
-// ---- v1→v2 migration state (migration 77) ------------------------------------------------
-// `migration_pointer` is the extracted dissolution payload JSON (signpost + sealed `m`) —
-// wrapped by Local Encryption like every identifying community field. `migrated_to` is the
-// terminal flip fence. `migration_checked` converges the boot sweep on plain dissolutions.
-
-/// Persist the extracted migration payload. Overwrite-idempotent (pointer selection is
-/// total: the newest payload-carrying owner tombstone wins, so re-persisting is harmless).
-pub fn set_migration_pointer(community_id: &str, payload_json: &str) -> Result<(), String> {
-    let _seal = crate::crypto::gate::sealing();
-    let conn = super::get_write_connection_guard_static()?;
-    let wrapped = enc_txt(payload_json)?;
-    conn.execute(
-        "UPDATE communities SET migration_pointer = ?2, migration_checked = 1 WHERE community_id = ?1",
-        params![community_id, wrapped],
-    )
-    .map_err(|e| format!("set migration pointer: {e}"))?;
-    Ok(())
-}
-
-/// The persisted migration payload JSON, if any. `None` for unknown/pointer-less communities.
-pub fn get_migration_pointer(community_id: &str) -> Result<Option<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let v: Option<Option<String>> = conn
-        .query_row(
-            "SELECT migration_pointer FROM communities WHERE community_id = ?1",
-            params![community_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("get migration pointer: {e}"))?;
-    Ok(v.flatten().map(|s| dec_txt(&s)))
-}
-
-/// Terminal flip fence: the v2 community id this v1 community migrated to. Set ONLY inside
-/// the flip transaction. One-way (no clear path) — mirrors the dissolved seal's discipline.
-pub fn set_migrated_to(community_id: &str, v2_community_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET migrated_to = ?2 WHERE community_id = ?1 AND migrated_to IS NULL",
-        params![community_id, v2_community_id],
-    )
-    .map_err(|e| format!("set migrated_to: {e}"))?;
-    Ok(())
-}
-
-/// The flip fence readout — every v1 write path checks this first. `None` = not migrated.
-pub fn get_migrated_to(community_id: &str) -> Result<Option<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let v: Option<Option<String>> = conn
-        .query_row(
-            "SELECT migrated_to FROM communities WHERE community_id = ?1",
-            params![community_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("get migrated_to: {e}"))?;
-    Ok(v.flatten())
-}
-
-/// Mark a dissolved community's tombstone as migration-checked (found to be a plain `{}`
-/// dissolution) so the boot sweep stops re-probing it. Set implicitly by
-/// [`set_migration_pointer`] too — either outcome converges the sweep.
-pub fn set_migration_checked(community_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET migration_checked = 1 WHERE community_id = ?1",
-        params![community_id],
-    )
-    .map_err(|e| format!("set migration checked: {e}"))?;
-    Ok(())
-}
-
-// ---- Owner migration wizard ledger (migration 77 `community_migrations`) ------------------
-// Resumable phase tracking. `twin` carries enough to rebuild the twin on resume (the pre-flip
-// v2 twin has ZERO channel rows locally — the hijack guard skips v1-owned rows — so a reloaded
-// twin would be channel-less; the ledger holds the twin's v2 id + created channel set).
-
-/// Upsert the wizard's ledger row (phase reached + serialized twin state).
-pub fn set_migration_ledger(v1_community_id: &str, v2_community_id: &str, phase: i64, twin_json: &str) -> Result<(), String> {
-    let _seal = crate::crypto::gate::sealing();
-    let conn = super::get_write_connection_guard_static()?;
-    let wrapped = enc_txt(twin_json)?;
-    // Stamp every write: a row parked mid-ladder is the crash-resume signal, and
-    // without a time it can't say whether that crash was seconds or weeks ago.
-    let now = now_secs();
-    conn.execute(
-        "INSERT INTO community_migrations (community_id, v2_community_id, phase, twin, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4, updated_at=?5",
-        params![v1_community_id, v2_community_id, phase, wrapped, now],
-    )
-    .map_err(|e| format!("set migration ledger: {e}"))?;
-    Ok(())
-}
-
-/// Read the wizard ledger row: `(v2_community_id, phase, twin_json)`.
-pub fn get_migration_ledger(v1_community_id: &str) -> Result<Option<(String, i64, String)>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let row = conn
-        .query_row(
-            "SELECT v2_community_id, phase, twin FROM community_migrations WHERE community_id = ?1",
-            params![v1_community_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
-        )
-        .optional()
-        .map_err(|e| format!("get migration ledger: {e}"))?;
-    Ok(row.map(|(v2, phase, twin)| (v2, phase, dec_txt(&twin))))
-}
-
-/// Re-parent every stitched channel row from the v1 community to the v2 twin, in ONE
-/// transaction, AND stamp the terminal fence (`migrated_to` + `dissolved`) on the v1 row.
-/// The dedicated migration transaction the v2 hijack guard (`save_community_v2`) forces: the
-/// generic v2 save SKIPS foreign-owned channel rows, so nothing but this may adopt them.
-/// Callers must NOT `save_community_v2` after this: every in-memory v2 view at flip time is
-/// CHANNEL-LESS (its channel ids were v1-owned, so the pre-flip saves skipped them), and the
-/// v2 save PRUNES channel rows absent from the passed struct — a post-flip re-save DELETES
-/// the just-re-parented rows. Public channels fold from the control plane; nothing needs a
-/// re-save. Idempotent: a crash re-run re-parents zero rows and the fence writes are no-ops.
-pub fn reparent_channels_and_fence(v1_community_id: &str, v2_community_id: &str) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    let tx = conn.unchecked_transaction().map_err(|e| format!("flip txn: {e}"))?;
-    tx.execute(
-        "UPDATE community_channels SET community_id = ?2 WHERE community_id = ?1",
-        params![v1_community_id, v2_community_id],
-    )
-    .map_err(|e| format!("reparent channels: {e}"))?;
-    // Terminal fence: one-way, mirrors the dissolved seal's discipline. `dissolved` too,
-    // so a fallback-door/on-ramp flip (member never folded the tombstone) still activates
-    // fence layer 0 (the control fold short-circuit).
-    tx.execute(
-        "UPDATE communities SET migrated_to = ?2, dissolved = 1 WHERE community_id = ?1 AND migrated_to IS NULL",
-        params![v1_community_id, v2_community_id],
-    )
-    .map_err(|e| format!("set fence: {e}"))?;
-    tx.commit().map_err(|e| format!("flip commit: {e}"))?;
-    // The channel→community cache assumes an IMMUTABLE mapping (positives-only); the
-    // re-parent is the one place that mapping changes, so drop the stale v1 entries. They
-    // refill lazily as v2 on next lookup.
-    forget_community_channels(v1_community_id);
-    Ok(())
-}
-
-/// v1 communities the boot sweep must probe for a migration signpost: never flipped and
-/// not yet migration-checked, SEALED OR NOT. Sealed ones sort first (the common case);
-/// bounded per sweep so a long v1 tail can't storm the relays on every boot.
-pub fn migration_sweep_candidates() -> Result<Vec<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    // Deliberately NOT gated on `dissolved = 1`. Sealing happens inside the control
-    // fold, and the boot control probe can veto that fold indefinitely: the probe is
-    // `since`-windowed over the CONTROL plane, while the authoritative migration
-    // tombstone lives at the rotation-stable DISSOLVED coordinate. Once the probe
-    // cursor passes the tombstone, a migrated-away community looks quiet forever, so
-    // it never seals — and a seal-gated sweep could never reach it. An unsealed v1 is
-    // exactly the state that needs the probe most.
-    let mut stmt = conn
-        .prepare(
-            "SELECT community_id FROM communities
-             WHERE migrated_to IS NULL AND migration_checked = 0
-               AND (protocol IS NULL OR protocol = 1)
-             ORDER BY dissolved DESC
-             LIMIT 40",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    Ok(rows.flatten().collect())
-}
-
-/// Communities whose flip is UNFINISHED: a pointer is held but `migrated_to` never landed
-/// (crash between the v2 join and the flip txn, an unopenable-`m` retry, or a stale-root
-/// walk that can now advance). The boot maintenance re-drives each.
-pub fn migration_flip_candidates() -> Result<Vec<String>, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT community_id FROM communities
-             WHERE migration_pointer IS NOT NULL AND migrated_to IS NULL",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
-    Ok(rows.flatten().collect())
-}
-
 /// Whether a community has been sealed by a folded + owner-verified GroupDissolved tombstone.
 /// `false` for an unknown community.
 pub fn get_community_dissolved(community_id: &str) -> Result<bool, String> {
@@ -2772,78 +2069,6 @@ pub fn get_community_dissolved(community_id: &str) -> Result<bool, String> {
         .optional()
         .map_err(|e| format!("get dissolved: {e}"))?;
     Ok(v.unwrap_or(0) != 0)
-}
-
-/// Whether a PRIVATE-community read-cut re-seal is still outstanding (a prior attempt failed). The ban
-/// flow retries the re-seal whenever this is set. `false` for an unknown community.
-pub fn get_read_cut_pending(community_id: &str) -> Result<bool, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let v: Option<i64> = conn
-        .query_row(
-            "SELECT read_cut_pending FROM communities WHERE community_id = ?1",
-            params![community_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("get read_cut_pending: {e}"))?;
-    Ok(v.unwrap_or(0) != 0)
-}
-
-/// Set the base epoch a pending read-cut (re-founding) must reach. The re-seal rotates the base only
-/// while `server_root_epoch < target`, so a retry never double-rotates a base that already advanced. Set
-/// to `server_root_epoch + 1` on a fresh exclusion delta (ban add / privatize); left untouched on a pure
-/// resume so the in-flight target is preserved.
-pub fn set_read_cut_target_epoch(community_id: &str, target: u64) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET read_cut_target_epoch = ?1 WHERE community_id = ?2",
-        params![target as i64, community_id],
-    )
-    .map_err(|e| format!("set read_cut_target_epoch: {e}"))?;
-    Ok(())
-}
-
-/// The base epoch a pending read-cut must reach (see [`set_read_cut_target_epoch`]). `0` for an unknown
-/// community. Reinterpreted i64->u64 (lossless) for epochs >= 2^63.
-pub fn get_read_cut_target_epoch(community_id: &str) -> Result<u64, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let v: Option<i64> = conn
-        .query_row(
-            "SELECT read_cut_target_epoch FROM communities WHERE community_id = ?1",
-            params![community_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("get read_cut_target_epoch: {e}"))?;
-    Ok(v.unwrap_or(0) as u64)
-}
-
-/// The base (server-root) epoch a channel was last rekeyed FOR during a read-cut — the per-channel
-/// progress marker that lets a resumed re-founding skip channels already cut. `0` if unknown.
-pub fn channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str) -> Result<u64, String> {
-    let conn = super::get_db_connection_guard_static()?;
-    let v: Option<i64> = conn
-        .query_row(
-            "SELECT rekeyed_at_server_epoch FROM community_channels WHERE community_id = ?1 AND channel_id = ?2",
-            params![community_id, channel_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("get rekeyed_at_server_epoch: {e}"))?;
-    Ok(v.unwrap_or(0) as u64)
-}
-
-/// Record that a channel's key has been rotated to cover base epoch `server_epoch` (a read-cut step).
-/// Best-effort progress marker: written after the channel rekey lands, so a crash before it just re-rotates
-/// the channel on resume (safe, the rekey is monotonic) rather than skipping a channel that needed cutting.
-pub fn mark_channel_rekeyed_at_server_epoch(community_id: &str, channel_id: &str, server_epoch: u64) -> Result<(), String> {
-    let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE community_channels SET rekeyed_at_server_epoch = ?1 WHERE community_id = ?2 AND channel_id = ?3",
-        params![server_epoch as i64, community_id, channel_id],
-    )
-    .map_err(|e| format!("mark rekeyed_at_server_epoch: {e}"))?;
-    Ok(())
 }
 
 /// Ids of every locally-stored Community.
@@ -2862,7 +2087,7 @@ pub fn list_community_ids() -> Result<Vec<CommunityId>, String> {
     Ok(ids)
 }
 
-/// Every channel id held under a community we still hold, either protocol.
+/// Every channel id held under a community we still hold.
 pub fn held_channel_ids() -> Result<std::collections::HashSet<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
@@ -2872,7 +2097,7 @@ pub fn held_channel_ids() -> Result<std::collections::HashSet<String>, String> {
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
-/// Every relay a held community lists, either protocol, without opening any key.
+/// Every relay a held community lists, without opening any key.
 pub fn held_community_relays() -> Result<std::collections::HashSet<String>, String> {
     let sealed: Vec<String> = {
         let conn = super::get_db_connection_guard_static()?;
@@ -2889,7 +2114,7 @@ pub fn held_community_relays() -> Result<std::collections::HashSet<String>, Stri
     }))
 }
 
-/// A community's icon or banner, either protocol: both store the same JSON shape.
+/// A community's icon or banner, stored as [`CommunityImage`](crate::community::CommunityImage) JSON.
 pub fn community_image(community_id: &str, banner: bool) -> Result<Option<crate::community::CommunityImage>, String> {
     let sql = if banner {
         "SELECT banner FROM communities WHERE community_id = ?1"
@@ -2908,23 +2133,22 @@ pub fn community_image(community_id: &str, banner: bool) -> Result<Option<crate:
     serde_json::from_str(&json).map(Some).map_err(|e| format!("community image json: {e}"))
 }
 
-// ── Concord v2 storage (dual-stack) ──────────────────────────────────────────
+// ── Concord v2 storage ───────────────────────────────────────────────────────
 //
 // v2 communities reuse the shared community tables (migration 65 added the
 // `protocol`/`owner_pubkey`/`owner_salt`/`private` columns). The base access key
-// rides `server_root_key`/`server_root_epoch` (same role as v1's server root).
+// rides `server_root_key`/`server_root_epoch`.
 // A public channel stores the community_root in `channel_key` as a placeholder
 // (its real secret is derived from the root); a private channel stores its own
 // key. At-rest encryption reuses the same `enc_*`/`dec_*` helpers.
 
-/// The protocol a stored community runs, or `None` if it isn't held locally.
-pub fn community_protocol(id: &CommunityId) -> Result<Option<crate::community::ConcordProtocol>, String> {
+/// Whether the community is held locally.
+pub fn community_held(id: &CommunityId) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
-    let n: Option<i64> = conn
-        .query_row("SELECT protocol FROM communities WHERE community_id = ?1", params![id.to_hex()], |r| r.get(0))
+    conn.query_row("SELECT 1 FROM communities WHERE community_id = ?1", params![id.to_hex()], |_| Ok(()))
         .optional()
-        .map_err(|e| e.to_string())?;
-    Ok(n.map(crate::community::ConcordProtocol::from_i64))
+        .map(|row| row.is_some())
+        .map_err(|e| e.to_string())
 }
 
 /// The persisted CORD-02 §6 stash riding a community row: the vsk-0 fields
@@ -2964,9 +2188,8 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     let enc_desc = enc_txt_opt(&c.description)?;
     let enc_owner_pk = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_xonly))?;
     let enc_owner_salt = enc_txt(&crate::simd::hex::bytes_to_hex_32(&c.identity.owner_salt))?;
-    // ImageRef serializes to v1's CommunityImage JSON shape (`ext` rides the
-    // flattened `extra`), so the shared icon/banner columns serve both protocols
-    // — cache_community_image reads a v2 row's images unchanged.
+    // ImageRef serializes to the CommunityImage JSON shape (`ext` rides the
+    // flattened `extra`), so cache_community_image reads a v2 row's images unchanged.
     let icon_json = c.icon.as_ref().map(|i| serde_json::to_string(i).map_err(|e| e.to_string())).transpose()?;
     let banner_json = c.banner.as_ref().map(|b| serde_json::to_string(b).map_err(|e| e.to_string())).transpose()?;
     let enc_icon = enc_txt_opt(&icon_json)?;
@@ -3015,9 +2238,8 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
             // single replayed phantom (a same-owner cross-community vsk-2 edition)
             // would otherwise wedge ALL of this community's control-plane persistence
             // on every fold. The foreign row stays untouched; this community just
-            // never acquires a row for that id. Loud on purpose: a stitched migration
-            // twin whose flip never ran hits this on every fold and is otherwise deaf
-            // with no trace.
+            // never acquires a row for that id. Loud on purpose: a community that hits
+            // this on every fold is otherwise deaf with no trace.
             crate::log_warn!(
                 "[v2:{}] channel {} not saved: its row belongs to community {} (unflipped migration, or a hijack attempt)",
                 &id_hex[..8],
@@ -3085,7 +2307,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
     let row = conn
         .query_row(
             "SELECT server_root_key, name, relays, created_at, description,
-                    server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
+                    server_root_epoch, dissolved, owner_pubkey, owner_salt,
                     icon, banner, meta_extra, control_pk, control_root
              FROM communities WHERE community_id = ?1",
             params![id_hex],
@@ -3098,26 +2320,22 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, Option<String>>(9)?,
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<String>>(12)?,
-                    r.get::<_, Option<String>>(13)?,
-                    r.get::<_, Option<Vec<u8>>>(14)?,
+                    r.get::<_, Option<Vec<u8>>>(13)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e, control_pk_e, control_root_b)) = row
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e, control_pk_e, control_root_b)) = row
     else {
         return Ok(None);
     };
-    if crate::community::ConcordProtocol::from_i64(protocol) != crate::community::ConcordProtocol::V2 {
-        return Ok(None);
-    }
     let (Some(owner_pk_e), Some(owner_salt_e)) = (owner_pk_e, owner_salt_e) else {
         return Err("v2 community row is missing its owner commitment".to_string());
     };
@@ -3278,7 +2496,6 @@ pub fn set_guestbook(
 
 #[cfg(test)]
 mod tests {
-    use nostr_sdk::prelude::FinalizeEvent;
     use super::*;
 
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -3314,6 +2531,65 @@ mod tests {
         (tmp, guard)
     }
 
+    /// An unsaved v2 community fresh from genesis, holding one Public `#general` channel.
+    fn v2_fixture(name: &str, relays: &[&str]) -> crate::community::v2::community::CommunityV2 {
+        let owner = Keys::generate();
+        let g = crate::community::v2::control::genesis(
+            &owner,
+            crate::community::v2::control::CommunityMetadata { name: name.into(), ..Default::default() },
+            1_000,
+        )
+        .unwrap();
+        let relays = relays.iter().map(|r| r.to_string()).collect();
+        crate::community::v2::community::CommunityV2::from_genesis(&g, name, None, relays, 1_000)
+    }
+
+    /// A saved v2 community with the hex ids of it and its `#general` channel.
+    /// A bundle this build can join, named `name`.
+    fn v2_bundle(name: &str) -> String {
+        let bundle = crate::community::v2::service::bundle_of(
+            &v2_fixture(name, &["wss://r"]),
+            crate::community::v2::service::BundleAudience::Link,
+            None,
+            None,
+            None,
+        );
+        serde_json::to_string(&bundle).unwrap()
+    }
+
+    fn saved_v2(name: &str) -> (crate::community::v2::community::CommunityV2, String, String) {
+        let c = v2_fixture(name, &["wss://r"]);
+        save_community_v2(&c).unwrap();
+        let (cid, ch) = (c.id().to_hex(), c.channels[0].id.to_hex());
+        (c, cid, ch)
+    }
+
+    /// A Private channel holding its own key, to sit beside `#general`.
+    fn private_channel(id: u8, key: u8) -> crate::community::v2::community::ChannelV2 {
+        crate::community::v2::community::ChannelV2 {
+            id: ChannelId([id; 32]),
+            name: "staff".into(),
+            private: true,
+            key: Some([key; 32]),
+            epoch: Epoch(0),
+            voice: None,
+            meta_custom: None,
+            meta_extra: Default::default(),
+        }
+    }
+
+    /// A saved v2 community with its root and a Private channel's key archived, as the
+    /// service leaves one. Returns it with the hex ids of it and the Private channel.
+    fn archived_v2() -> (crate::community::v2::community::CommunityV2, String, String) {
+        let mut c = v2_fixture("HQ", &["r1"]);
+        c.channels.push(private_channel(0x61, 0x62));
+        save_community_v2(&c).unwrap();
+        let (cid, private) = (c.id().to_hex(), c.channels[1].id.to_hex());
+        store_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 0, &c.community_root).unwrap();
+        store_epoch_key(&cid, &private, 0, &[0x62; 32]).unwrap();
+        (c, cid, private)
+    }
+
     /// `cargo test --release -p vector-core --lib bench_load_community -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark, not an assertion"]
@@ -3322,25 +2598,8 @@ mod tests {
         crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
         crate::state::set_encryption_enabled(true);
 
-        let mut v1 = Community::create("HQ", "general", vec!["wss://r.one".into()]);
-        v1.description = Some("about".into());
-        for i in 0..7 {
-            let mut ch = v1.channels[0].clone();
-            ch.id = ChannelId([i as u8 + 1; 32]);
-            ch.name = format!("channel {i}");
-            v1.channels.push(ch);
-        }
-        save_community(&v1).unwrap();
-        set_community_roles(&v1.id.to_hex(), &crate::community::roles::CommunityRoles::default(), 1).unwrap();
-
-        let owner = nostr_sdk::prelude::Keys::generate();
-        let g = crate::community::v2::control::genesis(
-            &owner,
-            crate::community::v2::control::CommunityMetadata { name: "V2".into(), ..Default::default() },
-            1_000,
-        )
-        .unwrap();
-        let mut v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "V2", Some("about".into()), vec!["wss://r".into()], 1_000);
+        let mut v2 = v2_fixture("V2", &["wss://r"]);
+        v2.description = Some("about".into());
         for i in 0..7 {
             let mut ch = v2.channels[0].clone();
             ch.id = ChannelId([i as u8 + 0x40; 32]);
@@ -3361,9 +2620,6 @@ mod tests {
         };
         let mut get = || { std::hint::black_box(crate::state::ENCRYPTION_KEY.get()); };
         time("vault get()", &mut get);
-        time("load_community, 8 channels, encrypted", &mut || {
-            std::hint::black_box(load_community(&v1.id).unwrap().unwrap());
-        });
         time("load_community_v2, 8 channels, encrypted", &mut || {
             std::hint::black_box(load_community_v2(v2.id()).unwrap().unwrap());
         });
@@ -3375,9 +2631,7 @@ mod tests {
     fn encrypted_community_with_messages(n: usize) -> String {
         crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
         crate::state::set_encryption_enabled(true);
-        let c = Community::create("HQ", "general", vec!["wss://r".into()]);
-        save_community(&c).unwrap();
-        let ch = c.channels[0].id.to_hex();
+        let (_, cid, ch) = saved_v2("HQ");
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         for i in 0..n {
             let msg = crate::types::Message {
@@ -3389,7 +2643,7 @@ mod tests {
             };
             rt.block_on(crate::db::events::save_message(&ch, &msg)).unwrap();
         }
-        c.id.to_hex()
+        cid
     }
 
     #[test]
@@ -3529,7 +2783,7 @@ mod tests {
         assert_eq!(re.channels[0].meta_extra.get("vnd"), Some(&serde_json::Value::from(7)));
 
         // The stored JSON parses as a CommunityImage (`ext` from the flattened extra),
-        // so `community_image` serves either protocol from the column alone.
+        // so `community_image` serves it from the column alone.
         let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
         let img = community_image(&cid, false).unwrap().expect("the v2 icon reads as a CommunityImage");
         assert_eq!(img.url, "https://blossom.example/abc");
@@ -3540,7 +2794,7 @@ mod tests {
     }
 
     #[test]
-    fn column_reads_and_the_owner_check_serve_either_protocol() {
+    fn column_reads_and_the_owner_check_serve_a_v2_community() {
         use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role, RoleScope};
         use crate::community::moderation::is_owner_or_admin;
         let (_tmp, _guard) = init_test_db();
@@ -3553,8 +2807,9 @@ mod tests {
         .unwrap();
         let v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Two", None, vec!["wss://two".into()], 1_000);
         save_community_v2(&v2).unwrap();
-        let v1 = Community::create("One", "general", vec!["wss://one".into()]);
-        save_community(&v1).unwrap();
+        let mut other = v2_fixture("One", &["wss://one"]);
+        other.channels.push(private_channel(0x71, 0x72));
+        save_community_v2(&other).unwrap();
 
         crate::db::get_write_connection_guard_static()
             .unwrap()
@@ -3567,8 +2822,8 @@ mod tests {
         let channels = held_channel_ids().unwrap();
         assert!(!channels.contains(&"ee".repeat(32)), "a channel whose community is gone is not held");
         assert!(channels.contains(&crate::simd::hex::bytes_to_hex_32(&v2.channels[0].id.0)));
-        assert!(channels.contains(&v1.channels[0].id.to_hex()));
-        assert_eq!(channels.len(), v1.channels.len() + v2.channels.len());
+        assert!(other.channels.iter().all(|ch| channels.contains(&ch.id.to_hex())));
+        assert_eq!(channels.len(), other.channels.len() + v2.channels.len());
         let relays = held_community_relays().unwrap();
         assert!(relays.contains("wss://two") && relays.contains("wss://one"));
 
@@ -3591,22 +2846,6 @@ mod tests {
         assert!(!is_owner_or_admin(&cid, &social.to_hex()), "a role without management is not admin");
         assert!(!is_owner_or_admin(&cid, &stranger.to_hex()));
         assert!(!is_owner_or_admin(&"cd".repeat(32), &owner.public_key().to_hex()));
-    }
-
-    #[test]
-    fn server_root_epoch_round_trips() {
-        // The base read clock survives save/load (default 0; a rotated value preserved exactly).
-        let (_tmp, _guard) = init_test_db();
-        let mut c = Community::create("HQ", "general", vec![]);
-        save_community(&c).unwrap();
-        assert_eq!(load_community(&c.id).unwrap().unwrap().server_root_epoch, Epoch(0));
-
-        c.server_root_epoch = Epoch(5);
-        c.server_root_key = ServerRootKey([0x42u8; 32]);
-        save_community(&c).unwrap();
-        let loaded = load_community(&c.id).unwrap().unwrap();
-        assert_eq!(loaded.server_root_epoch, Epoch(5));
-        assert_eq!(loaded.server_root_key.as_bytes(), &[0x42u8; 32]);
     }
 
     #[test]
@@ -3647,28 +2886,6 @@ mod tests {
     }
 
     #[test]
-    fn save_community_populates_the_epoch_archive() {
-        // save_community mirrors the current base + channel keys into the multi-held archive, so the
-        // foundation is live without any explicit store_epoch_key call by the caller.
-        let (_tmp, _guard) = init_test_db();
-        let c = Community::create("HQ", "general", vec![]);
-        save_community(&c).unwrap();
-        let cid = c.id.to_hex();
-
-        // Base key archived under the server-root sentinel at epoch 0.
-        assert_eq!(
-            held_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 0).unwrap().as_ref(),
-            Some(c.server_root_key.as_bytes())
-        );
-        // The default channel's key archived under its channel id at epoch 0.
-        let chan = &c.channels[0];
-        assert_eq!(
-            held_epoch_key(&cid, &chan.id.to_hex(), 0).unwrap().as_ref(),
-            Some(chan.key.as_bytes())
-        );
-    }
-
-    #[test]
     fn at_rest_encryption_wraps_keys_and_metadata_on_disk() {
         let (_tmp, _guard) = init_test_db();
         // Local Encryption ON with a known vault key (the db-test guard serializes, so toggling these
@@ -3676,31 +2893,63 @@ mod tests {
         crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
         crate::state::set_encryption_enabled(true);
 
-        let mut c = Community::create("Secret HQ", "general", vec!["wss://relay.example".into()]);
-        c.server_root_key = ServerRootKey([0x42u8; 32]);
+        let mut c = v2_fixture("Secret HQ", &["wss://relay.example"]);
+        c.community_root = [0x42u8; 32];
         c.description = Some("top secret".into());
-        save_community(&c).unwrap();
-        let cid = c.id.to_hex();
+        c.channels.push(private_channel(0x61, 0x62));
+        save_community_v2(&c).unwrap();
+        let cid = c.id().to_hex();
+        store_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 0, &c.community_root).unwrap();
         set_community_banlist(&cid, &["deadbeef".repeat(8)], 1).unwrap();
 
         // On disk: secrets are 60-byte ciphertext (12 nonce + 32 + 16 tag), NOT raw 32-byte keys;
         // identifying text is hex ciphertext, never the plaintext.
         {
             let conn = crate::db::get_db_connection_guard_static().unwrap();
-            let (root_len, name, banlist): (i64, String, String) = conn
+            let (root_len, control_root_len, name, relays, description): (i64, i64, String, String, String) = conn
                 .query_row(
-                    "SELECT length(server_root_key), name, banlist FROM communities WHERE community_id = ?1",
+                    "SELECT length(server_root_key), length(control_root), name, relays, description
+                     FROM communities WHERE community_id = ?1",
+                    params![cid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!(root_len, 60, "server_root_key must be ciphertext, not a raw 32-byte key");
+            assert_eq!(control_root_len, 60, "control_root must be ciphertext, not a raw 32-byte key");
+            for (column, stored, plain) in [
+                ("name", &name, "Secret HQ"),
+                ("relays", &relays, r#"["wss://relay.example"]"#),
+                ("description", &description, "top secret"),
+            ] {
+                assert_ne!(stored, plain, "{column} must not be plaintext on disk");
+                assert!(crate::crypto::looks_encrypted(stored), "{column} column is ciphertext");
+            }
+            let (owner_pk, owner_salt, control_pk): (String, String, String) = conn
+                .query_row(
+                    "SELECT owner_pubkey, owner_salt, control_pk FROM communities WHERE community_id = ?1",
                     params![cid],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .unwrap();
-            assert_eq!(root_len, 60, "server_root_key must be ciphertext, not a raw 32-byte key");
-            assert_ne!(name, "Secret HQ", "name must not be plaintext on disk");
-            assert!(crate::crypto::looks_encrypted(&name), "name column is ciphertext");
-            // The banlist lives in `community_bans`, sealed; SQL filters are handed the opened
-            // list. The legacy column stays in the sweep so a PIN change before adoption cannot
-            // garble a row that still holds one.
-            let _ = &banlist;
+            for (column, stored, plain) in [
+                ("owner_pubkey", &owner_pk, crate::simd::hex::bytes_to_hex_32(&c.identity.owner_xonly)),
+                ("owner_salt", &owner_salt, crate::simd::hex::bytes_to_hex_32(&c.identity.owner_salt)),
+                ("control_pk", &control_pk, c.control_pk.unwrap().to_hex()),
+            ] {
+                assert_ne!(*stored, plain, "{column} must not be plaintext on disk");
+                assert!(crate::crypto::looks_encrypted(stored), "{column} column is ciphertext");
+            }
+            let mut stmt = conn
+                .prepare("SELECT length(channel_key), name FROM community_channels WHERE community_id = ?1")
+                .unwrap();
+            let channels: Vec<(i64, String)> =
+                stmt.query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+            assert_eq!(channels.len(), 2);
+            for (key_len, name) in &channels {
+                assert_eq!(*key_len, 60, "channel_key must be ciphertext, Public placeholder and Private key alike");
+                assert!(crate::crypto::looks_encrypted(name) && name != "general" && name != "staff", "channel name is ciphertext");
+            }
+            // The banlist lives in `community_bans`, sealed; SQL filters are handed the opened list.
             let banned_npub: String = conn
                 .query_row("SELECT npub FROM community_bans WHERE community_id = ?1 LIMIT 1", params![cid], |r| r.get(0))
                 .unwrap();
@@ -3718,11 +2967,18 @@ mod tests {
         }
 
         // In memory: load decrypts everything back to the originals.
-        let loaded = load_community(&c.id).unwrap().unwrap();
+        let loaded = load_community_v2(c.id()).unwrap().unwrap();
         assert_eq!(loaded.name, "Secret HQ");
         assert_eq!(loaded.description.as_deref(), Some("top secret"));
-        assert_eq!(loaded.server_root_key.as_bytes(), &[0x42u8; 32]);
+        assert_eq!(loaded.community_root, [0x42u8; 32]);
+        assert_eq!(loaded.control_root, c.control_root);
+        assert_eq!(loaded.control_pk, c.control_pk);
+        assert_eq!(loaded.identity.owner_xonly, c.identity.owner_xonly);
+        assert_eq!(loaded.identity.owner_salt, c.identity.owner_salt);
         assert_eq!(loaded.relays, vec!["wss://relay.example".to_string()]);
+        assert_eq!(loaded.channels[0].name, "general");
+        assert_eq!(loaded.channels[1].key, Some([0x62u8; 32]));
+        assert_eq!(held_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 0).unwrap(), Some([0x42u8; 32]));
         assert_eq!(get_community_banlist(&cid).unwrap(), vec!["deadbeef".repeat(8)]);
 
         crate::state::set_encryption_enabled(false);
@@ -3774,141 +3030,33 @@ mod tests {
         // encryption is on — the 32-vs-60 byte + `looks_encrypted` discriminators handle the mixed DB.
         let (_tmp, _guard) = init_test_db();
         crate::state::set_encryption_enabled(false);
-        let mut c = Community::create("Legacy HQ", "general", vec![]);
-        c.server_root_key = ServerRootKey([0x42u8; 32]);
-        save_community(&c).unwrap();
+        let mut c = v2_fixture("Legacy HQ", &[]);
+        c.community_root = [0x42u8; 32];
+        c.channels.push(private_channel(0x61, 0x62));
+        save_community_v2(&c).unwrap();
 
         crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
         crate::state::set_encryption_enabled(true);
-        let loaded = load_community(&c.id).unwrap().unwrap();
+        let loaded = load_community_v2(c.id()).unwrap().unwrap();
         assert_eq!(loaded.name, "Legacy HQ", "plaintext name reads through");
-        assert_eq!(loaded.server_root_key.as_bytes(), &[0x42u8; 32], "raw 32-byte key reads through");
+        assert_eq!(loaded.community_root, [0x42u8; 32], "raw 32-byte key reads through");
+        assert_eq!(loaded.control_root, c.control_root, "raw 32-byte control root reads through");
+        assert_eq!(loaded.channels[1].key, Some([0x62u8; 32]), "raw 32-byte channel key reads through");
 
         crate::state::set_encryption_enabled(false);
         crate::state::ENCRYPTION_KEY.clear(&[]);
     }
 
     #[test]
-    fn save_and_load_round_trip() {
-        let (_tmp, _guard) = init_test_db();
-        let original = Community::create("Vector HQ", "general", vec!["wss://r.one".into()]);
-        save_community(&original).unwrap();
-
-        let loaded = load_community(&original.id).unwrap().expect("present");
-        assert_eq!(loaded.id, original.id);
-        assert_eq!(loaded.name, "Vector HQ");
-        assert_eq!(loaded.relays, original.relays);
-        // Secrets survive the round trip byte-for-byte.
-        assert_eq!(loaded.server_root_key.as_bytes(), original.server_root_key.as_bytes());
-        // Channel survives with its key, epoch, and name.
-        assert_eq!(loaded.channels.len(), 1);
-        assert_eq!(loaded.channels[0].id, original.channels[0].id);
-        assert_eq!(loaded.channels[0].key.as_bytes(), original.channels[0].key.as_bytes());
-        assert_eq!(loaded.channels[0].epoch, Epoch(0));
-        assert_eq!(loaded.channels[0].name, "general");
-    }
-
-    #[test]
-    fn owner_is_protected_from_the_banlist_a_member_is_not() {
-        let (_tmp, _guard) = init_test_db();
-        let mut community = Community::create("HQ", "general", vec!["wss://r".into()]);
-        // Give it a proven owner (index 0).
-        let owner_id = Keys::new(SecretKey::from_slice(&[7u8; 32]).unwrap());
-        community.owner_attestation = Some(
-            crate::community::owner::build_owner_attestation_unsigned(
-                owner_id.public_key(),
-                &community.id.to_hex(),
-            )
-            .finalize(&owner_id)
-            .unwrap()
-            .as_json(),
-        );
-        save_community(&community).unwrap();
-
-        // A banlist naming BOTH the owner and a regular member.
-        let member = Keys::generate();
-        set_community_banlist(
-            &community.id.to_hex(),
-            &[owner_id.public_key().to_hex(), member.public_key().to_hex()],
-            1,
-        )
-        .unwrap();
-
-        let loaded = load_community(&community.id).unwrap().unwrap();
-        let ch = &loaded.channels[0];
-        // The owner is filtered OUT of the effective banlist (index 0 can't be banned)...
-        assert!(!ch.banned.contains(&owner_id.public_key()), "owner is never effectively banned");
-        assert!(ch.protected.contains(&owner_id.public_key()), "owner is in the protected set");
-        // ...but a regular member's ban stands.
-        assert!(ch.banned.contains(&member.public_key()), "a member's ban is honored");
-    }
-
-    #[test]
-    fn loaded_keys_actually_decrypt() {
-        // The reconstructed keys must be usable: seal with the original channel key,
-        // open with the loaded one (proves the blob round-trip preserved key bytes).
-        let (_tmp, _guard) = init_test_db();
-        let original = Community::create("HQ", "general", vec![]);
-        save_community(&original).unwrap();
-        let loaded = load_community(&original.id).unwrap().unwrap();
-
-        let author = nostr_sdk::prelude::Keys::generate();
-        let chan = &original.channels[0];
-        let sealed = crate::community::envelope::seal_message(
-            &author, &chan.key, &chan.id, chan.epoch, "persisted!", 1,
-        )
-        .unwrap();
-        let opened = crate::community::envelope::open_message(
-            &sealed,
-            &loaded.channels[0].key,
-            &loaded.channels[0].id,
-            loaded.channels[0].epoch,
-        )
-        .unwrap();
-        assert_eq!(opened.content, "persisted!");
-    }
-
-    #[test]
-    fn member_view_round_trips() {
-        // A joined member-view Community (keyless) persists + reloads with its
-        // server-root + channel keys intact.
-        let (_tmp, _guard) = init_test_db();
-        let member = Community {
-            id: CommunityId([7u8; 32]),
-            server_root_key: ServerRootKey([8u8; 32]),
-            server_root_epoch: Epoch(0),
-            name: "Joined".into(),
-            description: None,
-            icon: None,
-            banner: None,
-            relays: vec!["wss://r".into()],
-            channels: vec![Channel {
-                id: ChannelId([9u8; 32]),
-                key: ChannelKey([10u8; 32]),
-                epoch: Epoch(0),
-                name: "general".into(),
-                banned: Vec::new(),
-                protected: Vec::new(), roster: Default::default(),
-                epoch_keys: Vec::new(),
-                dissolved: false,
-            }],
-            owner_attestation: None,
-            dissolved: false,
-        };
-        save_community(&member).unwrap();
-        let loaded = load_community(&member.id).unwrap().expect("present");
-        assert_eq!(loaded.server_root_key.as_bytes(), &[8u8; 32]);
-        assert_eq!(loaded.channels[0].key.as_bytes(), &[10u8; 32]);
-    }
-
-    #[test]
     fn large_epoch_round_trips_losslessly() {
         // Epoch >= 2^63 stored as i64 then reinterpreted as u64 must be exact.
         let (_tmp, _guard) = init_test_db();
-        let mut c = Community::create("HQ", "g", vec![]);
+        let mut c = v2_fixture("HQ", &[]);
+        c.root_epoch = Epoch(u64::MAX - 3);
         c.channels[0].epoch = Epoch(u64::MAX - 7);
-        save_community(&c).unwrap();
-        let loaded = load_community(&c.id).unwrap().unwrap();
+        save_community_v2(&c).unwrap();
+        let loaded = load_community_v2(c.id()).unwrap().unwrap();
+        assert_eq!(loaded.root_epoch, Epoch(u64::MAX - 3));
         assert_eq!(loaded.channels[0].epoch, Epoch(u64::MAX - 7));
     }
 
@@ -3917,19 +3065,18 @@ mod tests {
         // A corrupted (short/non-hex) channel_id must error on load, not silently
         // reconstruct a wrong-but-self-consistent id.
         let (_tmp, _guard) = init_test_db();
-        let c = Community::create("HQ", "g", vec![]);
-        save_community(&c).unwrap();
+        let (c, cid, _) = saved_v2("HQ");
         {
             let conn = crate::db::get_write_connection_guard_static().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO community_channels
                     (channel_id, community_id, channel_key, epoch, name, created_at)
                  VALUES (?1, ?2, ?3, 0, 'bad', 0)",
-                rusqlite::params!["zz_not_hex", c.id.to_hex(), &[0u8; 32][..]],
+                rusqlite::params!["zz_not_hex", cid, &[0u8; 32][..]],
             )
             .unwrap();
         }
-        assert!(load_community(&c.id).is_err(), "malformed id must error, not corrupt");
+        assert!(load_community_v2(c.id()).is_err(), "malformed id must error, not corrupt");
     }
 
     #[test]
@@ -3955,40 +3102,37 @@ mod tests {
     fn missing_community_is_none() {
         let (_tmp, _guard) = init_test_db();
         let absent = CommunityId([0x33u8; 32]);
-        assert!(load_community(&absent).unwrap().is_none());
+        assert!(load_community_v2(&absent).unwrap().is_none());
     }
 
     #[test]
     fn list_ids_reflects_saved() {
         let (_tmp, _guard) = init_test_db();
-        let a = Community::create("A", "g", vec![]);
-        let b = Community::create("B", "g", vec![]);
-        save_community(&a).unwrap();
-        save_community(&b).unwrap();
+        let (a, _, _) = saved_v2("A");
+        let (b, _, _) = saved_v2("B");
         let ids = list_community_ids().unwrap();
         assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&a.id) && ids.contains(&b.id));
+        assert!(ids.contains(a.id()) && ids.contains(b.id()));
     }
 
     #[test]
     fn delete_community_clears_all_local_state() {
         let (_tmp, _guard) = init_test_db();
-        let c = Community::create("HQ", "general", vec!["r1".into()]);
-        save_community(&c).unwrap();
-        let cid = c.id.to_hex();
+        let (c, cid, private) = archived_v2();
         save_public_invite(&"ab".repeat(32), &cid, "url", None, None).unwrap();
         save_pending_invite(&"cd".repeat(32), "{}", "npub1x", 0).unwrap();
         set_edition_head(&cid, &"a".repeat(64), 3, &[0x11u8; 32]).unwrap();
-
-        // The save above archived the base + channel keys; this proves delete clears them too.
         assert!(!held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty());
+        assert!(!held_epoch_keys(&cid, &private).unwrap().is_empty());
 
         delete_community(&cid).unwrap();
-        assert!(!community_exists(&c.id).unwrap());
+        assert!(!community_exists(c.id()).unwrap());
         assert!(community_id_for_channel(&c.channels[0].id.to_hex()).unwrap().is_none());
+        assert!(community_id_for_channel(&private).unwrap().is_none());
         assert!(list_public_invites(&cid).unwrap().is_empty());
         assert_eq!(get_edition_head(&cid, &"a".repeat(64)).unwrap(), None, "edition heads cleared on delete");
         assert!(held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty(), "epoch keys cleared on delete");
+        assert!(held_epoch_keys(&cid, &private).unwrap().is_empty(), "channel epoch keys cleared on delete");
     }
 
     #[test]
@@ -3996,116 +3140,65 @@ mod tests {
         // self-removal teardown: drop chat/membership/control state but KEEP the held epoch keys so a
         // later self-scrub of own past messages stays possible.
         let (_tmp, _guard) = init_test_db();
-        let c = Community::create("HQ", "general", vec!["r1".into()]);
-        save_community(&c).unwrap();
-        let cid = c.id.to_hex();
+        let (c, cid, private) = archived_v2();
         save_public_invite(&"ab".repeat(32), &cid, "url", None, None).unwrap();
         set_edition_head(&cid, &"a".repeat(64), 3, &[0x11u8; 32]).unwrap();
 
         let base_before = held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap();
-        let chan_before = held_epoch_keys(&cid, &c.channels[0].id.to_hex()).unwrap();
-        assert!(!base_before.is_empty() && !chan_before.is_empty(), "save archived base + channel keys");
+        let chan_before = held_epoch_keys(&cid, &private).unwrap();
+        assert!(!base_before.is_empty() && !chan_before.is_empty(), "base + channel keys archived");
 
         delete_community_retain_keys(&cid).unwrap();
 
         // State is gone.
-        assert!(!community_exists(&c.id).unwrap());
+        assert!(!community_exists(c.id()).unwrap());
         assert!(community_id_for_channel(&c.channels[0].id.to_hex()).unwrap().is_none());
+        assert!(community_id_for_channel(&private).unwrap().is_none());
         assert!(list_public_invites(&cid).unwrap().is_empty());
         assert_eq!(get_edition_head(&cid, &"a".repeat(64)).unwrap(), None);
         // Epoch keys (base + channel, every epoch) survive intact.
         assert_eq!(held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap(), base_before,
             "base epoch keys retained for self-scrub");
-        assert_eq!(held_epoch_keys(&cid, &c.channels[0].id.to_hex()).unwrap(), chan_before,
+        assert_eq!(held_epoch_keys(&cid, &private).unwrap(), chan_before,
             "channel epoch keys retained for self-scrub");
     }
 
     #[test]
     fn channel_resolves_to_owning_community() {
         let (_tmp, _guard) = init_test_db();
-        let c = Community::create("HQ", "general", vec![]);
-        save_community(&c).unwrap();
-        let chan = c.channels[0].id.to_hex();
-        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(c.id.to_hex().as_str()));
+        let (_, cid, chan) = saved_v2("HQ");
+        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(cid.as_str()));
         assert!(community_id_for_channel(&"ff".repeat(32)).unwrap().is_none());
     }
 
     #[test]
     fn community_exists_reflects_saved() {
         let (_tmp, _guard) = init_test_db();
-        let c = Community::create("A", "g", vec![]);
-        assert!(!community_exists(&c.id).unwrap());
-        save_community(&c).unwrap();
-        assert!(community_exists(&c.id).unwrap());
-    }
-
-    #[test]
-    fn reparent_moves_channels_stamps_fence_and_invalidates_cache() {
-        let (_tmp, _guard) = init_test_db();
-        let v1 = Community::create("HQ", "general", vec![]);
-        save_community(&v1).unwrap();
-        let v1_cid = v1.id.to_hex();
-        let v2_cid = "ab".repeat(32);
-        let chan = v1.channels[0].id.to_hex();
-
-        // Warm the positives-only cache with the v1 mapping, then flip.
-        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(v1_cid.as_str()));
-        reparent_channels_and_fence(&v1_cid, &v2_cid).unwrap();
-
-        // Channel re-parented (cache invalidated → refills as v2), fence stamped both ways.
-        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(v2_cid.as_str()),
-            "stale v1 cache entry must not survive the re-parent");
-        assert_eq!(get_migrated_to(&v1_cid).unwrap().as_deref(), Some(v2_cid.as_str()));
-        assert!(get_community_dissolved(&v1_cid).unwrap(), "flip seals v1 (fence layer 0)");
-
-        // Idempotent: a second flip re-parents zero rows and the one-way fence holds.
-        reparent_channels_and_fence(&v1_cid, &"cd".repeat(32)).unwrap();
-        assert_eq!(get_migrated_to(&v1_cid).unwrap().as_deref(), Some(v2_cid.as_str()),
-            "migrated_to is one-way — a second flip cannot repoint it");
-    }
-
-    #[test]
-    fn migration_sweep_candidates_include_unsealed_v1() {
-        let (_tmp, _guard) = init_test_db();
-        let a = Community::create("A", "g", vec![]);
-        let b = Community::create("B", "g", vec![]);
-        let c = Community::create("C", "g", vec![]);
-        for x in [&a, &b, &c] { save_community(x).unwrap(); }
-        set_community_dissolved(&a.id.to_hex()).unwrap();
-        set_community_dissolved(&b.id.to_hex()).unwrap();
-        set_migrated_to(&b.id.to_hex(), &"ab".repeat(32)).unwrap();
-        let cands = migration_sweep_candidates().unwrap();
-        assert!(cands.contains(&a.id.to_hex()), "sealed + unchecked is a candidate");
-        assert!(!cands.contains(&b.id.to_hex()), "flipped is not a candidate");
-        // The regression this guards: a community migrated away whose control fold was
-        // vetoed by the boot probe never seals, so a seal-gated sweep could never reach
-        // it — leaving it stuck on v1 forever with no self-heal.
-        assert!(cands.contains(&c.id.to_hex()), "UNSEALED v1 is a candidate too");
-        // Marking checked converges the sweep for either kind.
-        set_migration_checked(&a.id.to_hex()).unwrap();
-        set_migration_checked(&c.id.to_hex()).unwrap();
-        let after = migration_sweep_candidates().unwrap();
-        assert!(!after.contains(&a.id.to_hex()) && !after.contains(&c.id.to_hex()));
+        let c = v2_fixture("A", &[]);
+        assert!(!community_exists(c.id()).unwrap());
+        save_community_v2(&c).unwrap();
+        assert!(community_exists(c.id()).unwrap());
     }
 
     #[test]
     fn pending_invite_first_wins_and_round_trips() {
         let (_tmp, _guard) = init_test_db();
         let cid = "ab".repeat(32);
+        let (first, second) = (v2_bundle("First"), v2_bundle("Second"));
         // First park inserts; a re-invite for the same id is IGNORED (first-wins, so a
         // hostile re-send can't rewrite a parked bundle or re-notify).
-        assert!(save_pending_invite(&cid, "{\"bundle\":1}", "npub1inviter", 0).unwrap());
-        assert!(!save_pending_invite(&cid, "{\"bundle\":2}", "npub1other", 0).unwrap());
+        assert!(save_pending_invite(&cid, &first, "npub1inviter", 0).unwrap());
+        assert!(!save_pending_invite(&cid, &second, "npub1other", 0).unwrap());
         assert!(pending_invite_exists(&cid).unwrap());
 
         let listed = list_pending_invites().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].community_id, cid);
-        assert_eq!(listed[0].bundle_json, "{\"bundle\":1}", "original bundle preserved");
+        assert_eq!(listed[0].bundle_json, first, "original bundle preserved");
         assert_eq!(listed[0].inviter_npub, "npub1inviter");
 
         // get is non-destructive; delete then removes it.
-        assert_eq!(get_pending_invite(&cid).unwrap().as_deref(), Some("{\"bundle\":1}"));
+        assert_eq!(get_pending_invite(&cid).unwrap(), Some(first.clone()));
         assert!(pending_invite_exists(&cid).unwrap(), "get must not delete");
         delete_pending_invite(&cid).unwrap();
         assert!(!pending_invite_exists(&cid).unwrap());
@@ -4117,9 +3210,7 @@ mod tests {
         let (_tmp, _guard) = init_test_db();
         // A community we hold + a parked invite for it (the cross-device race: invite landed
         // before the membership list rehydrated the community).
-        let held = Community::create("Held", "general", vec![]);
-        save_community(&held).unwrap();
-        let held_hex = held.id.to_hex();
+        let (_, held_hex, _) = saved_v2("Held");
         save_pending_invite(&held_hex, "{\"bundle\":1}", "npub1inviter", 0).unwrap();
         // An invite for a community we do NOT hold must survive the purge.
         let stranger = "ab".repeat(32);
@@ -4147,16 +3238,17 @@ mod tests {
         // so vary the id and rely on insertion order; to make ordering deterministic we bump the
         // stored time directly after each insert isn't needed — received_at ties break on id DESC).
         // Insert 150; the table must cap at 100.
+        let bundle = v2_bundle("Flood");
         for i in 0..150u32 {
             let cid = format!("{:064x}", i);
-            save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
+            save_pending_invite(&cid, &bundle, "npub1x", 0).unwrap();
         }
         let all = list_pending_invites().unwrap();
         assert_eq!(all.len(), 100, "table capped at MAX_PENDING_INVITES");
         // A spam flood can't grow it past the cap regardless of how many arrive.
         for i in 150..400u32 {
             let cid = format!("{:064x}", i);
-            save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
+            save_pending_invite(&cid, &bundle, "npub1x", 0).unwrap();
         }
         assert_eq!(list_pending_invites().unwrap().len(), 100, "cap holds under flood");
     }
@@ -4173,11 +3265,11 @@ mod tests {
         let expired = "bb".repeat(32);
         let permanent = "cc".repeat(32);
 
-        save_pending_invite(&live, "{\"live\":1}", "npub1x", now + 3600).unwrap();
-        save_pending_invite(&expired, "{\"dead\":1}", "npub1x", now - 1).unwrap();
+        save_pending_invite(&live, &v2_bundle("Live"), "npub1x", now + 3600).unwrap();
+        save_pending_invite(&expired, &v2_bundle("Dead"), "npub1x", now - 1).unwrap();
         // 0 = the sender declared no deadline (a pre-expiry client): stays permanent, because
         // an invite whose sender never promised a deadline isn't ours to revoke.
-        save_pending_invite(&permanent, "{\"forever\":1}", "npub1x", 0).unwrap();
+        save_pending_invite(&permanent, &v2_bundle("Forever"), "npub1x", 0).unwrap();
 
         let listed: Vec<String> = list_pending_invites().unwrap().into_iter().map(|i| i.community_id).collect();
         assert!(listed.contains(&live), "an unexpired invite still lists");
@@ -4217,9 +3309,7 @@ mod tests {
     #[test]
     fn a_legacy_banlist_is_adopted_on_first_read() {
         let (_tmp, _guard) = init_test_db();
-        let community = Community::create("Legacy bans", "general", vec![]);
-        save_community(&community).unwrap();
-        let cid = community.id.to_hex();
+        let (_, cid, _) = saved_v2("Legacy bans");
         let banned = "ab".repeat(32);
         {
             let conn = crate::db::get_write_connection_guard_static().unwrap();
@@ -4249,9 +3339,7 @@ mod tests {
         crate::db::set_sql_setting("encryption_enabled".to_string(), "true".to_string()).unwrap();
         crate::state::ENCRYPTION_KEY.set(KA, &[]);
         crate::state::set_encryption_enabled(true);
-        let community = Community::create("A", "general", vec![]);
-        save_community(&community).unwrap();
-        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let (_, cid, ch) = saved_v2("A");
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let late_write = |label: &'static str| {
@@ -4313,9 +3401,10 @@ mod tests {
         crate::db::set_sql_setting("security_type".to_string(), "pin".to_string()).unwrap();
         crate::db::set_sql_setting("last_vacuum".to_string(), "1".to_string()).unwrap();
         crate::db::set_pkey(&crate::crypto::encrypt_with_key("nsec1legacyaccount", &legacy).unwrap()).unwrap();
-        let community = Community::create("Old", "general", vec![]);
-        save_community(&community).unwrap();
-        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let mut community = v2_fixture("Old", &["wss://r"]);
+        community.channels.push(private_channel(0x61, 0x62));
+        save_community_v2(&community).unwrap();
+        let (cid, ch) = (community.id().to_hex(), community.channels[0].id.to_hex());
         set_community_pins(&cid, &ch, r#"{"pins":["old"]}"#, 1).unwrap();
         let dm_chat = make_test_npub(900_002);
         let dm = crate::types::Message { id: "e1".repeat(32), content: "said long ago".into(), at: 1_600_000_000_000, mine: true, ..Default::default() };
@@ -4324,11 +3413,12 @@ mod tests {
         let read = || {
             (
                 get_community_pins(&cid, &ch).unwrap(),
-                load_community(&community.id).unwrap().map(|c| *c.server_root_key.as_bytes()),
+                load_community_v2(community.id()).unwrap().map(|c| format!("{c:?}")),
                 rt.block_on(crate::db::events::get_message_views(dm_int, 10, 0)).unwrap().into_iter().map(|m| m.content).collect::<Vec<_>>(),
             )
         };
         let before = read();
+        assert_eq!(before.1, Some(format!("{community:?}")));
         assert_eq!(before.2, vec!["said long ago".to_string()]);
 
         assert!(!rt.block_on(at_rest::upgrade_after_unlock(pin, &[0x77; 32])).unwrap(), "a key that proves nothing moves nothing");
@@ -4428,9 +3518,7 @@ mod tests {
         crate::db::set_sql_setting("encryption_enabled".to_string(), "true".to_string()).unwrap();
         crate::db::set_sql_setting("security_type".to_string(), "pin".to_string()).unwrap();
         crate::db::set_pkey(&crate::crypto::encrypt_with_key("nsec1crashaccount", &legacy).unwrap()).unwrap();
-        let community = Community::create("Crash", "general", vec![]);
-        save_community(&community).unwrap();
-        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let (_, cid, ch) = saved_v2("Crash");
         set_community_pins(&cid, &ch, r#"{"pins":["kept"]}"#, 1).unwrap();
         let chat = crate::db::id_cache::get_or_create_chat_id(&make_test_npub(900_003)).unwrap();
         {
@@ -4544,7 +3632,7 @@ mod tests {
         let (_tmp, _guard) = init_test_db();
         let _vault = Vault;
         assert_eq!(Kdf::of_account().unwrap(), Kdf::Legacy, "no row reads as the legacy salt");
-        save_community(&Community::create("K", "general", vec![])).unwrap();
+        save_community_v2(&v2_fixture("K", &[])).unwrap();
 
         let (k1, key1) = (Kdf::fresh(), [0x51; 32]);
         at_rest::enable(&key1, &k1, "pin", None, None, &|_| {}).unwrap();
@@ -4642,9 +3730,7 @@ mod tests {
         let keys: Vec<[u8; 32]> = (0u8..31).map(|i| [0x90 + i; 32]).collect();
         crate::state::ENCRYPTION_KEY.set(keys[0], &[]);
         crate::state::set_encryption_enabled(true);
-        let community = Community::create("Read", "general", vec![]);
-        save_community(&community).unwrap();
-        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let (_, cid, ch) = saved_v2("Read");
         let pinned = r#"{"pins":["kept"]}"#;
         set_community_pins(&cid, &ch, pinned, 1).unwrap();
 
@@ -4664,6 +3750,14 @@ mod tests {
         };
         for pair in keys.windows(2) {
             crate::db::at_rest::rekey(&pair[0], &pair[1], &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
+            // The grace covers a read straddling ONE change; real PIN changes are seconds apart,
+            // so let a read that began after this one finish before the next.
+            let seen = reads.load(Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while reads.load(Ordering::SeqCst) < seen + 2 {
+                assert!(std::time::Instant::now() < deadline, "reads stopped completing across a PIN change");
+                std::thread::yield_now();
+            }
         }
         stop.store(true, Ordering::SeqCst);
         reader.join().unwrap();
@@ -4691,9 +3785,7 @@ mod tests {
         let keys: Vec<[u8; 32]> = (0u8..21).map(|i| [0x40 + i; 32]).collect();
         crate::state::ENCRYPTION_KEY.set(keys[0], &[]);
         crate::state::set_encryption_enabled(true);
-        let community = Community::create("Race", "general", vec![]);
-        save_community(&community).unwrap();
-        let (cid, ch) = (community.id.to_hex(), community.channels[0].id.to_hex());
+        let (_, cid, ch) = saved_v2("Race");
 
         let stop = Arc::new(AtomicBool::new(false));
         let last = Arc::new(AtomicU64::new(0));
@@ -4770,27 +3862,27 @@ mod tests {
     #[test]
     fn a_group_chat_becomes_a_community_with_a_second_channel_or_an_invite_link() {
         let (_tmp, _guard) = init_test_db();
-        let is = |c: &Community| crate::notify::is_community(&c.id.to_hex());
+        let is = |c: &crate::community::v2::community::CommunityV2| crate::notify::is_community(&c.id().to_hex());
 
-        let mut chat = Community::create("Friends", "general", vec!["wss://r".into()]);
-        save_community(&chat).unwrap();
+        let mut chat = v2_fixture("Friends", &["wss://r"]);
+        save_community_v2(&chat).unwrap();
         assert!(!is(&chat), "one channel, no link: a group chat");
-        assert_eq!(crate::notify::default_level(Some(&chat.id.to_hex())), crate::notify::NotifyLevel::All);
+        assert_eq!(crate::notify::default_level(Some(&chat.id().to_hex())), crate::notify::NotifyLevel::All);
 
         let mut second = chat.channels[0].clone();
         second.id = crate::community::ChannelId([0x42; 32]);
         second.name = "random".into();
         chat.channels.push(second);
-        save_community(&chat).unwrap();
+        save_community_v2(&chat).unwrap();
         assert!(is(&chat), "a second channel makes it a community");
-        assert_eq!(crate::notify::default_level(Some(&chat.id.to_hex())), crate::notify::NotifyLevel::Mentions);
+        assert_eq!(crate::notify::default_level(Some(&chat.id().to_hex())), crate::notify::NotifyLevel::Mentions);
 
-        let open = Community::create("Open", "general", vec!["wss://r".into()]);
-        save_community(&open).unwrap();
+        let open = v2_fixture("Open", &["wss://r"]);
+        save_community_v2(&open).unwrap();
         assert!(!is(&open));
-        set_community_invite_registry(&open.id.to_hex(), &["loc1".into()]).unwrap();
+        set_community_invite_registry(&open.id().to_hex(), &["loc1".into()]).unwrap();
         assert!(is(&open), "an invite link makes it a community");
-        set_community_invite_registry(&open.id.to_hex(), &[]).unwrap();
+        set_community_invite_registry(&open.id().to_hex(), &[]).unwrap();
         assert!(!is(&open), "revoking the last link makes it a group chat again");
 
         assert_eq!(crate::notify::default_level(None), crate::notify::NotifyLevel::All, "a DM rings for everything");
@@ -4814,11 +3906,24 @@ mod tests {
         crate::state::ENCRYPTION_KEY.set(K, &[]);
         crate::state::set_encryption_enabled(true);
 
-        let v1 = Community::create("HQ", "general", vec!["wss://r".into()]);
-        save_community(&v1).unwrap();
-        let cid = v1.id.to_hex();
-        let ch = v1.channels[0].id.to_hex();
-        park_channel_key(&cid, &ch, 3, &[0x33; 32], &"ab".repeat(32)).unwrap();
+        let mut v2 = v2_fixture("HQ", &["wss://r"]);
+        v2.description = Some("about".into());
+        let image = |url: &str| crate::community::v2::control::ImageRef {
+            url: url.into(), key: "0".repeat(64), nonce: "1".repeat(32), hash: "a".repeat(64), extra: Default::default(),
+        };
+        v2.icon = Some(image("https://blossom.example/icon"));
+        v2.banner = Some(image("https://blossom.example/banner"));
+        v2.meta_custom = Some([("k".to_string(), serde_json::Value::from("v"))].into_iter().collect());
+        v2.channels[0].voice = Some(true);
+        v2.channels[0].meta_extra.insert("vnd".into(), serde_json::Value::from(7));
+        v2.channels.push(private_channel(0x61, 0x62));
+        save_community_v2(&v2).unwrap();
+        let cid = v2.id().to_hex();
+        let ch = v2.channels[0].id.to_hex();
+        let private = v2.channels[1].id.to_hex();
+        store_epoch_key(&cid, crate::community::SERVER_ROOT_SCOPE_HEX, 0, &v2.community_root).unwrap();
+        store_epoch_key(&cid, &private, 0, &[0x62; 32]).unwrap();
+        park_channel_key(&cid, &private, 3, &[0x33; 32], &"ab".repeat(32)).unwrap();
         store_message_key("m1", "o1", &nostr_sdk::prelude::Keys::generate(), &["wss://r".into()]).unwrap();
         save_pending_invite(&"de".repeat(32), r#"{"bundle":1}"#, "npub1inviter", now_secs() + 3600).unwrap();
         save_public_invite(&"ab".repeat(32), &cid, "https://vectorapp.io/invite#x", None, Some("Label")).unwrap();
@@ -4827,24 +3932,8 @@ mod tests {
         set_community_roles(&cid, &crate::community::roles::CommunityRoles::default(), 1).unwrap();
         set_community_invite_registry(&cid, &["loc1".into()]).unwrap();
         replace_invite_link_sets(&cid, &[InviteLinkSetRow { creator_hex: "cd".repeat(32), locators: vec!["l1".into()] }]).unwrap();
-        set_migration_pointer(&cid, r#"{"pointer":1}"#).unwrap();
-        set_migration_ledger(&cid, &"ef".repeat(32), 1, r#"{"twin":1}"#).unwrap();
-
-        let owner = nostr_sdk::prelude::Keys::generate();
-        let g = crate::community::v2::control::genesis(
-            &owner,
-            crate::community::v2::control::CommunityMetadata { name: "Two".into(), ..Default::default() },
-            1_000,
-        )
-        .unwrap();
-        let mut v2 = crate::community::v2::community::CommunityV2::from_genesis(&g, "Two", None, vec!["wss://r".into()], 1_000);
-        v2.channels[0].voice = Some(true);
-        v2.channels[0].meta_extra.insert("vnd".into(), serde_json::Value::from(7));
-        save_community_v2(&v2).unwrap();
-        let v2cid = v2.id().to_hex();
-        let v2ch = v2.channels[0].id.to_hex();
-        set_guestbook(&v2cid, &[], 9).unwrap();
-        set_community_pins(&v2cid, &v2ch, r#"{"pins":["x"]}"#, 1).unwrap();
+        set_guestbook(&cid, &[], 9).unwrap();
+        set_community_pins(&cid, &ch, r#"{"pins":["x"]}"#, 1).unwrap();
 
         // A DM with a link preview and a file, and an unconfirmed send's retained rumor.
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -4901,11 +3990,12 @@ mod tests {
             (
                 get_pending_channel_keys(&cid).unwrap().iter().map(|k| (k.key, k.sender.clone())).collect::<Vec<_>>(),
                 get_community_ban_marks(&cid).unwrap(),
-                get_migration_pointer(&cid).unwrap(),
-                get_migration_ledger(&cid).unwrap(),
-                get_community_pins(&v2cid, &v2ch).unwrap(),
-                load_community_v2(v2.id()).unwrap().map(|c| (c.channels[0].voice, c.channels[0].meta_extra.clone())),
-                load_community(&v1.id).unwrap().map(|c| (*c.server_root_key.as_bytes(), c.name.clone())),
+                get_community_pins(&cid, &ch).unwrap(),
+                load_community_v2(v2.id()).unwrap().map(|c| format!("{c:?}")),
+                (
+                    held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap(),
+                    held_epoch_keys(&cid, &private).unwrap(),
+                ),
                 rt.block_on(crate::db::events::get_message_views(dm_chat_int, 10, 0)).unwrap()
                     .into_iter().map(|m| (m.content, m.preview_metadata, m.attachments)).collect::<Vec<_>>(),
                 crate::db::nip17_keys::get_resend_payload_by_pending("pending-1").unwrap().map(|p| p.rumor.content),
@@ -4919,12 +4009,13 @@ mod tests {
         };
         let before = read();
         assert_eq!(before.0, vec![([0x33; 32], "ab".repeat(32))]);
-        assert_eq!(before.2.as_deref(), Some(r#"{"pointer":1}"#));
-        assert_eq!(before.4, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
+        assert_eq!(before.2, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
+        assert_eq!(before.3, Some(format!("{v2:?}")));
+        assert_eq!(before.4, (vec![(Epoch(0), v2.community_root)], vec![(Epoch(0), [0x62; 32])]));
         // File captions are stored but not shown again yet; the view still carries the rest.
-        assert_eq!(before.7, vec![(String::new(), dm.preview_metadata.clone(), dm.attachments.clone())]);
-        assert_eq!(before.8.as_deref(), Some("still sending"));
-        assert_eq!(before.9, (vec![banned.to_hex()], vec!["d8".repeat(32)], 1, Some(1)), "the banned author stays hidden");
+        assert_eq!(before.5, vec![(String::new(), dm.preview_metadata.clone(), dm.attachments.clone())]);
+        assert_eq!(before.6.as_deref(), Some("still sending"));
+        assert_eq!(before.7, (vec![banned.to_hex()], vec!["d8".repeat(32)], 1, Some(1)), "the banned author stays hidden");
         let sealed: (String, String, String) = crate::db::get_db_connection_guard_static().unwrap().query_row(
             "SELECT a.name || e.preview_metadata || e.content, w.rumor_json, a.key FROM attachments a, events e, nip17_wrap_keys w
              WHERE e.id = a.event_id AND w.pending_id = 'pending-1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

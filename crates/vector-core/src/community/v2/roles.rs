@@ -5,7 +5,7 @@
 //! [`crate::community::roles`]'s `Role`/`MemberGrant`/`Permissions`, and the fold
 //! feeds the shared `authorize_delegation` + `is_authorized`. Only the SERIALIZATION
 //! is v2-native, because CORD-04 §3 rides `permissions` as a decimal STRING (the
-//! shared `Permissions` serializes as a bare `u64` for v1's storage), and a reader
+//! shared `Permissions` serializes as a bare `u64`), and a reader
 //! MUST accept either form (a number from an older edition, a string henceforth) and
 //! always write the string.
 

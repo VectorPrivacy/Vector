@@ -8,14 +8,12 @@ use std::time::Duration;
 use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use vector_core::community::transport::LiveTransport;
-use vector_core::community::{ChannelId, CommunityId, CommunityImage};
+use vector_core::community::{ChannelId, CommunityImage};
 use vector_core::simd::hex::bytes_to_hex_32;
 use vector_core::{db, VectorCore, STATE};
 
 use crate::commands::{core, Args};
-use crate::community::{id32, is_v2, load_v2};
-
-const LEGACY: &str = "Legacy communities are read-only on Vector Web";
+use crate::community::{id32, load_v2};
 
 pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Option<Result<Value, String>>> + 'a>> {
     Box::pin(async move {
@@ -44,8 +42,6 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             // --- Lifecycle ---
             "delete_community" => delete_community(a).await,
             "delete_community_channel" => delete_channel(a).await,
-            "migration_status" => migration_status(a),
-            "migrate_community" => migrate(a).await,
 
             // --- Roles ---
             "create_community_role" => create_role(a).await,
@@ -61,10 +57,6 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
 
 fn with_id(a: &Args, f: impl FnOnce(&str) -> Result<Value, String>) -> Result<Value, String> {
     f(&a.str("communityId")?)
-}
-
-fn now_secs() -> u64 {
-    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 fn channel_ids(community_id: &str) -> Vec<String> {
@@ -109,9 +101,6 @@ async fn hide_message(a: &Args) -> Result<Value, String> {
 
 async fn kick_member(a: &Args) -> Result<Value, String> {
     let (id, npub) = (a.str("communityId")?, a.str("npub")?);
-    if !is_v2(&id) {
-        return Err(LEGACY.into());
-    }
     db::scoped(async move { VectorCore.kick_member(&id, &npub).await.map_err(|e| e.to_string()) }).await?;
     Ok(Value::Null)
 }
@@ -132,9 +121,6 @@ async fn kick_members(a: &Args) -> Result<Value, String> {
 
 async fn ban_member(a: &Args, banned: bool) -> Result<Value, String> {
     let (id, npub) = (a.str("communityId")?, a.str("npub")?);
-    if !is_v2(&id) {
-        return Err(LEGACY.into());
-    }
     db::scoped(async move {
         VectorCore.set_member_banned(&id, &npub, banned).await.map_err(|e| e.to_string())?;
         reconcile_unread(&id).await;
@@ -193,12 +179,9 @@ fn set_policy(a: &Args) -> Result<Value, String> {
 async fn delete_community(a: &Args) -> Result<Value, String> {
     let id = a.str("communityId")?;
     db::scoped(async move {
-        if !is_v2(&id) {
-            return Err(LEGACY.to_string());
-        }
         let channels = channel_ids(&id);
         let relays = load_v2(&id).map(|c| c.relays).unwrap_or_default();
-        if !db::community::get_community_dissolved(&id).unwrap_or(false) {
+        if crate::community::is_held(&id) && !db::community::get_community_dissolved(&id).unwrap_or(false) {
             VectorCore.dissolve_community(&id).await.map_err(|e| e.to_string())?;
         }
         teardown_local(&id, &channels, &relays).await;
@@ -232,18 +215,13 @@ pub(crate) async fn teardown_local(id: &str, channels: &[String], relays: &[Stri
     STATE.lock().await.chats.retain(|c| !channels.contains(&c.id));
     for ch in channels {
         let _ = db::chats::delete_chat(ch);
-        vector_core::community::cache::clear_channel_sync_state(ch);
     }
-    vector_core::community::cache::abort_preload(id);
     vector_core::community::transport::prune_unneeded_community_relays(relays).await;
 }
 
 async fn delete_channel(a: &Args) -> Result<Value, String> {
     let (id, channel) = (a.str("communityId")?, a.str("channelId")?);
     db::scoped_result(async move {
-        if !is_v2(&id) {
-            return Err("Only Concord v2 communities support channel deletion".to_string());
-        }
         let ch = ChannelId(id32(&channel)?);
         let community = load_v2(&id)?;
         if community.primary_channel().is_some_and(|p| p.id.0 == ch.0) {
@@ -256,45 +234,6 @@ async fn delete_channel(a: &Args) -> Result<Value, String> {
             VectorCore.register_v2_chats(&c, &db::current_session()).await;
         }
         Ok(Value::Null)
-    })
-    .await
-}
-
-fn migration_status(a: &Args) -> Result<Value, String> {
-    use vector_core::community::migration;
-    let id = a.str("communityId")?;
-    let unlocked = migration::wizard_unlocked(now_secs());
-    if is_v2(&id) {
-        return Ok(json!({
-            "unlock_at": migration::MIGRATION_UNLOCK_AT, "unlocked": unlocked,
-            "eligible": false, "state": "not_applicable",
-        }));
-    }
-    let community = db::community::load_community(&CommunityId(id32(&id)?))?;
-    let is_owner = community.as_ref().is_some_and(vector_core::community::service::is_proven_owner);
-    let migrated_to = db::community::get_migrated_to(&id).ok().flatten();
-    let dissolved = db::community::get_community_dissolved(&id).unwrap_or(false);
-    let phase = db::community::get_migration_ledger(&id).ok().flatten().map(|(_, p, _)| p).unwrap_or(0);
-    let migrated = migrated_to.is_some();
-    Ok(json!({
-        "unlock_at": migration::MIGRATION_UNLOCK_AT,
-        "unlocked": unlocked,
-        "eligible": migration::migration_eligible(migrated, phase, dissolved, is_owner),
-        "state": migration::migration_state(migrated, phase, dissolved, is_owner, unlocked),
-        "phase": phase,
-        "migrated_to": migrated_to,
-    }))
-}
-
-async fn migrate(a: &Args) -> Result<Value, String> {
-    let id = a.str("communityId")?;
-    db::scoped(async move {
-        if is_v2(&id) {
-            return Err("this community is already on Concord v2".to_string());
-        }
-        let community = db::community::load_community(&CommunityId(id32(&id)?))?.ok_or("Community not found")?;
-        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
-        vector_core::community::migration::migrate_community_to_v2(&transport, &community, now_secs()).await.map(Value::String)
     })
     .await
 }
@@ -352,9 +291,6 @@ async fn set_community_image(a: &Args) -> Result<Value, String> {
     let crop = a.de::<Option<CropRect>>("crop").ok().flatten();
     db::scoped(async move {
         let session = db::current_session();
-        if !is_v2(&id) {
-            return Err(LEGACY.to_string());
-        }
         let community = load_v2(&id)?;
         let raw = vector_core::webfiles::read(Path::new(&filepath)).await.map_err(|e| format!("read image: {e}"))?;
         if vector_core::svg::looks_like_svg(&raw) {
@@ -410,14 +346,8 @@ async fn set_community_image(a: &Args) -> Result<Value, String> {
 /// A joined community's logo or banner as a local path, `null` when it has none.
 pub async fn cache_community_image(a: &Args) -> Result<Value, String> {
     let (id, is_banner) = (a.str("communityId")?, a.bool("isBanner").unwrap_or(false));
-    let image = if is_v2(&id) {
-        let c = load_v2(&id)?;
-        if is_banner { c.banner } else { c.icon }.map(|i| i.to_community_image())
-    } else {
-        let c = db::community::load_community(&CommunityId(id32(&id)?))?.ok_or("Community not found")?;
-        if is_banner { c.banner } else { c.icon }
-    };
-    match image {
+    let id = bytes_to_hex_32(&id32(&id)?);
+    match db::community::community_image(&id, is_banner)? {
         Some(img) => Ok(json!(cache_encrypted_image(&img, if is_banner { MAX_BANNER } else { MAX_ICON }).await?)),
         None => Ok(Value::Null),
     }
@@ -463,9 +393,6 @@ async fn cache_encrypted_image(image: &CommunityImage, max_bytes: usize) -> Resu
 async fn fetch_pinned_attachment(a: &Args) -> Result<Value, String> {
     let (id, channel, rumor_id) = (a.str("communityId")?, a.str("channelId")?, a.str("messageId")?);
     db::scoped(async move {
-        if !is_v2(&id) {
-            return Err("pins are only available in Concord v2 communities".to_string());
-        }
         let community = load_v2(&id)?;
         let pins = vector_core::community::v2::service::read_channel_pins(&community, &ChannelId(id32(&channel)?))?;
         let pin = pins.pins.iter().find(|p| p.rumor_id == rumor_id).ok_or("that message is not pinned")?;

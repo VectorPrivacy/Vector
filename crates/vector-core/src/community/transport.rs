@@ -70,7 +70,7 @@ impl PlaneFetch {
     }
 
     /// For transports with no relay set of their own (the in-memory test relays and
-    /// the v1 stubs): one authoritative source, fully answered.
+    /// stubs): one authoritative source, fully answered.
     pub fn whole(events: Vec<Event>) -> Self {
         PlaneFetch { events, answered: 1, attempted: 1 }
     }
@@ -470,8 +470,8 @@ fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: boo
 /// Callers own their evidence tier. The chat plane is flat, linear data — an
 /// event exists or it doesn't — so no transport floor promotes its reads.
 /// Every site that draws a completeness-sensitive conclusion from an `until`
-/// walk (the v1 history-start latch, join-verify's genesis anchor, refound
-/// compaction, guestbook folds) REQUESTS Full explicitly at its own Query.
+/// walk (join-verify's genesis anchor, refound compaction, guestbook folds)
+/// REQUESTS Full explicitly at its own Query.
 fn effective_evidence(query: &Query) -> Evidence {
     query.evidence
 }
@@ -654,23 +654,9 @@ fn demotion_allowed() -> bool {
 /// mutation: a swap mid-read must not warm account A's relays under B.
 pub async fn prewarm_held_communities() {
     crate::db::scoped(async move {
-        let mut relays: Vec<String> = Vec::new();
-        for id in crate::db::community::list_community_ids().unwrap_or_default() {
-            match crate::db::community::community_protocol(&id).ok().flatten() {
-                Some(crate::community::ConcordProtocol::V2) => {
-                    if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
-                        relays.extend(c.relays.iter().cloned());
-                    }
-                }
-                _ => {
-                    if let Ok(Some(c)) = crate::db::community::load_community(&id) {
-                        relays.extend(c.relays.iter().cloned());
-                    }
-                }
-            }
-        }
+        let mut relays: Vec<String> =
+            crate::db::community::held_community_relays().unwrap_or_default().into_iter().collect();
         relays.sort();
-        relays.dedup();
         if relays.is_empty() {
             return;
         }
@@ -1317,7 +1303,7 @@ impl Transport for LiveTransport {
         }
         wait_transport_ready().await?;
         // Skip relays the shared breaker already knows are dead — don't even pay
-        // their connect handshake + warmup + timeout (the v1 sweep / DM negentropy
+        // their connect handshake + warmup + timeout (DM negentropy and other sweeps
         // trip them early, so by the time a v2 backfill runs they're usually
         // marked). Keep all if that would leave none — a slow fetch beats no fetch.
         let relays = drop_refused(relays.to_vec())?;

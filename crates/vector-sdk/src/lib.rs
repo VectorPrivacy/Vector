@@ -362,14 +362,9 @@ impl VectorBot {
         self.core.list_pending_invites()
     }
 
-    /// Accept a parked Community invite by id, then start receiving its channels.
+    /// Accept a parked Community invite by id; core then subscribes to its channels.
     pub async fn accept_invite(&self, community_id: &str) -> Result<serde_json::Value> {
-        let res = self.core.accept_pending_invite(community_id).await?;
-        // The realtime sub was built without this community; refresh so its channels flow in.
-        if let Some(client) = vector_core::state::nostr_client() {
-            vector_core::community::realtime::refresh_subscription(&client).await;
-        }
-        Ok(res)
+        Ok(self.core.accept_pending_invite(community_id).await?)
     }
 
     /// Apply the invite policy to every currently-parked invite — auto-joining the ones it allows.
@@ -1815,7 +1810,7 @@ pub struct CommunityChannel {
     name: String,
     #[serde(default)]
     private: bool,
-    /// Absent on legacy (v1) communities, which have no private channels.
+    /// A summary that omits it reads as readable.
     #[serde(default = "default_true")]
     readable: bool,
     #[serde(default)]
@@ -2482,8 +2477,7 @@ mod tests {
 
     #[test]
     fn a_legacy_channel_without_the_readable_field_is_assumed_readable() {
-        // v1 communities have no private channels and emit no `readable` — the
-        // default must not render every legacy channel as locked.
+        // A summary without `readable` must not render the channel as locked.
         let json = serde_json::json!([{ "channel_id": "aa".repeat(32), "name": "general" }]);
         let chans: Vec<CommunityChannel> = serde_json::from_value(json).unwrap();
         assert!(chans[0].is_readable() && !chans[0].is_private());

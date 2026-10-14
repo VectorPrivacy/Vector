@@ -1,7 +1,6 @@
 //! v2 realtime — the `authors`-based live subscription + dispatch.
 //!
-//! v2 addresses planes by their group pubkey (CORD-01), not v1's `#z` tag, so
-//! the subscription is `{kinds:[1059,21059], authors:[…plane pubkeys…]}`. A
+//! v2 addresses planes by their group pubkey (CORD-01), so the subscription is `{kinds:[1059,21059], authors:[…plane pubkeys…]}`. A
 //! received event is routed to the owning community and handed to the shared
 //! [`inbound::dispatch_wrap`], which fires the protocol-agnostic
 //! `InboundEventHandler` the SDK's `on_message` consumes.
@@ -21,7 +20,7 @@ use tokio::sync::Mutex;
 use super::community::CommunityV2;
 use super::stream;
 use super::{derive, inbound};
-use crate::community::{CommunityId, ConcordProtocol, Epoch};
+use crate::community::{CommunityId, Epoch};
 use crate::event_handler::InboundEventHandler;
 use crate::ClientRelayExt;
 
@@ -30,7 +29,7 @@ static V2_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mut
 /// The pool-wide subscription id (the path that streams on Android).
 static V2_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 /// The current author-set (sorted hex) — an unchanged set skips a churny
-/// unsubscribe+resubscribe, exactly like v1's `COMMUNITY_SUB_SET`.
+/// unsubscribe+resubscribe.
 static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Session generation of the last COMPLETED [`refresh_subscription`] pass, or
@@ -60,8 +59,8 @@ pub fn subscription_ready() -> bool {
 /// Outer-wrap ids already dispatched, so the handler fires EXACTLY ONCE per
 /// message. The relay pool delivers the same wrap under both the targeted and
 /// pool-wide subs and from every relay independently, so without this a bot's
-/// `on_message` (and its reply) would run several times per message — the v1
-/// community path and the DM path dedup by outer id for the same reason. Cleared
+/// `on_message` (and its reply) would run several times per message — the DM
+/// path dedups by outer id for the same reason. Cleared
 /// on session swap; coarsely bounded (a message's duplicates all arrive within a
 /// short window, so a recent-set suffices).
 static V2_SEEN_WRAPS: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -155,8 +154,8 @@ pub async fn poolwide_subscription_id() -> Option<SubscriptionId> {
     V2_POOLWIDE_SUB_ID.lock().await.clone()
 }
 
-/// Clear the v2 realtime state on a session reset (called from `swap_session`
-/// alongside v1's clear), so a stale sub id / author-set can't leak across accounts.
+/// Clear the v2 realtime state on a session reset (called from `swap_session`), so a
+/// stale sub id / author-set can't leak across accounts.
 pub async fn clear() {
     *V2_SUB_ID.lock().await = None;
     *V2_POOLWIDE_SUB_ID.lock().await = None;
@@ -251,7 +250,7 @@ pub(crate) fn rekey_authors(c: &CommunityV2) -> Vec<PublicKey> {
 pub fn load_held_v2() -> Vec<CommunityV2> {
     let ids = crate::db::community::list_community_ids().unwrap_or_default();
     ids.iter()
-        .filter(|id| matches!(crate::db::community::community_protocol(id).ok().flatten(), Some(ConcordProtocol::V2)))
+        .filter(|id| crate::db::community::community_held(id).unwrap_or(false))
         .filter(|id| !crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false))
         .filter_map(|id| crate::db::community::load_community_v2(id).ok().flatten())
         .collect()
@@ -262,7 +261,7 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 pub fn load_dissolved_v2() -> Vec<CommunityV2> {
     let ids = crate::db::community::list_community_ids().unwrap_or_default();
     ids.iter()
-        .filter(|id| matches!(crate::db::community::community_protocol(id).ok().flatten(), Some(ConcordProtocol::V2)))
+        .filter(|id| crate::db::community::community_held(id).unwrap_or(false))
         .filter(|id| crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false))
         .filter_map(|id| crate::db::community::load_community_v2(id).ok().flatten())
         .collect()
@@ -339,8 +338,8 @@ pub fn invalidate_held_v2_cache() {
 }
 
 /// Refresh the v2 subscription for the held communities: register
-/// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
-/// mirroring v1). Idempotent on an unchanged author-set.
+/// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide).
+/// Idempotent on an unchanged author-set.
 /// Re-subscribe unconditionally, even if the author set is unchanged.
 ///
 /// `refresh_subscription` short-circuits when the set has not moved, on the
@@ -386,8 +385,7 @@ pub async fn refresh_subscription(client: &Client) {
             }
             client.connect().await;
             // Wait briefly for at least one relay to actually connect (a subscribe
-            // against a still-connecting relay silently fails to register — same
-            // trap as v1).
+            // against a still-connecting relay silently fails to register).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
             let wait_t = web_time::Instant::now();
             // 6 s on clearnet, the connect floor over Tor (a circuit build alone outlasts 6 s).
@@ -570,9 +568,8 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
 }
 
 /// Route an arriving v2 wrap: find the held community whose plane it opens under
-/// and fire the matching handler callback (via the shared bridge). Persistence to
-/// the local DB is deferred (bots deliver via the callback; GUI history is v1 for
-/// now). `session` gates against a mid-flight account swap.
+/// and fire the matching handler callback (via the shared bridge). `session` gates
+/// against a mid-flight account swap.
 pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>) {
     crate::db::scoped(async move {
         let Some(my_pk) = crate::my_public_key() else {
@@ -638,7 +635,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 }
                 // A chat event, opened but NOT yet applied: persist first (dedup by inner
                 // id + the author-scoped edit/delete checks), then fire the callback from
-                // the outcome — v1's exact model. A re-wrapped duplicate (any keyholder
+                // the outcome. A re-wrapped duplicate (any keyholder
                 // can re-seal a signed rumor into a fresh 1059), the relay echo of our
                 // own send, or a forged edit/delete yields no outcome and re-fires
                 // nothing.
@@ -657,7 +654,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                             handler.on_community_message(&channel_id, &message, fresh);
                         }
                         // A reaction or an edit: the folded TARGET row (its id is the
-                        // target's) — the same payload v1 hands this callback. Both come
+                        // target's). Both come
                         // back out of STATE, whose compact form drops the quoted
                         // attachment's extension, so re-resolve before rendering.
                         Some(inbound::ChatPersist::Updated { mut message, .. }) => {
@@ -1036,11 +1033,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         // Banned by the banlist we just folded → self-remove NOW, not when the Refounding
         // eventually lands. A Ban composes three layers (CORD-04 §6) and their guarantees
         // arrive at different speeds: the Banlist edition is instant, the Refounding is
-        // "heavy and asynchronous" by design. Waiting on the rotation to notice our own
-        // removal left the target sitting in a community that had already dropped them from
-        // its member count — silenced, still looking joined. Checked unconditionally: a
-        // banlist-only change folds no document, so `follow_control` returns None for it.
-        // v1 has done this since it shipped (`am_i_banned` in its own realtime refresh).
+        // "heavy and asynchronous" by design. Waiting on the rotation would leave the target
+        // sitting in a community that already dropped them from its member count — silenced,
+        // still looking joined. Checked unconditionally: a banlist-only change folds no
+        // document, so `follow_control` returns None for it.
         if let Some(me) = crate::my_public_key() {
             if crate::db::community::is_author_banned(&community_id, &me) {
                 crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);

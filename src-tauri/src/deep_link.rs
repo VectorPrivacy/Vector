@@ -161,15 +161,10 @@ fn validate_naddr(naddr: &str) -> bool {
 
 /// The locator half of an invite link (everything before the `#`).
 ///
-/// A v1 link keeps its whole payload in the fragment, so the path just ends at `/invite`.
-/// A v2 link carries the bundle coordinate as an naddr path segment (`/invite/<naddr>`) and is
-/// honoured from ANY host: the naddr+fragment self-authenticates and the domain is never
-/// contacted, so an Armada-minted link joins natively. Mirrors the frontend's
-/// `isCommunityInviteUrl`.
+/// The bundle coordinate rides as an naddr path segment (`/invite/<naddr>`) and is honoured
+/// from ANY host: the naddr+fragment self-authenticates and the domain is never contacted, so
+/// an Armada-minted link joins natively. Mirrors the frontend's `isCommunityInviteUrl`.
 fn is_invite_locator(before: &str) -> bool {
-    if before.ends_with("/invite") {
-        return true;
-    }
     match before.rsplit_once("/invite/") {
         Some((_, naddr)) => validate_naddr(strip_html_suffix(naddr.trim_end_matches('/'))),
         None => false,
@@ -294,22 +289,17 @@ pub fn open_chat_from_notification<R: Runtime>(
 mod tests {
     use super::*;
 
-    // The community-invite catch runs BEFORE the path parsers strip the
-    // fragment — every URL shape must survive intact.
+    // A retired fragment-only link is not an invite.
     #[test]
-    fn invite_fragment_parses_from_both_url_shapes() {
-        for url in [
-            "vector://invite#AgEs3q1MZz0",
-            "https://vectorapp.io/invite#AgEs3q1MZz0",
-        ] {
-            let action = parse_deep_link(url).expect(url);
-            assert_eq!(action.action_type, "community_invite");
-            assert_eq!(action.target, url, "join flow re-parses the full URL");
+    fn a_fragment_only_invite_link_is_not_an_invite() {
+        for url in ["vector://invite#AgEs3q1MZz0", "https://vectorapp.io/invite#AgEs3q1MZz0"] {
+            assert!(parse_deep_link(url).map(|a| a.action_type) != Some("community_invite".into()), "{url}");
         }
     }
 
-    // A v2 link puts the bundle coordinate in the PATH (`/invite/<naddr>#<frag>`), so it never
-    // ends with "/invite". Any host counts: the naddr+fragment self-authenticates.
+    // The bundle coordinate rides in the PATH (`/invite/<naddr>#<frag>`), and the community-invite
+    // catch runs BEFORE the path parsers strip the fragment. Any host counts: the naddr+fragment
+    // self-authenticates.
     const NADDR: &str = "naddr1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
     #[test]

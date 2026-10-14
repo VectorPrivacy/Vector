@@ -226,9 +226,9 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         }
     }
 
-    // --- Community realtime (vector-core's `community::realtime::dispatch_event` already
-    // ingested + persisted message-path events; these hooks own UI + notifications + the
-    // richer presence/teardown side-effects the GUI needs). ---
+    // --- Community realtime (vector-core's dispatcher already ingested + persisted
+    // message-path events; these hooks own UI + notifications + the richer
+    // presence/teardown side-effects the GUI needs). ---
 
     fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
         // Realtime community messages are genuinely live: the back-paging fetch is a SEPARATE one-shot
@@ -325,7 +325,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     fn on_community_self_removed(&self, community_id: &str) {
         let community_id = community_id.to_string();
         vector_core::db::spawn_bound(async move {
-            crate::commands::community::self_remove_from_community(&community_id, false).await;
+            crate::commands::community::self_remove_from_community(&community_id).await;
         });
     }
 
@@ -334,19 +334,10 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let community_id = community_id.to_string();
         vector_core::db::spawn_bound(async move {
             let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));
-            match vector_core::db::community::community_protocol(&id).ok().flatten() {
-                Some(vector_core::community::ConcordProtocol::V2) => {
-                    // A control fold may have revealed new channels — surface them as
-                    // chat rows so the list grows without a reboot.
-                    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
-                        vector_core::VectorCore.register_v2_chats(&c, &session).await;
-                    }
-                }
-                _ => {
-                    if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
-                        crate::commands::community::sync_community_chats(&c).await;
-                    }
-                }
+            // A control fold may have revealed new channels — surface them as chat rows so
+            // the list grows without a reboot.
+            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                vector_core::VectorCore.register_v2_chats(&c, &session).await;
             }
             vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community_id }));
         });

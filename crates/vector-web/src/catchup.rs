@@ -14,7 +14,7 @@ use futures_util::stream::{self, StreamExt};
 use nostr_sdk::prelude::*;
 use vector_core::community::v2::realtime;
 use vector_core::community::v2::volley::{self, PaintTarget};
-use vector_core::community::{CommunityId, ConcordProtocol};
+use vector_core::community::CommunityId;
 use vector_core::simd::hex::bytes_to_hex_32;
 use vector_core::{db, state, VectorCore};
 
@@ -138,9 +138,6 @@ async fn sweep() -> usize {
     let mut held: Vec<CommunityId> = Vec::new();
     let mut targets: Vec<(PaintTarget, u64)> = Vec::new();
     for id in ids {
-        if !matches!(db::community::community_protocol(&id).ok().flatten(), Some(ConcordProtocol::V2)) {
-            continue;
-        }
         let Ok(Some(c)) = db::community::load_community_v2(&id) else { continue };
         if c.dissolved {
             continue;
@@ -169,7 +166,7 @@ async fn sweep() -> usize {
             if db::session_stopped() {
                 return;
             }
-            let _ = crate::community::sync_community_channel(&cid, None, false).await;
+            let _ = crate::community::sync_community_channel(&cid, None).await;
         })
         .buffer_unordered(WINDOW)
         .collect::<Vec<()>>()

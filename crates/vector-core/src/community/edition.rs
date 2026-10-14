@@ -1,11 +1,9 @@
 //! Real-npub authority editions — the keyless model's authorship + version carrier.
 //!
-//! An authority change (a Grant, RoleMetadata, RoleOrder, Banlist, ...) is an **inner event signed
-//! by the ACTOR's own npub**, carrying the entity id, a per-entity
-//! `version`, and the previous edition's hash (`prev_hash`, see [`super::version`]). That inner event
-//! lives inside the channel/server-root encryption (the outer wrapper is the usual ephemeral signer,
-//! [`super::envelope`]), so authorship is **member-verifiable**: the inner Schnorr signature *is* the
-//! proof of who acted, and members check that npub against the roster.
+//! An authority change (a Grant, RoleMetadata, RoleOrder, Banlist, ...) is an edition **signed by
+//! the ACTOR's own npub**, carrying the entity id, a per-entity `version`, and the previous
+//! edition's hash (`prev_hash`, see [`super::version`]). Authorship is **member-verifiable**: the
+//! Schnorr signature *is* the proof of who acted, and members check that npub against the roster.
 //!
 //! This module is the wire encoding of one edition (build + verify + parse). It does NOT decide
 //! authorization — the signature proves WHO acted; the roster (§roles) decides WHETHER they were
@@ -13,7 +11,6 @@
 
 use crate::event_ext::FinalizeUnsignedWithId;
 use super::version;
-use crate::stored_event::event_kind;
 use nostr_sdk::prelude::*;
 
 const TAG_SUBKIND: &str = "vsk";
@@ -128,7 +125,7 @@ pub fn build_edition_inner(
     if let Some(a) = authority {
         tags.push(a.to_tag());
     }
-    EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), content)
+    EventBuilder::new(Kind::Custom(crate::community::v2::kind::CONTROL), content)
         .tags(tags)
         .custom_created_at(Timestamp::from_secs(created_at_secs))
         .finalize_unsigned_with_id(author)
@@ -194,7 +191,7 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
     let vsk = get(TAG_SUBKIND).ok_or(EditionError::MissingField("vsk"))?;
     let entity_id = decode_hash(&get(TAG_ENTITY).ok_or(EditionError::MissingField("eid"))?, "eid")?;
     // Digit-only: `u64::from_str` accepts a leading `+`, so "+5"/"5" would fold to
-    // one version as distinct signed inners (a convergence fork). Shared v1/v2 grammar.
+    // one version as distinct signed inners (a convergence fork).
     let ev_raw = get(TAG_EVERSION).ok_or(EditionError::MissingField("ev"))?;
     if !is_tag_decimal(&ev_raw) {
         return Err(EditionError::BadField("ev"));
@@ -437,7 +434,7 @@ mod tests {
     fn missing_required_field_is_rejected_not_panicked() {
         // An inner event lacking the entity-id tag is a parse error, never a panic.
         let actor = Keys::generate();
-        let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), "{}")
+        let inner = EventBuilder::new(Kind::Custom(crate::community::v2::kind::CONTROL), "{}")
             .tags([Tag::custom("vsk", ["3".to_string()])])
             .finalize(&actor)
             .unwrap();
@@ -460,7 +457,7 @@ mod tests {
                 Tag::custom("vac", [crate::simd::hex::bytes_to_hex_32(&eid()), "1".to_string(), hash.clone()]),
             ]
         };
-        let build = |tags: Vec<Tag>| EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), "{}")
+        let build = |tags: Vec<Tag>| EventBuilder::new(Kind::Custom(crate::community::v2::kind::CONTROL), "{}")
             .tags(tags).finalize(&actor).unwrap();
         assert!(parse_edition_inner(&build(base())).is_ok(), "a clean 5-tag base edition parses");
         for name in ["vsk", "eid", "ev", "ep", "vac"] {

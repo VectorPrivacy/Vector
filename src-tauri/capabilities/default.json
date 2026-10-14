@@ -166,8 +166,6 @@
     "allow-revoke-all-public-invites",
     "allow-unban-community-member",
     "allow-delete-community",
-    "allow-migrate-community",
-    "allow-migration-status",
     "allow-kick-community-member",
     "allow-get-community-banlist",
     "allow-hide-community-message",

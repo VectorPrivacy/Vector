@@ -255,15 +255,7 @@ impl VectorBot {
         if let Some(client) = vector_core::state::nostr_client() {
             relays.extend(client.relays().await.keys().map(|r| r.to_string()));
         }
-        for id in vector_core::db::community::list_community_ids().unwrap_or_default() {
-            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
-                relays.extend(c.relays.clone());
-            } else if let Ok(Some(c)) = vector_core::db::community::load_community(&id) {
-                // v1 community — invocations are plain content there too, so its
-                // members' pickers need the manifest on the same relays.
-                relays.extend(c.relays.clone());
-            }
-        }
+        relays.extend(vector_core::db::community::held_community_relays().unwrap_or_default());
         relays.sort();
         relays.dedup();
         match bot_interface::publish_manifest_event(&event, &relays).await {

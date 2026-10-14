@@ -713,19 +713,6 @@ fn list_moved(pubkey: &PublicKey, tried: &[String]) -> bool {
 // Send helper
 // ============================================================================
 
-/// Parsed `TRUSTED_RELAYS` URLs — computed once on first access.
-static TRUSTED_RELAY_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
-    crate::state::TRUSTED_RELAYS
-        .iter()
-        .filter_map(|s| RelayUrl::parse(s).ok())
-        .collect()
-});
-
-/// Get the cached parsed trusted relay URLs.
-pub fn trusted_relay_urls() -> Vec<RelayUrl> {
-    TRUSTED_RELAY_URLS.clone()
-}
-
 /// Send an event to specific relays, returning as soon as the **first** relay
 /// acknowledges success. Remaining relays continue sending in the background.
 ///

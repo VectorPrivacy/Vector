@@ -1870,8 +1870,8 @@ async function executeDeepLinkAction(payload) {
         // just hand it the address.
                     await openPackDetailsModal(target);
     } else if (action_type === 'community_invite') {
-        // Invite link (vector://invite#… or vectorapp.io/invite#…) — `target` is the full URL;
-        // the join flow re-parses its fragment, previews, and accepts on confirm.
+        // Invite link (vector://invite/<naddr>#… or vectorapp.io/invite/<naddr>#…) — `target` is
+        // the full URL; the join flow re-parses it, previews, and accepts on confirm.
         await previewAndJoinCommunityLink(target);
     } else if (action_type === 'go') {
         // A Vector link (vectorapp.io/go#…): `target` is its payload.

@@ -64,7 +64,7 @@ pub use attachments::{
 };
 // Event database functions
 pub use events::{
-    save_event, save_pivx_payment_event,
+    save_pivx_payment_event,
     delete_event,
     get_message_views, get_all_chats_last_messages,
     unread_counts,

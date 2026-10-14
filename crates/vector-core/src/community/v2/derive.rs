@@ -13,14 +13,11 @@
 //!   - the epoch (u64 big-endian) is the ONLY omittable field: labels marked
 //!     no-epoch omit the 8 bytes entirely.
 //!   - the `scalar_normalize` retry counter (A.3) appends AFTER whatever fields
-//!     are present, starting at byte value 0. (v1's equivalent starts its retry
-//!     byte at 1 — the two conventions differ only in a ~2⁻¹²⁸ branch, but v2
-//!     follows the spec exactly.)
+//!     are present, starting at byte value 0.
 //!
-//! These are DISTINCT from v1's `vector-community/v1/*` labels — the two
-//! protocols are different address universes by construction. The one label the
-//! specs share is the edition hash (`vector-community/v1/edition`,
-//! `community::version::EDITION_LABEL`), which upstream froze verbatim.
+//! The one `vector-community/v1/*` label still in use is the edition hash
+//! (`vector-community/v1/edition`, `community::version::EDITION_LABEL`), which
+//! upstream froze verbatim.
 
 use hkdf::Hkdf;
 use nostr_sdk::prelude::nip44::v2::ConversationKey;
@@ -53,8 +50,7 @@ const LABEL_EPOCH_COMMITMENT: &str = "concord/epoch-key-commitment";
 
 const ZERO32: [u8; 32] = [0u8; 32];
 
-/// The size of a public-invite unlock token (CORD-05 §2) — 16 bytes in v2
-/// (v1 tokens were 32).
+/// The size of a public-invite unlock token (CORD-05 §2).
 pub const TOKEN_LEN: usize = 16;
 
 /// Build the frozen A.1 `info` byte string. `epoch` is `None` for the no-epoch
@@ -299,8 +295,7 @@ pub fn invite_links_locator(community_id: &CommunityId, creator_xonly: &[u8; 32]
 /// Derived from PUBLIC inputs on purpose (full NIP-46 bunker parity, no raw-key
 /// access) — which means a locator match proves NOTHING. It is a lookup index
 /// only; authenticity rests on the rotator's seal + authority check and the
-/// blob's bound plaintext (D1 security relocation — never port v1's
-/// locator-match-⇒-authentic assumption).
+/// blob's bound plaintext (CORD-06 D1).
 pub fn recipient_locator(
     rotator_xonly: &[u8; 32],
     recipient_xonly: &[u8; 32],
@@ -324,8 +319,7 @@ pub fn invite_bundle_key(token: &[u8; TOKEN_LEN]) -> [u8; 32] {
 /// `community_id = sha256("concord/community" || owner_xonly || owner_salt)` —
 /// a plain SHA-256 commitment, NOT the hkdf shape. Ownership is a property of
 /// the id itself: forging a different owner onto an existing id is a
-/// second-preimage on SHA-256. (This is the root fix for the v1 forgeable
-/// owner-attestation anchor.)
+/// second-preimage on SHA-256.
 pub fn community_id_of(owner_xonly: &[u8; 32], owner_salt: &[u8; 32]) -> CommunityId {
     let mut h = Sha256::new();
     h.update(LABEL_COMMUNITY.as_bytes());

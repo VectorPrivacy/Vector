@@ -1,11 +1,8 @@
 //! The v2 in-memory community — the service/DB working type.
 //!
-//! Deliberately v2-native rather than reusing v1's [`crate::community::Community`]:
-//! a v1 `Channel` assumes an independent per-channel key, but a v2 Public Channel
-//! derives its key from the `community_root` (CORD-03), so the two don't share a
-//! shape. Both protocols converge instead at the FACADE, where each produces the
-//! same untyped JSON summary the SDK consumes — so dual-stack costs no SDK type
-//! change (a `version` field is the only tell).
+//! A Public Channel derives its key from the `community_root` (CORD-03); only a
+//! Private Channel holds its own. The FACADE hands the SDK an untyped JSON summary
+//! of it (see [`CommunityV2::to_summary_json`]).
 
 use nostr_sdk::prelude::PublicKey;
 
@@ -261,7 +258,7 @@ impl CommunityV2 {
     }
 
     /// The ONE channel the chat list surfaces for this community (multi-channel
-    /// UI is a later cut, mirroring v1's single-channel groups): a readable
+    /// UI is a later cut): a readable
     /// `#general` when present, else the oldest readable channel, else the first.
     /// A keyless Private channel is skipped — it can't render a single message.
     pub fn primary_channel(&self) -> Option<&ChannelV2> {
@@ -298,8 +295,7 @@ impl CommunityV2 {
     }
 
     /// The untyped summary the facade hands the SDK (protocol-agnostic shape +
-    /// a `version` tell). Kept deliberately close to v1's summary keys so a
-    /// consumer treats both uniformly.
+    /// a `version` field).
     pub fn to_summary_json(&self) -> serde_json::Value {
         serde_json::json!({
             "id": crate::simd::hex::bytes_to_hex_32(&self.identity.community_id.0),

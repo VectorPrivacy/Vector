@@ -115,9 +115,9 @@ function communityHasChannelList(communityId) {
     return channels.length > 1 || communityCanAddChannels(communityId);
 }
 
-/** v2 + MANAGE_CHANNELS: the two conditions for creating or deleting a channel. */
+/** MANAGE_CHANNELS: the condition for creating or deleting a channel. */
 function communityCanAddChannels(communityId) {
-    return communityIsV2(communityId) && communityCanManageChannels(communityId);
+    return communityCanManageChannels(communityId);
 }
 
 function toggleCommunityExpanded(communityId) {
@@ -161,12 +161,6 @@ function communityCanManageChannels(communityId) {
         })
         .catch(() => {});
     return false;
-}
-
-/** Channel create/delete are CORD-03 editions: v2 only. */
-function communityIsV2(communityId) {
-    return arrChats.some(c =>
-        communityIdOfChat(c) === communityId && c.metadata?.custom_fields?.proto_version === '2');
 }
 
 /* ── Sections ──────────────────────────────────────────────────────────────
@@ -334,9 +328,8 @@ async function openCommunityMenu(chat, ev, at) {
             });
         }
     }
-    // Batch containment (raid triage, invite revocation, key rotation). Needs BAN
-    // rather than KICK, and only v2 can rotate.
-    if (cf.proto_version === '2' && cf.community_id) {
+    // Batch containment (raid triage, invite revocation, key rotation). Needs BAN rather than KICK.
+    if (cf.community_id) {
         if (caps?.ban) {
             const raid = communityRaidAlerts.get(cf.community_id);
             items.push({

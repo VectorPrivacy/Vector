@@ -1,7 +1,7 @@
 //! v2 inbound bridge — turns opened v2 events into the protocol-agnostic
 //! [`InboundEventHandler`] callbacks the rest of Vector (and the SDK's
-//! `on_message`) already consumes. The handler is the seam: v1 and v2 both feed
-//! it, so a bot receives v2 messages with no SDK change.
+//! `on_message`) already consumes, so a bot receives community messages through
+//! the same seam as DMs.
 //!
 //! Dispatch is by which plane a kind-1059 wrap opens under. A received wrap is
 //! tried against each held channel's Chat-Plane key (author match, no trial
@@ -21,9 +21,9 @@ use crate::state::ChatState;
 use crate::types::{EmojiTag, Message, Reaction};
 
 /// Build a protocol-agnostic [`Message`] from an opened v2 chat Message event.
-/// Mirrors v1's `build_message` field-for-field (id = the rumor id, ms time,
-/// `mine`, npub, imeta attachments, NIP-30 emoji, the reply reference), so the
-/// frontend/SDK renderers treat a v2 message identically to a v1 or DM one.
+/// Every field a renderer reads (id = the rumor id, ms time, `mine`, npub, imeta
+/// attachments, NIP-30 emoji, the reply reference), so the frontend/SDK renderers
+/// treat a community message identically to a DM one.
 pub fn chat_message_to_message(
     opened: &stream::OpenedStream,
     reply_to: &Option<chat::ReplyRef>,
@@ -107,15 +107,15 @@ fn moderation_delete_authorized(
 }
 
 /// What applying a v2 chat event to STATE yielded — the caller persists it (async)
-/// once the STATE lock is dropped. Mirrors v1's `IncomingEvent` for the chat sub-kinds:
-/// a message row is saved fresh or re-saved (a landed reaction rides the row), a delete
-/// drops it. Persistence is the caller's so the apply step stays sync + lock-scoped.
+/// once the STATE lock is dropped. A message row is saved fresh or re-saved (a landed
+/// reaction rides the row), a delete drops it. Persistence is the caller's so the apply
+/// step stays sync + lock-scoped.
 pub enum ChatPersist {
     /// A brand-new message — save its row.
     New(Message),
     /// A message changed: a reaction landed (`edit_event` None → store its kind-7 row) or an
     /// edit applied (`edit_event` Some → save the folded MESSAGE_EDIT event, event-sourced
-    /// like v1 + DMs). Neither rewrites the message's own row.
+    /// like DMs). Neither rewrites the message's own row.
     Updated { message: Message, edit_event: Option<Box<crate::stored_event::StoredEvent>> },
     /// A message removed by its author — drop its row.
     Removed(String),
@@ -125,11 +125,11 @@ pub enum ChatPersist {
 }
 
 /// Apply an opened v2 [`ChatEvent`] to STATE (dedup + aggregate onto the SHARED
-/// [`ChatState`]), mirroring v1's `ingest_message`/`apply_reaction`/`apply_delete`. Sync:
-/// the DB dedup read + STATE mutation run under the caller's lock; the caller then does the
-/// async DB persist on the returned [`ChatPersist`] (see [`persist_chat`]). Returns `None`
-/// for a duplicate, an already-expired rumor, a non-persisted kind (typing/webxdc), or an
-/// aggregate whose target isn't resident in this channel.
+/// [`ChatState`]). Sync: the DB dedup read + STATE mutation run under the caller's lock;
+/// the caller then does the async DB persist on the returned [`ChatPersist`] (see
+/// [`persist_chat`]). Returns `None` for a duplicate, an already-expired rumor, a
+/// non-persisted kind (typing/webxdc), or an aggregate whose target isn't resident in
+/// this channel.
 pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey) -> Option<ChatPersist> {
     // CORD-04 §4: a banned npub VANISHES — every chat event they author (message,
     // reaction, edit, delete) is dropped at fold time. Severance (the rekey) only
@@ -176,7 +176,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 reference_id: target_id.clone(),
                 // npub, not hex: the frontend's whole reaction contract (profile
                 // name resolve + the own-reaction highlight vs strPubkey) keys on
-                // bech32 — exactly what v1 stores.
+                // bech32.
                 author_id: opened.author.to_bech32().unwrap_or_else(|_| opened.author.to_hex()),
                 emoji: emoji.clone(),
                 emoji_url: emoji_url.clone(),
@@ -199,7 +199,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 return None;
             }
             // Apply to STATE via the shared canonical applier (seeds history with the
-            // original once, dedups by `edited_at`, swaps content) — reused from v1/DMs.
+            // original once, dedups by `edited_at`, swaps content), shared with DMs.
             // The edit's emoji pairs ride along: apply_edit adopts the LATEST edit's
             // set, so peers render the replacement text from the replacement's tags.
             let edited_at = opened.at_ms;
@@ -209,8 +209,8 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
                 .collect();
             let text_spans = crate::text_spans::from_tags(opened.rumor.tags.iter(), new_content);
             let (_c, message) = state.update_message_with(&target_id, |m, i| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone(), text_spans.clone(), i))?;
-            // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching
-            // v1 — emoji tags included, or the reload fold re-strips what the live fold kept.
+            // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), emoji
+            // tags included, or the reload fold re-strips what the live fold kept.
             let edit_event = crate::stored_event::StoredEventBuilder::new()
                 .id(opened.rumor_id.to_hex())
                 .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
@@ -232,7 +232,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             // A delete may target a REACTION (an un-react) rather than a message.
             // Reactions are author-revocable only: the deleter must be the
             // reactor. Checked before the message path so a reaction id never
-            // falls through to message-removal logic (v1's exact rule).
+            // falls through to message-removal logic.
             if let Some((_chat, message_id, author_npub, _)) = state.find_reaction(&target_id) {
                 let reactor_ok = PublicKey::parse(&author_npub).map(|pk| pk == opened.author).unwrap_or(false);
                 if !reactor_ok {
@@ -323,8 +323,8 @@ pub async fn persist_chat_event(
         let mut st = crate::state::STATE.lock().await;
         apply_chat_to_state(&mut st, event, channel_id, my_pubkey)
     }?;
-    // Resolve a reply's preview (content/npub) from the DB before persist + emit
-    // (v1 parity): the parent is often persisted but outside the in-memory window,
+    // Resolve a reply's preview (content/npub) from the DB before persist + emit:
+    // the parent is often persisted but outside the in-memory window,
     // and without this the live render shows a reply with no context.
     let outcome = match outcome {
         ChatPersist::New(mut m) => {
@@ -442,7 +442,7 @@ pub enum DispatchedV2 {
     /// NOT yet applied. The realtime layer runs it through [`persist_chat_event`]
     /// and fires the matching callback from the outcome — so a re-wrapped
     /// duplicate (any keyholder can re-wrap a signed seal into a fresh 1059) or a
-    /// forged edit/delete never re-fires a handler, exactly v1's model.
+    /// forged edit/delete never re-fires a handler.
     Chat { channel_id: String, event: Box<ChatEvent> },
     /// A typing indicator from `npub` on `channel_id`.
     Typing { channel_id: String, npub: String },
@@ -557,7 +557,7 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey
             handler.on_community_typing(channel_id, &npub, until);
             DispatchedV2::Typing { channel_id: channel_id.to_string(), npub }
         }
-        // A WebXDC peer signal fires the same handler surface v1 uses — the shared
+        // A WebXDC peer signal fires the shared handler surface: the common
         // tail (30078 persist + recency gate + Iroh wiring + the lobby emit) does
         // the rest. Own-device echoes drop: the local realtime layer tracks itself.
         ChatEvent::Webxdc { opened } => {
@@ -774,7 +774,7 @@ mod tests {
         let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(5), false).unwrap();
 
         // Dispatch OPENS the event but fires no message callback — that belongs to
-        // the persist outcome (dedup + author checks), v1's model.
+        // the persist outcome (dedup + author checks).
         let rec = Recorder::default();
         let dispatched = dispatch_wrap(&wrap, &community, &me.public_key(), &rec);
         assert!(rec.messages.lock().unwrap().is_empty(), "no optimistic message callback");
@@ -1481,7 +1481,7 @@ mod tests {
         let (secret, epoch) = community.channel_secret(&community.channels[0]);
         let group = super::super::derive::channel_group_key(&secret, &general, epoch);
 
-        // A PEER's ad fires the shared v1 handler surface.
+        // A PEER's ad fires the shared handler surface.
         let peer = Keys::generate();
         let rumor = chat::build_webxdc_rumor(peer.public_key(), &general, epoch, &content, vec![], 5_000);
         let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &peer, Timestamp::from_secs(5), false).unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
             assert!(matches!(outcome, Some(ChatPersist::New(_))), "both persist as new messages");
         }
         // The reply row carries its parent as inline reply context, resolved
-        // from the persisted root (v1's reply-preview parity).
+        // from the persisted root.
         let held = {
             let st = crate::state::STATE.lock().await;
             st.find_message(&reply_id).map(|(_, m)| m)

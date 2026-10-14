@@ -658,11 +658,11 @@ function _dmsgLinkPreviewData(msg) {
     const hasMetadata = meta && (meta.og_image || meta.og_title || meta.title || meta.og_description || meta.description);
     if (!hasMetadata) {
         if (!meta && msg.content) {
-            // Pack-share URLs and bare naddrs are not links to preview.
+            // Invite links, pack-share URLs and bare naddrs are not links to preview.
             const contentForPreview = withoutNostrEmbedUrls(msg.content)
                 .replace(/<https?:\/\/[^\s>]+>/g, '')
-                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '')
-                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?)#[A-Za-z0-9_-]+/gi, '');
+                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/|vector:\/\/invite\/)naddr1[ac-hj-np-z02-9]{20,}\/?(?:#[A-Za-z0-9_-]+)?/gi, '')
+                .replace(/(?:https?:\/\/(?:www\.)?vectorapp\.io\/emojis\/pack\/|nostr:)?naddr1[ac-hj-np-z02-9]{20,}(?:\.html)?\/?/gi, '');
             if (contentForPreview.includes('https') && !isImageUrl(msg.content) && !_dmsgPreviewFetchedIds.has(msg.id)) {
                 _dmsgPreviewFetchedIds.add(msg.id);
                 invoke('fetch_msg_metadata', { chatId: strOpenChat, msgId: msg.id });

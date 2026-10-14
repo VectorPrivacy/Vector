@@ -1,9 +1,9 @@
 //! Per-entity version chain for authority editions.
 //!
-//! Every authority record (a Grant, RoleMetadata, RoleOrder, Banlist, the OwnerAttestation) is a
+//! Every authority record (a Grant, RoleMetadata, RoleOrder, Banlist, ...) is a
 //! sequence of **editions**. Each edition carries a monotonic `version` and the hash of its
 //! predecessor (`prev_hash`), and the actor's real-npub signature covers both — so the chain is over
-//! signed content, not the (ephemeral) outer wrapper. Clients fold the fetched set into the current
+//! signed content, not the outer wrap. Clients fold the fetched set into the current
 //! head by the rules:
 //!   - **refuse-downgrade** on the version integer (never accept a version below the floor already held);
 //!   - **equal-version fork** resolves by a deterministic tiebreak: the lower **inner edition id** (a

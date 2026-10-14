@@ -21,7 +21,6 @@
             avatarSrc: primary?.metadata?.avatar_cached ? h.convertFileSrc(primary.metadata.avatar_cached) : null,
             members: h.communityMemberSubtext(id),
             raid: h.raidAlert(id),
-            v2: cf.proto_version === '2',
         };
     });
 
@@ -30,11 +29,10 @@
     // landing must not refetch.
     $effect(() => {
         const id = vm?.id;
-        const v2 = !!vm?.v2;
         if (!id) return;
         untrack(() => {
             h.refreshMemberCount(id);
-            if (v2) h.refreshRaidAlert(id);
+            h.refreshRaidAlert(id);
         });
     });
 

@@ -156,13 +156,9 @@ function _derezExpired() {
     if (next !== Infinity) armExpiry(next);
 }
 
-/** DMs and Concord v2 community channels support the Self-Destruct Timer
- *  (sender-controlled NIP-40 TTL). A v1 community's send path ignores the tag,
- *  so it's gated out here to avoid an indicator that would lie. */
+/** DMs and community channels support the Self-Destruct Timer (sender-controlled NIP-40 TTL). */
 function chatSupportsSelfDestruct(chat) {
-    if (!chat) return false;
-    if (chat.chat_type === 'DirectMessage') return true;
-    return chat.chat_type === 'Community' && chat.metadata?.custom_fields?.proto_version === '2';
+    return chat?.chat_type === 'DirectMessage' || chat?.chat_type === 'Community';
 }
 
 function buildChatMenuItems(chat) {
@@ -1361,7 +1357,6 @@ async function openChat(contact, { reread = true } = {}) {
     const isDissolvedChat = chatIsDissolved(chat);
     VectorSvelte.setNotice('blocked', false);
     VectorSvelte.setNotice('dissolved', '');
-    VectorSvelte.setNotice('migrated', false);
     if (isBlockedChat) {
         VectorSvelte.setLock('blocked', 'Unblock to send messages');
         VectorSvelte.setNotice('blocked', true);

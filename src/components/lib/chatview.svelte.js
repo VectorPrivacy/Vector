@@ -60,9 +60,9 @@ export function clearDivider() {
 }
 
 // What the list shows beside the rows: the "start of channel" marker of an empty
-// community and the end-of-timeline notices (blocked peer, dissolved community, v1→v2
-// upgrade). The openers write these; the list renders them after the rows.
-const notices = $state({ empty: '', blocked: false, dissolved: '', migrated: false });
+// community and the end-of-timeline notices (blocked peer, dissolved community). The
+// openers write these; the list renders them after the rows.
+const notices = $state({ empty: '', blocked: false, dissolved: '' });
 export function noticeState() { return notices; }
 export function setNotice(key, value) { notices[key] = value; }
 

@@ -1,7 +1,4 @@
 //! Concord communities (v2) over the desktop command surface.
-//!
-//! v1 communities are read-only history on the web: new v1 joins ended at the
-//! protocol's timelock, and its desktop glue is platform-heavy.
 
 use std::time::Duration;
 
@@ -9,7 +6,7 @@ use nostr_sdk::prelude::*;
 use serde_json::{json, Value};
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::v2::community::CommunityV2;
-use vector_core::community::{ChannelId, CommunityId, ConcordProtocol};
+use vector_core::community::{ChannelId, CommunityId};
 use vector_core::sending::SendCallback;
 use vector_core::simd::hex::bytes_to_hex_32;
 use vector_core::{db, Message, VectorCore, STATE};
@@ -24,9 +21,9 @@ pub(crate) fn id32(hex: &str) -> Result<[u8; 32], String> {
     Ok(bytes)
 }
 
-pub(crate) fn is_v2(community_id: &str) -> bool {
+pub(crate) fn is_held(community_id: &str) -> bool {
     id32(community_id).is_ok_and(|b| {
-        matches!(db::community::community_protocol(&CommunityId(b)).ok().flatten(), Some(ConcordProtocol::V2))
+        db::community::community_held(&CommunityId(b)).unwrap_or(false)
     })
 }
 
@@ -52,34 +49,12 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
-        "preloaded": false,
-        "proto_version": ConcordProtocol::V2.as_i64(),
         "relays": c.relays,
     })
 }
 
 fn summarize_any(id: &CommunityId) -> Option<Value> {
-    match db::community::community_protocol(id).ok().flatten() {
-        Some(ConcordProtocol::V2) => db::community::load_community_v2(id).ok().flatten().map(|c| summarize_v2(&c)),
-        _ => db::community::load_community(id).ok().flatten().map(|c| {
-            json!({
-                "community_id": c.id.to_hex(),
-                "name": c.name,
-                "description": c.description,
-                "is_owner": false,
-                "has_icon": c.icon.is_some(),
-                "channels": c.channels.iter().map(|ch| json!({
-                    "channel_id": ch.id.to_hex(), "name": ch.name, "private": false, "readable": true,
-                })).collect::<Vec<_>>(),
-                "primary_channel": c.channels.first().map(|ch| ch.id.to_hex()),
-                "owner_npub": null,
-                "dissolved": c.dissolved,
-                "preloaded": false,
-                "proto_version": ConcordProtocol::V1.as_i64(),
-                "relays": c.relays,
-            })
-        }),
-    }
+    db::community::load_community_v2(id).ok().flatten().map(|c| summarize_v2(&c))
 }
 
 pub fn list_communities() -> Result<Value, String> {
@@ -92,7 +67,7 @@ pub fn get_community(community_id: &str) -> Result<Value, String> {
 }
 
 pub fn get_community_admins(community_id: &str) -> Result<Value, String> {
-    if !is_v2(community_id) {
+    if !is_held(community_id) {
         return Ok(json!([]));
     }
     let roles = VectorCore.community_roles(community_id).map_err(|e| e.to_string())?;
@@ -131,7 +106,7 @@ pub fn get_community_invite_summary(community_id: &str) -> Result<Value, String>
     Ok(json!({ "is_public": is_public, "creators": creators }))
 }
 
-pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>, reset_cursor: bool) -> Result<Value, String> {
+pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) -> Result<Value, String> {
     use vector_core::community::cache;
     let is_older = before_ms.is_some();
     let key = format!("{channel_id}:{}", if is_older { "older" } else { "latest" });
@@ -147,22 +122,14 @@ pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>, re
     }
     let _claim = Claim(key);
 
-    if reset_cursor {
-        cache::clear_channel_floors(channel_id);
-    }
-    if is_older && cache::is_at_history_start(channel_id) {
-        return Ok(json!({ "new_messages": 0, "reached_start": true, "oldest_ms": null }));
-    }
     let community_id = db::community::community_id_for_channel(channel_id)?.ok_or("Unknown Community channel")?;
-    if !is_v2(&community_id) {
+    if !is_held(&community_id) {
         return Ok(json!({ "new_messages": 0, "reached_start": true, "oldest_ms": null }));
     }
 
     const LIMIT: usize = 50;
-    const SINCE_LOOKBACK_SECS: u64 = 120;
-    let since = if is_older { None } else { cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS)) };
     let before = if is_older { before_ms.map(|m| m / 1000) } else { None };
-    let count = db::scoped(VectorCore.sync_community_channel_page(channel_id, LIMIT, before, since))
+    let count = db::scoped(VectorCore.sync_community_channel_page(channel_id, LIMIT, before, None))
         .await
         .map(|(c, _)| c)
         .unwrap_or_default();
@@ -183,9 +150,6 @@ pub async fn send_community_message(channel_id: String, content: String, replied
 
         let author = vector_core::my_public_key().ok_or("Public key not set")?;
         let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
-        if !is_v2(&community_id) {
-            return Err("Legacy communities are read-only on Vector Web".into());
-        }
         let community = load_v2(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
         let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
@@ -275,10 +239,6 @@ pub async fn send_community_message(channel_id: String, content: String, replied
 
 /// Reactions, edits and deletes. The facade's echo is silent, so the UI gets its update here.
 pub async fn community_control(channel_id: &str, target: &str, op: ControlOp<'_>) -> Result<(), String> {
-    let community_id = db::community::community_id_for_channel(channel_id)?.ok_or("Unknown Community channel")?;
-    if !is_v2(&community_id) {
-        return Err("Legacy communities are read-only on Vector Web".into());
-    }
     match op {
         ControlOp::React { emoji, url } => {
             vector_core::badges::check_new_reaction_allowance(target, emoji).await?;
@@ -337,15 +297,11 @@ pub async fn create_community(name: String, channel_name: Option<String>, relays
         "channel_id": channel_id,
         "owner_npub": community.owner().ok().and_then(|pk| pk.to_bech32().ok()),
         "channel_name": channel_name,
-        "proto_version": ConcordProtocol::V2.as_i64(),
     }))
 }
 
 pub async fn create_community_channel(community_id: String, name: String, private: bool) -> Result<Value, String> {
     db::scoped_result(async move {
-        if !is_v2(&community_id) {
-            return Err("Only Concord v2 communities support extra channels".to_string());
-        }
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err("A channel needs a name".into());
@@ -463,9 +419,6 @@ pub async fn send_community_file(
     db::scoped(async move {
         let reply = Some(replied_to).filter(|r| !r.is_empty());
         let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
-        if !is_v2(&community_id) {
-            return Err("Legacy communities are read-only on Vector Web".to_string());
-        }
         let community = load_v2(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
         community.channel(&ch).ok_or("Channel not found in Community")?;

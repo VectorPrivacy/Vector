@@ -147,9 +147,6 @@ async function setupRustListeners() {
         }
     });
 
-    // A v1 community upgraded to Concord v2: the chat row is re-parented in place (same
-    // chat_identifier, so history/unread survive). Refresh its metadata to the v2 identity
-    // and drop one "Community upgraded" line into the open timeline. Nothing else moves.
     /// Drop cached/painted messages for a community so the next read comes from the
     /// filtered queries.
     ///
@@ -172,49 +169,6 @@ async function setupRustListeners() {
         const open = channels.find(c => c.id === strOpenChat);
         if (open) await openChat(open.id, { reread: false });
     }
-
-    _on('community_migrated', async (evt) => {
-        const v1Id = evt.payload?.v1_community_id;
-        const v2Id = evt.payload?.v2_community_id;
-        if (!v2Id) return;
-        // Re-point any chat row still tagged with the v1 community id to the v2 identity.
-        // This is load-bearing (it unlocks the composer + clears the dissolved flag), so it
-        // runs UNCONDITIONALLY — the get_community fetch below only decorates name/owner and
-        // is best-effort; a failed fetch must not leave the room locked.
-        const rows = arrChats.filter(c => {
-            const f = c.metadata?.custom_fields;
-            return f && (f.community_id === v1Id || f.community_id === v2Id);
-        });
-        for (const c of rows) {
-            const f = c.metadata.custom_fields;
-            f.community_id = v2Id;
-            f.proto_version = '2';
-            f.dissolved = 'false';
-        }
-        try {
-            const summary = await invoke('get_community', { communityId: v2Id });
-            for (const c of rows) {
-                const f = c.metadata.custom_fields;
-                f.name = summary.name;
-                if (summary.owner_npub) f.owner_npub = summary.owner_npub;
-            }
-        } catch (_) {}
-        communityChanged(v1Id);
-        communityChanged(v2Id);
-        if (strOpenChat) {
-            const open = arrChats.find(c => c.id === strOpenChat);
-            if (open && open.metadata?.custom_fields?.community_id === v2Id) {
-                // The carrier's dissolved-fold ran the composer lockdown (disabled input,
-                // hidden file/voice/emoji, "dissolved" notice) a beat before this migration
-                // event. The room is ALIVE on v2, so fully RESTORE the composer — mirror
-                // openChat's live-chat branch, not just the placeholder.
-                VectorSvelte.setNotice('dissolved', '');
-                VectorSvelte.setNotice('migrated', true);
-                VectorSvelte.setLock(null);
-                VectorSvelte.flushSync();
-            }
-        }
-    });
 
     // A community synced in from another device (cross-device Community List, §6.3) appeared seamlessly —
     // render its metadata via the same path as a manual join so name/crown/members show without a restart.

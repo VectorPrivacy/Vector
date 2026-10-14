@@ -399,21 +399,6 @@ pub enum PreparedEvent {
         /// Time spent on rumor parsing (nanoseconds)
         parse_ns: u64,
     },
-    /// Community invite bundle (kind 3304) — parked for explicit user consent.
-    CommunityInvite {
-        invite: crate::community::invite::CommunityInvite,
-        /// Inviter's npub (bech32) — shown in the pending-invite UI.
-        inviter: String,
-        is_mine: bool,
-        wrapper_event_id_bytes: [u8; 32],
-        wrapper_created_at: u64,
-        /// Inner rumor `created_at` (seconds) — the real send time. Unlike the outer
-        /// wrapper, which NIP-59 backdates up to 2 days, this is honest; the tombstone
-        /// supersession test needs it so a re-invite isn't misread as older than a decline.
-        rumor_created_at: u64,
-        /// Sender-declared NIP-40 expiry (unix secs); 0 = none, so permanent.
-        expires_at: u64,
-    },
     /// Concord v2 Direct Invite (inner kind 3313) — parked for explicit consent.
     /// Carries the raw bundle JSON (parked verbatim; the accept path re-parses it).
     CommunityInviteV2 {
@@ -424,7 +409,8 @@ pub enum PreparedEvent {
         is_mine: bool,
         wrapper_event_id_bytes: [u8; 32],
         wrapper_created_at: u64,
-        /// Inner rumor `created_at` (seconds) — the real send time (see the v1 variant).
+        /// Inner rumor `created_at` (seconds) — the real send time; NIP-59 backdates the
+        /// outer wrapper up to 2 days.
         rumor_created_at: u64,
         /// Sender-declared NIP-40 expiry (unix secs); 0 = none, so permanent.
         expires_at: u64,
@@ -557,16 +543,10 @@ fn finish_prepare(
         };
     }
 
-    // Community invite (carrier) — a join, not a chat message. Recognized before
-    // process_rumor so it never lands as an UnknownEvent in the DM thread.
-    if rumor.kind == Kind::Custom(crate::stored_event::event_kind::COMMUNITY_INVITE_BUNDLE) {
-        return match crate::community::invite::parse_invite_rumor(rumor.kind, &rumor.content) {
-            Some(invite) => PreparedEvent::CommunityInvite {
-                invite, inviter: contact.clone(), is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at,
-                expires_at: crate::community::v2::invite::expiration_secs(&rumor.tags).unwrap_or(0),
-            },
-            None => PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at },
-        };
+    // A retired Concord v1 invite (kind 3304), still reachable through DM history: skipped,
+    // never processed as an unknown rumor, which would open a DM thread holding its keys.
+    if rumor.kind == Kind::Custom(3304) {
+        return PreparedEvent::ErrorSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
     }
 
     // Concord v2 Direct Invite (inner kind 3313) — the v2 join carrier. `from_bundle_json`
@@ -579,7 +559,7 @@ fn finish_prepare(
             Some((community_id, bundle_json)) => PreparedEvent::CommunityInviteV2 {
                 community_id,
                 bundle_json,
-                inviter: contact.clone(), // the seal signer's npub (bech32), like the v1 arm
+                inviter: contact.clone(), // the seal signer's npub (bech32)
                 is_mine,
                 wrapper_event_id_bytes,
                 wrapper_created_at,
@@ -944,89 +924,6 @@ pub async fn commit_prepared_event(
                 RumorProcessingResult::Ignored => false,
             }
         }
-        PreparedEvent::CommunityInvite { invite, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at, expires_at } => {
-            // Negentropy bookkeeping regardless of outcome (the outer wrapper id is
-            // attacker-controlled, so it can't be the join-idempotency key — see below).
-            {
-                let mut cache = WRAPPER_ID_CACHE.lock().await;
-                cache.insert(wrapper_event_id_bytes);
-            }
-            let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
-
-            // Never park our own echoed invite.
-            if is_mine {
-                return false;
-            }
-
-            // Past the sender's deadline OR past the recipient-enforced 24h
-            // lifetime (a catch-up sync of a stale wrap, a relay that ignores
-            // expiry, a sender that never set the tag): never park it.
-            if expired_invite(expires_at, rumor_created_at) {
-                return false;
-            }
-
-            // Cap-check before touching the DB (a hostile bundle can declare an
-            // unbounded channel/relay list).
-            if let Err(e) = invite.validate() {
-                log_warn!("[community] invite rejected: {}", e);
-                return false;
-            }
-
-            // Idempotency on the INNER identity (community_id), NOT the wrapper id: a
-            // replayed bundle re-wrapped under fresh ephemeral keys must not re-notify
-            // or churn. If we already hold this Community, or already have it parked,
-            // drop silently.
-            let community_id = invite.community_id.clone();
-            // PUBLIC input: a signature-valid invite can still carry a malformed id, so decode through
-            // the SIMD-validated path (rejects non-hex / wrong length in-register).
-            let already_held = crate::community::CommunityId(
-                match crate::simd::hex::hex_to_bytes_32_checked(&community_id) {
-                    Some(b) => b,
-                    None => { log_warn!("[community] invite has malformed id"); return false; }
-                },
-            );
-            if crate::db::community::community_exists(&already_held).unwrap_or(false) {
-                return false;
-            }
-            if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
-                return false;
-            }
-
-            // Supersession: a decline/leave tombstone suppresses any invite no newer than the
-            // decision (so the un-deletable 3304 can't re-nag, and a sibling's decline propagated via
-            // the synced list silences this device too). A STRICTLY-newer invite falls through and
-            // parks — a deliberate re-invite resurfaces. Ordered on the inner rumor time, not the
-            // NIP-59-backdated wrapper (which would make a fresh re-invite look older than the decline).
-            if crate::community::list::tombstone_suppresses(&community_id, rumor_created_at) {
-                return false;
-            }
-
-            // Park for explicit consent — do NOT join, subscribe, or dial the bundle's
-            // relays here. The user accepts via the command layer.
-            let bundle_json = match invite.to_json() {
-                Ok(j) => j,
-                Err(e) => { log_warn!("[community] invite re-serialize failed: {}", e); return false; }
-            };
-            match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter, expires_at as i64) {
-                Ok(true) => {
-                    handler.on_community_invite(&community_id);
-                    // Warm the community's first page in the background so a subsequent Accept opens
-                    // populated instead of paying the join sync. RAM-only + best-effort; promotion on
-                    // Join re-validates freshness. std::sync::Arc<crate::db::Session>'d so a mid-flight swap is a no-op.
-                    let invite_warm = invite.clone();
-                    let bg = crate::db::current_session();
-                    crate::rt::spawn(async move {
-                        if !bg.is_live() {
-                            return;
-                        }
-                        crate::community::service::preload_community(&invite_warm).await;
-                    });
-                }
-                Ok(false) => {} // raced — already parked
-                Err(e) => log_warn!("[community] invite park failed: {}", e),
-            }
-            false
-        }
         PreparedEvent::CommunityInviteV2 { bundle_json, community_id, inviter, is_mine, wrapper_event_id_bytes, wrapper_created_at, rumor_created_at, expires_at } => {
             {
                 let mut cache = WRAPPER_ID_CACHE.lock().await;
@@ -1038,7 +935,8 @@ pub async fn commit_prepared_event(
             if is_mine {
                 return false;
             }
-            // Past the sender's deadline or the 24h lifetime — see the v1 arm.
+            // Past the sender's deadline or the 24h lifetime (a stale wrap from a
+            // catch-up sync, a relay that ignores expiry): never park it.
             if expired_invite(expires_at, rumor_created_at) {
                 return false;
             }
@@ -1063,10 +961,7 @@ pub async fn commit_prepared_event(
             // Supersession: a decline/leave tombstone suppresses a re-wrapped invite no newer
             // than the decision, so a declined/left community can't be re-nagged by a fresh
             // ephemeral wrap. Ordered on the inner rumor time, not the NIP-59-backdated wrapper.
-            // The v1 list still holds v2 removals recorded before the v2 mirror existed.
-            if crate::community::v2::service::tombstone_suppresses(&community_id, rumor_created_at)
-                || crate::community::list::tombstone_suppresses(&community_id, rumor_created_at)
-            {
+            if crate::community::v2::service::tombstone_suppresses(&community_id, rumor_created_at) {
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.

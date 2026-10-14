@@ -1,18 +1,17 @@
 //! The v2 Control Plane (CORD-04 over CORD-01/02).
 //!
-//! Editions keep v1's exact grammar — the `vsk/eid/ev/ep/vac` tags, the frozen
-//! `edition_hash` (`community::version`, label `vector-community/v1/edition`,
-//! which upstream froze verbatim), and the fold rules — but ride the v2 stream
-//! envelope: a kind-3308 UNSIGNED rumor inside a **plaintext seal** (20014) at
-//! `control_pk`. Authorship moves from the rumor's own signature (v1) to the
-//! seal's (v2): [`super::stream::open_wrap`] Schnorr-verifies the seal and pins
+//! Editions use the `vsk/eid/ev/ep/vac` tags, the frozen `edition_hash`
+//! (`community::version`, label `vector-community/v1/edition`, which upstream froze
+//! verbatim), and the shared fold rules, riding the stream envelope: a kind-3308
+//! UNSIGNED rumor inside a **plaintext seal** (20014) at `control_pk`. Authorship is
+//! the seal's signature: [`super::stream::open_wrap`] Schnorr-verifies the seal and pins
 //! `rumor.pubkey == seal.pubkey`, so by the time an edition is parsed here its
 //! author is already proven. The plaintext seal is load-bearing: a compaction
 //! re-wraps the signed seal into a new epoch byte-verbatim, and the signature
 //! (over the rumor string) survives — an encrypted seal could not.
 //!
-//! Two v1↔v2 wire deltas, both deliberate:
-//!   - v2 editions carry NO `["v","1"]` protocol tag (frozen derivations
+//! Two deliberate wire choices:
+//!   - editions carry NO `["v","1"]` protocol tag (frozen derivations
 //!     partition protocol revisions by address; version tags are the rejected
 //!     mechanism).
 //!   - the owner is proven by the self-certifying `community_id` commitment
@@ -110,8 +109,8 @@ impl CommunityIdentity {
 
 // ── Edition rumors (build + parse) ───────────────────────────────────────────
 
-/// Build the unsigned kind-3308 edition rumor — v1's grammar minus the protocol
-/// `v` tag. Control editions carry no `ms` tag: they fold by version, not time.
+/// Build the unsigned kind-3308 edition rumor (no protocol `v` tag). Control
+/// editions carry no `ms` tag: they fold by version, not time.
 #[allow(clippy::too_many_arguments)]
 pub fn build_edition_rumor(
     author: PublicKey,
@@ -371,9 +370,9 @@ pub struct ImageRef {
 }
 
 impl ImageRef {
-    /// Bridge to the v1 image-ref shape so the shared download/decrypt/cache
-    /// plumbing serves both protocols. `ext` rides the flattened extras; fall
-    /// back to the URL's extension, else png.
+    /// Convert to the [`CommunityImage`](crate::community::CommunityImage) shape the
+    /// shared download/decrypt/cache plumbing takes. `ext` rides the flattened
+    /// extras; fall back to the URL's extension, else png.
     pub fn to_community_image(&self) -> crate::community::CommunityImage {
         let ext = self
             .extra
@@ -538,22 +537,8 @@ pub fn genesis(owner_keys: &Keys, mut metadata: CommunityMetadata, at_secs: u64)
 pub async fn genesis_signed<S: crate::signer::VectorSigner + ?Sized>(
     owner_pk: PublicKey,
     signer: &S,
-    metadata: CommunityMetadata,
-    at_secs: u64,
-) -> Result<Genesis, ControlError> {
-    genesis_signed_with_primary(owner_pk, signer, metadata, at_secs, None).await
-}
-
-/// [`genesis_signed`] with an OPTIONAL explicit primary-channel id + name — the
-/// migration-only path (§migration) so the v2 twin's #general reuses the v1 primary
-/// channel id and history stitches through the flip. `None` mints a fresh id (the
-/// ordinary create path).
-pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized>(
-    owner_pk: PublicKey,
-    signer: &S,
     mut metadata: CommunityMetadata,
     at_secs: u64,
-    primary: Option<(ChannelId, String)>,
 ) -> Result<Genesis, ControlError> {
     validate_community_metadata(&metadata)?;
     metadata.relays.truncate(super::super::MAX_COMMUNITY_RELAYS);
@@ -561,10 +546,7 @@ pub async fn genesis_signed_with_primary<S: crate::signer::VectorSigner + ?Sized
     let identity = CommunityIdentity::mint(&owner_pk);
     let community_root = super::super::random_32();
     let control_root = super::super::random_32();
-    let (general_channel_id, general_name) = match primary {
-        Some((id, name)) => (id, name),
-        None => (ChannelId(super::super::random_32()), "general".to_string()),
-    };
+    let (general_channel_id, general_name) = (ChannelId(super::super::random_32()), "general".to_string());
     let group = split_write_group(&control_root, &community_root, &identity.community_id, Epoch(0));
 
     let meta_json = serde_json::to_string(&metadata).map_err(|e| ControlError::Stream(StreamError::Parse(e.to_string())))?;
@@ -683,10 +665,8 @@ mod tests {
 
     #[test]
     fn edition_hash_is_identical_across_protocols() {
-        // The edition hash is the ONE construction both protocols share (upstream
-        // froze v1's byte layout, label included). The same logical edition must
-        // hash identically whether built as a v1 signed inner or a v2 rumor —
-        // this is what makes the fold engine shareable.
+        // The edition hash is frozen (byte layout and label). The same logical
+        // edition must hash identically whether built as a signed inner or a rumor.
         let author = Keys::generate();
         let entity = [0x55; 32];
         let content = "{\"member\":\"aa\",\"role_ids\":[]}";

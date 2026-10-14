@@ -56,27 +56,14 @@ pub async fn send(chat_id: &str, topic: &str, node_addr: Option<&str>) -> Result
 }
 
 async fn send_to_channel(channel_id: &str, topic: &str, node_addr: Option<&str>) -> Result<(), String> {
-    use crate::community::{v2, ChannelId, CommunityId, ConcordProtocol};
+    use crate::community::{v2, ChannelId, CommunityId};
     use crate::simd::hex::hex_to_bytes_32;
     let cid = crate::db::community::community_id_for_channel(channel_id)?.ok_or("Not a Community channel")?;
     let community_id = CommunityId(hex_to_bytes_32(&cid));
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-    if crate::db::community::community_protocol(&community_id)? == Some(ConcordProtocol::V2) {
-        let community = crate::db::community::load_community_v2(&community_id)?.ok_or("Community not found")?;
-        let channel = ChannelId(hex_to_bytes_32(channel_id));
-        return v2::service::send_webxdc_signal(&transport, &community, &channel, topic, node_addr).await;
-    }
-    if cfg!(target_arch = "wasm32") {
-        return Err("Legacy communities are not available on Vector Web".into());
-    }
-    let community = crate::db::community::load_community(&community_id)?.ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .cloned()
-        .ok_or("Channel not found in Community")?;
-    crate::community::service::publish_webxdc_signal(&transport, &community, &channel, topic, node_addr).await
+    let community = crate::db::community::load_community_v2(&community_id)?.ok_or("Community not found")?;
+    let channel = ChannelId(hex_to_bytes_32(channel_id));
+    v2::service::send_webxdc_signal(&transport, &community, &channel, topic, node_addr).await
 }
 
 /// Take in a peer signal from a DM (`chat_id` = the contact's npub) or a

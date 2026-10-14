@@ -53,13 +53,6 @@ async function surfaceCommunitySummary(summary) {
         if (summary.primary_channel) chat.metadata.custom_fields.primary_channel = summary.primary_channel;
         chat.metadata.custom_fields.is_owner = summary.is_owner ? 'true' : 'false';
         chat.metadata.custom_fields.dissolved = summary.dissolved ? 'true' : 'false';
-        // Protocol stack (1 = v1, 2 = v2) gates v2-only affordances (e.g. the
-        // Self-Destruct Timer). Never downgrade — mirrors upsert_community_chat:
-        // a dual-stack community identified as v2 stays v2.
-        const curProto = parseInt(chat.metadata.custom_fields.proto_version, 10) || 0;
-        if ((summary.proto_version || 0) > curProto) {
-            chat.metadata.custom_fields.proto_version = String(summary.proto_version);
-        }
         // Stamp the join moment so an empty community sorts to the top right away. Reloads
         // re-source this from the persisted DB created_at via upsert_community_chat.
         if (!chat.metadata.custom_fields.created_at) {
@@ -82,12 +75,10 @@ async function surfaceCommunitySummary(summary) {
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
     listChanged();
-    // If a warmed preload was promoted on Accept, the chat is ALREADY populated (its messages were
-    // emitted by the backend), so open immediately — the first sync trues it up in the background.
-    // Only await the sync when NOT preloaded (a cold join would otherwise open to an empty chat).
+    // Await the first sync, or a fresh join would open to an empty chat.
     const openChannel = firstChannel || fallbackChannel;
     const openSync = firstChannel ? firstSync : fallbackSync;
-    if (openSync && !summary.preloaded) await openSync;
+    if (openSync) await openSync;
     communityChanged(summary.community_id);
     return openChannel;
 }
@@ -286,38 +277,31 @@ async function previewAndJoinCommunityLink(url) {
     }
 }
 
-/** Detect a Vector community invite URL (or bare payload) in pasted/typed text.
- *  Covers the v1 fragment form (vectorapp.io only), the v2 naddr form on ANY
- *  host (`…/invite/naddr1…#<frag>` — the naddr+fragment is the whole payload
- *  and self-authenticates, so armada.buzz links join natively), and the
- *  bare-payload equivalents of both. */
+/** Detect a Vector community invite URL (or bare payload) in pasted/typed text: the
+ *  naddr form on ANY host (`…/invite/naddr1…#<frag>` — the naddr+fragment is the whole
+ *  payload and self-authenticates, so armada.buzz links join natively), or bare. */
 function isCommunityInviteUrl(text) {
     if (typeof text !== 'string' || !text.includes('#')) return false;
     const t = text.trim();
-    return /vectorapp\.io\/invite\/?#/i.test(t)
-        || /\/invite\/naddr1[a-z0-9]{20,}#/i.test(t)
-        || /^(?:nostr:)?naddr1[a-z0-9]{20,}#[A-Za-z0-9_-]{20,}$/i.test(t)
-        || /^#?[A-Za-z0-9_-]{40,}$/.test(t);
+    return /\/invite\/naddr1[a-z0-9]{20,}#/i.test(t)
+        || /^(?:nostr:)?naddr1[a-z0-9]{20,}#[A-Za-z0-9_-]{20,}$/i.test(t);
 }
 
 // ============================================================================
 // In-chat Community Invite cards
 // ============================================================================
 
-// Matches a shareable Community invite link in either form (https share URL or vector://
-// deep link), v1 or v2. v1 is fragment-only and vectorapp.io-specific (`/invite#<frag>`);
-// v2 carries the bundle coordinate as an naddr in the path (`/invite/<naddr>#<frag>`) and
-// is accepted from ANY host — the naddr+fragment self-authenticates (the domain is never
-// contacted), so Armada-minted links render + join natively. The invite KEY —
-// `<naddr>#<frag>` for v2, bare `<frag>` for v1 — is the whole payload: it keys the
-// preview cache and reconstructs a canonical URL for the backend.
-const COMMUNITY_INVITE_URL_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/?|vector:\/\/invite\/?|https?:\/\/[^\s#]+?\/invite\/(?=naddr1))(naddr1[a-z0-9]{20,})?#([A-Za-z0-9_-]{20,})/gi;
+// Matches a shareable Community invite link (https share URL or vector:// deep link). It
+// carries the bundle coordinate as an naddr in the path (`/invite/<naddr>#<frag>`) and is
+// accepted from ANY host — the naddr+fragment self-authenticates (the domain is never
+// contacted), so Armada-minted links render + join natively. The invite KEY
+// `<naddr>#<frag>` is the whole payload: it keys the preview cache and reconstructs a
+// canonical URL for the backend.
+const COMMUNITY_INVITE_URL_REGEX = /(?:https?:\/\/(?:www\.)?vectorapp\.io\/invite\/|vector:\/\/invite\/|https?:\/\/[^\s#]+?\/invite\/(?=naddr1))(naddr1[a-z0-9]{20,})#([A-Za-z0-9_-]{20,})/gi;
 
-/** Canonical share URL from an invite key (a v2 key carries its naddr locator). */
+/** Canonical share URL from an invite key. */
 function communityInviteUrlFromKey(inviteKey) {
-    return inviteKey.includes('#')
-        ? `https://vectorapp.io/invite/${inviteKey}`
-        : `https://vectorapp.io/invite#${inviteKey}`;
+    return `https://vectorapp.io/invite/${inviteKey}`;
 }
 
 /** Strip Community invite links from `text` — the invite card carries the affordance. */
@@ -339,7 +323,7 @@ function replaceCommunityInviteUrlsForPreview(text) {
     return text.replace(COMMUNITY_INVITE_URL_REGEX, 'Community Invite');
 }
 
-// Resolved previews keyed by invite key (v1: fragment; v2: naddr#fragment):
+// Resolved previews keyed by invite key (naddr#fragment):
 // { state: 'ok', info, iconSrc, ts } or { state: 'err', error, ts } or
 // { state: 'loading', promise }. Errors expire so a chat
 // reopen after a slow relay retries instead of inheriting a stale "Invite Unavailable".
@@ -366,7 +350,7 @@ function communityInviteKeys(text) {
     COMMUNITY_INVITE_URL_REGEX.lastIndex = 0;
     let match;
     while ((match = COMMUNITY_INVITE_URL_REGEX.exec(text)) !== null) {
-        const inviteKey = match[1] ? `${match[1]}#${match[2]}` : match[2];
+        const inviteKey = `${match[1]}#${match[2]}`;
         if (keys.includes(inviteKey)) continue;
         if (keys.length >= INVITE_CARDS_PER_MSG) break;
         keys.push(inviteKey);
@@ -624,52 +608,6 @@ async function removeCommunityFromUI(communityId) {
     if (wasViewing) openChatlist();
 }
 
-/**
- * Render the owner-only "Upgrade to Concord v2" migration row from the backend status.
- * Timelock-gated: before the unlock the button is disabled and shows a countdown; once
- * unlocked, a confirm dialog arms the irreversible wizard. Hidden entirely for members,
- * v2 communities, and dissolved/migrated/ineligible ones.
- */
-/** Surface the v2 upgrade row where an action or a countdown is meaningful: owner-only, v1-only. */
-async function loadMigrationStatus(communityId) {
-    let status;
-    try {
-        status = await invoke('migration_status', { communityId });
-    } catch (_) { return; }
-    if (VectorSvelte.overviewState().communityId !== communityId) return;
-    const shown = status && (status.state === 'ready' || status.state === 'locked' || status.state === 'in_progress');
-    VectorSvelte.setOverview({ migration: shown ? status : null });
-}
-
-/** The type-to-confirm, irreversible upgrade wizard. Lands the owner back inside the room. */
-async function runCommunityMigration() {
-    const { communityId, name, chatId } = VectorSvelte.overviewState();
-    const ok = await popupConfirm(
-        'Upgrade to Concord v2?',
-        `This upgrades "<b>${escapeHtml(name)}</b>" to the newer, more private Concord v2.<br><br>Everyone here moves over automatically, keeping their history. Your old invite links will stop working, so you'll need to share new ones. This cannot be undone.`,
-        false, '', 'concord_v2.svg');
-    if (!ok) return;
-    // Lock the app behind the unclosable ring modal for the whole wizard (rekey contract): the owner
-    // closing the app mid-wizard is the worst case. Registered before the invoke so no phase is missed.
-    const modal = await showRekeyProgressModal('Upgrading to Concord v2', 'community_migration_progress');
-    try {
-        await invoke('migrate_community', { communityId });
-        await modal.finish('Upgrade complete!');
-        modal.close();
-        // openGroupOverview hid every other pane, so a bare hide paints black: this is the back-entry's
-        // close path. The v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
-        popBack('group-overview');
-        VectorSvelte.showPane('groupOverview', false);
-        VectorSvelte.setOverviewGroup(null);
-        openChat(chatId);
-    } catch (e) {
-        modal.close();
-        await popupConfirm('Upgrade Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-        // A partially-progressed wizard must come back as "Resume upgrade".
-        loadMigrationStatus(communityId);
-    }
-}
-
 function registerCommunityOverview() {
     const cur = () => {
         const { chatId } = VectorSvelte.overviewState();
@@ -726,7 +664,6 @@ function registerCommunityOverview() {
             moderate: () => openModerationPanel(VectorSvelte.overviewState().communityId),
             // The flows live in `communityLeaveOrDelete`: the widescreen header menu offers the same action.
             leaveOrDelete: async () => { const chat = cur(); if (chat) await communityLeaveOrDelete(chat); },
-            migrate: runCommunityMigration,
         },
     });
 }
@@ -818,10 +755,8 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         avatarSrc: chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null,
         muted: !!chat.community_muted,
         isOwner: cf.is_owner === 'true',
-        isV2: cf.proto_version === '2',
         caps: _communityCapsCache.get(communityId) || {},
         raid: null,
-        migration: null,
         upload: null,
     });
     // Role-engine capabilities (NOT an owner check — the owner is just the top role). Each management
@@ -837,7 +772,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             if (v?.detected && VectorSvelte.overviewState().communityId === communityId) VectorSvelte.setOverview({ raid: { suspects: v.suspects } });
         }).catch(() => {});
     }
-    loadMigrationStatus(communityId);
 
     // Member list = observed participants (best-effort): everyone who has posted across the
     // Community's channels. Lurkers and link-joiners who haven't spoken don't appear (membership

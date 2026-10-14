@@ -131,7 +131,6 @@ async function createCommunityFromPanel(inviteeNpubs) {
         // channel after the community, and without primary_channel it isn't the row.
         chat.metadata.custom_fields.channel_name = created.channel_name || 'general';
         chat.metadata.custom_fields.primary_channel = channelId;
-        chat.metadata.custom_fields.proto_version = String(created.proto_version || 2);
         // Stamp the proven owner npub so the crown/Owner tag shows now, not after reload.
         if (created.owner_npub) chat.metadata.custom_fields.owner_npub = created.owner_npub;
         // Creation time sorts the empty community to the top right away; reloads re-source it.

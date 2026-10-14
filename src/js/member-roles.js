@@ -8,7 +8,7 @@ function roleTint(color) {
     return color ? `#${color.toString(16).padStart(6, '0')}` : '#99aab5';
 }
 
-/** The roles view with its proven owner, or null where roles don't apply (a v1 community). */
+/** The roles view with its proven owner, or null when it can't be read. */
 async function memberRolesView(communityId) {
     try {
         const view = await invoke('get_community_roles_view', { communityId });

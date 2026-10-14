@@ -424,7 +424,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "list_community_invites" => to_value(db::community::list_pending_invites()?),
         "list_public_invites" => to_value(db::community::list_public_invites(&a.str("communityId")?)?),
         "sync_community_channel" => {
-            cm::sync_community_channel(&a.str("channelId")?, a.de("beforeMs")?, a.bool("resetCursor").unwrap_or(false)).await
+            cm::sync_community_channel(&a.str("channelId")?, a.de("beforeMs")?).await
         }
         "send_community_message" => cm::send_community_message(a.str("channelId")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo"), a.opt_str("bot"))
             .await

@@ -584,7 +584,7 @@ mod xform_tests {
     /// not touch omitted).
     fn migrate_test_schema(conn: &rusqlite::Connection) {
         conn.execute_batch(
-            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, banlist_marks TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB, migration_pointer TEXT);
+            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, banlist_marks TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB);
              CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT, meta_extra TEXT);
              CREATE TABLE community_epoch_keys (key BLOB);
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
@@ -594,7 +594,6 @@ mod xform_tests {
              CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);
              CREATE TABLE community_guestbook (community_id TEXT, events TEXT, cursor_secs INTEGER);
              CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);
-             CREATE TABLE community_migrations (community_id TEXT PRIMARY KEY, twin TEXT NOT NULL DEFAULT '');
              CREATE TABLE community_pins (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
              CREATE TABLE attachments (key TEXT, nonce TEXT, name TEXT, url TEXT, fallback_urls TEXT, img_meta TEXT);
              CREATE TABLE events (preview_metadata TEXT);
@@ -909,8 +908,8 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("nip17_wrap_keys", &["rumor_json"]),
     ("communities", &[
         "server_root_key", "name", "relays", "description", "icon", "banner", "banlist",
-        "banlist_marks", "owner_attestation", "roles", "invite_registry", "owner_pubkey",
-        "owner_salt", "meta_extra", "control_pk", "control_root", "migration_pointer",
+        "banlist_marks", "roles", "invite_registry", "owner_pubkey", "owner_salt", "meta_extra",
+        "control_pk", "control_root",
     ]),
     ("community_channels", &["channel_key", "name", "meta_extra"]),
     ("community_epoch_keys", &["key"]),
@@ -921,7 +920,6 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_policies", &["bytes"]),
     ("community_public_invites", &["token", "url", "label"]),
     ("community_invite_link_sets", &["creator", "locators"]),
-    ("community_migrations", &["twin"]),
     ("community_pins", &["content"]),
     ("community_bans", &["npub"]),
 ];

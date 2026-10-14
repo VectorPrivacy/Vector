@@ -87,6 +87,7 @@ async fn apply_blocks(list: IdList) {
 }
 
 async fn apply_mutes(list: IdList) {
+    vector_core::db::v1_purge::retain_purged_mutes(|id| list.contains(id));
     let chats: Vec<(String, bool, bool)> = {
         let mut state = STATE.lock().await;
         for id in list.ids.iter().filter(|id| id.starts_with("npub1")) {
@@ -139,8 +140,6 @@ async fn apply_nicknames(map: NicknameMap) {
 async fn subscribe() {
     let (Some(client), Some(me)) = (vector_core::state::nostr_client(), vector_core::my_public_key()) else { return };
     let lists = Filter::new().author(me).kind(Kind::Custom(APPLICATION_SPECIFIC)).identifiers([
-        vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
-        vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
         vector_core::pinned_chats::PINNED_D_TAG.to_string(),
         synced_prefs::BLOCKS_D_TAG.to_string(),
         synced_prefs::MUTES_D_TAG.to_string(),

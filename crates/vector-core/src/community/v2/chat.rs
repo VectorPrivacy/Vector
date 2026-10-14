@@ -12,7 +12,7 @@
 //!   - kind 3310 WebXDC peer signal (payload opaque to the protocol)
 //!   - kind 23311 typing (ephemeral tier — rides the 21059 wrap)
 //!
-//! Two Vector inner-tag conventions carry over from v1: NIP-30
+//! Two Vector inner-tag conventions: NIP-30
 //! `["emoji", shortcode, url]` tags and verbatim extra tags (NIP-92 `imeta`
 //! attachments) ride inside the signed rumor, so they are author-committed.
 //!
@@ -48,7 +48,7 @@ pub enum ChatError {
     /// encrypted form on this plane, a strict reader drops the violation.
     NotEncryptedSealed,
     /// The rumor kind isn't in the chat-plane registry (retired numbers stay
-    /// burned — a 3300 is v1 traffic, never a v2 message).
+    /// burned — a 3300 is never a v2 message).
     UnknownKind(u16),
     MissingTag(&'static str),
     /// A target-bearing tag appears more than once — ambiguous, rejected
@@ -1102,7 +1102,7 @@ mod tests {
     #[test]
     fn unknown_rumor_kind_is_rejected_on_both_sides() {
         let author = Keys::generate();
-        // 3300 is a RETIRED v1 number — burned forever, never a v2 chat kind.
+        // 3300 is a RETIRED number — burned forever, never a v2 chat kind.
         let tags = stream::channel_binding_tags(&chan(), Epoch(0));
         let rumor = stream::build_rumor_ms(3300, author.public_key(), "v1 ghost", tags, AT);
         assert!(matches!(

@@ -131,8 +131,7 @@ mod tests {
     }
 }
 
-/// The kind-3310 peer-signal content, shared by every community transport (the
-/// v1 channel plane and the v2 chat plane must stay byte-compatible):
+/// The kind-3310 peer-signal content on the Concord chat plane:
 /// `{"op":"ad","topic":..,"addr":..}` advertises an Iroh node, `{"op":"left",..}`
 /// departs.
 pub fn peer_signal_content(topic_id: &str, node_addr: Option<&str>) -> String {

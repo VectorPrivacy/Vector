@@ -2,20 +2,16 @@
 //! event that carries a rotation.
 //!
 //! A rotation mints a fresh-random key for the next epoch and delivers it only
-//! to the members who STAY, one **per-recipient blob** each. Two structural
-//! shifts from v1, both security-load-bearing:
+//! to the members who STAY, one **per-recipient blob** each. Two choices are
+//! security-load-bearing:
 //!
-//! **D1 — the locator is PUBLIC and authenticates nothing.** v1 located a blob
-//! by `HKDF(pairwise_ECDH_secret, …)` — a value only the sender↔recipient pair
-//! could compute, so in v1 a matching locator *proved* the blob was minted for
-//! that pair. v2 locates by `HKDF(rotator_xonly || recipient_xonly, …)` — public
-//! inputs (full NIP-46 bunker parity: a bunker computes it without a raw key).
-//! A public locator proves NOTHING; it is a lookup index only. Authenticity now
-//! rests entirely on (a) the crate's **rotator seal + roster authority** —
+//! **D1 — the locator is PUBLIC and authenticates nothing.** A blob is located by
+//! `HKDF(rotator_xonly || recipient_xonly, …)` — public inputs (full NIP-46 bunker
+//! parity: a bunker computes it without a raw key). A public locator proves
+//! NOTHING; it is a lookup index only. Authenticity rests entirely on (a) the crate's **rotator seal + roster authority** —
 //! verified by the caller before any blob is trusted — and (b) the blob's
 //! **bound plaintext** (scope+epoch checked after decrypt). So [`open_blob`]
-//! does NOT gate on the locator (that was v1's `open_rekey_blob` assumption —
-//! do not port it): the decrypt itself (only the addressed recipient's key
+//! does NOT gate on the locator: the decrypt itself (only the addressed recipient's key
 //! opens a blob wrapped to them) plus the bound-plaintext check are the gate.
 //!
 //! **D5 — the blob wrap carries base64.** NIP-44/NIP-46 encrypt surfaces are
@@ -1095,8 +1091,7 @@ mod tests {
     fn a_relocated_blob_still_opens_by_decrypt_not_locator() {
         // Because open ignores the locator (D1), corrupting the locator does NOT
         // break a legitimate recipient's open — the decrypt + bound check govern.
-        // (Contrast v1, where a locator mismatch was a hard reject.) The FIND
-        // step uses the locator; OPEN does not.
+        // The FIND step uses the locator; OPEN does not.
         let rotator = keys(7);
         let recipient = keys(8);
         let mut blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[3u8; 32]).unwrap();

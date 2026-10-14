@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 102;
+pub const HIGHEST_MIGRATION_ID: u32 = 104;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1458,6 +1458,15 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("create miniapp_meta: {e}"))
     })?;
+
+    // Concord v1's removal: finish each held flip, then drop every v1 community and its rooms.
+    run_atomic_migration(conn, 103, "Remove Concord v1", |tx| {
+        let plan = super::v1_purge::plan_v1_purge(tx)?;
+        super::v1_purge::apply_v1_purge(tx, &plan)
+    })?;
+
+    // Separate from 103 so a database is never left without the columns the purge reads.
+    run_atomic_migration(conn, 104, "Drop Concord v1 columns", |tx| super::v1_purge::drop_v1_columns(tx))?;
 
     Ok(())
 }

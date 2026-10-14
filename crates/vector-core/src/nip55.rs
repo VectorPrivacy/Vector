@@ -222,9 +222,8 @@ pub const VECTOR_NIP55_SIGN_KINDS: &[u16] = &[
     22242, // NIP-42 relay auth
     24242, // blossom auth
     30078, // app-specific data (invite acceptance)
-    // Concord / Communities (v1 3300-3311, v2 added 3312/3313).
-    3300, 3301, 3302, 3303, 3304, 3305, 3306,
-    3307, 3308, 3309, 3310, 3311, 3312, 3313,
+    // Concord (`community::v2::kind`).
+    3302, 3303, 3306, 3308, 3309, 3310, 3312, 3313,
 ];
 
 /// Render the pairing `permissions` JSON: blanket encrypt/decrypt plus one
