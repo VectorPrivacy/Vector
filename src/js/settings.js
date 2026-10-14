@@ -943,7 +943,6 @@ const DISPLAY_EXPLAINERS = {
     imageTypes: ['Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.'],
     chatBg: ['Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.'],
     timeSuggestions: ['Time Suggestions', 'When you type a time to come, like <b>in 6 hours</b> or <b>dec 25 at 8pm</b>, the composer offers to send it as a time everyone sees in their own zone: a live countdown, or the date and time where they are.<br><br>Press <b>Tab</b> or tap the suggestion to use it; keep typing to leave it as written.'],
-    richComposer: ['Rich Composer', 'The chat box formats <b>bold</b>, <i>italics</i>, code and links as you type.<br><br>Turn it off to use a plain text box instead. The change applies on the next app start.'],
     emoticons: ['Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.'],
     autocorrect: ['Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.'],
     sendOnEnter: ['Send on Enter', 'When enabled, <b>Enter</b> sends your message, and <b>Shift + Enter</b> starts a new line.<br><br>Turn it off to have Enter always start a new line; send with the Send button, or <b>Ctrl + Enter</b> (<b>Cmd + Enter</b> on a Mac).<br><br>On by default on computers and off on phones. This applies to this device only.'],
@@ -968,11 +967,6 @@ const DISPLAY_HANDLERS = {
                 document.body.classList.toggle('chat-bg-disabled', !on);
                 await saveChatBgEnabled(on);
                 refreshChatWallpaper();
-                break;
-            case 'richComposer':
-                localStorage.setItem('rich_composer', on ? 'true' : 'false');
-                // The input is built once at startup, so the swap needs a fresh load.
-                popupConfirm('Restart required', 'The composer changes on the next app start.', true);
                 break;
             case 'emoticons':
                 emoticonSuggestionsEnabled = on;
@@ -1015,7 +1009,6 @@ async function initDisplaySettings() {
     VectorSvelte.setDisplaySettings({
         imageTypes: fDisplayImageTypes,
         chatBg,
-        richComposer: localStorage.getItem('rich_composer') !== 'false',
         emoticons: emoticonSuggestionsEnabled,
         timeSuggestions: timeSuggestionsEnabled,
         autocorrect: fAutocorrectEnabled,

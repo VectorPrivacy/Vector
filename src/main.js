@@ -241,21 +241,15 @@ const domChatMessages = document.getElementById('chat-messages');
 // matter which of the two runs first.
 var composerMentionLookup = () => [];
 
-/** The plain `<textarea>` the composer replaced. Kept as an escape hatch for a
- *  WebView that can't drive a contenteditable, and as the automatic landing spot
- *  if the composer fails to construct. Shares the same id, so every rule and call
- *  site that isn't rich-composer-specific behaves as it always did. */
-function createLegacyComposer(host) {
+/** The plain `<textarea>` chat lands on if the rich composer fails to construct on a
+ *  WebView we haven't met. Shares its id, so every rule and call site that isn't
+ *  rich-composer-specific still applies. */
+function createFallbackComposer(host) {
     const ta = document.createElement('textarea');
     ta.id = 'chat-input';
     ta.placeholder = 'Enter message...';
     host.appendChild(ta);
     return ta;
-}
-
-/** Off only when explicitly disabled, so a fresh install gets the rich one. */
-function richComposerEnabled() {
-    try { return localStorage.getItem('rich_composer') !== 'false'; } catch (_) { return true; }
 }
 
 // Rich composer: renders markdown, mention pills and custom emoji inline while
@@ -269,13 +263,12 @@ function richComposerEnabled() {
 // we haven't met yet.
 const domChatMessageInput = (() => {
     const host = document.getElementById('chat-input-host');
-    if (!richComposerEnabled()) return createLegacyComposer(host);
     try {
         return buildRichComposer(host);
     } catch (err) {
         console.error('[composer] rich composer failed to construct, falling back', err);
         host.textContent = '';
-        return createLegacyComposer(host);
+        return createFallbackComposer(host);
     }
 })();
 

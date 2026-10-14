@@ -9,7 +9,6 @@
     const rows = [
         { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types', group: 'Chat' },
         { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper', group: 'Chat' },
-        { key: 'richComposer', id: 'rich-composer-toggle', label: 'Rich Composer', group: 'Composer' },
         { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions', group: 'Composer' },
         { key: 'timeSuggestions', id: 'time-suggestions-toggle', label: 'Time Suggestions', group: 'Composer' },
         { key: 'autocorrect', id: 'autocorrect-toggle', label: 'Autocorrect', group: 'Composer' },
