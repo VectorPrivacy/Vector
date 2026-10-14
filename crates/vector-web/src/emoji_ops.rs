@@ -272,7 +272,11 @@ fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, w: u32, h: u32, max_bytes: Opt
         img.apply_orientation(o);
     }
     bounds(img.width(), img.height())?;
-    let cropped = img.crop_imm(x, y, w, h).to_rgba8();
+    let mut cropped = img.crop_imm(x, y, w, h).to_rgba8();
+    // An emoji uploads at most MAX_UPLOAD_DIM wide: sized once here, the budget is met in one encode.
+    if max_bytes.is_some() && w > MAX_UPLOAD_DIM {
+        cropped = image::imageops::resize(&cropped, MAX_UPLOAD_DIM, MAX_UPLOAD_DIM, image::imageops::FilterType::Lanczos3);
+    }
     let jpeg = mime.contains("jpeg") || mime.contains("jpg");
     fit_budget(&[(cropped, 0)], max_bytes, |f| if jpeg { encode_jpeg(&f[0].0) } else { encode_png(&f[0].0) })
 }

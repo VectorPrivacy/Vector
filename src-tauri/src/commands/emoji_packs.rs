@@ -139,6 +139,8 @@ const MAX_EMOJI_BYTES: usize = 256 * 1024;
 // Downscale floor when shrinking an oversized crop to fit the byte cap — an
 // emoji this small is still legible, and nothing legible fails to fit under it.
 const MIN_EMOJI_DIM: u32 = 48;
+/// Static emojis upload at most this wide (`UploadImageKind::Emoji`).
+const MAX_UPLOAD_DIM: u32 = 256;
 
 #[derive(Deserialize)]
 pub struct EmojiPackEmojiInput {
@@ -1249,7 +1251,11 @@ fn crop_and_reencode_blocking(input: EmojiCropInput, max_bytes: Option<usize>) -
     }
     let (sw, sh) = (dynimg.width(), dynimg.height());
     validate_crop_bounds(x, y, w, h, sw, sh)?;
-    let cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();
+    let mut cropped = dynimg.crop_imm(x, y, w, h).to_rgba8();
+    // An emoji uploads at most MAX_UPLOAD_DIM wide: sized once here, the budget is met in one encode.
+    if max_bytes.is_some() && w > MAX_UPLOAD_DIM {
+        cropped = image::imageops::resize(&cropped, MAX_UPLOAD_DIM, MAX_UPLOAD_DIM, image::imageops::FilterType::Lanczos3);
+    }
     encode_within_budget(&[(cropped, 0u32)], max_bytes, |scaled| encode_static(&scaled[0].0, format))
 }
 
@@ -1652,6 +1658,22 @@ mod tests {
         let img = image::load_from_memory(&out).unwrap();
         assert_eq!((img.width(), img.height()), (476, 292));
         assert!(crop_image(out, 0, 0, 500, 10).is_err(), "outside the source is refused");
+    }
+
+    #[test]
+    fn an_emoji_crop_comes_out_at_its_upload_size() {
+        let src = image::RgbaImage::from_fn(1200, 900, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(src.as_raw(), 1200, 900, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let input = EmojiCropInput { mime: "image/png".into(), x: 100, y: 0, w: 900, h: 900, bytes: png.clone() };
+        let out = crop_and_reencode_blocking(input, Some(MAX_EMOJI_BYTES)).unwrap();
+        let img = image::load_from_memory(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (MAX_UPLOAD_DIM, MAX_UPLOAD_DIM));
+        let small = EmojiCropInput { mime: "image/png".into(), x: 0, y: 0, w: 200, h: 200, bytes: png };
+        let img = image::load_from_memory(&crop_and_reencode_blocking(small, Some(MAX_EMOJI_BYTES)).unwrap()).unwrap();
+        assert_eq!(img.width(), 200, "never scaled up");
     }
 }
 
