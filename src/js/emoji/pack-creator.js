@@ -783,11 +783,21 @@ async function _pcSave() {
     // cap — the input's maxlength only constrains new typing, not values
     // we hydrated into the field from an existing pack.
     const name = (_pc.name || '').trim().slice(0, 26);
-    if (!name || !_pc.emojis.length) {
-        // Empty pack — drop the in-progress edit silently. Better than
-        // publishing a useless empty/no-name set the user clearly bailed on.
-        _pc.dirty = false;
-        return true;
+    if (!_pc.emojis.length) {
+        // A fresh editor opened and closed holds nothing: drop it silently. Anything entered
+        // (an icon, a name, an existing pack) stays, with what it still needs.
+        if (!_pc.editingId && !name && !_pc.logoFile) {
+            _pc.dirty = false;
+            return true;
+        }
+        _pcShowError('Oops! Add an Emoji First!', 'A pack needs at least one emoji. Add one to save it, or delete it to discard the draft.');
+        return false;
+    }
+    // Emojis without a name are work in progress, never something to drop.
+    if (!name) {
+        _pcShowError('Oops! Name Your Pack First!', 'Give it a name to save it, or delete it to discard the draft.');
+        if (!platformFeatures?.is_mobile) VectorSvelte.focusCreatorName();
+        return false;
     }
 
     const seenCodes = new Set();
@@ -800,7 +810,10 @@ async function _pcSave() {
         // paint the cell's busy state without searching by reference.
         sanitized.push({ ...e, shortcode: sc, originalIdx });
     });
-    if (!sanitized.length) { _pc.dirty = false; return true; }
+    if (!sanitized.length) {
+        _pcShowError('Oops! Your Emojis Need Names!', 'Give each emoji a name, then save.');
+        return false;
+    }
 
     // Defense-in-depth: only forward `editingIdentifier` when the matching
     // pack is still in `arrEmojiPacks` AND owned by the current user.

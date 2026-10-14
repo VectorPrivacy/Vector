@@ -22,10 +22,16 @@
 // the shared tooltip on keyboard-driven closes (no mouse leaves, so no mouseleave).
 VectorSvelte.onPickerVisibility((visible) => {
     if (visible) {
-        pushBack('emoji-picker', () => {
+        const backClose = () => {
+            // A pack edit that can't be saved keeps the panel, and its back entry.
+            if (_pc.open) {
+                closeEmojiPackCreator().then((closed) => (closed ? backClose() : pushBack('emoji-picker', backClose)));
+                return;
+            }
             VectorSvelte.setPickerVisible(false);
             VectorSvelte.setPickerBottom('');
-        });
+        };
+        pushBack('emoji-picker', backClose);
         // Every way the panel appears wakes the grids on screen; they sleep while hidden.
         _rearmVisiblePackCanvases();
     } else {
@@ -312,10 +318,14 @@ function _openPanel({ isDefaultPanel, reactionId }) {
 /** Hide + reset the emoji/reaction panel. Extracted from the toggle so other
  *  flows (e.g. a reacted-to message being removed) can dismiss it too. */
 function closeEmojiPanel() {
+    // Closing saves the pack being edited. One that can't be saved (no name, a failed upload)
+    // keeps the panel open, with the reason on it.
+    if (_pc.open) {
+        closeEmojiPackCreator().then((closed) => { if (closed) closeEmojiPanel(); });
+        return;
+    }
     // Hide and reset the UI - use class instead of inline style
     emojiSearch.value = '';
-    // Auto-save any in-progress pack edit before the panel disappears.
-    if (_pc.open) closeEmojiPackCreator();
     VectorSvelte.setPickerVisible(false);
     // A dialog-owned insert target ends with the panel; a reopen for the dialog sets it again.
     _emojiPanelTarget = null;
