@@ -1331,6 +1331,11 @@ fn crop_animated_webp(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: O
 }
 
 fn crop_gif(bytes: &[u8], x: u32, y: u32, w: u32, h: u32, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+    if let Some(out) = vector_core::image_crop::crop_gif(bytes, x, y, w, h) {
+        if max_bytes.is_none_or(|max| out.len() <= max) {
+            return Ok(out);
+        }
+    }
     let frames = decode_gif_frames(bytes)?;
     if frames.is_empty() {
         return Err("gif: no frames".to_string());

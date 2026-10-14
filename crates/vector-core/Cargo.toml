@@ -105,6 +105,8 @@ fast-thumbhash = "0.2"
 web-time = "1"
 rand = "0.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Indexed GIF frames, for a crop that keeps every palette and timing (`image_crop::crop_gif`).
+gif = "0.14"
 # SVG to pixels in Rust, so untrusted SVG markup never reaches a webview (see `svg.rs`). No
 # SVGZ (a decompression bomb), no GIF/WebP decoders for embedded images, no text (an SVG with any is refused).
 resvg = { version = "0.48", default-features = false, features = ["raster-images"] }

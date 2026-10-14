@@ -11756,6 +11756,7 @@ dependencies = [
  "getrandom 0.2.15",
  "getrandom 0.4.1",
  "ghash 0.6.0",
+ "gif",
  "hkdf",
  "hmac",
  "http",

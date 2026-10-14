@@ -259,6 +259,11 @@ fn crop(bytes: &[u8], mime: &str, x: u32, y: u32, w: u32, h: u32, max_bytes: Opt
         }
     };
     if is_animated(bytes) {
+        if let Some(out) = vector_core::image_crop::crop_gif(bytes, x, y, w, h) {
+            if max_bytes.is_none_or(|max| out.len() <= max) {
+                return Ok(out);
+            }
+        }
         let decoded = frames(bytes)?;
         let first = decoded.first().ok_or("no frames decoded")?;
         bounds(first.0.width(), first.0.height())?;
