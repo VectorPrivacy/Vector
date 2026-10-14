@@ -140,4 +140,41 @@ for (const needed of ['Content-Security-Policy', '/web/tauri-shim.js', '/web/web
     }
 }
 
+// Release: the page's scripts as a few bundles, joined in document order so they run exactly as
+// before. The onion is plain HTTP/1.1, where every file is another Tor round trip.
+if (release) await bundleScripts();
+
+async function bundleScripts() {
+    const { minify } = await import('terser');
+    // build-frontend's options: a bare property read (`store.seq;`) is a Svelte subscription.
+    const options = () => ({ compress: { dead_code: true, drop_console: true, passes: 3 }, mangle: true, format: { comments: false } });
+    const probe = await minify('function f(o) { o.seq; return 1; }', options());
+    if (!/\.seq/.test(probe.code)) throw new Error('[build-web] terser options drop bare property reads');
+
+    let page = readFileSync(indexPath, 'utf8');
+    // A directive counts only at the top of a script: inside a bundle it is lost, or leaks
+    // onto every file after it, so such a file keeps its own tag and splits the run.
+    const strict = (src) => /^\s*(\/\*[\s\S]*?\*\/\s*|\/\/[^\n]*\n\s*)*['"]use strict['"]/.test(readFileSync(join(OUT, src), 'utf8'));
+    const groups = [];
+    const runs = { true: null, false: null };
+    for (const [tag, src, defer] of page.matchAll(/ *<script src="([^"]+)"( defer)?><\/script>\n?/g)) {
+        const kind = !!defer;
+        if (strict(src)) { runs[kind] = null; continue; }
+        if (!runs[kind]) groups.push(runs[kind] = { defer: kind, srcs: [], tags: [] });
+        runs[kind].srcs.push(src);
+        runs[kind].tags.push(tag);
+    }
+    let n = 0;
+    for (const g of groups.filter((g) => g.srcs.length > 1)) {
+        const joined = g.srcs.map((src) => readFileSync(join(OUT, src), 'utf8')).join('\n;\n');
+        const { code } = await minify(joined, options());
+        const name = `/web/bundle-${n++}.js`;
+        writeFileSync(join(OUT, name), code);
+        page = page.replace(g.tags[0], `    <script src="${name}"${g.defer ? ' defer' : ''}></script>\n`);
+        for (const tag of g.tags.slice(1)) page = page.replace(tag, '');
+        console.log(`[build-web] ${name}: ${g.srcs.length} scripts${g.defer ? ' (deferred)' : ''}, ${(joined.length / 1024).toFixed(0)} KB → ${(code.length / 1024).toFixed(0)} KB`);
+    }
+    writeFileSync(indexPath, page);
+}
+
 console.log(`[build-web] → ${OUT}`);
