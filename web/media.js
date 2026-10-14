@@ -161,7 +161,16 @@
     }
 
     register('start_recording', async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        // Absent where the browser turns media off for pages (Tor Browser) or outside a secure context.
+        if (!navigator.mediaDevices?.getUserMedia) throw 'This browser keeps the microphone off for websites';
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        } catch (e) {
+            if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') throw 'Microphone access was denied';
+            if (e?.name === 'NotFoundError') throw 'No microphone was found';
+            throw String(e?.message ?? e);
+        }
         const ctx = new AudioContext();
         const src = ctx.createMediaStreamSource(stream);
         const proc = ctx.createScriptProcessor(4096, 1, 1);
