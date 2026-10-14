@@ -1057,6 +1057,7 @@ impl CompactAttachment {
     }
 
     /// Heap bytes held beyond the struct itself (DeepSize).
+    #[cfg(debug_assertions)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.url.len()
             + self.name.len()
@@ -1499,6 +1500,7 @@ impl HeldSpan {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn heap_bytes(&self) -> usize {
         match self {
             HeldSpan::Color { colors, .. } => colors.heap_bytes(),
@@ -1633,6 +1635,7 @@ impl MessageExtras {
     }
 
     /// Heap bytes held beyond the box itself (DeepSize).
+    #[cfg(debug_assertions)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.edits.heap_bytes()
             + self.edits.iter().map(|e| e.content.len()).sum::<usize>()

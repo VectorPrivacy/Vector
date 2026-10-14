@@ -13,6 +13,7 @@ import { cpSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, s
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
+import { homedir } from 'os';
 import { buildSvelte } from './build-svelte.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,10 +21,30 @@ const OUT = join(ROOT, 'dist-web');
 const release = process.argv.includes('--release');
 
 if (!process.argv.includes('--no-wasm')) {
+    // A release links the whole program at once (fat LTO, one codegen unit): ~7% smaller and
+    // optimised across crate boundaries, for a slower build.
+    const lto = release ? { CARGO_PROFILE_RELEASE_LTO: 'fat', CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1' } : {};
     execFileSync('wasm-pack', [
         'build', '--target', 'web', release ? '--release' : '--dev',
         '--no-typescript', '--no-pack', '--out-dir', join(ROOT, 'web', 'pkg'),
-    ], { cwd: join(ROOT, 'crates', 'vector-web'), stdio: 'inherit' });
+    ], { cwd: join(ROOT, 'crates', 'vector-web'), stdio: 'inherit', env: { ...process.env, ...lto } });
+    if (release) stripWasmNames(join(ROOT, 'web', 'pkg', 'vector_web_bg.wasm'));
+}
+
+/** Drop the function-name section (~10% of the module): nothing at runtime reads it, only
+ *  stack traces do. No optimisation passes: `-O3` inlined enough to compress worse. */
+function stripWasmNames(wasm) {
+    const cached = join(homedir(), 'Library', 'Caches', '.wasm-pack');
+    const candidates = ['wasm-opt', ...(existsSync(cached) ? readdirSync(cached).filter((d) => d.startsWith('wasm-opt-')).map((d) => join(cached, d, 'bin', 'wasm-opt')) : [])];
+    for (const tool of candidates) {
+        try {
+            execFileSync(tool, [wasm, '--all-features', '--strip-debug', '--strip-producers', '-o', wasm], { stdio: 'inherit' });
+            return;
+        } catch (e) {
+            if (e.code !== 'ENOENT') throw e;
+        }
+    }
+    console.warn('[build-web] wasm-opt not found: the wasm keeps its name section');
 }
 if (!existsSync(join(ROOT, 'web', 'pkg', 'vector_web_bg.wasm'))) {
     console.error('[build-web] no wasm build in web/pkg — run without --no-wasm first');
