@@ -690,8 +690,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes 0.14.0",
- "rand 0.8.7",
- "rand_core 0.6.4",
+ "rand 0.7.3",
+ "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
 ]
@@ -1852,7 +1852,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.100",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1924,7 +1924,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98e02cd118058400797c74550dca132b57cf2e6af0e9ea0672a83eb186fd655e"
 dependencies = [
  "derive-deftly-macros",
- "heck 0.5.0",
+ "heck 0.4.1",
 ]
 
 [[package]]
@@ -1933,8 +1933,8 @@ version = "1.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba91f619216e76a5eb2515783f7ec2e271938b51aadac592f4930517f4626863"
 dependencies = [
- "heck 0.5.0",
- "indexmap 2.14.0",
+ "heck 0.4.1",
+ "indexmap 1.9.3",
  "itertools 0.15.0",
  "proc-macro-crate 3.3.0",
  "proc-macro2",
@@ -2079,7 +2079,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3104,7 +3104,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.1",
  "windows-result 0.4.1",
 ]
 
@@ -4802,7 +4802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -5401,7 +5401,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.5.9",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -5443,7 +5443,7 @@ source = "git+https://github.com/n0-computer/noq.git?rev=64a7e4cb9b11def5fbfc4cc
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.1",
+ "socket2 0.5.9",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -5451,7 +5451,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.45.5"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#1723fbb11582f322bdeee3683f0bf22ab228f40e"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#61888f2b142e924afb9f719503bbced16e40be12"
 dependencies = [
  "aes 0.8.4",
  "base64 0.22.1",
@@ -5491,7 +5491,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.45.2"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#1723fbb11582f322bdeee3683f0bf22ab228f40e"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#61888f2b142e924afb9f719503bbced16e40be12"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -5500,7 +5500,7 @@ dependencies = [
 [[package]]
 name = "nostr-gossip"
 version = "0.45.1"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#1723fbb11582f322bdeee3683f0bf22ab228f40e"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#61888f2b142e924afb9f719503bbced16e40be12"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -5509,7 +5509,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.45.4"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#1723fbb11582f322bdeee3683f0bf22ab228f40e"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.4#61888f2b142e924afb9f719503bbced16e40be12"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -5582,7 +5582,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7810,7 +7810,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7868,7 +7868,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8071,7 +8071,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9683,7 +9683,7 @@ dependencies = [
  "getrandom 0.3.2",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
