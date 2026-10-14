@@ -19,8 +19,28 @@ const SANDBOX = {
     'Cache-Control': 'no-cache',
 };
 
+// The UI's own icons and fonts, cache-first: WebKit ignores stale-while-revalidate, so once
+// their max-age ran out every launch waited on the server before they painted. The name
+// carries a hash of their contents (build-web.mjs), so a deploy that changes one replaces it.
+const ASSETS = 'vector-assets-dev';
+const ASSET_DIRS = ['/icons/', '/fonts/'];
+
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (e) => e.waitUntil((async () => {
+    for (const key of await caches.keys()) {
+        if (key.startsWith('vector-assets-') && key !== ASSETS) await caches.delete(key);
+    }
+    await self.clients.claim();
+})()));
+
+async function cachedAsset(request) {
+    const cache = await caches.open(ASSETS);
+    const hit = await cache.match(request, { ignoreSearch: true });
+    if (hit) return hit;
+    const res = await fetch(request);
+    if (res.ok) await cache.put(request, res.clone());
+    return res;
+}
 
 async function openFile(path) {
     let dir = await navigator.storage.getDirectory();
@@ -57,7 +77,9 @@ async function serve(request, path) {
 
 self.addEventListener('fetch', (e) => {
     const url = new URL(e.request.url);
-    if (url.origin !== location.origin || !url.pathname.startsWith(PREFIX)) return;
+    if (url.origin !== location.origin) return;
+    if (e.request.method === 'GET' && ASSET_DIRS.some((d) => url.pathname.startsWith(d))) return e.respondWith(cachedAsset(e.request));
+    if (!url.pathname.startsWith(PREFIX)) return;
     let path;
     try { path = decodeURIComponent(url.pathname.slice(PREFIX.length - 1)); } catch { return; }
     if (path.split('/').includes('..')) return e.respondWith(new Response('Bad path', { status: 400 }));

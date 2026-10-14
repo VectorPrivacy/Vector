@@ -14,6 +14,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { homedir } from 'os';
+import { createHash } from 'crypto';
 import { buildSvelte } from './build-svelte.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -90,6 +91,24 @@ const collect = (dir, url) => {
 collect(join(OUT, 'icons'), '/icons/');
 collect(join(OUT, 'fonts'), '/fonts/');
 writeFileSync(join(OUT, 'web', 'warm.json'), JSON.stringify(warm));
+// The service worker caches everything under these by a name that changes only when a file does.
+{
+    const hash = createHash('sha256');
+    const digest = (dir) => {
+        for (const name of readdirSync(dir).sort()) {
+            const path = join(dir, name);
+            if (statSync(path).isDirectory()) digest(path);
+            else hash.update(path.slice(OUT.length)).update(readFileSync(path));
+        }
+    };
+    digest(join(OUT, 'icons'));
+    digest(join(OUT, 'fonts'));
+    const swPath = join(OUT, 'sw.js');
+    const sw = readFileSync(swPath, 'utf8');
+    const named = sw.replace("const ASSETS = 'vector-assets-dev';", `const ASSETS = 'vector-assets-${hash.digest('hex').slice(0, 12)}';`);
+    if (named === sw) throw new Error('[build-web] sw.js lost its ASSETS marker');
+    writeFileSync(swPath, named);
+}
 
 // Desktop's policy, minus Tauri's schemes. Nothing remote: every remote file reaches the page
 // as a local copy the worker fetched and checked. Frames are the exception: Mini Apps, and a
