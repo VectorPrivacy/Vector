@@ -31,7 +31,7 @@ impl VectorWs {
 
 /// What nostr-sdk's default transport names itself in the upgrade request.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) const UPGRADE_USER_AGENT: &str = "nostr-sdk/0.45.1";
+pub(crate) const UPGRADE_USER_AGENT: &str = "nostr-sdk/0.45.4";
 
 fn refused(e: super::ConnectError) -> nostr_sdk::prelude::Error {
     nostr_sdk::prelude::Error::transport(e.text())

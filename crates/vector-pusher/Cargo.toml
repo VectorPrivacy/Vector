@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 vector-push = { path = "../vector-push", features = ["vapid"] }
-nostr-sdk = "=0.45.1"
+nostr-sdk = "=0.45.4"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "time", "signal"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

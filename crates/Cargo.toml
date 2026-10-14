@@ -30,9 +30,9 @@ opt-level = 1
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork
 # zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
-nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
-nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 # saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
 # (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
 # and its saturating ops evaluate those limits eagerly — so tor-netdoc's first

@@ -312,9 +312,12 @@ mod tests {
     use super::*;
 
     fn rumor(from: &PublicKey, to: &PublicKey) -> UnsignedEvent {
-        EventBuilder::new(Kind::PrivateDirectMessage, "see you at nine")
+        // With its id, as the seal builder encrypts it.
+        let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, "see you at nine")
             .tag(Tag::public_key(*to))
-            .finalize_unsigned(*from)
+            .finalize_unsigned(*from);
+        rumor.ensure_id();
+        rumor
     }
 
     fn seal(author: &Keys, rumor: &UnsignedEvent, to: &PublicKey) -> Event {

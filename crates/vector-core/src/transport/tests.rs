@@ -1285,7 +1285,7 @@ async fn ws_upgrade_request_matches_default() {
     .await;
     let theirs = without_key(&theirs).replace(&url1.port().unwrap().to_string(), "PORT");
     let ours = without_key(&ours).replace(&port2.to_string(), "PORT");
-    assert!(theirs.contains("user-agent: nostr-sdk/0.45.1"), "{theirs}");
+    assert!(theirs.contains("user-agent: nostr-sdk/0.45.4"), "{theirs}");
     assert_eq!(ours, theirs, "the Direct path sends the default transport's upgrade, byte for byte");
 }
 

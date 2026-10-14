@@ -176,7 +176,7 @@ vector-core = { path = "../crates/vector-core", default-features = false, featur
 
 # NIP features are set on the `nostr` dep in vector-core and unify across the
 # workspace; 0.45 removed them from nostr-sdk entirely.
-nostr-sdk = "=0.45.1"
+nostr-sdk = "=0.45.4"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
@@ -350,9 +350,9 @@ whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev 
 # zeroizes with volatile writes. nostr-sdk: its verification cache re-hashes the event ID, and a
 # gift wrap's ID is checked but not its throwaway-key signature (NIP-59; readers verify the seal).
 # Fork: https://github.com/VectorPrivacy/nostr/tree/vector-v0.45.1
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
-nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
-nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.1" }
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
+nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 # noq's published BBR3 (through 1.1.1) is a partial merge with an unchecked subtraction
 # that underflows whenever loss exceeds the loss threshold — panic in dev builds, garbage
 # inflight estimate in release (n0-computer/noq#768). Pinned to the quinn-sync commit that

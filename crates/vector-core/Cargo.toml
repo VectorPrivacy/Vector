@@ -29,11 +29,11 @@ vector-push = { path = "../vector-push", version = "0.1.0" }
 # consumer resolve a MIXED set, and these crates share types across their
 # boundaries, so a mismatched sibling fails to compile. Bump all four together
 # or not at all.
-nostr = { version = "=0.45.1", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
-nostr-sdk = "=0.45.1"
+nostr = { version = "=0.45.5", features = ["nip04", "nip06", "nip44", "nip46", "nip59", "rand", "os-rng"] }
+nostr-sdk = "=0.45.4"
 # Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).
-nostr-database = "=0.45.1"
-nostr-connect = "=0.45.1"
+nostr-database = "=0.45.2"
+nostr-connect = "=0.45.2"
 # Blossom blob hashing. Must track nostr's own bitcoin_hashes major, or the
 # tree carries two copies. `hex` is explicit because it
 # gates Display/FromStr on the hash: the `std` default only forwards to it
