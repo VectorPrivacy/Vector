@@ -8,6 +8,7 @@
     // order (listVersion) and from each candidate chat's own signal, so a reply in one
     // chat re-derives the DM selection (a cheap scan) and patches one item; a rename
     // or avatar touches one item; nothing rebuilds the strip.
+    import { tick } from 'svelte';
     import { listVersion, chatVersion, openChatId } from '../lib/signals.svelte.js';
     import RailItem from './RailItem.svelte';
 
@@ -222,6 +223,40 @@
         },
     };
 
+    // ── room ──
+    // A short rail gives up unread DMs first, a whole row at a time: Communities keeps
+    // room for two rows, and the Messages tile above is the way to every DM.
+    let dmFit = $state(DM_COUNT);
+    const dmShown = $derived(groups.dms.slice(0, dmFit));
+    let spacesRowsEl = null;
+    function fitDms() {
+        const rowsEl = spacesRowsEl;
+        if (!rows.length || !rowsEl) {
+            dmFit = DM_COUNT;
+            return;
+        }
+        const item = rowsEl.querySelector('.ws-rail-item');
+        if (!item) return;
+        const rowH = item.getBoundingClientRect().height;
+        const room = rowsEl.clientHeight - Math.min(rows.length, 2) * rowH;
+        const shown = Math.min(dmFit, groups.dms.length);
+        // Bringing the group back also brings its label, so the first row asks for more.
+        if (room < 0 && shown > 0) dmFit = shown - 1;
+        else if (shown < Math.min(DM_COUNT, groups.dms.length) && room >= rowH * (shown === 0 ? 2.5 : 1)) dmFit = shown + 1;
+    }
+    function fitHost(node) {
+        spacesRowsEl = node;
+        const ro = new ResizeObserver(() => fitDms());
+        ro.observe(node);
+        return { destroy: () => { ro.disconnect(); spacesRowsEl = null; } };
+    }
+    $effect(() => {
+        groups;
+        rows;
+        dmFit;
+        tick().then(fitDms);
+    });
+
     // Everything waiting behind the Chat tab is the vanilla side's to paint.
     $effect(() => h.onUnreadDms(groups.unreadDms));
 
@@ -249,17 +284,17 @@
         <span class="ws-rail-messages-label">Messages</span>
     </div>
 </div>
-<div id="ws-rail-dms" class="ws-rail-group" hidden={groups.dms.length === 0}>
+<div id="ws-rail-dms" class="ws-rail-group" hidden={dmShown.length === 0}>
     <div class="ws-rail-group-label">New Messages</div>
     <div class="ws-rail-rows">
-        {#each groups.dms as chat (chat.id)}
+        {#each dmShown as chat (chat.id)}
             <RailItem {h} {chat} isCommunity={false} active={activeId === chat.id} />
         {/each}
     </div>
 </div>
 <div id="ws-rail-spaces" class="ws-rail-group" hidden={groups.spaces.length === 0}>
     <div class="ws-rail-group-label">Communities</div>
-    <div class="ws-rail-rows" use:bindSpacesRows use:fade>
+    <div class="ws-rail-rows" use:bindSpacesRows use:fade use:fitHost>
         {#each rows as row (row.type === 'folder' ? `f:${row.id}` : `i:${row.key}`)}
             {#if row.type === 'folder'}
                 <RailFolder {h} folder={row} {activeId} {drag} />
