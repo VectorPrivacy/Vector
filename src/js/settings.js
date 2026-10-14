@@ -1114,6 +1114,27 @@ async function setTorMultiCircuit(on) {
     }
 }
 
+/** The Tor engine: Vector's own, or one already running here, and where one answers. */
+async function loadTorEngine() {
+    try { VectorSvelte.setTorEngine(await invoke('tor_get_engine')); } catch (_) { /* keeps the default */ }
+}
+
+/** Switch engines, or fix the running Tor's port (`port` null finds it). Tor in use reconnects. */
+async function chooseTorEngine(external, port) {
+    VectorSvelte.setTorEngine({ busy: true });
+    VectorSvelte.setTransportLocked(true);
+    try {
+        VectorSvelte.setTorEngine(await invoke('tor_set_engine', { external, port }));
+        forgetTorCircuits();
+    } catch (err) {
+        showToast(String(err));
+        await loadTorEngine();
+    } finally {
+        VectorSvelte.setTorEngine({ busy: false });
+        VectorSvelte.setTransportLocked(false);
+    }
+}
+
 /** Multi-Circuit's saved mode, which applies whenever Tor is in use. */
 async function loadTorMulti() {
     try { VectorSvelte.setTorMulti((await invoke('tor_get_state'))?.multi_circuit); } catch (_) { /* keeps the default */ }
@@ -1261,6 +1282,7 @@ async function initSettings() {
     await loadTransportConfig();
     if (net?.supported?.includes('tor')) {
         await loadTorMulti();
+        await loadTorEngine();
         await loadTorBridges();
     }
 
@@ -1939,6 +1961,7 @@ const SETTINGS_HELP = {
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
     transport: ['Routing', 'Choose how Vector reaches relays and servers.<br><br><b>Tor</b> and <b>I2P</b> hide your IP address. Calls and multiplayer Mini Apps ask before connecting outside them.'],
     torMultiCircuit: ['Multi-Circuit', 'Each relay and media server gets its own Tor circuit. No single exit sees every server you use, and a slow circuit only slows the one connection riding it.<br><br>Turn this off to send everything over one shared circuit, like a VPN: fewer circuits to build, and one exit for all your traffic.'],
+    torExternal: ['Use Running Tor', 'Vector connects through a Tor that\'s already running on this device instead of starting its own: <b>Tor Browser</b> (port 9150), or <b>tor</b> or <b>Orbot</b> (port 9050). It starts instantly and shares that Tor\'s bridges.<br><br>Vector trusts whatever answers on this port. Leave the port empty to find it.'],
     torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before switching to Tor.'],
     i2pRouter: ['I2P Router', 'Vector uses the I2P router already running on this device, through its SAM bridge.<br><br>In i2pd, set <b>[sam] enabled = true</b>. In Java I2P, start the <b>SAM application bridge</b>. On Android, turn on <b>SAM</b> in the i2pd app, where it starts off.<br><br>For a router on another machine, forward its SAM port to this one, for example over SSH.<br><br>Vector trusts whatever answers on this port. Other apps that can reach your router can use Vector\'s I2P address.'],
     i2pAuth: ['SAM Password', 'Only needed if your router asks for one.'],
@@ -2057,6 +2080,8 @@ const SETTINGS_HELPERS = {
         newCircuit: () => loadTorCircuits(true, true),
         setBridgesEnabled: setTorBridgesEnabled,
         setMultiCircuit: setTorMultiCircuit,
+        setEngine: chooseTorEngine,
+        findTor: loadTorEngine,
         bridgesInput: onTorBridgesInput,
         applyBridges: applyTorBridges,
     },

@@ -10,7 +10,8 @@ use super::{Kind, KindConfig, TransportFactory};
 pub fn decode(kind: Kind, json: Option<&str>) -> KindConfig {
     match kind {
         Kind::I2p => Arc::new(super::i2p_config::I2pConfig::parse(json)),
-        Kind::Clearnet | Kind::Tor => Arc::new(()),
+        Kind::Tor => Arc::new(super::tor_config::TorConfig::parse(json)),
+        Kind::Clearnet => Arc::new(()),
     }
 }
 
@@ -18,7 +19,8 @@ pub fn decode(kind: Kind, json: Option<&str>) -> KindConfig {
 pub fn decode_unreadable(kind: Kind) -> KindConfig {
     match kind {
         Kind::I2p => Arc::new(super::i2p_config::I2pConfig::unreadable()),
-        Kind::Clearnet | Kind::Tor => Arc::new(()),
+        Kind::Tor => Arc::new(super::tor_config::TorConfig::default()),
+        Kind::Clearnet => Arc::new(()),
     }
 }
 

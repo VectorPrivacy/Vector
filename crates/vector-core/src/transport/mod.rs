@@ -14,6 +14,7 @@ pub mod cycle;
 pub mod guard;
 pub mod host;
 pub mod i2p_config;
+pub mod tor_config;
 pub mod kinds;
 pub mod prefs;
 pub mod prelogin;
@@ -268,7 +269,10 @@ impl ConnectError {
             ConnectError::NotReady(Some(k)) => format!("{} is still connecting.", k.label()),
             ConnectError::Blocked(t) => t.clone(),
             ConnectError::Stale => "The network changed. Try again.".into(),
-            ConnectError::RouterDown { port } => format!("Can't reach your I2P router at 127.0.0.1:{port}."),
+            ConnectError::RouterDown { port } => match preference() {
+                Some(Kind::Tor) => format!("Can't reach Tor at 127.0.0.1:{port}."),
+                _ => format!("Can't reach your I2P router at 127.0.0.1:{port}."),
+            },
             ConnectError::UnknownName => "This I2P name isn't in your router's address book. Use its .b32.i2p address.".into(),
             ConnectError::Unreachable(detail) => match preference() {
                 Some(Kind::I2p) => "This I2P address isn't online right now.".into(),

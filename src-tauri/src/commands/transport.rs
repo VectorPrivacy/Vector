@@ -62,6 +62,18 @@ async fn start_ctx(kind: Kind, prelogin: bool, owner: u64) -> Result<StartCtx, S
     match kind {
         #[cfg(feature = "tor")]
         Kind::Tor => {
+            let engine = prelogin::config_for(Kind::Tor)
+                .downcast_ref::<transport::tor_config::TorConfig>()
+                .cloned()
+                .unwrap_or_default();
+            if engine.external {
+                return Ok(StartCtx {
+                    owner,
+                    started_prelogin: prelogin,
+                    dirs: None,
+                    config: std::sync::Arc::new(vector_core::tor::TorStartConfig { bridges: Vec::new(), engine }),
+                });
+            }
             let (dirs, bridges) = if prelogin {
                 (vector_core::tor::prelogin_dirs()?, Vec::new())
             } else {
@@ -71,7 +83,7 @@ async fn start_ctx(kind: Kind, prelogin: bool, owner: u64) -> Result<StartCtx, S
                 owner,
                 started_prelogin: prelogin,
                 dirs: Some(dirs),
-                config: std::sync::Arc::new(vector_core::tor::TorStartConfig { bridges }),
+                config: std::sync::Arc::new(vector_core::tor::TorStartConfig { bridges, engine }),
             })
         }
         _ => Ok(StartCtx { owner, started_prelogin: prelogin, dirs: None, config: prelogin::config_for(kind) }),
@@ -658,6 +670,19 @@ pub(crate) async fn set_i2p_router(port: i64, auth: Option<Option<(String, Strin
     ensure_live()?;
     i2p_config::set_router(port, auth)?;
     let restarted = restart_if_incompatible(Kind::I2p).await;
+    emit_view();
+    restarted?;
+    Ok(view())
+}
+
+/// Use Vector's own Tor or one already running here (`port` None finds it); a running Tor moves
+/// onto the chosen engine.
+#[cfg(feature = "tor")]
+pub(crate) async fn set_tor_engine(external: bool, port: Option<u16>) -> Result<TransportStateView, String> {
+    let _serial = LIFECYCLE.lock().await;
+    ensure_live()?;
+    transport::tor_config::set(external, port)?;
+    let restarted = restart_if_incompatible(Kind::Tor).await;
     emit_view();
     restarted?;
     Ok(view())

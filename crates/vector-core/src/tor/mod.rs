@@ -22,6 +22,7 @@ use tor_rtcompat::PreferredRuntime;
 use crate::transport::{Kind, TransportState};
 
 mod connect;
+pub mod external;
 pub use connect::{TorFactory, TorStartConfig};
 
 /// Set true for the duration of a `TorService::start()` call. Lets `is_active`
@@ -451,17 +452,17 @@ pub fn current() -> Option<Arc<TorService>> {
 
 /// For display only (`socks5h://127.0.0.1:<port>`, no credentials) while Tor is installed.
 pub fn proxy_url() -> Option<String> {
-    current().and_then(|_| crate::transport::bridge::display_url())
+    is_active().then(crate::transport::bridge::display_url).flatten()
 }
 
 /// The bridge address while Tor is installed. A connect there without credentials is refused.
 pub fn socks_addr() -> Option<SocketAddr> {
-    current().and_then(|_| crate::transport::bridge::addr().ok())
+    is_active().then(|| crate::transport::bridge::addr().ok()).flatten()
 }
 
-/// Is Tor the installed kind?
+/// Is Tor the installed kind, on either engine?
 pub fn is_active() -> bool {
-    current().is_some()
+    current().is_some() || external::active().is_some()
 }
 
 /// What the transport status reports for Tor while no instance is installed.
@@ -774,6 +775,7 @@ pub fn rotate_circuits() {
     host_isolation().lock().unwrap_or_else(|e| e.into_inner()).clear();
     host_tunnels().lock().unwrap_or_else(|e| e.into_inner()).clear();
     *LATEST_HOST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    external::rotate();
 }
 
 /// Multi-circuit (the default): every host rides its own circuit, so one stalled circuit costs
@@ -1022,6 +1024,16 @@ mod circuit_mode_tests {
         let shared = current_isolation_token();
         assert_eq!(isolation_for("relay.one.example"), shared, "single mode shares one circuit");
         assert_eq!(isolation_for("relay.two.example"), shared);
+        set_multi_circuit(true);
+
+        // A running Tor isolates by SOCKS username, on the same modes.
+        let a = external::isolation_user("Relay.One.example");
+        assert_eq!(a, external::isolation_user("relay.one.example"), "a host keeps its circuit");
+        assert_ne!(a, external::isolation_user("relay.two.example"), "each host gets its own");
+        rotate_circuits();
+        assert_ne!(a, external::isolation_user("relay.one.example"), "a rotation replaces every one");
+        set_multi_circuit(false);
+        assert_eq!(external::isolation_user("relay.one.example"), external::isolation_user("relay.two.example"));
         set_multi_circuit(true);
     }
 }

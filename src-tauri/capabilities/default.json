@@ -439,6 +439,8 @@
     "allow-tor-set-prelogin",
     "allow-tor-get-host-circuit",
     "allow-tor-set-multi-circuit",
+    "allow-tor-get-engine",
+    "allow-tor-set-engine",
     "allow-tor-prelogin-abandon",
     "allow-tor-get-circuits",
     "allow-tor-get-bridges",

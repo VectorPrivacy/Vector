@@ -3,11 +3,13 @@
 const tor = $state({
     multi: true,          // each host on its own circuit, or one shared circuit
     circuits: { phase: 'idle', hops: [], host: '', count: 0, hosts: 0, error: '' },   // idle | loading | ok | error
+    engine: { external: false, port: null, found: null, busy: false },   // a Tor already running here, and where it answers
 });
 
 export function torState() { return tor; }
 export function setTorMulti(on) { tor.multi = on !== false; }
 export function setTorCircuits(circuits) { tor.circuits = circuits; }
+export function setTorEngine(patch) { Object.assign(tor.engine, patch); }
 
 const blocked = $state({ seq: 0 });
 export function blockedVersion() { return blocked.seq; }

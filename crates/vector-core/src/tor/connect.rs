@@ -10,12 +10,17 @@ use crate::transport::{
     BoxedStream, ConnectError, Dialed, Dest, Kind, KindConfig, Lane, Route, RouteCtx, StartCtx, Transport, TransportFactory,
 };
 
+use crate::transport::tor_config::TorConfig;
+
+use super::external::ExternalTor;
 use super::TorService;
 
 /// What a Tor start needs beyond its directories.
 #[derive(Clone, Debug, Default)]
 pub struct TorStartConfig {
     pub bridges: Vec<String>,
+    /// Which engine: Vector's own, or a Tor already running here.
+    pub engine: TorConfig,
 }
 
 #[async_trait::async_trait]
@@ -85,6 +90,10 @@ impl Transport for TorService {
     fn into_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
+
+    fn as_any(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        Some(self)
+    }
 }
 
 /// One plain sentence for a failed stream: arti's error is a chain of every layer it passed.
@@ -119,8 +128,13 @@ impl TransportFactory for TorFactory {
     }
 
     async fn start(&self, ctx: StartCtx) -> Result<Arc<dyn Transport>, String> {
+        let start = ctx.config.downcast_ref::<TorStartConfig>().cloned().unwrap_or_default();
+        if start.engine.external {
+            super::clear_last_bootstrap_error();
+            return Ok(ExternalTor::start(&start.engine).await);
+        }
         let (state, cache) = ctx.dirs.ok_or_else(|| "Tor needs its data directories.".to_string())?;
-        let bridges = ctx.config.downcast_ref::<TorStartConfig>().map(|c| c.bridges.clone()).unwrap_or_default();
+        let bridges = start.bridges;
         let budget = crate::transport::budget(crate::transport::Op::Startup, std::time::Duration::ZERO);
         match crate::rt::time::timeout(budget, TorService::bootstrap(state, cache, &bridges)).await {
             Ok(Ok(svc)) => Ok(svc),
@@ -138,7 +152,12 @@ impl TransportFactory for TorFactory {
         false
     }
 
-    fn compatible(&self, _inst: &dyn Transport, _cfg: &KindConfig) -> bool {
-        true
+    /// The engine must match: a running Tor serves its own port choice, Vector's own serves the rest.
+    fn compatible(&self, inst: &dyn Transport, cfg: &KindConfig) -> bool {
+        let engine = cfg.downcast_ref::<TorConfig>().cloned().unwrap_or_default();
+        match inst.as_any() {
+            Some(a) if a.is::<ExternalTor>() => a.downcast_ref::<ExternalTor>().is_some_and(|t| t.serves(&engine)),
+            _ => !engine.external,
+        }
     }
 }

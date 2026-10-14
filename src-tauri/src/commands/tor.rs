@@ -137,6 +137,10 @@ fn current_status_string() -> String {
     if vector_core::tor::is_bootstrapping() {
         return format!("bootstrapping {}%", vector_core::tor::bootstrap_progress());
     }
+    if let Some(t) = vector_core::tor::external::active() {
+        use vector_core::transport::Transport;
+        return if t.ready() { "connected".into() } else { "waiting for Tor".into() };
+    }
     match vector_core::tor::current().map(|s| s.status()) {
         // Nothing installed: never started, or the last start failed. Surface the failure so
         // the toggle unlocks instead of looping on "Starting…".
@@ -293,6 +297,10 @@ pub async fn tor_get_circuits(force_new: Option<bool>) -> Result<CircuitOut, Str
             vector_core::tor::rotate_circuits();
             lifecycle::switch_relay_transport().await;
         }
+        // A running Tor builds its own circuits: rotating is all Vector does with them.
+        if vector_core::tor::external::active().is_some() {
+            return Ok(CircuitOut { host: None, hops: Vec::new(), circuits: 0, hosts: 0 });
+        }
         let (circuits, hosts) = vector_core::tor::active_circuits();
         // Multi-circuit has no one circuit to show: the count is the view, and it builds nothing.
         if vector_core::tor::multi_circuit() {
@@ -371,6 +379,54 @@ pub async fn tor_set_multi_circuit(enabled: bool) -> Result<TorState, String> {
         }
     }
     Ok(tor_get_state())
+}
+
+/// Which Tor engine the account uses, and where a running Tor was found.
+#[derive(Debug, Serialize)]
+pub struct TorEngineView {
+    /// A Tor already running here rather than Vector's own.
+    pub external: bool,
+    /// The port the user fixed; `None` finds it.
+    pub port: Option<u16>,
+    /// Where a running Tor answers now, if anywhere.
+    pub found: Option<u16>,
+}
+
+/// The engine setting, and a look for a running Tor on the ports it would use.
+#[tauri::command]
+pub async fn tor_get_engine() -> TorEngineView {
+    let cfg = vector_core::transport::tor_config::current();
+    #[cfg(feature = "tor")]
+    let found = match vector_core::tor::external::active().and_then(|t| t.port()) {
+        Some(p) => Some(p),
+        None => {
+            let ports = cfg.ports();
+            // spawn-detached: two loopback probes on the runtime that owns transport sockets; awaited.
+            vector_core::transport::spawn_on(async move { vector_core::tor::external::detect(&ports).await }).await.ok().flatten()
+        }
+    };
+    #[cfg(not(feature = "tor"))]
+    let found = None;
+    TorEngineView { external: cfg.external, port: cfg.port, found }
+}
+
+/// Use a Tor already running here (`port` 0 or absent finds it) or Vector's own.
+#[tauri::command]
+pub async fn tor_set_engine(external: bool, port: Option<i64>) -> Result<TorEngineView, String> {
+    let port = match port {
+        None | Some(0) => None,
+        Some(p) => Some(vector_core::transport::i2p_config::validate_port(p)?),
+    };
+    #[cfg(feature = "tor")]
+    {
+        vector_core::db::scoped_result(lifecycle::set_tor_engine(external, port)).await?;
+        Ok(tor_get_engine().await)
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        let _ = (external, port);
+        Err(vector_core::transport::status::not_in_build(Kind::Tor).text)
+    }
 }
 
 /// Read the current Tor state. Cheap, safe to poll from the UI.
