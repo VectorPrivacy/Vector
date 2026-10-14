@@ -370,6 +370,38 @@ fn pooled(desc: &HttpClient, epoch: u64, egress: &crate::transport::Egress) -> R
     Ok(client)
 }
 
+/// Hosts this page reaches at another address: `(host, base)`, the host matching itself and its
+/// subdomains. Vector Web served from an onion reaches Magnitude at its onion, since Tor Browser
+/// sends `Origin: null` from an onion page to the clearnet and Magnitude admits browsers by Origin.
+#[cfg(target_arch = "wasm32")]
+static HOST_ALIASES: std::sync::OnceLock<Vec<(String, reqwest::Url)>> = std::sync::OnceLock::new();
+
+#[cfg(target_arch = "wasm32")]
+pub fn set_host_aliases(aliases: &[(&str, &str)]) {
+    let parsed = aliases.iter().filter_map(|(host, base)| Some((host.to_string(), reqwest::Url::parse(base).ok()?))).collect();
+    let _ = HOST_ALIASES.set(parsed);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_host_alias(url: &mut reqwest::Url) {
+    if let Some(next) = HOST_ALIASES.get().and_then(|aliases| aliased(url, aliases)) {
+        *url = next;
+    }
+}
+
+/// `url` at its alias, keeping the path and query; `None` when its host has none.
+#[cfg(any(target_arch = "wasm32", test))]
+fn aliased(url: &reqwest::Url, aliases: &[(String, reqwest::Url)]) -> Option<reqwest::Url> {
+    let host = url.host_str()?;
+    let (_, base) = aliases
+        .iter()
+        .find(|(alias, _)| host == alias || host.strip_suffix(alias.as_str()).is_some_and(|sub| sub.ends_with('.')))?;
+    let mut next = base.clone();
+    next.set_path(url.path());
+    next.set_query(url.query());
+    Some(next)
+}
+
 /// A request being built. Forwards the builder methods call sites use.
 pub struct Req {
     rb: reqwest::RequestBuilder,
@@ -430,7 +462,10 @@ impl Req {
     #[allow(clippy::disallowed_methods)]
     pub async fn send(self) -> Result<Resp, HttpError> {
         let (_, req) = self.rb.build_split();
-        let req = req.map_err(HttpError::from_reqwest)?;
+        #[allow(unused_mut)]
+        let mut req = req.map_err(HttpError::from_reqwest)?;
+        #[cfg(target_arch = "wasm32")]
+        apply_host_alias(req.url_mut());
         let host = req.url().host_str().unwrap_or_default().to_string();
         let port = req.url().port_or_known_default().unwrap_or(443);
         let desc = self.client;
@@ -1276,6 +1311,23 @@ mod fd_limit_tests {
         let ceiling: libc::rlim_t = 1 << 20;
         assert!(after.rlim_cur >= before.rlim_cur);
         assert!(after.rlim_cur >= after.rlim_max.min(ceiling));
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::aliased;
+
+    #[test]
+    fn a_host_and_its_subdomains_reach_the_alias_and_nothing_else_does() {
+        let onion = reqwest::Url::parse("http://abc.onion").unwrap();
+        let aliases = [("magnitude.vectorapp.io".to_string(), onion.clone()), ("magnitude.jskitty.com".to_string(), onion)];
+        let at = |u: &str| aliased(&reqwest::Url::parse(u).unwrap(), &aliases).map(|u| u.to_string());
+        assert_eq!(at("https://magnitude.vectorapp.io/ab.png").as_deref(), Some("http://abc.onion/ab.png"));
+        assert_eq!(at("https://us.magnitude.jskitty.com/proxy?url=x%2Fy").as_deref(), Some("http://abc.onion/proxy?url=x%2Fy"));
+        assert_eq!(at("https://evilmagnitude.vectorapp.io/ab.png"), None);
+        assert_eq!(at("https://magnitude.vectorapp.io.evil.com/ab.png"), None);
+        assert_eq!(at("https://blossom.primal.net/ab.png"), None);
     }
 }
 

@@ -60,6 +60,10 @@ pub async fn start(version: String, level: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
 
     storage::install(&level).await?;
+    if page_hostname().is_some_and(|h| h.ends_with(".onion")) {
+        let onion = "http://mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion";
+        vector_core::net::set_host_aliases(&[("magnitude.vectorapp.io", onion), ("magnitude.jskitty.com", onion)]);
+    }
 
     signers::install();
     calls::install();
@@ -119,4 +123,10 @@ pub async fn invoke_bytes(cmd: String, bytes: Vec<u8>, headers: String) -> Resul
         },
         _ => Err(JsValue::from_str(&format!("`{cmd}` does not take a raw body on Vector Web"))),
     }
+}
+
+/// The hostname this worker's page was served from.
+fn page_hostname() -> Option<String> {
+    let location = js_sys::Reflect::get(&js_sys::global(), &"location".into()).ok()?;
+    js_sys::Reflect::get(&location, &"hostname".into()).ok()?.as_string()
 }
