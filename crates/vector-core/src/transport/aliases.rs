@@ -17,11 +17,13 @@ pub enum AliasSource {
     BuiltIn,
 }
 
-/// Twins of Vector's own relay, run by its operator. Each serves that host's TLS on 443 and
-/// nothing else. A user's entry for the host, even an empty one, replaces them.
+/// Twins of Vector's own relay and media server, run by their operator. Each serves that host's
+/// TLS on 443. A user's entry for the host, even an empty one, replaces them.
 pub const BUILT_IN: &[(&str, Kind, &str)] = &[
     ("jskitty.com", Kind::Tor, "jskittynoz22rnwlzyg2akvixkyqp243dd4iq7rs2imry5d6imv4uoyd.onion"),
     ("jskitty.com", Kind::I2p, "nk7ghqbv2nwrleccnq5yz5nsvbkkufhwvcya5gqskxv37bnbfaea.b32.i2p"),
+    ("magnitude.vectorapp.io", Kind::Tor, "mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion"),
+    ("magnitude.jskitty.com", Kind::Tor, "mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion"),
 ];
 
 #[cfg(test)]
