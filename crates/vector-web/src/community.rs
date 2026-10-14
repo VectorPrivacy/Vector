@@ -109,18 +109,10 @@ pub fn get_community_invite_summary(community_id: &str) -> Result<Value, String>
 pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) -> Result<Value, String> {
     use vector_core::community::cache;
     let is_older = before_ms.is_some();
-    let key = format!("{channel_id}:{}", if is_older { "older" } else { "latest" });
     let empty = json!({ "new_messages": 0, "reached_start": false, "oldest_ms": null });
-    if !cache::try_begin_page_fetch(&key) {
+    let Some(_claim) = cache::claim_page_fetch(channel_id, is_older) else {
         return Ok(empty);
-    }
-    struct Claim(String);
-    impl Drop for Claim {
-        fn drop(&mut self) {
-            vector_core::community::cache::end_page_fetch(&self.0);
-        }
-    }
-    let _claim = Claim(key);
+    };
 
     let community_id = db::community::community_id_for_channel(channel_id)?.ok_or("Unknown Community channel")?;
     if !is_held(&community_id) {
@@ -390,7 +382,7 @@ pub async fn apply_presence(
         .lock()
         .await
         .get_profile(npub)
-        .is_none_or(|p| p.nickname().is_empty() && p.display_name.is_empty() && p.name.is_empty());
+        .is_none_or(|p| p.nickname().is_empty() && p.display_name().is_empty() && p.name().is_empty());
     if nameless {
         vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
     }
@@ -530,7 +522,7 @@ pub async fn send_community_file(
             state.update_attachment(&channel_id, &real_id, &attachment.id, |a| {
                 a.set_downloaded(true);
                 a.set_downloading(false);
-                a.path = path.clone().into_boxed_str();
+                a.set_path(path.clone());
             });
             state.find_message(&real_id).map(|(_, m)| m)
         };

@@ -743,8 +743,8 @@ pub async fn apply_received_wallpaper(
             .and_then(|p| {
                 if !p.nickname().is_empty() {
                     Some(p.nickname().to_string())
-                } else if !p.name.is_empty() {
-                    Some(p.name.to_string())
+                } else if !p.name().is_empty() {
+                    Some(p.name().to_string())
                 } else {
                     None
                 }
@@ -831,8 +831,8 @@ async fn emit_wallpaper_removed(
             .and_then(|p| {
                 if !p.nickname().is_empty() {
                     Some(p.nickname().to_string())
-                } else if !p.name.is_empty() {
-                    Some(p.name.to_string())
+                } else if !p.name().is_empty() {
+                    Some(p.name().to_string())
                 } else {
                     None
                 }

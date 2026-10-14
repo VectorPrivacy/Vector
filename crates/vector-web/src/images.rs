@@ -245,14 +245,14 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
         let changed = state.get_profile_mut_by_id(id).is_some_and(|p| {
             let mut changed = false;
             if let Some(a) = &avatar {
-                if *p.avatar_cached != **a {
-                    p.avatar_cached = a.clone().into_boxed_str();
+                if *p.avatar_cached() != **a {
+                    p.set_avatar_cached(a);
                     changed = true;
                 }
             }
             if let Some(b) = &banner {
-                if *p.banner_cached != **b {
-                    p.banner_cached = b.clone().into_boxed_str();
+                if *p.banner_cached() != **b {
+                    p.set_banner_cached(b);
                     changed = true;
                 }
             }
@@ -273,10 +273,10 @@ pub async fn cache_all_profile_images() {
         state
             .profiles
             .iter()
-            .filter(|p| (!p.avatar.is_empty() && p.avatar_cached.is_empty()) || (!p.banner.is_empty() && p.banner_cached.is_empty()))
+            .filter(|p| (!p.avatar().is_empty() && !p.has_avatar_cached()) || (!p.banner().is_empty() && !p.has_banner_cached()))
             .filter_map(|p| {
                 let npub = state.interner.resolve(p.id)?.to_string();
-                Some((npub, p.avatar.to_string(), p.banner.to_string()))
+                Some((npub, p.avatar().to_string(), p.banner().to_string()))
             })
             .collect()
     };

@@ -610,7 +610,8 @@ impl CompactReaction {
 // Compact Attachment
 // ============================================================================
 
-/// Packed flags for attachment state (1 byte instead of multiple bools)
+/// Packed attachment state: the three bools, where the local path comes from, and
+/// whether the original hash is the id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentFlags(u8);
 
@@ -619,6 +620,14 @@ impl AttachmentFlags {
     const DOWNLOADING: u8 = 0b0001;
     const DOWNLOADED: u8  = 0b0010;
     const SHORT_NONCE: u8 = 0b0100; // 12-byte nonce (legacy) vs 16-byte (DM)
+    const PATH_MASK: u8 = 0b1_1000;
+    /// `{download dir}{id}.{ext}`
+    const PATH_HASHED: u8 = 0b0_1000;
+    /// `{download dir}{name}`
+    const PATH_NAMED: u8 = 0b1_0000;
+    /// Held verbatim in the cold box
+    const PATH_CUSTOM: u8 = 0b1_1000;
+    const ORIGINAL_IS_ID: u8 = 0b10_0000;
 
     #[inline]
     pub fn is_downloading(self) -> bool { self.0 & Self::DOWNLOADING != 0 }
@@ -640,6 +649,12 @@ impl AttachmentFlags {
         if value { self.0 |= Self::SHORT_NONCE; } else { self.0 &= !Self::SHORT_NONCE; }
     }
 
+    #[inline]
+    fn path_kind(self) -> u8 { self.0 & Self::PATH_MASK }
+
+    #[inline]
+    fn set_path_kind(&mut self, kind: u8) { self.0 = (self.0 & !Self::PATH_MASK) | kind; }
+
     pub fn from_bools(downloading: bool, downloaded: bool) -> Self {
         let mut flags = Self::NONE;
         flags.set_downloading(downloading);
@@ -648,51 +663,112 @@ impl AttachmentFlags {
     }
 }
 
-/// Memory-efficient attachment with binary hashes and compact strings.
-///
-/// Compared to the regular `Attachment` struct (~320+ bytes):
-/// - id (SHA256): `[u8; 32]` instead of hex String (saves ~56 bytes)
-/// - key: `[u8; 32]` instead of String (saves ~56 bytes)
-/// - nonce: `[u8; 16]` instead of String (saves ~32 bytes)
-/// - Bools packed into AttachmentFlags (saves padding)
-/// - Strings use Box<str> (saves 8 bytes each)
-/// - Rare fields boxed (saves ~100+ bytes when None)
-/// - Total: ~120 bytes vs ~320 bytes (62% savings!)
+/// Extensions held as their index here; anything else rides the cold box as [`EXT_COLD`].
+const EXTENSIONS: [&str; 93] = [
+    "", "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "bmp", "tiff", "tif", "ico", "svg", "jfif",
+    "mp4", "mov", "webm", "mkv", "avi", "m4v", "3gp", "mpg", "mpeg", "ogv", "flv", "wmv",
+    "mp3", "m4a", "ogg", "oga", "opus", "wav", "flac", "aac", "wma", "weba", "caf", "amr",
+    "pdf", "txt", "md", "csv", "json", "xml", "yaml", "yml", "toml", "rtf", "log", "html", "htm", "css",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub",
+    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "iso", "dmg", "apk", "jar", "exe", "deb",
+    "xdc", "js", "ts", "py", "rs", "sql", "sh",
+    "glb", "gltf", "obj", "stl", "dae", "arw", "cr2", "dng", "nef",
+];
+const EXT_COLD: u8 = u8::MAX;
+
+fn extension_code(ext: &str) -> u8 {
+    EXTENSIONS.iter().position(|&e| e == ext).map_or(EXT_COLD, |i| i as u8)
+}
+
+/// The download directory as a path prefix, captured once so a derived path rebuilds
+/// to the same string for the life of the process, whatever the directory does later.
+fn download_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<Box<str>> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| {
+        let probe = crate::db::get_download_dir().join("x");
+        let probe = probe.to_string_lossy();
+        probe[..probe.len() - 1].into()
+    })
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// `s` is exactly the lowercase hex of `id`, as [`bytes_to_hex_32`] writes it.
+fn is_hex_of(s: &[u8], id: &[u8; 32]) -> bool {
+    s.len() == 64
+        && id.iter().enumerate().all(|(i, b)| s[2 * i] == HEX[(b >> 4) as usize] && s[2 * i + 1] == HEX[(b & 0xf) as usize])
+}
+
+/// Which derivation reproduces `path` byte for byte, if any.
+fn classify_path(path: &str, id: &[u8; 32], ext: &str, name: &str) -> u8 {
+    if path.is_empty() {
+        return 0;
+    }
+    let Some(file) = path.strip_prefix(download_prefix()).map(str::as_bytes) else {
+        return AttachmentFlags::PATH_CUSTOM;
+    };
+    if !name.is_empty() && file == name.as_bytes() {
+        return AttachmentFlags::PATH_NAMED;
+    }
+    if file.len() == 65 + ext.len() && file[64] == b'.' && file[65..] == *ext.as_bytes() && is_hex_of(&file[..64], id) {
+        return AttachmentFlags::PATH_HASHED;
+    }
+    AttachmentFlags::PATH_CUSTOM
+}
+
+/// The fields few attachments carry, boxed together so the rest pay 8 bytes.
+#[derive(Clone, Debug, Default)]
+struct AttachmentCold {
+    /// Set when the extension has no code
+    extension: Box<str>,
+    /// Set when the path has no derivation
+    path: Box<str>,
+    /// Mirror URLs for the same ciphertext
+    fallback_urls: Box<[Box<str>]>,
+    /// WebXDC topic (Mini Apps only)
+    webxdc_topic: Option<Box<str>>,
+    /// Original file hash, when it differs from the id
+    original_hash: Option<Box<[u8; 32]>>,
+    /// Legacy group ID for key derivation
+    group_id: Option<Box<[u8; 32]>>,
+}
+
+impl AttachmentCold {
+    fn is_empty(&self) -> bool {
+        self.extension.is_empty()
+            && self.path.is_empty()
+            && self.fallback_urls.is_empty()
+            && self.webxdc_topic.is_none()
+            && self.original_hash.is_none()
+            && self.group_id.is_none()
+    }
+}
+
+/// Memory-efficient attachment: binary hashes, the extension as a code, the local path
+/// derived from the id or name when it can be, image metadata in one allocation, and
+/// the rarely-set fields behind one box.
 #[derive(Clone, Debug)]
 pub struct CompactAttachment {
-    // === Fixed binary fields ===
-    /// SHA256 file hash as binary (was hex String)
-    pub id: [u8; 32],
+    /// SHA256 file hash as binary. A derived path follows it.
+    id: [u8; 32],
     /// Encryption key - 32 bytes (empty = legacy derived)
     pub key: [u8; 32],
     /// Encryption nonce - 16 bytes (AES-256-GCM with 0xChat compatibility)
     pub nonce: [u8; 16],
     /// File size in bytes
     pub size: u64,
-    /// Packed boolean flags (downloading, downloaded)
-    pub flags: AttachmentFlags,
-
-    // === Variable fields (Box<str> = 16 bytes each vs String's 24) ===
-    /// File extension (e.g., "png", "mp4")
-    pub extension: Box<str>,
     /// Host URL (blossom server, etc.)
     pub url: Box<str>,
-    /// Local file path (empty if not downloaded)
-    pub path: Box<str>,
-
-    // === Optional fields - boxed to save space when None ===
-    /// Image metadata (only for images/videos)
-    pub img_meta: Option<Box<ImageMetadata>>,
-    /// Legacy group ID for key derivation
-    pub group_id: Option<Box<[u8; 32]>>,
-    /// Original file hash before encryption
-    pub original_hash: Option<Box<[u8; 32]>>,
-    /// WebXDC topic (Mini Apps only - very rare)
-    pub webxdc_topic: Option<Box<str>>,
-    /// Mirror URLs for the same ciphertext (None = no mirrors, the common case)
-    pub fallback_urls: Option<Box<[Box<str>]>>,
-    /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
-    pub name: Box<str>,
+    /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}. A
+    /// derived path follows it.
+    name: Box<str>,
+    /// `[width u32 LE][height u32 LE][thumbhash]`; empty when there is none
+    img_meta: TinyVec<u8>,
+    cold: Option<Box<AttachmentCold>>,
+    /// Packed boolean flags, path kind and original-hash bit
+    flags: AttachmentFlags,
+    /// Index into [`EXTENSIONS`], or [`EXT_COLD`]
+    ext: u8,
 }
 
 impl CompactAttachment {
@@ -740,55 +816,222 @@ impl CompactAttachment {
         }
     }
 
-    /// Convert from regular Attachment (borrowed)
-    pub fn from_attachment(att: &Attachment) -> Self {
-        // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
-        let is_short_nonce = att.nonce.len() == 24;
-        let mut flags = AttachmentFlags::from_bools(att.downloading, att.downloaded);
-        flags.set_short_nonce(is_short_nonce);
+    #[inline]
+    fn cold(&self) -> Option<&AttachmentCold> {
+        self.cold.as_deref()
+    }
 
-        Self {
-            id: hex_to_bytes_32(&att.id),
-            key: if att.key.is_empty() { [0u8; 32] } else { hex_to_bytes_32(&att.key) },
-            nonce: if att.nonce.is_empty() { [0u8; 16] } else { parse_nonce(&att.nonce) },
-            size: att.size,
-            flags,
-            extension: att.extension.clone().into_boxed_str(),
-            url: att.url.clone().into_boxed_str(),
-            path: att.path.clone().into_boxed_str(),
-            img_meta: att.img_meta.clone().map(Box::new),
-            group_id: att.group_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
-            original_hash: att.original_hash.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
-            webxdc_topic: att.webxdc_topic.clone().map(|s| s.into_boxed_str()),
-            fallback_urls: (!att.fallback_urls.is_empty())
-                .then(|| att.fallback_urls.iter().map(|s| s.as_str().into()).collect()),
-            name: att.name.clone().into_boxed_str(),
+    fn cold_mut(&mut self) -> &mut AttachmentCold {
+        self.cold.get_or_insert_with(Default::default)
+    }
+
+    fn drop_empty_cold(&mut self) {
+        if self.cold.as_ref().is_some_and(|c| c.is_empty()) {
+            self.cold = None;
         }
     }
 
+    /// File extension (e.g., "png", "mp4")
+    #[inline]
+    pub fn extension(&self) -> &str {
+        match EXTENSIONS.get(self.ext as usize) {
+            Some(ext) => ext,
+            None => self.cold().map_or("", |c| &c.extension),
+        }
+    }
+
+    /// Whether a local path is set, without building it.
+    #[inline]
+    pub fn has_path(&self) -> bool {
+        self.flags.path_kind() != 0
+    }
+
+    /// Local file path (empty if not downloaded). Allocates only for a derived path.
+    pub fn path(&self) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+        match self.flags.path_kind() {
+            AttachmentFlags::PATH_HASHED => {
+                let (prefix, ext) = (download_prefix(), self.extension());
+                let mut path = String::with_capacity(prefix.len() + 65 + ext.len());
+                path.push_str(prefix);
+                for b in self.id {
+                    path.push(HEX[(b >> 4) as usize] as char);
+                    path.push(HEX[(b & 0xf) as usize] as char);
+                }
+                path.push('.');
+                path.push_str(ext);
+                Cow::Owned(path)
+            }
+            AttachmentFlags::PATH_NAMED => Cow::Owned([download_prefix(), &self.name].concat()),
+            AttachmentFlags::PATH_CUSTOM => Cow::Borrowed(self.cold().map_or("", |c| &c.path)),
+            _ => Cow::Borrowed(""),
+        }
+    }
+
+    #[inline]
+    pub fn id(&self) -> &[u8; 32] {
+        &self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[inline]
+    pub fn flags(&self) -> AttachmentFlags {
+        self.flags
+    }
+
+    /// The path and original hash stay what they were: both may be derived from the id.
+    pub fn set_id(&mut self, id: [u8; 32]) {
+        if id == self.id {
+            return;
+        }
+        let path = self.path().into_owned();
+        if self.flags.0 & AttachmentFlags::ORIGINAL_IS_ID != 0 {
+            self.flags.0 &= !AttachmentFlags::ORIGINAL_IS_ID;
+            let old = self.id;
+            self.cold_mut().original_hash = Some(Box::new(old));
+        }
+        self.id = id;
+        self.set_path(path);
+    }
+
+    /// The path stays what it was: it may be derived from the name.
+    pub fn set_name(&mut self, name: &str) {
+        if *name == *self.name {
+            return;
+        }
+        let path = self.path().into_owned();
+        self.name = name.into();
+        self.set_path(path);
+    }
+
+    pub fn set_path(&mut self, path: String) {
+        let kind = classify_path(&path, &self.id, self.extension(), &self.name);
+        self.flags.set_path_kind(kind);
+        if kind == AttachmentFlags::PATH_CUSTOM {
+            self.cold_mut().path = path.into_boxed_str();
+        } else if let Some(cold) = self.cold.as_mut() {
+            cold.path = Box::default();
+            self.drop_empty_cold();
+        }
+    }
+
+    /// Image dimensions and thumbhash (only for images/videos)
+    pub fn img_meta(&self) -> Option<ImageMetadata> {
+        let b = self.img_meta.as_slice();
+        (b.len() >= 8).then(|| ImageMetadata {
+            width: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            height: u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            thumbhash: std::str::from_utf8(&b[8..]).unwrap_or_default().to_string(),
+        })
+    }
+
+    #[inline]
+    pub fn has_img_meta(&self) -> bool {
+        !self.img_meta.is_empty()
+    }
+
+    pub fn set_img_meta(&mut self, meta: Option<&ImageMetadata>) {
+        self.img_meta = pack_img_meta(meta);
+    }
+
+    /// Original file hash before encryption
+    pub fn original_hash(&self) -> Option<[u8; 32]> {
+        if self.flags.0 & AttachmentFlags::ORIGINAL_IS_ID != 0 {
+            return Some(self.id);
+        }
+        self.cold().and_then(|c| c.original_hash.as_deref().copied())
+    }
+
+    /// Legacy group ID for key derivation
+    pub fn group_id(&self) -> Option<[u8; 32]> {
+        self.cold().and_then(|c| c.group_id.as_deref().copied())
+    }
+
+    /// WebXDC topic (Mini Apps only)
+    #[inline]
+    pub fn webxdc_topic(&self) -> Option<&str> {
+        self.cold().and_then(|c| c.webxdc_topic.as_deref())
+    }
+
+    /// Mirror URLs for the same ciphertext
+    #[inline]
+    pub fn fallback_urls(&self) -> &[Box<str>] {
+        self.cold().map_or(&[], |c| &c.fallback_urls)
+    }
+
+    pub fn set_fallback_urls(&mut self, urls: impl IntoIterator<Item = Box<str>>) {
+        let urls: Box<[Box<str>]> = urls.into_iter().collect();
+        if !urls.is_empty() {
+            self.cold_mut().fallback_urls = urls;
+        } else if let Some(cold) = self.cold.as_mut() {
+            cold.fallback_urls = Box::default();
+            self.drop_empty_cold();
+        }
+    }
+
+    /// Convert from regular Attachment (borrowed)
+    pub fn from_attachment(att: &Attachment) -> Self {
+        Self::compact(
+            att,
+            att.url.as_str().into(),
+            att.name.as_str().into(),
+            att.fallback_urls.iter().map(|s| s.as_str().into()).collect(),
+            att.webxdc_topic.as_deref().map(Into::into),
+        )
+    }
+
     /// Convert from regular Attachment (owned) - zero-copy where possible
-    pub fn from_attachment_owned(att: Attachment) -> Self {
-        // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
-        let is_short_nonce = att.nonce.len() == 24;
+    pub fn from_attachment_owned(mut att: Attachment) -> Self {
+        let url = std::mem::take(&mut att.url).into_boxed_str();
+        let name = std::mem::take(&mut att.name).into_boxed_str();
+        let fallback_urls = std::mem::take(&mut att.fallback_urls).into_iter().map(String::into_boxed_str).collect();
+        let webxdc_topic = att.webxdc_topic.take().map(String::into_boxed_str);
+        Self::compact(&att, url, name, fallback_urls, webxdc_topic)
+    }
+
+    fn compact(
+        att: &Attachment,
+        url: Box<str>,
+        name: Box<str>,
+        fallback_urls: Box<[Box<str>]>,
+        webxdc_topic: Option<Box<str>>,
+    ) -> Self {
+        let id = hex_to_bytes_32(&att.id);
+        let ext = extension_code(&att.extension);
         let mut flags = AttachmentFlags::from_bools(att.downloading, att.downloaded);
-        flags.set_short_nonce(is_short_nonce);
+        // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
+        flags.set_short_nonce(att.nonce.len() == 24);
+        let path_kind = classify_path(&att.path, &id, &att.extension, &name);
+        flags.set_path_kind(path_kind);
+
+        let original = att.original_hash.as_deref().map(hex_to_bytes_32);
+        if original == Some(id) {
+            flags.0 |= AttachmentFlags::ORIGINAL_IS_ID;
+        }
+        let cold = AttachmentCold {
+            extension: if ext == EXT_COLD { att.extension.as_str().into() } else { Box::default() },
+            path: if path_kind == AttachmentFlags::PATH_CUSTOM { att.path.as_str().into() } else { Box::default() },
+            fallback_urls,
+            webxdc_topic,
+            original_hash: original.filter(|h| *h != id).map(Box::new),
+            group_id: att.group_id.as_deref().map(|s| Box::new(hex_to_bytes_32(s))),
+        };
 
         Self {
-            id: hex_to_bytes_32(&att.id),
+            id,
             key: if att.key.is_empty() { [0u8; 32] } else { hex_to_bytes_32(&att.key) },
             nonce: if att.nonce.is_empty() { [0u8; 16] } else { parse_nonce(&att.nonce) },
             size: att.size,
+            url,
+            name,
+            img_meta: pack_img_meta(att.img_meta.as_ref()),
+            cold: (!cold.is_empty()).then(|| Box::new(cold)),
             flags,
-            extension: att.extension.into_boxed_str(),
-            url: att.url.into_boxed_str(),
-            path: att.path.into_boxed_str(),
-            img_meta: att.img_meta.map(Box::new),
-            group_id: att.group_id.map(|s| Box::new(hex_to_bytes_32(&s))),
-            original_hash: att.original_hash.map(|s| Box::new(hex_to_bytes_32(&s))),
-            webxdc_topic: att.webxdc_topic.map(|s| s.into_boxed_str()),
-            fallback_urls: (!att.fallback_urls.is_empty())
-                .then(|| att.fallback_urls.into_iter().map(|s| s.into_boxed_str()).collect()),
-            name: att.name.into_boxed_str(),
+            ext,
         }
     }
 
@@ -798,24 +1041,46 @@ impl CompactAttachment {
             id: self.id_hex(),
             key: self.key_hex(),
             nonce: self.nonce_hex(),
-            extension: self.extension.to_string(),
+            extension: self.extension().to_string(),
             name: self.name.to_string(),
             url: self.url.to_string(),
-            path: self.path.to_string(),
+            path: self.path().into_owned(),
             size: self.size,
-            img_meta: self.img_meta.as_ref().map(|b| (**b).clone()),
+            img_meta: self.img_meta(),
             downloading: self.flags.is_downloading(),
             downloaded: self.flags.is_downloaded(),
-            webxdc_topic: self.webxdc_topic.as_ref().map(|s| s.to_string()),
-            group_id: self.group_id.as_ref().map(|b| bytes_to_hex_32(b)),
-            original_hash: self.original_hash.as_ref().map(|b| bytes_to_hex_32(b)),
-            fallback_urls: self
-                .fallback_urls
-                .as_deref()
-                .map(|urls| urls.iter().map(|u| u.to_string()).collect())
-                .unwrap_or_default(),
+            webxdc_topic: self.webxdc_topic().map(str::to_string),
+            group_id: self.group_id().map(|b| bytes_to_hex_32(&b)),
+            original_hash: self.original_hash().map(|b| bytes_to_hex_32(&b)),
+            fallback_urls: self.fallback_urls().iter().map(|u| u.to_string()).collect(),
         }
     }
+
+    /// Heap bytes held beyond the struct itself (DeepSize).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.url.len()
+            + self.name.len()
+            + self.img_meta.heap_bytes()
+            + self.cold().map_or(0, |c| {
+                std::mem::size_of::<AttachmentCold>()
+                    + c.extension.len()
+                    + c.path.len()
+                    + std::mem::size_of_val(&*c.fallback_urls)
+                    + c.fallback_urls.iter().map(|u| u.len()).sum::<usize>()
+                    + c.webxdc_topic.as_ref().map_or(0, |t| t.len())
+                    + c.original_hash.as_ref().map_or(0, |_| 32)
+                    + c.group_id.as_ref().map_or(0, |_| 32)
+            })
+    }
+}
+
+fn pack_img_meta(meta: Option<&ImageMetadata>) -> TinyVec<u8> {
+    let Some(m) = meta else { return TinyVec::new() };
+    let mut b = Vec::with_capacity(8 + m.thumbhash.len());
+    b.extend_from_slice(&m.width.to_le_bytes());
+    b.extend_from_slice(&m.height.to_le_bytes());
+    b.extend_from_slice(m.thumbhash.as_bytes());
+    TinyVec::from_vec(b)
 }
 
 /// Parse a hex nonce string into [u8; 16], left-aligned, zero-allocation.
@@ -830,21 +1095,79 @@ fn parse_nonce(hex: &str) -> [u8; 16] {
 // Npub Interner
 // ============================================================================
 
+/// Strings laid end to end in one buffer: entry `i` is `bytes[ends[i - 1]..ends[i]]`.
+#[derive(Clone, Debug, Default)]
+struct StrArena {
+    bytes: Vec<u8>,
+    ends: Vec<u32>,
+}
+
+impl StrArena {
+    /// Whether `extra` more bytes keep every offset within u32.
+    #[inline]
+    fn fits(&self, extra: usize) -> bool {
+        u32::try_from(self.bytes.len() + extra).is_ok()
+    }
+
+    /// Append `s` and return its index. Callers check [`Self::fits`] first; a truncated end
+    /// offset would let `get` slice through a character.
+    fn push(&mut self, s: &str) -> usize {
+        let end = u32::try_from(self.bytes.len() + s.len()).expect("arena past u32");
+        self.bytes.extend_from_slice(s.as_bytes());
+        self.ends.push(end);
+        self.ends.len() - 1
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> Option<&str> {
+        let end = *self.ends.get(i)? as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        let bytes = &self.bytes[start..end];
+        debug_assert!(std::str::from_utf8(bytes).is_ok(), "arena entry {i} split a character");
+        // SAFETY: `push` appends whole `&str`s only, and nothing else writes the buffer.
+        Some(unsafe { std::str::from_utf8_unchecked(bytes) })
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn reserve(&mut self, entries: usize, bytes: usize) {
+        self.ends.reserve(entries);
+        self.bytes.reserve(bytes);
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.ends.shrink_to_fit();
+        self.bytes.shrink_to_fit();
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.bytes.capacity() + self.ends.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
+/// Length of a bech32 npub, for sizing the arena ahead of a bulk load.
+const NPUB_LEN: usize = 63;
+
 /// String interner for npubs using sorted Vec + binary search.
 ///
 /// Each unique npub is stored exactly once. Messages reference npubs by u16 index.
 /// - `intern()`: O(log n) lookup + O(n) insert for new strings
 /// - `resolve()`: O(1) by index
 ///
-/// Memory: ~2 bytes per npub for the sorted index, plus the strings themselves.
+/// Memory: the npub bytes in one arena, plus a 4-byte offset and a 2-byte sorted index each.
 #[derive(Clone, Debug, Default)]
 pub struct NpubInterner {
     /// npubs in insertion order - index is the stable ID used by messages
-    npubs: Vec<String>,
+    npubs: StrArena,
     /// Indices into npubs, sorted alphabetically for binary search
     sorted: Vec<u16>,
-    /// Reaction (emoji, NIP-30 url) pairs in insertion order; a few hundred per session.
-    emojis: Vec<(Box<str>, Option<Box<str>>)>,
+    /// Reaction (emoji, NIP-30 url) pairs in insertion order, two entries each; a few hundred per session.
+    emojis: StrArena,
+    /// Per pair: whether it has a url, since an absent url and an empty one are different keys.
+    emoji_has_url: Vec<bool>,
     /// Indices into emojis, sorted by pair for binary search
     emojis_sorted: Vec<u32>,
 }
@@ -859,25 +1182,51 @@ impl NpubInterner {
 
     /// Pre-allocate capacity for expected number of unique npubs
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            npubs: Vec::with_capacity(capacity),
-            sorted: Vec::with_capacity(capacity),
-            ..Self::default()
-        }
+        let mut interner = Self::default();
+        interner.reserve(capacity);
+        interner
+    }
+
+    /// Room for `additional` more npubs, so a bulk load grows each buffer once.
+    pub fn reserve(&mut self, additional: usize) {
+        self.npubs.reserve(additional, additional * NPUB_LEN);
+        self.sorted.reserve(additional);
+    }
+
+    /// Drop the growth slack, once a bulk load is done.
+    pub fn shrink_to_fit(&mut self) {
+        self.npubs.shrink_to_fit();
+        self.sorted.shrink_to_fit();
+        self.emojis.shrink_to_fit();
+        self.emoji_has_url.shrink_to_fit();
+        self.emojis_sorted.shrink_to_fit();
+    }
+
+    #[inline]
+    fn emoji_pair(&self, idx: usize) -> Option<(&str, Option<&str>)> {
+        let at = idx.checked_mul(2)?;
+        let emoji = self.emojis.get(at)?;
+        let url = self.emojis.get(at + 1)?;
+        Some((emoji, self.emoji_has_url[idx].then_some(url)))
     }
 
     /// Intern a reaction's (emoji, url) pair, returning its stable index.
     pub fn intern_emoji(&mut self, emoji: &str, url: Option<&str>) -> u32 {
         let key = (emoji, url);
         let found = self.emojis_sorted.binary_search_by(|&i| {
-            let (e, u) = &self.emojis[i as usize];
-            (&**e, u.as_deref()).cmp(&key)
+            self.emoji_pair(i as usize).unwrap_or(("", None)).cmp(&key)
         });
         match found {
             Ok(pos) => self.emojis_sorted[pos],
             Err(pos) => {
-                let idx = self.emojis.len() as u32;
-                self.emojis.push((emoji.into(), url.map(Into::into)));
+                // Past u32 the pair reads as no emoji, as an unknown index does.
+                let Ok(idx) = u32::try_from(self.emoji_has_url.len()) else { return u32::MAX };
+                if idx == u32::MAX || !self.emojis.fits(emoji.len() + url.map_or(0, str::len)) {
+                    return u32::MAX;
+                }
+                self.emojis.push(emoji);
+                self.emojis.push(url.unwrap_or(""));
+                self.emoji_has_url.push(url.is_some());
                 self.emojis_sorted.insert(pos, idx);
                 idx
             }
@@ -887,7 +1236,12 @@ impl NpubInterner {
     /// Resolve an interned (emoji, url) pair; an unknown index reads as no emoji.
     #[inline]
     pub fn emoji(&self, idx: u32) -> (&str, Option<&str>) {
-        self.emojis.get(idx as usize).map_or(("", None), |(e, u)| (&**e, u.as_deref()))
+        self.emoji_pair(idx as usize).unwrap_or(("", None))
+    }
+
+    #[inline]
+    fn npub_at(&self, idx: u16) -> &str {
+        self.npubs.get(idx as usize).unwrap_or("")
     }
 
     /// Intern an npub string, returning its stable index.
@@ -896,21 +1250,17 @@ impl NpubInterner {
     /// If new, stores it and returns a new index.
     pub fn intern(&mut self, npub: &str) -> u16 {
         // Binary search in sorted order
-        let result = self.sorted.binary_search_by(|&idx| {
-            self.npubs[idx as usize].as_str().cmp(npub)
-        });
+        let result = self.sorted.binary_search_by(|&idx| self.npub_at(idx).cmp(npub));
 
         match result {
             Ok(pos) => self.sorted[pos], // Found existing
             Err(insert_pos) => {
                 // u16::MAX is the NO_NPUB sentinel; at/past it new indices would alias the
                 // sentinel then wrap, misattributing authors — degrade to authorless instead.
-                if self.npubs.len() >= NO_NPUB as usize {
+                if self.npubs.len() >= NO_NPUB as usize || !self.npubs.fits(npub.len()) {
                     return NO_NPUB;
                 }
-                // New npub - add to both vectors
-                let new_idx = self.npubs.len() as u16;
-                self.npubs.push(npub.to_string());
+                let new_idx = self.npubs.push(npub) as u16;
                 self.sorted.insert(insert_pos, new_idx);
                 new_idx
             }
@@ -928,9 +1278,7 @@ impl NpubInterner {
 
     /// Look up an npub without inserting. Returns its handle if already interned.
     pub fn lookup(&self, npub: &str) -> Option<u16> {
-        self.sorted.binary_search_by(|&idx| {
-            self.npubs[idx as usize].as_str().cmp(npub)
-        }).ok().map(|pos| self.sorted[pos])
+        self.sorted.binary_search_by(|&idx| self.npub_at(idx).cmp(npub)).ok().map(|pos| self.sorted[pos])
     }
 
     /// Resolve an index back to the npub string.
@@ -941,7 +1289,7 @@ impl NpubInterner {
         if idx == NO_NPUB {
             return None;
         }
-        self.npubs.get(idx as usize).map(|s| s.as_str())
+        self.npubs.get(idx as usize)
     }
 
     /// Number of unique npubs stored
@@ -952,18 +1300,108 @@ impl NpubInterner {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.npubs.is_empty()
+        self.npubs.len() == 0
     }
 
     /// Total memory used by the interner (approximate)
     pub fn memory_usage(&self) -> usize {
         std::mem::size_of::<Self>()
-            + self.npubs.capacity() * std::mem::size_of::<String>()
-            + self.npubs.iter().map(|s| s.capacity()).sum::<usize>()
+            + self.npubs.heap_bytes()
             + self.sorted.capacity() * std::mem::size_of::<u16>()
-            + self.emojis.capacity() * std::mem::size_of::<(Box<str>, Option<Box<str>>)>()
-            + self.emojis.iter().map(|(e, u)| e.len() + u.as_ref().map_or(0, |u| u.len())).sum::<usize>()
+            + self.emojis.heap_bytes()
+            + self.emoji_has_url.capacity()
             + self.emojis_sorted.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
+#[cfg(test)]
+mod interner_arena_tests {
+    use super::*;
+
+    #[test]
+    fn arena_entries_of_any_length_read_back() {
+        let mut a = StrArena::default();
+        let words = ["", "a", "npub1xyz", "", "猫🐈 multi-byte", &"z".repeat(70_000), "end"];
+        for (i, w) in words.iter().enumerate() {
+            assert!(a.fits(w.len()));
+            assert_eq!(a.push(w), i);
+        }
+        for (i, w) in words.iter().enumerate() {
+            assert_eq!(a.get(i), Some(*w), "entry {i}");
+        }
+        assert_eq!(a.get(words.len()), None);
+        assert_eq!(a.bytes.len(), words.iter().map(|w| w.len()).sum::<usize>(), "no separators, no padding");
+    }
+
+    #[test]
+    fn npubs_intern_resolve_and_look_up_through_the_arena() {
+        let npubs: Vec<String> = (0..500).rev().map(|i| format!("npub1{i:0>58}")).collect();
+        let mut interner = NpubInterner::new();
+        let handles: Vec<u16> = npubs.iter().map(|n| interner.intern(n)).collect();
+        assert_eq!(handles, (0..500).collect::<Vec<u16>>(), "handles follow insertion order");
+        for (n, &h) in npubs.iter().zip(&handles) {
+            assert_eq!(interner.resolve(h), Some(n.as_str()));
+            assert_eq!(interner.lookup(n), Some(h));
+            assert_eq!(interner.intern(n), h, "a repeat keeps its handle");
+        }
+        assert_eq!(interner.len(), 500);
+        assert_eq!(interner.lookup("npub1missing"), None);
+        assert_eq!(interner.npubs.bytes.len(), 500 * 63);
+    }
+
+    #[test]
+    fn the_handle_space_stops_short_of_the_sentinel() {
+        let mut interner = NpubInterner::new();
+        for i in 0..NO_NPUB as usize {
+            assert_eq!(interner.intern(&format!("n{i:06}")), i as u16);
+        }
+        assert_eq!(interner.intern("n999999"), NO_NPUB, "the 65536th npub degrades to authorless");
+        assert_eq!(interner.len(), NO_NPUB as usize);
+        assert_eq!(interner.intern("n000000"), 0, "known npubs still resolve");
+        assert_eq!(interner.resolve(65534), Some("n065534"));
+        assert_eq!(interner.resolve(NO_NPUB), None);
+    }
+
+    #[test]
+    fn reserve_and_shrink_keep_every_entry() {
+        let mut interner = NpubInterner::new();
+        interner.reserve(100);
+        assert!(interner.npubs.bytes.capacity() >= 100 * NPUB_LEN);
+        let a = interner.intern("npub1a");
+        let e = interner.intern_emoji("🔥", None);
+        interner.shrink_to_fit();
+        assert_eq!(interner.npubs.bytes.capacity(), interner.npubs.bytes.len());
+        assert_eq!(interner.resolve(a), Some("npub1a"));
+        assert_eq!(interner.emoji(e), ("🔥", None));
+    }
+
+    #[test]
+    fn emoji_pairs_keep_an_absent_url_apart_from_an_empty_one() {
+        let mut interner = NpubInterner::new();
+        let none = interner.intern_emoji("party", None);
+        let empty = interner.intern_emoji("party", Some(""));
+        let url = interner.intern_emoji("party", Some("https://e/p.png"));
+        let fire = interner.intern_emoji("🔥", None);
+        assert_eq!([none, empty, url, fire], [0, 1, 2, 3]);
+        assert_eq!(interner.emoji(none), ("party", None));
+        assert_eq!(interner.emoji(empty), ("party", Some("")));
+        assert_eq!(interner.emoji(url), ("party", Some("https://e/p.png")));
+        assert_eq!(interner.emoji(fire), ("🔥", None));
+        assert_eq!(interner.intern_emoji("party", Some("")), empty);
+        assert_eq!(interner.intern_emoji("🔥", None), fire);
+        assert_eq!(interner.emoji(4), ("", None));
+        assert_eq!(interner.emoji(u32::MAX), ("", None));
+    }
+
+    #[test]
+    fn the_arena_costs_less_than_a_string_per_npub() {
+        let mut interner = NpubInterner::new();
+        interner.reserve(2000);
+        for i in 0..2000 {
+            interner.intern(&format!("npub1{i:0>58}"));
+        }
+        let per = interner.memory_usage() / 2000;
+        assert!(per <= 63 + 4 + 2 + 1, "{per} B per npub");
     }
 }
 
@@ -977,11 +1415,11 @@ impl NpubInterner {
 #[derive(Clone, Debug)]
 pub struct CompactMessage {
     /// Message ID as binary (64 hex chars -> 32 bytes)
-    pub id: [u8; 32],
+    id: [u8; 32],
     /// Timestamp in milliseconds (full precision for sub-second ordering)
     pub at: u64,
     /// Message content (Box<str> = 16 bytes vs String's 24 bytes)
-    pub content: Box<str>,
+    content: Box<str>,
     /// File attachments
     pub attachments: TinyVec<CompactAttachment>,
     /// Emoji reactions
@@ -1010,25 +1448,199 @@ pub struct CompactReply {
     pub emoji_tags: TinyVec<u32>,
 }
 
+/// One revision of an edited message.
+#[derive(Clone, Debug)]
+struct CompactEdit {
+    /// Empty for the newest revision while [`MessageExtras::tail_is_content`]: that text is the message's own.
+    content: Box<str>,
+    edited_at: u64,
+}
+
+/// A text span as held: a colour run's stops packed to `0xRRGGBB` when every one is
+/// canonical `#rrggbb`, which is all the parsers emit.
+#[derive(Clone, Debug)]
+enum HeldSpan {
+    Color { from: u32, to: u32, effect: crate::text_color::Effect, colors: TinyVec<u32> },
+    Time(crate::text_spans::TimeSpan),
+    Raw(Box<crate::text_spans::ColorSpan>),
+}
+
+fn pack_color(c: &str) -> Option<u32> {
+    let h = c.strip_prefix('#')?.as_bytes();
+    if h.len() != 6 || !h.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
+        return None;
+    }
+    Some(h.iter().fold(0u32, |v, &b| (v << 4) | (b as char).to_digit(16).unwrap_or(0)))
+}
+
+impl HeldSpan {
+    fn hold(span: crate::text_spans::TextSpan) -> Self {
+        use crate::text_spans::TextSpan;
+        match span {
+            TextSpan::Time(t) => HeldSpan::Time(t),
+            TextSpan::Color(c) => match c.colors.iter().map(|s| pack_color(s)).collect::<Option<Vec<u32>>>() {
+                Some(colors) => HeldSpan::Color { from: c.from, to: c.to, effect: c.effect, colors: TinyVec::from_vec(colors) },
+                None => HeldSpan::Raw(Box::new(c)),
+            },
+        }
+    }
+
+    fn to_span(&self) -> crate::text_spans::TextSpan {
+        use crate::text_spans::{ColorSpan, TextSpan};
+        match self {
+            HeldSpan::Color { from, to, effect, colors } => TextSpan::Color(ColorSpan {
+                from: *from,
+                to: *to,
+                effect: *effect,
+                colors: colors.iter().map(|v| format!("#{v:06x}")).collect(),
+            }),
+            HeldSpan::Time(t) => TextSpan::Time(t.clone()),
+            HeldSpan::Raw(c) => TextSpan::Color((**c).clone()),
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match self {
+            HeldSpan::Color { colors, .. } => colors.heap_bytes(),
+            HeldSpan::Time(_) => 0,
+            HeldSpan::Raw(c) => {
+                std::mem::size_of::<crate::text_spans::ColorSpan>()
+                    + c.colors.capacity() * std::mem::size_of::<String>()
+                    + c.colors.iter().map(|s| s.capacity()).sum::<usize>()
+            }
+        }
+    }
+}
+
+fn hold_spans(spans: Vec<crate::text_spans::TextSpan>) -> TinyVec<HeldSpan> {
+    spans.into_iter().map(HeldSpan::hold).collect()
+}
+
+/// Preview presence bits, in [`preview_fields`] order, then the two "same as og_" bits.
+const PREVIEW_TITLE_IS_OG: u16 = 1 << 8;
+const PREVIEW_DESC_IS_OG: u16 = 1 << 9;
+
+fn preview_fields(m: &SiteMetadata) -> [&Option<String>; 8] {
+    [&m.og_title, &m.og_description, &m.og_image, &m.og_url, &m.og_type, &m.title, &m.description, &m.favicon]
+}
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    let mut n = s.len();
+    while n >= 0x80 {
+        out.push(n as u8 | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn take_str<'a>(b: &'a [u8], pos: &mut usize) -> &'a str {
+    let (mut n, mut shift) = (0usize, 0);
+    while let Some(&byte) = b.get(*pos) {
+        *pos += 1;
+        n |= ((byte & 0x7f) as usize) << shift;
+        if byte < 0x80 {
+            break;
+        }
+        shift += 7;
+    }
+    let s = b.get(*pos..*pos + n).and_then(|s| std::str::from_utf8(s).ok()).unwrap_or_default();
+    *pos += n;
+    s
+}
+
+/// A link preview in one allocation: presence bits, then the domain and each present
+/// string length-prefixed; a title or description equal to its og_ twin is stored once.
+fn pack_preview(m: &SiteMetadata) -> TinyVec<u8> {
+    let fields = preview_fields(m);
+    let mut bits = 0u16;
+    if m.title.is_some() && m.title == m.og_title {
+        bits |= PREVIEW_TITLE_IS_OG;
+    }
+    if m.description.is_some() && m.description == m.og_description {
+        bits |= PREVIEW_DESC_IS_OG;
+    }
+    let len = fields.iter().filter_map(|f| f.as_ref()).map(|s| s.len() + 3).sum::<usize>() + m.domain.len() + 5;
+    let mut out = Vec::with_capacity(len);
+    out.extend_from_slice(&[0, 0]);
+    put_str(&mut out, &m.domain);
+    for (i, f) in fields.iter().enumerate() {
+        let Some(s) = f else { continue };
+        bits |= 1 << i;
+        let deduped = (i == 5 && bits & PREVIEW_TITLE_IS_OG != 0) || (i == 6 && bits & PREVIEW_DESC_IS_OG != 0);
+        if !deduped {
+            put_str(&mut out, s);
+        }
+    }
+    out[..2].copy_from_slice(&bits.to_le_bytes());
+    TinyVec::from_vec(out)
+}
+
+fn unpack_preview(b: &[u8]) -> Option<SiteMetadata> {
+    let bits = u16::from_le_bytes([*b.first()?, *b.get(1)?]);
+    let mut pos = 2;
+    let domain = take_str(b, &mut pos).to_string();
+    let mut f: [Option<String>; 8] = Default::default();
+    for i in 0..8 {
+        if bits & (1 << i) == 0 {
+            continue;
+        }
+        f[i] = Some(match i {
+            5 if bits & PREVIEW_TITLE_IS_OG != 0 => f[0].clone().unwrap_or_default(),
+            6 if bits & PREVIEW_DESC_IS_OG != 0 => f[1].clone().unwrap_or_default(),
+            _ => take_str(b, &mut pos).to_string(),
+        });
+    }
+    let [og_title, og_description, og_image, og_url, og_type, title, description, favicon] = f;
+    Some(SiteMetadata { domain, og_title, og_description, og_image, og_url, og_type, title, description, favicon })
+}
+
 /// The rarely-set parts of a message, boxed together so a plain message pays 8 bytes.
 #[derive(Clone, Debug, Default)]
 pub struct MessageExtras {
-    pub edit_history: Vec<EditEntry>,
-    pub preview_metadata: Option<Box<SiteMetadata>>,
+    /// Oldest first
+    edits: TinyVec<CompactEdit>,
+    /// Packed by [`pack_preview`]; empty when there is none
+    preview: TinyVec<u8>,
     /// NIP-30 emoji tags travelling with this rumor, interned
     pub emoji_tags: TinyVec<u32>,
     /// Bot routing targets as interned npub handles
     pub addressed_bots: TinyVec<u16>,
-    pub text_spans: Vec<crate::text_spans::TextSpan>,
+    spans: TinyVec<HeldSpan>,
+    /// The newest edit's text is the message content, held there once
+    tail_is_content: bool,
 }
 
 impl MessageExtras {
     fn is_empty(&self) -> bool {
-        self.edit_history.is_empty()
-            && self.preview_metadata.is_none()
+        self.edits.is_empty()
+            && self.preview.is_empty()
             && self.emoji_tags.is_empty()
             && self.addressed_bots.is_empty()
-            && self.text_spans.is_empty()
+            && self.spans.is_empty()
+    }
+
+    fn edit_history(&self, content: &str) -> Vec<EditEntry> {
+        let last = self.edits.len().wrapping_sub(1);
+        self.edits
+            .iter()
+            .enumerate()
+            .map(|(i, e)| EditEntry {
+                content: if i == last && self.tail_is_content { content.to_string() } else { e.content.to_string() },
+                edited_at: e.edited_at,
+            })
+            .collect()
+    }
+
+    /// Heap bytes held beyond the box itself (DeepSize).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.edits.heap_bytes()
+            + self.edits.iter().map(|e| e.content.len()).sum::<usize>()
+            + self.preview.heap_bytes()
+            + self.emoji_tags.heap_bytes()
+            + self.addressed_bots.heap_bytes()
+            + self.spans.heap_bytes()
+            + self.spans.iter().map(HeldSpan::heap_bytes).sum::<usize>()
     }
 }
 
@@ -1055,22 +1667,20 @@ impl CompactMessage {
     /// Check if this message has been edited
     #[inline]
     pub fn is_edited(&self) -> bool {
-        self.extras.as_ref().is_some_and(|x| !x.edit_history.is_empty())
+        self.extras.as_ref().is_some_and(|x| !x.edits.is_empty())
     }
 
     /// The edit history, oldest first; empty when never edited.
-    #[inline]
-    pub fn edit_history(&self) -> &[EditEntry] {
-        self.extras.as_ref().map_or(&[], |x| &x.edit_history)
+    pub fn edit_history(&self) -> Vec<EditEntry> {
+        self.extras.as_ref().map_or_else(Vec::new, |x| x.edit_history(&self.content))
     }
 
-    #[inline]
-    pub fn preview_metadata(&self) -> Option<&SiteMetadata> {
-        self.extras.as_ref().and_then(|x| x.preview_metadata.as_deref())
+    pub fn preview_metadata(&self) -> Option<SiteMetadata> {
+        self.extras.as_ref().and_then(|x| unpack_preview(x.preview.as_slice()))
     }
 
     pub fn set_preview_metadata(&mut self, metadata: Option<SiteMetadata>) {
-        self.extras_mut().preview_metadata = metadata.map(Box::new);
+        self.extras_mut().preview = metadata.as_ref().map_or_else(TinyVec::new, pack_preview);
         self.drop_empty_extras();
     }
 
@@ -1083,6 +1693,18 @@ impl CompactMessage {
         if self.extras.as_ref().is_some_and(|x| x.is_empty()) {
             self.extras = None;
         }
+    }
+
+    /// Fixed once stored: the index orders positions by it.
+    #[inline]
+    pub fn id(&self) -> &[u8; 32] {
+        &self.id
+    }
+
+    /// Also the newest revision of the edit history; change it through an edit.
+    #[inline]
+    pub fn content(&self) -> &str {
+        &self.content
     }
 
     /// Get the message ID as a string (hex for event IDs, "pending-..." for pending)
@@ -1111,26 +1733,36 @@ impl CompactMessage {
     /// `emoji_tags` are the NIP-30 custom-emoji tags resolved from the new
     /// content; they're adopted only when this edit is the newest revision so
     /// an out-of-order older edit can't clobber the live content's emoji.
-    pub fn apply_edit(&mut self, new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>, text_spans: Vec<crate::text_spans::TextSpan>, interner: &mut NpubInterner) {
-        let original = EditEntry { content: self.content.to_string(), edited_at: self.timestamp_ms() };
-        let extras = self.extras_mut();
+    pub fn apply_edit(&mut self, mut new_content: String, edited_at: u64, emoji_tags: Vec<crate::types::EmojiTag>, text_spans: Vec<crate::text_spans::TextSpan>, interner: &mut NpubInterner) {
+        let original_at = self.timestamp_ms();
+        let extras = self.extras.get_or_insert_with(Default::default);
         // Initialize edit history with original content if not present
-        if extras.edit_history.is_empty() {
-            extras.edit_history.push(original);
+        if extras.edits.is_empty() {
+            extras.edits.push(CompactEdit { content: Box::default(), edited_at: original_at });
+            extras.tail_is_content = true;
         }
         // Deduplicate: skip if we already have this edit
-        if extras.edit_history.iter().any(|e| e.edited_at == edited_at) {
+        if extras.edits.iter().any(|e| e.edited_at == edited_at) {
             return;
         }
-        extras.edit_history.push(EditEntry { content: new_content.clone(), edited_at });
-        extras.edit_history.sort_by_key(|e| e.edited_at);
-        let is_latest = extras.edit_history.last().is_none_or(|e| e.edited_at == edited_at);
-
         // Only the newest revision drives the visible content + emoji.
+        let is_latest = extras.edits.iter().all(|e| e.edited_at < edited_at);
+        if std::mem::take(&mut extras.tail_is_content) {
+            if let Some(tail) = extras.edits.last_mut() {
+                tail.content = if is_latest { std::mem::take(&mut self.content) } else { self.content.clone() };
+            }
+        }
+        let content = if is_latest { Box::default() } else { std::mem::take(&mut new_content).into_boxed_str() };
+        extras.edits.push(CompactEdit { content, edited_at });
+        extras.edits.as_mut_slice().sort_by_key(|e| e.edited_at);
         if is_latest {
             self.content = new_content.into_boxed_str();
-            self.extras_mut().emoji_tags = intern_emoji_tags(&emoji_tags, interner);
-            self.extras_mut().text_spans = text_spans;
+            extras.tail_is_content = true;
+            extras.emoji_tags = intern_emoji_tags(&emoji_tags, interner);
+            extras.spans = hold_spans(text_spans);
+        } else if let Some(tail) = extras.edits.last_mut().filter(|t| t.content == self.content) {
+            tail.content = Box::default();
+            extras.tail_is_content = true;
         }
     }
 
@@ -1220,14 +1852,22 @@ impl CompactMessage {
 
 /// Sorted message storage with O(log n) lookup by ID.
 ///
-/// Messages are stored sorted by timestamp. A separate index provides
-/// O(log n) lookup by message ID using binary search.
+/// Messages are stored sorted by timestamp. A separate index of positions, ordered by
+/// each message's id, gives O(log n) lookup by binary search through the positions.
 #[derive(Clone, Debug, Default)]
 pub struct CompactMessageVec {
     /// Messages sorted by timestamp (ascending)
     messages: Vec<CompactMessage>,
-    /// Index for ID lookup: (id, position in messages), sorted by id
-    id_index: Vec<([u8; 32], u32)>,
+    /// Positions in `messages`, sorted by the id at each
+    id_index: Vec<u32>,
+}
+
+/// Room for `additional` more, growing by an eighth (at least 8) when full: a large
+/// chat's next live message must not double its buffers.
+fn reserve_slack<T>(v: &mut Vec<T>, additional: usize) {
+    if v.capacity() - v.len() < additional {
+        v.reserve_exact(additional.max(v.len() / 8).max(8));
+    }
 }
 
 impl CompactMessageVec {
@@ -1262,7 +1902,8 @@ impl CompactMessageVec {
         &self.messages
     }
 
-    /// Get a mutable reference to all messages
+    /// Get a mutable reference to all messages. Call `rebuild_index()` after changing
+    /// any id or the order.
     #[inline]
     pub fn messages_mut(&mut self) -> &mut Vec<CompactMessage> {
         &mut self.messages
@@ -1298,22 +1939,27 @@ impl CompactMessageVec {
         self.messages.first()
     }
 
+    /// Binary search of the index: `Ok(rank)` where `id` is held, else where it would go.
+    /// A stale position (between a bulk change and `rebuild_index`) sorts last rather than panicking.
+    #[inline]
+    fn search(&self, id: &[u8; 32]) -> Result<usize, usize> {
+        let messages = &self.messages;
+        self.id_index.binary_search_by(|&pos| {
+            messages.get(pos as usize).map_or(std::cmp::Ordering::Greater, |m| m.id.cmp(id))
+        })
+    }
+
     /// Find a message by ID using binary search - O(log n)
     pub fn find_by_id(&self, id: &[u8; 32]) -> Option<&CompactMessage> {
-        let pos = self.id_index
-            .binary_search_by(|(idx_id, _)| idx_id.cmp(id))
-            .ok()?;
-        let msg_pos = self.id_index[pos].1 as usize;
-        self.messages.get(msg_pos)
+        let rank = self.search(id).ok()?;
+        self.messages.get(self.id_index[rank] as usize)
     }
 
     /// Find a message by ID (mutable) - O(log n)
     pub fn find_by_id_mut(&mut self, id: &[u8; 32]) -> Option<&mut CompactMessage> {
-        let pos = self.id_index
-            .binary_search_by(|(idx_id, _)| idx_id.cmp(id))
-            .ok()?;
-        let msg_pos = self.id_index[pos].1 as usize;
-        self.messages.get_mut(msg_pos)
+        let rank = self.search(id).ok()?;
+        let pos = self.id_index[rank] as usize;
+        self.messages.get_mut(pos)
     }
 
     /// Find a message by ID string (hex or pending) - O(log n)
@@ -1336,9 +1982,7 @@ impl CompactMessageVec {
 
     /// Check if a message with the given ID exists - O(log n)
     pub fn contains_id(&self, id: &[u8; 32]) -> bool {
-        self.id_index
-            .binary_search_by(|(idx_id, _)| idx_id.cmp(id))
-            .is_ok()
+        self.search(id).is_ok()
     }
 
     /// Remove a message by hex ID string. Returns true if removed.
@@ -1351,14 +1995,11 @@ impl CompactMessageVec {
 
     /// Remove a message by binary ID. Returns true if removed.
     pub fn remove_by_id(&mut self, id: &[u8; 32]) -> bool {
-        let idx_pos = match self.id_index.binary_search_by(|(idx_id, _)| idx_id.cmp(id)) {
-            Ok(pos) => pos,
-            Err(_) => return false,
-        };
-        let (_, msg_pos) = self.id_index.remove(idx_pos);
+        let Ok(rank) = self.search(id) else { return false };
+        let msg_pos = self.id_index.remove(rank);
         self.messages.remove(msg_pos as usize);
         // Positions past the hole shift down by one; the id order is untouched.
-        for (_, pos) in &mut self.id_index {
+        for pos in &mut self.id_index {
             if *pos > msg_pos {
                 *pos -= 1;
             }
@@ -1372,11 +2013,11 @@ impl CompactMessageVec {
         if old == &new {
             return self.contains_id(old);
         }
-        let Ok(old_pos) = self.id_index.binary_search_by(|(id, _)| id.cmp(old)) else { return false };
-        let Err(new_pos) = self.id_index.binary_search_by(|(id, _)| id.cmp(&new)) else { return false };
-        let (_, msg_pos) = self.id_index.remove(old_pos);
-        let new_pos = if new_pos > old_pos { new_pos - 1 } else { new_pos };
-        self.id_index.insert(new_pos, (new, msg_pos));
+        let Ok(old_rank) = self.search(old) else { return false };
+        let Err(new_rank) = self.search(&new) else { return false };
+        let msg_pos = self.id_index.remove(old_rank);
+        let new_rank = if new_rank > old_rank { new_rank - 1 } else { new_rank };
+        self.id_index.insert(new_rank, msg_pos);
         self.messages[msg_pos as usize].id = new;
         true
     }
@@ -1397,61 +2038,67 @@ impl CompactMessageVec {
     /// **Performance**: append costs a binary search plus one index shift (ids are random, so
     /// the shift averages half the index); an out-of-order insert is O(n).
     pub fn insert(&mut self, msg: CompactMessage) -> bool {
-        // Check for duplicate ID - O(log n)
-        if self.contains_id(&msg.id) {
-            return false;
-        }
-
-        let msg_id = msg.id;
+        let Err(rank) = self.search(&msg.id) else { return false };
+        reserve_slack(&mut self.messages, 1);
+        reserve_slack(&mut self.id_index, 1);
 
         // Fast path: append if message is newer than or equal to last (common case)
-        // This is O(log n) for the index insert only
         if self.messages.last().is_none_or(|last| msg.at >= last.at) {
-            let msg_pos = self.messages.len() as u32;
+            self.id_index.insert(rank, self.messages.len() as u32);
             self.messages.push(msg);
-
-            let idx_pos = self.id_index
-                .binary_search_by(|(id, _)| id.cmp(&msg_id))
-                .unwrap_err();
-            self.id_index.insert(idx_pos, (msg_id, msg_pos));
-
             return true;
         }
 
         // Slow path: out-of-order insert (rare for real-time chat)
-        // Find insertion position by timestamp
         let msg_pos = match self.messages.binary_search_by(|m| m.at.cmp(&msg.at)) {
             Ok(pos) => pos,
             Err(pos) => pos,
-        };
+        } as u32;
 
-        // Update id_index positions for messages that will shift - O(n)
-        for (_, pos) in &mut self.id_index {
-            if *pos >= msg_pos as u32 {
+        // Positions at or past the insert shift up; the id order is untouched - O(n)
+        for pos in &mut self.id_index {
+            if *pos >= msg_pos {
                 *pos += 1;
             }
         }
-
-        // Insert into messages - O(n)
-        self.messages.insert(msg_pos, msg);
-
-        // Insert into id_index - O(n)
-        let idx_pos = self.id_index
-            .binary_search_by(|(id, _)| id.cmp(&msg_id))
-            .unwrap_err();
-        self.id_index.insert(idx_pos, (msg_id, msg_pos as u32));
-
+        self.messages.insert(msg_pos as usize, msg);
+        self.id_index.insert(rank, msg_pos);
         true
     }
 
     /// Rebuild the ID index (call after bulk modifications)
     pub fn rebuild_index(&mut self) {
-        self.id_index.clear();
-        self.id_index.reserve(self.messages.len());
-        for (pos, msg) in self.messages.iter().enumerate() {
-            self.id_index.push((msg.id, pos as u32));
+        let messages = &self.messages;
+        let mut index: Vec<u32> = (0..messages.len() as u32).collect();
+        index.sort_unstable_by(|&a, &b| messages[a as usize].id.cmp(&messages[b as usize].id).then(a.cmp(&b)));
+        self.id_index = index;
+    }
+
+    /// The positions in `range`, ordered by id.
+    fn ranked(&self, range: std::ops::Range<usize>) -> Vec<u32> {
+        let messages = &self.messages;
+        let mut fresh: Vec<u32> = (range.start as u32..range.end as u32).collect();
+        fresh.sort_unstable_by(|&a, &b| messages[a as usize].id.cmp(&messages[b as usize].id).then(a.cmp(&b)));
+        fresh
+    }
+
+    /// Merge id-ordered `fresh` positions into the index in O(n + k).
+    fn merge_into_index(&mut self, fresh: Vec<u32>) {
+        let messages = &self.messages;
+        let id = |pos: u32| &messages[pos as usize].id;
+        let old = std::mem::take(&mut self.id_index);
+        let mut merged = Vec::with_capacity(old.len() + fresh.len());
+        let (mut a, mut b) = (old.into_iter().peekable(), fresh.into_iter().peekable());
+        loop {
+            let take_old = match (a.peek(), b.peek()) {
+                (Some(&o), Some(&n)) => id(o) < id(n),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            merged.extend(if take_old { a.next() } else { b.next() });
         }
-        self.id_index.sort_by_key(|(a, _)| *a);
+        self.id_index = merged;
     }
 
     /// Batch insert messages - optimized for different scenarios.
@@ -1459,8 +2106,8 @@ impl CompactMessageVec {
     /// Returns the number of messages actually added (excludes duplicates).
     ///
     /// **Performance**:
-    /// - Append case (newer msgs): O(k log n) where k = new messages
-    /// - Prepend case (older msgs): O(k log n + k)
+    /// - Append case (newer msgs): O(k log k + n)
+    /// - Prepend case (older msgs): O(k log k + n)
     /// - Mixed: O(n log n) full sort
     pub fn insert_batch(&mut self, messages: impl IntoIterator<Item = CompactMessage>) -> usize {
         let messages: Vec<_> = messages.into_iter().collect();
@@ -1495,82 +2142,29 @@ impl CompactMessageVec {
             self.rebuild_index();
         } else if their_min >= our_last.unwrap() {
             // All new messages are NEWER - append path (common for real-time + catch-up).
+            // Appended positions are past every existing one, so none shifts.
             to_add.sort_by_key(|m| m.at);
-            let base_pos = self.messages.len() as u32;
-            // Index entries for the appended messages (positions = append offsets, so no
-            // existing position shifts).
-            let mut new_index_entries: Vec<_> = to_add.iter()
-                .enumerate()
-                .map(|(i, msg)| (msg.id, base_pos + i as u32))
-                .collect();
+            let base = self.messages.len();
+            reserve_slack(&mut self.messages, to_add.len());
             self.messages.extend(to_add);
-            new_index_entries.sort_by_key(|(a, _)| *a);
-
-            // Merge sorted index entries in O(n + k) instead of O(k * n) — mirrors the
-            // prepend path; a per-message binary-search-insert shifts the whole index each time.
-            let old_index = std::mem::take(&mut self.id_index);
-            self.id_index.reserve(old_index.len() + new_index_entries.len());
-            let mut old_iter = old_index.into_iter().peekable();
-            let mut new_iter = new_index_entries.into_iter().peekable();
-            while old_iter.peek().is_some() || new_iter.peek().is_some() {
-                match (old_iter.peek(), new_iter.peek()) {
-                    (Some((old_id, _)), Some((new_id, _))) => {
-                        if old_id < new_id {
-                            self.id_index.push(old_iter.next().unwrap());
-                        } else {
-                            self.id_index.push(new_iter.next().unwrap());
-                        }
-                    }
-                    (Some(_), None) => self.id_index.push(old_iter.next().unwrap()),
-                    (None, Some(_)) => self.id_index.push(new_iter.next().unwrap()),
-                    (None, None) => break,
-                }
-            }
+            let fresh = self.ranked(base..self.messages.len());
+            self.merge_into_index(fresh);
         } else if their_max <= our_first.unwrap() {
             // All new messages are OLDER - prepend path (common for pagination)
             to_add.sort_by_key(|m| m.at);
             let prepend_count = to_add.len();
-
-            // Shift all existing index positions
-            for (_, pos) in &mut self.id_index {
+            for pos in &mut self.id_index {
                 *pos += prepend_count as u32;
             }
-
-            // Build new index entries (already sorted by construction since to_add is sorted by timestamp)
-            let mut new_index_entries: Vec<_> = to_add.iter()
-                .enumerate()
-                .map(|(i, msg)| (msg.id, i as u32))
-                .collect();
-            new_index_entries.sort_by_key(|(a, _)| *a);
-
-            // Merge sorted index entries in O(n + k) instead of O(k * n)
-            let old_index = std::mem::take(&mut self.id_index);
-            self.id_index.reserve(old_index.len() + new_index_entries.len());
-
-            let mut old_iter = old_index.into_iter().peekable();
-            let mut new_iter = new_index_entries.into_iter().peekable();
-
-            while old_iter.peek().is_some() || new_iter.peek().is_some() {
-                match (old_iter.peek(), new_iter.peek()) {
-                    (Some((old_id, _)), Some((new_id, _))) => {
-                        if old_id < new_id {
-                            self.id_index.push(old_iter.next().unwrap());
-                        } else {
-                            self.id_index.push(new_iter.next().unwrap());
-                        }
-                    }
-                    (Some(_), None) => self.id_index.push(old_iter.next().unwrap()),
-                    (None, Some(_)) => self.id_index.push(new_iter.next().unwrap()),
-                    (None, None) => break,
-                }
-            }
-
-            // Prepend messages
-            let mut new_messages = to_add;
-            new_messages.append(&mut self.messages);
-            self.messages = new_messages;
+            let mut joined = Vec::with_capacity(prepend_count + self.messages.len());
+            joined.extend(to_add);
+            joined.append(&mut self.messages);
+            self.messages = joined;
+            let fresh = self.ranked(0..prepend_count);
+            self.merge_into_index(fresh);
         } else {
             // Mixed timestamps - fall back to full sort
+            reserve_slack(&mut self.messages, to_add.len());
             self.messages.extend(to_add);
             self.messages.sort_by_key(|m| m.at);
             self.rebuild_index();
@@ -1582,7 +2176,7 @@ impl CompactMessageVec {
     /// Heap held by the two vectors, at capacity (not what the messages own)
     pub fn memory_usage(&self) -> usize {
         self.messages.capacity() * std::mem::size_of::<CompactMessage>()
-            + self.id_index.capacity() * std::mem::size_of::<([u8; 32], u32)>()
+            + self.id_index.capacity() * std::mem::size_of::<u32>()
             // Note: doesn't include heap allocations inside CompactMessage
     }
 
@@ -1600,9 +2194,8 @@ impl CompactMessageVec {
             i += 1;
             kept
         });
-        self.rebuild_index();
         self.messages.shrink_to_fit();
-        self.id_index.shrink_to_fit();
+        self.rebuild_index();
         n - self.messages.len()
     }
 
@@ -1623,10 +2216,10 @@ impl CompactMessageVec {
         self.rebuild_index();
     }
 
-    /// Clear all messages
+    /// Clear all messages, releasing both buffers
     pub fn clear(&mut self) {
-        self.messages.clear();
-        self.id_index.clear();
+        self.messages = Vec::new();
+        self.id_index = Vec::new();
     }
 }
 
@@ -1669,12 +2262,23 @@ impl CompactMessage {
                 emoji_tags: msg.replied_to_emoji_tags.as_deref().map_or_else(TinyVec::new, |t| intern_emoji_tags(t, interner)),
             })
         });
+        let history = msg.edit_history.unwrap_or_default();
+        let tail_is_content = history.last().is_some_and(|e| e.content == msg.content);
+        let tail = history.len().wrapping_sub(1);
         let extras = MessageExtras {
-            edit_history: msg.edit_history.unwrap_or_default(),
-            preview_metadata: msg.preview_metadata.map(Box::new),
+            edits: history
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| CompactEdit {
+                    content: if tail_is_content && i == tail { Box::default() } else { e.content.into_boxed_str() },
+                    edited_at: e.edited_at,
+                })
+                .collect(),
+            preview: msg.preview_metadata.as_ref().map_or_else(TinyVec::new, pack_preview),
             emoji_tags: intern_emoji_tags(&msg.emoji_tags, interner),
             addressed_bots: msg.addressed_bots.iter().map(|n| interner.intern(n)).collect(),
-            text_spans: msg.text_spans,
+            spans: hold_spans(msg.text_spans),
+            tail_is_content,
         };
         Self {
             id: encode_message_id(&msg.id),
@@ -1719,19 +2323,37 @@ impl CompactMessage {
             wrapper_event_id: None,
             content: self.content.to_string(),
             attachments: self.attachments.iter().map(|a| a.to_attachment()).collect(),
-            edit_history: extras.filter(|x| !x.edit_history.is_empty()).map(|x| x.edit_history.clone()),
-            preview_metadata: extras.and_then(|x| x.preview_metadata.as_deref().cloned()),
+            edit_history: extras.filter(|x| !x.edits.is_empty()).map(|x| x.edit_history(&self.content)),
+            preview_metadata: extras.and_then(|x| unpack_preview(x.preview.as_slice())),
             emoji_tags: extras.map(|x| resolve_emoji_tags(&x.emoji_tags, interner)).unwrap_or_default(),
             addressed_bots: extras
                 .map(|x| x.addressed_bots.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
                 .unwrap_or_default(),
-            text_spans: extras.map(|x| x.text_spans.clone()).unwrap_or_default(),
+            text_spans: extras.map(|x| x.spans.iter().map(HeldSpan::to_span).collect()).unwrap_or_default(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_new_id_keeps_the_original_hash_and_path() {
+        let ox = "ab".repeat(32);
+        let att = crate::types::Attachment {
+            id: ox.clone(),
+            extension: "png".into(),
+            path: "/elsewhere/file.png".into(),
+            original_hash: Some(ox.clone()),
+            ..Default::default()
+        };
+        let mut c = CompactAttachment::from_attachment(&att);
+        c.set_id([0xcd; 32]);
+        let back = c.to_attachment();
+        assert_eq!(back.id, "cd".repeat(32));
+        assert_eq!(back.original_hash.as_deref(), Some(ox.as_str()), "the original hash is not the new id");
+        assert_eq!(back.path, "/elsewhere/file.png");
+    }
     use super::*;
 
     // A real event id that happens to start with the pending marker byte must
@@ -1995,7 +2617,7 @@ mod tests {
             .map(|m| crate::stats::DeepSize::deep_size(m) - std::mem::size_of::<CompactMessage>())
             .sum();
         let compact_struct_mem = compact_vec.len() * std::mem::size_of::<CompactMessage>();
-        let compact_index_mem = compact_vec.len() * std::mem::size_of::<([u8; 32], u32)>();
+        let compact_index_mem = compact_vec.len() * std::mem::size_of::<u32>();
         let interner_mem = interner.memory_usage();
         let compact_total = compact_struct_mem + compact_heap_estimate + compact_index_mem + interner_mem;
 
@@ -3046,17 +3668,20 @@ mod tests {
         let mut vec = CompactMessageVec::new();
         let old_id = "aa00000000000000000000000000000000000000000000000000000000000000";
         let new_id = "ff00000000000000000000000000000000000000000000000000000000000000";
+        let others = ["bb00000000000000000000000000000000000000000000000000000000000000", "cc00000000000000000000000000000000000000000000000000000000000000"];
         vec.insert(make_compact_msg(old_id, 100));
+        vec.insert(make_compact_msg(others[0], 200));
+        vec.insert(make_compact_msg(others[1], 300));
 
-        // Mutate the message's ID directly (simulating an ID update like pending -> confirmed)
+        // Mutate the message's ID directly (simulating an ID update like pending -> confirmed):
+        // it now sorts last but sits first in the index until a rebuild.
         vec.messages_mut()[0].id = encode_message_id(new_id);
-        // Index is now stale
-        assert!(!vec.contains_hex_id(new_id), "stale index should not find new ID");
 
         // Rebuild index
         vec.rebuild_index();
         assert!(vec.contains_hex_id(new_id), "after rebuild, new ID should be found");
         assert!(!vec.contains_hex_id(old_id), "after rebuild, old ID should not be found");
+        assert!(others.iter().all(|id| vec.contains_hex_id(id)), "the untouched ids still resolve");
     }
 
     #[test]
@@ -3277,6 +3902,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<CompactMessage>(), 96);
         assert_eq!(std::mem::size_of::<CompactReaction>(), 40);
         assert_eq!(std::mem::size_of::<TinyVec<CompactReaction>>(), 8);
+        assert_eq!(std::mem::size_of::<CompactAttachment>(), 144);
+        assert_eq!(std::mem::size_of::<MessageExtras>(), 48);
+        assert_eq!(std::mem::size_of::<CompactEdit>(), 24);
+        assert_eq!(std::mem::size_of::<HeldSpan>(), 32);
     }
 
     #[test]
@@ -3740,10 +4369,10 @@ mod tests {
         let att = Attachment::default();
         let compact = CompactAttachment::from_attachment(&att);
 
-        assert!(compact.img_meta.is_none());
-        assert!(compact.group_id.is_none());
-        assert!(compact.original_hash.is_none());
-        assert!(compact.webxdc_topic.is_none());
+        assert!(!compact.has_img_meta());
+        assert!(compact.group_id().is_none());
+        assert!(compact.original_hash().is_none());
+        assert!(compact.webxdc_topic().is_none());
 
         let restored = compact.to_attachment();
         assert!(restored.img_meta.is_none());
@@ -3778,10 +4407,10 @@ mod tests {
 
         let compact = CompactAttachment::from_attachment(&att);
 
-        assert!(compact.img_meta.is_some());
-        assert!(compact.group_id.is_some());
-        assert!(compact.original_hash.is_some());
-        assert!(compact.webxdc_topic.is_some());
+        assert!(compact.has_img_meta());
+        assert!(compact.group_id().is_some());
+        assert!(compact.original_hash().is_some());
+        assert!(compact.webxdc_topic().is_some());
 
         let restored = compact.to_attachment();
         let meta = restored.img_meta.unwrap();
@@ -3992,5 +4621,432 @@ mod tests {
         let bytes: Vec<u8> = vec![0xaa, 0xbb, 0xcc, 0xdd];
         let hex = bytes_to_hex_string(&bytes);
         assert_eq!(hex, "aabbccdd");
+    }
+
+    // ========================================================================
+    // Resident representation: exact round trips
+    // ========================================================================
+
+    fn hex64(n: u64) -> String {
+        format!("{:064x}", n.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    }
+
+    fn att_with(id: &str, ext: &str, name: &str, path: String) -> Attachment {
+        Attachment {
+            id: id.into(),
+            key: hex64(7),
+            nonce: "aabbccddaabbccddaabbccddaabbccdd".into(),
+            extension: ext.into(),
+            name: name.into(),
+            url: format!("https://blossom.example/{id}"),
+            path,
+            size: 4242,
+            img_meta: None,
+            downloading: false,
+            downloaded: true,
+            webxdc_topic: None,
+            group_id: None,
+            original_hash: Some(id.into()),
+            fallback_urls: Vec::new(),
+        }
+    }
+
+    fn path_kind_of(att: &Attachment) -> u8 {
+        CompactAttachment::from_attachment(att).flags.path_kind()
+    }
+
+    /// Both conversions, then back: the boundary type must come out identical.
+    fn assert_exact(msg: &Message) {
+        let mut interner = NpubInterner::new();
+        let borrowed = CompactMessage::from_message(msg, &mut interner).to_message(&interner);
+        assert_eq!(&borrowed, msg, "from_message round trip");
+        let owned = CompactMessage::from_message_owned(msg.clone(), &mut interner).to_message(&interner);
+        assert_eq!(&owned, msg, "from_message_owned round trip");
+    }
+
+    /// A message whose every field survives RAM: the wrapper link and quoted extension
+    /// never do, and a reaction's reference is its parent.
+    fn rich_message() -> Message {
+        let id = hex64(1);
+        let mut msg = make_full_message();
+        msg.id = id.clone();
+        msg.wrapper_event_id = None;
+        msg.replied_to_attachment_extension = None;
+        msg.content = "Edited".into();
+        for r in &mut msg.reactions {
+            r.reference_id = id.clone();
+        }
+        msg.attachments = vec![att_with(&hex64(2), "png", "photo.png", format!("{}photo.png", download_prefix()))];
+        msg
+    }
+
+    #[test]
+    fn a_rich_message_round_trips_exactly() {
+        assert_exact(&rich_message());
+        assert_exact(&Message { id: hex64(3), content: "plain".into(), at: 1_700_000_000_123, ..Default::default() });
+    }
+
+    #[test]
+    fn every_path_kind_round_trips_exactly() {
+        let id = hex64(10);
+        let prefix = download_prefix();
+        let cases = [
+            (String::new(), 0, "empty"),
+            (format!("{prefix}{id}.jpg"), AttachmentFlags::PATH_HASHED, "hashed"),
+            (format!("{prefix}holiday.jpg"), AttachmentFlags::PATH_NAMED, "named"),
+            (format!("{prefix}holiday-1.jpg"), AttachmentFlags::PATH_CUSTOM, "collision suffix"),
+            (format!("{prefix}{}.jpg", id.to_uppercase()), AttachmentFlags::PATH_CUSTOM, "uppercase hash"),
+            (format!("{prefix}{id}.png"), AttachmentFlags::PATH_CUSTOM, "hash with another extension"),
+            (format!("{prefix}{}.jpg", hex64(11)), AttachmentFlags::PATH_CUSTOM, "another hash"),
+            (format!("{prefix}{id}.jpg.part"), AttachmentFlags::PATH_CUSTOM, "hashed plus a tail"),
+            ("/elsewhere/holiday.jpg".to_string(), AttachmentFlags::PATH_CUSTOM, "another directory"),
+            (format!("{prefix}sub/holiday.jpg"), AttachmentFlags::PATH_CUSTOM, "a subdirectory"),
+        ];
+        for (path, kind, label) in cases {
+            let att = att_with(&id, "jpg", "holiday.jpg", path);
+            assert_eq!(path_kind_of(&att), kind, "{label}");
+            assert_eq!(CompactAttachment::from_attachment(&att).to_attachment(), att, "{label}");
+            assert_eq!(CompactAttachment::from_attachment_owned(att.clone()).to_attachment(), att, "{label} (owned)");
+        }
+        // No name: the prefix alone is not a named path.
+        let bare = att_with(&id, "jpg", "", prefix.to_string());
+        assert_eq!(path_kind_of(&bare), AttachmentFlags::PATH_CUSTOM);
+        assert_eq!(CompactAttachment::from_attachment(&bare).to_attachment(), bare);
+        // A name equal to the hashed file name reproduces either way.
+        let both = att_with(&id, "jpg", &format!("{id}.jpg"), format!("{prefix}{id}.jpg"));
+        assert_eq!(CompactAttachment::from_attachment(&both).to_attachment(), both);
+    }
+
+    #[test]
+    fn a_derived_path_follows_set_path() {
+        let id = hex64(20);
+        let mut c = CompactAttachment::from_attachment(&att_with(&id, "mp4", "clip.mp4", String::new()));
+        assert!(!c.has_path());
+        assert!(c.cold.is_none());
+        c.set_path(format!("{}clip.mp4", download_prefix()));
+        assert_eq!(c.flags.path_kind(), AttachmentFlags::PATH_NAMED);
+        assert!(c.cold.is_none(), "a derived path needs no cold box");
+        c.set_path("/custom/clip.mp4".into());
+        assert_eq!(c.path(), "/custom/clip.mp4");
+        assert!(c.cold.is_some());
+        c.set_path(String::new());
+        assert!(!c.has_path());
+        assert_eq!(c.path(), "");
+        assert!(c.cold.is_none(), "clearing the only cold field drops the box");
+        assert!(c.downloaded(), "the path kind leaves the other flags alone");
+    }
+
+    #[test]
+    fn cold_fields_round_trip_exactly() {
+        let id = hex64(30);
+        let mut att = att_with(&id, "tar.zst", "", "/var/x".into());
+        att.original_hash = Some(hex64(31));
+        att.group_id = Some(hex64(32));
+        att.webxdc_topic = Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST".into());
+        att.fallback_urls = vec!["https://a.example/x".into(), "https://b.example/x".into()];
+        att.img_meta = Some(ImageMetadata { thumbhash: "ẞ-thumb".into(), width: 7, height: 9 });
+        let c = CompactAttachment::from_attachment(&att);
+        assert_eq!(c.ext, EXT_COLD);
+        assert_eq!(c.to_attachment(), att);
+
+        // Unknown or differently-cased extensions keep their exact spelling.
+        for ext in ["JPG", "Png", "weird", ""] {
+            let a = att_with(&id, ext, "", String::new());
+            assert_eq!(CompactAttachment::from_attachment(&a).to_attachment(), a, "{ext:?}");
+        }
+        // An image with an empty thumbhash is still an image.
+        let mut a = att_with(&id, "png", "", String::new());
+        a.img_meta = Some(ImageMetadata { thumbhash: String::new(), width: 0, height: 0 });
+        assert_eq!(CompactAttachment::from_attachment(&a).to_attachment(), a);
+        // No original hash, and one that differs only from the id.
+        a.original_hash = None;
+        assert_eq!(CompactAttachment::from_attachment(&a).to_attachment(), a);
+        assert!(CompactAttachment::from_attachment(&a).cold.is_none());
+    }
+
+    #[test]
+    fn the_common_attachment_holds_nothing_cold() {
+        let id = hex64(40);
+        let att = att_with(&id, "webp", "", format!("{}{id}.webp", download_prefix()));
+        let c = CompactAttachment::from_attachment(&att);
+        assert!(c.cold.is_none(), "known extension, hashed path and original == id need no box");
+        assert_eq!(c.to_attachment(), att);
+        for ext in ["png", "mp4", "", "tar.zst"] {
+            let a = att_with(&id, ext, "", format!("{}{id}.{ext}", download_prefix()));
+            assert_eq!(path_kind_of(&a), AttachmentFlags::PATH_HASHED, "{ext:?}");
+            assert_eq!(CompactAttachment::from_attachment(&a).to_attachment(), a, "{ext:?}");
+        }
+        assert_eq!(c.flags.0 & AttachmentFlags::ORIGINAL_IS_ID, AttachmentFlags::ORIGINAL_IS_ID);
+        assert_eq!(c.original_hash(), Some(c.id));
+    }
+
+    #[test]
+    fn every_extension_code_reads_back() {
+        for (i, ext) in EXTENSIONS.iter().enumerate() {
+            assert_eq!(extension_code(ext) as usize, i, "{ext} must appear once");
+        }
+        assert!(EXTENSIONS.len() < EXT_COLD as usize);
+    }
+
+    fn preview(title: Option<&str>, og_title: Option<&str>, desc: Option<&str>, og_desc: Option<&str>) -> SiteMetadata {
+        SiteMetadata {
+            domain: "example.com".into(),
+            og_title: og_title.map(Into::into),
+            og_description: og_desc.map(Into::into),
+            og_image: Some("https://example.com/i.png".into()),
+            og_url: None,
+            og_type: Some("article".into()),
+            title: title.map(Into::into),
+            description: desc.map(Into::into),
+            favicon: Some(String::new()),
+        }
+    }
+
+    #[test]
+    fn previews_round_trip_exactly() {
+        let long = "ü".repeat(9000);
+        let cases = [
+            preview(Some("Same"), Some("Same"), Some("D"), Some("D")),
+            preview(Some("Mine"), Some("Theirs"), Some("D1"), Some("D2")),
+            preview(Some("Only title"), None, None, Some("Only og")),
+            preview(None, Some("Only og"), Some("Only desc"), None),
+            preview(None, None, None, None),
+            preview(Some(""), Some(""), Some(""), None),
+            preview(Some(&long), Some(&long), Some(&long[..200]), Some(&long)),
+        ];
+        for meta in cases {
+            assert_eq!(unpack_preview(pack_preview(&meta).as_slice()).as_ref(), Some(&meta));
+            let msg = Message { id: hex64(50), preview_metadata: Some(meta.clone()), ..Default::default() };
+            assert_exact(&msg);
+            let mut interner = NpubInterner::new();
+            let mut c = CompactMessage::from_message(&Message { id: hex64(51), ..Default::default() }, &mut interner);
+            c.set_preview_metadata(Some(meta.clone()));
+            assert_eq!(c.preview_metadata(), Some(meta));
+            c.set_preview_metadata(None);
+            assert!(c.extras.is_none(), "removing the only extra drops the box");
+        }
+        let same = preview(Some("Same title"), Some("Same title"), Some("Same desc"), Some("Same desc"));
+        let differ = preview(Some("Same title"), Some("Other title"), Some("Same desc"), Some("Other desc"));
+        assert!(pack_preview(&same).len() + 18 < pack_preview(&differ).len(), "equal twins are stored once");
+    }
+
+    #[test]
+    fn spans_round_trip_exactly() {
+        use crate::text_spans::{ColorSpan, TextSpan, TimeSpan};
+        use crate::text_color::Effect;
+        let color = |colors: &[&str]| TextSpan::Color(ColorSpan {
+            from: 1,
+            to: 4,
+            effect: Effect::Gradient,
+            colors: colors.iter().map(|c| c.to_string()).collect(),
+        });
+        let spans = vec![
+            color(&["#000000", "#ffffff", "#0a1b2c"]),
+            color(&["#ABCDEF", "#abcdef"]),
+            color(&["red"]),
+            color(&["#abc"]),
+            TextSpan::Color(ColorSpan { from: 0, to: 9, effect: Effect::Rainbow, colors: Vec::new() }),
+            TextSpan::Time(TimeSpan { from: 2, to: 8, unix: -62_167_219_200, style: 'R' }),
+        ];
+        let held: Vec<_> = spans.iter().cloned().map(HeldSpan::hold).collect();
+        assert!(matches!(held[0], HeldSpan::Color { .. }), "canonical stops pack");
+        assert!(matches!(held[1], HeldSpan::Raw(_)), "a non-canonical stop keeps the span verbatim");
+        assert!(matches!(held[2], HeldSpan::Raw(_)));
+        assert!(matches!(held[3], HeldSpan::Raw(_)));
+        let msg = Message { id: hex64(60), content: "0123456789".into(), text_spans: spans, ..Default::default() };
+        assert_exact(&msg);
+    }
+
+    #[test]
+    fn edit_history_round_trips_exactly() {
+        let edits = |v: &[(&str, u64)]| Some(v.iter().map(|&(c, at)| EditEntry { content: c.into(), edited_at: at }).collect::<Vec<_>>());
+        let base = |content: &str, history| Message { id: hex64(70), content: content.into(), at: 1000, edited: true, edit_history: history, ..Default::default() };
+        let cases = [
+            base("v2", edits(&[("v1", 1000), ("v2", 2000)])),
+            base("v1", edits(&[("v1", 1000), ("v2", 2000)])),
+            base("", edits(&[("", 1000)])),
+            base("x", edits(&[("b", 3000), ("x", 1000)])),
+            base("same", edits(&[("same", 1000), ("same", 2000)])),
+        ];
+        for msg in cases {
+            assert_exact(&msg);
+        }
+        let mut interner = NpubInterner::new();
+        let tail = CompactMessage::from_message(&base("v2", edits(&[("v1", 1000), ("v2", 2000)])), &mut interner);
+        let x = tail.extras.as_deref().unwrap();
+        assert!(x.tail_is_content && x.edits[1].content.is_empty(), "the newest revision is held once");
+    }
+
+    /// The edit rules on plain data, which the shared-tail history must reproduce.
+    fn reference_apply(content: &mut String, history: &mut Vec<EditEntry>, at: u64, new: &str, edited_at: u64) {
+        if history.is_empty() {
+            history.push(EditEntry { content: content.clone(), edited_at: at });
+        }
+        if history.iter().any(|e| e.edited_at == edited_at) {
+            return;
+        }
+        history.push(EditEntry { content: new.to_string(), edited_at });
+        history.sort_by_key(|e| e.edited_at);
+        if history.last().is_none_or(|e| e.edited_at == edited_at) {
+            *content = new.to_string();
+        }
+    }
+
+    #[test]
+    fn apply_edit_matches_the_reference_rules() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for round in 0..400 {
+            let at = 1000 + next(5) * 1000;
+            let mut content = format!("c{}", next(3));
+            let mut history: Vec<EditEntry> = Vec::new();
+            // Some messages arrive already edited, a few out of order.
+            if next(3) == 0 {
+                for _ in 0..1 + next(3) {
+                    history.push(EditEntry { content: format!("c{}", next(3)), edited_at: next(8) * 1000 });
+                }
+                history.dedup_by_key(|e| e.edited_at);
+                if next(2) == 0 {
+                    content = history.last().unwrap().content.clone();
+                }
+            }
+            let msg = Message {
+                id: hex64(round),
+                content: content.clone(),
+                at,
+                edited: !history.is_empty(),
+                edit_history: (!history.is_empty()).then(|| history.clone()),
+                ..Default::default()
+            };
+            let mut interner = NpubInterner::new();
+            let mut compact = CompactMessage::from_message(&msg, &mut interner);
+            for _ in 0..next(6) {
+                let new = format!("c{}", next(3));
+                let edited_at = next(8) * 1000;
+                reference_apply(&mut content, &mut history, at, &new, edited_at);
+                compact.apply_edit(new, edited_at, Vec::new(), Vec::new(), &mut interner);
+                let out = compact.to_message(&interner);
+                assert_eq!(out.content, content, "round {round}");
+                assert_eq!(out.edit_history.unwrap_or_default(), history, "round {round}");
+                assert_eq!(compact.edit_history(), history, "round {round}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_newest_edit_brings_its_emoji_and_spans() {
+        use crate::text_spans::{ColorSpan, TextSpan};
+        let mut interner = NpubInterner::new();
+        let mut c = CompactMessage::from_message(&Message { id: hex64(80), content: "a".into(), at: 1000, ..Default::default() }, &mut interner);
+        let span = TextSpan::Color(ColorSpan { from: 0, to: 1, effect: crate::text_color::Effect::Solid, colors: vec!["#f472b6".into()] });
+        let tag = crate::types::EmojiTag { shortcode: "cat".into(), url: "https://e.example/cat.png".into() };
+        c.apply_edit("b".into(), 2000, vec![tag.clone()], vec![span.clone()], &mut interner);
+        c.apply_edit("older".into(), 1500, Vec::new(), Vec::new(), &mut interner);
+        let out = c.to_message(&interner);
+        assert_eq!(out.content, "b");
+        assert_eq!(out.text_spans, vec![span]);
+        assert_eq!(out.emoji_tags, vec![tag]);
+        assert_eq!(out.edit_history.unwrap().iter().map(|e| e.content.as_str()).collect::<Vec<_>>(), ["a", "older", "b"]);
+    }
+
+    // ========================================================================
+    // Position index
+    // ========================================================================
+
+    /// The index must hold every position once, ordered by the id at each.
+    fn assert_index_sound(v: &CompactMessageVec) {
+        assert_eq!(v.id_index.len(), v.messages.len());
+        let mut seen = vec![false; v.messages.len()];
+        for &p in &v.id_index {
+            assert!(!std::mem::replace(&mut seen[p as usize], true), "position {p} twice");
+        }
+        for w in v.id_index.windows(2) {
+            assert!(v.messages[w[0] as usize].id < v.messages[w[1] as usize].id, "index out of id order");
+        }
+        for w in v.messages.windows(2) {
+            assert!(w[0].at <= w[1].at, "messages out of time order");
+        }
+        for m in &v.messages {
+            assert_eq!(v.find_by_id(&m.id).map(|f| f.id), Some(m.id));
+        }
+    }
+
+    #[test]
+    fn the_index_stays_sound_through_every_path() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut v = CompactMessageVec::new();
+        let mut held: Vec<String> = Vec::new();
+        let (mut serial, mut rekeys) = (0u64, 0u64);
+        let mut fresh = |at: u64, held: &mut Vec<String>| {
+            serial += 1;
+            let id = hex64(serial);
+            held.push(id.clone());
+            make_compact_msg(&id, at)
+        };
+        for _ in 0..600 {
+            let first = v.first().map_or(10_000, |m| m.at);
+            let last = v.last().map_or(10_000, |m| m.at);
+            match next(7) {
+                0 => assert!(v.insert(fresh(last + next(3), &mut held))),
+                1 => assert!(v.insert(fresh(first + next(last - first + 1), &mut held))),
+                2 => {
+                    let batch: Vec<_> = (0..1 + next(30)).map(|_| fresh(last + next(50), &mut held)).collect();
+                    assert_eq!(v.insert_batch(batch.clone()), batch.len());
+                    assert_eq!(v.insert_batch(batch), 0, "a repeated batch adds nothing");
+                }
+                3 => {
+                    let batch: Vec<_> = (0..1 + next(30)).map(|_| fresh(first.saturating_sub(next(50)), &mut held)).collect();
+                    v.insert_batch(batch);
+                }
+                4 => {
+                    let batch: Vec<_> = (0..1 + next(30)).map(|_| fresh(first + next(last - first + 100), &mut held)).collect();
+                    v.insert_batch(batch);
+                }
+                5 if !held.is_empty() => {
+                    let id = held.swap_remove(next(held.len() as u64) as usize);
+                    assert!(v.remove_by_hex_id(&id));
+                    assert!(!v.contains_hex_id(&id));
+                }
+                6 if !held.is_empty() => {
+                    let i = next(held.len() as u64) as usize;
+                    rekeys += 1;
+                    let new = hex64(1 << 40 | rekeys);
+                    assert!(v.rekey(&encode_message_id(&held[i]), encode_message_id(&new)));
+                    held[i] = new;
+                }
+                _ => {}
+            }
+            assert_index_sound(&v);
+            assert_eq!(v.len(), held.len());
+        }
+        assert!(v.len() > 50);
+        assert_eq!(v.retain_newest(50), held.len() - 50);
+        assert_index_sound(&v);
+        assert_eq!(v.memory_usage(), 50 * (std::mem::size_of::<CompactMessage>() + 4), "eviction hands capacity back");
+    }
+
+    #[test]
+    fn a_live_message_grows_a_loaded_chat_by_an_eighth() {
+        let mut v = CompactMessageVec::new();
+        v.insert_batch((0..1000u64).map(|n| make_compact_msg(&hex64(n), n)));
+        let loaded = v.memory_usage();
+        assert_eq!(loaded, 1000 * (std::mem::size_of::<CompactMessage>() + 4), "a page loads at exact capacity");
+        assert!(v.insert(make_compact_msg(&hex64(5000), 5000)));
+        assert_eq!(v.memory_usage(), 1125 * (std::mem::size_of::<CompactMessage>() + 4));
+        // Older pages join without slack; the next arrival grows again by an eighth.
+        v.insert_batch((0..200u64).map(|n| make_compact_msg(&hex64(10_000 + n), 0)));
+        assert_index_sound(&v);
+        assert_eq!(v.messages.capacity(), 1201);
     }
 }

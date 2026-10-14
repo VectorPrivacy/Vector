@@ -31,10 +31,25 @@ pub(crate) fn fit_for_send(bytes: &[u8]) -> Result<::image::DynamicImage, String
 
 /// The composer preview's `fit_for_send`, kept for the compression that follows so the image is
 /// decoded and resized once. One entry, keyed by the SHA-256 of the image's bytes.
-static FITTED: std::sync::Mutex<Option<([u8; 32], ::image::DynamicImage)>> = std::sync::Mutex::new(None);
+type Fitted = ([u8; 32], ::image::DynamicImage, std::time::Instant);
+static FITTED: std::sync::Mutex<Option<Fitted>> = std::sync::Mutex::new(None);
 
 pub(crate) fn keep_fitted(digest: [u8; 32], img: ::image::DynamicImage) {
-    *FITTED.lock().unwrap_or_else(|e| e.into_inner()) = Some((digest, img));
+    *FITTED.lock().unwrap_or_else(|e| e.into_inner()) = Some((digest, img, std::time::Instant::now()));
+}
+
+/// Drop a fit no send took within `ttl` (a preview that never closed); true when one went.
+pub(crate) fn sweep_fitted(ttl: std::time::Duration) -> bool {
+    expire_fitted(&FITTED, ttl)
+}
+
+fn expire_fitted(slot: &std::sync::Mutex<Option<Fitted>>, ttl: std::time::Duration) -> bool {
+    let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let stale = slot.as_ref().is_some_and(|(_, _, at)| at.elapsed() >= ttl);
+    if stale {
+        *slot = None;
+    }
+    stale
 }
 
 pub(crate) fn forget_fitted() {
@@ -46,8 +61,8 @@ fn fitted(bytes: &[u8]) -> Result<::image::DynamicImage, String> {
     if FITTED.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
         let key = vector_core::crypto::sha256::digest(bytes);
         let mut slot = FITTED.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.as_ref().is_some_and(|(k, _)| *k == key) {
-            if let Some((_, img)) = slot.take() {
+        if slot.as_ref().is_some_and(|(k, _, _)| *k == key) {
+            if let Some((_, img, _)) = slot.take() {
                 return Ok(img);
             }
         }
@@ -305,7 +320,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
     #[cfg(target_os = "android")]
     let (bytes, extension) = {
         let cache = ANDROID_FILE_CACHE.lock().unwrap();
-        if let Some((cached_bytes, ext, _, _)) = cache.get(file_path) {
+        if let Some((cached_bytes, ext, ..)) = cache.get(file_path) {
             (cached_bytes.clone(), ext.clone())
         } else {
             drop(cache);
@@ -431,5 +446,15 @@ mod fitted_tests {
         let reused = compress_bytes_internal(Arc::new(png), "png", None).unwrap();
         assert!(FITTED.lock().unwrap().is_none(), "the compression took it");
         assert_eq!((reused.bytes, reused.extension), (plain.bytes, plain.extension));
+    }
+
+    #[test]
+    fn a_fit_nobody_sent_goes_after_its_ttl() {
+        let slot = std::sync::Mutex::new(Some(([0u8; 32], ::image::DynamicImage::new_rgba8(1, 1), std::time::Instant::now())));
+        assert!(!expire_fitted(&slot, std::time::Duration::from_secs(60)), "still fresh");
+        assert!(slot.lock().unwrap().is_some());
+        assert!(expire_fitted(&slot, std::time::Duration::ZERO));
+        assert!(slot.lock().unwrap().is_none());
+        assert!(!expire_fitted(&slot, std::time::Duration::ZERO), "nothing left to drop");
     }
 }

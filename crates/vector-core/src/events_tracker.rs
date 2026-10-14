@@ -20,29 +20,49 @@ pub struct LazyEventsTracker {
     seen: Mutex<Seen>,
 }
 
+/// Ids are held by their first 8 bytes. They are SHA-256, so a false "seen" is about 2e-15
+/// per event and costs one live delivery, which negentropy recovers.
 #[derive(Debug, Default)]
 struct Seen {
-    ids: HashSet<EventId>,
-    order: VecDeque<EventId>,
+    ids: HashSet<u64>,
+    /// `ids` oldest first. Grown by hand to exactly the bound: doubling would end near 2x it.
+    order: VecDeque<u64>,
+}
+
+fn short(id: &EventId) -> u64 {
+    let b = id.as_bytes();
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
 }
 
 impl Seen {
+    fn contains(&self, id: &EventId) -> bool {
+        self.ids.contains(&short(id))
+    }
+
+    /// The id forgotten is nearly always one just marked, so it is sought from the newest end.
     fn remove(&mut self, id: &EventId) {
-        if self.ids.remove(id) {
-            self.order.retain(|o| o != id);
+        let key = short(id);
+        if self.ids.remove(&key) {
+            if let Some(at) = self.order.iter().rposition(|&o| o == key) {
+                self.order.remove(at);
+            }
         }
     }
 
     fn insert(&mut self, id: EventId) {
-        if !self.ids.insert(id) {
+        let key = short(&id);
+        if !self.ids.insert(key) {
             return;
         }
-        self.order.push_back(id);
-        if self.order.len() > MAX_EVENTS {
+        if self.order.len() == MAX_EVENTS {
             if let Some(old) = self.order.pop_front() {
                 self.ids.remove(&old);
             }
+        } else if self.order.len() == self.order.capacity() {
+            let grow = self.order.capacity().max(64).min(MAX_EVENTS - self.order.len());
+            self.order.reserve_exact(grow);
         }
+        self.order.push_back(key);
     }
 }
 
@@ -66,7 +86,7 @@ impl NostrDatabase for LazyEventsTracker {
 
     fn check_id<'a>(&'a self, event_id: &'a EventId) -> Fut<'a, DatabaseEventStatus> {
         Box::pin(async move {
-            let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner()).ids.contains(event_id);
+            let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner()).contains(event_id);
             Ok(if seen { DatabaseEventStatus::Saved } else { DatabaseEventStatus::NotExistent })
         })
     }
@@ -114,21 +134,68 @@ impl NostrDatabase for LazyEventsTracker {
 mod tests {
     use super::*;
 
+    fn id(n: u32) -> EventId {
+        let mut b = [0u8; 32];
+        b[..4].copy_from_slice(&n.to_le_bytes());
+        EventId::from_byte_array(b)
+    }
+
     #[test]
     fn it_forgets_the_oldest_past_its_bound() {
         let mut seen = Seen::default();
-        let id = |n: u32| {
-            let mut b = [0u8; 32];
-            b[..4].copy_from_slice(&n.to_le_bytes());
-            EventId::from_byte_array(b)
-        };
         for n in 0..(MAX_EVENTS as u32 + 3) {
             seen.insert(id(n));
         }
         seen.insert(id(MAX_EVENTS as u32 + 2));
         assert_eq!(seen.ids.len(), MAX_EVENTS);
         assert_eq!(seen.order.len(), MAX_EVENTS);
-        assert!(!seen.ids.contains(&id(2)) && seen.ids.contains(&id(3)));
+        assert!(!seen.contains(&id(2)) && seen.contains(&id(3)));
+        assert!(seen.contains(&id(MAX_EVENTS as u32 + 2)), "the newest stays");
+        assert_eq!(seen.order.capacity(), MAX_EVENTS, "the ring never grows past its bound");
+    }
+
+    #[test]
+    fn it_evicts_in_the_order_ids_arrived() {
+        let mut seen = Seen::default();
+        for n in 0..MAX_EVENTS as u32 {
+            seen.insert(id(n));
+        }
+        seen.insert(id(0));
+        for k in 0..5u32 {
+            seen.insert(id(1_000_000 + k));
+            assert!(!seen.contains(&id(k)), "id {k} was the oldest");
+            assert!(seen.contains(&id(k + 1)), "id {} is not yet", k + 1);
+        }
+    }
+
+    #[test]
+    fn a_forgotten_id_frees_its_place_in_the_order() {
+        let mut seen = Seen::default();
+        for n in 0..10 {
+            seen.insert(id(n));
+        }
+        seen.remove(&id(4));
+        seen.remove(&id(9));
+        seen.remove(&id(77));
+        assert_eq!(seen.ids.len(), 8);
+        assert_eq!(seen.order.len(), 8);
+        assert!(!seen.contains(&id(4)) && !seen.contains(&id(9)) && seen.contains(&id(5)));
+        seen.insert(id(4));
+        assert_eq!(seen.order.back(), Some(&short(&id(4))), "a returning id is the newest");
+    }
+
+    #[test]
+    fn a_saturated_tracker_holds_under_a_quarter_of_the_old_bytes() {
+        let mut seen = Seen::default();
+        for n in 0..MAX_EVENTS as u32 {
+            seen.insert(id(n));
+        }
+        // hashbrown keeps 7/8 of its buckets usable and one control byte per bucket.
+        let set = (seen.ids.capacity() * 8 / 7).next_power_of_two() * 9;
+        let ring = seen.order.capacity() * 8;
+        // Full 32-byte ids at the same cap: 65,536 buckets and a doubled ring.
+        let full_ids = 65_536 * 33 + 65_536 * 32;
+        assert!((set + ring) * 4 < full_ids, "set {set} B + ring {ring} B vs {full_ids} B");
     }
 
     #[tokio::test]

@@ -70,12 +70,23 @@ pub fn chat_message_to_message(
 
 /// Whether `author` sits on the banlist of the community owning `channel_id`
 /// (fail-open on a lookup error: availability must never hide honest traffic —
-/// the ban re-applies on the next fold).
-fn author_is_banned_here(channel_id: &str, author: &PublicKey) -> bool {
-    let Ok(Some(cid_hex)) = crate::db::community::community_id_for_channel(channel_id) else {
-        return false;
+/// the ban re-applies on the next fold). `community` is the owner when the
+/// caller already routed the wrap to it.
+fn author_is_banned_here(channel_id: &str, community: Option<&[u8; 32]>, author: &PublicKey) -> bool {
+    let resolved;
+    let community = match community {
+        Some(c) => c,
+        None => {
+            let Some(Ok(Some(c))) =
+                crate::community::id32_from_hex(channel_id).map(|ch| crate::db::community::community_for_channel(&ch))
+            else {
+                return false;
+            };
+            resolved = c;
+            &resolved
+        }
     };
-    crate::db::community::is_author_banned(&cid_hex, author)
+    crate::db::community::is_author_banned_in(community, author)
 }
 
 /// May `deleter` remove a message authored by `author` in this channel? The
@@ -131,13 +142,24 @@ pub enum ChatPersist {
 /// non-persisted kind (typing/webxdc), or an aggregate whose target isn't resident in
 /// this channel.
 pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id: &str, my_pubkey: &PublicKey) -> Option<ChatPersist> {
+    apply_chat_to_state_in(state, event, channel_id, None, my_pubkey)
+}
+
+/// [`apply_chat_to_state`], given the owning community when the caller already knows it.
+fn apply_chat_to_state_in(
+    state: &mut ChatState,
+    event: &ChatEvent,
+    channel_id: &str,
+    community: Option<&[u8; 32]>,
+    my_pubkey: &PublicKey,
+) -> Option<ChatPersist> {
     // CORD-04 §4: a banned npub VANISHES — every chat event they author (message,
     // reaction, edit, delete) is dropped at fold time. Severance (the rekey) only
     // cuts their READ of new epochs; they still hold old epoch keys and can post
     // to old planes forever — refusing to fold them is what makes the ban hold.
     // The persisted banlist can never name the owner (the authority fold refuses
     // a ban whose target is position 0), so no owner exemption is needed here.
-    if author_is_banned_here(channel_id, &event.opened().author) {
+    if author_is_banned_here(channel_id, community, &event.opened().author) {
         return None;
     }
     // CORD-08 §3: the rumor's own NIP-40 expiry governs, the wrap's copy is relay hygiene.
@@ -318,10 +340,29 @@ pub async fn persist_chat_event(
     channel_id: &str,
     my_pubkey: &PublicKey,
 ) -> Option<ChatPersist> {
+    persist_chat_event_in(event, channel_id, None, my_pubkey).await
+}
+
+/// [`persist_chat_event`] for a wrap the dispatcher already routed to `community`.
+pub(crate) async fn persist_routed_chat_event(
+    event: &ChatEvent,
+    channel_id: &str,
+    community: &[u8; 32],
+    my_pubkey: &PublicKey,
+) -> Option<ChatPersist> {
+    persist_chat_event_in(event, channel_id, Some(community), my_pubkey).await
+}
+
+async fn persist_chat_event_in(
+    event: &ChatEvent,
+    channel_id: &str,
+    community: Option<&[u8; 32]>,
+    my_pubkey: &PublicKey,
+) -> Option<ChatPersist> {
     hydrate_target(event, channel_id).await;
     let outcome = {
         let mut st = crate::state::STATE.lock().await;
-        apply_chat_to_state(&mut st, event, channel_id, my_pubkey)
+        apply_chat_to_state_in(&mut st, event, channel_id, community, my_pubkey)
     }?;
     // Resolve a reply's preview (content/npub) from the DB before persist + emit:
     // the parent is often persisted but outside the in-memory window,
@@ -498,7 +539,7 @@ pub fn dispatch_wrap(
             return DispatchedV2::NotOurs;
         };
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        return dispatch_chat_event(event, &channel_id, my_pubkey, handler);
+        return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
     }
 
     // 2. Guestbook plane: join/leave presence.
@@ -539,7 +580,13 @@ pub fn dispatch_wrap(
     DispatchedV2::NotOurs
 }
 
-fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
+fn dispatch_chat_event(
+    event: ChatEvent,
+    channel_id: &str,
+    community: &[u8; 32],
+    my_pubkey: &PublicKey,
+    handler: &dyn InboundEventHandler,
+) -> DispatchedV2 {
     match event {
         // Typing is ephemeral (never persisted) — fired inline, so it carries its
         // own CORD-04 banned-author drop (the persisted kinds get theirs in
@@ -549,7 +596,7 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey
             // key is still us, and the send-side dedup only knows our own wraps.
             // Drop by AUTHOR, not by wrap id: another client signing with the same
             // key is still us, and the send-side dedup only knows our own wraps.
-            if opened.author == *my_pubkey || author_is_banned_here(channel_id, &opened.author) {
+            if opened.author == *my_pubkey || author_is_banned_here(channel_id, Some(community), &opened.author) {
                 return DispatchedV2::Ignored;
             }
             let npub = opened.author.to_bech32().unwrap_or_default();
@@ -561,7 +608,7 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey
         // tail (30078 persist + recency gate + Iroh wiring + the lobby emit) does
         // the rest. Own-device echoes drop: the local realtime layer tracks itself.
         ChatEvent::Webxdc { opened } => {
-            if opened.author == *my_pubkey || author_is_banned_here(channel_id, &opened.author) {
+            if opened.author == *my_pubkey || author_is_banned_here(channel_id, Some(community), &opened.author) {
                 return DispatchedV2::Ignored;
             }
             let Some((topic_id, node_addr)) = crate::webxdc::parse_peer_signal(&opened.rumor.content) else {

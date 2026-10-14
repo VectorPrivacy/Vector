@@ -362,8 +362,9 @@ pub fn forget_warmed_relay(url: &str) {
 
 /// A network switch: every warm socket and breaker verdict belonged to the old route.
 pub fn on_transport_switch() {
-    WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
-    RELAY_BREAKER.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+    // Replaced, not cleared: a cleared table keeps its peak allocation.
+    WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1 = Default::default();
+    RELAY_BREAKER.lock().unwrap_or_else(|e| e.into_inner()).1 = Default::default();
 }
 
 /// Per-relay failure tracker behind the fetch circuit breaker. Generation-keyed
@@ -393,7 +394,7 @@ fn with_breaker_at<R>(
     let mut guard = RELAY_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.0 != generation {
         guard.0 = generation;
-        guard.1.clear();
+        guard.1 = Default::default();
     }
     f(&mut guard.1)
 }
@@ -1020,7 +1021,7 @@ impl LiveTransport {
             let mut warmed = WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner());
             if warmed.0 != generation {
                 warmed.0 = generation;
-                warmed.1.clear();
+                warmed.1 = Default::default();
             }
             for url in succeeded {
                 warmed.1.insert(url.clone());

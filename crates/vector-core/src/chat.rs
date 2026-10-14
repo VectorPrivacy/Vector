@@ -4,7 +4,9 @@
 //! Use `to_serializable()` to convert to frontend-friendly `SerializableChat`.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::compact::{CompactMessage, CompactMessageVec, NpubInterner, encode_message_id, decode_message_id};
 use crate::types::Message;
@@ -152,7 +154,7 @@ impl Chat {
     pub fn set_as_read(&mut self) -> bool {
         for msg in self.messages.iter().rev() {
             if !msg.flags.is_mine() {
-                self.mark_read_at(msg.id);
+                self.mark_read_at(*msg.id());
                 return true;
             }
         }
@@ -266,12 +268,11 @@ impl Chat {
     /// (it re-stamps on the next registration), which matches the chat list's own
     /// fallback so the two can't disagree.
     pub fn is_surfaced_community_channel(&self) -> bool {
-        let cf = &self.metadata.custom_fields;
-        if !cf.contains_key("community_id") {
+        if self.metadata.community_id().is_none() {
             return false; // bare persistence anchor from the message-persist path
         }
-        match cf.get("primary_channel") {
-            Some(primary) => *primary == self.id,
+        match self.metadata.primary_channel() {
+            Some(primary) => primary == self.id,
             None => true,
         }
     }
@@ -408,18 +409,396 @@ impl ChatType {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+/// A chat row's display metadata: string → string, which is all the frontend and
+/// the database ever see (`{"custom_fields":{..}}`, keys in byte order).
+///
+/// A Community channel's keys are held typed, the community-wide ones in one
+/// header its sibling rows share. Any other key, and a known key whose value the
+/// typed form could not give back byte for byte, stays a plain pair.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ChatMetadata {
-    pub custom_fields: HashMap<String, String>,
+    community: Option<Box<CommunityStamp>>,
+    /// Sorted by key; never a key whose typed slot is set.
+    other: Vec<(Box<str>, Box<str>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+struct CommunityStamp {
+    header: Arc<CommunityHeader>,
+    channel_name: Option<Box<str>>,
+}
+
+/// The keys every channel row of one community carries alike.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct CommunityHeader {
+    community_id: Option<Box<str>>,
+    name: Option<Box<str>>,
+    description: Option<Box<str>>,
+    primary_channel: Option<Box<str>>,
+    owner_npub: Option<Box<str>>,
+    created_at: Option<u64>,
+    is_owner: Option<bool>,
+    dissolved: Option<bool>,
+    /// Stored as `"1"`.
+    icon: bool,
+}
+
+/// What a channel registration stamps onto its row.
+pub(crate) struct CommunityRegistration<'a> {
+    pub community_id: &'a str,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub primary_channel: &'a str,
+    pub owner_npub: Option<&'a str>,
+    /// `None` keeps whatever the row already holds.
+    pub created_at_ms: Option<u64>,
+    pub is_owner: bool,
+    pub dissolved: bool,
+    pub has_icon: bool,
+}
+
+/// The typed keys, in byte order of their names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    ChannelName,
+    CommunityId,
+    CreatedAt,
+    Description,
+    Dissolved,
+    Icon,
+    IsOwner,
+    Name,
+    OwnerNpub,
+    PrimaryChannel,
+}
+
+impl Field {
+    const ALL: [Field; 10] = [
+        Field::ChannelName,
+        Field::CommunityId,
+        Field::CreatedAt,
+        Field::Description,
+        Field::Dissolved,
+        Field::Icon,
+        Field::IsOwner,
+        Field::Name,
+        Field::OwnerNpub,
+        Field::PrimaryChannel,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Field::ChannelName => "channel_name",
+            Field::CommunityId => "community_id",
+            Field::CreatedAt => "created_at",
+            Field::Description => "description",
+            Field::Dissolved => "dissolved",
+            Field::Icon => "icon",
+            Field::IsOwner => "is_owner",
+            Field::Name => "name",
+            Field::OwnerNpub => "owner_npub",
+            Field::PrimaryChannel => "primary_channel",
+        }
+    }
+
+    fn parse(key: &str) -> Option<Field> {
+        Field::ALL.into_iter().find(|f| f.key() == key)
+    }
+}
+
+fn bool_text(b: bool) -> &'static str {
+    if b { "true" } else { "false" }
+}
+
+fn parse_bool_text(v: &str) -> Option<bool> {
+    match v {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// A number only when printing it gives `v` back (no sign, no leading zero).
+fn parse_ms_text(v: &str) -> Option<u64> {
+    v.parse::<u64>().ok().filter(|n| n.to_string() == v)
+}
+
+impl CommunityHeader {
+    fn text(&self, f: Field) -> Option<&Option<Box<str>>> {
+        match f {
+            Field::CommunityId => Some(&self.community_id),
+            Field::Name => Some(&self.name),
+            Field::Description => Some(&self.description),
+            Field::PrimaryChannel => Some(&self.primary_channel),
+            Field::OwnerNpub => Some(&self.owner_npub),
+            _ => None,
+        }
+    }
+
+    fn text_mut(&mut self, f: Field) -> Option<&mut Option<Box<str>>> {
+        match f {
+            Field::CommunityId => Some(&mut self.community_id),
+            Field::Name => Some(&mut self.name),
+            Field::Description => Some(&mut self.description),
+            Field::PrimaryChannel => Some(&mut self.primary_channel),
+            Field::OwnerNpub => Some(&mut self.owner_npub),
+            _ => None,
+        }
+    }
+
+    fn heap_size(&self) -> usize {
+        [&self.community_id, &self.name, &self.description, &self.primary_channel, &self.owner_npub]
+            .into_iter()
+            .map(|s| s.as_deref().map_or(0, str::len))
+            .sum()
+    }
 }
 
 impl ChatMetadata {
-    pub fn new() -> Self { Self { custom_fields: HashMap::new() } }
+    pub fn new() -> Self { Self::default() }
 
-    pub fn set_name(&mut self, name: String) { self.custom_fields.insert("name".to_string(), name); }
-    pub fn get_name(&self) -> Option<&str> { self.custom_fields.get("name").map(|s| s.as_str()) }
-    pub fn set_member_count(&mut self, count: usize) { self.custom_fields.insert("member_count".to_string(), count.to_string()); }
-    pub fn get_member_count(&self) -> Option<usize> { self.custom_fields.get("member_count").and_then(|s| s.parse().ok()) }
+    pub fn set_name(&mut self, name: String) { self.insert("name", name); }
+    pub fn get_name(&self) -> Option<&str> { self.header()?.name.as_deref() }
+    pub fn set_member_count(&mut self, count: usize) { self.insert("member_count", count.to_string()); }
+    pub fn get_member_count(&self) -> Option<usize> { self.get("member_count").and_then(|s| s.parse().ok()) }
+
+    /// The owning community's id (hex) on a Community channel row.
+    pub fn community_id(&self) -> Option<&str> { self.header()?.community_id.as_deref() }
+    /// The community's primary channel id (hex), the one row the list renders.
+    pub fn primary_channel(&self) -> Option<&str> { self.header()?.primary_channel.as_deref() }
+    /// Whether the owner dissolved this row's community.
+    pub fn is_dissolved(&self) -> bool { self.header().is_some_and(|h| h.dissolved == Some(true)) }
+
+    fn header(&self) -> Option<&CommunityHeader> { self.community.as_deref().map(|s| &*s.header) }
+
+    fn typed(&self, f: Field) -> Option<Cow<'_, str>> {
+        let stamp = self.community.as_deref()?;
+        let h = &*stamp.header;
+        if let Some(text) = h.text(f) {
+            return text.as_deref().map(Cow::Borrowed);
+        }
+        match f {
+            Field::ChannelName => stamp.channel_name.as_deref().map(Cow::Borrowed),
+            Field::CreatedAt => h.created_at.map(|n| Cow::Owned(n.to_string())),
+            Field::IsOwner => h.is_owner.map(|b| Cow::Borrowed(bool_text(b))),
+            Field::Dissolved => h.dissolved.map(|b| Cow::Borrowed(bool_text(b))),
+            Field::Icon => h.icon.then_some(Cow::Borrowed("1")),
+            _ => None,
+        }
+    }
+
+    fn typed_present(&self, f: Field) -> bool {
+        let Some(stamp) = self.community.as_deref() else { return false };
+        let h = &*stamp.header;
+        match h.text(f) {
+            Some(text) => text.is_some(),
+            None => match f {
+                Field::ChannelName => stamp.channel_name.is_some(),
+                Field::CreatedAt => h.created_at.is_some(),
+                Field::IsOwner => h.is_owner.is_some(),
+                Field::Dissolved => h.dissolved.is_some(),
+                Field::Icon => h.icon,
+                _ => false,
+            },
+        }
+    }
+
+    /// Hold `value` in `f`'s typed slot; `false` when the slot can't give it back exactly.
+    fn set_typed(&mut self, f: Field, value: &str) -> bool {
+        let (mut ms, mut flag) = (None, None);
+        let fits = match f {
+            Field::CreatedAt => {
+                ms = parse_ms_text(value);
+                ms.is_some()
+            }
+            Field::IsOwner | Field::Dissolved => {
+                flag = parse_bool_text(value);
+                flag.is_some()
+            }
+            Field::Icon => value == "1",
+            _ => true,
+        };
+        if !fits {
+            return false;
+        }
+        let stamp = self.community.get_or_insert_with(Default::default);
+        if f == Field::ChannelName {
+            stamp.channel_name = Some(value.into());
+            return true;
+        }
+        let h = Arc::make_mut(&mut stamp.header);
+        match h.text_mut(f) {
+            Some(slot) => *slot = Some(value.into()),
+            None => match f {
+                Field::CreatedAt => h.created_at = ms,
+                Field::IsOwner => h.is_owner = flag,
+                Field::Dissolved => h.dissolved = flag,
+                Field::Icon => h.icon = true,
+                _ => {}
+            },
+        }
+        true
+    }
+
+    fn clear_typed(&mut self, f: Field) {
+        if !self.typed_present(f) {
+            return;
+        }
+        let Some(stamp) = self.community.as_deref_mut() else { return };
+        if f == Field::ChannelName {
+            stamp.channel_name = None;
+        } else {
+            let h = Arc::make_mut(&mut stamp.header);
+            match h.text_mut(f) {
+                Some(slot) => *slot = None,
+                None => match f {
+                    Field::CreatedAt => h.created_at = None,
+                    Field::IsOwner => h.is_owner = None,
+                    Field::Dissolved => h.dissolved = None,
+                    Field::Icon => h.icon = false,
+                    _ => {}
+                },
+            }
+        }
+        if stamp.channel_name.is_none() && *stamp.header == CommunityHeader::default() {
+            self.community = None;
+        }
+    }
+
+    fn other_index(&self, key: &str) -> Result<usize, usize> {
+        self.other.binary_search_by(|(k, _)| (**k).cmp(key))
+    }
+
+    /// One field's value, exactly as it serializes.
+    pub fn get(&self, key: &str) -> Option<Cow<'_, str>> {
+        if let Some(v) = Field::parse(key).and_then(|f| self.typed(f)) {
+            return Some(v);
+        }
+        self.other_index(key).ok().map(|i| Cow::Borrowed(&*self.other[i].1))
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        Field::parse(key).is_some_and(|f| self.typed_present(f)) || self.other_index(key).is_ok()
+    }
+
+    pub fn insert(&mut self, key: &str, value: String) {
+        if let Some(f) = Field::parse(key) {
+            if self.set_typed(f, &value) {
+                self.remove_other(key);
+                return;
+            }
+            self.clear_typed(f);
+        }
+        match self.other_index(key) {
+            Ok(i) => self.other[i].1 = value.into_boxed_str(),
+            Err(i) => self.other.insert(i, (key.into(), value.into_boxed_str())),
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        if let Some(f) = Field::parse(key) {
+            self.clear_typed(f);
+        }
+        self.remove_other(key);
+    }
+
+    fn remove_other(&mut self, key: &str) {
+        if let Ok(i) = self.other_index(key) {
+            self.other.remove(i);
+        }
+    }
+
+    /// Every field in byte order of its key, as it serializes.
+    pub fn entries(&self) -> Vec<(&str, Cow<'_, str>)> {
+        let mut out: Vec<(&str, Cow<'_, str>)> = Vec::with_capacity(Field::ALL.len() + self.other.len());
+        out.extend(Field::ALL.into_iter().filter_map(|f| self.typed(f).map(|v| (f.key(), v))));
+        out.extend(self.other.iter().map(|(k, v)| (&**k, Cow::Borrowed(&**v))));
+        // Both halves are sorted and share no key, so only an interleave is left to settle.
+        out.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        out
+    }
+
+    pub fn from_map(map: HashMap<String, String>) -> Self {
+        let mut meta = Self::default();
+        for (k, v) in map {
+            meta.insert(&k, v);
+        }
+        meta
+    }
+
+    /// This row's header under `reg`, before any sharing.
+    pub(crate) fn registration_header(&self, reg: &CommunityRegistration<'_>) -> CommunityHeader {
+        CommunityHeader {
+            community_id: Some(reg.community_id.into()),
+            name: Some(reg.name.into()),
+            description: Some(reg.description.into()),
+            primary_channel: Some(reg.primary_channel.into()),
+            owner_npub: reg.owner_npub.map(Into::into),
+            created_at: reg.created_at_ms.or_else(|| self.header().and_then(|h| h.created_at)),
+            is_owner: Some(reg.is_owner),
+            dissolved: Some(reg.dissolved),
+            icon: reg.has_icon,
+        }
+    }
+
+    /// The header this row shares with its community's other rows.
+    pub(crate) fn community_header(&self) -> Option<&Arc<CommunityHeader>> {
+        self.community.as_deref().map(|s| &s.header)
+    }
+
+    /// Stamp a registration: every key it names now answers from `header`, except a
+    /// `created_at` the registration left to the row.
+    pub(crate) fn stamp_community(&mut self, header: Arc<CommunityHeader>, channel_name: &str, created_at_given: bool) {
+        self.community = Some(Box::new(CommunityStamp { header, channel_name: Some(channel_name.into()) }));
+        self.other.retain(|(k, _)| match Field::parse(k) {
+            Some(Field::CreatedAt) => !created_at_given,
+            Some(_) => false,
+            None => true,
+        });
+    }
+
+    /// Bytes held on the heap for this row; a shared header counts its share.
+    pub fn heap_size(&self) -> usize {
+        let other = self.other.capacity() * std::mem::size_of::<(Box<str>, Box<str>)>()
+            + self.other.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        let stamp = self.community.as_deref().map_or(0, |s| {
+            std::mem::size_of::<CommunityStamp>()
+                + s.channel_name.as_deref().map_or(0, str::len)
+                + (std::mem::size_of::<CommunityHeader>() + s.header.heap_size()) / Arc::strong_count(&s.header)
+        });
+        other + stamp
+    }
+}
+
+impl Serialize for ChatMetadata {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        struct Fields<'a>(&'a ChatMetadata);
+        impl Serialize for Fields<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let entries = self.0.entries();
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (k, v) in &entries {
+                    map.serialize_entry(k, v.as_ref())?;
+                }
+                map.end()
+            }
+        }
+        let mut s = serializer.serialize_struct("ChatMetadata", 1)?;
+        s.serialize_field("custom_fields", &Fields(self))?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMetadata {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "ChatMetadata")]
+        struct Wire {
+            custom_fields: HashMap<String, String>,
+        }
+        Ok(Self::from_map(Wire::deserialize(deserializer)?.custom_fields))
+    }
 }
 
 #[cfg(test)]
@@ -441,10 +820,10 @@ mod tests {
         let mut stamp = |id: &str, community: bool, primary: Option<&str>| {
             let mut chat = Chat::new_community_channel(id.to_string(), Vec::new(), &mut interner);
             if community {
-                chat.metadata.custom_fields.insert("community_id".into(), make_hex_id(0x99));
+                chat.metadata.insert("community_id", make_hex_id(0x99));
             }
             if let Some(p) = primary {
-                chat.metadata.custom_fields.insert("primary_channel".into(), p.to_string());
+                chat.metadata.insert("primary_channel", p.to_string());
             }
             chat
         };
@@ -918,6 +1297,132 @@ mod tests {
 
         assert_eq!(meta.get_name(), Some("My Group"), "name should be set");
         assert_eq!(meta.get_member_count(), Some(42), "member count should be set");
+    }
+
+    /// The JSON shape the frontend and DB read: a plain string map. A
+    /// `BTreeMap`, so its keys come out in the byte order the typed form promises.
+    #[derive(Serialize, Deserialize)]
+    struct PlainMetadata {
+        custom_fields: std::collections::BTreeMap<String, String>,
+    }
+
+    fn plain(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn typed(pairs: &[(&str, &str)]) -> ChatMetadata {
+        ChatMetadata::from_map(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    fn community_row(cid: &str, primary: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("name", "Rust Club".into()),
+            ("channel_name", "general".into()),
+            ("primary_channel", primary.into()),
+            ("description", "".into()),
+            ("community_id", cid.into()),
+            ("is_owner", "false".into()),
+            ("dissolved", "true".into()),
+            ("created_at", "1712345678901".into()),
+            ("owner_npub", "npub1owner".into()),
+            ("icon", "1".into()),
+            ("proto_version", "2".into()),
+            ("member_count", "12".into()),
+        ]
+    }
+
+    #[test]
+    fn custom_fields_serialize_byte_for_byte_as_a_plain_map() {
+        let (cid, primary) = (make_hex_id(0x41), make_hex_id(0x42));
+        let full = community_row(&cid, &primary);
+        let full: Vec<(&str, &str)> = full.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let rows: [&[(&str, &str)]; 5] = [
+            // A DM.
+            &[],
+            // A Community channel, with keys outside the typed set alongside.
+            &full,
+            // Known keys holding values no typed slot gives back exactly, beside unknown ones.
+            &[
+                ("is_owner", "yes"),
+                ("dissolved", "TRUE"),
+                ("created_at", "0042"),
+                ("icon", "true"),
+                ("community_id", "Not-Hex!"),
+                ("aaa", "first"),
+                ("zzz", "last"),
+                ("channel_name", ""),
+            ],
+            // A row stamped before most keys existed.
+            &[("community_id", "c0ffee"), ("name", "old")],
+            // A DM that was only ever named.
+            &[("name", "Bob"), ("member_count", "2")],
+        ];
+        for pairs in rows {
+            let expected = serde_json::to_string(&PlainMetadata { custom_fields: plain(pairs) }).unwrap();
+            let meta = typed(pairs);
+            let json = serde_json::to_string(&meta).unwrap();
+            assert_eq!(json, expected, "the typed row must serialize exactly as the plain map");
+            let back: ChatMetadata = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, meta, "a round trip rebuilds the same row");
+            assert_eq!(serde_json::to_string(&back).unwrap(), expected, "and re-serializes identically");
+            for (k, v) in pairs {
+                assert_eq!(meta.get(k).as_deref(), Some(*v), "{k} reads back verbatim");
+                assert!(meta.contains_key(k));
+            }
+            assert_eq!(meta.entries().len(), pairs.len());
+        }
+        assert_eq!(serde_json::to_string(&ChatMetadata::new()).unwrap(), r#"{"custom_fields":{}}"#);
+    }
+
+    #[test]
+    fn custom_fields_deserialize_like_the_derived_map_did() {
+        for json in [
+            r#"{"custom_fields":{"name":"x","is_owner":"true"},"unknown":1}"#,
+            r#"{"custom_fields":{}}"#,
+            r#"{}"#,
+            r#"{"custom_fields":{"name":null}}"#,
+            r#"{"custom_fields":{"n":5}}"#,
+            r#"{"custom_fields":[]}"#,
+            r#"[]"#,
+        ] {
+            let plain = serde_json::from_str::<PlainMetadata>(json);
+            let typed = serde_json::from_str::<ChatMetadata>(json);
+            assert_eq!(plain.is_ok(), typed.is_ok(), "{json} must be accepted or refused alike");
+            if let (Ok(p), Ok(t)) = (plain, typed) {
+                assert_eq!(serde_json::to_string(&t).unwrap(), serde_json::to_string(&p).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn a_community_chat_serializes_its_metadata_unchanged() {
+        let mut interner = NpubInterner::new();
+        let (cid, primary) = (make_hex_id(0x51), make_hex_id(0x52));
+        let mut chat = Chat::new_community_channel(primary.clone(), Vec::new(), &mut interner);
+        let row = community_row(&cid, &primary);
+        for (k, v) in &row {
+            chat.metadata.insert(k, v.clone());
+        }
+        let pairs: Vec<(&str, &str)> = row.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let expected = serde_json::to_value(PlainMetadata { custom_fields: plain(&pairs) }).unwrap();
+        let sent = serde_json::to_value(chat.to_serializable(&interner)).unwrap();
+        assert_eq!(sent["metadata"], expected);
+        assert!(chat.is_surfaced_community_channel());
+        assert_eq!(chat.metadata.community_id(), Some(cid.as_str()));
+        assert!(chat.metadata.is_dissolved());
+    }
+
+    #[test]
+    fn rewriting_a_typed_key_with_an_untyped_value_moves_it_cleanly() {
+        let mut meta = typed(&[("community_id", "abc"), ("is_owner", "true")]);
+        meta.insert("is_owner", "maybe".into());
+        assert_eq!(meta.get("is_owner").as_deref(), Some("maybe"));
+        meta.insert("is_owner", "false".into());
+        assert_eq!(meta.get("is_owner").as_deref(), Some("false"));
+        assert_eq!(meta, typed(&[("community_id", "abc"), ("is_owner", "false")]), "one key, one place");
+        meta.remove("community_id");
+        meta.remove("is_owner");
+        assert_eq!(meta, ChatMetadata::new(), "an emptied row holds nothing");
     }
 
     // ========================================================================

@@ -167,6 +167,9 @@ type JoinOutcome = Option<std::result::Result<(), String>>;
 /// How long an ask waits on a join already under way: past a departure still
 /// publishing from the window's previous session, and a cold node.
 const JOIN_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long a closed window's label is remembered: its webview is gone well before, so a
+/// join it sent can only be in flight for moments.
+const CLOSED_KEEP: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 struct Joined {
     stop: Option<oneshot::Sender<()>>,
@@ -195,9 +198,9 @@ pub struct RealtimeManager {
     /// Map of window_label → WS sender for bi-directional receive.
     pub(crate) ws_senders: WsSenders,
     slots: tokio::sync::Mutex<HashMap<String, Slot>>,
-    /// The newest instance closed under each label: a join that starts after its
+    /// The newest instance closed under each label, and when: a join that starts after its
     /// window closed must not go on to advertise.
-    closed: std::sync::Mutex<HashMap<String, u64>>,
+    closed: std::sync::Mutex<HashMap<String, (u64, std::time::Instant)>>,
 }
 
 impl RealtimeManager {
@@ -224,7 +227,7 @@ impl RealtimeManager {
             Join(SharedEventTarget, watch::Sender<JoinOutcome>),
         }
         let (target, ready) = loop {
-            if self.closed.lock().unwrap_or_else(|e| e.into_inner()).get(&label).is_some_and(|&c| c >= window.instance_id) {
+            if self.closed.lock().unwrap_or_else(|e| e.into_inner()).get(&label).is_some_and(|&(c, _)| c >= window.instance_id) {
                 return Err(anyhow!("the Mini App closed before joining"));
             }
             let step = {
@@ -354,8 +357,9 @@ impl RealtimeManager {
     pub async fn close(&self, label: &str, instance_id: u64) {
         {
             let mut closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
-            let newest = closed.entry(label.to_string()).or_insert(0);
-            *newest = (*newest).max(instance_id);
+            closed.retain(|_, (_, at)| at.elapsed() < CLOSED_KEEP);
+            let newest = closed.entry(label.to_string()).or_insert((0, std::time::Instant::now()));
+            *newest = (newest.0.max(instance_id), std::time::Instant::now());
         }
         let slot = {
             let mut slots = self.slots.lock().await;

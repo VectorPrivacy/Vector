@@ -31,6 +31,8 @@ const REMOTE_TIMEOUT_SECS: u64 = 8;
 /// A miss is retried after this long, so a relay blip doesn't blank a card all session.
 const MISS_TTL_SECS: u64 = 30;
 const CACHE_CAP: usize = 512;
+/// What the remembered cards may hold between them; past it the oldest go.
+const CACHE_BYTES: usize = 4 * 1024 * 1024;
 /// Longest a second ask waits on a first still fetching before fetching itself: past every
 /// relay budget, so it only fires when the first was lost.
 const WAIT_DEADLINE_SECS: u64 = 150;
@@ -212,7 +214,7 @@ pub async fn fetch(reference: &str) -> Result<Embed, String> {
     let started = web_time::Instant::now();
     let _claim = loop {
         match cache_lookup(&owner, &key) {
-            Lookup::Hit(result) => return result,
+            Lookup::Hit(result) => return result.map(Arc::unwrap_or_clone),
             Lookup::Fetch => break InFlight { owner: owner.clone(), key: key.clone() },
             Lookup::Wait if started.elapsed().as_secs() >= WAIT_DEADLINE_SECS => {
                 break InFlight { owner: owner.clone(), key: key.clone() };
@@ -246,18 +248,53 @@ struct EmbedCacheKey;
 
 #[derive(Default)]
 struct EmbedCache {
-    entries: HashMap<String, Cached>,
-    order: VecDeque<String>,
+    entries: HashMap<Arc<str>, Cached>,
+    order: VecDeque<Arc<str>>,
     in_flight: HashSet<String>,
+    /// Sum of the entries' [`Cached::weight`].
+    bytes: usize,
 }
 
 enum Cached {
-    Hit(Embed),
-    Miss { error: String, at: web_time::Instant },
+    Hit { embed: Arc<Embed>, weight: usize },
+    Miss { error: Box<str>, at: web_time::Instant },
+}
+
+impl Cached {
+    fn weight(&self) -> usize {
+        match self {
+            Cached::Hit { weight, .. } => *weight,
+            Cached::Miss { error, .. } => error.len(),
+        }
+    }
+}
+
+/// The bytes an embed holds, near enough to budget the cache by.
+fn weight(e: &Embed) -> usize {
+    fn opt(s: &Option<String>) -> usize {
+        s.as_ref().map_or(0, String::len)
+    }
+    fn media(m: &EmbedMedia) -> usize {
+        m.url.len() + opt(&m.mime) + opt(&m.poster) + opt(&m.sha256) + m.fallbacks.iter().map(String::len).sum::<usize>()
+    }
+    std::mem::size_of::<Embed>()
+        + e.id.len()
+        + e.author.len()
+        + opt(&e.title)
+        + opt(&e.summary)
+        + opt(&e.image)
+        + e.text.len()
+        + e.media.iter().map(|m| std::mem::size_of::<EmbedMedia>() + media(m)).sum::<usize>()
+        + e.video.as_ref().map_or(0, media)
+        + opt(&e.link)
+        + opt(&e.content_warning)
+        + e.emoji.iter().map(|t| t.shortcode.len() + t.url.len()).sum::<usize>()
+        + e.bech32.len()
+        + opt(&e.reposted_by)
 }
 
 enum Lookup {
-    Hit(Result<Embed, String>),
+    Hit(Result<Arc<Embed>, String>),
     Wait,
     Fetch,
 }
@@ -270,9 +307,9 @@ fn cache() -> Arc<Mutex<EmbedCache>> {
 fn cache_lookup(owner: &Mutex<EmbedCache>, key: &str) -> Lookup {
     let mut c = owner.lock().unwrap_or_else(|e| e.into_inner());
     match c.entries.get(key) {
-        Some(Cached::Hit(embed)) => return Lookup::Hit(Ok(embed.clone())),
+        Some(Cached::Hit { embed, .. }) => return Lookup::Hit(Ok(embed.clone())),
         Some(Cached::Miss { error, at }) if at.elapsed().as_secs() < MISS_TTL_SECS => {
-            return Lookup::Hit(Err(error.clone()));
+            return Lookup::Hit(Err(error.to_string()));
         }
         _ => {}
     }
@@ -286,15 +323,24 @@ fn cache_lookup(owner: &Mutex<EmbedCache>, key: &str) -> Lookup {
 fn cache_store(owner: &Mutex<EmbedCache>, key: &str, result: &Result<Embed, String>) {
     let mut c = owner.lock().unwrap_or_else(|e| e.into_inner());
     let entry = match result {
-        Ok(embed) => Cached::Hit(embed.clone()),
-        Err(error) => Cached::Miss { error: error.clone(), at: web_time::Instant::now() },
+        Ok(embed) => Cached::Hit { embed: Arc::new(embed.clone()), weight: weight(embed) },
+        Err(error) => Cached::Miss { error: error.as_str().into(), at: web_time::Instant::now() },
     };
-    if c.entries.insert(key.to_string(), entry).is_none() {
-        c.order.push_back(key.to_string());
+    c.bytes += entry.weight();
+    let key: Arc<str> = Arc::from(key);
+    if let Some(old) = c.entries.insert(key.clone(), entry) {
+        c.bytes -= old.weight();
+        // Newest again, so the budget below never takes what was just stored.
+        if let Some(at) = c.order.iter().position(|k| **k == *key) {
+            c.order.remove(at);
+        }
     }
-    while c.order.len() > CACHE_CAP {
+    c.order.push_back(key);
+    while c.order.len() > 1 && (c.order.len() > CACHE_CAP || c.bytes > CACHE_BYTES) {
         if let Some(old) = c.order.pop_front() {
-            c.entries.remove(&old);
+            if let Some(gone) = c.entries.remove(&old) {
+                c.bytes -= gone.weight();
+            }
         }
     }
 }
@@ -952,6 +998,51 @@ mod tests {
         assert!(!ok("wss://127.0.0.1:631"), "loopback");
         assert!(!ok("wss://192.168.1.1"), "LAN");
         assert!(!ok("wss://localhost"));
+    }
+
+    fn post_of(text_len: usize) -> Embed {
+        let (_, ev) = signed(KIND_POST, "hi", vec![]);
+        let mut embed = to_embed(&ev, &[]).unwrap();
+        embed.text = "x".repeat(text_len);
+        embed
+    }
+
+    #[test]
+    fn the_cache_lets_its_oldest_cards_go_past_its_byte_budget() {
+        let owner: Arc<Mutex<EmbedCache>> = Arc::default();
+        let big = CACHE_BYTES / 4;
+        for k in 0..6 {
+            cache_store(&owner, &format!("k{k}"), &Ok(post_of(big)));
+        }
+        let c = owner.lock().unwrap();
+        assert!(c.bytes <= CACHE_BYTES, "{} over {}", c.bytes, CACHE_BYTES);
+        assert_eq!(c.bytes, c.entries.values().map(Cached::weight).sum::<usize>());
+        assert!(!c.entries.contains_key("k0") && !c.entries.contains_key("k2"), "the oldest went");
+        assert!(c.entries.contains_key("k3") && c.entries.contains_key("k5"));
+        assert_eq!(c.order.front().map(|k| &**k), Some("k3"));
+    }
+
+    #[test]
+    fn a_card_past_the_whole_budget_is_still_kept_alone() {
+        let owner: Arc<Mutex<EmbedCache>> = Arc::default();
+        cache_store(&owner, "small", &Err("Not found on any relay".into()));
+        cache_store(&owner, "huge", &Ok(post_of(CACHE_BYTES + 1)));
+        let c = owner.lock().unwrap();
+        assert_eq!(c.entries.len(), 1);
+        assert!(matches!(c.entries.get("huge"), Some(Cached::Hit { .. })));
+        drop(c);
+        assert!(matches!(cache_lookup(&owner, "huge"), Lookup::Hit(Ok(e)) if e.text.len() == CACHE_BYTES + 1));
+    }
+
+    #[test]
+    fn storing_a_key_again_keeps_one_entry_and_makes_it_newest() {
+        let owner: Arc<Mutex<EmbedCache>> = Arc::default();
+        cache_store(&owner, "a", &Err("Not found on any relay".into()));
+        cache_store(&owner, "b", &Ok(post_of(10)));
+        cache_store(&owner, "a", &Ok(post_of(20)));
+        let c = owner.lock().unwrap();
+        assert_eq!(c.order.iter().map(|k| &**k).collect::<Vec<_>>(), ["b", "a"]);
+        assert_eq!(c.bytes, c.entries.values().map(Cached::weight).sum::<usize>());
     }
 
     #[test]

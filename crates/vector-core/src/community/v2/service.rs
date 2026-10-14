@@ -1908,6 +1908,8 @@ struct VerifiedPreview {
     /// Weak: the slot is process-wide and must not keep a swapped-out account alive.
     session: std::sync::Weak<crate::db::Session>,
     at: web_time::Instant,
+    /// Which preview this is, so its expiry never takes a newer one.
+    seq: u64,
     community_id: [u8; 32],
     community_root: [u8; 32],
     folded: CommunityV2,
@@ -1924,6 +1926,30 @@ struct VerifiedPreview {
 }
 static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
 const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Park a verified preview for the join, dropping it once its TTL lapses unjoined:
+/// a full fold of a large community has no business staying resident.
+fn stash_verified_preview(mut preview: VerifiedPreview) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    preview.seq = seq;
+    *VERIFIED_PREVIEW.lock().unwrap_or_else(|e| e.into_inner()) = Some(preview);
+    if !crate::rt::can_spawn() {
+        return;
+    }
+    // spawn-detached: clears a process-wide slot that holds its session weakly; binding would pin it.
+    crate::rt::spawn(async move {
+        crate::rt::time::sleep(VERIFIED_PREVIEW_TTL).await;
+        expire_verified_preview(seq);
+    });
+}
+
+fn expire_verified_preview(seq: u64) {
+    let mut slot = VERIFIED_PREVIEW.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|v| v.seq == seq) {
+        *slot = None;
+    }
+}
 
 /// Read-only rich preview of a public link: the decrypted bundle plus the LATEST
 /// display metadata folded live from the Control Plane (a v2 bundle deliberately
@@ -1945,9 +1971,10 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
     match verify_owner_root_and_reconcile(transport, community.clone()).await {
         Ok(vj) => {
             let folded = vj.community;
-            *VERIFIED_PREVIEW.lock().unwrap() = Some(VerifiedPreview {
+            stash_verified_preview(VerifiedPreview {
                 session: std::sync::Arc::downgrade(&crate::db::current_session()),
                 at: web_time::Instant::now(),
+                seq: 0,
                 community_id: folded.id().0,
                 community_root: folded.community_root,
                 folded: folded.clone(),
@@ -2643,7 +2670,7 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         // counts that never converge. Re-walking each session heals that, and it also
         // covers what no persisted flag can: a walk ends on a short page when the relays
         // that ANSWERED had no more, which is not the same as the plane being exhausted.
-        let full = !guestbook_walked_this_session(&cid_hex);
+        let full = !guestbook_walked_this_session(community.id());
         // Overlap one second so a same-second boundary event can't slip the cursor;
         // the rumor-id merge below dedups the re-fetched edge.
         let since = if full { 0 } else { cursor.saturating_sub(1) };
@@ -2691,7 +2718,7 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
             mark_guestbook_observed_since(&cid_hex);
         }
         if full && reached_end {
-            mark_guestbook_walked(&cid_hex);
+            mark_guestbook_walked(community.id());
         }
         Ok(added)
     })
@@ -2703,17 +2730,17 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
 /// its own rather than inheriting this one's coverage.
 struct GuestbookWalked;
 
-fn guestbook_walked_set() -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+fn guestbook_walked_set() -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>> {
     crate::db::current_session().scoped::<GuestbookWalked, _>()
 }
 
-fn guestbook_walked_this_session(community_id: &str) -> bool {
-    guestbook_walked_set().lock().is_ok_and(|s| s.contains(community_id))
+fn guestbook_walked_this_session(community: &crate::community::CommunityId) -> bool {
+    guestbook_walked_set().lock().is_ok_and(|s| s.contains(&community.0))
 }
 
-fn mark_guestbook_walked(community_id: &str) {
+fn mark_guestbook_walked(community: &crate::community::CommunityId) {
     if let Ok(mut s) = guestbook_walked_set().lock() {
-        s.insert(community_id.to_string());
+        s.insert(community.0);
     }
 }
 
@@ -5402,7 +5429,12 @@ fn moderation_lock(cid: &crate::community::CommunityId) -> std::sync::Arc<tokio:
     let map = crate::db::current_session()
         .scoped::<ModerationLocks, std::sync::Mutex<std::collections::HashMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>>>();
     let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
-    m.entry(cid.0).or_default().clone()
+    if let Some(lock) = m.get(&cid.0) {
+        return std::sync::Arc::clone(lock);
+    }
+    // A lock only the map holds has no holder or waiter, so a left community's goes here.
+    m.retain(|_, lock| std::sync::Arc::strong_count(lock) > 1);
+    std::sync::Arc::clone(m.entry(cid.0).or_default())
 }
 
 /// Fold control + guestbook so a moderation unit composes over the freshest view
@@ -7250,16 +7282,9 @@ pub async fn follow_control<T: Transport + ?Sized>(
         }
         // Owner-side silent Admin widening (PIN_MESSAGES): after the roster has
         // folded, so the check reads the settled roles. Once per community per
-        // process — the fold runs constantly and the upgrade is a one-shot.
-        {
-            static UPGRADED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
-            let first = UPGRADED
-                .lock()
-                .map(|mut set| set.get_or_insert_with(Default::default).insert(cid_hex.clone()))
-                .unwrap_or(false);
-            if first {
-                let _ = upgrade_admin_role_pin_bit(transport, community).await;
-            }
+        // session — the fold runs constantly and the upgrade is a one-shot.
+        if first_admin_pin_upgrade(community.id()) {
+            let _ = upgrade_admin_role_pin_bit(transport, community).await;
         }
         // The pins/upgrade tail awaited network I/O — re-validate before the vault save.
         // An adopted staff key rides whatever gets saved (the fold's update, or the
@@ -9532,6 +9557,18 @@ async fn run_pin_duty<T: Transport + ?Sized>(
     publish_pin_list(transport, &community, &ch, &entries).await
 }
 
+/// Communities this session has already offered [`upgrade_admin_role_pin_bit`].
+/// Per session: whether the account folding is the owner decides what it does.
+struct AdminPinUpgraded;
+
+/// `true` the first time this session asks for `community`.
+fn first_admin_pin_upgrade(community: &crate::community::CommunityId) -> bool {
+    let set = crate::db::current_session()
+        .scoped::<AdminPinUpgraded, std::sync::Mutex<std::collections::HashSet<[u8; 32]>>>();
+    let first = set.lock().unwrap_or_else(|e| e.into_inner()).insert(community.0);
+    first
+}
+
 /// Silent owner-side widening: an Admin role published before PIN_MESSAGES
 /// existed gains the bit, so delegated admins can curate pins in communities
 /// founded before this build. One edition, idempotent, converges across owner
@@ -10133,6 +10170,35 @@ mod tests {
         // The slot was CONSUMED by the join — proving the handoff path ran (a
         // verify re-walk would have left the preview's entry in place).
         assert!(VERIFIED_PREVIEW.lock().unwrap().is_none(), "the handoff slot must be consumed by the join");
+    }
+
+    #[tokio::test]
+    async fn an_unjoined_preview_is_let_go_once_its_ttl_lapses() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Window", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        bed.swap_to(&member);
+        let _ = preview_public_link(&bed.relay, &link.url).await.unwrap();
+        let seq = VERIFIED_PREVIEW.lock().unwrap().as_ref().map(|v| v.seq).expect("a preview parks its fold");
+
+        expire_verified_preview(seq.wrapping_add(1));
+        assert!(VERIFIED_PREVIEW.lock().unwrap().is_some(), "another preview's expiry leaves this one be");
+
+        // Paused, the clock jumps straight to each due timer.
+        tokio::time::pause();
+        tokio::time::sleep(VERIFIED_PREVIEW_TTL + std::time::Duration::from_secs(1)).await;
+        assert!(VERIFIED_PREVIEW.lock().unwrap().is_none(), "an unjoined preview must not stay resident");
+    }
+
+    #[tokio::test]
+    async fn the_admin_pin_upgrade_is_offered_once_per_account_session() {
+        let (a, b) = (crate::db::Session::empty(), crate::db::Session::empty());
+        let id = crate::community::CommunityId([0x5A; 32]);
+        let offer = |s| crate::db::with_session(s, async move { first_admin_pin_upgrade(&id) });
+        assert!(offer(a.clone()).await, "the first fold offers it");
+        assert!(!offer(a).await, "a one-shot within the session");
+        assert!(offer(b).await, "an owner logging in later in the same process still gets it");
     }
 
     #[tokio::test]

@@ -200,7 +200,7 @@ pub(crate) async fn self_remove(id: &str) {
         channels = state
             .chats
             .iter()
-            .filter(|c| c.metadata().custom_fields.get("community_id").map(String::as_str) == Some(id))
+            .filter(|c| c.metadata().community_id() == Some(id))
             .map(|c| c.id.clone())
             .collect();
     }

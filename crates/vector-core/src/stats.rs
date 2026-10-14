@@ -212,16 +212,7 @@ impl DeepSize for ProfileFlags {
 
 impl DeepSize for Profile {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<Profile>()
-            + self.name.len() + self.display_name.len()
-            + self.banner.len() + self.avatar.len()
-            + self.about.len()
-            + self.avatar_cached.len() + self.banner_cached.len()
-            + self.extras.as_ref().map_or(0, |e| {
-                std::mem::size_of::<crate::profile::ProfileExtras>()
-                    + e.nickname.len() + e.lud06.len() + e.lud16.len() + e.nip05.len()
-                    + e.website.len() + e.status_title.len() + e.status_purpose.len() + e.status_url.len()
-            })
+        std::mem::size_of::<Profile>() + self.heap_bytes()
     }
 }
 
@@ -238,23 +229,14 @@ impl DeepSize for CompactReaction {
 
 impl DeepSize for CompactAttachment {
     fn deep_size(&self) -> usize {
-        std::mem::size_of::<CompactAttachment>()
-            + self.extension.len() + self.url.len() + self.path.len()
-            + self.name.len()
-            + self.img_meta.as_ref().map(|m| m.deep_size()).unwrap_or(0)
-            + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
-            + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)
-            + self.webxdc_topic.as_ref().map(|s| s.len()).unwrap_or(0)
-            + self.fallback_urls.as_deref().map(|urls| {
-                std::mem::size_of_val(urls) + urls.iter().map(|u| u.len()).sum::<usize>()
-            }).unwrap_or(0)
+        std::mem::size_of::<CompactAttachment>() + self.heap_bytes()
     }
 }
 
 impl DeepSize for CompactMessage {
     fn deep_size(&self) -> usize {
         std::mem::size_of::<CompactMessage>()
-            + self.content.len()
+            + self.content().len()
             + self.attachments.heap_bytes()
             + self.attachments.iter().map(|a| a.deep_size() - std::mem::size_of::<CompactAttachment>()).sum::<usize>()
             + self.reactions.heap_bytes()
@@ -263,14 +245,7 @@ impl DeepSize for CompactMessage {
                     + r.content.as_ref().map_or(0, |c| c.len())
                     + r.emoji_tags.heap_bytes()
             })
-            + self.extras.as_ref().map_or(0, |x| {
-                std::mem::size_of::<crate::compact::MessageExtras>()
-                    + x.edit_history.capacity() * std::mem::size_of::<EditEntry>()
-                    + x.edit_history.iter().map(|e| e.deep_size() - std::mem::size_of::<EditEntry>()).sum::<usize>()
-                    + x.preview_metadata.as_ref().map_or(0, |m| m.deep_size())
-                    + x.emoji_tags.heap_bytes()
-                    + x.addressed_bots.heap_bytes()
-            })
+            + self.extras.as_ref().map_or(0, |x| std::mem::size_of::<crate::compact::MessageExtras>() + x.heap_bytes())
     }
 }
 
@@ -294,9 +269,7 @@ impl DeepSize for Chat {
             + 32  // last_read [u8; 32] is inline
             + self.participants.capacity() * std::mem::size_of::<u16>()
             + self.messages.deep_size()
-            + self.metadata.custom_fields.iter()
-                .map(|(k, v)| k.capacity() + v.capacity())
-                .sum::<usize>()
+            + self.metadata.heap_size()
             + self.typing_participants.capacity() * std::mem::size_of::<(u16, u64)>()
     }
 }

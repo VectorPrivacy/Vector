@@ -133,10 +133,15 @@ struct Store {
     /// Channel ids their community still lists. A tombstoned channel keeps its
     /// chat row and its history, so "has a `community_id`" is not the same
     /// question as "has a row you can open and clear".
-    live_channels: Option<std::collections::HashSet<String>>,
+    live_channels: Option<std::collections::HashSet<[u8; 32]>>,
     /// Concord groups that are communities rather than group chats: more than one
     /// channel, or a live invite link anyone can join by.
-    communities: Option<std::collections::HashSet<String>>,
+    communities: Option<std::collections::HashSet<[u8; 32]>>,
+}
+
+/// Whether `id` names a member of `set`, which holds ids decoded from canonical hex.
+fn holds(set: &std::collections::HashSet<[u8; 32]>, id: &str) -> bool {
+    crate::community::id32_from_hex(id).is_some_and(|b| set.contains(&b))
 }
 
 struct NotifyStore;
@@ -201,7 +206,7 @@ pub fn is_community(community_id: &str) -> bool {
     let cell = store();
     if let Ok(g) = cell.read() {
         if let Some(set) = g.communities.as_ref() {
-            return set.contains(community_id);
+            return holds(set, community_id);
         }
     }
     // Unknown keeps the louder default: a missed ping costs more than an extra one.
@@ -209,7 +214,7 @@ pub fn is_community(community_id: &str) -> bool {
         Ok(ids) => ids,
         Err(_) => return false,
     };
-    let found = ids.contains(community_id);
+    let found = holds(&ids, community_id);
     if let Ok(mut g) = cell.write() {
         g.communities = Some(ids);
     }
@@ -228,15 +233,15 @@ pub fn channel_is_listed(channel_id: &str) -> bool {
     let cell = store();
     if let Ok(g) = cell.read() {
         if let Some(set) = g.live_channels.as_ref() {
-            return set.contains(channel_id);
+            return holds(set, channel_id);
         }
     }
     // Unknown beats silently dropping a room's unread.
-    let ids = match crate::db::notify::live_channel_ids() {
-        Ok(ids) => ids,
+    let ids: std::collections::HashSet<[u8; 32]> = match crate::db::notify::live_channel_ids() {
+        Ok(ids) => ids.iter().filter_map(|id| crate::community::id32_from_hex(id)).collect(),
         Err(_) => return true,
     };
-    let listed = ids.contains(channel_id);
+    let listed = holds(&ids, channel_id);
     if let Ok(mut g) = cell.write() {
         g.live_channels = Some(ids);
     }
@@ -333,7 +338,7 @@ pub fn resolve_from(own: ScopePrefs, parent: ScopePrefs, fallback: NotifyLevel, 
 
 /// The community a chat belongs to, or `None` for a DM.
 fn community_of(chat: &crate::chat::Chat) -> Option<&str> {
-    chat.metadata.custom_fields.get("community_id").map(|s| s.as_str())
+    chat.metadata.community_id()
 }
 
 /// A chat's settings, with its stored `muted` flag folded in. That flag is the
@@ -657,12 +662,12 @@ pub fn sender(state: &crate::state::ChatState, gate: &StreamGate, npub: &str, fa
     };
     Sender {
         name: display_name(p).unwrap_or(fallback).to_string(),
-        avatar: (!p.avatar_cached.is_empty()).then(|| p.avatar_cached.to_string()),
+        avatar: p.has_avatar_cached().then(|| p.avatar_cached().into_owned()),
     }
 }
 
 fn display_name(p: &crate::profile::Profile) -> Option<&str> {
-    [p.nickname(), &p.name, &p.display_name].into_iter().find(|n| !n.is_empty())
+    [p.nickname(), p.name(), p.display_name()].into_iter().find(|n| !n.is_empty())
 }
 
 /// `content` without terminal escape sequences: an ```ansi block's colour codes are
@@ -1000,14 +1005,14 @@ mod tests {
         let mut state = crate::state::ChatState::new();
         let person = |name: &str, consent: bool| {
             let mut p = crate::profile::Profile::new();
-            p.name = name.into();
-            p.avatar_cached = format!("/{name}.png").into();
+            p.set_name(name);
+            p.set_avatar_cached(&format!("/{name}.png"));
             p.flags.set_stream_consent(consent);
             p
         };
         state.insert_or_replace_profile(ME, person("Me", false));
         let mut fan = person("Fan", true);
-        fan.extras_mut().nickname = "Bestie".into();
+        fan.set_nickname("Bestie");
         state.insert_or_replace_profile(FAN, fan);
         state.insert_or_replace_profile(SHY, person("Shy", false));
         state
@@ -1062,7 +1067,7 @@ mod tests {
         let pk = Keys::generate().public_key();
         let npub = pk.to_bech32().unwrap();
         let mut p = crate::profile::Profile::new();
-        p.name = "Hidden".into();
+        p.set_name("Hidden");
         state.insert_or_replace_profile(&npub, p);
         let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
         let nprofile = Nip19Profile::new(pk, [relay]).to_bech32().unwrap();

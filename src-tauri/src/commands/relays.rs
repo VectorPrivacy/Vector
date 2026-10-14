@@ -6,6 +6,7 @@
 //! - Relay metrics and logging
 //! - Connection monitoring and health checks
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 use std::sync::Arc;
@@ -45,9 +46,12 @@ pub struct RelayMetrics {
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct RelayLog {
     pub timestamp: u64,
-    pub level: String,
-    pub message: String,
+    pub level: &'static str,
+    pub message: Cow<'static, str>,
 }
+
+/// Lines kept per relay, newest first.
+const RELAY_LOG_LINES: usize = 10;
 
 /// Relay information for frontend display
 #[derive(serde::Serialize)]
@@ -160,7 +164,7 @@ where
 /// Add a log entry for a relay
 /// Log `message` unless it is already this relay's newest line: a relay the network refuses
 /// says so once, not on every refused connect.
-fn add_relay_log_once(url: &str, level: &str, message: &str) {
+fn add_relay_log_once(url: &str, level: &'static str, message: String) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
     let repeated = relay_logs()
         .read()
@@ -172,7 +176,7 @@ fn add_relay_log_once(url: &str, level: &str, message: &str) {
     }
 }
 
-pub fn add_relay_log(url: &str, level: &str, message: &str) {
+pub fn add_relay_log(url: &str, level: &'static str, message: impl Into<Cow<'static, str>>) {
     let normalized = url.trim().trim_end_matches('/').to_lowercase();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -181,18 +185,17 @@ pub fn add_relay_log(url: &str, level: &str, message: &str) {
 
     let log = RelayLog {
         timestamp,
-        level: level.to_string(),
-        message: message.to_string(),
+        level,
+        message: message.into(),
     };
 
     let logs_owner = relay_logs();
     let locked = logs_owner.write();
     if let Ok(mut logs) = locked {
-        let relay_logs = logs.entry(normalized).or_insert_with(VecDeque::new);
+        let relay_logs = logs.entry(normalized).or_insert_with(|| VecDeque::with_capacity(RELAY_LOG_LINES));
+        // Popped first, so the ring never grows past its lines.
+        relay_logs.truncate(RELAY_LOG_LINES - 1);
         relay_logs.push_front(log);
-        while relay_logs.len() > 10 {
-            relay_logs.pop_back();
-        }
     }
 }
 
@@ -1190,8 +1193,8 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         _ => "info",
                     };
                     match vector_core::transport::refuses(&url_str).filter(|_| status != RelayStatus::Connected) {
-                        Some(why) => add_relay_log_once(&url_str, "info", &why),
-                        None => add_relay_log(&url_str, log_level, &format!("Status changed to {}", status_str)),
+                        Some(why) => add_relay_log_once(&url_str, "info", why),
+                        None => add_relay_log(&url_str, log_level, format!("Status changed to {}", status_str)),
                     }
 
                     let _ = handle_clone.emit("relay_status_change", serde_json::json!({
@@ -1340,7 +1343,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                             });
                         }
                         Ok(Err(e)) => {
-                            add_relay_log(&url_str, "warn", &format!("Health check failed: {}", e));
+                            add_relay_log(&url_str, "warn", format!("Health check failed: {}", e));
                             relay.disconnect();
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             add_relay_log(&url_str, "info", "Attempting reconnection...");
@@ -1584,7 +1587,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
                         add_relay_log(&url, "info", "Added to relay pool");
                     } else {
                         println!("[Relay] Added custom relay: {} (mode: {})", url, mode);
-                        add_relay_log(&url, "info", &format!("Added to relay pool (mode: {})", mode));
+                        add_relay_log(&url, "info", format!("Added to relay pool (mode: {})", mode));
                     }
                 }
                 Err(e) => {
@@ -1593,7 +1596,7 @@ pub async fn connect<R: Runtime>(handle: AppHandle<R>) -> bool {
                     } else {
                         eprintln!("[Relay] Failed to add custom relay {}: {}", url, e);
                     }
-                    add_relay_log(&url, "error", &format!("Failed to add: {}", e));
+                    add_relay_log(&url, "error", format!("Failed to add: {}", e));
                 }
             }
         }

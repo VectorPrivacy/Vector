@@ -156,7 +156,7 @@ fn self_name(npub: &str) -> String {
     let state = STATE.try_lock();
     let name = state.ok().and_then(|s| {
         s.get_profile(npub).map(|p| {
-            [p.nickname().to_string(), p.display_name.to_string(), p.name.to_string()].into_iter().find(|n| !n.is_empty())
+            [p.nickname().to_string(), p.display_name().to_string(), p.name().to_string()].into_iter().find(|n| !n.is_empty())
         })
     });
     name.flatten().unwrap_or_else(|| npub.to_string())

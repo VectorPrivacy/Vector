@@ -106,6 +106,19 @@ pub struct GroupKey {
     conv_key: ConversationKey,
 }
 
+/// Bound on the session's [`GroupKey`] memo: communities x channels x a few epochs
+/// is tiny, so only a runaway (mass rekey probing) reaches it.
+const GROUP_KEY_MEMO_CAP: usize = 1024;
+
+/// A full memo starts over in a NEW table: a cleared one keeps the runaway's
+/// allocation for the rest of the session.
+fn memo_insert(map: &mut std::collections::HashMap<[u8; 32], GroupKey>, key: [u8; 32], value: GroupKey) {
+    if map.len() >= GROUP_KEY_MEMO_CAP {
+        *map = std::collections::HashMap::new();
+    }
+    map.insert(key, value);
+}
+
 impl GroupKey {
     /// Assemble a SPLIT write group (CORD-01 Write-Restricted Streams): the
     /// control_root-derived signer keypair paired with the community_root-derived
@@ -145,13 +158,7 @@ impl GroupKey {
         let conv_key = ConversationKey::derive(keys.secret_key(), &keys.public_key())
             .expect("self-ECDH of a valid keypair cannot fail");
         let out = GroupKey { keys, conv_key };
-        let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
-        // Bound: communities x channels x a few epochs is tiny; a runaway
-        // (mass rekey probing) resets rather than grows.
-        if map.len() >= 1024 {
-            map.clear();
-        }
-        map.insert(memo_key, out.clone());
+        memo_insert(&mut memo.lock().unwrap_or_else(|e| e.into_inner()), memo_key, out.clone());
         out
     }
 
@@ -351,6 +358,25 @@ pub fn epoch_key_commitment(prev_epoch: Epoch, prev_key: &[u8; 32]) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_group_key_memo_starts_over_in_a_small_table() {
+        let value = guestbook_group_key(&[7; 32], &CommunityId([8; 32]), Epoch(0));
+        let mut map = std::collections::HashMap::new();
+        for i in 0..GROUP_KEY_MEMO_CAP as u32 {
+            let mut k = [0u8; 32];
+            k[..4].copy_from_slice(&i.to_le_bytes());
+            memo_insert(&mut map, k, value.clone());
+        }
+        assert_eq!(map.len(), GROUP_KEY_MEMO_CAP);
+        let peak = map.capacity();
+        memo_insert(&mut map, [0xEE; 32], value.clone());
+        assert_eq!(map.len(), 1, "a full memo resets rather than grows");
+        assert!(map.contains_key(&[0xEE; 32]), "the entry that tripped the reset is kept");
+        assert!(map.capacity() < peak / 8, "the reset frees the runaway's table ({} of {peak})", map.capacity());
+        memo_insert(&mut map, [0xEF; 32], value);
+        assert_eq!(map.len(), 2, "below the cap the memo only grows");
+    }
 
     // Fixed test inputs. The golden hex below was produced by an INDEPENDENT
     // implementation (Python: hmac+hashlib RFC 5869 HKDF, and pure-integer

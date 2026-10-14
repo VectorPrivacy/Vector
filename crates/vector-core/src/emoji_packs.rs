@@ -1048,6 +1048,11 @@ fn cached_write_relays_verified(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
 /// Store a freshly-resolved write-relay list for `pubkey` in the cache.
 fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>, verified: bool) {
     if let Ok(mut cache) = nip65_cache().write() {
+        // An expired entry is never read again, only replaced.
+        cache.retain(|_, e| {
+            let ttl = if e.empty { NIP65_CACHE_TTL_ERROR_SECS } else { NIP65_CACHE_TTL_SECS };
+            e.fetched_at.elapsed() < std::time::Duration::from_secs(ttl)
+        });
         let empty = relays.is_empty();
         cache.insert(pubkey, CachedRelayList {
             relays,

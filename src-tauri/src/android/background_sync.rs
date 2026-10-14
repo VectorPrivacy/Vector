@@ -1375,15 +1375,15 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(
                                     let state = crate::STATE.lock().await;
                                     match state.get_profile(&npub) {
                                         Some(profile) => {
-                                            let name = if !profile.display_name.is_empty() {
-                                                format!("Me ({})", &*profile.display_name)
-                                            } else if !profile.name.is_empty() {
-                                                format!("Me ({})", &*profile.name)
+                                            let name = if !profile.display_name().is_empty() {
+                                                format!("Me ({})", profile.display_name())
+                                            } else if !profile.name().is_empty() {
+                                                format!("Me ({})", profile.name())
                                             } else {
                                                 "Me".to_string()
                                             };
-                                            let av = if !profile.avatar_cached.is_empty() {
-                                                Some(profile.avatar_cached.to_string())
+                                            let av = if profile.has_avatar_cached() {
+                                                Some(profile.avatar_cached().into_owned())
                                             } else {
                                                 None
                                             };

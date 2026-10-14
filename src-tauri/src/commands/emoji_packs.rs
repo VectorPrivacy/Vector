@@ -531,40 +531,83 @@ fn prune_spritesheet_cache(dir: &std::path::Path) {
     }
 }
 
-/// URL → sheet descriptor (path + metadata, no pixels), so a picker reopen is a
-/// map lookup rather than a stat and a JSON read. Bounded so long sessions
-/// browsing many packs stay flat.
-const MAX_SPRITESHEET_CACHE: usize = 2000;
+/// URL → sheet descriptor (metadata, no pixels), so a picker reopen is a map lookup
+/// rather than a stat and a JSON read. Bounded so long sessions browsing many packs
+/// stay flat; this many fills a 2048-bucket table.
+const MAX_SPRITESHEET_CACHE: usize = 1792;
+
+/// A remembered sheet is always the emoji's own, `<dir>/<sha256(url)>.png` at the origin, so
+/// only its metadata is kept.
+struct CachedSheet {
+    used: u64,
+    frame_count: u16,
+    frame_size: u16,
+    durations: Box<[u16]>,
+}
 
 struct SpritesheetCache {
-    /// URL → sheet. Insertion order doubles as access order: every `get`
-    /// promotes to the back, every miss inserts at the back.
-    entries: std::collections::VecDeque<(String, EmojiSheet)>,
+    dir: std::path::PathBuf,
+    /// Keyed by sha256(url), the sheet's file name.
+    entries: std::collections::HashMap<[u8; 32], CachedSheet>,
+    tick: u64,
+}
+
+fn own_sheet_path(dir: &std::path::Path, key: &[u8; 32]) -> String {
+    dir.join(format!("{}.png", vector_core::simd::hex::bytes_to_hex_32(key))).to_string_lossy().into_owned()
 }
 
 impl SpritesheetCache {
     fn new() -> Self {
-        Self { entries: std::collections::VecDeque::with_capacity(MAX_SPRITESHEET_CACHE) }
-    }
-    fn get(&mut self, url: &str) -> Option<EmojiSheet> {
-        let pos = self.entries.iter().position(|(k, _)| k == url)?;
-        let (k, v) = self.entries.remove(pos).unwrap();
-        let clone = v.clone();
-        self.entries.push_back((k, v));
-        Some(clone)
-    }
-    fn remove(&mut self, url: &str) {
-        self.entries.retain(|(u, _)| u != url);
+        Self { dir: std::path::PathBuf::new(), entries: std::collections::HashMap::new(), tick: 0 }
     }
 
-    fn insert(&mut self, url: String, sheet: EmojiSheet) {
-        if let Some(pos) = self.entries.iter().position(|(k, _)| k == &url) {
-            self.entries.remove(pos);
+    fn get(&mut self, url: &str) -> Option<EmojiSheet> {
+        let key = vector_core::crypto::sha256::digest(url.as_bytes());
+        self.tick += 1;
+        let hit = self.entries.get_mut(&key)?;
+        hit.used = self.tick;
+        Some(EmojiSheet {
+            path: own_sheet_path(&self.dir, &key),
+            x: 0,
+            y: 0,
+            frame_count: hit.frame_count.into(),
+            frame_size: hit.frame_size.into(),
+            frame_durations_ms: hit.durations.iter().map(|&d| d.into()).collect(),
+        })
+    }
+
+    fn remove(&mut self, url: &str) {
+        self.entries.remove(&vector_core::crypto::sha256::digest(url.as_bytes()));
+    }
+
+    /// Only a descriptor the cache can rebuild is kept (the emoji's own sheet in `dir`, every
+    /// frame under 65.5 s); anything else stays a disk read.
+    fn insert(&mut self, dir: &std::path::Path, url: &str, sheet: &EmojiSheet) {
+        let key = vector_core::crypto::sha256::digest(url.as_bytes());
+        let durations: Option<Box<[u16]>> = sheet.frame_durations_ms.iter().map(|&d| u16::try_from(d).ok()).collect();
+        let (Ok(frame_count), Ok(frame_size), Some(durations)) =
+            (u16::try_from(sheet.frame_count), u16::try_from(sheet.frame_size), durations)
+        else {
+            return;
+        };
+        if sheet.x != 0 || sheet.y != 0 || sheet.path != own_sheet_path(dir, &key) {
+            return;
         }
-        if self.entries.len() >= MAX_SPRITESHEET_CACHE {
-            self.entries.pop_front();
+        if self.dir != dir {
+            self.entries.clear();
+            self.dir = dir.to_path_buf();
         }
-        self.entries.push_back((url, sheet));
+        if self.entries.len() >= MAX_SPRITESHEET_CACHE && !self.entries.contains_key(&key) {
+            if let Some(oldest) = self.entries.iter().min_by_key(|(_, s)| s.used).map(|(k, _)| *k) {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.tick += 1;
+        self.entries.insert(key, CachedSheet { used: self.tick, frame_count, frame_size, durations });
+    }
+
+    fn clear(&mut self) {
+        self.entries = std::collections::HashMap::new();
     }
 }
 
@@ -572,7 +615,7 @@ impl SpritesheetCache {
 /// underneath them. Each one re-checks its file anyway, but a cache that is
 /// known to be wrong should not wait to be caught.
 pub fn forget_sheets() {
-    spritesheet_cache().lock().unwrap().entries.clear();
+    spritesheet_cache().lock().unwrap().clear();
 }
 
 fn spritesheet_cache() -> &'static Mutex<SpritesheetCache> {
@@ -693,7 +736,7 @@ pub async fn cached_emoji_sheets<R: tauri::Runtime>(
                 }
                 let sheet = read_sheet(&dir, url)?;
                 converted = true;
-                spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
+                spritesheet_cache().lock().unwrap().insert(&dir, url, &sheet);
                 Some(sheet)
             })
             .collect();
@@ -798,7 +841,7 @@ async fn decode_animated_emoji_uncached<R: tauri::Runtime>(
     let sheet_dir = sheet_cache_dir(&handle);
     if let Some(dir) = &sheet_dir {
         if let Some(sheet) = read_sheet(dir, &url) {
-            spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
+            spritesheet_cache().lock().unwrap().insert(dir, &url, &sheet);
             return Ok(sheet);
         }
     }
@@ -871,14 +914,15 @@ async fn decode_animated_emoji_uncached<R: tauri::Runtime>(
     // The sheet lives on disk from here on: future opens and launches are a stat,
     // and the webview reads the PNG itself.
     let dir = sheet_dir.ok_or_else(|| "no sheet cache directory".to_string())?;
+    let write_dir = dir.clone();
     let sheet = tokio::task::spawn_blocking(move || {
-        let sheet = write_sheet(&dir, &url_for_sheet, &decoded)?;
-        prune_spritesheet_cache(&dir);
+        let sheet = write_sheet(&write_dir, &url_for_sheet, &decoded)?;
+        prune_spritesheet_cache(&write_dir);
         Ok::<_, String>(sheet)
     })
     .await
     .map_err(|e| format!("sheet write join: {}", e))??;
-    spritesheet_cache().lock().unwrap().insert(url, sheet.clone());
+    spritesheet_cache().lock().unwrap().insert(&dir, &url, &sheet);
     Ok(sheet)
 }
 
@@ -1425,6 +1469,67 @@ mod tests {
         std::fs::remove_file(&b.path).unwrap();
         let c = write_sheet(&dir, "https://x/c.png", &DecodedSheet { png: strip_png(1, 90), frame_count: 1, frame_size: 56, durations: vec![0] }).unwrap();
         assert!(atlas_for(&dir, &[a, b, c]).is_none(), "a missing member means no atlas, not a hole");
+    }
+
+    #[test]
+    fn a_remembered_sheet_comes_back_as_it_was_written() {
+        let dir = scratch_dir("remembered");
+        let decoded = DecodedSheet { png: strip_png(3, 7), frame_count: 3, frame_size: 56, durations: vec![100, 120, 65_535] };
+        let written = write_sheet(&dir, "https://x/a.gif", &decoded).unwrap();
+        let mut cache = SpritesheetCache::new();
+        cache.insert(&dir, "https://x/a.gif", &written);
+        let got = cache.get("https://x/a.gif").expect("remembered");
+        assert_eq!(got.path, written.path, "the path is rebuilt from the key");
+        assert_eq!((got.x, got.y, got.frame_count, got.frame_size), (0, 0, 3, 56));
+        assert_eq!(got.frame_durations_ms, vec![100, 120, 65_535]);
+        assert!(cache.get("https://x/b.gif").is_none());
+        cache.remove("https://x/a.gif");
+        assert!(cache.get("https://x/a.gif").is_none());
+    }
+
+    #[test]
+    fn only_a_sheet_the_cache_can_rebuild_is_remembered() {
+        let dir = scratch_dir("rebuild");
+        let decoded = DecodedSheet { png: strip_png(1, 7), frame_count: 1, frame_size: 56, durations: vec![70_000] };
+        let long = write_sheet(&dir, "https://x/slow.gif", &decoded).unwrap();
+        let mut cache = SpritesheetCache::new();
+        cache.insert(&dir, "https://x/slow.gif", &long);
+        assert!(cache.get("https://x/slow.gif").is_none(), "a frame past u16 ms stays a disk read");
+        let mut in_atlas = write_sheet(&dir, "https://x/a.png", &DecodedSheet { durations: vec![0], ..decoded }).unwrap();
+        in_atlas.y = 58;
+        cache.insert(&dir, "https://x/a.png", &in_atlas);
+        assert!(cache.get("https://x/a.png").is_none(), "an atlas placement is never remembered");
+        in_atlas.y = 0;
+        cache.insert(&dir.join("elsewhere"), "https://x/a.png", &in_atlas);
+        assert!(cache.get("https://x/a.png").is_none(), "nor a sheet outside the cache's dir");
+    }
+
+    #[test]
+    fn the_sheet_cache_lets_the_least_recently_used_go() {
+        let dir = scratch_dir("lru");
+        let sheet = |n: usize| EmojiSheet {
+            path: own_sheet_path(&dir, &vector_core::crypto::sha256::digest(format!("u{n}").as_bytes())),
+            x: 0,
+            y: 0,
+            frame_count: 1,
+            frame_size: 56,
+            frame_durations_ms: vec![0],
+        };
+        let mut cache = SpritesheetCache::new();
+        for n in 0..MAX_SPRITESHEET_CACHE {
+            cache.insert(&dir, &format!("u{n}"), &sheet(n));
+        }
+        assert!(cache.get("u0").is_some(), "u0 used again, so u1 is now the oldest");
+        cache.insert(&dir, "u1", &sheet(1));
+        cache.insert(&dir, "u2", &sheet(2));
+        cache.insert(&dir, "u5", &sheet(5));
+        assert_eq!(cache.entries.len(), MAX_SPRITESHEET_CACHE, "a known key replaces itself, evicting nothing");
+        cache.insert(&dir, "fresh", &EmojiSheet { path: own_sheet_path(&dir, &vector_core::crypto::sha256::digest(b"fresh")), ..sheet(0) });
+        assert_eq!(cache.entries.len(), MAX_SPRITESHEET_CACHE);
+        assert!(cache.get("u3").is_none(), "the least recently used went");
+        for kept in ["u0", "u1", "u2", "u4", "u5", "fresh"] {
+            assert!(cache.get(kept).is_some(), "{kept} stays");
+        }
     }
 
     #[test]

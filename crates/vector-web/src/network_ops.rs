@@ -992,8 +992,7 @@ pub(crate) async fn reconcile_mirror() {
         let mut moved: Vec<(String, bool)> = Vec::new();
         let mut rows = Vec::with_capacity(state.chats.len());
         for i in 0..state.chats.len() {
-            let community = state.chats[i].metadata.custom_fields.get("community_id").cloned();
-            let want = notify::resolve(&state.chats[i].id, community.as_deref(), now);
+            let want = notify::resolve(&state.chats[i].id, state.chats[i].metadata.community_id(), now);
             if state.chats[i].muted != want.muted {
                 state.chats[i].muted = want.muted;
                 moved.push((state.chats[i].id.clone(), want.muted));

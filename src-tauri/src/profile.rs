@@ -61,12 +61,12 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
         };
         let updated = if let Some(profile) = state.get_profile_mut_by_id(id) {
             let mut changed = false;
-            if !avatar_cached.is_empty() && *profile.avatar_cached != *avatar_cached {
-                profile.avatar_cached = avatar_cached.into_boxed_str();
+            if !avatar_cached.is_empty() && *profile.avatar_cached() != *avatar_cached {
+                profile.set_avatar_cached(&avatar_cached);
                 changed = true;
             }
-            if !banner_cached.is_empty() && *profile.banner_cached != *banner_cached {
-                profile.banner_cached = banner_cached.into_boxed_str();
+            if !banner_cached.is_empty() && *profile.banner_cached() != *banner_cached {
+                profile.set_banner_cached(&banner_cached);
                 changed = true;
             }
             changed
@@ -95,12 +95,12 @@ pub async fn cache_all_profile_images() {
         let state = STATE.lock().await;
         state.profiles.iter()
             .filter(|p| {
-                (!p.avatar.is_empty() && p.avatar_cached.is_empty()) ||
-                (!p.banner.is_empty() && p.banner_cached.is_empty())
+                (!p.avatar().is_empty() && !p.has_avatar_cached()) ||
+                (!p.banner().is_empty() && !p.has_banner_cached())
             })
             .filter_map(|p| {
                 state.interner.resolve(p.id)
-                    .map(|npub| (npub.to_string(), p.avatar.to_string(), p.banner.to_string()))
+                    .map(|npub| (npub.to_string(), p.avatar().to_string(), p.banner().to_string()))
             })
             .collect()
     };
@@ -125,8 +125,8 @@ pub async fn cache_all_profile_images() {
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {
                             if let Some(profile) = state.get_profile_mut_by_id(id) {
-                                if profile.avatar_cached.is_empty() {
-                                    profile.avatar_cached = path.into_boxed_str();
+                                if !profile.has_avatar_cached() {
+                                    profile.set_avatar_cached(&path);
                                     true
                                 } else { false }
                             } else { false }
@@ -150,8 +150,8 @@ pub async fn cache_all_profile_images() {
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {
                             if let Some(profile) = state.get_profile_mut_by_id(id) {
-                                if profile.banner_cached.is_empty() {
-                                    profile.banner_cached = path.into_boxed_str();
+                                if !profile.has_banner_cached() {
+                                    profile.set_banner_cached(&path);
                                     true
                                 } else { false }
                             } else { false }

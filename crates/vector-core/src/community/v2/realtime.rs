@@ -10,7 +10,7 @@
 //! (both `#p=me`) stay on the DM subscription — the author-set here never
 //! includes an identity key, so the two never collide.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId, Timestamp};
@@ -28,9 +28,9 @@ use crate::ClientRelayExt;
 static V2_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
 /// The pool-wide subscription id (the path that streams on Android).
 static V2_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
-/// The current author-set (sorted hex) — an unchanged set skips a churny
-/// unsubscribe+resubscribe.
-static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Fingerprint of the relay→authors plan the live subs carry — an unchanged plan
+/// skips a churny unsubscribe+resubscribe.
+static V2_SUB_FP: LazyLock<Mutex<Option<u64>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Session generation of the last COMPLETED [`refresh_subscription`] pass, or
 /// `u64::MAX` before any. Generation-keyed rather than a bare bool so an account
@@ -60,12 +60,40 @@ pub fn subscription_ready() -> bool {
 /// message. The relay pool delivers the same wrap under both the targeted and
 /// pool-wide subs and from every relay independently, so without this a bot's
 /// `on_message` (and its reply) would run several times per message — the DM
-/// path dedups by outer id for the same reason. Cleared
-/// on session swap; coarsely bounded (a message's duplicates all arrive within a
-/// short window, so a recent-set suffices).
-static V2_SEEN_WRAPS: LazyLock<Mutex<HashSet<[u8; 32]>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// Bound on [`V2_SEEN_WRAPS`] before a coarse flush.
-const SEEN_WRAPS_CAP: usize = 8192;
+/// path dedups by outer id for the same reason. Per session; a message's
+/// duplicates all arrive within a short window, so a recent-set suffices.
+///
+/// Two generations of each id's first 8 bytes (ids are SHA-256): a full `cur`
+/// ages into `prev`, so the newest [`SEEN_WRAPS_GEN`] ids are always remembered.
+#[derive(Default)]
+struct SeenWraps {
+    cur: HashSet<u64>,
+    prev: HashSet<u64>,
+}
+const SEEN_WRAPS_GEN: usize = 2048;
+
+impl SeenWraps {
+    /// `true` the first time `id` is offered.
+    fn first_sight(&mut self, id: &[u8; 32]) -> bool {
+        let key = u64::from_le_bytes([id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]]);
+        if self.cur.contains(&key) || self.prev.contains(&key) {
+            return false;
+        }
+        if self.cur.len() >= SEEN_WRAPS_GEN {
+            // Swap then clear: the new `cur` reuses the retired table instead of regrowing one.
+            std::mem::swap(&mut self.cur, &mut self.prev);
+            self.cur.clear();
+        }
+        self.cur.insert(key);
+        true
+    }
+}
+
+struct SeenWrapsKey;
+fn seen_wraps() -> Arc<StdMutex<SeenWraps>> {
+    crate::db::current_session().scoped::<SeenWrapsKey, StdMutex<SeenWraps>>()
+}
+
 /// The per-community follow QUEUE. dispatch, boot catch-up, reconnect, and manual
 /// sync all just [`enqueue_follow`] — non-blocking + coalesced. A single spawned
 /// worker ([`spawn_follow_worker`]) drains it and runs one combined rekey+control
@@ -96,15 +124,34 @@ static V2_FOLLOW_LOCKS: LazyLock<StdMutex<FollowLocks>> =
 
 /// The follow lock for one community (created on first use).
 pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
-    V2_FOLLOW_LOCKS.lock().unwrap().entry(id.0).or_default().clone()
+    let mut locks = V2_FOLLOW_LOCKS.lock().unwrap();
+    if let Some(lock) = locks.get(&id.0) {
+        return Arc::clone(lock);
+    }
+    // A lock only the map holds has no holder or waiter, so a left community's goes here.
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    Arc::clone(locks.entry(id.0).or_default())
 }
 
-/// The author set the live v2 subscription CURRENTLY carries (sorted hex).
-/// Diagnostics: comparing this against the freshly-derived plane authors is the
-/// one-glance test for "did a rotation leave this client subscribed to a dead
-/// epoch" — the failure that otherwise only shows up as silent missing events.
+/// The author set the live v2 subscriptions CURRENTLY carry (sorted hex), read
+/// from the client's own table. Diagnostics: comparing this against the freshly-
+/// derived plane authors is the one-glance test for "did a rotation leave this
+/// client subscribed to a dead epoch" — the failure that otherwise only shows up
+/// as silent missing events.
 pub async fn subscribed_author_set() -> Vec<String> {
-    V2_SUB_SET.lock().await.clone()
+    let Some(client) = crate::state::nostr_client() else {
+        return Vec::new();
+    };
+    let ids = [V2_SUB_ID.lock().await.clone(), V2_POOLWIDE_SUB_ID.lock().await.clone()];
+    let mut authors: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    for id in ids.into_iter().flatten() {
+        for filters in client.subscription(&id).await.into_values() {
+            for f in filters {
+                authors.extend(f.authors.into_iter().flatten().map(|pk| pk.to_bytes()));
+            }
+        }
+    }
+    authors.iter().map(crate::simd::hex::bytes_to_hex_32).collect()
 }
 
 /// Diagnostics: run the three follow stages once for `id` UNDER the follow lock
@@ -159,14 +206,15 @@ pub async fn poolwide_subscription_id() -> Option<SubscriptionId> {
 pub async fn clear() {
     *V2_SUB_ID.lock().await = None;
     *V2_POOLWIDE_SUB_ID.lock().await = None;
-    V2_SUB_SET.lock().await.clear();
-    V2_SEEN_WRAPS.lock().await.clear();
+    *V2_SUB_FP.lock().await = None;
+    *seen_wraps().lock().unwrap_or_else(|e| e.into_inner()) = SeenWraps::default();
     // Drop the queue sender so the worker's channel closes and it exits; the
     // next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
-    V2_FOLLOW_PENDING.lock().unwrap().clear();
-    V2_FOLLOW_URGENT.lock().unwrap().clear();
-    V2_FOLLOW_LOCKS.lock().unwrap().clear();
+    // Replaced, not cleared: a cleared table keeps its peak allocation.
+    *V2_FOLLOW_PENDING.lock().unwrap() = HashSet::new();
+    *V2_FOLLOW_URGENT.lock().unwrap() = HashSet::new();
+    *V2_FOLLOW_LOCKS.lock().unwrap() = FollowLocks::new();
     // Account A's stream keys must not keep authenticating (or answering relay
     // challenges) once account B is live.
     super::streamauth::clear();
@@ -211,6 +259,83 @@ fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
     }
     out.extend(rekey_authors(c));
     out
+}
+
+/// The live subscription split by relay: each relay is asked only for the planes of
+/// the communities that list it, so the pool stores no relay's copy of everyone's.
+struct SubPlan {
+    /// Every plane address, sorted and deduped — [`plane_authors`], the pool-wide filter.
+    authors: Vec<PublicKey>,
+    /// Each community relay's share, sorted and deduped.
+    per_relay: BTreeMap<RelayUrl, Vec<PublicKey>>,
+}
+
+fn sort_dedup(pks: &mut Vec<PublicKey>) {
+    pks.sort_unstable_by_key(|p| p.to_bytes());
+    pks.dedup();
+}
+
+fn subscription_plan(communities: &[CommunityV2]) -> SubPlan {
+    let mut authors = Vec::new();
+    let mut per_relay: BTreeMap<RelayUrl, Vec<PublicKey>> = BTreeMap::new();
+    let mut unplaced = Vec::new();
+    for c in communities {
+        let addresses = community_addresses(c);
+        let mut placed = false;
+        for r in &c.relays {
+            // Keyed by the parsed url: two spellings of one relay must merge, not overwrite.
+            let Ok(url) = RelayUrl::parse(r) else { continue };
+            per_relay.entry(url).or_default().extend_from_slice(&addresses);
+            placed = true;
+        }
+        if !placed {
+            unplaced.extend_from_slice(&addresses);
+        }
+        authors.extend(addresses);
+    }
+    // A community with no usable relay is asked of every relay rather than of none.
+    if !unplaced.is_empty() {
+        for share in per_relay.values_mut() {
+            share.extend_from_slice(&unplaced);
+        }
+    }
+    per_relay.values_mut().for_each(sort_dedup);
+    sort_dedup(&mut authors);
+    SubPlan { authors, per_relay }
+}
+
+/// Keyed per process, so no community's chosen addresses can steer a collision.
+fn plan_fingerprint(plan: &SubPlan) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    static KEYS: LazyLock<std::collections::hash_map::RandomState> = LazyLock::new(Default::default);
+    let mut h = KEYS.build_hasher();
+    plan.authors.len().hash(&mut h);
+    for pk in &plan.authors {
+        h.write(pk.as_bytes());
+    }
+    for (url, share) in &plan.per_relay {
+        url.as_str().hash(&mut h);
+        share.len().hash(&mut h);
+        for pk in share {
+            h.write(pk.as_bytes());
+        }
+    }
+    h.finish()
+}
+
+fn live_filter(authors: impl IntoIterator<Item = PublicKey>, since: Timestamp) -> Filter {
+    Filter::new()
+        .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
+        .authors(authors)
+        .since(since)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .limit(0)
+}
+
+fn live_since() -> Timestamp {
+    Timestamp::from_secs(Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000))
 }
 
 /// This community's Control Plane address at the current root epoch — the single
@@ -293,7 +418,7 @@ fn held_v2_cache() -> Arc<HeldV2Slot> {
 /// its plane's address, so it routes straight to its community instead of being tried against
 /// every one held.
 pub struct HeldV2 {
-    communities: Vec<CommunityV2>,
+    communities: Box<[CommunityV2]>,
     /// Built on the first route, from the same snapshot, so it can't disagree with it.
     routes: std::sync::OnceLock<HashMap<[u8; 32], usize>>,
 }
@@ -325,7 +450,7 @@ pub fn load_held_v2_cached() -> Arc<HeldV2> {
             }
         }
     }
-    let fresh = Arc::new(HeldV2 { communities: load_held_v2(), routes: std::sync::OnceLock::new() });
+    let fresh = Arc::new(HeldV2 { communities: load_held_v2().into_boxed_slice(), routes: std::sync::OnceLock::new() });
     *cache.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((web_time::Instant::now(), Arc::clone(&fresh)));
     fresh
@@ -363,8 +488,8 @@ pub async fn force_refresh_subscription(client: &Client) {
         if let Some(old) = pw.take() {
             let _ = client.unsubscribe(&old).await;
         }
-        // Clearing the remembered set too, so the equality check cannot match.
-        V2_SUB_SET.lock().await.clear();
+        // Clearing the remembered plan too, so the equality check cannot match.
+        *V2_SUB_FP.lock().await = None;
     }
     refresh_subscription(client).await;
 }
@@ -420,30 +545,29 @@ pub async fn refresh_subscription(client: &Client) {
     // relays appeared between the phases subscribes now and connects on the next
     // refresh — the follow that discovers it always triggers one.)
     let mut sub_guard = V2_SUB_ID.lock().await;
-    let mut set_guard = V2_SUB_SET.lock().await;
+    let mut fp_guard = V2_SUB_FP.lock().await;
 
     let communities = load_held_v2();
-    let authors = plane_authors(&communities);
+    let plan = subscription_plan(&communities);
     let mut relays: Vec<String> = communities.iter().flat_map(|c| c.relays.iter().cloned()).collect();
     relays.sort();
     relays.dedup();
 
-    let mut new_set: Vec<String> = authors.iter().map(|p| p.to_hex()).collect();
-    new_set.sort();
+    let fingerprint = plan_fingerprint(&plan);
 
-    // Unchanged-set fast path — but only when BOTH subs actually registered (a
+    // Unchanged-plan fast path — but only when BOTH subs actually registered (a
     // failed pool-wide subscribe would otherwise stay absent until the author-set
     // changes, and Android streams via the pool-wide path).
-    if sub_guard.is_some() && *set_guard == new_set && (authors.is_empty() || V2_POOLWIDE_SUB_ID.lock().await.is_some()) {
+    if sub_guard.is_some() && *fp_guard == Some(fingerprint) && (plan.authors.is_empty() || V2_POOLWIDE_SUB_ID.lock().await.is_some()) {
         mark_subscription_ready(); // an unchanged live sub is a completed pass
         return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
         let _ = client.unsubscribe(&old).await;
     }
-    *set_guard = new_set;
+    *fp_guard = Some(fingerprint);
 
-    if authors.is_empty() {
+    if plan.authors.is_empty() {
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
             let _ = client.unsubscribe(&old_pw).await;
         }
@@ -453,23 +577,15 @@ pub async fn refresh_subscription(client: &Client) {
         return;
     }
 
-    let filter = Filter::new()
-        .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
-        .authors(authors)
-        // limit(0) suppresses the stored dump at REQ time, but a relay that
-        // ACCEPTS a backfilled old event later pushes it to matching live subs
-        // regardless — the `since` floor excludes those at the relay.
-        .since(Timestamp::from_secs(
-            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
-        ))
-        .limit(0);
+    let since = live_since();
+    let SubPlan { authors, per_relay } = plan;
 
     {
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
             let _ = client.unsubscribe(&old).await;
         }
-        match client.subscribe(filter.clone()).await {
+        match client.subscribe(live_filter(authors, since)).await {
             Ok(out) => {
                 crate::log_info!(
                     "[v2-sub] poolwide {}: ok {:?} failed {:?}",
@@ -484,7 +600,7 @@ pub async fn refresh_subscription(client: &Client) {
     }
     match client
         .subscribe(nostr_sdk::prelude::ReqTarget::manual(
-            relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+            per_relay.into_iter().map(|(url, share)| (url, vec![live_filter(share, since)])),
         ))
         .await
     {
@@ -500,7 +616,7 @@ pub async fn refresh_subscription(client: &Client) {
         Err(e) => crate::log_warn!("[v2-sub] targeted subscribe FAILED: {e}"),
     }
     mark_subscription_ready();
-    drop(set_guard);
+    drop(fp_guard);
     drop(sub_guard);
 
     // AUTH-gating relays serve the planes only to a stream-authenticated
@@ -538,6 +654,8 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
 /// be re-sent. nostr-sdk re-sends them only when ITS OWN auth completes (it
 /// can't see ours), which usually wins by socket ordering; this makes the heal
 /// deterministic and independent of that internal. Same-id REQs are idempotent.
+/// The targeted id carries this relay's share only; one no held community lists
+/// gets none.
 pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
     let targeted = V2_SUB_ID.lock().await.clone();
     let poolwide = V2_POOLWIDE_SUB_ID.lock().await.clone();
@@ -545,23 +663,18 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
         return; // nothing subscribed yet — the first refresh registers on an authed socket.
     }
     let communities = load_held_v2();
-    let authors = plane_authors(&communities);
+    let SubPlan { authors, mut per_relay } = subscription_plan(&communities);
     if authors.is_empty() {
         return;
     }
-    let filter = Filter::new()
-        .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
-        .authors(authors)
-        // limit(0) suppresses the stored dump at REQ time, but a relay that
-        // ACCEPTS a backfilled old event later pushes it to matching live subs
-        // regardless — the `since` floor excludes those at the relay.
-        .since(Timestamp::from_secs(
-            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
-        ))
-        .limit(0);
-    for id in [targeted, poolwide].into_iter().flatten() {
+    let since = live_since();
+    let sends = [
+        targeted.zip(per_relay.remove(relay)),
+        poolwide.map(|id| (id, authors)),
+    ];
+    for (id, share) in sends.into_iter().flatten() {
         let _ = client
-            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), [filter.clone()]))
+            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), [live_filter(share, since)]))
             .with_id(id)
             .await;
     }
@@ -576,17 +689,9 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
             return;
         };
         // Fire EXACTLY ONCE per wrap: the pool re-delivers the same event under both
-        // subs and from every relay. `insert` returns false if already dispatched.
-        {
-            let mut seen = V2_SEEN_WRAPS.lock().await;
-            if !seen.insert(event.id.to_bytes()) {
-                return;
-            }
-            if seen.len() > SEEN_WRAPS_CAP {
-                let keep = event.id.to_bytes();
-                seen.clear();
-                seen.insert(keep);
-            }
+        // subs and from every relay.
+        if !seen_wraps().lock().unwrap_or_else(|e| e.into_inner()).first_sight(event.id.as_bytes()) {
+            return;
         }
         // Handled in an earlier session (the Concord ledger), or a message stored under this
         // outer id before v2 kept the ledger: opening it again would find nothing new.
@@ -640,7 +745,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // own send, or a forged edit/delete yields no outcome and re-fires
                 // nothing.
                 inbound::DispatchedV2::Chat { channel_id, event } => {
-                    let outcome = inbound::persist_chat_event(&event, &channel_id, &my_pk).await;
+                    let outcome = inbound::persist_routed_chat_event(&event, &channel_id, &c.id().0, &my_pk).await;
                     // A reaction or edit whose message hasn't arrived stays retryable.
                     if outcome.is_some() || !inbound::awaits_target(&event).await {
                         remember();
@@ -1373,13 +1478,126 @@ mod tests {
     #[test]
     fn every_plane_address_routes_to_its_own_community() {
         let (a, b) = (a_community("A"), a_community("B"));
-        let held = HeldV2 { communities: vec![a.clone(), b.clone()], routes: Default::default() };
+        let held = HeldV2 { communities: vec![a.clone(), b.clone()].into(), routes: Default::default() };
         for c in [&a, &b] {
             for pk in community_addresses(c) {
                 assert_eq!(held.route(&pk).map(|r| r.id().0), Some(c.id().0));
             }
         }
         assert!(held.route(&Keys::generate().public_key()).is_none(), "a stranger's wrap routes nowhere");
+    }
+
+    fn wrap_id(n: u32) -> [u8; 32] {
+        let mut id = [0x5C; 32];
+        id[..4].copy_from_slice(&n.to_le_bytes());
+        id
+    }
+
+    #[test]
+    fn a_wrap_is_dispatched_once_across_a_generation_turnover() {
+        let gen = SEEN_WRAPS_GEN as u32;
+        let mut seen = SeenWraps::default();
+        assert!(seen.first_sight(&wrap_id(0)));
+        assert!(!seen.first_sight(&wrap_id(0)), "a re-delivery is refused");
+        for n in 1..gen {
+            assert!(seen.first_sight(&wrap_id(n)));
+        }
+        // The id past a full generation turns it over, and nothing just seen is forgotten.
+        assert!(seen.first_sight(&wrap_id(gen)));
+        assert_eq!((seen.cur.len(), seen.prev.len()), (1, SEEN_WRAPS_GEN), "a full generation ages whole");
+        for n in 0..=gen {
+            assert!(!seen.first_sight(&wrap_id(n)), "wrap {n} fired twice across a turnover");
+        }
+        // A second full generation retires the first, and memory stays at two.
+        for n in gen + 1..=2 * gen {
+            assert!(seen.first_sight(&wrap_id(n)));
+        }
+        assert!(seen.cur.len() + seen.prev.len() <= 2 * SEEN_WRAPS_GEN);
+        assert!(!seen.first_sight(&wrap_id(gen)), "the previous generation is still remembered");
+        assert!(seen.first_sight(&wrap_id(0)), "two generations back is let go");
+    }
+
+    #[tokio::test]
+    async fn each_account_keeps_its_own_seen_wraps() {
+        let (a, b) = (crate::db::Session::empty(), crate::db::Session::empty());
+        let id = wrap_id(77);
+        let first = |s| crate::db::with_session(s, async move { seen_wraps().lock().unwrap().first_sight(&id) });
+        assert!(first(a.clone()).await);
+        assert!(!first(a).await);
+        assert!(first(b).await, "a wrap one account dispatched is still new to another");
+    }
+
+    fn community_on(name: &str, relays: &[&str]) -> CommunityV2 {
+        let mut c = a_community(name);
+        c.relays = relays.iter().map(|r| r.to_string()).collect();
+        c
+    }
+
+    fn key_set(pks: impl IntoIterator<Item = PublicKey>) -> std::collections::BTreeSet<[u8; 32]> {
+        pks.into_iter().map(|p| p.to_bytes()).collect()
+    }
+
+    #[test]
+    fn each_relay_is_asked_for_exactly_the_planes_of_the_communities_that_list_it() {
+        // Two spellings of one relay, a relay listed twice, and a community with no usable relay.
+        let a = community_on("A", &["wss://one.example", "wss://one.example/", "wss://shared.example"]);
+        let b = community_on("B", &["wss://shared.example/", "wss://two.example"]);
+        let lost = community_on("C", &["not a relay"]);
+        let held = [a.clone(), b.clone(), lost.clone()];
+        let plan = subscription_plan(&held);
+        let url = |s: &str| RelayUrl::parse(s).unwrap();
+
+        // Every address, from every listed relay.
+        let old_authors = plane_authors(&held);
+        let old_relays: std::collections::BTreeSet<RelayUrl> =
+            held.iter().flat_map(|c| c.relays.iter()).filter_map(|r| RelayUrl::parse(r).ok()).collect();
+        assert_eq!(plan.authors, old_authors, "the pool-wide filter is unchanged");
+        assert_eq!(plan.per_relay.keys().cloned().collect::<std::collections::BTreeSet<_>>(), old_relays);
+        assert_eq!(key_set(plan.per_relay.values().flatten().copied()), key_set(old_authors.iter().copied()), "no address is dropped");
+
+        // Coverage: every community's planes from every relay it lists.
+        for c in &held {
+            for r in c.relays.iter().filter_map(|r| RelayUrl::parse(r).ok()) {
+                let share = key_set(plan.per_relay[&r].iter().copied());
+                assert!(key_set(community_addresses(c)).is_subset(&share), "{} lost coverage on {r}", c.name);
+            }
+        }
+        // The saving: a relay carries only its own communities, plus the one with nowhere else.
+        let only = |cs: &[&CommunityV2]| key_set(cs.iter().flat_map(|c| community_addresses(c)));
+        assert_eq!(key_set(plan.per_relay[&url("wss://one.example")].iter().copied()), only(&[&a, &lost]));
+        assert_eq!(key_set(plan.per_relay[&url("wss://two.example")].iter().copied()), only(&[&b, &lost]));
+        assert_eq!(key_set(plan.per_relay[&url("wss://shared.example")].iter().copied()), only(&[&a, &b, &lost]));
+        for share in plan.per_relay.values() {
+            assert!(share.windows(2).all(|w| w[0].to_bytes() < w[1].to_bytes()), "each share is sorted and deduped");
+        }
+    }
+
+    #[test]
+    fn the_plan_fingerprint_moves_with_any_relays_share() {
+        let a = community_on("A", &["wss://one.example"]);
+        let b = community_on("B", &["wss://two.example"]);
+        let base = subscription_plan(&[a.clone(), b.clone()]);
+        assert_eq!(plan_fingerprint(&base), plan_fingerprint(&subscription_plan(&[b.clone(), a.clone()])));
+        // Same author set overall, split differently: the unchanged-plan fast path must not take it.
+        let mut moved_b = b.clone();
+        moved_b.relays = vec!["wss://one.example".into()];
+        let moved = subscription_plan(&[a.clone(), moved_b]);
+        assert_eq!(moved.authors, base.authors);
+        assert_ne!(plan_fingerprint(&moved), plan_fingerprint(&base));
+        assert_ne!(plan_fingerprint(&subscription_plan(&[a])), plan_fingerprint(&base));
+    }
+
+    #[test]
+    fn an_idle_follow_lock_is_pruned_and_a_held_one_is_shared() {
+        let _serial = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (held_id, idle_id) = (CommunityId([0xA1; 32]), CommunityId([0xB2; 32]));
+        let held = follow_lock(&held_id);
+        assert!(Arc::ptr_eq(&held, &follow_lock(&held_id)), "every caller gets the one lock");
+        drop(follow_lock(&idle_id));
+        let _next = follow_lock(&CommunityId([0xC3; 32]));
+        let locks = V2_FOLLOW_LOCKS.lock().unwrap();
+        assert!(!locks.contains_key(&idle_id.0), "a lock nobody holds goes when a new one is made");
+        assert!(locks.contains_key(&held_id.0), "a held lock is never dropped from under its holder");
     }
 
     #[tokio::test]

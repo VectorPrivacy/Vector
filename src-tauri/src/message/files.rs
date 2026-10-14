@@ -31,6 +31,36 @@ pub(crate) static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<JsCachedFile>>
 pub(crate) static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
     LazyLock::new(|| TokioMutex::new(None));
 
+/// When a JS slot was filled, by the address of the bytes it holds, so the sweep never ages
+/// a slot by an earlier fill.
+struct Filled(std::sync::Mutex<Option<(usize, std::time::Instant)>>);
+
+impl Filled {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn mark(&self, bytes: &Arc<Vec<u8>>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((Arc::as_ptr(bytes) as usize, std::time::Instant::now()));
+    }
+
+    /// Bytes it never saw filled count from now.
+    fn older_than(&self, bytes: &Arc<Vec<u8>>, ttl: std::time::Duration) -> bool {
+        let mut filled = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let ptr = Arc::as_ptr(bytes) as usize;
+        match *filled {
+            Some((p, at)) if p == ptr => at.elapsed() >= ttl,
+            _ => {
+                *filled = Some((ptr, std::time::Instant::now()));
+                false
+            }
+        }
+    }
+}
+
+static JS_FILE_FILLED: Filled = Filled::new();
+static JS_COMPRESSION_FILLED: Filled = Filled::new();
+
 /// Longest side of a composer preview. Enough for a retina overlay, a few hundred KB
 /// at most, and the webview never decodes the original's full resolution for it.
 const PREVIEW_MAX_DIM: u32 = 1024;
@@ -176,7 +206,7 @@ pub async fn preview_cached_file(app: tauri::AppHandle, file_path: String, send:
     let cached: Option<(Arc<Vec<u8>>, String)> = if file_path.is_empty() {
         JS_FILE_CACHE.lock().unwrap().as_ref().map(|(b, _, ext)| (b.clone(), ext.clone()))
     } else {
-        ANDROID_FILE_CACHE.lock().unwrap().get(&file_path).map(|(b, ext, _, _)| (b.clone(), ext.clone()))
+        ANDROID_FILE_CACHE.lock().unwrap().get(&file_path).map(|(b, ext, ..)| (b.clone(), ext.clone()))
     };
     let Some((bytes, ext)) = cached else { return Ok(None) };
     if !is_previewable_extension(&ext) {
@@ -210,6 +240,7 @@ pub fn cache_file_bytes(request: tauri::ipc::Request<'_>) -> Result<CacheFileByt
     let size = bytes.len() as u64;
 
     let bytes = Arc::new(bytes);
+    JS_FILE_FILLED.mark(&bytes);
 
     let mut cache = JS_FILE_CACHE.lock().unwrap();
     *cache = Some((bytes, file_name.clone(), extension.clone()));
@@ -319,6 +350,9 @@ pub async fn start_cached_bytes_compression() -> Result<(), String> {
             .unwrap_or_else(|e| Err(e.to_string()));
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
         *comp_cache = result.ok();
+        if let Some(done) = comp_cache.as_ref() {
+            JS_COMPRESSION_FILLED.mark(&done.bytes);
+        }
     });
 
     Ok(())
@@ -489,7 +523,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
             // First check if we have cached bytes for this URI
             // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((bytes, extension, cached_name, _)) = cache.remove(&file_path) {
+            if let Some((bytes, extension, cached_name, ..)) = cache.remove(&file_path) {
                 drop(cache);
                 AttachmentFile {
                     bytes,
@@ -661,7 +695,7 @@ fn cache_picked_file(file_path: String) -> Result<AndroidFileCacheResult, String
 
         // Cache the bytes - already Arc from read_android_uri
         let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-        cache.insert(file_path, (bytes, extension.clone(), name.clone(), size));
+        cache.insert(file_path, (bytes, extension.clone(), name.clone(), size, std::time::Instant::now()));
         
         Ok(AndroidFileCacheResult {
             size,
@@ -704,7 +738,7 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
         }
         // First check if we have cached bytes for this URI
         let cache = ANDROID_FILE_CACHE.lock().unwrap();
-        if let Some((bytes, extension, name, _)) = cache.get(&file_path) {
+        if let Some((bytes, extension, name, ..)) = cache.get(&file_path) {
             return Ok(FileInfo {
                 size: bytes.len() as u64,
                 name: name.clone(),
@@ -1372,13 +1406,39 @@ pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<Ca
 /// finished pre-compressions nobody collected go after `PRECOMPRESSION_TTL`.
 const PRECOMPRESSION_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// The same backstop for the composer's other slots. What a send can rebuild goes after
+/// `PRECOMPRESSION_TTL`; a pick's bytes are the only copy, so they last as long as its preview file.
 pub(crate) async fn sweep_compression_cache() -> usize {
     let running: std::collections::HashSet<String> =
         super::types::COMPRESSION_NOTIFY.lock().await.keys().cloned().collect();
-    let mut cache = COMPRESSION_CACHE.lock().await;
-    let before = cache.len();
-    cache.retain(|path, slot| running.contains(path) || slot.started.elapsed() < PRECOMPRESSION_TTL);
-    before - cache.len()
+    let mut swept = {
+        let mut cache = COMPRESSION_CACHE.lock().await;
+        let before = cache.len();
+        cache.retain(|path, slot| running.contains(path) || slot.started.elapsed() < PRECOMPRESSION_TTL);
+        before - cache.len()
+    };
+    swept += usize::from(super::compression::sweep_fitted(PRECOMPRESSION_TTL));
+    {
+        let mut slot = JS_COMPRESSION_CACHE.lock().await;
+        if slot.as_ref().is_some_and(|c| JS_COMPRESSION_FILLED.older_than(&c.bytes, PRECOMPRESSION_TTL)) {
+            *slot = None;
+            swept += 1;
+        }
+    }
+    {
+        let mut slot = JS_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|(bytes, ..)| JS_FILE_FILLED.older_than(bytes, PREVIEW_MAX_AGE)) {
+            *slot = None;
+            swept += 1;
+        }
+    }
+    {
+        let mut picks = ANDROID_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let before = picks.len();
+        picks.retain(|_, (.., at)| at.elapsed() < PREVIEW_MAX_AGE);
+        swept += before - picks.len();
+    }
+    swept
 }
 
 /// Send a file using the cached compressed version if available
@@ -1524,6 +1584,24 @@ mod preview_tests {
         assert_eq!(prune_dir(&dir), 1);
         assert!(!stale.exists());
         assert!(fresh.exists());
+    }
+}
+
+#[cfg(test)]
+mod filled_tests {
+    use super::*;
+
+    #[test]
+    fn a_slot_ages_from_the_fill_of_the_bytes_it_holds() {
+        let filled = Filled::new();
+        let (a, b) = (Arc::new(vec![1u8]), Arc::new(vec![2u8]));
+        filled.mark(&a);
+        assert!(filled.older_than(&a, std::time::Duration::ZERO));
+        assert!(!filled.older_than(&a, std::time::Duration::from_secs(60)));
+        assert!(!filled.older_than(&b, std::time::Duration::ZERO), "bytes it never saw filled start now");
+        assert!(filled.older_than(&b, std::time::Duration::ZERO), "and age from then on");
+        filled.mark(&a);
+        assert!(!filled.older_than(&a, std::time::Duration::from_secs(60)), "a refill starts over");
     }
 }
 

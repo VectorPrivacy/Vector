@@ -400,7 +400,7 @@ pub(crate) async fn teardown_community_records(community_id: &str, channel_ids: 
     // A row deleted before teardown takes its channel rows with it; the rooms still name it.
     let mut channel_ids = channel_ids.to_vec();
     for chat in vector_core::state::STATE.lock().await.chats.iter() {
-        if chat.metadata.custom_fields.get("community_id").map(String::as_str) == Some(community_id)
+        if chat.metadata.community_id() == Some(community_id)
             && !channel_ids.contains(&chat.id)
         {
             channel_ids.push(chat.id.clone());
@@ -1237,7 +1237,7 @@ async fn dispatch_community_attachment_message(
                 attachment.fallback_urls = mirror_urls.clone();
                 let mut state = vector_core::state::STATE.lock().await;
                 state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
-                    a.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+                    a.set_fallback_urls(mirror_urls.iter().map(|s| s.as_str().into()));
                 });
             }
             uploaded.push(attachment);
@@ -1297,7 +1297,7 @@ async fn dispatch_community_attachment_message(
                         state.update_attachment(&channel_id, &real_id, &local.id, |a| {
                             a.set_downloaded(true);
                             a.set_downloading(false);
-                            a.path = path.clone().into_boxed_str();
+                            a.set_path(path.clone());
                         });
                     }
                     state.find_message(&real_id).map(|(_, m)| m.clone())
@@ -1371,19 +1371,9 @@ pub async fn sync_community_channel(channel_id: String, before_ms: Option<u64>) 
 
     // Anti-stampede: one in-flight fetch per channel per direction. Claimed FIRST so the cursor reset
     // below runs UNDER the claim — it can't clear the floor out from under a racing scroll-up fetch.
-    let key = format!("{channel_id}:{}", if is_older { "older" } else { "latest" });
-    if !vector_core::community::cache::try_begin_page_fetch(&key) {
+    let Some(_claim) = vector_core::community::cache::claim_page_fetch(&channel_id, is_older) else {
         return Ok(CommunitySyncResult::default());
-    }
-    // RAII release: the claim is dropped on return OR panic, so a panic deep in the fetch can never
-    // leave a permanent in-flight claim that wedges all future syncs of this channel.
-    struct PageClaim(String);
-    impl Drop for PageClaim {
-        fn drop(&mut self) {
-            vector_core::community::cache::end_page_fetch(&self.0);
-        }
-    }
-    let _claim = PageClaim(key);
+    };
 
     sync_community_channel_inner(&channel_id, before_ms, is_older).await
 }
@@ -1884,8 +1874,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         for c in vector_core::community::v2::realtime::load_dissolved_v2() {
             let cid = vector_core::simd::hex::bytes_to_hex_32(&c.id().0);
             let unsealed = crate::STATE.lock().await.chats.iter().any(|ch| {
-                ch.metadata.custom_fields.get("community_id") == Some(&cid)
-                    && ch.metadata.custom_fields.get("dissolved").map(String::as_str) != Some("true")
+                ch.metadata.community_id() == Some(cid.as_str()) && !ch.metadata.is_dissolved()
             });
             vector_core::VectorCore.register_v2_chats(&c, &session).await;
             // The UI already holds the rows it booted with; tell it only about a repair.
@@ -2270,7 +2259,7 @@ pub(crate) async fn apply_community_presence(
             let nameless = {
                 let state = vector_core::state::STATE.lock().await;
                 state.get_profile(npub).is_none_or(|p| {
-                    p.nickname().is_empty() && p.display_name.is_empty() && p.name.is_empty()
+                    p.nickname().is_empty() && p.display_name().is_empty() && p.name().is_empty()
                 })
             };
             if nameless {

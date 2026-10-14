@@ -153,9 +153,10 @@ fn resub_cooldown_elapsed(relay: &RelayUrl) -> bool {
 /// Forget every registered stream key (on session swap). The responder task
 /// exits on its own once the registry it serves is empty.
 pub fn clear() {
-    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    RESUB_AT.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    // Replaced, not cleared: a cleared table keeps its peak allocation.
+    *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = HashMap::new();
+    *CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()) = HashMap::new();
+    *RESUB_AT.lock().unwrap_or_else(|e| e.into_inner()) = HashMap::new();
     RESPONDER_RUNNING.store(false, Ordering::SeqCst);
 }
 

@@ -192,6 +192,8 @@ pub async fn reconcile_missing(
         }
 
         let connect_allowance = crate::relay_request_timeout(Duration::from_secs(3)).min(timeout);
+        // One shared copy: the set can be every wrap we hold, and each relay keeps its future alive.
+        let local_items = std::sync::Arc::new(local_items);
         let mut futs = FuturesUnordered::new();
         for (url, relay) in &relays {
             let url = url.clone();
@@ -203,7 +205,7 @@ pub async fn reconcile_missing(
                 if !wait_connected(&relay, connect_allowance).await {
                     return (url, None, false);
                 }
-                let r = crate::rt::time::timeout(timeout, relay.sync(f).items(items).opts(o)).await;
+                let r = crate::rt::time::timeout(timeout, relay.sync(f).items(items.iter().copied()).opts(o)).await;
                 let connected = relay.status() == RelayStatus::Connected;
                 (url, Some(r), connected)
             });

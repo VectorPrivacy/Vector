@@ -107,6 +107,12 @@ pub const SERVER_ROOT_SCOPE_HEX: &str =
 /// the secret per epoch.
 pub const CONTROL_ROOT_SCOPE: &str = "control-root";
 
+/// The bytes behind an id written exactly as [`CommunityId::to_hex`] writes one, so a
+/// byte-keyed cache answers only for strings it would have matched character for character.
+pub(crate) fn id32_from_hex(hex: &str) -> Option<[u8; 32]> {
+    crate::simd::hex::hex_to_bytes_32_checked(hex).filter(|_| !hex.bytes().any(|b| b.is_ascii_uppercase()))
+}
+
 /// 32 cryptographically-random bytes (OsRng).
 pub(crate) fn random_32() -> [u8; 32] {
     let mut b = [0u8; 32];

@@ -104,7 +104,7 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         let chat_idx = state.chats.iter().position(|c| c.id == chat_id);
         if let Some(idx) = chat_idx {
             state.chats[idx].messages.find_by_hex_id(&msg_id)
-                .map(|m| m.content.clone())
+                .map(|m| Box::<str>::from(m.content()))
         } else { None }
     };
 
@@ -194,8 +194,8 @@ pub async fn forward_attachment(
             if let Some(msg) = chat.messages.find_by_hex_id(&source_msg_id) {
                 // Find the attachment in the message
                 if let Some(attachment) = msg.attachments.iter().find(|a| a.id_eq(&source_attachment_id)) {
-                    if !attachment.path.is_empty() && attachment.downloaded() {
-                        found_path = Some(attachment.path.to_string());
+                    if attachment.has_path() && attachment.downloaded() {
+                        found_path = Some(attachment.path().into_owned());
                     }
                 }
                 break;

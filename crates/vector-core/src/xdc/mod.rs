@@ -35,7 +35,7 @@ pub async fn find_by_topic_in(chat_id: &str, topic: &str) -> Option<AppMessage> 
     {
         let state = crate::state::STATE.lock().await;
         if let Some(chat) = state.chats.iter().find(|c| c.id == chat_id) {
-            let hit = chat.messages.iter().find(|m| m.attachments.iter().any(|a| a.webxdc_topic.as_deref() == Some(topic)));
+            let hit = chat.messages.iter().find(|m| m.attachments.iter().any(|a| a.webxdc_topic() == Some(topic)));
             if let Some(compact) = hit {
                 let msg = compact.to_message(&state.interner);
                 let attachment = msg.attachments.into_iter().find(|a| a.webxdc_topic.as_deref() == Some(topic))?;

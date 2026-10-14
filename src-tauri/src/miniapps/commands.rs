@@ -642,9 +642,25 @@ async fn miniapp_storage_partition(file_hash: &str) -> String {
     }
 }
 
+/// The Mini App capability, granted on the first open: each of its commands compiles its own
+/// URL matcher (~150 KB apiece), which a session that runs no Mini App never needs.
+#[cfg(not(target_os = "android"))]
+const MINIAPP_CAPABILITY: &str = include_str!("../../capabilities-lazy/miniapp.json");
+
+#[cfg(not(target_os = "android"))]
+fn grant_miniapp_ipc(app: &AppHandle) -> Result<(), Error> {
+    static GRANTED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+    let mut granted = GRANTED.lock().map_err(|_| Error::Anyhow(anyhow::anyhow!("capability registry poisoned")))?;
+    if !*granted {
+        app.add_capability(MINIAPP_CAPABILITY).map_err(Error::Tauri)?;
+        *granted = true;
+    }
+    Ok(())
+}
+
 /// IPC for a window on the loopback host. Tauri treats that origin as remote,
 /// so it needs its own capability: this window, this exact origin, and the
-/// same commands as `capabilities/miniapp.json`.
+/// same commands as `capabilities-lazy/miniapp.json`.
 #[cfg(not(target_os = "android"))]
 const ISOLATED_IPC_PERMISSIONS: [&str; 7] = [
     // No core:event permissions: Vector broadcasts app events (decrypted messages
@@ -691,11 +707,10 @@ fn grant_isolated_ipc(app: &AppHandle, window_label: &str, port: u16) -> Result<
 
 #[cfg(all(test, not(target_os = "android")))]
 mod isolated_ipc_tests {
-    /// An unknown permission id panics inside Tauri; stay a copy of the static capability.
+    /// An unknown permission id panics inside Tauri; stay a copy of the Mini App capability.
     #[test]
     fn the_isolated_grant_matches_the_miniapp_capability() {
-        let file: serde_json::Value =
-            serde_json::from_str(include_str!("../../capabilities/miniapp.json")).unwrap();
+        let file: serde_json::Value = serde_json::from_str(super::MINIAPP_CAPABILITY).unwrap();
         let listed: Vec<&str> = file["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
         let mut ours: Vec<&str> = super::ISOLATED_IPC_PERMISSIONS.to_vec();
         let mut theirs = listed.clone();
@@ -703,6 +718,23 @@ mod isolated_ipc_tests {
         theirs.sort();
         assert_eq!(ours, theirs);
         assert!(!listed.iter().any(|p| p.starts_with("core:event")));
+    }
+
+    /// Granted at runtime, the capability skips the build's check: every permission it names
+    /// must exist in the ACL the build generated, or the grant panics inside Tauri.
+    #[test]
+    fn every_miniapp_permission_is_known_to_the_acl() {
+        let file: serde_json::Value = serde_json::from_str(super::MINIAPP_CAPABILITY).unwrap();
+        let acl: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/schemas/acl-manifests.json")).unwrap(),
+        )
+        .unwrap();
+        for permission in file["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()) {
+            let (manifest, id) = permission.rsplit_once(':').unwrap_or(("__app-acl__", permission));
+            assert!(acl[manifest]["permissions"][id].is_object(), "{permission} is not in the ACL");
+        }
+        let parsed: tauri::utils::acl::capability::CapabilityFile = super::MINIAPP_CAPABILITY.parse().unwrap();
+        assert!(matches!(parsed, tauri::utils::acl::capability::CapabilityFile::Capability(_)));
     }
 }
 
@@ -938,6 +970,9 @@ pub async fn miniapp_open(
             Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
         })??;
         log_trace!("[MiniApp] Package loaded successfully: {}", package.name);
+        // Before any instance or realtime join exists: a failed grant leaves nothing behind.
+        #[cfg(not(target_os = "android"))]
+        grant_miniapp_ipc(&app)?;
 
         #[cfg(target_os = "android")]
         if package.cross_origin_isolated && !crate::android::miniapp::THREADED_MINIAPPS {

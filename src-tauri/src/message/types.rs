@@ -46,10 +46,10 @@ pub static COMPRESSION_CACHE: LazyLock<TokioMutex<HashMap<String, CompressionSlo
 pub static COMPRESSION_NOTIFY: LazyLock<TokioMutex<HashMap<String, Arc<tokio::sync::Notify>>>> =
     LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
-/// (bytes, extension, name, size)
-type AndroidCachedFile = (Arc<Vec<u8>>, String, String, u64);
+/// (bytes, extension, name, size, when cached)
+type AndroidCachedFile = (Arc<Vec<u8>>, String, String, u64, std::time::Instant);
 
-/// Cache for Android file bytes: uri -> (bytes, extension, name, size)
+/// Cache for Android file bytes: uri -> (bytes, extension, name, size, when cached)
 /// This is used to cache file bytes immediately after file selection on Android,
 /// before the temporary content URI permission expires.
 pub static ANDROID_FILE_CACHE: LazyLock<std::sync::Mutex<HashMap<String, AndroidCachedFile>>> =

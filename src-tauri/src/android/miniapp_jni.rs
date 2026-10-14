@@ -602,8 +602,8 @@ fn get_user_display_name() -> String {
             if let Some(profile) = state.profiles.iter().find(|p| p.flags.is_mine()) {
                 if !profile.nickname().is_empty() {
                     return profile.nickname().to_string();
-                } else if !profile.name.is_empty() {
-                    return profile.name.to_string();
+                } else if !profile.name().is_empty() {
+                    return profile.name().to_string();
                 }
             }
         }

@@ -381,7 +381,7 @@ pub async fn fetch_messages<R: Runtime>(
                 // error surfaces instead of this blunt outer timeout.
                 neg_budget + std::time::Duration::from_secs(7),
                 with_auth_retry(|| async {
-                    relay.sync(filter.clone()).items(items.clone()).opts(sync_opts.clone()).await
+                    relay.sync(filter.clone()).items(items.iter().copied()).opts(sync_opts.clone()).await
                 }),
             ).await;
 
@@ -669,6 +669,7 @@ pub async fn fetch_messages<R: Runtime>(
                         eprintln!("Failed to load chats from database: {:?}", slim_chats_result);
                     }
 
+                    state.shrink_after_load();
                     state.db_loaded = true;
 
                     // Orphan REPORT: a Community chat row whose communities row is GONE (partial
@@ -1158,7 +1159,8 @@ pub async fn fetch_messages<R: Runtime>(
 
 
                 // Reload items (includes anything saved during quick phase)
-                let items = db::load_negentropy_items().unwrap_or_default();
+                // One shared set: each reconcile copies it only for as long as its own call runs.
+                let items = std::sync::Arc::new(db::load_negentropy_items().unwrap_or_default());
                 println!("[Sync] Archive: negentropy with {} items", items.len());
 
                 let filter = Filter::new()
@@ -1223,7 +1225,7 @@ pub async fn fetch_messages<R: Runtime>(
                         let mut result = tokio::time::timeout(
                             std::time::Duration::from_secs(480),
                             with_auth_retry(|| async {
-                                relay.sync(f.clone()).items(i.clone()).opts(o.clone()).await
+                                relay.sync(f.clone()).items(i.iter().copied()).opts(o.clone()).await
                             }),
                         ).await;
                         // A broadcast-lag kill lands AFTER the relay paid its
@@ -1234,7 +1236,7 @@ pub async fn fetch_messages<R: Runtime>(
                             result = tokio::time::timeout(
                                 std::time::Duration::from_secs(480),
                                 with_auth_retry(|| async {
-                                    relay.sync(f.clone()).items(i.clone()).opts(o.clone()).await
+                                    relay.sync(f.clone()).items(i.iter().copied()).opts(o.clone()).await
                                 }),
                             ).await;
                         }

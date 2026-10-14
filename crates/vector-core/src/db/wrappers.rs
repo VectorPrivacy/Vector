@@ -66,7 +66,10 @@ pub fn load_processed_wrappers() -> Result<Vec<[u8; 32]>, String> {
         }
     }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
 
-    Ok(rows.flatten().collect())
+    // The dedup cache holds this for a whole sync, and collect's doubling can leave it half empty.
+    let mut ids: Vec<[u8; 32]> = rows.flatten().collect();
+    ids.shrink_to_fit();
+    Ok(ids)
 }
 
 /// [`load_processed_wrappers`] bounded to `wrapper_created_at >= since_secs` —
@@ -91,7 +94,9 @@ pub fn load_processed_wrappers_since(since_secs: u64) -> Result<Vec<[u8; 32]>, S
         }
     }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
 
-    Ok(rows.flatten().collect())
+    let mut ids: Vec<[u8; 32]> = rows.flatten().collect();
+    ids.shrink_to_fit();
+    Ok(ids)
 }
 
 /// Load all processed wrappers as (EventId, Timestamp) pairs for negentropy (NIP-77).
@@ -171,6 +176,8 @@ fn load_negentropy_items_inner(
             Timestamp::from_secs(created_at as u64),
         ));
     }
+    // An archive reconcile holds the set for minutes.
+    items.shrink_to_fit();
 
     Ok(items)
 }

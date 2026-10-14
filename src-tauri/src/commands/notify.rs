@@ -139,12 +139,7 @@ pub async fn reconcile_mirror() {
         for i in 0..state.chats.len() {
             // Resolve without the stored flag folded in, or a mirror that is
             // already stale would keep confirming itself.
-            let community = state.chats[i]
-                .metadata
-                .custom_fields
-                .get("community_id")
-                .cloned();
-            let want = notify::resolve(&state.chats[i].id, community.as_deref(), now);
+            let want = notify::resolve(&state.chats[i].id, state.chats[i].metadata.community_id(), now);
             if state.chats[i].muted != want.muted {
                 state.chats[i].muted = want.muted;
                 moved.push((state.chats[i].id.clone(), want.muted));

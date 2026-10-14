@@ -985,9 +985,9 @@ pub(crate) async fn forget_profile_images_and_refetch() {
         let mut state = crate::STATE.lock().await;
         let mut cleared_ids = Vec::new();
         for profile in &mut state.profiles {
-            if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
-                profile.avatar_cached = Box::<str>::default();
-                profile.banner_cached = Box::<str>::default();
+            if profile.has_avatar_cached() || profile.has_banner_cached() {
+                profile.set_avatar_cached("");
+                profile.set_banner_cached("");
                 cleared_ids.push(profile.id);
             }
         }
@@ -995,7 +995,7 @@ pub(crate) async fn forget_profile_images_and_refetch() {
             if let Some(slim) = state.serialize_profile(id) {
                 let (avatar, banner) = state
                     .get_profile_by_id(id)
-                    .map(|p| (p.avatar.to_string(), p.banner.to_string()))
+                    .map(|p| (p.avatar().to_string(), p.banner().to_string()))
                     .unwrap_or_default();
                 if !avatar.is_empty() || !banner.is_empty() {
                     refetch.push((slim.id.clone(), avatar, banner));

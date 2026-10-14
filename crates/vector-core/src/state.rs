@@ -19,18 +19,30 @@ use crate::traits::emit_event;
 // WrapperIdCache — Hybrid duplicate detection during sync
 // ============================================================================
 
+/// Outside a sync the ledger dedups; only a catch-up batch whose ledger writes are still
+/// buffered needs remembering.
+const IDLE_PENDING_CAP: usize = 512;
+
 pub struct WrapperIdCache {
     historical: Vec<[u8; 32]>,
     pending: HashSet<[u8; 32]>,
+    /// Between `load` and `clear`: every insert is kept until the dump.
+    syncing: bool,
+    /// Idle inserts, oldest first, so `pending` stays at [`IDLE_PENDING_CAP`].
+    recent: std::collections::VecDeque<[u8; 32]>,
 }
 
 impl WrapperIdCache {
-    pub fn new() -> Self { Self { historical: Vec::new(), pending: HashSet::new() } }
+    pub fn new() -> Self {
+        Self { historical: Vec::new(), pending: HashSet::new(), syncing: false, recent: std::collections::VecDeque::new() }
+    }
 
     pub fn load(&mut self, mut ids: Vec<[u8; 32]>) {
         ids.sort_unstable();
         self.historical = ids;
         self.pending.clear();
+        self.recent = std::collections::VecDeque::new();
+        self.syncing = true;
     }
 
     #[inline]
@@ -39,13 +51,25 @@ impl WrapperIdCache {
     }
 
     #[inline]
-    pub fn insert(&mut self, id: [u8; 32]) { self.pending.insert(id); }
+    pub fn insert(&mut self, id: [u8; 32]) {
+        if !self.pending.insert(id) || self.syncing {
+            return;
+        }
+        if self.recent.len() == IDLE_PENDING_CAP {
+            if let Some(old) = self.recent.pop_front() {
+                self.pending.remove(&old);
+            }
+        }
+        self.recent.push_back(id);
+    }
 
     pub fn clear(&mut self) {
         self.historical.clear();
         self.historical.shrink_to_fit();
         self.pending.clear();
         self.pending.shrink_to_fit();
+        self.recent = std::collections::VecDeque::new();
+        self.syncing = false;
     }
 
     pub fn len(&self) -> usize { self.historical.len() + self.pending.len() }
@@ -419,18 +443,6 @@ pub fn clear_pending_invite() {
     *pending_invite_slot().write().unwrap() = None;
 }
 
-/// npubs already welcomed, so the greeting fires once per contact — per
-/// account, since the contact list is.
-pub struct NotifiedWelcomesHandle;
-
-pub static NOTIFIED_WELCOMES: NotifiedWelcomesHandle = NotifiedWelcomesHandle;
-
-impl NotifiedWelcomesHandle {
-    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<HashSet<String>> {
-        crate::db::current_session().scoped::<Self, Mutex<HashSet<String>>>().lock_owned().await
-    }
-}
-
 // ============================================================================
 // Session generation — defends background tasks against account swaps
 // ============================================================================
@@ -444,23 +456,58 @@ impl NotifiedWelcomesHandle {
 /// Event ids are meaningless across accounts, so this is per-account.
 struct DeletedMessageTombstones;
 
-fn deleted_message_tombstones() -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
+/// Event ids as their 32 bytes; anything that isn't lowercase 64-hex is kept verbatim, so
+/// membership is exactly the strings' own.
+#[derive(Default)]
+struct Tombstones {
+    ids: HashSet<[u8; 32]>,
+    other: HashSet<Box<str>>,
+}
+
+impl Tombstones {
+    fn key(id: &str) -> Option<[u8; 32]> {
+        crate::community::id32_from_hex(id)
+    }
+
+    fn insert(&mut self, id: &str) {
+        match Self::key(id) {
+            Some(bytes) => self.ids.insert(bytes),
+            None => self.other.insert(id.into()),
+        };
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        match Self::key(id) {
+            Some(bytes) => self.ids.contains(&bytes),
+            None => self.other.contains(id),
+        }
+    }
+}
+
+fn deleted_message_tombstones() -> std::sync::Arc<std::sync::Mutex<Tombstones>> {
     crate::db::current_session().scoped::<DeletedMessageTombstones, _>()
 }
 
 /// Record that `message_id` was deleted this session (called where the deletion is decided).
 pub fn note_message_deleted(message_id: &str) {
     if let Ok(mut set) = deleted_message_tombstones().lock() {
-        set.insert(message_id.to_string());
+        set.insert(message_id);
     }
 }
 
 /// Seed the tombstone set from the account's durable `deleted_messages` rows,
 /// making `was_message_deleted` survive restarts and account swaps. Called at
 /// account DB init (the set was cleared by the session bump on swap).
-pub fn seed_message_tombstones(ids: Vec<String>) {
-    if let Ok(mut set) = deleted_message_tombstones().lock() {
-        set.extend(ids);
+pub fn seed_message_tombstones<S: AsRef<str>>(ids: impl IntoIterator<Item = S>) {
+    // In chunks: the scan feeding this can be long, and ingest reads the set meanwhile.
+    let tombstones = deleted_message_tombstones();
+    let mut ids = ids.into_iter().peekable();
+    while ids.peek().is_some() {
+        let chunk: Vec<S> = ids.by_ref().take(1024).collect();
+        let Ok(mut set) = tombstones.lock() else { return };
+        for id in &chunk {
+            set.insert(id.as_ref());
+        }
     }
 }
 
@@ -477,7 +524,36 @@ pub fn was_message_deleted(message_id: &str) -> bool {
 #[inline]
 pub fn clear_message_tombstones() {
     if let Ok(mut set) = deleted_message_tombstones().lock() {
-        set.clear();
+        *set = Tombstones::default();
+    }
+}
+
+#[cfg(test)]
+mod tombstone_tests {
+    use super::Tombstones;
+
+    #[test]
+    fn hex_ids_are_held_as_bytes_and_match_only_themselves() {
+        let mut t = Tombstones::default();
+        let id = "ab".repeat(32);
+        t.insert(&id);
+        assert!(t.contains(&id));
+        assert_eq!((t.ids.len(), t.other.len()), (1, 0));
+        assert!(!t.contains(&"ab".repeat(31)));
+        assert!(!t.contains(&"AB".repeat(32)), "an uppercase spelling is a different string");
+    }
+
+    #[test]
+    fn anything_else_is_kept_verbatim() {
+        let mut t = Tombstones::default();
+        let (upper, not_hex, long) = ("AB".repeat(32), "zz".repeat(32), "ab".repeat(33));
+        for id in ["moderated_evt", "", upper.as_str(), not_hex.as_str(), long.as_str()] {
+            t.insert(id);
+            assert!(t.contains(id), "{id:?}");
+        }
+        assert_eq!(t.ids.len(), 0);
+        assert!(!t.contains(&"ab".repeat(32)), "the lowercase twin of an uppercase id was never deleted");
+        assert!(!t.contains("moderated"));
     }
 }
 
@@ -766,7 +842,7 @@ pub struct ChatState {
 /// stopped listing — a tombstoned or no-longer-readable one keeps its chat row
 /// and history on disk, so its unread could never be seen or cleared.
 fn chat_has_a_row(chat: &crate::chat::Chat) -> bool {
-    if !chat.metadata.custom_fields.contains_key("community_id") {
+    if chat.metadata.community_id().is_none() {
         return false;
     }
     chat.is_surfaced_community_channel() || crate::notify::channel_is_listed(&chat.id)
@@ -792,11 +868,19 @@ impl ChatState {
     // ========================================================================
 
     pub fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>, my_npub: &str) {
+        self.profiles.reserve(slim_profiles.len());
+        self.interner.reserve(slim_profiles.len());
         for slim in slim_profiles {
             let mut full_profile = slim.to_profile();
             full_profile.flags.set_mine(slim.id == my_npub);
             self.insert_or_replace_profile(&slim.id, full_profile);
         }
+    }
+
+    /// Drop the growth slack in the profile list and interner once the DB load is in.
+    pub fn shrink_after_load(&mut self) {
+        self.profiles.shrink_to_fit();
+        self.interner.shrink_to_fit();
     }
 
     pub fn insert_or_replace_profile(&mut self, npub: &str, mut profile: Profile) {
@@ -864,8 +948,9 @@ impl ChatState {
 
     /// Create-or-update a Community channel chat with its display metadata, so the chat
     /// row carries name/description/owning-community directly (and persists + loads like
-    /// any DM — no separate hydrate). `is_owner`/`has_icon` are stored as "true"/"1"
+    /// any DM — no separate hydrate). `is_owner`/`has_icon` read as "true"/"1"
     /// strings in `custom_fields`. The caller persists the row (`save_slim_chat`).
+    /// Sibling rows of one community share one header.
     ///
     /// `name` is the COMMUNITY's name (every channel row carries it, so the chat list can
     /// label a community from any one of its rows); `channel_name` is this channel's own.
@@ -888,31 +973,30 @@ impl ChatState {
         primary_channel: &str,
     ) {
         self.ensure_community_chat(channel_id);
-        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == channel_id) {
-            let cf = &mut chat.metadata.custom_fields;
-            cf.insert("name".to_string(), name.to_string());
-            cf.insert("channel_name".to_string(), channel_name.to_string());
-            cf.insert("primary_channel".to_string(), primary_channel.to_string());
-            cf.insert("description".to_string(), description.to_string());
-            cf.insert("community_id".to_string(), community_id.to_string());
-            cf.insert("is_owner".to_string(), is_owner.to_string());
-            // Owner-dissolution seal — the GUI reads this to lock the composer + show the end divider.
-            cf.insert("dissolved".to_string(), dissolved.to_string());
-            // Join time — sorts a not-yet-active community by when we joined, not to the bottom.
-            if let Some(ms) = created_at_ms {
-                cf.insert("created_at".to_string(), ms.to_string());
-            }
+        let Some(idx) = self.chats.iter().position(|c| c.id == channel_id) else { return };
+        let reg = crate::chat::CommunityRegistration {
+            community_id,
+            name,
+            description,
+            primary_channel,
             // The PROVEN owner npub (verified upstream) — for the crown/hoist + in-chat tag.
-            match owner_npub {
-                Some(n) => { cf.insert("owner_npub".to_string(), n.to_string()); }
-                None => { cf.remove("owner_npub"); }
-            }
-            if has_icon {
-                cf.insert("icon".to_string(), "1".to_string());
-            } else {
-                cf.remove("icon");
-            }
-        }
+            owner_npub,
+            // Join time — sorts a not-yet-active community by when we joined, not to the bottom.
+            created_at_ms,
+            is_owner,
+            // Owner-dissolution seal — the GUI reads this to lock the composer + show the end divider.
+            dissolved,
+            has_icon,
+        };
+        let header = self.chats[idx].metadata.registration_header(&reg);
+        let header = self
+            .chats
+            .iter()
+            .filter_map(|c| c.metadata.community_header())
+            .find(|h| ***h == header)
+            .cloned()
+            .unwrap_or_else(|| std::sync::Arc::new(header));
+        self.chats[idx].metadata.stamp_community(header, channel_name, created_at_ms.is_some());
     }
 
     pub fn add_message_to_chat(&mut self, chat_id: &str, message: &Message) -> bool {
@@ -1162,7 +1246,7 @@ impl ChatState {
         for chat in &mut self.chats {
             if let Some(compact) = chat.messages.find_by_hex_id(message_id) {
                 let msg = compact.to_message(&self.interner);
-                let removed_id = compact.id;
+                let removed_id = *compact.id();
                 let removed_at = compact.at;
                 let chat_id = chat.id.clone();
                 let was_marker = chat.last_read == removed_id;
@@ -1172,7 +1256,7 @@ impl ChatState {
                 if was_unread_from {
                     chat.unread_from = chat.messages.iter()
                         .find(|m| m.at >= removed_at)
-                        .map(|m| m.id)
+                        .map(|m| *m.id())
                         .unwrap_or([0u8; 32]);
                 }
                 // A deleted read marker leaves `last_read` dangling and collapses the unread anchor
@@ -1181,7 +1265,7 @@ impl ChatState {
                 if was_marker {
                     chat.last_read = chat.messages.iter().rev()
                         .find(|m| m.at <= removed_at && !m.flags.is_mine())
-                        .map(|m| m.id)
+                        .map(|m| *m.id())
                         .unwrap_or([0u8; 32]);
                 }
                 return Some((chat_id, msg));
@@ -1297,7 +1381,7 @@ impl ChatState {
             let from = (chat.unread_from != [0u8; 32]).then_some(chat.unread_from);
             for msg in chat.iter_compact().rev() {
                 if let Some(from) = from {
-                    let reached = msg.id == from;
+                    let reached = *msg.id() == from;
                     if !msg.flags.is_mine() && !(is_group && msg.npub_idx != NO_NPUB
                         && (muted_senders.contains(&msg.npub_idx)
                             || self.get_profile_by_id(msg.npub_idx).is_some_and(|p| p.flags.is_blocked())))
@@ -1308,7 +1392,7 @@ impl ChatState {
                     continue;
                 }
                 if msg.flags.is_mine() { break; }
-                if chat.last_read != [0u8; 32] && msg.id == chat.last_read { break; }
+                if chat.last_read != [0u8; 32] && *msg.id() == chat.last_read { break; }
                 if is_group && msg.npub_idx != NO_NPUB {
                     if muted_senders.contains(&msg.npub_idx) { continue; }
                     if self.get_profile_by_id(msg.npub_idx).is_some_and(|p| p.flags.is_blocked()) { continue; }
@@ -1319,7 +1403,7 @@ impl ChatState {
             #[cfg(debug_assertions)]
             if unread_count > 0 {
                 let last_read_hex = crate::compact::decode_message_id(&chat.last_read);
-                let last_msg_hex = chat.messages.last().map(|m| crate::compact::decode_message_id(&m.id)).unwrap_or_default();
+                let last_msg_hex = chat.messages.last().map(|m| crate::compact::decode_message_id(m.id())).unwrap_or_default();
                 let msg_count = chat.message_count();
                 eprintln!("[Unread] chat={} unread={} msgs_in_memory={} last_read={} last_msg={}",
                     &chat.id[..20.min(chat.id.len())], unread_count, msg_count,
@@ -1367,6 +1451,119 @@ mod tests {
         bytes[0] = seed.wrapping_add(0x10) | 0x10; // never 0x00 or 0x01
         bytes[1] = seed.wrapping_mul(37);
         bytes_to_hex_32(&bytes)
+    }
+
+    /// One channel registration, as `upsert_community_chat` takes it.
+    struct Reg<'a> {
+        name: &'a str,
+        description: &'a str,
+        community_id: &'a str,
+        is_owner: bool,
+        has_icon: bool,
+        owner_npub: Option<&'a str>,
+        created_at_ms: Option<u64>,
+        dissolved: bool,
+        channel_name: &'a str,
+        primary_channel: &'a str,
+    }
+
+    impl Reg<'_> {
+        fn apply(&self, state: &mut ChatState, channel_id: &str) {
+            state.upsert_community_chat(
+                channel_id, self.name, self.description, self.community_id, self.is_owner, self.has_icon,
+                self.owner_npub, self.created_at_ms, self.dissolved, self.channel_name, self.primary_channel,
+            );
+        }
+
+        /// The registration as a plain string map holds it.
+        fn apply_plain(&self, cf: &mut std::collections::BTreeMap<String, String>) {
+            let mut put = |k: &str, v: String| cf.insert(k.to_string(), v);
+            put("name", self.name.into());
+            put("channel_name", self.channel_name.into());
+            put("primary_channel", self.primary_channel.into());
+            put("description", self.description.into());
+            put("community_id", self.community_id.into());
+            put("is_owner", self.is_owner.to_string());
+            put("dissolved", self.dissolved.to_string());
+            if let Some(ms) = self.created_at_ms {
+                put("created_at", ms.to_string());
+            }
+            match self.owner_npub {
+                Some(n) => { cf.insert("owner_npub".into(), n.into()); }
+                None => { cf.remove("owner_npub"); }
+            }
+            if self.has_icon {
+                cf.insert("icon".into(), "1".into());
+            } else {
+                cf.remove("icon");
+            }
+        }
+    }
+
+    #[test]
+    fn a_registration_stamps_exactly_what_the_plain_map_upsert_did() {
+        let (cid, primary, sibling) = (make_hex_id(0x61), make_hex_id(0x62), make_hex_id(0x63));
+        let first = Reg {
+            name: "Club", description: "about", community_id: &cid, is_owner: true, has_icon: true,
+            owner_npub: Some("npub1owner"), created_at_ms: Some(1_700_000_000_123), dissolved: false,
+            channel_name: "general", primary_channel: &primary,
+        };
+        let later = Reg {
+            name: "Club 2", description: "", has_icon: false, owner_npub: None, created_at_ms: None,
+            dissolved: true, ..first
+        };
+        // Rows as they might have been stored: empty, keys outside the typed set, and typed
+        // keys holding values only a plain pair can carry.
+        let priors: [&[(&str, &str)]; 3] = [
+            &[],
+            &[("member_count", "9"), ("proto_version", "2")],
+            &[("is_owner", "yes"), ("icon", "true"), ("created_at", "0042"), ("zz", "kept")],
+        ];
+        for prior in priors {
+            for regs in [&[&first][..], &[&first, &later][..], &[&later][..]] {
+                let mut state = ChatState::new();
+                let mut cf: std::collections::BTreeMap<String, String> =
+                    prior.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                state.ensure_community_chat(&sibling);
+                state.chats[0].metadata = crate::chat::ChatMetadata::from_map(cf.clone().into_iter().collect());
+                for reg in regs {
+                    reg.apply(&mut state, &sibling);
+                    reg.apply_plain(&mut cf);
+                }
+                let got: std::collections::BTreeMap<String, String> = state.chats[0]
+                    .metadata
+                    .entries()
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.into_owned()))
+                    .collect();
+                assert_eq!(got, cf, "prior {prior:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sibling_channels_share_their_communitys_header() {
+        let (cid, other, primary) = (make_hex_id(0x71), make_hex_id(0x72), make_hex_id(0x73));
+        let reg = Reg {
+            name: "Club", description: "", community_id: &cid, is_owner: false, has_icon: false,
+            owner_npub: None, created_at_ms: Some(5), dissolved: false, channel_name: "general",
+            primary_channel: &primary,
+        };
+        let mut state = ChatState::new();
+        reg.apply(&mut state, &primary);
+        Reg { channel_name: "random", ..reg }.apply(&mut state, &make_hex_id(0x74));
+        Reg { community_id: &other, ..reg }.apply(&mut state, &make_hex_id(0x75));
+        let header = |state: &ChatState, i: usize| state.chats[i].metadata.community_header().unwrap().clone();
+        assert!(std::sync::Arc::ptr_eq(&header(&state, 0), &header(&state, 1)), "one community, one header");
+        assert!(!std::sync::Arc::ptr_eq(&header(&state, 0), &header(&state, 2)), "another community keeps its own");
+        assert_eq!(state.chats[1].metadata.get("channel_name").as_deref(), Some("random"));
+        // A rename re-stamps every row onto a new shared header.
+        let before = header(&state, 0);
+        Reg { name: "Renamed", ..reg }.apply(&mut state, &primary);
+        Reg { name: "Renamed", channel_name: "random", ..reg }.apply(&mut state, &make_hex_id(0x74));
+        assert!(std::sync::Arc::ptr_eq(&header(&state, 0), &header(&state, 1)));
+        assert!(!std::sync::Arc::ptr_eq(&header(&state, 0), &before));
+        assert_eq!(state.chats[1].metadata.get_name(), Some("Renamed"));
     }
 
     /// Build a test Message with the given parameters.
@@ -1438,16 +1635,16 @@ mod tests {
     fn insert_or_replace_profile_updates_existing() {
         let mut state = ChatState::new();
         let mut p1 = Profile::new();
-        p1.name = "Alice".to_string().into_boxed_str();
+        p1.set_name("Alice");
         state.insert_or_replace_profile("npub1alice", p1);
 
         let mut p2 = Profile::new();
-        p2.name = "Alice Updated".to_string().into_boxed_str();
+        p2.set_name("Alice Updated");
         state.insert_or_replace_profile("npub1alice", p2);
 
         let fetched = state.get_profile("npub1alice").expect("profile should exist");
         assert_eq!(
-            &*fetched.name, "Alice Updated",
+            fetched.name(), "Alice Updated",
             "profile name should be updated after replace"
         );
         assert_eq!(state.profiles.len(), 1, "should still be one profile, not duplicated");
@@ -1457,11 +1654,11 @@ mod tests {
     fn get_profile_by_npub() {
         let mut state = ChatState::new();
         let mut profile = Profile::new();
-        profile.name = "Bob".to_string().into_boxed_str();
+        profile.set_name("Bob");
         state.insert_or_replace_profile("npub1bob", profile);
 
         let fetched = state.get_profile("npub1bob").expect("profile should be found");
-        assert_eq!(&*fetched.name, "Bob", "fetched profile name should match");
+        assert_eq!(fetched.name(), "Bob", "fetched profile name should match");
     }
 
     #[test]
@@ -1477,12 +1674,12 @@ mod tests {
     fn get_profile_by_id_works() {
         let mut state = ChatState::new();
         let mut profile = Profile::new();
-        profile.name = "Charlie".to_string().into_boxed_str();
+        profile.set_name("Charlie");
         state.insert_or_replace_profile("npub1charlie", profile);
 
         let id = state.interner.lookup("npub1charlie").expect("npub should be interned");
         let fetched = state.get_profile_by_id(id).expect("profile should be found by id");
-        assert_eq!(&*fetched.name, "Charlie", "profile looked up by id should match");
+        assert_eq!(fetched.name(), "Charlie", "profile looked up by id should match");
     }
 
     #[test]
@@ -1513,8 +1710,8 @@ mod tests {
     fn serialize_profile_roundtrip() {
         let mut state = ChatState::new();
         let mut profile = Profile::new();
-        profile.name = "Roundtrip".to_string().into_boxed_str();
-        profile.about = "Test about".to_string().into_boxed_str();
+        profile.set_name("Roundtrip");
+        profile.set_about("Test about");
         profile.flags.set_blocked(true);
         state.insert_or_replace_profile("npub1round", profile);
 
@@ -1528,7 +1725,7 @@ mod tests {
 
         // Convert back to profile and re-insert
         let restored = slim.to_profile();
-        assert_eq!(&*restored.name, "Roundtrip", "restored name should match");
+        assert_eq!(restored.name(), "Roundtrip", "restored name should match");
         assert!(restored.flags.is_blocked(), "restored blocked flag should be true");
     }
 
@@ -1547,7 +1744,7 @@ mod tests {
 
         for npub in &shuffled {
             let mut profile = Profile::new();
-            profile.name = npub.clone().into_boxed_str();
+            profile.set_name(&npub);
             state.insert_or_replace_profile(npub, profile);
         }
 
@@ -1577,13 +1774,13 @@ mod tests {
 
         for i in 0..5 {
             let mut profile = Profile::new();
-            profile.name = format!("version_{}", i).into_boxed_str();
+            profile.set_name(&format!("version_{}", i));
             state.insert_or_replace_profile("npub1repeated", profile);
         }
 
         assert_eq!(state.profiles.len(), 1, "repeated inserts should not create duplicates");
         let p = state.get_profile("npub1repeated").unwrap();
-        assert_eq!(&*p.name, "version_4", "should retain the last update");
+        assert_eq!(p.name(), "version_4", "should retain the last update");
     }
 
     #[test]
@@ -1593,10 +1790,10 @@ mod tests {
         state.insert_or_replace_profile("npub1mutable", profile);
 
         let p = state.get_profile_mut("npub1mutable").expect("profile should exist");
-        p.name = "Mutated".to_string().into_boxed_str();
+        p.set_name("Mutated");
 
         let fetched = state.get_profile("npub1mutable").unwrap();
-        assert_eq!(&*fetched.name, "Mutated", "mutation should persist");
+        assert_eq!(fetched.name(), "Mutated", "mutation should persist");
     }
 
     // ========================================================================
@@ -1772,7 +1969,7 @@ mod tests {
 
         // Pre-create profile
         let mut profile = Profile::new();
-        profile.name = "Known User".to_string().into_boxed_str();
+        profile.set_name("Known User");
         state.insert_or_replace_profile("npub1known", profile);
 
         let msg = make_message(1, "hello", 1700000000000, false);
@@ -1780,7 +1977,7 @@ mod tests {
 
         // Profile should not be replaced
         let p = state.get_profile("npub1known").unwrap();
-        assert_eq!(&*p.name, "Known User", "existing profile should not be overwritten");
+        assert_eq!(p.name(), "Known User", "existing profile should not be overwritten");
     }
 
     #[test]
@@ -1826,12 +2023,12 @@ mod tests {
         state.add_message_to_chat("npub1peer", &msg);
 
         let result = state.update_message(&msg_id, |cm| {
-            cm.content = "updated content".to_string().into_boxed_str();
+            cm.at += 1;
         });
 
         let (chat_id, updated) = result.expect("update should return Some");
         assert_eq!(chat_id, "npub1peer", "should return correct chat id");
-        assert_eq!(updated.content, "updated content", "content should be updated");
+        assert_eq!(updated.at, 1700000000001, "the update should land");
     }
 
     #[test]
@@ -2261,7 +2458,7 @@ mod tests {
         // anchor row is excluded from unread totals by design.
         state.ensure_community_chat("grp1");
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == "grp1") {
-            chat.metadata.custom_fields.insert("community_id".to_string(), "c".repeat(64));
+            chat.metadata.insert("community_id", "c".repeat(64));
         }
 
         // Message from blocked member
@@ -2290,7 +2487,7 @@ mod tests {
 
         state.ensure_community_chat("grp1");
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == "grp1") {
-            chat.metadata.custom_fields.insert("community_id".to_string(), "c".repeat(64));
+            chat.metadata.insert("community_id", "c".repeat(64));
         }
 
         let msg_muted = make_message_from(1, "muted says hi", 1700000001000, "npub1mutedmember");
@@ -2417,6 +2614,41 @@ mod tests {
         assert!(cache.contains(&id3), "pending id should be found");
         assert!(!cache.contains(&[4u8; 32]), "unknown id should not be found");
         assert_eq!(cache.len(), 3, "total count should be 3");
+    }
+
+    #[test]
+    fn an_idle_wrapper_cache_keeps_only_the_newest_inserts() {
+        let mut cache = WrapperIdCache::new();
+        let id = |n: u32| {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&n.to_le_bytes());
+            b
+        };
+        let extra = 5u32;
+        for n in 0..IDLE_PENDING_CAP as u32 + extra {
+            cache.insert(id(n));
+        }
+        cache.insert(id(IDLE_PENDING_CAP as u32 + extra - 1));
+        assert_eq!(cache.len(), IDLE_PENDING_CAP);
+        for n in 0..extra {
+            assert!(!cache.contains(&id(n)), "id {n} was among the oldest");
+        }
+        assert!(cache.contains(&id(extra)), "the oldest kept");
+        assert!(cache.contains(&id(IDLE_PENDING_CAP as u32 + extra - 1)), "the newest kept");
+
+        cache.load(vec![]);
+        for n in 0..IDLE_PENDING_CAP as u32 * 2 {
+            cache.insert(id(n));
+        }
+        assert_eq!(cache.len(), IDLE_PENDING_CAP * 2, "a sync keeps everything until the dump");
+        assert!(cache.contains(&id(0)));
+
+        cache.clear();
+        for n in 0..IDLE_PENDING_CAP as u32 + 1 {
+            cache.insert(id(n));
+        }
+        assert_eq!(cache.len(), IDLE_PENDING_CAP, "idle again after the dump");
+        assert!(!cache.contains(&id(0)) && cache.contains(&id(1)));
     }
 
     #[test]

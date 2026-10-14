@@ -140,8 +140,8 @@ async fn own_face(pk: PublicKey) -> (Option<String>, Option<Vec<u8>>) {
         let state = crate::STATE.lock().await;
         match state.get_profile(&npub) {
             Some(p) => {
-                let name = if p.display_name.trim().is_empty() { p.name.trim() } else { p.display_name.trim() };
-                ((!name.is_empty()).then(|| name.to_string()), p.avatar_cached.to_string())
+                let name = if p.display_name().trim().is_empty() { p.name().trim() } else { p.display_name().trim() };
+                ((!name.is_empty()).then(|| name.to_string()), p.avatar_cached().into_owned())
             }
             None => (None, String::new()),
         }

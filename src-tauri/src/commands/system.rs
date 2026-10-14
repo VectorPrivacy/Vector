@@ -247,14 +247,15 @@ async fn clear_attachment_files<R: Runtime>(
 
                 // Iterate through matching attachments and reset their properties
                 for attachment in &mut message.attachments {
-                    if !attachment.downloaded() && attachment.path.is_empty() {
+                    if !attachment.downloaded() && !attachment.has_path() {
                         continue;
                     }
+                    let path = attachment.path();
 
                     // Category clears match on the on-disk filename extension — the
                     // same derivation the storage chart buckets by
                     if let Some(set) = exts {
-                        let ext = std::path::Path::new(&*attachment.path)
+                        let ext = std::path::Path::new(&*path)
                             .file_name()
                             .and_then(|n| n.to_str())
                             .and_then(|n| n.split('.').next_back())
@@ -268,7 +269,7 @@ async fn clear_attachment_files<R: Runtime>(
                     // send, symlink) is left fully intact: it isn't Vector's
                     // storage. A path that no longer resolves is a dangling ref:
                     // nothing to delete, but the metadata still needs the reset
-                    if let Ok(real) = std::path::Path::new(&*attachment.path).canonicalize() {
+                    if let Ok(real) = std::path::Path::new(&*path).canonicalize() {
                         match &download_dir {
                             Some(dir) if real.starts_with(dir) => {
                                 let _ = std::fs::remove_file(&real);
@@ -279,13 +280,13 @@ async fn clear_attachment_files<R: Runtime>(
                     // Reset attachment properties
                     attachment.set_downloaded(false);
                     attachment.set_downloading(false);
-                    attachment.path = String::new().into_boxed_str();
+                    attachment.set_path(String::new());
                     attachment_updated = true;
                 }
 
                 // If any attachment was updated, track this message for save/emit
                 if attachment_updated {
-                    updated_msg_ids.push(message.id);
+                    updated_msg_ids.push(*message.id());
                 }
             }
 

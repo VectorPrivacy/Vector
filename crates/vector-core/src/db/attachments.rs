@@ -354,7 +354,7 @@ pub async fn verify_message_attachments(msg: &mut crate::types::Message, chat_hi
             for (att_id, path) in converted {
                 state.update_attachment(chat, &msg.id, &att_id, |a| {
                     a.set_downloaded(true);
-                    a.path = path.into_boxed_str();
+                    a.set_path(path);
                 });
             }
         }

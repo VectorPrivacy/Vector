@@ -690,12 +690,20 @@ async fn begin_leave(shared: &Arc<Shared>) -> Option<Finish> {
 async fn announce_left(shared: &Shared) {
     if shared.session.is_live() && shared.advertised.load(Ordering::SeqCst) {
         let _ = signal::send(&shared.chat_id, &shared.topic_b32, None).await;
-        last_left_of(&shared.session).lock().unwrap().insert(shared.topic, unix_now());
+        let now = unix_now();
+        let owner = last_left_of(&shared.session);
+        let mut left = owner.lock().unwrap();
+        left.retain(|_, at| at.saturating_add(LAST_LEFT_KEEP_SECS) >= now);
+        left.insert(shared.topic, now);
     }
 }
 
 /// When this account last announced leaving each topic (unix seconds).
 struct LastLeft;
+
+/// A departure only delays an advertisement made within its own second; this is slack for
+/// the clock stepping back.
+const LAST_LEFT_KEEP_SECS: u64 = 60;
 
 fn last_left_of(session: &Arc<crate::db::Session>) -> Arc<Mutex<HashMap<[u8; 32], u64>>> {
     session.scoped::<LastLeft, _>()
@@ -1334,8 +1342,11 @@ mod tests {
             announce_left(&shared).await;
             assert!(!departed(), "nothing of ours to retract");
             let _ = advertise(&shared, "addr").await;
+            let stale = [60u8; 32];
+            last_left_of(&shared.session).lock().unwrap().insert(stale, unix_now() - LAST_LEFT_KEEP_SECS - 1);
             announce_left(&shared).await;
             assert!(departed());
+            assert!(!last_left_of(&shared.session).lock().unwrap().contains_key(&stale), "a departure too old to matter goes");
         })
         .await;
     }

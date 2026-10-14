@@ -140,13 +140,14 @@ pub fn hex(s: &str) -> Option<String> {
             _ => None,
         };
     }
-    names().get(s.to_ascii_lowercase().as_str()).cloned()
+    names().get(s.to_ascii_lowercase().as_str()).map(|h| h.to_string())
 }
 
 /// Every colour name a sender can type: the CSS names, the basic ones tuned for the
 /// dark chat, and a few friendly extras. The JS side reads the same file's contents.
-fn names() -> &'static std::collections::HashMap<String, String> {
-    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+fn names() -> &'static std::collections::HashMap<&'static str, &'static str> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static str>> = std::sync::OnceLock::new();
+    // Borrowed from the bundled file, so it must hold no `\` escapes; the table test parses it.
     NAMES.get_or_init(|| serde_json::from_str(include_str!("text_color_names.json")).expect("colour names parse"))
 }
 

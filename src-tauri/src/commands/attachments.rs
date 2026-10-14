@@ -128,7 +128,7 @@ pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<
                 if let Some(message) = chat.messages.find_by_hex_id(&msg_id) {
                     // Get the first attachment
                     if let Some(attachment) = message.attachments.first() {
-                        found_attachment = attachment.img_meta.clone();
+                        found_attachment = attachment.img_meta();
                         break;
                     }
                 }
@@ -482,13 +482,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             {
                                 let vector_dir = vector_core::db::get_download_dir();
                                 // Check both hash-based and human-readable filenames
-                                let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(&attachment.id), &*attachment.extension));
-                                let name_path = if !attachment.name.is_empty() {
-                                    Some(vector_dir.join(&*attachment.name))
+                                let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(attachment.id()), attachment.extension()));
+                                let name_path = if !attachment.name().is_empty() {
+                                    Some(vector_dir.join(attachment.name()))
                                 } else {
                                     None
                                 };
-                                let expected_hash = util::bytes_to_hex_32(&attachment.id);
+                                let expected_hash = util::bytes_to_hex_32(attachment.id());
                                 // Reuse requires a content-hash match, whatever the filename:
                                 // an ox-named file proves nothing by itself (ox is the
                                 // sender's CLAIM), and the honest pipeline never writes
@@ -529,7 +529,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 if let Some(file_path) = file_path {
                                     // File already exists! Update the state and return success
                                     attachment.set_downloaded(true);
-                                    attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
+                                    attachment.set_path(file_path.to_string_lossy().to_string());
 
                                     // Emit success event
                                     emit_for(sid, handle, "attachment_download_result", serde_json::json!({
@@ -612,7 +612,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             }
         };
 
-        let attachment_hex_id = util::bytes_to_hex_32(&attachment.id);
+        let attachment_hex_id = util::bytes_to_hex_32(attachment.id());
 
         // The ciphertext streams into this account's partial file and survives any
         // failure behind a checkpoint, so a retry, a mirror or the next launch picks
@@ -649,9 +649,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         // mirrors on bad bytes is the redundancy they exist to provide.
         let attachment_for_decrypt = attachment.to_attachment();
         let mut candidates: Vec<String> = vec![attachment.url.to_string()];
-        if let Some(fbs) = attachment.fallback_urls.as_deref() {
-            candidates.extend(fbs.iter().map(|u| u.to_string()));
-        }
+        candidates.extend(attachment.fallback_urls().iter().map(|u| u.to_string()));
         let mut saved: Option<(std::path::PathBuf, String)> = None;
         let mut last_error: String = "Download failed".to_string();
         let mut hash_swap_tried = false;
@@ -884,13 +882,12 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                 // Update ID from nonce to hash
-                let hash_bytes = hex_string_to_bytes(&file_hash);
-                if hash_bytes.len() == 32 {
-                    att.id.copy_from_slice(&hash_bytes);
+                if let Ok(hash) = <[u8; 32]>::try_from(hex_string_to_bytes(&file_hash).as_slice()) {
+                    att.set_id(hash);
                 }
                 att.set_downloading(false);
                 att.set_downloaded(true);
-                att.path = path_str.clone().into_boxed_str();
+                att.set_path(path_str.clone());
             });
 
             // Emit the finished download with both old and new IDs
@@ -939,10 +936,10 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         if compact_msg.id_hex() == msg_id { continue; }
                         let mut changed = false;
                         for att in compact_msg.attachments.iter_mut() {
-                            if att.id == hash_bytes.as_slice() && !att.downloaded() {
+                            if att.id().as_slice() == hash_bytes.as_slice() && !att.downloaded() {
                                 att.set_downloading(false);
                                 att.set_downloaded(true);
-                                att.path = path_str.clone().into_boxed_str();
+                                att.set_path(path_str.clone());
                                 changed = true;
                             }
                         }
@@ -1013,12 +1010,12 @@ pub(crate) async fn reconcile_missing_attachments_in_state(affected: &[String]) 
             }
             let mut changed = false;
             for att in msg.attachments.iter_mut() {
-                if att.downloaded() && !att.path.is_empty()
-                    && !std::path::Path::new(&*att.path).exists()
+                if att.downloaded() && att.has_path()
+                    && !std::path::Path::new(&*att.path()).exists()
                 {
                     att.set_downloaded(false);
                     att.set_downloading(false);
-                    att.path = String::new().into_boxed_str();
+                    att.set_path(String::new());
                     changed = true;
                 }
             }

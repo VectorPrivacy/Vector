@@ -60,6 +60,7 @@ async fn hydrate_and_announce() {
             }
             state.chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_time()));
         }
+        state.shrink_after_load();
         state.db_loaded = true;
         let _ = db::id_cache::preload_id_caches();
     }

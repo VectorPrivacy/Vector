@@ -2,41 +2,62 @@
 //! account's channel ids, so it lives on the account's session and goes when that does.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct InflightKey;
 
-/// Run `f` against this account's in-flight set. A closure, so the lock can never be held
-/// across an await; poison-tolerant, so a panicking caller can't wedge every later sync.
-fn with_inflight<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
-    let set = crate::db::current_session().scoped::<InflightKey, Mutex<HashSet<String>>>();
-    let mut guard = set.lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
+/// A channel's page direction: `true` for an older page, `false` for the latest.
+type PageKey = ([u8; 32], bool);
+type Inflight = Mutex<HashSet<PageKey>>;
+
+/// One running page fetch, released when dropped — on return or panic alike, so a
+/// panicking fetch can't wedge every later sync of its channel. Releases into the set
+/// it claimed from, whichever account is live by then.
+pub struct PageFetchClaim {
+    set: Arc<Inflight>,
+    key: Option<PageKey>,
 }
 
-/// Claim an in-flight page fetch (key `"{channel_id}:{older|latest}"`). Returns `false` if one is
-/// already running — the caller should no-op. Pair with [`end_page_fetch`].
-pub fn try_begin_page_fetch(key: &str) -> bool {
-    with_inflight(|c| c.insert(key.to_string()))
+impl Drop for PageFetchClaim {
+    fn drop(&mut self) {
+        if let Some(key) = self.key {
+            self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        }
+    }
 }
 
-/// Release an in-flight page-fetch claim (success or error).
-pub fn end_page_fetch(key: &str) {
-    with_inflight(|c| c.remove(key));
+/// Claim the fetch of one channel page. `None` if one is already running — the caller
+/// should no-op. A channel id that is not canonical hex names no channel; its claim
+/// always succeeds and guards nothing.
+pub fn claim_page_fetch(channel_id: &str, older: bool) -> Option<PageFetchClaim> {
+    let set = crate::db::current_session().scoped::<InflightKey, Inflight>();
+    let Some(channel) = super::id32_from_hex(channel_id) else {
+        return Some(PageFetchClaim { set, key: None });
+    };
+    let key = (channel, older);
+    if !set.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+        return None;
+    }
+    Some(PageFetchClaim { set, key: Some(key) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_page_is_claimed_once_until_released() {
-        assert!(try_begin_page_fetch("ch:latest"));
-        assert!(!try_begin_page_fetch("ch:latest"));
-        assert!(try_begin_page_fetch("ch:older"));
-        end_page_fetch("ch:latest");
-        assert!(try_begin_page_fetch("ch:latest"));
-        end_page_fetch("ch:latest");
-        end_page_fetch("ch:older");
+    #[tokio::test]
+    async fn a_page_is_claimed_once_until_released() {
+        // A private session: the live one is swapped by tests running alongside.
+        crate::db::with_session(crate::db::Session::empty(), async {
+            let ch = "ab".repeat(32);
+            let latest = claim_page_fetch(&ch, false).expect("first claim");
+            assert!(claim_page_fetch(&ch, false).is_none(), "a running fetch refuses a second");
+            let older = claim_page_fetch(&ch, true).expect("the other direction is its own claim");
+            drop(latest);
+            let again = claim_page_fetch(&ch, false).expect("released on drop");
+            drop((again, older));
+            assert!(claim_page_fetch(&ch, true).is_some(), "both released");
+        })
+        .await;
     }
 }

@@ -494,38 +494,67 @@ pub fn take_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<St
 // `save_community_v2` prune (some rows); `save_community` is UPSERT-only and never
 // removes a channel, so it needs none. POSITIVES ONLY — a missing channel is never
 // cached, so a not-yet-synced channel resolves the moment its row lands and `None`
-// keeps meaning "gone" for delete-then-check callers. Swap-cleared via `clear_id_caches`.
-static CHANNEL_COMMUNITY_CACHE: std::sync::LazyLock<
-    std::sync::RwLock<std::collections::HashMap<String, String>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+// keeps meaning "gone" for delete-then-check callers. Per session: what is held is
+// the account's own. Keyed by bytes; an id not in canonical hex skips the cache.
+struct ChannelCommunityCache;
+type ChannelCommunityMap = std::sync::RwLock<std::collections::HashMap<[u8; 32], [u8; 32]>>;
 
-/// Drop every cached channel→community mapping (account swap).
+fn channel_community_cache() -> std::sync::Arc<ChannelCommunityMap> {
+    crate::db::current_session().scoped::<ChannelCommunityCache, ChannelCommunityMap>()
+}
+
+/// Drop every cached channel→community mapping.
 pub fn clear_channel_community_cache() {
-    CHANNEL_COMMUNITY_CACHE.write().unwrap().clear();
+    *channel_community_cache().write().unwrap_or_else(|e| e.into_inner()) = Default::default();
     crate::notify::invalidate_communities();
 }
 
 /// Forget a community's channel mappings — its rows were dropped or rewritten, so any
 /// pruned entry must stop resolving. Retained channels refill lazily on next lookup.
 fn forget_community_channels(community_id: &str) {
-    CHANNEL_COMMUNITY_CACHE.write().unwrap().retain(|_, cid| cid != community_id);
+    if let Some(cid) = crate::community::id32_from_hex(community_id) {
+        channel_community_cache().write().unwrap_or_else(|e| e.into_inner()).retain(|_, c| *c != cid);
+    }
     // A prune here is how a channel stops being openable, which is what decides
     // whether its unread may still badge.
     crate::notify::invalidate_communities();
 }
 
-pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {
-    if let Some(cid) = CHANNEL_COMMUNITY_CACHE.read().unwrap().get(channel_id) {
-        return Ok(Some(cid.clone()));
-    }
+fn query_community_for_channel(channel_id: &str) -> Result<Option<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
-    let cid: Option<String> = conn
-        .prepare_cached("SELECT community_id FROM community_channels WHERE channel_id = ?1")
+    conn.prepare_cached("SELECT community_id FROM community_channels WHERE channel_id = ?1")
         .and_then(|mut stmt| stmt.query_row(params![channel_id], |r| r.get::<_, String>(0)))
         .optional()
-        .map_err(|e| format!("community_id_for_channel: {e}"))?;
-    if let Some(ref c) = cid {
-        CHANNEL_COMMUNITY_CACHE.write().unwrap().insert(channel_id.to_string(), c.clone());
+        .map_err(|e| format!("community_id_for_channel: {e}"))
+}
+
+/// The id of the Community that owns `channel`, if one is stored locally.
+pub fn community_for_channel(channel: &[u8; 32]) -> Result<Option<[u8; 32]>, String> {
+    let cache = channel_community_cache();
+    if let Some(cid) = cache.read().unwrap_or_else(|e| e.into_inner()).get(channel) {
+        return Ok(Some(*cid));
+    }
+    let Some(cid_hex) = query_community_for_channel(&crate::simd::hex::bytes_to_hex_32(channel))? else {
+        return Ok(None);
+    };
+    let Some(cid) = crate::community::id32_from_hex(&cid_hex) else {
+        return Ok(None);
+    };
+    cache.write().unwrap_or_else(|e| e.into_inner()).insert(*channel, cid);
+    Ok(Some(cid))
+}
+
+/// [`community_for_channel`] over hex, returning the stored id verbatim.
+pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {
+    let channel = crate::community::id32_from_hex(channel_id);
+    if let Some(ch) = channel {
+        if let Some(cid) = channel_community_cache().read().unwrap_or_else(|e| e.into_inner()).get(&ch) {
+            return Ok(Some(crate::simd::hex::bytes_to_hex_32(cid)));
+        }
+    }
+    let cid = query_community_for_channel(channel_id)?;
+    if let (Some(ch), Some(c)) = (channel, cid.as_deref().and_then(crate::community::id32_from_hex)) {
+        channel_community_cache().write().unwrap_or_else(|e| e.into_inner()).insert(ch, c);
     }
     Ok(cid)
 }
@@ -920,7 +949,9 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
             .map_err(|e| format!("delete community: {e}"))?;
     }
     tx.commit().map_err(|e| format!("delete community commit: {e}"))?;
-    BANLIST_CACHE.write().unwrap().remove(community_id);
+    if let Some(cid) = crate::community::id32_from_hex(community_id) {
+        banlist_cache().write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
+    }
     forget_community_channels(community_id);
     // `community_message_keys` is INTENTIONALLY left intact: those are our OWN ephemeral signing keys for
     // NIP-09-deleting our own messages. The right to erase our own content from relays outlives membership
@@ -1365,45 +1396,67 @@ pub fn community_recent_texts(community_id: &str, limit: usize) -> Result<Vec<(S
 // ── Banlist cache ────────────────────────────────────────────────────────────
 // The inbound ban check runs per community event; uncached, each call costs a DB
 // fetch + ChaCha20 vault decrypt + JSON parse, even though the banlist only changes
-// on a fold. Cache the banned pubkeys as raw bytes, keyed by community_id — kept
-// coherent by write-through in `set_community_banlist` and eviction in
-// `delete_community_inner`, and cleared wholesale on account swap via
-// `clear_id_caches`. Absent entry = not yet loaded (lazy-fills from DB on first read).
-type BanlistMap = std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<[u8; 32]>>>;
+// on a fold. Cache the banned pubkeys as raw bytes, keyed by community id bytes —
+// kept coherent by write-through in `set_community_banlist` and eviction in
+// `delete_community_inner`, and held on the session, so a swap starts empty.
+// Absent entry = not yet loaded (lazy-fills from DB on first read). An id not in
+// canonical hex skips the cache and reads the DB.
+type BanSet = std::sync::Arc<std::collections::HashSet<[u8; 32]>>;
+struct BanlistCache;
+type BanlistMap = std::sync::RwLock<std::collections::HashMap<[u8; 32], BanSet>>;
 
-static BANLIST_CACHE: std::sync::LazyLock<std::sync::RwLock<BanlistMap>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-
-fn banlist_set_from_hexes(hexes: &[String]) -> std::collections::HashSet<[u8; 32]> {
-    hexes.iter().filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h)).collect()
+fn banlist_cache() -> std::sync::Arc<BanlistMap> {
+    crate::db::current_session().scoped::<BanlistCache, BanlistMap>()
 }
 
-/// Drop every cached banlist. The stored sets belong to the previous account's DB.
+/// Most communities ban nobody; they all share this one empty set.
+fn empty_ban_set() -> BanSet {
+    static EMPTY: std::sync::LazyLock<BanSet> = std::sync::LazyLock::new(Default::default);
+    std::sync::Arc::clone(&EMPTY)
+}
+
+fn ban_set_from_hexes(hexes: &[String]) -> BanSet {
+    let set: std::collections::HashSet<[u8; 32]> =
+        hexes.iter().filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h)).collect();
+    if set.is_empty() { empty_ban_set() } else { std::sync::Arc::new(set) }
+}
+
+/// Drop every cached banlist.
 pub fn clear_banlist_cache() {
-    BANLIST_CACHE.write().unwrap().clear();
+    *banlist_cache().write().unwrap_or_else(|e| e.into_inner()) = Default::default();
+}
+
+/// [`banned_set`] by community id bytes — the inbound hot path's form.
+pub fn banned_set_of(community: &[u8; 32]) -> BanSet {
+    let cache = banlist_cache();
+    if let Some(set) = cache.read().unwrap_or_else(|e| e.into_inner()).get(community) {
+        return std::sync::Arc::clone(set);
+    }
+    let set = ban_set_from_hexes(&get_community_banlist(&crate::simd::hex::bytes_to_hex_32(community)).unwrap_or_default());
+    cache.write().unwrap_or_else(|e| e.into_inner()).insert(*community, std::sync::Arc::clone(&set));
+    set
 }
 
 /// The banned-pubkey set for a community, lazily decrypted+parsed from DB on first
 /// use and held (no further DB/decrypt) until a fold or delete invalidates it.
-pub fn banned_set(community_id: &str) -> std::sync::Arc<std::collections::HashSet<[u8; 32]>> {
-    if let Some(set) = BANLIST_CACHE.read().unwrap().get(community_id) {
-        return std::sync::Arc::clone(set);
+pub fn banned_set(community_id: &str) -> BanSet {
+    match crate::community::id32_from_hex(community_id) {
+        Some(cid) => banned_set_of(&cid),
+        None => ban_set_from_hexes(&get_community_banlist(community_id).unwrap_or_default()),
     }
-    let set = std::sync::Arc::new(banlist_set_from_hexes(
-        &get_community_banlist(community_id).unwrap_or_default(),
-    ));
-    BANLIST_CACHE
-        .write()
-        .unwrap()
-        .insert(community_id.to_string(), std::sync::Arc::clone(&set));
-    set
 }
 
 /// Whether `author` is banned in this community. The per-event hot check: a HashSet
 /// lookup once warm, no DB / decrypt / parse.
 pub fn is_author_banned(community_id: &str, author: &PublicKey) -> bool {
     let set = banned_set(community_id);
-    !set.is_empty() && set.contains(&author.to_bytes())
+    !set.is_empty() && set.contains(author.as_bytes())
+}
+
+/// [`is_author_banned`] by community id bytes.
+pub fn is_author_banned_in(community: &[u8; 32], author: &PublicKey) -> bool {
+    let set = banned_set_of(community);
+    !set.is_empty() && set.contains(author.as_bytes())
 }
 
 /// Drop the moderation console's memoised verdict for this community. Called from
@@ -1477,10 +1530,9 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
     forget_console_verdict(community_id);
     // Write-through: the hot-path cache must not lag a fold — a stale ban would wrongly
     // vanish a now-unbanned author's messages (fail-closed).
-    BANLIST_CACHE
-        .write()
-        .unwrap()
-        .insert(community_id.to_string(), std::sync::Arc::new(banlist_set_from_hexes(banned_hex)));
+    if let Some(cid) = crate::community::id32_from_hex(community_id) {
+        banlist_cache().write().unwrap_or_else(|e| e.into_inner()).insert(cid, ban_set_from_hexes(banned_hex));
+    }
     Ok(())
 }
 
@@ -1922,7 +1974,7 @@ pub fn set_community_invite_registry(community_id: &str, link_locators: &[String
 
 /// Every Concord group that is a community rather than a group chat: more than one
 /// channel we hold, or a live invite link. See [`crate::notify::is_community`].
-pub fn community_ids_beyond_group_chat() -> Result<std::collections::HashSet<String>, String> {
+pub fn community_ids_beyond_group_chat() -> Result<std::collections::HashSet<[u8; 32]>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare(
@@ -1943,7 +1995,7 @@ pub fn community_ids_beyond_group_chat() -> Result<std::collections::HashSet<Str
     for (id, registry, channels) in rows {
         let links: Vec<String> = serde_json::from_str(&dec_txt(&registry)).unwrap_or_default();
         if channels > 1 || !links.is_empty() {
-            out.insert(id);
+            out.extend(crate::community::id32_from_hex(&id));
         }
     }
     Ok(out)
@@ -2398,6 +2450,8 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                 });
             }
         }
+        // The held set keeps these resident; push-growth leaves up to half unused.
+        channels.shrink_to_fit();
 
         // Unparseable image JSON degrades to no-image rather than failing the load —
         // the fold re-persists the authoritative value on its next pass.
@@ -3169,6 +3223,45 @@ mod tests {
         let (_, cid, chan) = saved_v2("HQ");
         assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(cid.as_str()));
         assert!(community_id_for_channel(&"ff".repeat(32)).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_channel_cache_answers_in_bytes_and_hex_alike() {
+        let (_tmp, _guard) = init_test_db();
+        let (c, cid, chan) = saved_v2("Bytes");
+        let ch = c.channels[0].id.0;
+        // A miss fills the cache; the hit after it answers the same, in either form.
+        assert_eq!(community_for_channel(&ch).unwrap(), Some(c.id().0));
+        assert_eq!(channel_community_cache().read().unwrap().get(&ch), Some(&c.id().0), "the miss filled the cache");
+        assert_eq!(community_for_channel(&ch).unwrap(), Some(c.id().0));
+        assert_eq!(community_id_for_channel(&chan).unwrap().as_deref(), Some(cid.as_str()));
+        // Only the exact stored spelling resolves, cached or not.
+        assert_eq!(community_id_for_channel(&chan.to_uppercase()).unwrap(), None);
+        assert_eq!(community_for_channel(&[0xFF; 32]).unwrap(), None);
+        assert!(channel_community_cache().read().unwrap().get(&[0xFF; 32]).is_none(), "a miss is never cached");
+        // Deleting the community stops both forms resolving.
+        delete_community_retain_keys(&cid).unwrap();
+        assert_eq!(community_for_channel(&ch).unwrap(), None);
+        assert_eq!(community_id_for_channel(&chan).unwrap(), None);
+    }
+
+    #[test]
+    fn communities_that_ban_nobody_share_one_empty_set() {
+        let (_tmp, _guard) = init_test_db();
+        let (a, a_hex, _) = saved_v2("Calm");
+        let (b, b_hex, _) = saved_v2("Quiet");
+        let (ea, eb) = (banned_set_of(&a.id().0), banned_set(&b_hex));
+        assert!(ea.is_empty() && std::sync::Arc::ptr_eq(&ea, &eb), "every empty banlist is the one shared set");
+
+        let villain = Keys::generate().public_key();
+        set_community_banlist(&a_hex, &[villain.to_hex()], 10).unwrap();
+        assert!(is_author_banned(&a_hex, &villain) && is_author_banned_in(&a.id().0, &villain));
+        assert!(!is_author_banned_in(&b.id().0, &villain), "a ban stays in its own community");
+        assert!(!std::sync::Arc::ptr_eq(&banned_set_of(&a.id().0), &empty_ban_set()));
+
+        set_community_banlist(&a_hex, &[], 11).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&banned_set_of(&a.id().0), &empty_ban_set()), "an emptied banlist returns to the shared set");
+        assert!(!is_author_banned_in(&a.id().0, &villain));
     }
 
     #[test]

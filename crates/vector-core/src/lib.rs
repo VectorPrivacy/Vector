@@ -1521,6 +1521,38 @@ fn raid_report_cache() -> ReportCache<crate::community::raid::RaidReport> {
     crate::db::current_session().scoped::<RaidReportCache, _>()
 }
 
+/// A fresh memoised report. Expired entries go on every touch, so a community looked at
+/// once is not held for the rest of the session.
+fn report_get<T>(cache: &ReportCache<T>, cid_hex: &str, now_secs: u64) -> Option<std::sync::Arc<T>> {
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (at, _)| now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS);
+    map.get(cid_hex).map(|(_, report)| report.clone())
+}
+
+fn report_put<T>(cache: &ReportCache<T>, cid_hex: &str, now_secs: u64, report: std::sync::Arc<T>) {
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (at, _)| now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS);
+    map.insert(cid_hex.to_string(), (now_secs, report));
+}
+
+#[cfg(test)]
+mod report_cache_tests {
+    use super::*;
+
+    #[test]
+    fn an_expired_report_goes_on_the_next_touch() {
+        let cache: ReportCache<u32> = Default::default();
+        report_put(&cache, "a", 1_000, std::sync::Arc::new(1));
+        report_put(&cache, "b", 1_050, std::sync::Arc::new(2));
+        assert_eq!(report_get(&cache, "a", 1_000 + RAID_REPORT_TTL_SECS - 1).as_deref(), Some(&1));
+        assert_eq!(report_get(&cache, "a", 1_000 + RAID_REPORT_TTL_SECS), None, "a report is fresh for the TTL, no longer");
+        assert_eq!(cache.lock().unwrap().len(), 1, "the lookup dropped it");
+        report_put(&cache, "c", 1_050 + RAID_REPORT_TTL_SECS, std::sync::Arc::new(3));
+        let map = cache.lock().unwrap();
+        assert!(!map.contains_key("b") && map.contains_key("c"), "and so does an insert");
+    }
+}
+
 impl VectorCore {
     /// Join a Community from a public invite URL (`vectorapp.io/invite/<naddr>#...`). Fetches the
     /// token-encrypted bundle, persists the member-view Community, and registers its channels
@@ -2682,14 +2714,8 @@ impl VectorCore {
             .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        {
-            let cache = raid_report_cache();
-            let map = cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, report)) = map.get(cid_hex) {
-                if now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS {
-                    return Ok(report.clone());
-                }
-            }
+        if let Some(report) = report_get(&raid_report_cache(), cid_hex, now_secs) {
+            return Ok(report);
         }
         let community = crate::db::community::load_community_v2(&crate::community::CommunityId(
             crate::simd::hex::hex_to_bytes_32(cid_hex),
@@ -2769,10 +2795,7 @@ impl VectorCore {
             ..Default::default()
         };
         let report = std::sync::Arc::new(raid::assess(&signals, now_secs, &params));
-        raid_report_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(cid_hex.to_string(), (now_secs, report.clone()));
+        report_put(&raid_report_cache(), cid_hex, now_secs, report.clone());
         Ok(report)
     }
 
@@ -2983,14 +3006,8 @@ impl VectorCore {
             .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        {
-            let cache = policy_report_cache();
-            let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, cached)) = guard.get(cid_hex) {
-                if now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS {
-                    return Ok(cached.clone());
-                }
-            }
+        if let Some(cached) = report_get(&policy_report_cache(), cid_hex, now_secs) {
+            return Ok(cached);
         }
 
         let owner = community.owner().map_err(VectorError::Other)?;
@@ -3058,10 +3075,7 @@ impl VectorCore {
             crate::community::policy::harness::evaluate_for_console(cid_hex, &assembled, now_ms)
                 .map_err(VectorError::Other)?,
         );
-        policy_report_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(cid_hex.to_string(), (now_secs, report.clone()));
+        report_put(&policy_report_cache(), cid_hex, now_secs, report.clone());
         Ok(report)
     }
 
@@ -4394,6 +4408,7 @@ impl VectorCore {
             };
 
             log_info!("[SyncDMs] {} negentropy items, since_days={:?}", items.len(), since_days);
+            let items = std::sync::Arc::new(items);
 
             // Dry-run negentropy: exchange fingerprints to identify missing events
             let sync_opts = nostr_sdk::prelude::SyncOptions::new()
@@ -4437,7 +4452,7 @@ impl VectorCore {
                     // (which distinguishes refusal from silence) surfaces first.
                     let result = crate::rt::time::timeout(
                         neg_outer,
-                        relay.sync(f).items(i).opts(o),
+                        relay.sync(f).items(i.iter().copied()).opts(o),
                     ).await;
                     let connected = relay.status() == RelayStatus::Connected;
                     (url, Some(result), connected)

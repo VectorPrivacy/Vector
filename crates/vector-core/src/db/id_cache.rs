@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::profile::NpubMap;
+
 // Row ids belong to ONE account's database. Resolving a chat or npub against
 // another account's cache returns a live id for the wrong row, which reads and
 // writes then follow silently.
@@ -16,7 +18,7 @@ fn chat_id_cache() -> Arc<RwLock<HashMap<String, i64>>> {
     crate::db::current_session().scoped::<ChatIds, _>()
 }
 
-fn user_id_cache() -> Arc<RwLock<HashMap<String, i64>>> {
+fn user_id_cache() -> Arc<RwLock<NpubMap<i64>>> {
     crate::db::current_session().scoped::<UserIds, _>()
 }
 
@@ -151,7 +153,7 @@ pub fn get_or_create_user_id(npub: &str) -> Result<Option<i64>, String> {
     {
         let owner = user_id_cache();
         let mut cache = owner.write().unwrap();
-        cache.insert(npub.to_string(), id);
+        cache.insert(npub, id);
     }
 
     Ok(Some(id))
@@ -190,7 +192,7 @@ pub fn preload_id_caches() -> Result<(), String> {
         let owner = user_id_cache();
         let mut cache = owner.write().unwrap();
         for row in rows.flatten() {
-            cache.insert(row.0, row.1);
+            cache.insert(&row.0, row.1);
         }
     }
 
@@ -201,4 +203,68 @@ pub fn preload_id_caches() -> Result<(), String> {
 pub fn clear_id_caches() {
     chat_id_cache().write().unwrap().clear();
     user_id_cache().write().unwrap().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::prelude::{Keys, ToBech32};
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn drop_row(npub: &str) {
+        crate::db::get_write_connection_guard_static()
+            .unwrap()
+            .execute("DELETE FROM profiles WHERE npub = ?1", rusqlite::params![npub])
+            .unwrap();
+    }
+
+    #[test]
+    fn user_ids_are_cached_per_npub_and_never_merged() {
+        let (_tmp, _guard) = init_test_db();
+        let a = Keys::generate().public_key().to_bech32().unwrap();
+        let b = Keys::generate().public_key().to_bech32().unwrap();
+        let id_a = get_or_create_user_id(&a).unwrap().unwrap();
+        let id_b = get_or_create_user_id(&b).unwrap().unwrap();
+        assert_ne!(id_a, id_b);
+
+        let upper = a.to_uppercase();
+        let id_upper = get_or_create_user_id(&upper).unwrap().unwrap();
+        assert_ne!(id_upper, id_a, "another spelling is another row, never the same key");
+        let id_fake = get_or_create_user_id("npub1notbech32").unwrap().unwrap();
+
+        for npub in [&a, &b, &upper] {
+            drop_row(npub);
+        }
+        drop_row("npub1notbech32");
+        assert_eq!(get_or_create_user_id(&a).unwrap(), Some(id_a), "served from the cache");
+        assert_eq!(get_or_create_user_id(&b).unwrap(), Some(id_b));
+        assert_eq!(get_or_create_user_id(&upper).unwrap(), Some(id_upper));
+        assert_eq!(get_or_create_user_id("npub1notbech32").unwrap(), Some(id_fake));
+        assert_eq!(get_or_create_user_id("").unwrap(), None);
+    }
+
+    #[test]
+    fn preload_fills_the_user_cache_from_the_table() {
+        let (_tmp, _guard) = init_test_db();
+        let a = Keys::generate().public_key().to_bech32().unwrap();
+        let id_a = get_or_create_user_id(&a).unwrap().unwrap();
+        let id_fake = get_or_create_user_id("npub1legacy").unwrap().unwrap();
+        clear_id_caches();
+        preload_id_caches().unwrap();
+        drop_row(&a);
+        drop_row("npub1legacy");
+        assert_eq!(get_or_create_user_id(&a).unwrap(), Some(id_a));
+        assert_eq!(get_or_create_user_id("npub1legacy").unwrap(), Some(id_fake));
+    }
 }

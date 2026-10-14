@@ -93,9 +93,15 @@ pub struct ProfileSyncQueue {
     queued: HashMap<String, (u64, SyncPriority)>,
     next_gen: u64,
     processing: HashSet<String>,
-    last_fetched: HashMap<String, Instant>,
+    /// Seconds after `epoch` each npub was last fetched; pruned past the longest cache window.
+    last_fetched: crate::profile::NpubMap<u32>,
+    epoch: Instant,
+    done_since_prune: u32,
     is_processing: bool,
 }
+
+/// `mark_done` calls between sweeps of `last_fetched`.
+const PRUNE_EVERY: u32 = 256;
 
 impl Default for ProfileSyncQueue {
     fn default() -> Self { Self::new() }
@@ -111,7 +117,9 @@ impl ProfileSyncQueue {
             queued: HashMap::new(),
             next_gen: 0,
             processing: HashSet::new(),
-            last_fetched: HashMap::new(),
+            last_fetched: Default::default(),
+            epoch: Instant::now(),
+            done_since_prune: 0,
             is_processing: false,
         }
     }
@@ -130,8 +138,8 @@ impl ProfileSyncQueue {
 
         // Check cache window (unless force_refresh)
         if !force_refresh {
-            if let Some(last_fetch) = self.last_fetched.get(key) {
-                if last_fetch.elapsed() < priority.cache_window() {
+            if let Some(&fetched_at) = self.last_fetched.get(key) {
+                if u64::from(self.secs().saturating_sub(fetched_at)) < priority.cache_window().as_secs() {
                     return;
                 }
             }
@@ -243,7 +251,27 @@ impl ProfileSyncQueue {
 
     pub fn mark_done(&mut self, npub: &str) {
         self.processing.remove(npub);
-        self.last_fetched.insert(npub.to_string(), Instant::now());
+        let now = self.secs();
+        self.last_fetched.insert(npub, now);
+        self.done_since_prune += 1;
+        if self.done_since_prune >= PRUNE_EVERY {
+            self.done_since_prune = 0;
+            self.prune_fetched(now);
+        }
+    }
+
+    /// Forget fetches older than every cache window: they no longer hold anything back.
+    fn prune_fetched(&mut self, now: u32) {
+        let window = [SyncPriority::Critical, SyncPriority::High, SyncPriority::Medium, SyncPriority::Low]
+            .map(|p| p.cache_window().as_secs())
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        self.last_fetched.retain(|&at| u64::from(now.saturating_sub(at)) < window);
+    }
+
+    fn secs(&self) -> u32 {
+        u32::try_from(self.epoch.elapsed().as_secs()).unwrap_or(u32::MAX)
     }
 }
 
@@ -361,7 +389,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 old_status_title = p.status_title().to_string();
                 old_status_purpose = p.status_purpose().to_string();
                 old_status_url = p.status_url().to_string();
-                old_status_emoji_tags = p.status_emoji_tags().to_vec();
+                old_status_emoji_tags = p.status_emoji_tags();
             }
             None => {
                 state.insert_or_replace_profile(&npub, Profile::new());
@@ -427,19 +455,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         let status_changed = profile.status_title() != status_title.as_str()
                             || profile.status_purpose() != status_purpose.as_str()
                             || profile.status_url() != status_url.as_str()
-                            || profile.status_emoji_tags() != status_emoji_tags.as_slice();
-                        // Only touch the extras box when there's a real status to store or one
-                        // already exists to clear — never materialize an empty box on the common
-                        // status-less profile (that would make it larger than before the split).
-                        let has_status = !status_title.is_empty()
-                            || !status_purpose.is_empty() || !status_url.is_empty();
-                        if profile.extras.is_some() || has_status {
-                            let ex = profile.extras_mut();
-                            ex.status_title = status_title.into_boxed_str();
-                            ex.status_purpose = status_purpose.into_boxed_str();
-                            ex.status_url = status_url.into_boxed_str();
-                            ex.status_emoji_tags = status_emoji_tags.into_boxed_slice();
-                        }
+                            || profile.status_emoji_tags() != status_emoji_tags;
+                        profile.set_status(&status_title, &status_purpose, &status_url, &status_emoji_tags);
 
                         // Update metadata
                         let metadata_changed = profile.from_metadata(meta);
@@ -453,8 +470,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         );
 
                         (status_changed || metadata_changed,
-                         profile.avatar.to_string(),
-                         profile.banner.to_string())
+                         profile.avatar().to_string(),
+                         profile.banner().to_string())
                     };
 
                     if changed {
@@ -568,21 +585,21 @@ pub(crate) fn own_metadata(
 ) -> Metadata {
     let pick = |new: &str, old: &str| if new.is_empty() { old.to_string() } else { new.to_string() };
 
-    let mut meta = Metadata::new().name(pick(name, &profile.name));
+    let mut meta = Metadata::new().name(pick(name, profile.name()));
 
-    let avatar_url = pick(avatar, &profile.avatar);
+    let avatar_url = pick(avatar, profile.avatar());
     if let Ok(url) = Url::parse(&avatar_url) {
         meta = meta.picture(url);
     }
-    let banner_url = pick(banner, &profile.banner);
+    let banner_url = pick(banner, profile.banner());
     if let Ok(url) = Url::parse(&banner_url) {
         meta = meta.banner(url);
     }
 
-    if !profile.display_name.is_empty() {
-        meta = meta.display_name(&*profile.display_name);
+    if !profile.display_name().is_empty() {
+        meta = meta.display_name(profile.display_name());
     }
-    meta = meta.about(pick(about, &profile.about));
+    meta = meta.about(pick(about, profile.about()));
 
     if let Ok(url) = Url::parse(profile.website()) {
         meta = meta.website(url);
@@ -648,7 +665,7 @@ async fn apply_own_metadata(npub: &str, meta: Metadata, handler: &dyn ProfileSyn
         let mut profile = state.get_profile(npub).cloned().unwrap_or_default();
         profile.from_metadata(meta);
         profile.flags.set_mine(true);
-        let urls = (profile.avatar.to_string(), profile.banner.to_string());
+        let urls = (profile.avatar().to_string(), profile.banner().to_string());
         state.insert_or_replace_profile(npub, profile);
         let slim = state
             .interner
@@ -678,8 +695,8 @@ pub(crate) fn consent_plan(fetched: Option<Metadata>, local: &Profile, on: bool)
         Some(remote) if crate::profile::metadata_stream_consent(&remote) == on => Ok(ConsentPlan::Unchanged(remote)),
         Some(remote) => Ok(ConsentPlan::Publish(crate::profile::with_stream_consent(remote, on))),
         None => {
-            if local.name.is_empty() && local.display_name.is_empty()
-                && local.about.is_empty() && local.avatar.is_empty()
+            if local.name().is_empty() && local.display_name().is_empty()
+                && local.about().is_empty() && local.avatar().is_empty()
             {
                 return Err("Couldn't find your profile on your relays".to_string());
             }
@@ -776,10 +793,9 @@ pub async fn update_status(status: String) -> bool {
                     Some(p) => p,
                     None => return false,
                 };
-                let ex = profile.extras_mut();
-                ex.status_purpose = "general".into();
-                ex.status_title = status.into_boxed_str();
-                ex.status_emoji_tags = emoji_tags.into_boxed_slice();
+                profile.set_status_title(&status);
+                profile.set_status_purpose("general");
+                profile.set_status_emoji_tags(&emoji_tags);
             }
 
             let slim = state.serialize_profile(id).unwrap();
@@ -878,7 +894,7 @@ pub async fn set_nickname(npub: String, nickname: String, handler: &dyn ProfileS
                 Some(p) => p,
                 None => return false,
             };
-            profile.extras_mut().nickname = nickname.into_boxed_str();
+            profile.set_nickname(&nickname);
         }
         let slim = state.serialize_profile(id).unwrap();
         drop(state);
@@ -1011,7 +1027,7 @@ fn on_screen_need(profile: Option<&Profile>, now: u64) -> Option<SyncPriority> {
     }
     let checked = secs_from_compact(p.last_updated);
     if checked == 0 {
-        let known = !p.name.is_empty() || !p.display_name.is_empty() || !p.avatar.is_empty();
+        let known = !p.name().is_empty() || !p.display_name().is_empty() || !p.avatar().is_empty();
         return Some(if known { SyncPriority::Medium } else { SyncPriority::Critical });
     }
     (now.saturating_sub(checked) >= ON_SCREEN_FRESH.as_secs()).then_some(SyncPriority::Medium)
@@ -1068,7 +1084,7 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
         let has_metadata = state.get_profile_by_id(handle)
             .map(|p| {
-                let has_data = !p.name.is_empty() || !p.display_name.is_empty() || !p.avatar.is_empty();
+                let has_data = !p.name().is_empty() || !p.display_name().is_empty() || !p.avatar().is_empty();
                 let was_fetched = p.last_updated > 0;
                 has_data || was_fetched
             })
@@ -1109,7 +1125,7 @@ pub async fn sync_all_profiles() {
     let mut queue = owner.lock().unwrap();
 
     for profile in &state.profiles {
-        let has_metadata = !profile.name.is_empty() || !profile.display_name.is_empty() || !profile.avatar.is_empty();
+        let has_metadata = !profile.name().is_empty() || !profile.display_name().is_empty() || !profile.avatar().is_empty();
         if has_metadata || profile.last_updated > 0 {
             continue;
         }
@@ -1152,7 +1168,7 @@ mod on_screen_tests {
         assert_eq!(on_screen_need(None, now), Some(SyncPriority::Critical));
         let mut p = Profile::new();
         assert_eq!(on_screen_need(Some(&p), now), Some(SyncPriority::Critical));
-        p.name = "kitty".into();
+        p.set_name("kitty");
         assert_eq!(on_screen_need(Some(&p), now), Some(SyncPriority::Medium), "named but never checked");
         p.last_updated = secs_to_compact(now - 60);
         assert_eq!(on_screen_need(Some(&p), now), None, "checked a minute ago");
@@ -1338,7 +1354,55 @@ mod tests {
 
         queue.mark_done("npub1eve");
         assert!(!queue.processing.contains("npub1eve"));
-        assert!(queue.last_fetched.contains_key("npub1eve"));
+        assert!(queue.last_fetched.contains("npub1eve"));
+    }
+
+    #[test]
+    fn fetches_older_than_every_window_are_forgotten() {
+        let mut queue = ProfileSyncQueue::new();
+        let day = 24 * 60 * 60;
+        let now = 3 * day;
+        queue.last_fetched.insert("npub1stale", now - day);
+        queue.last_fetched.insert("npub1edge", now - day + 1);
+        queue.last_fetched.insert("npub1fresh", now - 10);
+        queue.prune_fetched(now);
+        assert!(!queue.last_fetched.contains("npub1stale"), "a day old gates nothing");
+        assert!(queue.last_fetched.contains("npub1edge"), "inside the Low window it still gates a Low re-add");
+        assert!(queue.last_fetched.contains("npub1fresh"));
+    }
+
+    #[test]
+    fn mark_done_sweeps_every_so_often() {
+        let mut queue = ProfileSyncQueue::new();
+        for i in 0..PRUNE_EVERY - 1 {
+            queue.mark_done(&format!("npub1done{i}"));
+        }
+        assert_eq!(queue.done_since_prune, PRUNE_EVERY - 1);
+        queue.last_fetched.insert("npub1future", u32::MAX);
+        queue.mark_done("npub1last");
+        assert_eq!(queue.done_since_prune, 0, "the sweep ran");
+        assert_eq!(queue.last_fetched.len(), PRUNE_EVERY as usize + 1, "nothing recent was dropped");
+    }
+
+    #[test]
+    fn the_cache_window_reads_whole_seconds_since_the_fetch() {
+        use nostr_sdk::prelude::{Keys, ToBech32};
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        let mut queue = ProfileSyncQueue::new();
+        let now = queue.secs();
+        queue.last_fetched.insert(&npub, now);
+        queue.add(npub.clone(), SyncPriority::High, false);
+        assert!(queue.high_queue.is_empty(), "a canonical npub is found by its key bytes");
+
+        let mut queue = ProfileSyncQueue::new();
+        queue.epoch = queue.epoch.checked_sub(Duration::from_secs(400)).unwrap_or(queue.epoch);
+        if queue.secs() >= 400 {
+            queue.last_fetched.insert(&npub, queue.secs() - 301);
+            queue.add(npub.clone(), SyncPriority::Medium, false);
+            assert!(queue.medium_queue.is_empty(), "301 s is inside Medium's 30 min");
+            queue.add(npub.clone(), SyncPriority::High, false);
+            assert_eq!(queue.live(&queue.high_queue), [npub.as_str()], "and past High's 5 min");
+        }
     }
 
     fn consenting_profile() -> Profile {
@@ -1471,7 +1535,7 @@ mod processor_bench {
                 let npub = format!("npub1bench{i}");
                 let t = Instant::now();
                 refresh_profile_now(npub.clone());
-                while !profile_sync_queue().lock().unwrap().last_fetched.contains_key(&npub) {
+                while !profile_sync_queue().lock().unwrap().last_fetched.contains(&npub) {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 waits.push(t.elapsed().as_secs_f64() * 1e3);

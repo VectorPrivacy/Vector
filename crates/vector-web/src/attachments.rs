@@ -152,11 +152,10 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
     {
         let mut state = STATE.lock().await;
         state.update_attachment(&chat_id, &msg_id, &attachment_id, |att| {
-            let id = vector_core::simd::hex::hex_to_bytes_32(&hash);
-            att.id.copy_from_slice(&id);
+            att.set_id(vector_core::simd::hex::hex_to_bytes_32(&hash));
             att.set_downloading(false);
             att.set_downloaded(true);
-            att.path = path_str.clone().into_boxed_str();
+            att.set_path(path_str.clone());
         });
     }
 

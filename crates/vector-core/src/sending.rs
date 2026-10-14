@@ -1254,7 +1254,7 @@ pub async fn send_file_dm_from(
                 let mut state = STATE.lock().await;
                 state.update_message(&pending_id, |msg| {
                     if let Some(att) = msg.attachments.last_mut() {
-                        att.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+                        att.set_fallback_urls(mirror_urls.iter().map(|s| s.as_str().into()));
                     }
                 });
             }

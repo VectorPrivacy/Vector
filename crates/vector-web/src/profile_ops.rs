@@ -581,23 +581,24 @@ async fn clear_attachment_files(exts: Option<&HashSet<String>>) -> Result<usize,
             for message in state.chats[chat_idx].messages.iter_mut() {
                 let mut changed = false;
                 for attachment in &mut message.attachments {
-                    if !attachment.path.starts_with(&download_prefix) {
+                    let path = attachment.path();
+                    if !path.starts_with(&download_prefix) {
                         continue;
                     }
                     if let Some(set) = exts {
-                        let ext = attachment.path.rsplit('/').next().and_then(bucket_of);
+                        let ext = path.rsplit('/').next().and_then(bucket_of);
                         if !ext.is_some_and(|e| set.contains(&e)) {
                             continue;
                         }
                     }
-                    doomed.push(attachment.path.to_string());
+                    doomed.push(path.into_owned());
                     attachment.set_downloaded(false);
                     attachment.set_downloading(false);
-                    attachment.path = Box::default();
+                    attachment.set_path(String::new());
                     changed = true;
                 }
                 if changed {
-                    touched.push(message.id);
+                    touched.push(*message.id());
                 }
             }
             if touched.is_empty() {
@@ -635,17 +636,17 @@ async fn clear_media_caches() {
         let mut state = STATE.lock().await;
         let mut cleared = Vec::new();
         for profile in state.profiles.iter_mut() {
-            if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
-                profile.avatar_cached = Box::default();
-                profile.banner_cached = Box::default();
+            if profile.has_avatar_cached() || profile.has_banner_cached() {
+                profile.set_avatar_cached("");
+                profile.set_banner_cached("");
                 cleared.push(profile.id);
             }
         }
         for id in cleared {
             let Some(slim) = state.serialize_profile(id) else { continue };
             if let Some(p) = state.get_profile_by_id(id) {
-                if !p.avatar.is_empty() || !p.banner.is_empty() {
-                    refetch.push((slim.id.clone(), p.avatar.to_string(), p.banner.to_string()));
+                if !p.avatar().is_empty() || !p.banner().is_empty() {
+                    refetch.push((slim.id.clone(), p.avatar().to_string(), p.banner().to_string()));
                 }
             }
             let _ = db::profiles::set_profile(&slim);

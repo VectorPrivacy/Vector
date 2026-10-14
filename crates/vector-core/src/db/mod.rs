@@ -1595,11 +1595,9 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     {
         let mut stmt = conn.prepare("SELECT event_id FROM deleted_messages")
             .map_err(|e| format!("tombstone seed prepare: {}", e))?;
-        let ids: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))
+        let ids = stmt.query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("tombstone seed query: {}", e))?
-            .filter_map(|r| r.ok())
-            .collect();
-        drop(stmt);
+            .filter_map(|r| r.ok());
         crate::state::seed_message_tombstones(ids);
     }
 
