@@ -464,8 +464,6 @@ impl Req {
         let (_, req) = self.rb.build_split();
         #[allow(unused_mut)]
         let mut req = req.map_err(HttpError::from_reqwest)?;
-        #[cfg(target_arch = "wasm32")]
-        apply_host_alias(req.url_mut());
         let host = req.url().host_str().unwrap_or_default().to_string();
         let port = req.url().port_or_known_default().unwrap_or(443);
         let desc = self.client;
@@ -487,6 +485,10 @@ impl Req {
             }
         }
         let client = client.expect("the loop ran");
+        // After the decision: the transport judges the host asked for, and the alias is an
+        // address only this page's browser reaches (an onion, from a page served on one).
+        #[cfg(target_arch = "wasm32")]
+        apply_host_alias(req.url_mut());
         // The change is polled first: a switch that lands before the first poll must stop the
         // request before it resolves or dials anything.
         let changed = crate::transport::changed(epoch);
