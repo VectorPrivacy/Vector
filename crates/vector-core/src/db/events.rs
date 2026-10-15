@@ -760,6 +760,20 @@ pub fn wrapper_event_exists(wrapper_event_id: &str) -> Result<bool, String> {
         .map_err(|e| format!("Failed to check wrapper event existence: {}", e))
 }
 
+/// The community wraps among `wrapper_event_ids` whose message is stored with nothing left to
+/// learn from opening it again: someone else's, or mine with its delete key kept.
+pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections::HashSet<String> {
+    let Ok(conn) = super::get_db_connection_guard_static() else { return Default::default() };
+    let Ok(ids) = serde_json::to_string(wrapper_event_ids) else { return Default::default() };
+    let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT DISTINCT e.wrapper_event_id FROM json_each(?1) j JOIN events e ON e.wrapper_event_id = j.value \
+         WHERE e.mine = 0 OR EXISTS(SELECT 1 FROM community_message_keys k WHERE k.message_id = e.id)",
+    ) else {
+        return Default::default();
+    };
+    stmt.query_map([ids], |row| row.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
 /// Update the wrapper event ID for an existing event.
 /// Returns true if updated, false if event already had a wrapper_id.
 pub fn update_wrapper_event_id(event_id: &str, wrapper_event_id: &str) -> Result<bool, String> {

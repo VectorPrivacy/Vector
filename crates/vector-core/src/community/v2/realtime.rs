@@ -1387,6 +1387,19 @@ mod tests {
         }
         assert!(crate::db::wrappers::processed_wrapper_exists(&first_id.to_bytes()), "a handled wrap joins the ledger");
 
+        // Settled for a catch-up: someone else's stored message, or mine once its delete key is kept.
+        let wrap_hex = first_id.to_hex();
+        assert!(crate::db::events::community_wraps_settled(std::slice::from_ref(&wrap_hex)).contains(&wrap_hex), "a stored foreign message is settled");
+        assert_eq!(crate::db::events::community_wraps_settled(&[wrap_hex.clone(), "cd".repeat(32)]).len(), 1, "an unknown wrap is not");
+        let w = crate::db::get_write_connection_guard_static().unwrap();
+        w.execute("UPDATE events SET mine = 1 WHERE wrapper_event_id = ?1", [&wrap_hex]).unwrap();
+        let rumor_hex: String = w.query_row("SELECT id FROM events WHERE wrapper_event_id = ?1", [&wrap_hex], |r| r.get(0)).unwrap();
+        drop(w);
+        assert!(!crate::db::events::community_wraps_settled(std::slice::from_ref(&wrap_hex)).contains(&wrap_hex), "my message without its delete key still heals on open");
+        crate::db::community::store_message_key(&rumor_hex, &wrap_hex, group.keys(), &community.relays).unwrap();
+        assert!(crate::db::events::community_wraps_settled(std::slice::from_ref(&wrap_hex)).contains(&wrap_hex), "with the key kept there is nothing left to heal");
+        crate::db::get_write_connection_guard_static().unwrap().execute("UPDATE events SET mine = 0 WHERE wrapper_event_id = ?1", [&wrap_hex]).unwrap();
+
         // A reaction to a message we don't hold yet stays retryable: no ledger entry.
         let unseen = "ab".repeat(32);
         let reaction = super::super::chat::build_reaction_rumor(

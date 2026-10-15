@@ -3483,6 +3483,7 @@ impl VectorCore {
         let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return BackfillCount::default() };
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
+        let held = std::sync::atomic::AtomicUsize::new(0);
         let Ok(page) = crate::community::v2::service::fetch_channel_history(
             &transport,
             &community,
@@ -3496,8 +3497,9 @@ impl VectorCore {
             // whose messages are all known means we've reached our own history. Only
             // message kinds get their own rows (reactions/edits fold into their
             // targets), so a page with no messages is undecidable — keep paging.
-            |page| {
-                let mut saw_message = false;
+            // A settled wrap is a held row, which decides the page like a held message.
+            |page, settled| {
+                let mut saw_message = settled > 0;
                 for f in page {
                     if matches!(&f.event, crate::community::v2::chat::ChatEvent::Message { .. }) {
                         saw_message = true;
@@ -3508,12 +3510,23 @@ impl VectorCore {
                 }
                 !saw_message
             },
+            // Only a catch-up skips what it holds: a back-page feeds the reader what it scrolled to.
+            |wraps| {
+                if until.is_some() {
+                    return Default::default();
+                }
+                let hex: Vec<String> = wraps.iter().map(|w| w.to_hex()).collect();
+                let settled = crate::db::events::community_wraps_settled(&hex);
+                let skip: std::collections::HashSet<_> = wraps.iter().zip(&hex).filter(|(_, h)| settled.contains(*h)).map(|(w, _)| *w).collect();
+                held.fetch_add(skip.len(), std::sync::atomic::Ordering::Relaxed);
+                skip
+            },
         )
         .await
         else {
             return BackfillCount::default();
         };
-        let fetched = page.len();
+        let fetched = page.len() + held.into_inner();
         let new_messages = Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await;
         BackfillCount { fetched, new_messages }
     }

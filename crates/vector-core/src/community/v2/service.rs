@@ -481,7 +481,7 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     limit: usize,
 ) -> Result<Vec<FetchedEvent>, String> {
-    fetch_channel_history(transport, community, channel_id, limit, 1, None, None, crate::community::transport::Evidence::Quorum, |_| true).await
+    fetch_channel_history(transport, community, channel_id, limit, 1, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await
 }
 
 /// Walk a channel's history newest-first (CORD-03 §3 "clients load a Channel
@@ -496,7 +496,8 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
 /// siblings beyond the relay cap are unreachable — logged, and a protocol-level
 /// limitation (the `ms` tag can't be filtered server-side).
 ///
-/// Returns everything opened, deduped by rumor id, oldest→newest.
+/// Returns everything opened, deduped by rumor id, oldest→newest; `settled` wraps are not
+/// opened and not returned.
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_channel_history<T: Transport + ?Sized>(
     transport: &T,
@@ -509,7 +510,11 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
     // cursor. `None` starts at the newest.
     start_until: Option<u64>,
     evidence: crate::community::transport::Evidence,
-    mut keep_paging: impl FnMut(&[FetchedEvent]) -> bool,
+    // Given a page's opened events and how many of its wraps were `settled`.
+    mut keep_paging: impl FnMut(&[FetchedEvent], usize) -> bool,
+    // Of a page's wraps, those the caller already holds in full: skipped unopened, and counted
+    // for `keep_paging`.
+    settled: impl Fn(&[nostr_sdk::prelude::EventId]) -> std::collections::HashSet<nostr_sdk::prelude::EventId>,
 ) -> Result<Vec<FetchedEvent>, String> {
     crate::db::scoped(async move {
         // Guards the opportunistic scrub-key heals below — the fetch loop straddles
@@ -590,6 +595,9 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                 break;
             }
             let mut fresh = 0usize;
+            let mut held = 0usize;
+            let unseen: Vec<_> = wraps.iter().map(|w| w.id).filter(|id| !seen_wraps.contains(id)).collect();
+            let settled_here = if unseen.is_empty() { Default::default() } else { settled(&unseen) };
             let mut page_events: Vec<FetchedEvent> = Vec::new();
             for wrap in &wraps {
                 if !seen_wraps.insert(wrap.id) {
@@ -599,6 +607,10 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                 let at = wrap.created_at.as_secs();
                 if oldest.is_none_or(|o| at < o) {
                     oldest = Some(at);
+                }
+                if settled_here.contains(&wrap.id) {
+                    held += 1;
+                    continue;
                 }
                 // Select the epoch whose group key authored this wrap (no trial decrypt).
                 for (secret, epoch) in &coords {
@@ -631,7 +643,7 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                 until = Some(o - 1);
                 continue;
             }
-            let stop = !page_events.is_empty() && !keep_paging(&page_events);
+            let stop = (!page_events.is_empty() || held > 0) && !keep_paging(&page_events, held);
             out.extend(page_events.into_iter().map(|e| (e.event.opened().at_ms, e)));
             if stop {
                 break; // the caller holds everything from here back.
@@ -9970,7 +9982,8 @@ mod tests {
             None,
             Some(from_now),
             crate::community::transport::Evidence::Quorum,
-            |_| true,
+            |_, _| true,
+            |_| Default::default(),
         )
         .await
         .unwrap()
@@ -15541,7 +15554,7 @@ mod tests {
         let general = community.channels[0].id;
         flood_general(&relay, &community, &owner, 120, 10_000).await;
 
-        let all = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
+        let all = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         assert_eq!(all.len(), 120, "the walk pages the whole burst");
         // Oldest→newest, no duplicates.
         let contents: Vec<String> = all.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
@@ -15569,7 +15582,7 @@ mod tests {
 
         let older = fetch_channel_history(
             &relay, &community, &general, 50, 8, None, Some(10_059),
-            crate::community::transport::Evidence::Quorum, |_| true,
+            crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default(),
         )
         .await
         .unwrap();
@@ -15589,15 +15602,48 @@ mod tests {
 
         // The caller says "I hold everything" after the first page — no deeper fetch.
         let mut pages = 0usize;
-        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_| {
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _| {
             pages += 1;
             false
-        })
+        }, |_| Default::default())
         .await
         .unwrap();
         assert_eq!(pages, 1, "the early stop is consulted once");
         assert_eq!(got.len(), 50, "only the newest page is fetched");
         assert_eq!(got.last().map(|f| f.event.opened().rumor.content.clone()).as_deref(), Some("msg 119"));
+    }
+
+    #[tokio::test]
+    async fn a_page_of_settled_wraps_ends_the_walk_unopened() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Settled", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        flood_general(&relay, &community, &owner, 120, 10_000).await;
+
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let mut seen = Vec::new();
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |page, held| {
+            seen.push((page.len(), held));
+            held == 0
+        }, |ids| {
+            asked.fetch_add(ids.len(), std::sync::atomic::Ordering::Relaxed);
+            ids.iter().copied().collect()
+        })
+        .await
+        .unwrap();
+        assert!(got.is_empty(), "nothing settled is opened");
+        assert_eq!(seen, [(0, 50)], "a page of only settled wraps still reaches the caller's stop");
+        assert_eq!(asked.into_inner(), 50, "the newest page alone: all of it held, so the walk ends there");
+
+        // Half settled: the rest open, and the walk goes on past a page with something new.
+        let newest = fetch_channel(&relay, &community, &general, 50).await.unwrap();
+        let held: std::collections::HashSet<_> = newest.iter().take(25).map(|f| f.event.opened().wrapper_id).collect();
+        let got = fetch_channel_history(&relay, &community, &general, 50, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |ids| ids.iter().filter(|id| held.contains(*id)).copied().collect())
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 95, "everything but the 25 held");
+        assert!(got.iter().all(|f| !held.contains(&f.event.opened().wrapper_id)));
     }
 
     #[tokio::test]
@@ -15615,7 +15661,7 @@ mod tests {
             let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &owner, Timestamp::from_secs(5_000), false).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
-        let got = fetch_channel_history(&relay, &community, &general, 25, 8, None, None, crate::community::transport::Evidence::Quorum, |_| true).await.unwrap();
+        let got = fetch_channel_history(&relay, &community, &general, 25, 8, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         assert!(got.len() >= 25, "at least the relay page is read");
         assert!(got.len() <= 60, "sane bound");
         // Termination is the assertion: reaching here means the wall didn't loop.
