@@ -915,6 +915,23 @@ pub fn remove_cached_image<R: Runtime>(
     Ok(())
 }
 
+/// Delete a profile picture's cached file, and an avatar's thumb with it. Only a file inside
+/// that kind's cache directory is touched.
+pub fn forget_profile_image<R: Runtime>(handle: &AppHandle<R>, path: &str, banner: bool) {
+    let kind = if banner { ImageType::Banner } else { ImageType::Avatar };
+    let (Ok(dir), Ok(file)) = (get_cache_dir(handle, kind), std::fs::canonicalize(path)) else { return };
+    let Ok(dir) = std::fs::canonicalize(dir) else { return };
+    if file.parent() != Some(dir.as_path()) {
+        return;
+    }
+    let _ = std::fs::remove_file(&file);
+    if !banner {
+        if let Some(thumb) = avatar_thumb_path(&file) {
+            let _ = std::fs::remove_file(thumb);
+        }
+    }
+}
+
 /// Clear all cached images of a specific type
 pub fn clear_cache<R: Runtime>(
     handle: &AppHandle<R>,

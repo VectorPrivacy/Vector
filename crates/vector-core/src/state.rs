@@ -867,6 +867,21 @@ impl ChatState {
     // Profile Management
     // ========================================================================
 
+    /// Drop the pictures every blocked profile still holds, for blocks made before a block
+    /// erased them. Returns each changed profile to persist and the files to delete
+    /// (`profile::sync::persist_forgotten_imagery`).
+    pub fn forget_blocked_imagery(&mut self) -> (Vec<SlimProfile>, Vec<crate::profile::CachedImage>) {
+        let ids: Vec<u16> = self.profiles.iter().filter(|p| p.flags.is_blocked() && p.has_imagery()).map(|p| p.id).collect();
+        let mut slims = Vec::with_capacity(ids.len());
+        let mut images = Vec::new();
+        for id in ids {
+            let held = self.get_profile_mut_by_id(id).map(|p| p.forget_imagery()).unwrap_or_default();
+            images.extend(crate::profile::sync::unshared(self, id, held));
+            slims.extend(self.serialize_profile(id));
+        }
+        (slims, images)
+    }
+
     pub fn merge_db_profiles(&mut self, slim_profiles: Vec<SlimProfile>, my_npub: &str) {
         self.profiles.reserve(slim_profiles.len());
         self.interner.reserve(slim_profiles.len());
@@ -2295,6 +2310,31 @@ mod tests {
         state.add_message_to_chat("npub1blocked", &msg);
 
         assert_eq!(state.count_unread_messages(), 0, "blocked user DM should not count");
+    }
+
+    #[test]
+    fn blocked_pictures_are_forgotten_but_a_file_another_profile_shows_is_kept() {
+        let mut state = ChatState::new();
+        let mut shown = |npub: &str, blocked: bool, avatar: &str| {
+            let mut p = Profile::new();
+            p.set_avatar(&format!("https://x/{avatar}"));
+            p.set_avatar_cached(&format!("/cache/avatars/{avatar}"));
+            p.flags.set_blocked(blocked);
+            state.insert_or_replace_profile(npub, p);
+        };
+        shown("npub1blocked", true, "own.png");
+        shown("npub1alsoblocked", true, "shared.png");
+        shown("npub1friend", false, "shared.png");
+
+        let (slims, files) = state.forget_blocked_imagery();
+        let mut ids: Vec<&str> = slims.iter().map(|s| s.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["npub1alsoblocked", "npub1blocked"]);
+        assert!(slims.iter().all(|s| s.avatar.is_empty() && s.avatar_cached.is_empty()));
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["/cache/avatars/own.png"], "the friend still shows shared.png");
+        assert!(state.get_profile("npub1friend").unwrap().has_avatar_cached());
+        assert!(state.forget_blocked_imagery().0.is_empty(), "a second sweep finds nothing");
     }
 
     #[test]

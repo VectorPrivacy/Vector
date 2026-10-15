@@ -232,8 +232,35 @@ pub async fn clear_all() {
     vector_core::webfiles::remove(Path::new("/cache")).await;
 }
 
+/// Delete blocked profiles' pictures: each file, an avatar's thumb, and the index entry that
+/// would hand the path out again.
+pub async fn forget(images: Vec<vector_core::profile::CachedImage>) {
+    for img in images {
+        let kind = if img.banner { Kind::Banner } else { Kind::Avatar };
+        if !img.path.starts_with(&format!("/cache/{}/", kind.dir())) {
+            continue;
+        }
+        KNOWN.with(|k| k.borrow_mut().remove(&(img.url.clone(), kind as u8)));
+        if let Some(dir) = app_data() {
+            let _ = db::webfs::remove(&dir, &index_path(&img.url, kind));
+        }
+        vector_core::webfiles::remove(Path::new(&img.path)).await;
+        if kind == Kind::Avatar {
+            let thumb = img.path.replacen("/cache/avatars/", "/cache/avatars/thumbs/", 1);
+            vector_core::webfiles::remove(Path::new(&thumb)).await;
+        }
+    }
+}
+
+async fn is_blocked(npub: &str) -> bool {
+    STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked())
+}
+
 /// Cache a profile's pictures and repaint it when either landed.
 pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str) {
+    if is_blocked(npub).await {
+        return;
+    }
     let avatar = if avatar_url.is_empty() { None } else { cache(avatar_url, Kind::Avatar).await.ok() };
     let banner = if banner_url.is_empty() { None } else { cache(banner_url, Kind::Banner).await.ok() };
     if avatar.is_none() && banner.is_none() {
@@ -242,6 +269,16 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
     let slim: Option<SlimProfile> = {
         let mut state = STATE.lock().await;
         let Some(id) = state.interner.lookup(npub) else { return };
+        // Blocked while the download ran: nothing is kept.
+        if state.get_profile_by_id(id).is_some_and(|p| p.flags.is_blocked()) {
+            drop(state);
+            let lost = [(avatar_url, avatar, false), (banner_url, banner, true)]
+                .into_iter()
+                .filter_map(|(url, path, banner)| Some(vector_core::profile::CachedImage { url: url.to_string(), path: path?, banner }))
+                .collect();
+            forget(lost).await;
+            return;
+        }
         let changed = state.get_profile_mut_by_id(id).is_some_and(|p| {
             let mut changed = false;
             if let Some(a) = &avatar {

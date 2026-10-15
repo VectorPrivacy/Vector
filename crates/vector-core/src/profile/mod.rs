@@ -278,6 +278,15 @@ impl std::fmt::Debug for Profile {
     }
 }
 
+/// A profile picture held on disk: the URL it was fetched from and the file holding it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedImage {
+    pub url: String,
+    pub path: String,
+    /// The banner rather than the avatar.
+    pub banner: bool,
+}
+
 impl Profile {
     pub fn new() -> Self {
         Self { id: NO_NPUB, flags: ProfileFlags::default(), in_cache: 0, last_updated: 0, text: ProfileText(None) }
@@ -335,6 +344,24 @@ impl Profile {
         self.write(&[(STATUS_TITLE, title), (STATUS_PURPOSE, purpose), (STATUS_URL, url)], Some(tags));
     }
 
+    /// Drop the avatar and banner, URLs and cached copies alike; returns the copies to delete.
+    pub fn forget_imagery(&mut self) -> Vec<CachedImage> {
+        let images = [
+            (self.avatar(), self.avatar_cached(), false),
+            (self.banner(), self.banner_cached(), true),
+        ]
+        .into_iter()
+        .filter(|(_, path, _)| !path.is_empty())
+        .map(|(url, path, banner)| CachedImage { url: url.to_string(), path: path.into_owned(), banner })
+        .collect();
+        self.write(&[(AVATAR, ""), (BANNER, ""), (AVATAR_CACHED, ""), (BANNER_CACHED, "")], None);
+        images
+    }
+
+    #[inline] pub fn has_imagery(&self) -> bool {
+        !self.avatar().is_empty() || !self.banner().is_empty() || self.has_avatar_cached() || self.has_banner_cached()
+    }
+
     pub fn set_avatar_cached(&mut self, path: &str) { self.set_cached(AVATAR_CACHED, AVATAR_IN_CACHE, 0, path); }
     pub fn set_banner_cached(&mut self, path: &str) { self.set_cached(BANNER_CACHED, BANNER_IN_CACHE, 1, path); }
 
@@ -385,6 +412,8 @@ impl Profile {
         let mut fields = self.text.fields();
         let mut in_cache = self.in_cache;
         let mut changed = false;
+        // A blocked profile takes no pictures: nothing of theirs is fetched, cached or shown.
+        let blocked = self.flags.is_blocked();
         for (i, value) in [
             (NAME, &meta.name),
             (DISPLAY_NAME, &meta.display_name),
@@ -397,6 +426,9 @@ impl Profile {
             (NIP05, &meta.nip05),
         ] {
             let Some(value) = value.as_deref() else { continue };
+            if blocked && (i == AVATAR || i == BANNER) {
+                continue;
+            }
             if fields[i] == value {
                 continue;
             }
@@ -996,6 +1028,7 @@ mod packed_tests {
         assert!(!p.from_metadata(meta.custom_field(STREAM_CONSENT_KEY, true)), "the same kind-0 changes nothing");
 
         let mut q = p.clone();
+        q.flags.set_blocked(false); // the fixture sets every flag, and a blocked profile takes no pictures
         q.from_metadata(Metadata::from_json(r#"{"picture":"https://new/a.png","banner":"https://new/b.png"}"#).unwrap());
         assert_eq!(q.avatar(), "https://new/a.png");
         assert!(!q.has_avatar_cached() && !q.has_banner_cached(), "a new image drops the old cached file");
@@ -1213,5 +1246,40 @@ mod packed_tests {
         assert!(map.contains(&npubs[2]) && !map.contains(&npubs[1]));
         map.clear();
         assert_eq!(map.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod blocked_imagery_tests {
+    use super::*;
+
+    fn pictured(avatar: &str, banner: &str) -> Profile {
+        let mut p = Profile::new();
+        p.from_metadata(Metadata::from_json(&format!(r#"{{"name":"a","picture":"{avatar}","banner":"{banner}"}}"#)).unwrap());
+        p
+    }
+
+    #[test]
+    fn a_blocked_profile_takes_no_pictures_from_its_kind0() {
+        let mut p = Profile::new();
+        p.flags.set_blocked(true);
+        assert!(p.from_metadata(Metadata::from_json(r#"{"name":"a","picture":"https://x/a.png","banner":"https://x/b.png"}"#).unwrap()));
+        assert_eq!(p.name(), "a", "the rest of the kind-0 still lands");
+        assert!(p.avatar().is_empty() && p.banner().is_empty());
+        assert!(!p.has_imagery());
+    }
+
+    #[test]
+    fn forgetting_drops_both_pictures_and_hands_back_their_files() {
+        let mut p = pictured("https://x/a.png", "https://x/b.png");
+        p.set_avatar_cached("/elsewhere/a.png");
+        p.set_banner_cached("/elsewhere/b.png");
+        let files = p.forget_imagery();
+        assert_eq!(files, vec![
+            CachedImage { url: "https://x/a.png".into(), path: "/elsewhere/a.png".into(), banner: false },
+            CachedImage { url: "https://x/b.png".into(), path: "/elsewhere/b.png".into(), banner: true },
+        ]);
+        assert!(!p.has_imagery(), "URLs and cached paths are all gone");
+        assert!(pictured("https://x/a.png", "").forget_imagery().is_empty(), "nothing on disk, nothing to delete");
     }
 }

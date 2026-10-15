@@ -551,6 +551,8 @@ pub async fn fetch_messages<R: Runtime>(
                     if let Ok(profiles) = profiles_result {
                         state.merge_db_profiles(profiles, &npub);
                     }
+                    // Before the boot payload, so a blocked profile's pictures never paint.
+                    let forgotten = state.forget_blocked_imagery();
                     println!("[Boot] Profile merge in {:?}", merge_start.elapsed());
 
                     // Spawn background task to cache profile images for offline support
@@ -572,6 +574,7 @@ pub async fn fetch_messages<R: Runtime>(
                             })
                             .await;
                         }
+                        vector_core::profile::sync::persist_forgotten_imagery(&crate::profile_sync::TauriProfileSyncHandler, forgotten.0, forgotten.1);
                         profile::cache_all_profile_images().await;
                     });
 

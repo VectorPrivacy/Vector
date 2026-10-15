@@ -25,6 +25,10 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
         None => return,
     };
 
+    if is_blocked(npub).await {
+        return;
+    }
+
     let mut avatar_cached = String::new();
     let mut banner_cached = String::new();
 
@@ -59,6 +63,13 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
             Some(id) => id,
             None => return,
         };
+        // Blocked while the download ran: the copies go, nothing is kept.
+        if state.get_profile_by_id(id).is_some_and(|p| p.flags.is_blocked()) {
+            drop(state);
+            if !avatar_cached.is_empty() { image_cache::forget_profile_image(handle, &avatar_cached, false); }
+            if !banner_cached.is_empty() { image_cache::forget_profile_image(handle, &banner_cached, true); }
+            return;
+        }
         let updated = if let Some(profile) = state.get_profile_mut_by_id(id) {
             let mut changed = false;
             if !avatar_cached.is_empty() && *profile.avatar_cached() != *avatar_cached {
@@ -79,6 +90,10 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
             db::set_profile(slim).await.ok();
         }
     }
+}
+
+async fn is_blocked(npub: &str) -> bool {
+    STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked())
 }
 
 /// Cache images for all profiles that have avatar/banner URLs but no cached paths

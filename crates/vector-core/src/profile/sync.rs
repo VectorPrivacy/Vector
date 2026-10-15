@@ -319,6 +319,22 @@ pub trait ProfileSyncHandler: Send + Sync {
     /// `slim` is ready for DB persistence. `avatar_url`/`banner_url` are
     /// for image caching (may be empty).
     fn on_profile_fetched(&self, _slim: &crate::SlimProfile, _avatar_url: &str, _banner_url: &str) {}
+
+    /// Delete a blocked profile's cached pictures from disk. No other profile points at them.
+    fn forget_images(&self, _images: Vec<super::CachedImage>) {}
+}
+
+/// `images` less any file another unblocked profile still shows: the cache is keyed by URL,
+/// so two profiles can share one copy.
+pub(crate) fn unshared(state: &crate::state::ChatState, owner: u16, images: Vec<super::CachedImage>) -> Vec<super::CachedImage> {
+    images
+        .into_iter()
+        .filter(|img| {
+            !state.profiles.iter().any(|p| {
+                p.id != owner && !p.flags.is_blocked() && (*p.avatar_cached() == *img.path || *p.banner_cached() == *img.path)
+            })
+        })
+        .collect()
 }
 
 /// No-op handler for CLI/tests.
@@ -841,10 +857,13 @@ pub async fn block_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool 
             };
             profile.flags.set_blocked(true);
         }
+        let images = state.get_profile_mut_by_id(id).map(|p| p.forget_imagery()).unwrap_or_default();
+        let images = unshared(&state, id, images);
         let slim = state.serialize_profile(id).unwrap();
         drop(state);
         emit_event("profile_update", &slim);
         handler.on_profile_fetched(&slim, "", "");
+        handler.forget_images(images);
         crate::push::controls_changed();
         true
     } else {
@@ -869,10 +888,24 @@ pub async fn unblock_user(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         emit_event("profile_update", &slim);
         handler.on_profile_fetched(&slim, "", "");
         crate::push::controls_changed();
+        // Their pictures were dropped at the block: the next fetch brings them back.
+        queue_profile_sync(npub, SyncPriority::Critical, true);
         true
     } else {
         false
     }
+}
+
+/// Persist what `ChatState::forget_blocked_imagery` dropped and delete the files.
+pub fn persist_forgotten_imagery(handler: &dyn ProfileSyncHandler, slims: Vec<crate::SlimProfile>, images: Vec<super::CachedImage>) {
+    if slims.is_empty() {
+        return;
+    }
+    log_info!("[Profile] Dropped the pictures of {} blocked profiles", slims.len());
+    for slim in &slims {
+        handler.on_profile_fetched(slim, "", "");
+    }
+    handler.forget_images(images);
 }
 
 /// Get all blocked profiles.

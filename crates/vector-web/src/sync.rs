@@ -18,6 +18,14 @@ impl vector_core::ProfileSyncHandler for WebProfileSyncHandler {
             crate::images::cache_profile_images(&slim.id, &avatar, &banner).await;
         });
     }
+
+    fn forget_images(&self, images: Vec<vector_core::profile::CachedImage>) {
+        if images.is_empty() {
+            return;
+        }
+        // spawn-detached: deletes cache files by path, global to the device, no account state
+        vector_core::rt::spawn(crate::images::forget(images));
+    }
 }
 
 /// Load chats and profiles from the database into state and hand them to the
@@ -29,6 +37,9 @@ async fn hydrate_and_announce() {
         if let Ok(profiles) = db::profiles::get_all_profiles() {
             state.merge_db_profiles(profiles, &npub);
         }
+        // Before the boot payload, so a blocked profile's pictures never paint.
+        let (slims, images) = state.forget_blocked_imagery();
+        vector_core::profile::sync::persist_forgotten_imagery(&WebProfileSyncHandler, slims, images);
         let mut last_messages = db::events::get_all_chats_last_messages().await.unwrap_or_default();
         if let Ok(slim_chats) = db::chats::get_all_chats() {
             let mut known: std::collections::HashSet<u16> = state.profiles.iter().map(|p| p.id).collect();

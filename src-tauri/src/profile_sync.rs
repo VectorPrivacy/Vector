@@ -25,6 +25,13 @@ impl ProfileSyncHandler for TauriProfileSyncHandler {
             profile::cache_profile_images(&npub, &avatar, &banner).await;
         });
     }
+
+    fn forget_images(&self, images: Vec<vector_core::profile::CachedImage>) {
+        let Some(handle) = crate::TAURI_APP.get() else { return };
+        for img in images {
+            crate::image_cache::forget_profile_image(handle, &img.path, img.banner);
+        }
+    }
 }
 
 /// Start the background profile sync processor with Tauri handler.
