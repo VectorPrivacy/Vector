@@ -78,6 +78,8 @@ mod vault_audit;
 
 // === Network ===
 pub mod net;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tls;
 pub mod events_tracker;
 pub mod proxy;
 pub mod negentropy;

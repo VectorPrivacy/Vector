@@ -144,6 +144,40 @@ pub(crate) mod native {
         }
     }
 
+    /// `host`'s addresses, resolved at most once a minute: a boot dials a handful of hosts a
+    /// hundred times over, and concurrent system lookups queue on one lock. Callers for the
+    /// same host share one lookup.
+    async fn resolve(session: &std::sync::Arc<crate::db::Session>, host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::collections::HashMap;
+        use std::net::{IpAddr, SocketAddr};
+        use std::sync::{Arc, Mutex};
+        type Slot = Arc<tokio::sync::Mutex<Option<(web_time::Instant, Vec<IpAddr>)>>>;
+        const FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(vec![SocketAddr::new(ip, port)]);
+        }
+        // On the account's session: a switch forgets which hosts the last account dialed.
+        struct Resolved;
+        let slots = session.scoped::<Resolved, Mutex<HashMap<String, Slot>>>();
+        let slot = {
+            let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+            // Bounded by the hosts an account dials; a stale entry costs one lookup.
+            if slots.len() > 512 {
+                slots.clear();
+            }
+            slots.entry(host.to_ascii_lowercase()).or_default().clone()
+        };
+        let mut cached = slot.lock().await;
+        if let Some((at, ips)) = cached.as_ref() {
+            if at.elapsed() < FRESH && !ips.is_empty() {
+                return Ok(ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect());
+            }
+        }
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        *cached = Some((web_time::Instant::now(), addrs.iter().map(|a| a.ip()).collect()));
+        Ok(addrs)
+    }
+
     async fn open(owner: u64, lane: Lane, no_direct: bool, url: &url::Url) -> Result<(WebSocketSink, WebSocketStream), nostr_sdk::prelude::Error> {
         use nostr_sdk::prelude::Error;
         let host = url.host_str().ok_or_else(|| Error::transport("empty host"))?;
@@ -151,13 +185,18 @@ pub(crate) mod native {
         let bare = host.trim_start_matches('[').trim_end_matches(']');
         // Read before deciding: a decision that a switch overtakes trips its guard at once.
         let epoch = super::super::epoch();
+        // The owner's own caches: nostr-sdk's tasks are unbound, so the session is looked up, never assumed.
+        let session = crate::db::live_session();
+        if session.id() != owner {
+            return Err(refused(super::super::ConnectError::Stale));
+        }
         let stream = match super::super::egress(owner, lane, bare, port) {
             super::super::Egress::Refuse(e) => return Err(refused(e)),
             super::super::Egress::Direct if no_direct => return Err(refused(super::super::ConnectError::Stale)),
             super::super::Egress::Direct => {
                 // Raced against a switch: a connect still trying further addresses must stop
                 // sending SYNs over the OS network the moment it no longer may.
-                let dial = tokio_happy_eyeballs::connect(format!("{host}:{port}"));
+                let dial = async { tokio_happy_eyeballs::connect(&resolve(&session, bare, port).await?[..]).await };
                 let changed = super::super::changed(epoch);
                 tokio::pin!(dial, changed);
                 let tcp = tokio::select! {
@@ -180,7 +219,7 @@ pub(crate) mod native {
             }
         };
         let request = upgrade_request(url).map_err(Error::transport)?;
-        let (ws, _) = Box::pin(tokio_tungstenite::client_async_tls_with_config(request, stream, Some(relay_socket_config()), None)).await.map_err(Error::transport)?;
+        let (ws, _) = Box::pin(tokio_tungstenite::client_async_tls_with_config(request, stream, Some(relay_socket_config()), Some(tokio_tungstenite::Connector::Rustls(crate::tls::websocket_config(&session, lane))))).await.map_err(Error::transport)?;
         let (tx, rx) = ws.split();
         let sink: WebSocketSink = Box::pin(VectorSink(tx));
         let stream: WebSocketStream = Box::pin(rx.filter_map(|m| async move {

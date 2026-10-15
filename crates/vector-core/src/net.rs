@@ -215,21 +215,20 @@ fn template() -> &'static reqwest::Client {
     T.get_or_init(|| client_builder().build().expect("a plain reqwest client always builds"))
 }
 
-/// Ring with the webpki roots, offering h2 before HTTP/1.1.
+/// Ring with the webpki roots, offering h2 before HTTP/1.1, with a session store of its own.
+///
+/// Built per pooled client, never cloned from a shared one: a clone shares the session store,
+/// and a resumed ticket would tie this account and lane to another's requests to that server.
 #[cfg(not(target_arch = "wasm32"))]
 fn tls_config() -> rustls::ClientConfig {
-    static CFG: std::sync::OnceLock<rustls::ClientConfig> = std::sync::OnceLock::new();
-    CFG.get_or_init(|| {
-        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports TLS 1.2 and 1.3")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        cfg
-    })
-    .clone()
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports TLS 1.2 and 1.3")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    cfg
 }
 
 #[allow(clippy::disallowed_methods)]
