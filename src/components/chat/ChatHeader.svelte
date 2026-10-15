@@ -3,6 +3,7 @@
     // member count or a renamed channel repaints it with no retro-resolve code. The
     // helpers arrive from chat.js after the shell mounts, so they are read lazily.
     import { openChatId, chatVersion, profileVersion, communityVersion, listVersion, invitesVersion } from '../lib/signals.svelte.js';
+    import { avatarThumb } from '../lib/avatar.js';
     import { chatHeaderHandlers } from '../lib/chatpane.svelte.js';
     import { pinsState, pinsEls } from '../lib/pins.svelte.js';
     import { wallpaperState } from '../lib/wallpaper.svelte.js';
@@ -32,7 +33,7 @@
             name = 'Notes';
         } else if (group) {
             name = H.communityChatTitle(chat) || `Group ${id.substring(0, 10)}...`;
-            avatarSrc = chat.metadata?.avatar_cached ? H.convertFileSrc(chat.metadata.avatar_cached) : null;
+            avatarSrc = chat.metadata?.avatar_cached ? H.convertFileSrc(avatarThumb(chat.metadata.avatar_cached)) : null;
             click = () => H.openCommunity(chat);
         } else {
             name = H.getName(profile || id);

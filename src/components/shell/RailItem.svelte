@@ -2,6 +2,7 @@
     // One rail shortcut. Reads its own chat/profile/community signals, so a change in
     // any other chat leaves this node untouched.
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
+    import { avatarThumb } from '../lib/avatar.js';
     import Avatar from '../ui/Avatar.svelte';
     import { reorderable } from '../lib/reorder.js';
 
@@ -27,7 +28,7 @@
             name,
             twemoji: isCommunity || !!(profile?.nickname || profile?.name),
             src: isCommunity
-                ? (chat.metadata?.avatar_cached ? h.convertFileSrc(chat.metadata.avatar_cached) : null)
+                ? (chat.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(chat.metadata.avatar_cached)) : null)
                 : h.getProfileAvatarSrc(profile) || null,
             unread,
             pings,

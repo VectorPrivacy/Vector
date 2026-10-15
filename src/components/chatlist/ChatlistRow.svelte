@@ -1,5 +1,6 @@
 <script>
     import { markedChatId } from '../lib/signals.svelte.js';
+    import { avatarThumb } from '../lib/avatar.js';
     import { shellState } from '../lib/shell.svelte.js';
     // One chat row.
     //
@@ -134,7 +135,7 @@
 >
     <div style:position="relative">
         {#if vm.isGroup}
-            <Avatar src={vm.chat.metadata?.avatar_cached ? h.convertFileSrc(vm.chat.metadata.avatar_cached) : null} size={50} group />
+            <Avatar src={vm.chat.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(vm.chat.metadata.avatar_cached)) : null} size={50} group />
         {:else}
             <Avatar src={h.getProfileAvatarSrc(vm.profile)} size={50} />
         {/if}

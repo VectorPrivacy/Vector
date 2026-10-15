@@ -3,6 +3,7 @@
     // communities stacked beneath it, on a band of the folder's colour, while open.
     // Shut, it carries its members' unread so nothing inside goes quiet unnoticed.
     import { chatVersion, communityVersion } from '../lib/signals.svelte.js';
+    import { avatarThumb } from '../lib/avatar.js';
     import { railFolderOpen, toggleRailFolder } from '../lib/rail.svelte.js';
     import { reorderable } from '../lib/reorder.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -28,7 +29,7 @@
             if (tiles.length < 4) {
                 tiles.push({
                     id: chat.id,
-                    src: chat.metadata?.avatar_cached ? h.convertFileSrc(chat.metadata.avatar_cached) : null,
+                    src: chat.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(chat.metadata.avatar_cached)) : null,
                 });
             }
         }

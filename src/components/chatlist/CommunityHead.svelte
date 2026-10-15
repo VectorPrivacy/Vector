@@ -3,6 +3,7 @@
     // name, member count, raid pip. Derives from the pane's community and that
     // community's signal, so a count landing or a rename repaints one span.
     import { untrack } from 'svelte';
+    import { avatarThumb } from '../lib/avatar.js';
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -18,7 +19,7 @@
             id,
             primary,
             name: cf.name || 'Community',
-            avatarSrc: primary?.metadata?.avatar_cached ? h.convertFileSrc(primary.metadata.avatar_cached) : null,
+            avatarSrc: primary?.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(primary.metadata.avatar_cached)) : null,
             members: h.communityMemberSubtext(id),
             raid: h.raidAlert(id),
         };

@@ -2,6 +2,13 @@
 // A thumb that is not there yet (a cache still being backfilled) falls back to the original.
 const THUMBS = /avatars(%2F|%5C|[\\/])thumbs\1/i;
 
+/** `.../avatars/<file>` → `.../avatars/thumbs/<file>`: the 160 px still a small face decodes
+ *  instead of the original (Avatar falls back to the original until it exists). */
+export function avatarThumb(path) {
+    const m = path?.match(/^(.*[\\/])avatars([\\/])([^\\/]+)$/);
+    return m ? `${m[1]}avatars${m[2]}thumbs${m[2]}${m[3]}` : path;
+}
+
 export function avatarFallback(src) {
     if (!src) return null;
     // Vector Web without a service worker hands out placeholders that name no path.
