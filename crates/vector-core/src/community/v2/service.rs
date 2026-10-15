@@ -2396,14 +2396,9 @@ fn fold_members(
         }
     }
 
-    // Snapshot authority (CORD-02 §5): a refounding rolls `root_epoch` and re-seeds the
-    // new epoch's Guestbook with a 3312 snapshot of the survivors. Only the OWNER's snapshot is
-    // honored here, so a silent survivor stays in the memberlist across an owner refound
-    // without re-posting. A genesis community (root_epoch 0) has no refounder, hence no
-    // snapshot power. KNOWN GAP (do not "fix" unilaterally — CORD-04/06 + Armada): the refound
-    // send/receive gates authorize any BAN-holder to refound, but their snapshot is NOT honored
-    // here, so a non-owner admin's refound drops silent survivors (incl. migration roster seeds)
-    // until they re-post. Binding the minting rotator into snapshot authority is a spec change.
+    // Snapshot authority (CORD-02 §5): the npub whose verified Refounding minted the current
+    // epoch — an admin's or a bot's as much as the owner's — so its survivors stay members
+    // without re-posting. Genesis has no refounder, hence no snapshot power.
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let snapshot_authority = snapshot_authority_pk.as_ref();
     // Kick authority (CORD-04 §5/§6): the signer must cite a Grant we've synced AND
@@ -3541,6 +3536,26 @@ fn join_material(community: &CommunityV2) -> super::list::JoinMaterial {
     }
 }
 
+/// Our rebuild of a snapshot, keeping what another client wrote into the SAME one.
+/// A rebuild knows only our fields, and an epoch tie seats the lower-sorting snapshot
+/// whole, so a local edit would otherwise shed a peer's fields — Armada's channel
+/// `priors` are retired keys — on every device (CORD-02 §8 round-trip). Same epoch
+/// only: across a rotation we author a new snapshot rather than edit theirs.
+fn keep_peer_unknowns(mut ours: super::list::JoinMaterial, theirs: Option<&super::list::JoinMaterial>) -> super::list::JoinMaterial {
+    let Some(theirs) = theirs.filter(|t| t.root_epoch == ours.root_epoch) else { return ours };
+    for (k, v) in &theirs.extra {
+        ours.extra.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    for ch in &mut ours.channels {
+        if let Some(peer) = theirs.channels.iter().find(|c| c.id == ch.id && c.epoch == ch.epoch) {
+            for (k, v) in &peer.extra {
+                ch.extra.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    ours
+}
+
 /// Rebuild an invite bundle from list join material, for a cross-device rehydrate
 /// (the material IS the membership subset of a bundle). The owner root is still
 /// verified over the network before the community is trusted (accept_bundle).
@@ -3718,6 +3733,14 @@ async fn read_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String])
     }
     if newest.is_empty() {
         return Ok(FragRead { set: None, answered, unreadable: blocking > 0 });
+    }
+    // Fragment-level unknowns belong to the List, not the version fold: each index
+    // speaks through its newest copy, and the lowest index wins a key (CORD-02 §8).
+    list.extra = Default::default();
+    for (_, _, frag) in newest.values() {
+        for (k, v) in &frag.extra {
+            list.extra.entry(k.clone()).or_insert_with(|| v.clone());
+        }
     }
     // The newest fragment governs `frags`; an age tie resolves to the LARGER count
     // (CORD-02 §8) — too large reads an index that turns out empty, too small sends
@@ -4044,7 +4067,10 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
                 held_since
             };
             let jm = join_material(&c);
-            local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed: jm.clone(), current: jm, added_at, extra: Default::default() });
+            let theirs = remote.entries.iter().find(|e| e.community_id == cid_hex);
+            let current = keep_peer_unknowns(jm.clone(), theirs.map(|e| &e.current));
+            let seed = keep_peer_unknowns(jm, theirs.map(|e| &e.seed));
+            local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed, current, added_at, extra: Default::default() });
         }
         let merged = remote.merge(&local).merge(&pending_tombstones());
         // No whole-list cap: fragmentation is what keeps each event publishable,
@@ -12793,6 +12819,110 @@ mod tests {
         assert!(!set.is_complete(), "index 2 is unread, so the set refuses to write");
     }
 
+    fn ext(pairs: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        pairs.as_object().expect("an object").clone()
+    }
+
+    #[tokio::test]
+    async fn fragment_level_unknowns_resolve_to_the_lowest_index_whatever_their_ages() {
+        // CORD-02 §8: fragment-level unknowns belong to the List, and where two
+        // fragments carry one key the LOWEST index wins. Age decides which copy of an
+        // index speaks, never which index outranks another.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relays = vec!["wss://r".to_string()];
+        let at = now_ms() / 1000;
+        let frag = |v: &str| super::super::list_frag::FragList { frags: 2, entries: vec![], tombstones: vec![], extra: ext(serde_json::json!({ "x-ext": v })) };
+        // Both age orders: the higher index newer, then older.
+        for (age0, age1) in [(at, at + 5), (at + 5, at)] {
+            let relay = MemoryRelay::new();
+            for (index, value, age) in [(0usize, "zero", age0), (1usize, "one", age1)] {
+                let e = super::super::list_frag::build_fragment_event_keys(&owner, &frag(value), index, age).unwrap();
+                relay.publish(&e, &relays).await.unwrap();
+            }
+            let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+            assert_eq!(
+                set.list.extra.get("x-ext"),
+                Some(&serde_json::json!("zero")),
+                "index 0 wins at ages ({age0}, {age1})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_newer_copy_of_a_fragment_edits_its_unknown_field() {
+        // Within ONE index the newest copy is the fragment (relays resolve the
+        // coordinate the same way), so an unknown field edited by its own client
+        // sticks, whatever order the relay serves the copies in.
+        let (_tmp, _guard, owner) = init_test_db();
+        let at = now_ms() / 1000;
+        let frag = |v: &str| super::super::list_frag::FragList { frags: 1, entries: vec![], tombstones: vec![], extra: ext(serde_json::json!({ "x-ext": v })) };
+        // Two relays disagreeing on the copy — the shape every version-merge reads —
+        // with the stale copy on each side in turn.
+        let relays = vec!["wss://a".to_string(), "wss://b".to_string()];
+        for stale_on_first in [true, false] {
+            let relay = MemoryRelay::new();
+            let (stale_at, fresh_at) = if stale_on_first { (&relays[0], &relays[1]) } else { (&relays[1], &relays[0]) };
+            for (value, age, on) in [("old", at, stale_at), ("new", at + 5, fresh_at)] {
+                let e = super::super::list_frag::build_fragment_event_keys(&owner, &frag(value), 0, age).unwrap();
+                relay.publish(&e, std::slice::from_ref(on)).await.unwrap();
+            }
+            let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+            assert_eq!(set.list.extra.get("x-ext"), Some(&serde_json::json!("new")), "the newest copy speaks for index 0");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_republish_keeps_a_peer_clients_unknown_fields_when_a_known_field_changed() {
+        // The List is the member's vault (CORD-02 §8): a republish rebuilds each
+        // snapshot from local state, and if that rebuild sheds what another client
+        // wrote — Armada's channel `priors` are retired keys — the material is gone on
+        // every device. The trap is the same-epoch tiebreak: once a KNOWN field also
+        // differs (a rename, a new key), the whole lower-sorting snapshot wins, and a
+        // bare local rebuild that sorts lower takes nothing of the peer's with it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Alpha", relays.clone(), None).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&relay, &held, "alpha-ch").await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let key = held.channel(&ch).and_then(|c| c.key).unwrap();
+        let b64 = |b: &[u8; 32]| crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(b);
+
+        // A peer client's write of fragment 0: this channel listed under its own
+        // label, and its own fields at every level. Its channel name sorts ABOVE
+        // ours, so our rebuild out-sorts its snapshot at the first key.
+        let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+        let mut frag = set.read_frags.get(&0).unwrap().clone();
+        frag.extra.insert("frag-ext".into(), serde_json::json!(true));
+        let entry = frag.entries.first_mut().unwrap();
+        entry.extra.insert("entry-ext".into(), serde_json::json!(1));
+        entry.current.extra.insert("zz-ext".into(), serde_json::json!({ "held": "root" }));
+        entry.current.channels = vec![super::super::list_frag::FragChannel {
+            id: b64(&ch.0),
+            key: Some(b64(&key)),
+            epoch: 1,
+            name: "zeta-ch".into(),
+            extra: ext(serde_json::json!({ "priors": [{ "epoch": 0, "key": "retired" }] })),
+        }];
+        // Everywhere the List lives: a stale copy left on any relay is a separate
+        // hazard.
+        let e = super::super::list_frag::build_fragment_event_keys(&owner, &frag, 0, set.created_at[&0] + 1).unwrap();
+        relay.publish(&e, &list_read_relays(&[]).await).await.unwrap();
+
+        republish_community_list(&relay, None).await.unwrap();
+        let after = fetch_fragments(&relay, &relays).await.unwrap().unwrap().list;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let entry = after.entries.iter().find(|e| e.community_id == cid_hex).unwrap();
+        assert_eq!(entry.current.extra.get("zz-ext"), Some(&serde_json::json!({ "held": "root" })), "snapshot unknowns survive");
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let kept = entry.current.channels.iter().find(|c| c.id == ch_hex).unwrap();
+        assert_eq!(kept.name, "alpha-ch");
+        assert_eq!(kept.extra.get("priors"), Some(&serde_json::json!([{ "epoch": 0, "key": "retired" }])), "channel unknowns survive");
+        assert_eq!(entry.extra.get("entry-ext"), Some(&serde_json::json!(1)), "entry unknowns survive");
+        assert_eq!(after.extra.get("frag-ext"), Some(&serde_json::json!(true)), "fragment unknowns survive");
+    }
+
     /// Aggregate fetches answer from the healthy relay; asked alone, the dead
     /// relay errors — the partial-failure shape a boot read can't see through.
     struct HalfDeaf<'a>(&'a MemoryRelay, String);
@@ -13381,6 +13511,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_adopted_rotations_minter_owns_the_epochs_snapshot_not_the_owner() {
+        // CORD-02 §5: a snapshot is honored "only from the npub whose Refounding
+        // minted that epoch". The minter must come from the rotation this device
+        // verified and adopted, and once an admin minted the epoch the OWNER holds no
+        // snapshot power over it — or the owner could re-seed members the admin cut.
+        let (bed, owner, me) = TestBed::new();
+        let admin = Keys::generate();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Minter", bed.relays.clone(), None).await.unwrap();
+        let rid = "b7".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        publish_base_rotation(&bed.relay, &joined, &admin, &[owner.keys.public_key(), me.keys.public_key()], &[0xC8; 32], &joined.community_root).await;
+        let at_1 = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated.expect("adopted");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        assert_eq!(
+            epoch_minters(&cid_hex).get(&1).map(String::as_str),
+            Some(admin.public_key().to_hex().as_str()),
+            "adoption records the verified rotator as the epoch's minter"
+        );
+
+        // A member the admin's containment cut, and the owner trying to re-seed them.
+        let cut = Keys::generate().public_key();
+        let survivors = vec![owner.keys.public_key(), me.keys.public_key()];
+        let snapshot = |by: PublicKey, members: Vec<PublicKey>, id: u8, at_ms: u64| guestbook::GuestbookEvent {
+            epoch: Some(1), observed_at: None, rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Snapshot { refounder: by, members, snapshot_id: [id; 32], chunk: (1, 1), at_ms },
+        };
+        let events = vec![
+            guestbook::GuestbookEvent {
+                epoch: Some(0), observed_at: None, rumor_id: [0x61; 32],
+                entry: guestbook::GuestbookEntry::Join { member: cut, invited_by: None, at_ms: 1_000 },
+            },
+            snapshot(admin.public_key(), survivors, 0x62, 5_000),
+            snapshot(owner.keys.public_key(), vec![cut], 0x63, 6_000),
+        ];
+        crate::db::community::set_guestbook(&cid_hex, &events, 6).unwrap();
+        let members = stored_memberlist(&at_1).unwrap();
+        assert!(!members.contains(&cut), "the owner's snapshot holds no power over an epoch the admin minted");
+        assert!(members.contains(&me.keys.public_key()), "the minter's survivors stay members");
+    }
+
+    #[tokio::test]
     async fn adopting_a_severing_rotation_revokes_my_own_links_instead_of_refreshing_them() {
         // The inverse of the sibling test: a SEVERING refound flips the stable-URL
         // contract. A raid arrives through the door, so every creator's client
@@ -13569,6 +13748,38 @@ mod tests {
             "once a relay answers, the rotation it was holding is adopted — the earlier \
              silence was never evidence",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_short_rekey_page_ends_the_walk_only_when_every_relay_answered() {
+        // A short page reads as "the plane ends here" — true only if nobody was left
+        // out. With a relay unheard, the rotation may sit just past the page, and
+        // stopping there parks the member on a dead epoch.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        for (fault, expect_found) in [(Fault::ShortUnconfirmed(3), true), (Fault::ShortPage(3), false)] {
+            let relay = AdversarialRelay::new();
+            let community = create_community(relay.relay(), "Pager", bed.relays.clone(), None).await.unwrap();
+            // The genuine rotation, OLDER than everything served on the first page.
+            publish_base_rotation(relay.relay(), &community, &owner.keys, &[owner.keys.public_key()], &[0xA1; 32], &community.community_root).await;
+            let plane = base_rekey_group_key(&community.community_root, community.id(), Epoch(1));
+            for ts in 2_001..=2_005u64 {
+                let rumor = stream::build_rumor_secs(1, owner.keys.public_key(), "noise", vec![], ts);
+                let seal = stream::build_seal(&rumor, stream::SealForm::Encrypted, &plane, &owner.keys).unwrap();
+                let (wrap, _) = stream::wrap_seal(&seal, &plane, stream::KIND_WRAP, Timestamp::from_secs(ts)).unwrap();
+                relay.relay().publish(&wrap, &community.relays).await.unwrap();
+            }
+            let label = format!("{fault:?}");
+            relay.on(Match::author(&plane.pk_hex()).nth(1), fault);
+            let chunks = fetch_rekey_chunks(&relay, &community.relays, &plane).await.unwrap();
+            assert_eq!(
+                chunks.iter().any(|c| c.rotator == owner.keys.public_key()),
+                expect_found,
+                "{label}: the walk {} past a short first page",
+                if expect_found { "pages on" } else { "stops" }
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

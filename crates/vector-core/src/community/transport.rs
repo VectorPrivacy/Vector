@@ -468,6 +468,30 @@ fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: boo
     })
 }
 
+/// The relays a plane read asks. A tripped relay is skipped to spare its dead
+/// timeout, unless that would leave nobody to ask — but it stays in the reachable
+/// set, unanswered, so a read that skipped one never claims full coverage.
+struct PlaneTargets {
+    ask: Vec<String>,
+    skipped: usize,
+}
+
+fn plane_targets(relays: Vec<String>, tripped: impl Fn(&str) -> bool) -> PlaneTargets {
+    let ask: Vec<String> = relays.iter().filter(|r| !tripped(r)).cloned().collect();
+    if ask.is_empty() {
+        return PlaneTargets { ask: relays, skipped: 0 };
+    }
+    let skipped = relays.len() - ask.len();
+    PlaneTargets { ask, skipped }
+}
+
+impl PlaneTargets {
+    /// The read's coverage, over the `asked` relays still standing after dead sockets left.
+    fn fetched(&self, events: Vec<Event>, answered: usize, asked: usize) -> PlaneFetch {
+        PlaneFetch { events, answered, attempted: asked + self.skipped }
+    }
+}
+
 /// Callers own their evidence tier. The chat plane is flat, linear data — an
 /// event exists or it doesn't — so no transport floor promotes its reads.
 /// Every site that draws a completeness-sensitive conclusion from an `until`
@@ -1308,10 +1332,8 @@ impl Transport for LiveTransport {
         // trip them early, so by the time a v2 backfill runs they're usually
         // marked). Keep all if that would leave none — a slow fetch beats no fetch.
         let relays = drop_refused(relays.to_vec())?;
-        let mut targets: Vec<String> = relays.iter().filter(|r| !breaker_tripped(r)).cloned().collect();
-        if targets.is_empty() {
-            targets = relays.to_vec();
-        }
+        let selected = plane_targets(relays, breaker_tripped);
+        let targets = selected.ask.clone();
         let filter = query.to_filter();
         let generation = crate::db::current_session_id();
         let key = plane_pool_key(&plane.public_key().to_hex(), &targets);
@@ -1406,7 +1428,7 @@ impl Transport for LiveTransport {
             return Err(format!("no relay answered the plane fetch (0/{} attempted)", targets.len()));
         }
         // The client stays POOLED (not disconnected) for the next page/epoch/community.
-        Ok(PlaneFetch { events: result, answered: successes, attempted: targets.len() })
+        Ok(selected.fetched(result, successes, targets.len()))
     }
 
     async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
@@ -1704,6 +1726,9 @@ pub(crate) mod adversarial {
         ShortPage(usize),
         /// Succeed, but serve nothing at all — a relay silently withholding.
         Empty,
+        /// Serve at most `n` events from the relays that answered, while another
+        /// stayed silent: a short page that is NOT the end of the plane.
+        ShortUnconfirmed(usize),
     }
 
     /// Which fetches a rule applies to. Matched against the query, so a plan can
@@ -1799,25 +1824,23 @@ pub(crate) mod adversarial {
             None
         }
 
-        async fn governed(&self, query: &Query, relays: &[String], plane: Option<&Keys>) -> Result<Vec<Event>, String> {
+        /// The served events, and whether every relay answered.
+        async fn governed(&self, query: &Query, relays: &[String], plane: Option<&Keys>) -> Result<(Vec<Event>, bool), String> {
             self.fetches.fetch_add(1, Ordering::Relaxed);
-            match self.verdict(query) {
+            let short = match self.verdict(query) {
                 Some(Fault::FailFetch(why)) => return Err(why),
-                Some(Fault::Empty) => return Ok(Vec::new()),
-                Some(Fault::ShortPage(n)) => {
-                    let mut out = match plane {
-                        Some(p) => self.inner.fetch_plane(p, query, relays).await?.events,
-                        None => self.inner.fetch(query, relays).await?,
-                    };
-                    out.truncate(n);
-                    return Ok(out);
-                }
-                None => {}
-            }
-            match plane {
-                Some(p) => self.inner.fetch_plane(p, query, relays).await.map(|f| f.events),
-                None => self.inner.fetch(query, relays).await,
-            }
+                Some(Fault::Empty) => return Ok((Vec::new(), true)),
+                Some(Fault::ShortPage(n)) => Some((n, true)),
+                Some(Fault::ShortUnconfirmed(n)) => Some((n, false)),
+                None => None,
+            };
+            let mut out = match plane {
+                Some(p) => self.inner.fetch_plane(p, query, relays).await?.events,
+                None => self.inner.fetch(query, relays).await?,
+            };
+            let Some((n, complete)) = short else { return Ok((out, true)) };
+            out.truncate(n);
+            Ok((out, complete))
         }
     }
 
@@ -1830,13 +1853,14 @@ pub(crate) mod adversarial {
             self.inner.publish_durable(event, relays).await
         }
         async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
-            self.governed(query, relays, None).await
+            self.governed(query, relays, None).await.map(|(events, _)| events)
         }
         async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String> {
             // `Empty` answers with nothing (coverage intact, so absence is real)
             // while `FailFetch` propagates an Err (nobody answered, so absence is
             // unproven) — the exact distinction the coverage field carries.
-            Ok(PlaneFetch::whole(self.governed(query, relays, Some(plane)).await?))
+            let (events, complete) = self.governed(query, relays, Some(plane)).await?;
+            Ok(if complete { PlaneFetch::whole(events) } else { PlaneFetch { events, answered: 1, attempted: 2 } })
         }
     }
 }
@@ -1844,6 +1868,45 @@ pub(crate) mod adversarial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Plane read coverage ───────────────────────────────────────────────────
+
+    fn urls(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("wss://r{i}")).collect()
+    }
+
+    #[test]
+    fn a_plane_read_that_skipped_a_tripped_relay_does_not_claim_full_coverage() {
+        // A skipped relay was never asked, so whatever it holds is unseen: the read
+        // may RETURN early, but it must not report every relay as having answered.
+        let sel = plane_targets(urls(3), |r| r == "wss://r1");
+        assert_eq!(sel.ask, vec!["wss://r0".to_string(), "wss://r2".to_string()], "the tripped relay is spared");
+        let read = sel.fetched(Vec::new(), 2, sel.ask.len());
+        assert_eq!((read.answered, read.attempted), (2, 3), "the skipped relay stays in the denominator");
+        assert!(!read.is_complete(), "an empty answer from the asked relays is not proof of absence");
+    }
+
+    #[test]
+    fn a_plane_read_with_nothing_tripped_or_everything_tripped_asks_everyone() {
+        let none = plane_targets(urls(3), |_| false);
+        assert_eq!((none.ask.len(), none.skipped), (3, 0));
+        assert!(none.fetched(Vec::new(), 3, 3).is_complete(), "every relay asked and answered IS full coverage");
+        // Skipping every relay would ask nobody: ask them all rather than return nothing.
+        let all = plane_targets(urls(3), |_| true);
+        assert_eq!((all.ask.len(), all.skipped), (3, 0));
+        assert!(all.fetched(Vec::new(), 3, 3).is_complete());
+    }
+
+    #[test]
+    fn a_dead_socket_leaves_the_denominator_but_a_tripped_relay_does_not() {
+        // A dead socket can't answer this call at all, so it was never reachable;
+        // a tripped relay merely answered badly lately and may hold the event.
+        let sel = plane_targets(urls(4), |r| r == "wss://r3");
+        let after_dead_sockets = sel.ask.len() - 1;
+        let read = sel.fetched(Vec::new(), after_dead_sockets, after_dead_sockets);
+        assert_eq!(read.attempted, 3, "asked minus the dead socket, plus the tripped relay");
+        assert!(!read.is_complete());
+    }
 
     // ── Plane pool ────────────────────────────────────────────────────────────
 
