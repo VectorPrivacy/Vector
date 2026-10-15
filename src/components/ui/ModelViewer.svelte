@@ -103,6 +103,7 @@
                     {/if}
                 </button>
                 <input class="model-viewer-scrub" type="range" min="0" max={duration} step="0.01" value={time}
+                       style:--pos={duration ? Math.min(time / duration, 1) : 0}
                        aria-label="Animation position" oninput={(e) => scrub(Number(e.currentTarget.value))}>
                 <span class="model-viewer-time">{fmt(time)} / {fmt(duration)}</span>
                 <button class="model-viewer-speed" aria-label="Speed" onclick={cycleSpeed}>{speed}×</button>
@@ -183,10 +184,48 @@
     .model-viewer-speed { min-width: 44px; padding: 0 8px; font-size: 13px; font-variant-numeric: tabular-nums; }
     .model-viewer-play:hover,
     .model-viewer-speed:hover { background: rgba(255, 255, 255, 0.16); }
+    /* Drawn here, not by the platform: the fill ends at the handle's centre, which travels
+       from half a handle in to half a handle short of the end. */
     .model-viewer-scrub {
+        --thumb: 16px;
         flex: 1;
         min-width: 60px;
-        accent-color: var(--icon-color-primary, #59fcb3);
+        height: var(--thumb);
+        margin: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        background: transparent;
+        cursor: pointer;
+    }
+    .model-viewer-scrub::-webkit-slider-runnable-track {
+        height: 6px;
+        border-radius: 3px;
+        background: linear-gradient(to right,
+            var(--icon-color-primary, #59fcb3) calc(var(--pos) * (100% - var(--thumb)) + var(--thumb) / 2),
+            rgba(255, 255, 255, 0.18) 0);
+    }
+    .model-viewer-scrub::-moz-range-track {
+        height: 6px;
+        border-radius: 3px;
+        background: linear-gradient(to right,
+            var(--icon-color-primary, #59fcb3) calc(var(--pos) * (100% - var(--thumb)) + var(--thumb) / 2),
+            rgba(255, 255, 255, 0.18) 0);
+    }
+    .model-viewer-scrub::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: var(--thumb);
+        height: var(--thumb);
+        margin-top: -5px;
+        border: none;
+        border-radius: 50%;
+        background: #fff;
+    }
+    .model-viewer-scrub::-moz-range-thumb {
+        width: var(--thumb);
+        height: var(--thumb);
+        border: none;
+        border-radius: 50%;
+        background: #fff;
     }
     .model-viewer-time {
         flex-shrink: 0;
