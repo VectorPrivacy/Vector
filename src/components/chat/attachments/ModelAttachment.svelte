@@ -10,6 +10,7 @@
     let phase = $state('loading');
     let error = $state('');
     let animated = $state(false);
+    let clips = $state([]);
     // No viewer here after all: the file alone, as anywhere else.
     let fallback = $state(false);
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
@@ -24,7 +25,7 @@
             view = engine.createView(canvas, {
                 url: h.assetUrl(att.path),
                 ext: (att.extension || '').toLowerCase(),
-                onState: (s) => { phase = s.phase; error = s.text || ''; animated = !!s.animated; },
+                onState: (s) => { phase = s.phase; error = s.text || ''; animated = !!s.animated; clips = s.clips || []; },
                 onTap: () => h.openModel(att),
             });
         }).catch(() => { if (live) fallback = true; });
@@ -43,7 +44,16 @@
         {:else if phase === 'error'}
             <span class="model3d-note is-error">{error}</span>
         {:else}
+            <div class="model3d-top">
             <span class="model3d-badge">3D</span>
+            <!-- More than one animation: say which plays here, and that full screen has the rest. -->
+            {#if clips.length > 1}
+                <button type="button" class="model3d-clip" title="{clips.length} animations: open to choose" onclick={() => h.openModel(att)}>
+                    <span class="model3d-clip-name">{clips[0].name}</span>
+                    <span class="model3d-clip-more">+{clips.length - 1}</span>
+                </button>
+            {/if}
+            </div>
             <div class="model3d-tools">
                 {#if animated}
                     <button type="button" class="model3d-btn" title={playing ? 'Pause' : 'Play'} onclick={togglePlay}>
@@ -111,19 +121,46 @@
         pointer-events: none;
     }
     .model3d-note.is-error { color: rgba(255, 140, 117, 0.9); }
-    .model3d-badge {
+    .model3d-top {
         position: absolute;
         top: 8px;
         left: 8px;
-        padding: 2px 7px;
+        right: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        pointer-events: none;
+    }
+    .model3d-badge {
+        display: flex;
+        align-items: center;
+        height: 22px;
+        padding: 0 7px;
         border-radius: 6px;
         background: rgba(0, 0, 0, 0.45);
         color: rgba(255, 255, 255, 0.75);
         font-size: 11px;
         font-weight: 700;
         letter-spacing: 0.06em;
-        pointer-events: none;
     }
+    .model3d-clip {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 22px;
+        padding: 0 8px;
+        border: none;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.45);
+        color: rgba(255, 255, 255, 0.85);
+        font-size: 12px;
+        cursor: pointer;
+        pointer-events: auto;
+    }
+    .model3d-clip:hover { background: rgba(0, 0, 0, 0.65); }
+    .model3d-clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model3d-clip-more { flex-shrink: 0; color: rgba(255, 255, 255, 0.5); font-variant-numeric: tabular-nums; }
     .model3d-tools {
         position: absolute;
         right: 8px;
