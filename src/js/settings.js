@@ -1290,9 +1290,8 @@ async function initSettings() {
 
     await initNotificationSettings();
 
-    // Pre-fetch logs so clipboard.writeText runs synchronously on click (user gesture required)
+    // Logs are fetched when Settings opens, so Copy writes them inside the click.
     window._cachedLogs = '';
-    invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
 
     // Initialize battery / background service settings (mobile only)
     if (platformFeatures.is_mobile) {
