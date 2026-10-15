@@ -15493,40 +15493,54 @@ button.popout-thumb {
   font-size: 16px;
 }
 
-/* Shown only on preview builds; `display` is toggled to block from JS. */
-.update-preview-notice {
-  margin-bottom: 15px;
-  padding: 12px 14px;
-  text-align: left;
+/* Current Version: the label and its (i) on the left, the build and its standing on the right. */
+.upd-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  margin-bottom: 10px;
+}
+.upd-version-label,
+.upd-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #fff;
+  font-size: 16px;
+}
+.upd-version-label .icon {
+  position: relative;
+  inset: auto;
+  flex-shrink: 0;
+}
+/* White over the themes' accent: the badge beside it carries the standing. */
+.upd-version #current-version { color: #fff; }
+.upd-badge {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+/* margin-top too: there's no global `p` reset. */
+.upd-card {
+  margin: 0 0 16px !important;
+  padding: 14px 20px;
+  border: 1px solid #2c2c2c;
   border-radius: 8px;
-  background-color: var(--danger-color-hover);
-  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
-}
-
-/* Rides the text baseline so it reads as the first word, not a gutter icon. */
-.update-preview-notice .warning-icon {
-  vertical-align: -3px;
-  margin-right: 6px;
-}
-
-/* margin-top too: there's no global `p` reset, so the UA's 1em block-start
-   would otherwise stack on top of the card's own padding. */
-.update-preview-notice p {
-  margin-top: 0;
-  margin-bottom: 8px;
-  font-size: 13px;
+  color: #b2b2b2;
+  font-size: 14px !important;
   line-height: 1.45;
-  opacity: 0.85;
+  text-align: left;
 }
-
-.update-preview-notice p:last-child {
-  margin-bottom: 0;
-}
-
-.update-preview-notice strong {
+/* The design draws the 17x16 glyph a quarter up, level with the 22px badges. */
+.upd-badge.preview {
+  width: 21px;
+  height: 20px;
   color: var(--danger-color);
-  opacity: 1;
 }
+.upd-lead.latest { color: #59fcb3; }
+.upd-lead.preview { color: var(--danger-color); }
 
 #check-updates-btn {
   margin: 0 auto;
@@ -25755,12 +25769,6 @@ body.profile-switcher-editing .profile-switcher-add {
 
 /* Updates: the version as a row, the action under the rows. */
 .st-page .update-info { text-align: left; }
-.st-page .update-info > p:first-child {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.st-page .update-info > p:first-child > span:first-child { opacity: 1 !important; color: #fff; }
 .st-page #check-updates-btn { margin: 6px 0 0; }
 
 /* Blocked users: the list keeps the column's edges, names at row size. */

@@ -1916,6 +1916,9 @@ body.ws.ws-rail-collapsed .ws-rail-folder .ws-rail-item {
 body.ws .ws-rail-folder-inner {
   overflow-x: visible;
   overflow-y: clip;
+  /* Visible overflow brings back a grid item's min-content floor, which let a long
+     name widen the folder past the rail. */
+  min-width: 0;
 }
 body.ws.ws-rail-collapsed .ws-rail-folder-inner {
   display: flex;

@@ -89,6 +89,7 @@ const updates = $state({
     downloadLabel: 'Download Update',
     betaRow: false,        // the Beta Updates toggle is offered on this install
     beta: false,
+    latest: false,         // the last check found nothing newer
 });
 export function updatesState() { return updates; }
 export function setUpdates(values) { Object.assign(updates, values); }
