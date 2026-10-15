@@ -9,6 +9,18 @@ let qrScanToastGate = false;
 let qrScanTaker = null;
 // The scanner's video element, handed over by the component once it mounts.
 let qrScanVideo = null;
+// The decoder loads with the first scan: it is a quarter megabyte no other screen needs.
+let qrDecoderLoad = null;
+function loadQrDecoder() {
+    qrDecoderLoad ??= new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/js/jsqr.js';
+        s.onload = () => resolve();
+        s.onerror = () => { qrDecoderLoad = null; reject(new Error('QR decoder failed to load')); };
+        document.head.appendChild(s);
+    });
+    return qrDecoderLoad;
+}
 VectorSvelte.setScreen('qrScanner', { h: { video: (el) => { qrScanVideo = el; }, close: () => closeQrScanner() } });
 
 /**
@@ -37,6 +49,12 @@ const QR_SCAN_RESOLUTION = { width: { ideal: 1280 }, height: { ideal: 720 } };
 async function openQrScanner(taker = null) {
     if (qrScanStream) return;
     const video = qrScanVideo;
+    try {
+        await loadQrDecoder();
+    } catch (e) {
+        showToast('Scanner unavailable');
+        return;
+    }
     try {
         qrScanStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: 'environment', ...QR_SCAN_RESOLUTION },
@@ -99,7 +117,7 @@ async function openQrScanner(taker = null) {
         canvas.height = target;
         ctx.drawImage(video, sx, sy, side, side, 0, 0, target, target);
         const img = ctx.getImageData(0, 0, target, target);
-        const hit = jsQR(img.data, target, target, { inversionAttempts: 'attemptBoth' });
+        const hit = window.jsQR(img.data, target, target, { inversionAttempts: 'attemptBoth' });
         if (hit?.data) handleScannedQr(hit.data.trim());
     };
     qrScanRafId = requestAnimationFrame(tick);
