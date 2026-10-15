@@ -7890,8 +7890,9 @@ fn select_authorized(
                 while i > 0 && cands[i - 1].head.version == ver {
                     i -= 1;
                 }
-                // One winner per version: fork siblings can't sidestep the gate.
-                for c in cands[i..hi].iter().rev() {
+                // One winner per version: fork siblings can't sidestep the gate. The
+                // group is inner_id-ASC, so the first admissible is the lowest id.
+                for c in cands[i..hi].iter() {
                     let Some(role) = &c.role else { continue };
                     let ah = c.author.to_hex();
                     let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
@@ -11693,6 +11694,45 @@ mod tests {
         let authority = fold_authority(&community, &fetch_control(&bed.relay, &community).await, &load_floors(&community));
         assert!(authority.roles.is_admin(&victim.to_hex()), "the legit admin survives the forged flood");
         assert_eq!(authority.roles.roles.len(), 1, "only the owner's admin role is authorized; every forgery is dropped");
+    }
+
+    #[tokio::test]
+    async fn a_same_version_role_fork_folds_to_the_lowest_rumor_id_in_any_order() {
+        // CORD-04 §1: two authorized editions tying on version converge on the LOWEST
+        // id — the rule grants, metadata, the persisted floor and Armada all apply.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "RoleFork", bed.relays.clone(), None).await.unwrap();
+        let eid = [0x42u8; 32];
+        let rid = crate::simd::hex::bytes_to_hex_32(&eid);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        let v1 = head_hash_on_relay(&bed.relay, &community, &eid).await.unwrap();
+
+        // The owner on two devices: two v2 editions off the same v1.
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let mut forks: Vec<(&str, [u8; 32])> = Vec::new();
+        for (name, ts) in [("Left", 2_000u64), ("Right", 2_001)] {
+            let mut role = admin_role(&rid, Permissions::ADMIN_ALL);
+            role.name = name.into();
+            let content = crate::community::v2::roles::role_content_json(&role).unwrap();
+            let rumor = control::build_edition_rumor(owner.keys.public_key(), vsk::ROLE, &eid, 2, Some(&v1), &content, ts, None);
+            forks.push((name, rumor.id.unwrap().to_bytes()));
+            let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner.keys, Timestamp::from_secs(ts)).unwrap();
+            bed.relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        let (winner, winner_id) = *forks.iter().min_by_key(|(_, id)| *id).unwrap();
+
+        let editions = fetch_control(&bed.relay, &community).await;
+        let floors = load_floors(&community);
+        let mut reversed = editions.clone();
+        reversed.reverse();
+        for (order, set) in [("served", &editions), ("reversed", &reversed)] {
+            let folded = fold_authority(&community, set, &floors);
+            assert_eq!(folded.roles.role(&rid).unwrap().name, winner, "{order} order folds the lowest-id fork");
+            // The head the floor commits to — and a refound re-wraps — is that same edition.
+            let head = folded.heads.iter().find(|h| h.entity_hex == rid).unwrap();
+            assert_eq!((head.version, head.inner_id), (2, winner_id), "{order} order heads the lowest-id fork");
+        }
     }
 
     /// A canonical (order-independent) fingerprint of an AuthoritySet's authorized
