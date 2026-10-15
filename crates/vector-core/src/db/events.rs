@@ -1994,18 +1994,24 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
         .and_then(|cid| banned_npubs_json(&cid));
     let count: i64 = conn
         .prepare_cached(
-            "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
-             LEFT JOIN events f ON c.unread_from != '' AND f.id = c.unread_from AND f.chat_id = c.id \
-             WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
-               AND (e.npub IS NULL OR e.npub NOT IN ( \
+            // `unread_counts`' anchor for one chat, computed once so the count range-seeks the index.
+            "WITH a AS MATERIALIZED ( \
+                SELECT c.id AS chat_id, MAX( \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?1), 0), \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?2), 0), \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?3), 0), \
+                    COALESCE((SELECT created_at FROM events WHERE c.last_read != '' AND id = c.last_read AND chat_id = c.id), 0) \
+                ) AS anchor_ts, \
+                (SELECT created_at FROM events WHERE c.unread_from != '' AND id = c.unread_from AND chat_id = c.id) AS from_ts \
+                FROM chats c WHERE c.chat_identifier = ?4 \
+             ) \
+             SELECT COUNT(*) FROM a JOIN events e ON e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
+               AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
+             WHERE (e.npub IS NULL OR e.npub NOT IN ( \
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
-               AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5))) \
-               AND e.created_at >= COALESCE(f.created_at, COALESCE(( \
-                     SELECT MAX(e2.created_at) FROM events e2 \
-                     WHERE e2.chat_id = c.id \
-                       AND ((e2.mine = 1 AND e2.kind IN (?1, ?2, ?3)) OR (c.last_read != '' AND e2.id = c.last_read))), 0) + 1)",
+               AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5)))",
         )
         .and_then(|mut stmt| {
             stmt.query_row(
