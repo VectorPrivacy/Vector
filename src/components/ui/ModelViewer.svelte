@@ -3,6 +3,7 @@
     // zoom, double-click to reset. An animated model gets its animations, a scrubber and speed.
     import { modelViewerState, modelViewerHandlers } from '../lib/modelviewer.svelte.js';
     import { loadModelEngine } from '../lib/model3d.js';
+    import Select from './Select.svelte';
     const v = modelViewerState();
     const h = () => modelViewerHandlers();
 
@@ -108,9 +109,8 @@
                 <span class="model-viewer-time">{fmt(time)} / {fmt(duration)}</span>
                 <button class="model-viewer-speed" aria-label="Speed" onclick={cycleSpeed}>{speed}×</button>
                 {#if clips.length > 1}
-                    <select class="model-viewer-clip" aria-label="Animation" value={clip} onchange={(e) => pick(Number(e.currentTarget.value))}>
-                        {#each clips as c, i (i)}<option value={i}>{c.name}</option>{/each}
-                    </select>
+                    <Select class="model-viewer-clip" label="Animation" value={clip} onchange={pick}
+                            options={clips.map((c, i) => ({ value: i, label: c.name }))} />
                 {/if}
             </div>
         {/if}
@@ -233,18 +233,12 @@
         font-size: 12px;
         font-variant-numeric: tabular-nums;
     }
-    .model-viewer-clip {
-        flex-shrink: 1;
+    .model-viewer-anim :global(.vselect.model-viewer-clip) {
+        width: 170px;
+        flex: 0 1 170px;
         min-width: 0;
-        max-width: 160px;
-        height: 32px;
-        padding: 0 8px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 8px;
-        background: #111;
-        color: #fff;
-        font-size: 13px;
     }
+    .model-viewer-anim :global(.model-viewer-clip .vselect-btn) { height: 32px; }
     @media (max-width: 480px) {
         .model-viewer-time { display: none; }
     }
