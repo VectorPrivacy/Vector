@@ -566,6 +566,7 @@ pub async fn fetch_messages<R: Runtime>(
                                 crate::image_cache::migrate_svg_cache(&handle);
                                 crate::image_cache::backfill_animated_cache(&handle);
                                 crate::image_cache::backfill_avatar_thumbs(&handle);
+                                crate::image_cache::backfill_emoji_stills(&handle);
                                 crate::message::files::prune_preview_cache(&handle);
                                 crate::message::files::prune_svg_renders(&handle);
                             })

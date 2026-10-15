@@ -251,14 +251,13 @@ pub fn get_cached_path<R: Runtime>(
     let cache_dir = get_cache_dir(handle, image_type).ok()?;
     let cache_key = url_to_cache_key(url);
 
-    // Check for any file with this cache key (any extension)
-    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-        for entry in entries.flatten() {
-            let filename = entry.file_name();
-            let filename_str = filename.to_string_lossy();
-            if filename_str.starts_with(&cache_key) {
-                return Some(entry.path().to_string_lossy().into_owned());
-            }
+    // Every extension a cache file is written with (the validated formats, their re-encodes,
+    // migrated SVGs), most common first: a stat each, where listing the directory read every
+    // entry of a cache holding thousands, on every lookup.
+    for ext in ["jpg", "png", "webp", "gif", "ico", "svg", "bmp"] {
+        let path = cache_dir.join(format!("{cache_key}.{ext}"));
+        if path.is_file() {
+            return Some(path.to_string_lossy().into_owned());
         }
     }
 
@@ -304,6 +303,11 @@ pub fn precache_image_bytes<R: Runtime>(
     } else {
         (bytes, extension)
     };
+    let still = emoji_still(image_type, bytes);
+    let (bytes, extension) = match &still {
+        Some(s) => (&s.bytes[..], s.extension),
+        None => (bytes, extension),
+    };
 
     // Get cache directory
     let cache_dir = match get_cache_dir(handle, image_type) {
@@ -324,6 +328,18 @@ pub fn precache_image_bytes<R: Runtime>(
 
     let path_str = file_path.to_string_lossy().to_string();
     log_info!("[ImageCache] Pre-cached {:?} {} -> {}", image_type, url, path_str);
+
+    // A small face (a community logo in the rail or the list) reads the thumb, as a
+    // downloaded avatar's does.
+    if image_type == ImageType::Avatar {
+        let bytes = bytes.to_vec();
+        // spawn-detached: global image cache maintenance, no account state
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = write_avatar_thumb(&file_path, &bytes) {
+                log_debug!("[ImageCache] thumb skipped for precached avatar: {}", e);
+            }
+        });
+    }
 
     CacheResult::Cached(path_str)
 }
@@ -541,6 +557,26 @@ async fn cache_image_uncached<R: Runtime>(
         }
     }
 
+    // A still emoji or pack icon is kept at its display size. Blocking pool: a decode.
+    if matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon) {
+        let owned = bytes;
+        // spawn-detached: CPU work on bytes in hand, awaited
+        let (returned, still) = match tokio::task::spawn_blocking(move || {
+            let still = emoji_still(image_type, &owned);
+            (owned, still)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => return CacheResult::Failed(format!("emoji resize task: {e}")),
+        };
+        bytes = returned;
+        if let Some(s) = still {
+            bytes = s.bytes;
+            extension = s.extension;
+        }
+    }
+
     // Get cache directory and create filename
     let cache_dir = match get_cache_dir(handle, image_type) {
         Ok(dir) => dir,
@@ -608,6 +644,63 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
     std::fs::write(&tmp, out.as_deref().unwrap_or(bytes))
         .and_then(|_| std::fs::rename(&tmp, &dest))
         .map_err(|e| format!("thumb write: {e}"))
+}
+
+/// Longest side a still emoji or pack icon is kept at: it shows at most 64 CSS px, and a
+/// picker sheet frame is 56. A 512 px original decoded in full for an 18 px slot was a
+/// megabyte of pixels per icon.
+const EMOJI_STILL_DIM: u32 = 128;
+
+/// A still emoji or pack icon past its display size, re-encoded down to it (PNG keeps alpha).
+/// None leaves the bytes as they are: an animation, another kind, or one already small.
+fn emoji_still(image_type: ImageType, bytes: &[u8]) -> Option<crate::shared::image::EncodedImage> {
+    if !matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon) {
+        return None;
+    }
+    if crate::shared::image::animated_format(bytes).is_some() || vector_core::svg::looks_like_svg(bytes) {
+        return None;
+    }
+    let (w, h) = crate::shared::image::animated_dims(bytes)?;
+    if w.max(h) <= EMOJI_STILL_DIM {
+        return None;
+    }
+    let img = crate::shared::image::decode_image(bytes, EMOJI_STILL_DIM).ok()?;
+    crate::shared::image::compress_image(&img, EMOJI_STILL_DIM, 90).ok()
+}
+
+/// Bring still emojis and pack icons cached at full size down to [`EMOJI_STILL_DIM`], once per
+/// cache directory (a marker remembers it): new ones are sized as they are written.
+/// Returns how many were rewritten.
+pub fn backfill_emoji_stills<R: Runtime>(handle: &AppHandle<R>) -> usize {
+    const SWEPT: &str = ".stills-128";
+    let mut written = 0usize;
+    for image_type in [ImageType::Emoji, ImageType::EmojiPackIcon] {
+        let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
+        let marker = dir.join(SWEPT);
+        if marker.exists() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Some(still) = emoji_still(image_type, &bytes) else { continue };
+            let dest = path.with_extension(still.extension);
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, &still.bytes).and_then(|_| std::fs::rename(&tmp, &dest)).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+            if dest != path {
+                let _ = std::fs::remove_file(&path);
+            }
+            written += 1;
+        }
+        let _ = std::fs::write(&marker, b"");
+    }
+    if written > 0 {
+        log_info!("[ImageCache] backfill: {} emoji stills brought to display size", written);
+    }
+    written
 }
 
 /// Cache files written before SVGs were rendered: each `.svg` is rewritten in place as a render
