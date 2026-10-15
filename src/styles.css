@@ -206,6 +206,10 @@
   mask-image: url("./icons/bookmark.svg");
 }
 
+.icon-bookmark-fill {
+  mask-image: url("./icons/bookmark-fill.svg");
+}
+
 .icon-bot {
   mask-image: url("./icons/bot.svg");
 }
@@ -291,6 +295,10 @@
   mask-image: url("./icons/settings.svg");
 }
 
+.icon-settings-fill {
+  mask-image: url("./icons/settings-fill.svg");
+}
+
 .icon-volume-mute {
   mask-image: url("./icons/volume-mute.svg");
 }
@@ -367,6 +375,10 @@
 
 .icon-grid {
   mask-image: url("./icons/grid.svg");
+}
+
+.icon-grid-fill {
+  mask-image: url("./icons/grid-fill.svg");
 }
 
 .icon-help {

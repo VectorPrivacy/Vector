@@ -36,6 +36,8 @@
      is the app's "this is live/yours" signal, and spending it on every selected
      row leaves nothing to say it with. */
   --ws-active: rgba(255, 255, 255, 0.09);
+  /* A community icon's corner as a share of its side, so it keeps one shape at any size. */
+  --ws-community-radius: calc(100% * 8.5 / 45);
 
   /* The desktop title strip; 0 wherever the OS draws its own (js/chrome.js). */
   --chrome-h: 0px;
@@ -339,6 +341,11 @@ body.ws #chat-bookmarks-btn {
    it hides when there are no invites, which is still true here.) */
 body.ws #settings-btn {
   display: flex !important;
+}
+
+/* The rail's nav glyphs are solid; the mobile tab bar keeps its outlines. */
+body.ws #settings-btn .icon-settings {
+  mask-image: url("./icons/settings-fill.svg");
 }
 
 /* =================== 4. Un-viewporting the pane internals ================ */
@@ -1340,19 +1347,41 @@ body.ws:not(.ws-community-pane) .ws-rail-messages {
 }
 
 body.ws .ws-rail-messages svg {
-  width: 28px;
-  height: 28px;
+  width: 25px;
+  height: 20.5px;
   flex-shrink: 0;
+}
+
+/* Collapsed, the tile is a band the conversation header's height, and its seam
+   runs on from the header's across the rail. */
+body.ws.ws-rail-collapsed #ws-rail-shortcuts {
+  padding-top: 0;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-messages {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 61px;
+  padding: 0;
+  border-bottom: 1px solid var(--ws-seam);
 }
 
 body.ws.ws-rail-collapsed .ws-rail-messages {
   justify-content: center;
   gap: 0;
-  width: 40px;
-  height: 40px;
+  width: 45px;
+  height: 45px;
   padding: 0;
   margin: 0 auto;
-  border-radius: 12px;
+  border-radius: 8.5px;
+}
+
+/* The design's 62x51 glyph at its frame's 1.876 units to the pixel. */
+body.ws.ws-rail-collapsed .ws-rail-messages svg {
+  width: 33px;
+  height: 27px;
 }
 
 body.ws.ws-rail-collapsed .ws-rail-messages-label {
@@ -1440,6 +1469,20 @@ body.ws.ws-rail-collapsed .ws-rail-group-label {
   display: none;
 }
 
+/* The Messages band's own seam closes it, so a rule is drawn only under the DMs. */
+body.ws.ws-rail-collapsed .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
+  margin-top: 6px;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-messages ~ #ws-rail-spaces::before {
+  content: none;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-dms:not([hidden]) ~ #ws-rail-spaces::before {
+  content: "";
+  margin: 6px 16px 0;
+}
+
 /* The seam between the shortcut strip and the nav tabs below it. */
 body.ws #ws-rail-shortcuts {
   border-bottom: 1px solid var(--ws-seam);
@@ -1488,7 +1531,7 @@ body.ws .chatlist-community-head:hover {
 /* Communities read as rounded squares, DMs as circles: a room is not a person.
    ui/Avatar.svelte writes an inline `border-radius: 50%`, hence !important. */
 .ws-rail-item.is-community .ws-rail-item-avatar {
-  border-radius: 8px !important;
+  border-radius: var(--ws-community-radius) !important;
 }
 
 /* White is the resting state: every row in this strip has something waiting in
@@ -1592,11 +1635,6 @@ body.ws.ws-rail-collapsed .ws-rail-item-avatar {
   height: 32px !important;
 }
 
-/* Radius tracks the size, or a 32px tile reads as a circle with corners. */
-body.ws.ws-rail-collapsed .ws-rail-item.is-community .ws-rail-item-avatar {
-  border-radius: 10px !important;
-}
-
 body.ws.ws-rail-collapsed .ws-rail-item-name {
   display: none;
 }
@@ -1627,6 +1665,82 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.is-dot {
 
 body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
   background-color: rgba(255, 255, 255, 0.45);
+}
+
+/* Collapsed communities: the icon is the whole tile, on a dark plate for logos
+   with transparency. Hover and the open community ring the tile from outside.
+   The strip's padding keeps the ring and the badge clear of its clipping edge. */
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 0;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item,
+body.ws.ws-rail-collapsed .ws-rail-ghost {
+  width: 45px;
+  height: 45px;
+  border-radius: var(--ws-community-radius);
+  flex-shrink: 0;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item:hover {
+  background-color: transparent;
+  box-shadow: 0 0 0 3px var(--ws-hover);
+}
+
+/* The open community is marked as the open chat is: a bar on the rail's edge, in
+   both rail states. Every row stands 8px in from the edge when open. */
+body.ws #ws-rail-spaces .ws-rail-item.active {
+  background-color: transparent;
+}
+
+body.ws #ws-rail-spaces .ws-rail-item.active:hover {
+  background-color: var(--ws-hover);
+}
+
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item.active:hover {
+  background-color: transparent;
+}
+
+body.ws #ws-rail-spaces .ws-rail-item::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--icon-color-primary, #59fcb3);
+  opacity: 0;
+  transform: scaleY(0.35);
+  pointer-events: none;
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item::before {
+  left: calc((45px - var(--ws-rail-w)) / 2);
+}
+
+body.ws #ws-rail-spaces .ws-rail-item.active::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-avatar,
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item.is-community .ws-rail-item-avatar,
+body.ws.ws-rail-collapsed .ws-rail-ghost .ws-rail-item-avatar {
+  width: 45px !important;
+  height: 45px !important;
+  border-radius: var(--ws-community-radius) !important;
+  background-color: rgba(9, 9, 9, 0.9);
+}
+
+/* Centred just inside the tile's corner. */
+body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
+  top: -4px;
+  right: -4px;
 }
 
 /* ── Rail arrangement: drag to reorder, drop onto a community to make a folder.
@@ -1721,7 +1835,7 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
-  border-radius: 8px;
+  border-radius: var(--ws-community-radius);
   background-color: color-mix(in srgb, var(--folder-tint) 26%, transparent);
   transition: background-color 0.24s ease;
 }
@@ -1775,19 +1889,34 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
 
 body.ws.ws-rail-collapsed .ws-rail-folder {
   margin: 0 auto;
-  width: 48px;
+  width: 53px;
+  flex-shrink: 0;
 }
 body.ws.ws-rail-collapsed .ws-rail-folder .ws-rail-item {
   margin: 0 auto;
 }
+/* Clipped vertically only, for the fold: the open community's bar reaches out to
+   the rail's edge, past the folder's band. */
+body.ws .ws-rail-folder-inner {
+  overflow-x: visible;
+  overflow-y: clip;
+}
+body.ws.ws-rail-collapsed .ws-rail-folder-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+body.ws.ws-rail-collapsed .ws-rail-folder.is-open .ws-rail-folder-inner {
+  padding: 5px 0 4px;
+}
 body.ws.ws-rail-collapsed .ws-rail-folder-tile {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+  width: 45px;
+  height: 45px;
+  border-radius: var(--ws-community-radius);
 }
 body.ws.ws-rail-collapsed .ws-rail-folder-grid {
-  inset: 4px;
-  gap: 2px;
+  inset: 6px;
+  gap: 3px;
 }
 
 /* Nav rows: icon-left + label, with a neutral pill on the active tab. The row

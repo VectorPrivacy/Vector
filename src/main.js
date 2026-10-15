@@ -2467,7 +2467,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up our static buttons
-    VectorSvelte.mergeShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup, openMiniApps: () => showMarketplacePanel() });
+    VectorSvelte.mergeShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup, openMiniApps: () => showMarketplacePanel(), openBookmarks: () => openChat(strPubkey), myNpub: () => strPubkey });
     VectorSvelte.setAccountHandlers({
         openProfile: () => openProfile(),
         setStatus: askForStatus,
