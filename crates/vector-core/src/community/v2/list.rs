@@ -11,10 +11,11 @@
 //! epoch ever held (the full-history backfill anchor; only ever moves BACKWARD
 //! on merge) and `current` the LATEST (instant reconstruction on a fresh
 //! device; replaced on every Refounding or rename). The merges mirror each
-//! other — `seed` keeps the lower epoch, `current` the higher — and an epoch
-//! TIE breaks on the lexicographically lowest [`canonical_json`] bytes of the
-//! whole join material, a total order so two devices can't flap competing
-//! same-epoch republishes.
+//! other — `seed` keeps the lower epoch, `current` the higher — and within one
+//! epoch the higher `rev` wins, a tie on that breaking on the lexicographically
+//! lowest [`canonical_json`] bytes of the whole join material: a total order, so
+//! two devices can't flap competing same-epoch republishes, in which the latest
+//! write wins rather than whichever copy sorts first.
 //!
 //! Tombstones are per-Community, timestamped, and PERMANENT (pruning would let
 //! a long-offline device resurrect a Community you left). The newest of
@@ -66,11 +67,25 @@ pub struct JoinMaterial {
     #[serde(default)]
     pub relays: Vec<String>,
     pub name: String,
+    /// The snapshot's revision within its epoch: a writer that changes the content
+    /// sets it one past the highest it read, so an epoch tie seats the latest write
+    /// instead of whichever copy sorts first. Absent = 0, and 0 is never written,
+    /// so a List no writer has revised stays byte-identical.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rev: u64,
     /// Round-tripped verbatim: `held_roots`, `refounder`, and anything a peer
     /// client added that this one doesn't model.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
+
+pub(super) fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// The largest revision honoured: JavaScript peers read JSON numbers as doubles,
+/// exact only up to 2^53 − 1. Anything above reads as 0.
+pub const MAX_REV: u64 = (1 << 53) - 1;
 
 /// A private Channel's key reference inside join material (CORD-03). Shape is
 /// pinned to armada's inline `{id,key,epoch,name}` — a mismatch breaks the
@@ -201,10 +216,17 @@ fn material_canonical(jm: &JoinMaterial) -> String {
     canonical_json(&serde_json::to_value(jm).expect("JoinMaterial serializes"))
 }
 
-/// Higher epoch wins; on a tie, the lexicographically lowest canonical bytes.
-fn freshest<'a>(a: &'a JoinMaterial, b: &'a JoinMaterial) -> &'a JoinMaterial {
-    if a.root_epoch != b.root_epoch {
-        return if a.root_epoch > b.root_epoch { a } else { b };
+impl JoinMaterial {
+    /// The revision as merges read it: a value past [`MAX_REV`] counts as 0.
+    pub fn effective_rev(&self) -> u64 {
+        if self.rev > MAX_REV { 0 } else { self.rev }
+    }
+}
+
+/// Within one epoch: the higher revision, then the lowest canonical bytes.
+fn latest_revision<'a>(a: &'a JoinMaterial, b: &'a JoinMaterial) -> &'a JoinMaterial {
+    if a.effective_rev() != b.effective_rev() {
+        return if a.effective_rev() > b.effective_rev() { a } else { b };
     }
     if material_canonical(a) <= material_canonical(b) {
         a
@@ -213,16 +235,20 @@ fn freshest<'a>(a: &'a JoinMaterial, b: &'a JoinMaterial) -> &'a JoinMaterial {
     }
 }
 
-/// Lower epoch wins; on a tie, the lexicographically lowest canonical bytes.
+/// Higher epoch wins; within one, [`latest_revision`].
+fn freshest<'a>(a: &'a JoinMaterial, b: &'a JoinMaterial) -> &'a JoinMaterial {
+    if a.root_epoch != b.root_epoch {
+        return if a.root_epoch > b.root_epoch { a } else { b };
+    }
+    latest_revision(a, b)
+}
+
+/// Lower epoch wins; within one, [`latest_revision`].
 fn earliest<'a>(a: &'a JoinMaterial, b: &'a JoinMaterial) -> &'a JoinMaterial {
     if a.root_epoch != b.root_epoch {
         return if a.root_epoch < b.root_epoch { a } else { b };
     }
-    if material_canonical(a) <= material_canonical(b) {
-        a
-    } else {
-        b
-    }
+    latest_revision(a, b)
 }
 
 fn merge_extra(
@@ -314,6 +340,7 @@ mod tests {
             channels: vec![],
             relays: vec![],
             name: name.to_string(),
+            rev: 0,
             extra: serde_json::Map::new(),
         }
     }
@@ -508,6 +535,82 @@ mod tests {
         assert_eq!(reparsed["entries"][0]["seed"]["held_roots"][0]["epoch"], 1);
         assert_eq!(reparsed["entries"][0]["seed"]["refounder"], "rr");
         assert_eq!(reparsed["entries"][0]["seed"]["weird"], 123);
+    }
+
+    fn revised(mut jm: JoinMaterial, rev: u64) -> JoinMaterial {
+        jm.rev = rev;
+        jm
+    }
+
+    #[test]
+    fn at_an_epoch_tie_the_higher_rev_wins_even_when_it_sorts_later() {
+        // "zzz" sorts after "aaa", so the bytes alone would seat the stale copy for
+        // good: a same-epoch update could only ever land by luck of the alphabet.
+        let old = list(vec![entry("aa", 100, revised(material(5, "aaa"), 1), revised(material(5, "aaa"), 1))], vec![]);
+        let new = list(vec![entry("aa", 100, revised(material(5, "zzz"), 2), revised(material(5, "zzz"), 2))], vec![]);
+        for (order, merged) in [("old+new", old.merge(&new)), ("new+old", new.merge(&old))] {
+            assert_eq!(merged.entries[0].current.name, "zzz", "{order}: the newer revision is current");
+            assert_eq!(merged.entries[0].current.rev, 2);
+            assert_eq!(merged.entries[0].seed.name, "zzz", "{order}: an equal-epoch seed follows the same revision");
+        }
+    }
+
+    #[test]
+    fn the_epoch_outranks_the_revision() {
+        // A revision orders writes WITHIN an epoch; it never outvotes a Refounding.
+        let a = list(vec![entry("aa", 100, material(1, "a"), material(6, "a"))], vec![]);
+        let b = list(vec![entry("aa", 100, revised(material(2, "b"), 9), revised(material(5, "b"), 9))], vec![]);
+        for merged in [a.merge(&b), b.merge(&a)] {
+            assert_eq!(merged.entries[0].current.root_epoch, 6, "current keeps the higher epoch over a higher rev");
+            assert_eq!(merged.entries[0].seed.root_epoch, 1, "seed keeps the lower epoch over a higher rev");
+        }
+    }
+
+    #[test]
+    fn an_equal_revision_still_breaks_on_the_lowest_bytes() {
+        let a = list(vec![entry("aa", 100, revised(material(5, "aaa"), 3), revised(material(5, "aaa"), 3))], vec![]);
+        let b = list(vec![entry("aa", 100, revised(material(5, "bbb"), 3), revised(material(5, "bbb"), 3))], vec![]);
+        for merged in [a.merge(&b), b.merge(&a)] {
+            assert_eq!(merged.entries[0].current.name, "aaa", "two writes at one revision settle on one copy");
+        }
+    }
+
+    #[test]
+    fn a_revision_past_the_safe_integer_range_counts_as_zero() {
+        // JavaScript peers read JSON numbers as doubles; past 2^53 two values
+        // compare equal there and differently here. And a runaway writer must not
+        // pin a snapshot no honest write can ever beat.
+        for runaway in [u64::MAX, MAX_REV + 1] {
+            let honest = list(vec![entry("aa", 100, revised(material(5, "zzz"), 1), revised(material(5, "zzz"), 1))], vec![]);
+            let wild = list(vec![entry("aa", 100, revised(material(5, "aaa"), runaway), revised(material(5, "aaa"), runaway))], vec![]);
+            for merged in [honest.merge(&wild), wild.merge(&honest)] {
+                assert_eq!(merged.entries[0].current.name, "zzz", "rev {runaway} reads as 0 and loses to rev 1");
+            }
+        }
+    }
+
+    #[test]
+    fn the_revised_merge_is_order_independent() {
+        // Every client folds whatever copies it holds in whatever order they came:
+        // all orders must seat one result.
+        let copies = [
+            list(vec![entry("aa", 100, revised(material(3, "a"), 4), revised(material(3, "a"), 4))], vec![]),
+            list(vec![entry("aa", 140, revised(material(3, "y"), 7), revised(material(3, "y"), 7))], vec![tomb("bb", 9)]),
+            list(vec![entry("aa", 120, revised(material(3, "x"), 7), revised(material(3, "x"), 7))], vec![]),
+            list(vec![entry("aa", 90, material(2, "seedy"), revised(material(3, "m"), 6))], vec![]),
+        ];
+        let orders: [[usize; 4]; 4] = [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1], [1, 3, 0, 2]];
+        let folded: Vec<CommunityList> = orders
+            .iter()
+            .map(|o| o.iter().fold(CommunityList::default(), |acc, i| acc.merge(&copies[*i])))
+            .collect();
+        for f in &folded[1..] {
+            assert_eq!(f, &folded[0], "one result whatever the order");
+        }
+        let current = &folded[0].entries[0].current;
+        assert_eq!((current.rev, current.name.as_str()), (7, "x"), "highest rev, then lowest bytes — never just the lowest bytes (\"a\")");
+        assert_eq!(folded[0].entries[0].seed.root_epoch, 2, "seed still keeps the lowest epoch");
+        assert_eq!(folded[0].merge(&folded[0]), folded[0], "and idempotent");
     }
 
     #[test]

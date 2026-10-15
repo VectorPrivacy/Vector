@@ -74,6 +74,8 @@ pub struct FragMaterial {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relays: Vec<String>,
     pub name: String,
+    #[serde(default, skip_serializing_if = "super::list::is_zero")]
+    pub rev: u64,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -122,6 +124,7 @@ fn material(src: &JoinMaterial) -> FragMaterial {
         channels: src.channels.iter().map(channel).collect(),
         relays: src.relays.clone(),
         name: src.name.clone(),
+        rev: src.rev,
         extra: src.extra.clone(),
     }
 }
@@ -178,6 +181,7 @@ fn unmaterial(src: &FragMaterial, community_id: &str) -> JoinMaterial {
             .collect(),
         relays: src.relays.clone(),
         name: src.name.clone(),
+        rev: src.rev,
         extra: src.extra.clone(),
     }
 }
@@ -411,6 +415,7 @@ mod tests {
             channels: vec![],
             relays: vec!["wss://relay.example.com".into()],
             name: name.into(),
+            rev: 0,
             extra: Default::default(),
         }
     }
@@ -601,5 +606,44 @@ mod tests {
         let g = fragment(&list_of(vec![entry(refounded, jm("New Name"))]));
         let seed = g[0].entries[0].seed.as_ref().expect("an older epoch is a real difference");
         assert_eq!(seed.name, "New Name", "seed's cosmetic fields are current's");
+    }
+
+    #[test]
+    fn an_unrevised_snapshot_carries_no_rev_and_a_revised_one_a_json_number() {
+        // Absent means 0, so a List no writer has revised stays byte-identical to
+        // what every shipped client already writes.
+        let plain = serde_json::to_value(&fragment(&list_of(vec![entry(jm("x"), jm("x"))]))[0]).unwrap();
+        assert!(plain["entries"][0]["current"].get("rev").is_none(), "rev 0 is never written");
+        let mut revised = jm("x");
+        revised.rev = 7;
+        let v = serde_json::to_value(&fragment(&list_of(vec![entry(revised.clone(), revised)]))[0]).unwrap();
+        assert_eq!(v["entries"][0]["current"]["rev"], serde_json::json!(7), "a number, never a string");
+    }
+
+    #[test]
+    fn a_document_written_before_revisions_reads_as_rev_zero() {
+        let wire = serde_json::json!({
+            "frags": 1,
+            "entries": [{
+                "community_id": "x",
+                "current": { "owner": "o", "owner_salt": "s", "community_root": "r", "root_epoch": 2, "name": "n" },
+                "added_at": 5
+            }]
+        });
+        let frag: FragList = serde_json::from_value(wire).expect("an unrevised document parses");
+        let list = defragment(&[frag]);
+        assert_eq!(list.entries[0].current.rev, 0);
+        assert!(list.entries[0].current.extra.get("rev").is_none(), "rev is a field, not an unknown");
+    }
+
+    #[test]
+    fn a_revision_survives_fragment_then_defragment() {
+        let mut current = jm("x");
+        current.rev = 41;
+        let mut seed = jm("x");
+        seed.root_epoch = 1;
+        seed.rev = 3;
+        let back = defragment(&fragment(&list_of(vec![entry(seed, current)])));
+        assert_eq!((back.entries[0].seed.rev, back.entries[0].current.rev), (3, 41));
     }
 }

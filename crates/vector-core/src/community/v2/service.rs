@@ -3532,27 +3532,64 @@ fn join_material(community: &CommunityV2) -> super::list::JoinMaterial {
         channels,
         relays: community.relays.clone(),
         name: community.name.clone(),
+        rev: 0,
         extra: Default::default(),
     }
 }
 
-/// Our rebuild of a snapshot, keeping what another client wrote into the SAME one.
-/// A rebuild knows only our fields, and an epoch tie seats the lower-sorting snapshot
-/// whole, so a local edit would otherwise shed a peer's fields — Armada's channel
-/// `priors` are retired keys — on every device (CORD-02 §8 round-trip). Same epoch
-/// only: across a rotation we author a new snapshot rather than edit theirs.
-fn keep_peer_unknowns(mut ours: super::list::JoinMaterial, theirs: Option<&super::list::JoinMaterial>) -> super::list::JoinMaterial {
-    let Some(theirs) = theirs.filter(|t| t.root_epoch == ours.root_epoch) else { return ours };
-    for (k, v) in &theirs.extra {
-        ours.extra.entry(k.clone()).or_insert_with(|| v.clone());
-    }
-    for ch in &mut ours.channels {
-        if let Some(peer) = theirs.channels.iter().find(|c| c.id == ch.id && c.epoch == ch.epoch) {
-            for (k, v) in &peer.extra {
-                ch.extra.entry(k.clone()).or_insert_with(|| v.clone());
+/// Our snapshot as this write publishes it: what this device holds, merged with the
+/// same epoch's copy it read, one revision past that copy when the merge changes
+/// anything (CORD-02 §8).
+///
+/// The merge is what makes revisions safe: a newer revision wins outright, so a
+/// device behind its sibling — a channel key it has not received, a staff key, a
+/// peer client's own fields (Armada's `priors` are retired keys) — would otherwise
+/// publish its smaller view one revision up and erase them everywhere. Only names
+/// and relays are ours to overwrite: both come from this device's Control fold.
+/// Across a Refounding the read copy is a different snapshot and nothing is merged.
+fn rebuild_snapshot(mut ours: super::list::JoinMaterial, theirs: Option<&super::list::JoinMaterial>) -> super::list::JoinMaterial {
+    let Some(theirs) = theirs else {
+        ours.channels.sort_by(|a, b| a.id.cmp(&b.id));
+        return ours;
+    };
+    if theirs.root_epoch == ours.root_epoch {
+        if ours.control_root.is_none() && ours.control_pk == theirs.control_pk {
+            ours.control_root = theirs.control_root.clone();
+        }
+        for t in &theirs.channels {
+            let Some(c) = ours.channels.iter_mut().find(|c| c.id == t.id) else {
+                ours.channels.push(t.clone());
+                continue;
+            };
+            if t.epoch > c.epoch {
+                c.epoch = t.epoch;
+                c.key = t.key.clone();
+            } else if t.epoch == c.epoch && c.key.is_none() {
+                c.key = t.key.clone();
+            }
+            if t.epoch == c.epoch {
+                for (k, v) in &t.extra {
+                    c.extra.entry(k.clone()).or_insert_with(|| v.clone());
+                }
             }
         }
+        for (k, v) in &theirs.extra {
+            ours.extra.entry(k.clone()).or_insert_with(|| v.clone());
+        }
     }
+    // One canonical order, or two devices read each other's copies as changes.
+    ours.channels.sort_by(|a, b| a.id.cmp(&b.id));
+    let unrevised = |jm: &super::list::JoinMaterial| {
+        let mut jm = jm.clone();
+        jm.rev = 0;
+        jm.channels.sort_by(|a, b| a.id.cmp(&b.id));
+        jm
+    };
+    ours.rev = if unrevised(&ours) == unrevised(theirs) {
+        theirs.effective_rev()
+    } else {
+        theirs.effective_rev() + 1
+    };
     ours
 }
 
@@ -4068,8 +4105,8 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
             };
             let jm = join_material(&c);
             let theirs = remote.entries.iter().find(|e| e.community_id == cid_hex);
-            let current = keep_peer_unknowns(jm.clone(), theirs.map(|e| &e.current));
-            let seed = keep_peer_unknowns(jm, theirs.map(|e| &e.seed));
+            let current = rebuild_snapshot(jm.clone(), theirs.map(|e| &e.current));
+            let seed = rebuild_snapshot(jm, theirs.map(|e| &e.seed));
             local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed, current, added_at, extra: Default::default() });
         }
         let merged = remote.merge(&local).merge(&pending_tombstones());
@@ -12921,6 +12958,151 @@ mod tests {
         assert_eq!(kept.extra.get("priors"), Some(&serde_json::json!([{ "epoch": 0, "key": "retired" }])), "channel unknowns survive");
         assert_eq!(entry.extra.get("entry-ext"), Some(&serde_json::json!(1)), "entry unknowns survive");
         assert_eq!(after.extra.get("frag-ext"), Some(&serde_json::json!(true)), "fragment unknowns survive");
+    }
+
+    fn snap(epoch: u64, rev: u64, channels: &[(u8, u64, Option<u8>)]) -> super::super::list::JoinMaterial {
+        let hex = |b: u8| crate::simd::hex::bytes_to_hex_32(&[b; 32]);
+        super::super::list::JoinMaterial {
+            community_id: hex(0x01),
+            owner: hex(0x02),
+            owner_salt: hex(0x03),
+            community_root: hex(0x04),
+            root_epoch: epoch,
+            control_pk: Some(hex(0x05)),
+            control_root: None,
+            channels: channels
+                .iter()
+                .map(|(id, ep, key)| super::super::list::ChannelKeyRef { id: hex(*id), key: key.map(hex), epoch: *ep, name: format!("ch{id}"), extra: Default::default() })
+                .collect(),
+            relays: vec!["wss://r".into()],
+            name: "N".into(),
+            rev,
+            extra: Default::default(),
+        }
+    }
+
+    fn list_entry_of(list: &super::super::list::CommunityList, community: &CommunityV2) -> super::super::list::CommunityListEntry {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        list.entries.iter().find(|e| e.community_id == cid_hex).cloned().expect("the membership is listed")
+    }
+
+    #[test]
+    fn a_rebuild_keeps_its_revision_when_nothing_changed_and_bumps_it_when_something_did() {
+        let read = snap(2, 4, &[(0xA1, 1, Some(0xB1))]);
+        let same = rebuild_snapshot(snap(2, 0, &[(0xA1, 1, Some(0xB1))]), Some(&read));
+        assert_eq!(same.rev, 4, "an unchanged snapshot republishes byte-identical");
+        let mut renamed = snap(2, 0, &[(0xA1, 1, Some(0xB1))]);
+        renamed.name = "Renamed".into();
+        assert_eq!(rebuild_snapshot(renamed, Some(&read)).rev, 5, "a change is one revision past what was read");
+        let first = rebuild_snapshot(snap(2, 0, &[(0xA2, 1, Some(0xB2)), (0xA1, 1, Some(0xB1))]), None);
+        assert_eq!(first.rev, 0, "a first write needs no revision");
+        assert!(first.channels[0].id < first.channels[1].id, "and is written in the canonical order too");
+    }
+
+    #[test]
+    fn two_devices_listing_channels_in_different_orders_agree_without_a_bump() {
+        // Without one canonical order each device reads the other's copy as a
+        // change and bumps, forever.
+        let read = snap(2, 4, &[(0xA1, 1, Some(0xB1)), (0xA2, 1, Some(0xB2))]);
+        let ours = rebuild_snapshot(snap(2, 0, &[(0xA2, 1, Some(0xB2)), (0xA1, 1, Some(0xB1))]), Some(&read));
+        assert_eq!(ours.rev, 4, "the same channels in another order are no change");
+        let ids: Vec<&str> = ours.channels.iter().map(|c| c.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "written in one canonical order");
+    }
+
+    #[test]
+    fn a_rebuild_keeps_what_it_read_but_does_not_hold_itself() {
+        // A device behind its sibling — no key for a channel yet, an older key for
+        // another — must not publish its smaller view one revision higher and erase
+        // what the sibling recorded. Only the same epoch's snapshot is merged: across
+        // a Refounding the read copy is a different snapshot.
+        let read = snap(2, 6, &[(0xA1, 3, Some(0xC3)), (0xA2, 1, Some(0xB2))]);
+        let ours = rebuild_snapshot(snap(2, 0, &[(0xA1, 2, Some(0xC2))]), Some(&read));
+        let a1 = ours.channels.iter().find(|c| c.id.starts_with("a1")).expect("still listed");
+        assert_eq!((a1.epoch, a1.key.as_deref().map(|k| &k[..2])), (3, Some("c3")), "the sibling's newer channel key stays");
+        assert!(ours.channels.iter().any(|c| c.id.starts_with("a2")), "a key only the sibling holds stays");
+        assert_eq!(ours.rev, 6, "nothing we know is news, so nothing to revise");
+
+        let mut staff = snap(2, 6, &[]);
+        staff.control_root = Some("e".repeat(64));
+        assert_eq!(rebuild_snapshot(snap(2, 0, &[]), Some(&staff)).control_root, staff.control_root, "the staff key stays too");
+
+        let other_epoch = rebuild_snapshot(snap(3, 0, &[]), Some(&read));
+        assert!(other_epoch.channels.is_empty(), "a Refounding's snapshot is not merged with the epoch before it");
+    }
+
+    #[tokio::test]
+    async fn a_first_private_channel_key_reaches_the_list_past_a_stale_copy() {
+        // The creation write still sits on the fallback relays with no channels, and
+        // "channels":[] sorts below "channels":[{ — so without revisions the stale
+        // copy out-sorted the key forever, and a fresh device never received it.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Keyed", relays.clone(), None).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&relay, &held, "inner").await.unwrap();
+        republish_community_list(&relay, None).await.unwrap();
+
+        let read_from = list_read_relays(&[]).await;
+        let entry = list_entry_of(&fetch_fragments(&relay, &read_from).await.unwrap().unwrap().list, &community);
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        assert!(
+            entry.current.channels.iter().any(|c| c.id == ch_hex && c.key.is_some()),
+            "the new key is in the List every device reads"
+        );
+        assert!(entry.current.rev >= 1, "it landed as a revision");
+
+        // And it stays put: an unchanged republish moves nothing.
+        let before = fetch_fragments(&relay, &read_from).await.unwrap().unwrap();
+        republish_community_list(&relay, None).await.unwrap();
+        let after = fetch_fragments(&relay, &read_from).await.unwrap().unwrap();
+        assert_eq!(list_entry_of(&after.list, &community).current.rev, entry.current.rev, "no change, no revision");
+        assert_eq!(after.created_at, before.created_at, "and no fragment rewritten");
+    }
+
+    #[tokio::test]
+    async fn a_rename_at_the_same_epoch_reaches_the_list() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Alpha", vec!["wss://r".into()], None).await.unwrap();
+        let mut held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        held.name = "Zulu".into();
+        crate::db::community::save_community_v2(&held).unwrap();
+        republish_community_list(&relay, None).await.unwrap();
+        let entry = list_entry_of(&fetch_fragments(&relay, &list_read_relays(&[]).await).await.unwrap().unwrap().list, &community);
+        assert_eq!(entry.current.name, "Zulu", "a rename that sorts later still lands");
+    }
+
+    #[tokio::test]
+    async fn a_device_behind_never_erases_a_key_its_sibling_recorded() {
+        // The sibling holds a private-channel key this device has not received yet,
+        // and recorded it at rev 2. Our republish — prompted by anything — must keep it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Behind", relays.clone(), None).await.unwrap();
+        let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+        let mut frag = set.read_frags.get(&0).unwrap().clone();
+        let b64 = |b: &[u8; 32]| crate::simd::base64::URL_SAFE_NO_PAD.encode_to_string(b);
+        let entry = frag.entries.first_mut().unwrap();
+        entry.current.channels.push(super::super::list_frag::FragChannel {
+            id: b64(&[0x5A; 32]),
+            key: Some(b64(&[0x6B; 32])),
+            epoch: 1,
+            name: "siblings".into(),
+            extra: Default::default(),
+        });
+        entry.current.rev = 2;
+        let e = super::super::list_frag::build_fragment_event_keys(&owner, &frag, 0, set.created_at[&0] + 1).unwrap();
+        relay.publish(&e, &list_read_relays(&[]).await).await.unwrap();
+
+        republish_community_list(&relay, None).await.unwrap();
+        let entry = list_entry_of(&fetch_fragments(&relay, &list_read_relays(&[]).await).await.unwrap().unwrap().list, &community);
+        let sibling = crate::simd::hex::bytes_to_hex_32(&[0x5A; 32]);
+        assert!(entry.current.channels.iter().any(|c| c.id == sibling && c.key.is_some()), "the sibling's key survives our republish");
     }
 
     /// Aggregate fetches answer from the healthy relay; asked alone, the dead
