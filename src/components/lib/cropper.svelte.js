@@ -9,7 +9,7 @@ let answer = null;
 /**
  * `context` dresses the banner preview as the real pane: { width, background, name, iconSrc,
  * members, sections: [{ label, rows: [{ name, tier }] }] }. `shape` frames a square crop as it
- * shows: 'round' (a person), 'community' (round, and the rail's rounded square).
+ * shows: 'round' (a person), 'community' (the rail's rounded square).
  * @param {{ src: string, aspect: number, title: string, hint?: string, preview?: 'square' | 'banner', shape?: 'round' | 'community' | null, context?: object }} opts
  * @returns {Promise<{ x: number, y: number, w: number, h: number } | null>}
  */

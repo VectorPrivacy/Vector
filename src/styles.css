@@ -6703,7 +6703,8 @@ img.emoji-img-loading {
 /* An avatar's frame: round, or the community rail's rounded square. */
 .crop-chip.round,
 .crop-box.round { border-radius: 50%; }
-.crop-chip.rail { border-radius: 31%; }
+.crop-chip.rail,
+.crop-box.rail { border-radius: var(--ws-community-radius); }
 /* The banner preview: the channel pane as a member sees it, built from the
    live pane's own classes. Width and background come from the real pane. */
 .crop-pane {
@@ -25350,7 +25351,7 @@ body.profile-switcher-editing .profile-switcher-add {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   aspect-ratio: 238 / 146;
   border: 1px dashed #333;
   border-radius: 12px;
@@ -25358,7 +25359,8 @@ body.profile-switcher-editing .profile-switcher-add {
   color: rgba(255, 255, 255, 0.45);
   font-size: 12.5px;
 }
-.cs-banner-empty .icon { position: relative; width: 22px; height: 22px; background-color: currentColor; }
+/* margin: 0, or .icon's auto margins split the column's free space around it. */
+.cs-banner-empty .icon { position: relative; width: 40px; height: 40px; margin: 0; background-color: currentColor; }
 .cs-banner-frame.editable:hover .cs-banner-empty { border-color: #555; color: rgba(255, 255, 255, 0.7); }
 
 .cs-field { display: flex; flex-direction: column; }
@@ -25399,6 +25401,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-input:focus { border-color: var(--icon-color-primary); }
 .cs-input:disabled { opacity: 0.6; }
 .cs-textarea {
+  font-weight: 400;
   resize: vertical;
   min-height: 110px;
   line-height: 1.5;

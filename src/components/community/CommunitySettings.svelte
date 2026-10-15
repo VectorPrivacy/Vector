@@ -237,7 +237,6 @@
                                     {/if}
                                     {#if st.draft.bannerPath}<span class="cs-icon-new">New</span>{/if}
                                 </div>
-                                <p class="cs-hint">Shown at the foot of the channel list, in the shape of a 238 × 146 card; larger images in that shape stay sharp. The top band fades under the channels, so keep what matters lower down.</p>
                             </div>
                         </section>
 

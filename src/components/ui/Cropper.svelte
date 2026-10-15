@@ -60,6 +60,13 @@
         crop = { x: img.left + (width - w) / 2, y: img.top + (height - h) / 2, w, h };
     }
 
+    // Each open lays out afresh: a kept <img> showing the same file fires no load.
+    $effect.pre(() => {
+        ov.tick;
+        img = { left: 0, top: 0, width: 0, height: 0 };
+        natural = { w: 0, h: 0 };
+    });
+
     function fit() {
         const w = clamp(crop.w, minW(), maxW());
         const h = w / ov.aspect;
@@ -211,13 +218,15 @@
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="crop-stage" bind:this={stage} bind:clientWidth={stageW}
                  onpointerdown={onStageDown} onpointermove={onMove} onpointerup={onUp} onpointercancel={onUp}>
-                {#if ov.src}
-                    <img class="crop-img" src={ov.src} alt="" draggable="false" onload={onLoad}
-                         style="left: {img.left}px; top: {img.top}px; width: {img.width}px; height: {img.height}px;"
-                         class:ready={img.width > 0}>
-                {/if}
+                {#key ov.tick}
+                    {#if ov.src}
+                        <img class="crop-img" src={ov.src} alt="" draggable="false" onload={onLoad}
+                             style="left: {img.left}px; top: {img.top}px; width: {img.width}px; height: {img.height}px;"
+                             class:ready={img.width > 0}>
+                    {/if}
+                {/key}
                 {#if img.width}
-                    <div class="crop-box" class:round={!!ov.shape} style="left: {crop.x}px; top: {crop.y}px; width: {crop.w}px; height: {crop.h}px;"
+                    <div class="crop-box" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="left: {crop.x}px; top: {crop.y}px; width: {crop.w}px; height: {crop.h}px;"
                          onpointerdown={(e) => begin(e, 'move', { sx: e.clientX, sy: e.clientY, cx: crop.x, cy: crop.y })}>
                         {#if ov.preview === 'banner'}
                             <div class="crop-guide" style="height: {BANNER_FADE * 100}%">
@@ -285,9 +294,9 @@
                     </div>
                 {:else}
                     <div class="crop-chips">
-                        <div class="crop-chip" class:round={!!ov.shape} style="width: 96px; height: 96px; {chipStyle(96)}"></div>
+                        <div class="crop-chip" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="width: 96px; height: 96px; {chipStyle(96)}"></div>
                         <div class="crop-chip" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="width: 48px; height: 48px; {chipStyle(48)}"></div>
-                        <div class="crop-chip" class:round={!!ov.shape} style="width: 24px; height: 24px; {chipStyle(24)}"></div>
+                        <div class="crop-chip" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="width: 24px; height: 24px; {chipStyle(24)}"></div>
                     </div>
                 {/if}
             </aside>
