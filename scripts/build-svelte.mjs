@@ -48,10 +48,37 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
+// The 3D model viewer: three.js, loaded only when a model first shows (src/model3d.bundle.js,
+// global VectorModel3D). Built beside the islands so every build path has it.
+async function buildModel3d(dev) {
+    const options = {
+        entryPoints: [join(ROOT, 'src/components/model3d/engine.js')],
+        outfile: join(ROOT, 'src/model3d.bundle.js'),
+        bundle: true,
+        format: 'iife',
+        globalName: 'VectorModel3D',
+        mainFields: ['browser', 'module', 'main'],
+        conditions: [dev ? 'development' : 'production', 'browser'],
+        minify: !dev,
+        legalComments: 'none',
+        logLevel: 'warning',
+    };
+    if (esbuild) {
+        await esbuild.build(options);
+    } else {
+        const { rollup } = await import('rollup');
+        const { nodeResolve } = await import('@rollup/plugin-node-resolve');
+        const bundle = await rollup({ input: options.entryPoints[0], plugins: [nodeResolve({ browser: true })] });
+        await bundle.write({ file: options.outfile, format: 'iife', name: options.globalName });
+        await bundle.close();
+    }
+}
+
 // dev=true keeps Svelte's dev machinery (runtime prop/binding validation, a11y warnings,
 // HMR + FILENAME hooks, dev warnings). dev=false compiles a lean production bundle with all of
 // that stripped. build-frontend passes dev:false for release. Minification stays terser's job.
 export async function buildSvelte({ watch = false, dev = true } = {}) {
+    await buildModel3d(dev);
     const options = {
         entryPoints: [join(ROOT, 'src/components/index.js')],
         outfile: join(ROOT, 'src/components.bundle.js'),

@@ -6,6 +6,8 @@
     import VideoAttachment from './attachments/VideoAttachment.svelte';
     import ThumbhashAttachment from './attachments/ThumbhashAttachment.svelte';
     import FileBox from './attachments/FileBox.svelte';
+    import ModelAttachment from './attachments/ModelAttachment.svelte';
+    import { MODEL_EXTENSIONS } from '../lib/model3d.js';
     import { messageVersion } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h } = $props();
@@ -42,6 +44,8 @@
             <AudioPlayer {att} {msg} h={h.audio} />
         {:else if h.isVideo(att.extension)}
             <VideoAttachment {att} {msg} {h} />
+        {:else if MODEL_EXTENSIONS.includes((att.extension || '').toLowerCase())}
+            <ModelAttachment {att} {msg} {sender} {h} />
         {:else}
             <FileBox {att} {msg} {sender} phase="downloaded" {h} />
         {/if}
