@@ -1,5 +1,5 @@
 // The 3D viewer (src/model3d.bundle.js) loads on the first model a chat shows, never at start.
-export const MODEL_EXTENSIONS = ['glb', 'gltf', 'stl', 'obj'];
+export const MODEL_EXTENSIONS = ['glb', 'gltf', 'stl', 'obj', 'fbx'];
 
 let engine = null;
 export function loadModelEngine() {

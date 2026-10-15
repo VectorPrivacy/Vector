@@ -11,8 +11,9 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 
-export const EXTENSIONS = ['glb', 'gltf', 'stl', 'obj'];
+export const EXTENSIONS = ['glb', 'gltf', 'stl', 'obj', 'fbx'];
 
 let shared = null;
 function gl() {
@@ -36,6 +37,25 @@ function sealedManager() {
     return manager;
 }
 
+// FBX's Phong and Lambert ignore the environment light the viewer uses and would render almost
+// black: each becomes the PBR material glTF has, with its colours and maps kept.
+const CARRIED = ['color', 'map', 'normalMap', 'normalScale', 'emissive', 'emissiveMap', 'emissiveIntensity',
+    'alphaMap', 'aoMap', 'aoMapIntensity', 'bumpMap', 'bumpScale', 'displacementMap', 'displacementScale',
+    'transparent', 'opacity', 'side', 'vertexColors', 'flatShading', 'alphaTest', 'name'];
+function physical(m) {
+    if (!m?.isMeshPhongMaterial && !m?.isMeshLambertMaterial) return m;
+    const next = new MeshStandardMaterial({ metalness: 0, roughness: 0.8 });
+    for (const k of CARRIED) {
+        if (m[k] === undefined || m[k] === null) continue;
+        if (m[k]?.isColor || m[k]?.isVector2) next[k].copy(m[k]);
+        else next[k] = m[k];
+    }
+    // Shininess 0..100 maps onto roughness; Phong's specular colour has no PBR twin.
+    if (m.isMeshPhongMaterial) next.roughness = Math.min(1, Math.max(0.15, 1 - Math.sqrt((m.shininess ?? 30) / 100)));
+    m.dispose();
+    return next;
+}
+
 function plain() {
     return new MeshStandardMaterial({ color: 0xb8b8c0, metalness: 0.1, roughness: 0.55 });
 }
@@ -54,6 +74,14 @@ async function parse(buffer, ext) {
         if (geometry.hasColors) material.vertexColors = true;
         return { root: new Mesh(geometry, material), clips: [] };
     }
+    if (ext === 'fbx') {
+        const root = new FBXLoader(manager).parse(buffer, '');
+        root.traverse((o) => {
+            if (!o.isMesh) return;
+            o.material = Array.isArray(o.material) ? o.material.map(physical) : physical(o.material);
+        });
+        return { root, clips: root.animations || [] };
+    }
     if (ext === 'obj') {
         const root = new OBJLoader(manager).parse(new TextDecoder().decode(buffer));
         // No .mtl travels with it: every surface gets one clean material.
@@ -67,6 +95,7 @@ function friendly(err) {
     const text = String(err?.message || err);
     if (/draco|meshopt|ktx2|basisu|KHR_texture_basisu|EXT_meshopt/i.test(text)) return "This model is compressed in a way Vector can't open yet.";
     if (/unsupported/i.test(text)) return "Vector can't open this kind of model.";
+    if (/FBX version|version not supported/i.test(text)) return "This FBX is too old to open. Re-export it as FBX 2011 or newer.";
     return "This model couldn't be opened.";
 }
 
@@ -329,6 +358,8 @@ export function createView(canvas, { url, ext, onState = () => {}, onTap = null,
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const parsed = await parse(await res.arrayBuffer(), ext);
+        // Exporters leave empty takes behind (FBX's "Take 001"): nothing to play.
+        parsed.clips = parsed.clips.filter((c) => c.duration > 0);
         if (disposed) { disposeTree(parsed.root); return; }
         root = parsed.root;
         // Centred on the pivot, and framed whatever its size or origin.
