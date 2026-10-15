@@ -456,15 +456,31 @@ body.ws .pins-drawer {
    the list. Left and right define it here instead — the 8px matches the composer's
    own inset, so the two line up edge to edge — and dropping the centring means
    restating both ends of the slide, since the transform carried it. */
+@property --ws-panel-hide {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+
 body.ws .attachment-panel {
   left: calc(var(--ws-main-left) + 8px);
   right: 8px;
   width: auto;
-  transform: translateY(100%);
+  /* A neutral surface with the panes' seam, not the accent: the composer below already wears it. */
+  background: #0c0c0c;
+  border-color: var(--ws-seam);
+  /* It slides out from behind the composer: the clip's floor stays on the composer's top
+     edge, 10px under the panel at rest, while the panel travels. Sides and top leave room
+     for the shadow. One animated number drives both, so the clip can't trail a slide the
+     compositor runs ahead of it. */
+  --ws-panel-hide: 1;
+  transform: translateY(calc(var(--ws-panel-hide) * 100%));
+  clip-path: inset(-40px -40px calc(var(--ws-panel-hide) * 100% - 10px) -40px);
+  transition: --ws-panel-hide 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
 }
 
 body.ws .attachment-panel.visible {
-  transform: translateY(0);
+  --ws-panel-hide: 0;
 }
 
 body.ws.ws-details .attachment-panel {

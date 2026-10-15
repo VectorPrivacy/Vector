@@ -381,6 +381,10 @@
   mask-image: url("./icons/grid-fill.svg");
 }
 
+.icon-grid-outline {
+  mask-image: url("./icons/grid-outline.svg");
+}
+
 .icon-help {
   mask-image: url("./icons/help.svg");
   -webkit-mask-image: url("./icons/help.svg");
@@ -8744,6 +8748,25 @@ body:has(.nostr-embed-overlay:not([hidden])) .mini-profile-popup { z-index: 5002
   -webkit-user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+
+/* The action row's glyphs at the design's sizes: each viewBox pads its glyph differently,
+   so the boxes differ to make the drawn shapes match. */
+.attachment-panel-actions .icon-file {
+  width: 26px;
+  height: 26px;
+}
+.attachment-panel-actions .icon-folder {
+  width: 27px;
+  height: 27px;
+}
+.attachment-panel-actions .icon-grid-outline {
+  width: 22px;
+  height: 22px;
+}
+.attachment-panel-actions .attachment-panel-svg {
+  width: 22.5px;
+  height: 22.5px;
 }
 
 .attachment-panel-btn .icon-pivx {

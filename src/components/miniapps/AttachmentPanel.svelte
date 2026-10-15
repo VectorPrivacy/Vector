@@ -38,7 +38,7 @@
 <div class="attachment-panel" id="attachment-panel" tabindex="-1" use:rootEl class:visible={st.visible} class:pivx-active={st.view === 'pivx'} style:bottom={st.bottom || null}>
 
 {#if st.view === 'main'}
-    <div class="attachment-panel-content" use:stagger={st.tick.main}>
+    <div class="attachment-panel-content attachment-panel-actions" use:stagger={st.tick.main}>
         <button class="attachment-panel-item" onclick={h.file}>
             <div class="attachment-panel-btn"><span class="icon icon-file"></span></div>
             <span class="attachment-panel-label">File</span>
@@ -57,7 +57,7 @@
             <span class="attachment-panel-label">Commands</span>
         </button>
         <button class="attachment-panel-item attachment-panel-miniapps" onclick={h.miniapps}>
-            <div class="attachment-panel-btn"><span class="icon icon-gamepad"></span></div>
+            <div class="attachment-panel-btn"><span class="icon icon-grid-outline"></span></div>
             <span class="attachment-panel-label">Mini Apps</span>
         </button>
     </div>
