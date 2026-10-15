@@ -1,0 +1,3 @@
+[env]
+# Matches src-tauri/.cargo/config.toml: without STAT4 a cached statement keeps its plan.
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_STAT4"
