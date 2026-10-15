@@ -42,28 +42,26 @@ fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
     // NSPasteboard is documented thread-safe (it proxies the pasteboard server),
     // so reading the general pasteboard off the main thread is fine. We copy the
     // immutable NSString paths straight into a Rust Vec; no Obj-C state escapes.
-    unsafe {
-        let pb = NSPasteboard::generalPasteboard();
-        // Legacy `NSFilenamesPboardType` returns an array of plain path strings —
-        // simpler and more reliable across sources than reconstructing each
-        // `public.file-url` item.
-        let ftype = NSString::from_str("NSFilenamesPboardType");
-        let Some(plist) = pb.propertyListForType(&ftype) else {
-            return Ok(Vec::new());
-        };
-        // objc2 only erases to `NSArray<AnyObject>`; element types are checked
-        // per-item (a stray non-string entry is skipped, not a hard error).
-        let Ok(arr) = plist.downcast::<NSArray<AnyObject>>() else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::with_capacity(arr.len());
-        for item in arr.iter() {
-            if let Ok(s) = item.downcast::<NSString>() {
-                out.push(s.to_string());
-            }
+    let pb = NSPasteboard::generalPasteboard();
+    // Legacy `NSFilenamesPboardType` returns an array of plain path strings —
+    // simpler and more reliable across sources than reconstructing each
+    // `public.file-url` item.
+    let ftype = NSString::from_str("NSFilenamesPboardType");
+    let Some(plist) = pb.propertyListForType(&ftype) else {
+        return Ok(Vec::new());
+    };
+    // objc2 only erases to `NSArray<AnyObject>`; element types are checked
+    // per-item (a stray non-string entry is skipped, not a hard error).
+    let Ok(arr) = plist.downcast::<NSArray<AnyObject>>() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr.iter() {
+        if let Ok(s) = item.downcast::<NSString>() {
+            out.push(s.to_string());
         }
-        Ok(out)
     }
+    Ok(out)
 }
 
 #[cfg(target_os = "android")]
@@ -148,9 +146,9 @@ fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
     use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
     use objc2_foundation::{NSArray, NSString, NSURL};
 
-    // SAFETY: writes immutable file-URL objects to the process-global pasteboard;
+    // Writes immutable file-URL objects to the process-global pasteboard;
     // nothing escapes the block.
-    unsafe {
+    {
         let urls: Vec<_> = paths
             .iter()
             .map(|p| NSURL::fileURLWithPath(&NSString::from_str(p)))

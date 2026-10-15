@@ -167,7 +167,7 @@ name = "vector_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.3", features = [] }
 cc = "1"
 
 [dependencies]
@@ -181,7 +181,7 @@ bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
 async-trait = "0.1"
-tauri = { version = "2.11.5", features = ["macos-private-api", "protocol-asset", "image-png"] }
+tauri = { version = "2.12.4", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 # Same crate Tauri parses `package_info().version` with, so the Android update
@@ -328,20 +328,18 @@ color_quant = "1.1"
 # checks the HOST OS, not the cross-compilation target. Our fork fixes this so Android
 # builds from macOS don't try to link Apple's Accelerate/BLAS framework.
 [patch.crates-io]
-# tao 0.35.3 wraps the Wayland titlebar in an EventBox with `set_above_child(true)`,
-# which swallows every click before the minimise/maximise/close buttons see it.
-# Upstream deleted that custom CSD in tauri-apps/tao#1218; the fix ships in tao 0.36.0,
-# which no published tauri-runtime-wry accepts yet (it requires ^0.35). This rev is
-# that commit, where the crate version is still 0.35.3.
-# Drop when a released tauri-runtime-wry depends on tao >= 0.36.
-tao = { git = "https://github.com/tauri-apps/tao", rev = "07f3742b1833b64be27b1ef991e38d557d4276c9" }
-# tauri-codegen emits embedded assets and CSP hashes in hash-map and directory
-# order, so the same tree yields a different binary per build. Sorted in the
-# fork; pin by rev so the patch is itself reproducible.
-# Fork: https://github.com/VectorPrivacy/tauri/tree/deterministic-codegen-2.6.3
-tauri-codegen = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "774a89a19d91" }
-# Same rev for tauri-utils (unchanged there) so the workspace holds one copy of it.
-tauri-utils = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "774a89a19d91" }
+# Tauri 2.12.4 plus: assets and CSP hashes in a fixed order (reproducible binaries), files
+# served in one blocking read, ACL manifests parsed on first use, and events batched into one
+# script with large payloads through JSON.parse. Every crate on one rev.
+# Fork: https://github.com/VectorPrivacy/tauri/tree/vector-2.12.4
+tauri = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-runtime = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-runtime-wry = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-macros = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-codegen = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-utils = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-build = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
+tauri-plugin = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
 # whisper-rs-sys: whisper.cpp 1.9.5 applying ../scripts/whisper/patches (WHISPER_PATCHES in
 # .cargo/config.toml), KleidiAI on Android arm64, x86-64-v3 releases. Pinned by rev.
 # Fork: https://github.com/VectorPrivacy/whisper-rs/tree/whisper-1.9.5

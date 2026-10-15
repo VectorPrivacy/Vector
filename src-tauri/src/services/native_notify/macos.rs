@@ -93,21 +93,21 @@ impl Backend for MacOS {
         if !bundled {
             return Err("not running from an app bundle".into());
         }
-        let center = unsafe { UNUserNotificationCenter::currentNotificationCenter() };
+        let center = UNUserNotificationCenter::currentNotificationCenter();
 
         // The center holds its delegate weakly; this one lives as long as the process.
         let delegate = Delegate::new();
-        unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         std::mem::forget(delegate);
 
-        unsafe { center.setNotificationCategories(&NSSet::from_retained_slice(&[category()])) };
+        center.setNotificationCategories(&NSSet::from_retained_slice(&[category()]));
         let asked = RcBlock::new(|granted: Bool, error: *mut NSError| {
             if !granted.as_bool() {
                 let why = unsafe { error.as_ref() }.map(|e| e.to_string()).unwrap_or_else(|| "declined".into());
                 log_warn!("[Notify] Notifications not allowed: {why}");
             }
         });
-        unsafe {
+        {
             center.requestAuthorizationWithOptions_completionHandler(
                 UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
                 &asked,
@@ -126,7 +126,7 @@ impl Backend for MacOS {
         // A community notification names the sender, with the community beneath.
         let title = if community { data.sender_name.as_deref().unwrap_or(&data.title) } else { &data.title };
 
-        let content = unsafe { UNMutableNotificationContent::new() };
+        let content = UNMutableNotificationContent::new();
         unsafe {
             content.setTitle(&NSString::from_str(title));
             if let Some(name) = data.group_name.as_deref().filter(|s| community && !s.is_empty()) {
@@ -143,7 +143,7 @@ impl Backend for MacOS {
 
         // One notification per message: a re-delivery replaces rather than duplicates it.
         let id = format!("{}|{}|{}", open.account, open.chat, open.message.as_deref().unwrap_or(""));
-        let request = unsafe {
+        let request = {
             UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(&id), &content, None)
         };
         let done = RcBlock::new(|error: *mut NSError| {
@@ -151,7 +151,7 @@ impl Backend for MacOS {
                 log_warn!("[Notify] Notification not delivered: {e}");
             }
         });
-        unsafe {
+        {
             UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&done))
         };
         Ok(())
@@ -168,22 +168,22 @@ fn retract_where(matches: impl Fn(Option<&Activation>, Option<u64>) -> bool + 's
         let delivered = unsafe { delivered.as_ref() };
         let mut gone: Vec<Retained<NSString>> = Vec::new();
         for notification in delivered.iter() {
-            let request = unsafe { notification.request() };
-            let info = unsafe { request.content().userInfo() };
+            let request = notification.request();
+            let info = request.content().userInfo();
             let activation = string_for(&info, KEY_ACTIVATION).and_then(|v| Activation::decode(&v, None));
             let expires = string_for(&info, KEY_EXPIRES).and_then(|e| e.parse().ok());
             if matches(activation.as_ref(), expires) {
-                gone.push(unsafe { request.identifier() });
+                gone.push(request.identifier());
             }
         }
         if !gone.is_empty() {
-            unsafe {
+            {
                 UNUserNotificationCenter::currentNotificationCenter()
                     .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&gone))
             };
         }
     });
-    unsafe { UNUserNotificationCenter::currentNotificationCenter().getDeliveredNotificationsWithCompletionHandler(&found) };
+    UNUserNotificationCenter::currentNotificationCenter().getDeliveredNotificationsWithCompletionHandler(&found);
 }
 
 /// The one category every message carries. macOS shows Reply as a button and the rest under
@@ -192,7 +192,7 @@ fn category() -> Retained<UNNotificationCategory> {
     let none = UNNotificationActionOptions::empty();
     let mut actions: Vec<Retained<UNNotificationAction>> = Vec::with_capacity(2 + super::MUTE_CHOICES.len());
     // The sender's name can be a fallback ("New Message") or masked, so the placeholder names nobody.
-    let reply = unsafe {
+    let reply = {
         UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
             &NSString::from_str(REPLY),
             ns_string!("Reply"),
@@ -202,9 +202,9 @@ fn category() -> Retained<UNNotificationCategory> {
         )
     };
     actions.push(Retained::into_super(reply));
-    actions.push(unsafe { UNNotificationAction::actionWithIdentifier_title_options(&NSString::from_str(READ), ns_string!("Mark as Read"), none) });
+    actions.push(UNNotificationAction::actionWithIdentifier_title_options(&NSString::from_str(READ), ns_string!("Mark as Read"), none));
     for (label, ms) in super::MUTE_CHOICES {
-        actions.push(unsafe {
+        actions.push({
             UNNotificationAction::actionWithIdentifier_title_options(
                 &NSString::from_str(&format!("{MUTE_PREFIX}{ms}")),
                 &NSString::from_str(label),
@@ -212,7 +212,7 @@ fn category() -> Retained<UNNotificationCategory> {
             )
         });
     }
-    unsafe {
+    {
         UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
             &NSString::from_str(CATEGORY),
             &NSArray::from_retained_slice(&actions),
@@ -224,14 +224,14 @@ fn category() -> Retained<UNNotificationCategory> {
 
 /// What the user asked for: the notification's target with the pressed action and typed text.
 fn activation_of(response: &UNNotificationResponse) -> Option<Activation> {
-    let info = unsafe { response.notification().request().content().userInfo() };
+    let info = response.notification().request().content().userInfo();
     let open = Activation::decode(&string_for(&info, KEY_ACTIVATION)?, None)?;
-    let action = unsafe { response.actionIdentifier() }.to_string();
+    let action = response.actionIdentifier().to_string();
     if action == unsafe { UNNotificationDefaultActionIdentifier }.to_string() {
         return Some(open);
     }
     if action == REPLY {
-        let text = response.downcast_ref::<UNTextInputNotificationResponse>().map(|r| unsafe { r.userText() }.to_string());
+        let text = response.downcast_ref::<UNTextInputNotificationResponse>().map(|r| r.userText().to_string());
         let mut reply = open.with(Action::Reply, true);
         reply.reply = text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         return Some(reply);
