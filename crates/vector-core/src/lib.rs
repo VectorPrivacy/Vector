@@ -47,6 +47,7 @@ pub mod tags;
 pub mod types;
 pub mod profile;
 pub mod chat;
+pub mod boot_payload;
 pub mod compact;
 
 // === State ===

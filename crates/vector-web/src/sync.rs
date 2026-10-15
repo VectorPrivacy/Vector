@@ -68,7 +68,7 @@ async fn hydrate_and_announce() {
     let chats: Vec<_> = state.chats.iter().map(|c| c.to_serializable(&state.interner)).collect();
     let profiles: Vec<SlimProfile> = state.profiles.iter().map(|p| SlimProfile::from_profile(p, &state.interner)).collect();
     drop(state);
-    emitter::emit("init_finished", &serde_json::json!({ "profiles": profiles, "chats": chats }));
+    emitter::emit("init_finished", &vector_core::boot_payload::boot_payload(&profiles, &chats, None));
     db::spawn_bound(crate::images::cache_all_profile_images());
 }
 

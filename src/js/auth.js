@@ -3,6 +3,34 @@
 // scope: this loads before main.js and shares its globals.
 
 
+/**
+ * `init_finished` leaves out every field equal to its template (vector_core::boot_payload);
+ * this rebuilds the full objects before anything reads them. A payload without templates is
+ * already whole.
+ */
+function expandBootPayload(payload) {
+    const t = payload.templates;
+    if (!t) return { profiles: payload.profiles || [], chats: payload.chats || [] };
+    const root = payload.cache_root || '';
+    const fill = (items, tpl) => {
+        // Object values are parsed per item, so no two objects share one.
+        const shared = {};
+        for (const k in tpl) if (tpl[k] !== null && typeof tpl[k] === 'object') shared[k] = JSON.stringify(tpl[k]);
+        return items.map(item => {
+            const o = {};
+            for (const k in tpl) o[k] = k in shared ? JSON.parse(shared[k]) : tpl[k];
+            for (const k in item) {
+                if (k.endsWith('~')) o[k.slice(0, -1)] = root + item[k];
+                else o[k] = item[k];
+            }
+            return o;
+        });
+    };
+    const chats = fill(payload.chats || [], t.chat);
+    for (const c of chats) c.messages = fill(c.messages || [], t.message);
+    return { profiles: fill(payload.profiles || [], t.profile), chats };
+}
+
 // Active nostrconnect:// URL — captured when start_nostrconnect_session
 // returns so the Copy button can place it on the clipboard.
 let strBunkerNostrConnectUrl = '';
@@ -219,8 +247,7 @@ async function login(skipAnimations = false) {
             console.timeEnd('[Boot] login() total');
             console.time('[Boot] init_finished handler');
             // The backend now sends both profiles (without messages) and chats (with messages)
-            arrProfiles = evt.payload.profiles || [];
-            arrChats = evt.payload.chats || [];
+            ({ profiles: arrProfiles, chats: arrChats } = expandBootPayload(evt.payload));
 
             // Pinned favourites, from the LOCAL mirror so the first paint is
             // already in pin order; the self-sync subscription streams any

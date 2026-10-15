@@ -742,20 +742,15 @@ pub async fn fetch_messages<R: Runtime>(
                     let slim_profiles: Vec<db::SlimProfile> = state.profiles.iter()
                         .map(|p| db::SlimProfile::from_profile(p, &state.interner))
                         .collect();
-                    println!("[Boot] Serialization in {:?}", serialize_start.elapsed());
 
-                    #[derive(serde::Serialize)]
-                    struct InitPayload<'a> {
-                        profiles: &'a [db::SlimProfile],
-                        chats: &'a [crate::chat::SerializableChat],
-                    }
+                    let cache_root = handle.path().app_data_dir().ok()
+                        .map(|d| format!("{}{}", d.join("cache").display(), std::path::MAIN_SEPARATOR));
+                    let payload = vector_core::boot_payload::boot_payload(&slim_profiles, &serializable_chats, cache_root.as_deref());
+                    println!("[Boot] Serialization in {:?}", serialize_start.elapsed());
 
                     let emit_start = std::time::Instant::now();
                     // A failed emit must not panic the boot task — the sync below still has to run.
-                    if let Err(e) = handle.emit("init_finished", &InitPayload {
-                        profiles: &slim_profiles,
-                        chats: &serializable_chats,
-                    }) {
+                    if let Err(e) = handle.emit("init_finished", &payload) {
                         eprintln!("[Boot] init_finished emit failed: {e}");
                     }
                     println!("[Boot] Event emit in {:?}", emit_start.elapsed());

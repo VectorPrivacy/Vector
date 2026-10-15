@@ -1,6 +1,6 @@
 use vector_core::compact::encode_message_id;
 
-pub use vector_core::{ChatType, SerializableChat};
+pub use vector_core::ChatType;
 // ============================================================================
 
 /// Headless mark-as-read: updates STATE + persists to DB without requiring TAURI_APP.
