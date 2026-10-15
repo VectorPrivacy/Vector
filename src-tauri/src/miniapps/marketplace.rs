@@ -149,8 +149,11 @@ impl MarketplaceState {
     }
 
     /// Get all cached apps
+    /// By id, so the same apps always list the same way.
     pub fn get_apps(&self) -> Vec<MarketplaceApp> {
-        self.apps.values().cloned().collect()
+        let mut apps: Vec<MarketplaceApp> = self.apps.values().cloned().collect();
+        apps.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        apps
     }
 
     /// Get a specific app by ID
@@ -271,21 +274,22 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     {
         let mut state = MARKETPLACE_STATE.write().await;
 
-        for event in events.iter() {
-            if let Some(app) = parse_marketplace_event(event) {
-                let mut app = app;
-                if let Some(existing) = state.get_app(&app.id) {
-                    app.installed = existing.installed;
-                    app.local_path = existing.local_path.clone();
-                    if app.icon_cached.is_none() {
-                        // Carry over the cached icon only if the file still exists (users can wipe the cache).
-                        app.icon_cached = icon_cached_if_present(existing.icon_cached.clone());
-                    }
+        // Relays can hold several releases of one app: only the newest is the app.
+        let mut releases: Vec<MarketplaceApp> = events.iter().filter_map(parse_marketplace_event).collect();
+        releases.sort_unstable_by(|a, b| a.id.cmp(&b.id).then(b.published_at.cmp(&a.published_at)));
+        releases.dedup_by(|older, newest| older.id == newest.id);
+        for mut app in releases {
+            if let Some(existing) = state.get_app(&app.id) {
+                app.installed = existing.installed;
+                app.local_path = existing.local_path.clone();
+                if app.icon_cached.is_none() {
+                    // Carry over the cached icon only if the file still exists (users can wipe the cache).
+                    app.icon_cached = icon_cached_if_present(existing.icon_cached.clone());
                 }
-
-                state.upsert_app(app.clone());
-                apps.push(app);
             }
+
+            state.upsert_app(app.clone());
+            apps.push(app);
         }
 
         state.last_sync = std::time::SystemTime::now()
@@ -903,6 +907,7 @@ fn extract_icon_from_xdc(xdc_bytes: &[u8]) -> Option<Vec<u8>> {
 /// spawn — the caller already spawned this).
 pub async fn preload_marketplace_cache() {
     let t = std::time::Instant::now();
+    let mut shown = None;
 
     // Step 1: Load from SQLite into MARKETPLACE_STATE (fast — sub-ms for ~30 apps)
     match crate::db::load_marketplace_cache() {
@@ -927,7 +932,7 @@ pub async fn preload_marketplace_cache() {
             }
 
             // Emit cached apps to frontend immediately
-            emit_marketplace_apps(&apps_for_backfill);
+            shown = emit_marketplace_apps(&apps_for_backfill, None);
         }
         Ok(_) => {
             println!("[Marketplace] No cached apps in SQLite");
@@ -939,15 +944,20 @@ pub async fn preload_marketplace_cache() {
 
     // Step 2: Network refresh (sequential — caller already spawned us)
     match fetch_marketplace_apps(true).await {
-        Ok(apps) => emit_marketplace_apps(&apps),
+        Ok(apps) => {
+            emit_marketplace_apps(&apps, shown.as_deref());
+        }
         Err(e) => log_warn!("[Marketplace] Background refresh failed: {}", e),
     }
 }
 
-/// Emit the current marketplace apps list to the frontend.
-fn emit_marketplace_apps(apps: &[MarketplaceApp]) {
-    if let Some(handle) = crate::TAURI_APP.get() {
-        let _ = handle.emit("marketplace_apps_updated", apps);
+/// Emit the marketplace apps list to the frontend, unless it is the list `shown` already.
+/// Returns what it compared, for the next call.
+fn emit_marketplace_apps(apps: &[MarketplaceApp], shown: Option<&str>) -> Option<String> {
+    let json = serde_json::to_string(apps).ok()?;
+    if shown != Some(json.as_str()) {
+        vector_core::traits::emit_event("marketplace_apps_updated", &apps);
     }
+    Some(json)
 }
 
