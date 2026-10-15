@@ -14,6 +14,11 @@
     // No viewer here after all: the file alone, as anywhere else.
     let fallback = $state(false);
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
+    // Parsing runs on the page's thread: a giant model waits for a tap rather than stalling
+    // the chat as it scrolls past.
+    const GIANT = 50 * 1024 * 1024;
+    // svelte-ignore state_referenced_locally
+    let armed = $state(!(att.size > GIANT));
     let playing = $state(false);
     let view = null;
 
@@ -38,8 +43,16 @@
 <div class="model3d">
     {#if !fallback}
     <div class="model3d-stage" class:is-ready={phase === 'ready'}>
-        <canvas use:viewport aria-label="3D model {att.name || ''}"></canvas>
-        {#if phase === 'loading'}
+        {#if armed}
+            <canvas use:viewport aria-label="3D model {att.name || ''}"></canvas>
+        {/if}
+        {#if !armed}
+            <div class="model3d-giant">
+                <span class="model3d-badge">3D</span>
+                <span class="model3d-giant-size">Large model · {h.formatBytes(att.size)}</span>
+                <button type="button" class="st-btn net-primary" onclick={() => { armed = true; }}>View in 3D</button>
+            </div>
+        {:else if phase === 'loading'}
             <span class="model3d-note">Loading model…</span>
         {:else if phase === 'error'}
             <span class="model3d-note is-error">{error}</span>
@@ -161,6 +174,16 @@
     .model3d-clip:hover { background: rgba(0, 0, 0, 0.65); }
     .model3d-clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .model3d-clip-more { flex-shrink: 0; color: rgba(255, 255, 255, 0.5); font-variant-numeric: tabular-nums; }
+    .model3d-giant {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+    }
+    .model3d-giant-size { color: rgba(255, 255, 255, 0.6); font-size: 13px; }
     .model3d-tools {
         position: absolute;
         right: 8px;
