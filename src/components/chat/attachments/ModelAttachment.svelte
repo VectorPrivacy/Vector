@@ -8,6 +8,8 @@
     let phase = $state('loading');
     let error = $state('');
     let animated = $state(false);
+    // No viewer here after all: the file alone, as anywhere else.
+    let fallback = $state(false);
     let playing = $state(false);
     let view = null;
 
@@ -15,17 +17,13 @@
         let live = true;
         loadModelEngine().then((engine) => {
             if (!live) return;
-            if (!engine.available()) { phase = 'error'; error = "This device can't show 3D models."; return; }
+            if (!engine.available()) { fallback = true; return; }
             view = engine.createView(canvas, {
                 url: h.assetUrl(att.path),
                 ext: (att.extension || '').toLowerCase(),
                 onState: (s) => { phase = s.phase; error = s.text || ''; animated = !!s.animated; },
             });
-        }).catch(() => {
-            if (!live) return;
-            phase = 'error';
-            error = "The 3D viewer couldn't load.";
-        });
+        }).catch(() => { if (live) fallback = true; });
         return { destroy() { live = false; view?.dispose(); view = null; } };
     }
 
@@ -33,6 +31,7 @@
 </script>
 
 <div class="model3d">
+    {#if !fallback}
     <div class="model3d-stage" class:is-ready={phase === 'ready'}>
         <canvas use:viewport aria-label="3D model {att.name || ''}"></canvas>
         {#if phase === 'loading'}
@@ -59,6 +58,7 @@
             </div>
         {/if}
     </div>
+    {/if}
     <FileBox {att} {msg} {sender} phase="downloaded" {h} />
 </div>
 

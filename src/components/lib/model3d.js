@@ -13,3 +13,19 @@ export function loadModelEngine() {
     });
     return engine;
 }
+
+// Whether this browser draws WebGL at all (Tor Browser turns it off): asked once, without the
+// viewer, so a model elsewhere is simply its file.
+let webgl = null;
+export function modelsSupported() {
+    if (webgl === null) {
+        try {
+            const ctx = document.createElement('canvas').getContext('webgl2');
+            webgl = !!ctx;
+            ctx?.getExtension('WEBGL_lose_context')?.loseContext();
+        } catch {
+            webgl = false;
+        }
+    }
+    return webgl;
+}
