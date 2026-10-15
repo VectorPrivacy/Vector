@@ -4,10 +4,9 @@
 // contexts. Nothing renders while idle: a frame is drawn on a change, or per tick while an
 // animation plays on screen.
 import {
-    WebGLRenderer, Scene, PerspectiveCamera, PMREMGenerator, Box3, Vector3, Mesh,
+    WebGLRenderer, Scene, PerspectiveCamera, PMREMGenerator, Box3, Vector3, Quaternion, Mesh, Group,
     MeshStandardMaterial, AnimationMixer, LoadingManager, ACESFilmicToneMapping, SRGBColorSpace, Timer,
 } from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -82,8 +81,137 @@ function disposeTree(root) {
     });
 }
 
-// Views whose animation plays, ticked by one loop that stops when none are on screen.
-const playing = new Set();
+const SPIN_PER_PX = 0.01;
+const SPIN_DECAY = 0.0045;   // per ms: a flick coasts for about half a second
+
+/**
+ * Free rotation: a drag turns the model itself about the view's own axes, so any side can face
+ * the camera; a flick keeps it turning briefly. A pinch (or ctrl+wheel, a trackpad's pinch) zooms.
+ */
+function turntable(canvas, camera, pivot, redraw, touched) {
+    const pointers = new Map();
+    let pinch = 0;
+    let velocity = { x: 0, y: 0, t: 0 };
+    let coast = 0;
+    let distance = 1;
+    let limits = [0.2, 4];
+    let home = { q: new Quaternion(), distance: 1 };
+    const axisX = new Vector3();
+    const axisY = new Vector3();
+    const q = new Quaternion();
+
+    const turn = (dx, dy) => {
+        axisX.setFromMatrixColumn(camera.matrixWorld, 0);
+        axisY.setFromMatrixColumn(camera.matrixWorld, 1);
+        pivot.quaternion.premultiply(q.setFromAxisAngle(axisY, dx * SPIN_PER_PX));
+        pivot.quaternion.premultiply(q.setFromAxisAngle(axisX, dy * SPIN_PER_PX));
+        redraw();
+    };
+    const place = () => {
+        camera.position.setLength(distance);
+        camera.near = distance / 100;
+        camera.far = distance * 100;
+        camera.updateProjectionMatrix();
+        redraw();
+    };
+    const zoom = (f) => {
+        distance = Math.min(Math.max(distance * f, limits[0]), limits[1]);
+        place();
+    };
+    const stop = () => { if (coast) cancelAnimationFrame(coast); coast = 0; };
+    const glide = (t0) => (t) => {
+        const dt = Math.min(t - t0, 50);
+        const k = Math.exp(-SPIN_DECAY * dt);
+        velocity.x *= k;
+        velocity.y *= k;
+        if (Math.hypot(velocity.x, velocity.y) < 0.02) { coast = 0; return; }
+        turn(velocity.x * dt, velocity.y * dt);
+        coast = requestAnimationFrame(glide(t));
+    };
+
+    const down = (e) => {
+        stop();
+        touched();
+        canvas.setPointerCapture?.(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        velocity = { x: 0, y: 0, t: e.timeStamp };
+        if (pointers.size === 2) {
+            const [a, b] = [...pointers.values()];
+            pinch = Math.hypot(a.x - b.x, a.y - b.y);
+        }
+    };
+    const move = (e) => {
+        const p = pointers.get(e.pointerId);
+        if (!p) return;
+        const dx = e.clientX - p.x;
+        const dy = e.clientY - p.y;
+        p.x = e.clientX;
+        p.y = e.clientY;
+        if (pointers.size === 1) {
+            const dt = Math.max(e.timeStamp - velocity.t, 1);
+            velocity = { x: dx / dt, y: dy / dt, t: e.timeStamp };
+            turn(dx, dy);
+        } else if (pointers.size === 2) {
+            const [a, b] = [...pointers.values()];
+            const d = Math.hypot(a.x - b.x, a.y - b.y);
+            if (pinch && d) zoom(pinch / d);
+            pinch = d;
+        }
+    };
+    const up = (e) => {
+        if (!pointers.delete(e.pointerId)) return;
+        pinch = 0;
+        // A flick still moving when released coasts; a drag that stopped first doesn't.
+        if (pointers.size === 0 && e.type === 'pointerup' && e.timeStamp - velocity.t < 60) {
+            coast = requestAnimationFrame(glide(performance.now()));
+        }
+    };
+    // A plain wheel scrolls the chat; ctrl+wheel (a trackpad pinch) zooms the model.
+    const wheel = (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        touched();
+        zoom(Math.exp(e.deltaY * 0.01));
+    };
+    canvas.addEventListener('pointerdown', down);
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+    canvas.addEventListener('wheel', wheel, { passive: false });
+
+    return {
+        frame(radius, fit) {
+            distance = fit;
+            limits = [radius * 1.05, fit * 4];
+            home = { q: pivot.quaternion.clone(), distance: fit };
+            place();
+        },
+        reset() {
+            stop();
+            pivot.quaternion.copy(home.q);
+            distance = home.distance;
+            place();
+        },
+        dispose() {
+            stop();
+            canvas.removeEventListener('pointerdown', down);
+            canvas.removeEventListener('pointermove', move);
+            canvas.removeEventListener('pointerup', up);
+            canvas.removeEventListener('pointercancel', up);
+            canvas.removeEventListener('wheel', wheel);
+        },
+    };
+}
+
+// The pedestal: an untouched model turns slowly about its vertical axis, drawn at 30 fps.
+const PEDESTAL_SPEED = 0.35;   // rad/s, a turn in about 18 s
+const PEDESTAL_FRAME = 1 / 30;
+const UP = new Vector3(0, 1, 0);
+const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+
+// Views that move on their own (an animation playing, a pedestal turning), ticked by one loop
+// that stops when none is on screen.
+const ticking = new Set();
 const timer = new Timer();
 let loop = 0;
 function tick(t) {
@@ -91,19 +219,28 @@ function tick(t) {
     timer.update(t);
     const dt = Math.min(timer.getDelta(), 0.1);
     let any = false;
-    for (const v of playing) {
+    for (const v of ticking) {
         if (!v.onScreen || document.hidden) continue;
-        v.mixer.update(dt);
-        v.draw();
         any = true;
+        if (v.animating) v.mixer.update(dt);
+        if (v.spinning) v.spun += dt;
+        if (!v.animating && v.spun < PEDESTAL_FRAME) continue;
+        if (v.spinning) v.pivot.rotateOnWorldAxis(UP, v.spun * PEDESTAL_SPEED);
+        v.spun = 0;
+        v.draw();
     }
     if (any) loop = requestAnimationFrame(tick);
 }
 function wake() {
-    if (!loop && playing.size) {
+    if (!loop && ticking.size) {
         timer.reset();
         loop = requestAnimationFrame(tick);
     }
+}
+function schedule(v) {
+    if (v.animating || v.spinning) ticking.add(v);
+    else ticking.delete(v);
+    wake();
 }
 document.addEventListener('visibilitychange', wake);
 
@@ -115,9 +252,12 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
     const ctx2d = canvas.getContext('2d');
     const scene = new Scene();
     const camera = new PerspectiveCamera(35, 1, 0.01, 1000);
-    const controls = new OrbitControls(camera, canvas);
-    controls.enableDamping = false;
-    controls.enablePan = false;
+    // The camera looks at the origin from a three-quarter view; the model turns, not the camera.
+    camera.position.set(0.6, 0.45, 1).normalize();
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+    const pivot = new Group();
+    scene.add(pivot);
     // A vertical swipe still scrolls the chat; a sideways drag or a pinch moves the model.
     canvas.style.touchAction = 'pan-y';
     let root = null;
@@ -126,6 +266,10 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
 
     const view = {
         mixer: null,
+        pivot,
+        animating: false,
+        spinning: false,
+        spun: 0,
         onScreen: true,
         draw() {
             if (disposed || !root) return;
@@ -150,12 +294,12 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         if (frame || disposed) return;
         frame = requestAnimationFrame(() => { frame = 0; view.draw(); });
     };
-    controls.addEventListener('change', requestDraw);
-
-    // A wheel scrolls the chat; a pinch (ctrl+wheel on a trackpad) zooms the model.
-    const onWheel = (e) => { if (!e.ctrlKey) e.stopImmediatePropagation(); };
-    canvas.addEventListener('wheel', onWheel, { capture: true });
-    const reset = () => { controls.reset(); requestDraw(); };
+    const pedestal = (on) => {
+        view.spinning = on && !calm?.matches;
+        schedule(view);
+    };
+    const controls = turntable(canvas, camera, pivot, requestDraw, () => pedestal(false));
+    const reset = () => { controls.reset(); pedestal(true); };
     canvas.addEventListener('dblclick', reset);
     const ro = new ResizeObserver(requestDraw);
     ro.observe(canvas);
@@ -172,21 +316,13 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         const parsed = await parse(await res.arrayBuffer(), ext);
         if (disposed) { disposeTree(parsed.root); return; }
         root = parsed.root;
-        scene.add(root);
-
-        // Framed from a three-quarter view, whatever its size or origin.
+        // Centred on the pivot, and framed whatever its size or origin.
         const box = new Box3().setFromObject(root);
         const center = box.getCenter(new Vector3());
         const radius = Math.max(box.getSize(new Vector3()).length() / 2, 1e-3);
-        const distance = radius / Math.sin((camera.fov * Math.PI) / 360) * 1.05;
-        camera.near = distance / 100;
-        camera.far = distance * 100;
-        camera.position.copy(center).add(new Vector3(0.6, 0.45, 1).normalize().multiplyScalar(distance));
-        controls.target.copy(center);
-        controls.minDistance = radius * 0.2;
-        controls.maxDistance = distance * 4;
-        controls.update();
-        controls.saveState();
+        root.position.sub(center);
+        pivot.add(root);
+        controls.frame(radius, radius / Math.sin((camera.fov * Math.PI) / 360) * 1.05);
 
         if (parsed.clips.length) {
             view.mixer = new AnimationMixer(root);
@@ -196,6 +332,7 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         }
         onState({ phase: 'ready', animated: !!view.mixer });
         requestDraw();
+        pedestal(true);
     })().catch((err) => {
         console.warn('[3D] model failed:', err);
         if (!disposed) onState({ phase: 'error', text: friendly(err) });
@@ -205,17 +342,17 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         /** Play or pause its first animation; returns whether it plays. */
         setPlaying(on) {
             if (!view.mixer) return false;
-            if (on) { playing.add(view); wake(); } else { playing.delete(view); }
+            view.animating = on;
+            schedule(view);
             return on;
         },
         reset,
         dispose() {
             disposed = true;
-            playing.delete(view);
+            ticking.delete(view);
             if (frame) cancelAnimationFrame(frame);
             ro.disconnect();
             io.disconnect();
-            canvas.removeEventListener('wheel', onWheel, { capture: true });
             canvas.removeEventListener('dblclick', reset);
             controls.dispose();
             view.mixer?.stopAllAction();
