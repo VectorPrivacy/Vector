@@ -21,13 +21,21 @@
         };
     }));
     const empty = $derived(!nav.some((sec) => sec.shown));
+    let searchEl = null;
 </script>
 
 <aside class="cs-nav">
-    <div class="cs-search">
+    <div class="cs-search" class:has-query={!!query}>
         <span class="icon icon-search"></span>
         <input placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-               value={query} oninput={(e) => onquery(e.currentTarget.value)}>
+               value={query} oninput={(e) => onquery(e.currentTarget.value)} bind:this={searchEl}>
+        {#if query}
+            <button class="cs-search-clear" type="button" aria-label="Clear search" onclick={() => { onquery(''); searchEl?.focus(); }}>
+                <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M11.1002 6.29922L6.3002 11.0992M6.3002 6.29922L11.1002 11.0992M16.7002 8.69922C16.7002 13.1175 13.1184 16.6992 8.7002 16.6992C4.28192 16.6992 0.700195 13.1175 0.700195 8.69922C0.700195 4.28094 4.28192 0.699219 8.7002 0.699219C13.1184 0.699219 16.7002 4.28094 16.7002 8.69922Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
+        {/if}
     </div>
     <div class="cs-nav-scroll">
         <div class="cs-nav-head">{@render head()}</div>
