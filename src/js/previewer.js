@@ -440,6 +440,39 @@ function updateZoomInfo() {
 }
 
 /** Save a file on Vector Web: `{ path }` of a stored file, or `{ url }` of one on screen. */
+// The fullscreen 3D model viewer, and the file action this platform has for it.
+let modelViewerPath = null;
+VectorSvelte.setModelViewerHandlers({
+    close: () => closeModelViewer(),
+    file: () => {
+        const path = modelViewerPath;
+        if (!path) return;
+        if (platformFeatures.os === 'android') invoke('share_attachment', { path }).catch((e) => showToast(String(e)));
+        else if (platformFeatures.os === 'web') saveWebFile({ path });
+        else revealItemInDir(path);
+    },
+});
+
+/** Open a downloaded model attachment full screen. */
+function openModelViewer(att) {
+    if (!att?.path) return;
+    modelViewerPath = att.path;
+    const os = platformFeatures.os;
+    const fileAction = os === 'android' ? 'share' : os === 'web' ? 'save' : platformFeatures.is_mobile ? null : 'reveal';
+    if (os === 'web') invoke('prepare_attachment', { path: att.path }).catch(() => {});
+    VectorSvelte.setModelViewer({ open: true, active: false, url: convertFileSrc(att.path), ext: (att.extension || '').toLowerCase(), name: att.name || '', fileAction });
+    setTimeout(() => VectorSvelte.setModelViewer({ active: true }), 10);
+    pushBack('model-viewer', closeModelViewer);
+}
+
+function closeModelViewer() {
+    if (!modelViewerPath) return;
+    modelViewerPath = null;
+    popBack('model-viewer');
+    VectorSvelte.setModelViewer({ active: false });
+    setTimeout(() => { if (!modelViewerPath) VectorSvelte.setModelViewer({ open: false, url: '' }); }, 200);
+}
+
 function saveWebFile(args) {
     invoke('save_attachment', args).catch((err) => showToast(String(err?.message ?? err)));
 }

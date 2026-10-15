@@ -1,8 +1,10 @@
 <script>
-    // A downloaded 3D model: a viewport to turn it in (drag; pinch to zoom; double-click to
-    // reset), its animation behind a Play button, and the file's own box below for saving.
+    // A downloaded 3D model: a viewport to turn it in (drag; pinch to zoom), opened full screen
+    // by a tap, its animation behind a Play button. The file's box shows only when the preview
+    // can't stand in for it: while it uploads, or when the model won't open here.
     import FileBox from './FileBox.svelte';
     import { loadModelEngine } from '../../lib/model3d.js';
+    import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, sender, h } = $props();   // h: MediaHelpers (js/render/chat/message-row.js)
 
     let phase = $state('loading');
@@ -10,6 +12,7 @@
     let animated = $state(false);
     // No viewer here after all: the file alone, as anywhere else.
     let fallback = $state(false);
+    const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let playing = $state(false);
     let view = null;
 
@@ -22,6 +25,7 @@
                 url: h.assetUrl(att.path),
                 ext: (att.extension || '').toLowerCase(),
                 onState: (s) => { phase = s.phase; error = s.text || ''; animated = !!s.animated; },
+                onTap: () => h.openModel(att),
             });
         }).catch(() => { if (live) fallback = true; });
         return { destroy() { live = false; view?.dispose(); view = null; } };
@@ -50,6 +54,11 @@
                         {/if}
                     </button>
                 {/if}
+                <button type="button" class="model3d-btn" title="Full screen" onclick={() => h.openModel(att)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                    </svg>
+                </button>
                 <button type="button" class="model3d-btn" title="Reset view" onclick={() => view?.reset()}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" />
@@ -59,7 +68,9 @@
         {/if}
     </div>
     {/if}
-    <FileBox {att} {msg} {sender} phase="downloaded" {h} />
+    {#if fallback || uploading || phase === 'error'}
+        <FileBox {att} {msg} {sender} phase="downloaded" {h} />
+    {/if}
 </div>
 
 <style>

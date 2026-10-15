@@ -88,8 +88,10 @@ const SPIN_DECAY = 0.0045;   // per ms: a flick coasts for about half a second
  * Free rotation: a drag turns the model itself about the view's own axes, so any side can face
  * the camera; a flick keeps it turning briefly. A pinch (or ctrl+wheel, a trackpad's pinch) zooms.
  */
-function turntable(canvas, camera, pivot, redraw, touched) {
+function turntable(canvas, camera, pivot, redraw, touched, { tapped = null, freeWheel = false } = {}) {
     const pointers = new Map();
+    let travel = 0;
+    let pressed = 0;
     let pinch = 0;
     let velocity = { x: 0, y: 0, t: 0 };
     let coast = 0;
@@ -131,7 +133,7 @@ function turntable(canvas, camera, pivot, redraw, touched) {
 
     const down = (e) => {
         stop();
-        touched();
+        if (pointers.size === 0) { travel = 0; pressed = e.timeStamp; }
         canvas.setPointerCapture?.(e.pointerId);
         pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         velocity = { x: 0, y: 0, t: e.timeStamp };
@@ -147,6 +149,9 @@ function turntable(canvas, camera, pivot, redraw, touched) {
         const dy = e.clientY - p.y;
         p.x = e.clientX;
         p.y = e.clientY;
+        travel += Math.hypot(dx, dy);
+        // A press only takes the model over once it moves: a tap is a tap.
+        if (travel > 4) touched();
         if (pointers.size === 1) {
             const dt = Math.max(e.timeStamp - velocity.t, 1);
             velocity = { x: dx / dt, y: dy / dt, t: e.timeStamp };
@@ -161,14 +166,16 @@ function turntable(canvas, camera, pivot, redraw, touched) {
     const up = (e) => {
         if (!pointers.delete(e.pointerId)) return;
         pinch = 0;
+        if (pointers.size === 0 && e.type === 'pointerup' && travel <= 4 && e.timeStamp - pressed < 500) tapped?.();
         // A flick still moving when released coasts; a drag that stopped first doesn't.
         if (pointers.size === 0 && e.type === 'pointerup' && e.timeStamp - velocity.t < 60) {
             coast = requestAnimationFrame(glide(performance.now()));
         }
     };
-    // A plain wheel scrolls the chat; ctrl+wheel (a trackpad pinch) zooms the model.
+    // In a chat a plain wheel scrolls it and ctrl+wheel (a trackpad pinch) zooms; full screen,
+    // any wheel zooms.
     const wheel = (e) => {
-        if (!e.ctrlKey) return;
+        if (!e.ctrlKey && !freeWheel) return;
         e.preventDefault();
         touched();
         zoom(Math.exp(e.deltaY * 0.01));
@@ -212,6 +219,8 @@ const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 // Views that move on their own (an animation playing, a pedestal turning), ticked by one loop
 // that stops when none is on screen.
 const ticking = new Set();
+// While one is full screen, the views behind it hold still.
+let front = null;
 const timer = new Timer();
 let loop = 0;
 function tick(t) {
@@ -220,7 +229,7 @@ function tick(t) {
     const dt = Math.min(timer.getDelta(), 0.1);
     let any = false;
     for (const v of ticking) {
-        if (!v.onScreen || document.hidden) continue;
+        if (!v.onScreen || document.hidden || (front && v !== front)) continue;
         any = true;
         if (v.animating) v.mixer.update(dt);
         if (v.spinning) v.spun += dt;
@@ -248,7 +257,7 @@ document.addEventListener('visibilitychange', wake);
  * Show the model at `url` (extension `ext`) on `canvas`. `onState` hears
  * `{ phase: 'loading' | 'ready' | 'error', text?, animated? }`.
  */
-export function createView(canvas, { url, ext, onState = () => {} }) {
+export function createView(canvas, { url, ext, onState = () => {}, onTap = null, fullscreen = false }) {
     const ctx2d = canvas.getContext('2d');
     const scene = new Scene();
     const camera = new PerspectiveCamera(35, 1, 0.01, 1000);
@@ -258,14 +267,17 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
     camera.updateMatrixWorld();
     const pivot = new Group();
     scene.add(pivot);
-    // A vertical swipe still scrolls the chat; a sideways drag or a pinch moves the model.
-    canvas.style.touchAction = 'pan-y';
+    let view = null;
+    // In a chat a vertical swipe still scrolls it; full screen, every gesture is the model's.
+    canvas.style.touchAction = fullscreen ? 'none' : 'pan-y';
     let root = null;
     let disposed = false;
     let frame = 0;
 
-    const view = {
+    view = {
         mixer: null,
+        actions: null,
+        clip: 0,
         pivot,
         animating: false,
         spinning: false,
@@ -274,7 +286,9 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         draw() {
             if (disposed || !root) return;
             const { renderer, environment } = gl();
-            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            // Sharp up to about 4 MP: a full screen at 2x would otherwise be 16.
+            const css = canvas.clientWidth * canvas.clientHeight;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(4e6 / Math.max(css, 1)));
             const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
             const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
             if (canvas.width !== w || canvas.height !== h) {
@@ -290,6 +304,7 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
             ctx2d.drawImage(renderer.domElement, 0, 0);
         },
     };
+    if (fullscreen) front = view;
     const requestDraw = () => {
         if (frame || disposed) return;
         frame = requestAnimationFrame(() => { frame = 0; view.draw(); });
@@ -298,9 +313,9 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         view.spinning = on && !calm?.matches;
         schedule(view);
     };
-    const controls = turntable(canvas, camera, pivot, requestDraw, () => pedestal(false));
+    const controls = turntable(canvas, camera, pivot, requestDraw, () => pedestal(false), { tapped: onTap, freeWheel: fullscreen });
     const reset = () => { controls.reset(); pedestal(true); };
-    canvas.addEventListener('dblclick', reset);
+    if (fullscreen) canvas.addEventListener('dblclick', reset);
     const ro = new ResizeObserver(requestDraw);
     ro.observe(canvas);
     const io = new IntersectionObserver(([e]) => {
@@ -322,15 +337,21 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
         const radius = Math.max(box.getSize(new Vector3()).length() / 2, 1e-3);
         root.position.sub(center);
         pivot.add(root);
-        controls.frame(radius, radius / Math.sin((camera.fov * Math.PI) / 360) * 1.05);
+        // Fits the narrower side: a tall phone screen frames by its width.
+        const vfov = (camera.fov * Math.PI) / 180;
+        const aspect = canvas.clientWidth / Math.max(canvas.clientHeight, 1) || 1;
+        const fov = Math.min(vfov, 2 * Math.atan(Math.tan(vfov / 2) * aspect));
+        controls.frame(radius, radius / Math.sin(fov / 2) * 1.05);
 
         if (parsed.clips.length) {
             view.mixer = new AnimationMixer(root);
-            for (const clip of parsed.clips.slice(0, 1)) view.mixer.clipAction(clip).play();
+            view.actions = parsed.clips.map((c) => view.mixer.clipAction(c));
+            view.actions[0].play();
             // Its first frame, not the bind pose, until it plays.
             view.mixer.update(0);
         }
-        onState({ phase: 'ready', animated: !!view.mixer });
+        const clips = parsed.clips.map((c, i) => ({ name: c.name || `Animation ${i + 1}`, duration: c.duration }));
+        onState({ phase: 'ready', animated: !!view.mixer, clips });
         requestDraw();
         pedestal(true);
     })().catch((err) => {
@@ -346,10 +367,35 @@ export function createView(canvas, { url, ext, onState = () => {} }) {
             schedule(view);
             return on;
         },
+        /** Switch to animation `i`, from its start. */
+        setClip(i) {
+            const next = view.actions?.[i];
+            if (!next || next === view.actions[view.clip]) return;
+            view.actions[view.clip].stop();
+            view.clip = i;
+            next.reset().play();
+            view.mixer.update(0);
+            requestDraw();
+        },
+        /** Jump to `t` seconds into the animation. */
+        seek(t) {
+            const a = view.actions?.[view.clip];
+            if (!a) return;
+            a.time = Math.max(0, Math.min(t, a.getClip().duration));
+            view.mixer.update(0);
+            requestDraw();
+        },
+        setSpeed(k) { if (view.mixer) view.mixer.timeScale = k; },
+        /** Where the animation is, in seconds. */
+        time() {
+            const a = view.actions?.[view.clip];
+            return a ? a.time % (a.getClip().duration || 1) : 0;
+        },
         reset,
         dispose() {
             disposed = true;
             ticking.delete(view);
+            if (front === view) { front = null; wake(); }
             if (frame) cancelAnimationFrame(frame);
             ro.disconnect();
             io.disconnect();
