@@ -119,7 +119,8 @@ export const CSP = [
     "img-src 'self' data: blob:",
     "media-src 'self' blob:",
     "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' blob:",
+    // A model's embedded textures and buffers are fetched as blob: and data: URLs.
+    "connect-src 'self' blob: data:",
     "worker-src 'self'",
     // Mini apps run on subdomains of whatever host serves Vector; the server narrows
     // this to its own `*.xdc.<host>` with a header, and both policies apply.
