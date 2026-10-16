@@ -2,6 +2,10 @@
 //! datagram rides in a packet the peer acknowledges, so the sender learns what
 //! went missing without a report channel. A lossy link steps the ladder down at
 //! once; a clean one climbs back a rung at a time.
+//!
+//! Loss is not the whole story. A relay carries QUIC inside TCP, where a full pipe
+//! shows as delay and never as loss, so the round trip's growth over the path's
+//! floor counts as trouble too.
 
 /// Bitrates the encoder may use, in kbit/s. Opus picks the audio bandwidth to
 /// match: narrowband at the bottom, fullband from the middle up.
@@ -19,6 +23,68 @@ const HOLD_SECS: u32 = 3;
 /// The FEC budget follows the loss actually seen, within these bounds.
 const FEC_MIN_PCT: u32 = 5;
 const FEC_MAX_PCT: u32 = 30;
+/// Round trip over the path's floor that reads as a standing queue: at least this
+/// much and at least the floor again, so an intercontinental path's ordinary swing
+/// is not mistaken for one.
+const QUEUE_MIN_MS: u32 = 300;
+/// A queue this deep, or this much loss in a second, is past a rung at a time.
+const SEVERE_QUEUE_MS: u32 = 1500;
+const SEVERE_LOSS_PCT: f32 = 15.0;
+/// Where a severe second puts the voice at once: still wideband.
+const SEVERE_KBPS: u32 = 32;
+
+/// Seconds per bucket of a round-trip floor, and how many buckets it keeps.
+const FLOOR_BUCKET_SECS: u32 = 10;
+const FLOOR_BUCKETS: usize = 30;
+
+/// The lowest round trip a path has shown over the last few minutes: what it costs
+/// with no queue of ours in it. Kept per path kind, so falling back to a relay
+/// neither borrows the direct path's floor nor relearns its own from a queue we filled.
+#[derive(Default)]
+pub struct RttFloor {
+    paths: [FloorWindow; 2],
+}
+
+#[derive(Clone, Copy)]
+struct FloorWindow {
+    buckets: [u32; FLOOR_BUCKETS],
+    at: usize,
+    secs: u32,
+}
+
+impl Default for FloorWindow {
+    fn default() -> Self {
+        Self { buckets: [u32::MAX; FLOOR_BUCKETS], at: 0, secs: 0 }
+    }
+}
+
+impl RttFloor {
+    /// Once a second, with the selected path's round trip (0 when unknown). Returns
+    /// that path's floor once it has one.
+    pub fn observe(&mut self, rtt_ms: u32, relay: bool) -> Option<u32> {
+        let w = &mut self.paths[relay as usize];
+        if rtt_ms > 0 {
+            if w.secs == FLOOR_BUCKET_SECS {
+                w.at = (w.at + 1) % FLOOR_BUCKETS;
+                w.buckets[w.at] = u32::MAX;
+                w.secs = 0;
+            }
+            w.buckets[w.at] = w.buckets[w.at].min(rtt_ms);
+            w.secs += 1;
+        }
+        let floor = w.buckets.iter().copied().min().unwrap_or(u32::MAX);
+        (floor != u32::MAX).then_some(floor)
+    }
+}
+
+/// A round trip that has grown past what the path's ordinary swing explains.
+fn queued(rtt_ms: u32, floor: Option<u32>) -> bool {
+    floor.is_some_and(|f| rtt_ms > f.saturating_add(QUEUE_MIN_MS.max(f)))
+}
+
+fn severe(rtt_ms: u32, floor: Option<u32>, loss_pct: f32) -> bool {
+    loss_pct >= SEVERE_LOSS_PCT || floor.is_some_and(|f| rtt_ms > f.saturating_add(SEVERE_QUEUE_MS))
+}
 
 pub struct RateControl {
     rung: usize,
@@ -28,6 +94,7 @@ pub struct RateControl {
     last_lost: u64,
     /// Loss smoothed over a few seconds, for the FEC budget.
     loss_avg: f32,
+    floor: RttFloor,
 }
 
 /// What the encoder should be set to after an observation.
@@ -40,7 +107,7 @@ pub struct Setting {
 impl RateControl {
     pub fn new() -> Self {
         let rung = LADDER.iter().position(|&k| k == START_KBPS).unwrap_or(0);
-        Self { rung, clean_secs: 0, hold: 0, last_sent: 0, last_lost: 0, loss_avg: 0.0 }
+        Self { rung, clean_secs: 0, hold: 0, last_sent: 0, last_lost: 0, loss_avg: 0.0, floor: RttFloor::default() }
     }
 
     /// Sets the baseline so the first observation covers only the next second.
@@ -58,13 +125,15 @@ impl RateControl {
         self.loss_avg
     }
 
-    /// Once a second, with the path's cumulative packet counts. Returns a new
-    /// setting when the encoder should change.
-    pub fn observe(&mut self, sent_packets: u64, lost_packets: u64) -> Option<Setting> {
+    /// Once a second, with the path's cumulative packet counts and the selected
+    /// path's round trip (0 when unknown). Returns a new setting when the encoder
+    /// should change.
+    pub fn observe(&mut self, sent_packets: u64, lost_packets: u64, rtt_ms: u32, relay: bool) -> Option<Setting> {
         let sent = sent_packets.saturating_sub(self.last_sent);
         let lost = lost_packets.saturating_sub(self.last_lost);
         self.last_sent = sent_packets;
         self.last_lost = lost_packets;
+        let floor = self.floor.observe(rtt_ms, relay);
         // Too few packets to judge: a call sends fifty a second.
         if sent < 10 {
             return None;
@@ -75,7 +144,12 @@ impl RateControl {
         if self.hold > 0 {
             self.hold -= 1;
         }
-        if loss >= DOWN_AT_PCT {
+        let severe = severe(rtt_ms, floor, loss);
+        if severe && self.kbps() > SEVERE_KBPS {
+            self.rung = LADDER.iter().position(|&k| k == SEVERE_KBPS).unwrap_or(0);
+            self.clean_secs = 0;
+            self.hold = HOLD_SECS;
+        } else if severe || loss >= DOWN_AT_PCT || queued(rtt_ms, floor) {
             self.clean_secs = 0;
             if self.hold == 0 && self.rung > 0 {
                 self.rung -= 1;
@@ -109,16 +183,16 @@ mod tests {
         let mut rc = RateControl::new();
         assert_eq!(rc.kbps(), 32);
         // 10% loss for one second: one rung, then held.
-        assert_eq!(rc.observe(50, 5).map(|s| s.kbps), Some(24));
-        assert_eq!(rc.observe(100, 10), None);
-        assert_eq!(rc.observe(150, 15), None);
-        assert_eq!(rc.observe(200, 20).map(|s| s.kbps), Some(20));
+        assert_eq!(rc.observe(50, 5, 0, false).map(|s| s.kbps), Some(24));
+        assert_eq!(rc.observe(100, 10, 0, false), None);
+        assert_eq!(rc.observe(150, 15, 0, false), None);
+        assert_eq!(rc.observe(200, 20, 0, false).map(|s| s.kbps), Some(20));
         // Clean seconds climb one rung every CLIMB_AFTER_SECS.
         let mut sent = 200;
         let mut changes = vec![];
         for _ in 0..(CLIMB_AFTER_SECS * 4) {
             sent += 50;
-            if let Some(s) = rc.observe(sent, 20) {
+            if let Some(s) = rc.observe(sent, 20, 0, false) {
                 changes.push(s.kbps);
             }
         }
@@ -128,17 +202,84 @@ mod tests {
     #[test]
     fn the_fec_budget_follows_the_loss_and_a_quiet_second_is_ignored() {
         let mut rc = RateControl::new();
-        assert_eq!(rc.observe(5, 0), None);
-        assert_eq!(rc.observe(55, 10).map(|s| s.fec_pct), Some(6));
+        assert_eq!(rc.observe(5, 0, 0, false), None);
+        assert_eq!(rc.observe(55, 10, 0, false).map(|s| s.fec_pct), Some(6));
         let mut sent = 55;
         let mut last = None;
         for _ in 0..6 {
             sent += 50;
-            if let Some(s) = rc.observe(sent, 10 + (sent - 55) / 5) {
+            if let Some(s) = rc.observe(sent, 10 + (sent - 55) / 5, 0, false) {
                 last = Some(s);
             }
         }
         assert_eq!(last.map(|s| s.fec_pct), Some(18));
+    }
+
+    /// Seconds of a clean call at `rtt`, from `sent` packets on; returns the packet count.
+    fn clean_secs(rc: &mut RateControl, mut sent: u64, secs: u32, rtt: u32, relay: bool) -> u64 {
+        for _ in 0..secs {
+            sent += 50;
+            rc.observe(sent, 0, rtt, relay);
+        }
+        sent
+    }
+
+    #[test]
+    fn a_queue_on_a_relay_steps_the_voice_down_without_any_loss() {
+        let mut rc = RateControl::new();
+        let sent = clean_secs(&mut rc, 0, 3, 400, true);
+        // TCP under the relay turns a full pipe into delay: no packet is ever lost.
+        assert_eq!(rc.observe(sent + 50, 0, 900, true).map(|s| s.kbps), Some(24));
+    }
+
+    #[test]
+    fn an_intercontinental_swing_is_not_a_queue() {
+        let mut rc = RateControl::new();
+        let mut sent = 0;
+        let mut kbps = vec![];
+        for i in 0..(CLIMB_AFTER_SECS * 3) {
+            sent += 50;
+            let rtt = if i % 2 == 0 { 300 } else { 550 };
+            if let Some(s) = rc.observe(sent, 0, rtt, true) {
+                kbps.push(s.kbps);
+            }
+        }
+        assert_eq!(kbps, vec![40, 48, 64], "300 to 550 ms with no loss is a clean call");
+        // A slow path's floor widens its own tolerance: double the floor before it's a queue.
+        assert!(!queued(1400, Some(800)));
+        assert!(queued(1700, Some(800)));
+    }
+
+    #[test]
+    fn a_severe_queue_drops_the_voice_to_wideband_at_once_and_keeps_stepping() {
+        let mut rc = RateControl::new();
+        let sent = clean_secs(&mut rc, 0, CLIMB_AFTER_SECS * 3, 400, true);
+        assert_eq!(rc.kbps(), 64);
+        assert_eq!(rc.observe(sent + 50, 0, 6000, true).map(|s| s.kbps), Some(SEVERE_KBPS));
+        let mut sent = sent + 50;
+        for _ in 0..HOLD_SECS {
+            sent += 50;
+            rc.observe(sent, 0, 6000, true);
+        }
+        assert_eq!(rc.kbps(), 24, "a queue that stays keeps costing rungs");
+        // Severe loss is the same emergency without the delay.
+        let mut lossy = RateControl::new();
+        let sent = clean_secs(&mut lossy, 0, CLIMB_AFTER_SECS * 3, 0, false);
+        assert_eq!(lossy.observe(sent + 50, 10, 0, false).map(|s| s.kbps), Some(SEVERE_KBPS));
+    }
+
+    #[test]
+    fn the_floor_is_kept_per_path_and_forgets_after_its_window() {
+        let mut f = RttFloor::default();
+        assert_eq!(f.observe(0, false), None, "an unknown round trip teaches nothing");
+        assert_eq!(f.observe(50, false), Some(50));
+        assert_eq!(f.observe(400, true), Some(400), "a relay never borrows the direct path's floor");
+        assert_eq!(f.observe(6000, true), Some(400), "nor relearns its own from a queue");
+        assert_eq!(f.observe(80, false), Some(50));
+        for _ in 0..(FLOOR_BUCKET_SECS * FLOOR_BUCKETS as u32) {
+            f.observe(700, true);
+        }
+        assert_eq!(f.observe(700, true), Some(700), "a path that really got slower is relearned");
     }
 }
 
@@ -189,12 +330,21 @@ const VIDEO_RTT_BLOAT_MS: u32 = 50;
 /// rung of video is worth more and costs less to give back.
 const VIDEO_CLIMB_AFTER_SECS: u32 = 5;
 
+/// The round trip the video's in-flight budget is sized to: the path's, but never
+/// past twice its floor. Beyond that the round trip is our own queue, and a budget
+/// that grew with it would keep it full.
+pub fn budget_rtt(rtt_ms: u32, floor: Option<u32>) -> u32 {
+    floor.map_or(rtt_ms, |f| rtt_ms.min(f.saturating_mul(2)))
+}
+
 /// What the video controller sees once a second.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VideoObservation {
     pub sent_packets: u64,
     pub lost_packets: u64,
     pub rtt_ms: u32,
+    /// The selected path's [`RttFloor`], once it has one.
+    pub floor_ms: Option<u32>,
     /// Audio datagrams the connection refused, cumulative: any growth is a step down.
     pub audio_send_dropped: u64,
     /// Frames still on the wire at the cap, or a frame reset, in the last second.
@@ -211,7 +361,6 @@ pub struct VideoRate {
     last_sent: u64,
     last_lost: u64,
     last_audio_dropped: u64,
-    min_rtt: u32,
     primed: bool,
     /// A rung the user chose; the ladder only leaves it to protect the voice.
     pin: Option<usize>,
@@ -240,7 +389,6 @@ impl VideoRate {
             last_sent: 0,
             last_lost: 0,
             last_audio_dropped: 0,
-            min_rtt: u32::MAX,
             primed: false,
             pin: None,
             fps: None,
@@ -284,11 +432,9 @@ impl VideoRate {
     }
 
     /// A new ceiling (the path changed, or the peer said how much it can take).
-    /// Returns the rung when the ceiling pushed it down. The round-trip floor starts
-    /// over too: a new path has its own.
+    /// Returns the rung when the ceiling pushed it down.
     pub fn set_cap(&mut self, cap: usize) -> Option<Rung> {
         self.cap = cap.min(self.ladder.len() - 1);
-        self.min_rtt = u32::MAX;
         if self.pin.is_none() && self.rung > self.cap {
             self.rung = self.cap;
             return Some(self.rung());
@@ -309,23 +455,27 @@ impl VideoRate {
             self.primed = true;
             return None;
         }
-        if obs.rtt_ms > 0 {
-            self.min_rtt = self.min_rtt.min(obs.rtt_ms);
-        }
         let loss = if sent >= 10 { 100.0 * lost as f32 / sent as f32 } else { 0.0 };
-        let bloated = self.min_rtt != u32::MAX && obs.rtt_ms > self.min_rtt + VIDEO_RTT_BLOAT_MS;
+        let bloated = obs.floor_ms.is_some_and(|f| obs.rtt_ms > f.saturating_add(VIDEO_RTT_BLOAT_MS));
+        // A queue this deep is already costing the voice, which rides behind it.
+        let severe = severe(obs.rtt_ms, obs.floor_ms, loss);
         // A pinned rung answers only to the voice: the one thing video may never cost.
         let trouble = if self.pin.is_some() {
-            audio_dropped > 0
+            audio_dropped > 0 || severe
         } else {
-            loss >= VIDEO_DOWN_AT_PCT || audio_dropped > 0 || bloated || obs.backlog
+            loss >= VIDEO_DOWN_AT_PCT || audio_dropped > 0 || bloated || obs.backlog || severe
         };
         let ceiling = self.pin.unwrap_or(self.cap);
         let before = self.rung;
         if self.hold > 0 {
             self.hold -= 1;
         }
-        if trouble {
+        if severe && self.rung > 0 {
+            // Past what a rung at a time can drain.
+            self.rung = 0;
+            self.clean_secs = 0;
+            self.hold = HOLD_SECS;
+        } else if trouble {
             self.clean_secs = 0;
             if self.hold == 0 && self.rung > 0 {
                 self.rung -= 1;
@@ -349,7 +499,7 @@ mod video_tests {
     use super::*;
 
     fn clean(sent: u64) -> VideoObservation {
-        VideoObservation { sent_packets: sent, lost_packets: 0, rtt_ms: 40, audio_send_dropped: 0, backlog: false }
+        VideoObservation { sent_packets: sent, lost_packets: 0, rtt_ms: 40, floor_ms: Some(40), audio_send_dropped: 0, backlog: false }
     }
 
     #[test]
@@ -378,15 +528,15 @@ mod video_tests {
         let mut r = VideoRate::camera(6);
         r.observe(clean(100));
         r.observe(clean(200));
-        let dropped = VideoObservation { sent_packets: 300, lost_packets: 0, rtt_ms: 40, audio_send_dropped: 3, backlog: false };
+        let dropped = VideoObservation { sent_packets: 300, lost_packets: 0, rtt_ms: 40, floor_ms: Some(40), audio_send_dropped: 3, backlog: false };
         assert_eq!(r.observe(dropped), Some(CAMERA_LADDER[3]));
         // Held for a few seconds: one bad second costs one rung, not the ladder.
-        let bloat = VideoObservation { sent_packets: 400, lost_packets: 0, rtt_ms: 140, audio_send_dropped: 3, backlog: false };
+        let bloat = VideoObservation { sent_packets: 400, lost_packets: 0, rtt_ms: 140, floor_ms: Some(40), audio_send_dropped: 3, backlog: false };
         assert_eq!(r.observe(bloat), None);
         let mut sent = 400;
         for _ in 0..HOLD_SECS {
             sent += 100;
-            r.observe(VideoObservation { sent_packets: sent, lost_packets: 0, rtt_ms: 140, audio_send_dropped: 3, backlog: false });
+            r.observe(VideoObservation { sent_packets: sent, lost_packets: 0, rtt_ms: 140, floor_ms: Some(40), audio_send_dropped: 3, backlog: false });
         }
         assert_eq!(r.rung(), CAMERA_LADDER[2]);
         assert_eq!(r.set_cap(0), Some(CAMERA_LADDER[0]));
@@ -397,14 +547,14 @@ mod video_tests {
         let mut r = VideoRate::camera(6);
         assert_eq!(r.set_pin(Some(6)), Some(CAMERA_LADDER[6]));
         r.observe(clean(100));
-        let lossy = VideoObservation { sent_packets: 200, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 0, backlog: true };
+        let lossy = VideoObservation { sent_packets: 200, lost_packets: 10, rtt_ms: 400, floor_ms: Some(40), audio_send_dropped: 0, backlog: true };
         assert_eq!(r.observe(lossy), None);
-        let voice = VideoObservation { sent_packets: 300, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true };
+        let voice = VideoObservation { sent_packets: 300, lost_packets: 10, rtt_ms: 400, floor_ms: Some(40), audio_send_dropped: 1, backlog: true };
         assert_eq!(r.observe(voice), Some(CAMERA_LADDER[5]));
         let mut sent = 300;
         for _ in 0..(HOLD_SECS + VIDEO_CLIMB_AFTER_SECS) {
             sent += 100;
-            r.observe(VideoObservation { sent_packets: sent, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true });
+            r.observe(VideoObservation { sent_packets: sent, lost_packets: 10, rtt_ms: 400, floor_ms: Some(40), audio_send_dropped: 1, backlog: true });
         }
         assert_eq!(r.rung(), CAMERA_LADDER[6], "climbs back to the pin once the voice is fine");
         assert_eq!(r.set_fps(Some(15)).fps, 15);
@@ -418,10 +568,34 @@ mod video_tests {
     }
 
     #[test]
+    fn a_severe_queue_drops_video_to_the_bottom_even_when_pinned() {
+        let deep = |sent| VideoObservation { sent_packets: sent, lost_packets: 0, rtt_ms: 6000, floor_ms: Some(400), audio_send_dropped: 0, backlog: false };
+        let mut r = VideoRate::screen(SCREEN_RELAY_CAP);
+        r.observe(clean(100));
+        assert_eq!(r.observe(deep(200)), Some(SCREEN_LADDER[0]));
+        let mut pinned = VideoRate::screen(SCREEN_RELAY_CAP);
+        pinned.set_pin(Some(5));
+        pinned.observe(clean(100));
+        assert_eq!(pinned.observe(deep(200)), Some(SCREEN_LADDER[0]), "the queue is already costing the voice");
+        let mut sent = 200;
+        for _ in 0..(HOLD_SECS + VIDEO_CLIMB_AFTER_SECS * 2) {
+            sent += 100;
+            assert_eq!(pinned.observe(deep(sent)), None, "no climbing back while the queue stands");
+        }
+    }
+
+    #[test]
+    fn the_in_flight_budget_stops_growing_at_twice_the_floor() {
+        assert_eq!(budget_rtt(6000, Some(400)), 800);
+        assert_eq!(budget_rtt(550, Some(400)), 550);
+        assert_eq!(budget_rtt(550, None), 550);
+    }
+
+    #[test]
     fn two_percent_loss_is_enough_for_video() {
         let mut r = VideoRate::screen(5);
         r.observe(clean(100));
-        let lossy = VideoObservation { sent_packets: 200, lost_packets: 3, rtt_ms: 40, audio_send_dropped: 0, backlog: false };
+        let lossy = VideoObservation { sent_packets: 200, lost_packets: 3, rtt_ms: 40, floor_ms: Some(40), audio_send_dropped: 0, backlog: false };
         assert_eq!(r.observe(lossy), Some(SCREEN_LADDER[2]));
     }
 }

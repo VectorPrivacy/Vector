@@ -504,7 +504,8 @@ fn capture_thread(
                 rate_tick = Instant::now();
                 // Every QUIC packet goes out as one UDP datagram, so this is packets sent.
                 let net = conn.stats();
-                if let Some(setting) = rate.observe(net.udp_tx.datagrams, net.lost_packets) {
+                let (relay, rtt_ms) = selected_path(conn);
+                if let Some(setting) = rate.observe(net.udp_tx.datagrams, net.lost_packets, rtt_ms, relay) {
                     if enc.set_rate(setting.kbps, setting.fec_pct).is_ok() {
                         stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
                     }
@@ -513,6 +514,15 @@ fn capture_thread(
             }
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Whether the path in use goes through a relay, and its round trip (0 when unknown).
+fn selected_path(conn: &iroh::endpoint::Connection) -> (bool, u32) {
+    let paths = conn.paths();
+    match paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()) {
+        Some(p) => (p.is_relay(), p.rtt().as_millis() as u32),
+        None => (true, 0),
     }
 }
 

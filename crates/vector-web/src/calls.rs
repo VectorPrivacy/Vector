@@ -239,7 +239,12 @@ pub fn call_audio_frame(packet: &[u8], ok: bool) {
         rate.1 = Instant::now();
         // Every QUIC packet goes out as one UDP datagram, so this is packets sent.
         let net = e.conn.stats();
-        if let Some(setting) = rate.0.observe(net.udp_tx.datagrams, net.lost_packets) {
+        let rtt_ms = {
+            let paths = e.conn.paths();
+            paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()).map_or(0, |p| p.rtt().as_millis() as u32)
+        };
+        // A browser has no UDP: every path it holds is a relay.
+        if let Some(setting) = rate.0.observe(net.udp_tx.datagrams, net.lost_packets, rtt_ms, true) {
             e.stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
             tell("rate", json!({ "kbps": setting.kbps, "fec": setting.fec_pct }));
         }

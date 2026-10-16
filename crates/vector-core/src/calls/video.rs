@@ -5,7 +5,7 @@
 
 use super::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_FRAME};
 use super::platform::{CallPlatform, LinkConn};
-use super::rate::{Rung, VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, SCREEN_LADDER, SCREEN_RELAY_CAP};
+use super::rate::{budget_rtt, RttFloor, Rung, VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, SCREEN_LADDER, SCREEN_RELAY_CAP};
 use super::share::ShareInput;
 use super::stats::MediaStats;
 use super::wire::{write_control, Control, Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
@@ -152,6 +152,8 @@ struct Shared {
     /// One ladder per track we send; None while that track is off.
     rate: Mutex<[Option<VideoRate>; 2]>,
     prefs: Mutex<[Prefs; 2]>,
+    /// The selected path's round-trip floor, in ms (0 until it has one).
+    floor_ms: AtomicU32,
 }
 
 impl Shared {
@@ -186,7 +188,9 @@ impl Shared {
     /// floor. An acknowledgement takes the round trip plus the peer's ACK delay and
     /// its read, so a cap sized to the round trip alone sits full on a clean link.
     fn in_flight_cap(&self, rtt_ms: u32) -> usize {
-        ((rtt_ms as usize + ACK_SLACK_MS) * self.sending_fps() / 1000 + 2).max(IN_FLIGHT_MIN)
+        let floor = Some(self.floor_ms.load(Ordering::Relaxed)).filter(|&f| f > 0);
+        let rtt = budget_rtt(rtt_ms, floor) as usize;
+        ((rtt + ACK_SLACK_MS) * self.sending_fps() / 1000 + 2).max(IN_FLIGHT_MIN)
     }
 
     /// The ceiling a track gets on this path, and beside its sibling.
@@ -228,6 +232,7 @@ impl VideoTrack {
             conn: conn.clone(),
             rate: Mutex::new([None, None]),
             prefs: Mutex::new([Prefs::default(), Prefs::default()]),
+            floor_ms: AtomicU32::new(0),
         });
         let (taker_tx, taker_rx) = mpsc::channel::<LinkConn>(1);
         platform.set_video_taker(Some(taker_tx));
@@ -534,9 +539,12 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
     let mut last_received = 0u64;
     let mut tick = 0u32;
     let mut was_relay: Option<bool> = None;
+    let mut floor = RttFloor::default();
     loop {
         crate::rt::time::sleep(Duration::from_secs(1)).await;
         let (relay, rtt_ms) = shared.path();
+        let floor_ms = floor.observe(rtt_ms, relay);
+        shared.floor_ms.store(floor_ms.unwrap_or(0), Ordering::Relaxed);
         let stale = shared.stats.stale.load(Ordering::Relaxed);
         let skipped = shared.stats.skipped.load(Ordering::Relaxed);
         let sent = shared.stats.sent.load(Ordering::Relaxed);
@@ -567,7 +575,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
                 rates.iter().flatten().map(|r| r.rung()).map(|r| format!("{}fps/{}kbps", r.fps, r.kbps)).collect::<Vec<_>>().join("+")
             };
             crate::log_info!(
-                "[VIDEO] rtt {rtt_ms} ms {} cwnd {} lost {} cong {} | blocked: data {} stream_data {} streams_uni {} | out: sent {} skipped {} stale {} in_flight {in_flight}/{cap} rung {rung} | in: received {received} dropped {} key_req {}",
+                "[VIDEO] rtt {rtt_ms} ms (floor {floor_ms:?}) {} cwnd {} lost {} cong {} | blocked: data {} stream_data {} streams_uni {} | out: sent {} skipped {} stale {} in_flight {in_flight}/{cap} rung {rung} | in: received {received} dropped {} key_req {}",
                 if relay { "relay" } else { "direct" },
                 cwnd,
                 net.lost_packets,
@@ -591,6 +599,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
             sent_packets: net.udp_tx.datagrams,
             lost_packets: net.lost_packets,
             rtt_ms,
+            floor_ms,
             audio_send_dropped: hooks.audio.send_dropped.load(Ordering::Relaxed),
             backlog,
         };
