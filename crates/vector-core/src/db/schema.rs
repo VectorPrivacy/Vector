@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 104;
+pub const HIGHEST_MIGRATION_ID: u32 = 105;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1467,6 +1467,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
 
     // Separate from 103 so a database is never left without the columns the purge reads.
     run_atomic_migration(conn, 104, "Drop Concord v1 columns", |tx| super::v1_purge::drop_v1_columns(tx))?;
+
+    // A held floor's author, so a same-version fork against it is judged authority first
+    // (CORD-04 §1) even when the held edition itself is no longer served.
+    run_atomic_migration(conn, 105, "Edition head author", |tx| {
+        tx.execute("ALTER TABLE community_edition_heads ADD COLUMN author BLOB", [])
+            .map_err(|e| format!("add community_edition_heads.author: {e}"))?;
+        Ok(())
+    })?;
 
     Ok(())
 }

@@ -218,14 +218,21 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
 }
 
 impl ParsedEdition {
-    /// The [`version::Edition`] view used by [`version::fold`].
+    /// The [`version::Edition`] view used by [`version::fold`], every author ranked alike: right
+    /// wherever one author writes the whole entity (an owner-only document, a creator's own registry).
     pub fn to_fold_edition(&self) -> version::Edition {
+        self.to_fold_edition_ranked(0)
+    }
+
+    /// As [`Self::to_fold_edition`], carrying the author's authority rank for fork tiebreaks.
+    pub fn to_fold_edition_ranked(&self, rank: u32) -> version::Edition {
         version::Edition {
             version: self.version,
             prev_hash: self.prev_hash,
             self_hash: self.self_hash,
             created_at: self.created_at,
             tiebreak_id: self.inner_id,
+            rank,
         }
     }
 }

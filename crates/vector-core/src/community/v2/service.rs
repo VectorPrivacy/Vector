@@ -100,7 +100,7 @@ pub async fn create_community<T: Transport + ?Sized>(
         for wrap in &genesis.wraps {
             if let Ok((ed, _)) = control.open(wrap) {
                 let entity_hex = crate::simd::hex::bytes_to_hex_32(&ed.entity_id);
-                crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
+                crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, &ed.author.to_bytes(), community.root_epoch.0)?;
             }
         }
         crate::db::community::save_community_v2(&community)?;
@@ -907,7 +907,7 @@ async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, com
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
             .collect();
         let authority = fold_authority(community, &editions, &floors);
         let sets = live_invite_link_sets(community.id(), &owner.to_hex(), &editions, &authority, &floors);
@@ -1003,7 +1003,7 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
                         .unwrap_or_default()
                         .into_iter()
                         .filter(|(_, f)| f.0 == community.root_epoch.0)
-                        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+                        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
                         .collect();
                     let owner_hex = community.owner().map(|o| o.to_hex()).unwrap_or_default();
                     let authority = fold_authority(community, &editions, &floors);
@@ -1304,7 +1304,7 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
         .unwrap_or_default()
         .into_iter()
         .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
         .collect();
     let authority = fold_authority(community, &editions, &floors);
     !live_invite_link_sets(cid, &owner.to_hex(), &editions, &authority, &floors).is_empty()
@@ -1406,7 +1406,7 @@ fn live_invite_link_sets(
             continue;
         }
         let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition()).collect();
-        let (Some(hi), _) = fold_head(&fold_eds, floors.get(&crate::simd::hex::bytes_to_hex_32(eid))) else { continue };
+        let (Some(hi), _) = fold_head(&fold_eds, floors.get(&crate::simd::hex::bytes_to_hex_32(eid)), &|_| 0) else { continue };
         if let Ok(signers) = invite::parse_registry_content(&authed[hi].content) {
             if signers.is_empty() {
                 continue; // a creator who retired every link is absent, not a zero row
@@ -1503,7 +1503,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // state below what this join already showed.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         for h in join_heads.iter().chain(join_authority_heads.iter()) {
-            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0)?;
         }
         crate::db::community::save_community_v2(&community)?;
         // Archive the joined root at its epoch, so this member reads Public-channel
@@ -2213,7 +2213,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         .unwrap_or_default()
         .into_iter()
         .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
         .collect();
     let control = control::ControlPlane::of(community);
 
@@ -3030,7 +3030,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
             .collect();
         let current_control = control::ControlPlane::of(community);
         // Page the ENTIRE control plane, not just the newest window: the compaction MUST
@@ -3141,7 +3141,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                 return Err(format!("re-founding aborted: the committed head of control entity {floor_key} (v{}) was not served; no state published", floor.0));
             };
             let (head_ed, head_os) = &opened[head_idx];
-            let h = FoldedHead { entity_hex: floor_key.clone(), version: head_ed.version, self_hash: head_ed.self_hash, inner_id: head_ed.inner_id };
+            let h = FoldedHead { entity_hex: floor_key.clone(), version: head_ed.version, self_hash: head_ed.self_hash, inner_id: head_ed.inner_id, author: head_ed.author.to_bytes() };
             let (rewrapped, _) = super::stream::rewrap_seal(&head_os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
             carried.push((h, rewrapped));
         }
@@ -3436,7 +3436,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         // compacted control on the next follow, so they self-heal.
         crate::db::community::advance_server_root_epoch(&cid_hex, new_epoch.0, &new_root)?;
         for (h, _) in &carried {
-            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, new_epoch.0)?;
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, new_epoch.0)?;
         }
         // Re-subscribe NOW: the rotation changed every plane author, and the live sub
         // still carries the OLD epoch's set. Members adopt via the follow worker
@@ -4859,7 +4859,7 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         // pool now points at another account's DB — skipping is safe (the next own
         // edit rebuilds the same head from the relay's copy).
         if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
-            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, &ed.author.to_bytes(), community.root_epoch.0)?;
         }
         Ok(())
     })
@@ -6951,7 +6951,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
         let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3)))
+            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
             .collect();
 
         // Newest window first; page OLDER only while a tracking entity is gapped (its
@@ -7112,8 +7112,14 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // the metadata/channel heads and the roster/banlist heads advance their floors;
         // run the advance (v+1) and same-version convergence (fork tiebreak) paths.
         for h in fold.heads.iter().chain(authority.heads.iter()) {
-            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
-            crate::db::community::converge_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0)?;
+            // The same edition content can arrive under another author's signature (the hash
+            // covers content, not signer): it must not re-key a floor that records its author,
+            // or a weaker copy lowers the bar a later rival has to beat.
+            let rekey = floors.get(&h.entity_hex).is_some_and(|f| f.0 == h.version && f.1 == h.self_hash && f.3.is_some());
+            if !rekey {
+                crate::db::community::converge_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, &h.author, community.root_epoch.0)?;
+            }
         }
         // Adopt the staff write key a promotion delivered inside MY OWN Grant
         // (CORD-04 §3): decrypt the control_wrap under the granter↔me pairwise key
@@ -7450,6 +7456,7 @@ struct FoldedHead {
     version: u64,
     self_hash: [u8; 32],
     inner_id: [u8; 32],
+    author: [u8; 32],
 }
 
 /// The outcome of a floor-aware control fold: the updated community (if content
@@ -7467,8 +7474,46 @@ struct ControlFold {
     pins_persist: Vec<(String, String, u64, String, u64)>,
 }
 
-/// Per-entity floor: `(version, self_hash, inner_id)` of the committed head.
-type Floor = (u64, [u8; 32], Option<[u8; 32]>);
+/// Per-entity floor: `(version, self_hash, inner_id, author)` of the committed head. The id and
+/// author are its fork tiebreak key; either is `None` on a row written before it was recorded.
+type Floor = (u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>);
+
+/// An author's authority in an equal-version fork (CORD-04 §1), lower outranking: the owner, then
+/// the lowest role position, then the roleless.
+fn fork_rank(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str) -> u32 {
+    if owner_hex == Some(author_hex) {
+        return 0;
+    }
+    roles.highest_position(author_hex).unwrap_or(u32::MAX)
+}
+
+/// The held floor's fork key, ranked against the roster the caller folds with.
+enum HeldKey {
+    /// No tiebreak was recorded for the held head: any same-version rival may replace it.
+    Replaceable,
+    /// Recorded before authors were: rivals compare by id alone.
+    Id([u8; 32]),
+    Ranked(u32, [u8; 32]),
+}
+
+impl HeldKey {
+    fn of(floor: &Floor, rank_of: &dyn Fn(&[u8; 32]) -> u32) -> Self {
+        match (floor.2, floor.3) {
+            (None, _) => HeldKey::Replaceable,
+            (Some(id), None) => HeldKey::Id(id),
+            (Some(id), Some(author)) => HeldKey::Ranked(rank_of(&author), id),
+        }
+    }
+
+    /// Whether a same-version rival takes the floor from the held head.
+    fn beaten_by(&self, rank: u32, id: &[u8; 32]) -> bool {
+        match self {
+            HeldKey::Replaceable => true,
+            HeldKey::Id(held) => id < held,
+            HeldKey::Ranked(held_rank, held) => (rank, id) < (*held_rank, held),
+        }
+    }
+}
 type Floors = std::collections::HashMap<String, Floor>;
 
 /// Fold owner-authored control editions into an updated community using the
@@ -7559,13 +7604,14 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             continue;
         }
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
-        let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition()).collect();
-        let (hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
+        let rank = |author_hex: &str| fork_rank(&authority.roles, owner_hex.as_deref(), author_hex);
+        let fold_eds: Vec<version::Edition> = authed.iter().map(|p| p.to_fold_edition_ranked(rank(&p.author.to_hex()))).collect();
+        let (hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex), &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)));
         gapped |= entity_gapped;
         let Some(hi) = hi else { continue };
 
         let head = authed[hi];
-        heads.push(FoldedHead { entity_hex, version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
+        heads.push(FoldedHead { entity_hex, version: head.version, self_hash: head.self_hash, inner_id: head.inner_id, author: head.author.to_bytes() });
         if is_meta {
             if let Ok(meta) = serde_json::from_str::<control::CommunityMetadata>(&head.content) {
                 changed |= apply_community_metadata(&mut out, meta);
@@ -7598,33 +7644,18 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
 /// head, what Armada shows across a compaction's dangling prev); adopt the chain-
 /// anchored head, paging on an upper gap; converge a same-version fork at the floor to
 /// the lower-inner-id winner; and fail closed otherwise.
-fn fold_head(fold_eds: &[version::Edition], floor: Option<&Floor>) -> (Option<usize>, bool) {
-    let floor_v = floor.map(|f| f.0).unwrap_or(0);
-    if floor_v == 0 {
-        return (version::bootstrap_head(fold_eds, 0), false);
-    }
-    let floor_hash = floor.map(|f| &f.1);
-    let held_inner = floor.and_then(|f| f.2);
-    let result = version::fold(fold_eds, floor_v, floor_hash);
+fn fold_head(fold_eds: &[version::Edition], floor: Option<&Floor>, rank_of: &dyn Fn(&[u8; 32]) -> u32) -> (Option<usize>, bool) {
+    let Some(floor) = floor.filter(|f| f.0 > 0) else { return (version::bootstrap_head(fold_eds, 0), false) };
+    // A same-version rival of a withheld held head may stand in for it only by beating
+    // the key the floor recorded; while the held edition is served, the tiebreak decides.
+    let held = HeldKey::of(floor, rank_of);
+    let result = version::fold_with_rivals(fold_eds, floor.0, Some(&floor.1), &|e| held.beaten_by(e.rank, &e.tiebreak_id));
     if result.anchored {
         return (result.head, result.gap); // verified prefix; page any upper gap.
     }
-    if result.head.is_none() && !result.gap {
-        return (None, false); // everything below floor — a stale relay, no paging.
-    }
-    // Unanchored under a held floor: converge a same-version fork at the floor to its
-    // deterministic winner (lower inner id; a NULL held id is always replaceable),
-    // else fail closed.
-    let fork = fold_eds.iter().enumerate().filter(|(_, e)| e.version == floor_v).min_by_key(|(_, e)| e.tiebreak_id);
-    let win_hash = match fork {
-        Some((_, w)) if floor_hash != Some(&w.self_hash) && held_inner.is_none_or(|h| w.tiebreak_id < h) => w.self_hash,
-        _ => return (None, true), // detached from our committed head → withholding.
-    };
-    let re = version::fold(fold_eds, floor_v, Some(&win_hash));
-    if !re.anchored {
-        return (None, true);
-    }
-    (re.head, re.gap)
+    // Nothing at or above the floor is a stale relay (no paging); anything else that
+    // fails to link is withholding, so fail closed.
+    (None, result.gap)
 }
 
 /// The folded, delegation-AUTHORIZED control-plane authority (CORD-04): the roster
@@ -7695,6 +7726,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let mut role_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
     let mut grant_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
     let mut gapped = false;
+    let mut chains: Vec<(String, &Vec<&ParsedEdition>)> = Vec::new();
 
     for (eid, group) in &groups {
         // The banlist is folded author-aware AFTER the roster is known (below).
@@ -7702,23 +7734,24 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
             continue;
         }
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
-        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition()).collect();
-        let (_hi, entity_gapped) = fold_head(&fold_eds, floors.get(&entity_hex));
-        gapped |= entity_gapped;
-        let floor_v = floors.get(&entity_hex).map(|f| f.0).unwrap_or(0);
+        chains.push((entity_hex.clone(), group));
+        let floor = floors.get(&entity_hex).copied();
+        let floor_v = floor.map(|f| f.0).unwrap_or(0);
+        let held_served = floor.is_some_and(|f| group.iter().any(|p| p.version == f.0 && p.self_hash == f.1));
+        let rival_floor = floor.filter(|_| !held_served);
 
         for p in group {
             // Refuse-downgrade: never consider an edition below the persisted floor.
             if p.version < floor_v {
                 continue;
             }
-            let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id };
+            let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id, author: p.author.to_bytes() };
             match p.vsk.as_str() {
                 vsk::ROLE => {
                     // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
                     if let Some(role) = super::roles::parse_role_content(&p.content) {
                         if role.role_id == entity_hex && role.position != 0 {
-                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head, citation: p.authority.clone() });
+                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head, citation: p.authority.clone(), floor: rival_floor });
                         }
                     }
                 }
@@ -7727,7 +7760,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                         if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
                             if super::derive::grant_locator(cid, &member) == *eid {
                                 grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
-                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head, citation: p.authority.clone() });
+                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head, citation: p.authority.clone(), floor: rival_floor });
                             }
                         }
                     }
@@ -7744,6 +7777,14 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
     let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty, None);
+    let prelim_rank = |author_hex: &str| fork_rank(&prelim, owner_hex.as_deref(), author_hex);
+    let prelim_rank_bytes = |a: &[u8; 32]| prelim_rank(&crate::simd::hex::bytes_to_hex_32(a));
+    // Whether a tracking role/grant chain gapped (drives older-paging), its forks ranked by
+    // the authority this pass resolved.
+    for (entity_hex, group) in &chains {
+        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition_ranked(prelim_rank(&p.author.to_hex()))).collect();
+        gapped |= fold_head(&fold_eds, floors.get(entity_hex), &prelim_rank_bytes).1;
+    }
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -7795,8 +7836,8 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let banned: std::collections::BTreeSet<String> = if banlist_authored.is_empty() {
         persisted_banned.into_iter().collect()
     } else {
-        let fold_eds: Vec<version::Edition> = banlist_authored.iter().map(|p| p.to_fold_edition()).collect();
-        let (hi, g) = fold_head(&fold_eds, floors.get(&banlist_hex));
+        let fold_eds: Vec<version::Edition> = banlist_authored.iter().map(|p| p.to_fold_edition_ranked(prelim_rank(&p.author.to_hex()))).collect();
+        let (hi, g) = fold_head(&fold_eds, floors.get(&banlist_hex), &prelim_rank_bytes);
         gapped |= g;
         match hi {
             Some(hi) => {
@@ -7808,7 +7849,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     .filter(|t| prelim.can_act_on_member(&ah, owner_hex.as_deref(), t, Permissions::BAN))
                     .take(super::roles::MAX_BANLIST)
                     .collect();
-                banlist_head = Some(FoldedHead { entity_hex: banlist_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id });
+                banlist_head = Some(FoldedHead { entity_hex: banlist_hex.clone(), version: head.version, self_hash: head.self_hash, inner_id: head.inner_id, author: head.author.to_bytes() });
                 banlist_persist = Some((list.clone(), head.version));
                 list.into_iter().collect()
             }
@@ -7852,6 +7893,24 @@ struct AuthorityCand {
     /// The `vac` this edition carried (CORD-04 §5). `None` for an owner edition
     /// (supreme, cites nothing) or an uncited one — the latter is refused.
     citation: Option<crate::community::edition::AuthorityCitation>,
+    /// Its entity's persisted floor, while the held edition is NOT served: a rival at the
+    /// floor's version must then beat the key the floor recorded. A served held edition
+    /// competes on the tiebreak like any sibling, so this is `None`.
+    floor: Option<Floor>,
+}
+
+impl AuthorityCand {
+    /// A same-version rival of the held floor edition that does not beat it (CORD-04 §1).
+    /// Taking it would let a relay withholding the better held edition swap in a worse one.
+    fn loses_to_floor(&self, roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>) -> bool {
+        let Some(floor) = self.floor.as_ref() else { return false };
+        if self.head.version != floor.0 || self.head.self_hash == floor.1 {
+            return false;
+        }
+        let rank_of = |a: &[u8; 32]| fork_rank(roles, owner_hex, &crate::simd::hex::bytes_to_hex_32(a));
+        let mine = fork_rank(roles, owner_hex, &self.author.to_hex());
+        !HeldKey::of(floor, &rank_of).beaten_by(mine, &self.head.inner_id)
+    }
 }
 
 /// CORD-04 §5 sync floor, resolved against the heads THIS fold pass has accepted.
@@ -7942,8 +8001,8 @@ fn select_authorized(
             //
             // The chain is replayed ASCENDING so each version is judged against
             // the position its own predecessor established, then the highest
-            // admissible version wins (candidates arrive version-DESC, forks
-            // broken by lowest inner_id — preserved by walking version groups).
+            // admissible version wins (candidates arrive version-DESC; forks are
+            // broken authority first, then the lowest inner_id, within each group).
             let mut admissible: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
             let mut standing: Option<u32> = None;
             let mut i = cands.len();
@@ -7953,10 +8012,15 @@ fn select_authorized(
                 while i > 0 && cands[i - 1].head.version == ver {
                     i -= 1;
                 }
-                // One winner per version: fork siblings can't sidestep the gate. The
-                // group is inner_id-ASC, so the first admissible is the lowest id.
-                for c in cands[i..hi].iter() {
+                // One winner per version: fork siblings can't sidestep the gate, and the
+                // first admissible in (authority, inner_id) order wins (CORD-04 §1).
+                let mut group: Vec<&AuthorityCand> = cands[i..hi].iter().collect();
+                group.sort_by_key(|c| (fork_rank(&accepted, owner_hex, &c.author.to_hex()), c.head.inner_id));
+                for c in group {
                     let Some(role) = &c.role else { continue };
+                    if c.loses_to_floor(&accepted, owner_hex) {
+                        continue;
+                    }
                     let ah = c.author.to_hex();
                     let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
                         if let Some(m) = w.as_mut() {
@@ -8011,9 +8075,15 @@ fn select_authorized(
             }
         }
         for cands in grant_cands.values() {
-            for c in cands {
+            // Highest version first; a same-version fork goes to authority, then the lowest id.
+            let mut ordered: Vec<&AuthorityCand> = cands.iter().collect();
+            ordered.sort_by_key(|c| (std::cmp::Reverse(c.head.version), fork_rank(&accepted, owner_hex, &c.author.to_hex()), c.head.inner_id));
+            for c in ordered {
                 let c2 = c;
                 let Some(grant) = &c.grant else { continue };
+                if c.loses_to_floor(&accepted, owner_hex) {
+                    continue;
+                }
                 let ah = c.author.to_hex();
                 let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
                     if let Some(m) = w.as_mut() {
@@ -11798,6 +11868,461 @@ mod tests {
         }
     }
 
+    /// Publish one side of a same-version fork to every relay given, nudging its clock until
+    /// its rumor id sorts as `order` against another id. A test can then pit authority against
+    /// the id rule instead of hoping the hashes fall the right way.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_fork(
+        relays: &[&MemoryRelay],
+        community: &CommunityV2,
+        signer: &Keys,
+        vsk_code: &str,
+        eid: &[u8; 32],
+        version: u64,
+        prev: Option<[u8; 32]>,
+        content: &str,
+        order: Option<(std::cmp::Ordering, [u8; 32])>,
+    ) -> [u8; 32] {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let cite = cite_on_relay(relays[0], community, signer).await;
+        for ts in 5_000u64.. {
+            let rumor = control::build_edition_rumor(signer.public_key(), vsk_code, eid, version, prev.as_ref(), content, ts, cite.as_ref());
+            let id = rumor.id.unwrap().to_bytes();
+            if order.is_some_and(|(want, other)| id.cmp(&other) != want) {
+                continue;
+            }
+            for relay in relays {
+                let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
+                relay.publish(&wrap, &community.relays).await.unwrap();
+            }
+            return id;
+        }
+        unreachable!()
+    }
+
+    fn channel_meta_json(name: &str) -> String {
+        serde_json::to_string(&control::ChannelMetadata { name: name.into(), private: false, ..Default::default() }).unwrap()
+    }
+
+    /// The persisted floor of one entity: `(version, inner_id, author)`.
+    fn floor_of(community: &CommunityV2, entity: &[u8; 32]) -> (u64, Option<[u8; 32]>, Option<[u8; 32]>) {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let f = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap()[&crate::simd::hex::bytes_to_hex_32(entity)];
+        (f.1, f.3, f.4)
+    }
+
+    /// A community whose `admin` holds a position-1 role with `perms`, granted by the owner.
+    async fn with_admin(relay: &MemoryRelay, name: &str, owner: &Keys, perms: u64) -> (CommunityV2, Keys) {
+        let community = create_community(relay, name, vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let rid = "d1".repeat(32);
+        publish_role(relay, &community, owner, &admin_role(&rid, perms), 1).await;
+        publish_grant(relay, &community, owner, &admin.public_key(), vec![rid], 1).await;
+        (community, admin)
+    }
+
+    #[tokio::test]
+    async fn a_same_version_channel_fork_goes_to_the_owner_over_a_lower_id_admin_edit() {
+        // CORD-04 §1: authority first, then the lower rumor id. The admin's edit sorts
+        // lower, so the old id-only rule would have seated it; Armada seats the owner's.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "ForkAuth", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let owner_id = publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("owner-pick"), None).await;
+        let admin_id = publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("admin-pick"), Some((std::cmp::Ordering::Less, owner_id))).await;
+
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("the fork folds");
+        assert_eq!(updated.channel(&ch).unwrap().name, "owner-pick", "authority beats the lower id");
+        assert_eq!(floor_of(&community, &ch.0), (2, Some(owner_id), Some(owner.public_key().to_bytes())), "the floor commits to the owner's edition");
+        assert_ne!(owner_id, admin_id);
+
+        // A fresh joiner (no floor for the entity) bootstraps to the same head.
+        let editions = fetch_control(&relay, &community).await;
+        let mut floors = load_floors(&community);
+        floors.remove(&crate::simd::hex::bytes_to_hex_32(&ch.0));
+        let authority = fold_authority(&community, &editions, &floors);
+        for set in [editions.clone(), editions.iter().rev().cloned().collect()] {
+            let fold = apply_control_fold(&community, &set, &floors, &authority);
+            let head = fold.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(&ch.0)).unwrap();
+            assert_eq!(head.inner_id, owner_id, "bootstrap picks the owner's fork in any order");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tracking_client_holding_the_admins_fork_converges_to_the_owners_higher_id() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "ForkTrack", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let admin_id = publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("admin-pick"), None).await;
+        let first = follow_control(&relay, &community).await.unwrap().updated.expect("the admin's edit folds");
+        assert_eq!(first.channel(&ch).unwrap().name, "admin-pick");
+        assert_eq!(floor_of(&community, &ch.0).1, Some(admin_id));
+
+        // The owner's sibling arrives later and sorts HIGHER: only authority can seat it.
+        let owner_id = publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("owner-pick"), Some((std::cmp::Ordering::Greater, admin_id))).await;
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let second = follow_control(&relay, &held).await.unwrap().updated.expect("the floor converges");
+        assert_eq!(second.channel(&ch).unwrap().name, "owner-pick");
+        assert_eq!(floor_of(&community, &ch.0), (2, Some(owner_id), Some(owner.public_key().to_bytes())));
+    }
+
+    #[tokio::test]
+    async fn a_withheld_owner_floor_is_not_swapped_for_a_served_admin_sibling() {
+        // The floor holds the owner's v2. A relay serving only the admin's v2 (lower id)
+        // must not flip it: the held key carries the owner's authority even unserved.
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let (community, admin) = with_admin(&full, "ForkHold", &owner, Permissions::MANAGE_CHANNELS).await;
+        let thin = MemoryRelay::new();
+        mirror_control(&full, &thin, &community).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&full, &community, &ch.0).await;
+        let owner_id = publish_fork(&[&full], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("owner-pick"), None).await;
+        publish_fork(&[&full, &thin], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("admin-pick"), Some((std::cmp::Ordering::Less, owner_id))).await;
+
+        follow_control(&full, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &ch.0).1, Some(owner_id));
+        // The thin relay's plane is coherent: the admin's edit alone would fold there.
+        let editions = fetch_control(&thin, &community).await;
+        let authority = fold_authority(&community, &editions, &load_floors(&community));
+        assert!(
+            editions.iter().any(|e| e.entity_id == ch.0 && e.version == 2 && authority.roles.is_authorized(&admin.public_key().to_hex(), None, Permissions::MANAGE_CHANNELS)),
+            "the admin's sibling is served and authorized on the thin relay"
+        );
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&thin, &held).await.unwrap();
+        assert_eq!(floor_of(&community, &ch.0).1, Some(owner_id), "a served worse sibling never takes the floor");
+        let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(after.channel(&ch).unwrap().name, "owner-pick");
+    }
+
+    /// Copy every control wrap one relay holds onto another, so both serve one coherent plane.
+    async fn mirror_control(from: &MemoryRelay, to: &MemoryRelay, community: &CommunityV2) {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        for w in from.fetch(&query, &community.relays).await.unwrap() {
+            to.publish(&w, &community.relays).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_floor_written_before_authors_were_recorded_still_converges_on_authority() {
+        // A pre-upgrade client held the admin's v2 (lower id) with no author recorded. With
+        // both siblings served, the tiebreak decides: authority seats the owner's.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "ForkLegacy", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let owner_id = publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("owner-pick"), None).await;
+        let admin_id = publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("admin-pick"), Some((std::cmp::Ordering::Less, owner_id))).await;
+        let editions = fetch_control(&relay, &community).await;
+        let admin_hash = editions.iter().find(|e| e.inner_id == admin_id).unwrap().self_hash;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_edition_head_with_id(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0), 2, &admin_hash, &admin_id).unwrap();
+        assert_eq!(floor_of(&community, &ch.0), (2, Some(admin_id), None), "a legacy row: id, no author");
+
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("the legacy floor converges");
+        assert_eq!(updated.channel(&ch).unwrap().name, "owner-pick");
+        assert_eq!(floor_of(&community, &ch.0), (2, Some(owner_id), Some(owner.public_key().to_bytes())));
+    }
+
+    #[tokio::test]
+    async fn a_role_floor_written_before_authors_were_recorded_still_converges_on_authority() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "RoleLegacy", &owner, Permissions::ADMIN_ALL).await;
+        let rlow = "f1".repeat(32);
+        let mut low = admin_role(&rlow, Permissions::KICK);
+        low.position = 5;
+        publish_role(&relay, &community, &owner, &low, 1).await;
+        let eid = crate::simd::hex::hex_to_bytes_32_checked(&rlow).unwrap();
+        let v1 = head_hash_on_relay(&relay, &community, &eid).await;
+        let named = |name: &str| {
+            let mut r = low.clone();
+            r.name = name.into();
+            crate::community::v2::roles::role_content_json(&r).unwrap()
+        };
+        let owner_id = publish_fork(&[&relay], &community, &owner, vsk::ROLE, &eid, 2, v1, &named("owner-pick"), None).await;
+        let admin_id = publish_fork(&[&relay], &community, &admin, vsk::ROLE, &eid, 2, v1, &named("admin-pick"), Some((std::cmp::Ordering::Less, owner_id))).await;
+        let editions = fetch_control(&relay, &community).await;
+        let admin_hash = editions.iter().find(|e| e.inner_id == admin_id).unwrap().self_hash;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_edition_head_with_id(&cid_hex, &rlow, 2, &admin_hash, &admin_id).unwrap();
+        assert_eq!(floor_of(&community, &eid), (2, Some(admin_id), None));
+
+        let a = fold_authority(&community, &editions, &load_floors(&community));
+        assert_eq!(a.roles.role(&rlow).unwrap().name, "owner-pick", "a served held edition competes on the tiebreak");
+        assert_eq!(a.heads.iter().find(|h| h.entity_hex == rlow).map(|h| h.inner_id), Some(owner_id));
+    }
+
+    #[tokio::test]
+    async fn a_fork_branch_the_chain_extended_is_followed_not_stranded() {
+        // CORD-04 §1 "the highest version whose chain is intact": the admin's v2 lost the
+        // tiebreak to the owner's, but v3 was built on the admin's. The head is v3.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "ForkExtend", &owner, Permissions::MANAGE_CHANNELS).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("owner-v2"), None).await;
+        let admin_v2 = publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("admin-v2"), None).await;
+        let editions = fetch_control(&relay, &community).await;
+        let admin_hash = editions.iter().find(|e| e.inner_id == admin_v2).unwrap().self_hash;
+        publish_fork(&[&relay], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 3, Some(admin_hash), &channel_meta_json("admin-v3"), None).await;
+
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("folds");
+        assert_eq!(updated.channel(&ch).unwrap().name, "admin-v3", "the extended branch is followed");
+        assert_eq!(floor_of(&community, &ch.0).0, 3);
+        // A client that had already settled on the owner's v2 follows it too.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner_v2 = editions.iter().find(|e| e.version == 2 && e.author == owner.public_key()).unwrap();
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        crate::db::community::delete_edition_head(&cid_hex, &ch_hex).unwrap();
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ch_hex, 2, &owner_v2.self_hash, &owner_v2.inner_id, &owner.public_key().to_bytes(), community.root_epoch.0).unwrap();
+        let editions = fetch_control(&relay, &community).await;
+        let floors = load_floors(&community);
+        let authority = fold_authority(&community, &editions, &floors);
+        let fold = apply_control_fold(&community, &editions, &floors, &authority);
+        let head = fold.heads.iter().find(|h| h.entity_hex == ch_hex).expect("a head, not a gap");
+        assert_eq!(head.version, 3, "the sibling's descendant outranks a dead-end winner");
+        assert!(!fold.gapped);
+    }
+
+    #[tokio::test]
+    async fn a_same_content_copy_does_not_rekey_the_floor_to_a_weaker_author() {
+        // The edition hash covers content, not signer: an admin re-signing the owner's exact
+        // v2 makes the same hash. Serving only that copy must not lower the floor's bar.
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let (community, admin) = with_admin(&full, "ForkCopy", &owner, Permissions::MANAGE_CHANNELS).await;
+        let thin = MemoryRelay::new();
+        mirror_control(&full, &thin, &community).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&full, &community, &ch.0).await;
+        let owner_id = publish_fork(&[&full], &community, &owner, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("same"), None).await;
+        publish_fork(&[&thin], &community, &admin, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("same"), None).await;
+        follow_control(&full, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&thin, &held).await.unwrap();
+        assert_eq!(floor_of(&community, &ch.0), (2, Some(owner_id), Some(owner.public_key().to_bytes())), "the floor keeps the owner's key");
+    }
+
+    #[tokio::test]
+    async fn a_higher_ranked_admin_wins_a_fork_over_a_lower_id_from_a_lesser_admin() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "ForkRanks", vec!["wss://r".into()], None).await.unwrap();
+        let (senior, junior) = (Keys::generate(), Keys::generate());
+        let (rs, rj) = ("e1".repeat(32), "e2".repeat(32));
+        let mut junior_role = admin_role(&rj, Permissions::MANAGE_CHANNELS);
+        junior_role.position = 2;
+        publish_role(&relay, &community, &owner, &admin_role(&rs, Permissions::MANAGE_CHANNELS), 1).await;
+        publish_role(&relay, &community, &owner, &junior_role, 1).await;
+        publish_grant(&relay, &community, &owner, &senior.public_key(), vec![rs], 1).await;
+        publish_grant(&relay, &community, &owner, &junior.public_key(), vec![rj], 1).await;
+        let ch = community.channels[0].id;
+        let v1 = head_hash_on_relay(&relay, &community, &ch.0).await;
+        let senior_id = publish_fork(&[&relay], &community, &senior, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("senior-pick"), None).await;
+        publish_fork(&[&relay], &community, &junior, vsk::CHANNEL_METADATA, &ch.0, 2, v1, &channel_meta_json("junior-pick"), Some((std::cmp::Ordering::Less, senior_id))).await;
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("folds");
+        assert_eq!(updated.channel(&ch).unwrap().name, "senior-pick", "position 1 outranks position 2 whatever the ids");
+    }
+
+    #[tokio::test]
+    async fn role_grant_and_banlist_forks_go_to_authority_in_any_order() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, admin) = with_admin(&relay, "ForkAuthority", &owner, Permissions::ADMIN_ALL).await;
+        // A role beneath the admin, and a member holding it.
+        let (rlow, rextra) = ("f1".repeat(32), "f2".repeat(32));
+        let mut low = admin_role(&rlow, Permissions::KICK);
+        low.position = 5;
+        let mut extra = admin_role(&rextra, 0);
+        extra.position = 6;
+        publish_role(&relay, &community, &owner, &low, 1).await;
+        publish_role(&relay, &community, &owner, &extra, 1).await;
+        let member = Keys::generate().public_key();
+        publish_grant(&relay, &community, &owner, &member, vec![rlow.clone()], 1).await;
+
+        // Role fork at v2.
+        let role_eid = crate::simd::hex::hex_to_bytes_32_checked(&rlow).unwrap();
+        let rv1 = head_hash_on_relay(&relay, &community, &role_eid).await;
+        let named = |name: &str| {
+            let mut r = low.clone();
+            r.name = name.into();
+            crate::community::v2::roles::role_content_json(&r).unwrap()
+        };
+        let owner_role = publish_fork(&[&relay], &community, &owner, vsk::ROLE, &role_eid, 2, rv1, &named("owner-pick"), None).await;
+        publish_fork(&[&relay], &community, &admin, vsk::ROLE, &role_eid, 2, rv1, &named("admin-pick"), Some((std::cmp::Ordering::Less, owner_role))).await;
+
+        // Grant fork at v2.
+        let grant_eid = crate::community::v2::derive::grant_locator(community.id(), &member.to_bytes());
+        let gv1 = head_hash_on_relay(&relay, &community, &grant_eid).await;
+        let grant_json = |ids: Vec<String>| crate::community::v2::roles::grant_content_json_with_wrap(&MemberGrant { member: member.to_hex(), role_ids: ids }, None).unwrap();
+        let owner_grant = publish_fork(&[&relay], &community, &owner, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![rlow.clone(), rextra.clone()]), None).await;
+        publish_fork(&[&relay], &community, &admin, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![]), Some((std::cmp::Ordering::Less, owner_grant))).await;
+
+        // Banlist fork at v1: each bans a different roleless member.
+        let (x, y) = ("aa".repeat(32), "bb".repeat(32));
+        let ban_eid = crate::community::v2::derive::banlist_locator(community.id());
+        let ban_json = |t: &str| crate::community::v2::roles::banlist_content_json(&[t.to_string()]).unwrap();
+        let owner_ban = publish_fork(&[&relay], &community, &owner, vsk::BANLIST, &ban_eid, 1, None, &ban_json(&x), None).await;
+        publish_fork(&[&relay], &community, &admin, vsk::BANLIST, &ban_eid, 1, None, &ban_json(&y), Some((std::cmp::Ordering::Less, owner_ban))).await;
+
+        let editions = fetch_control(&relay, &community).await;
+        let floors = load_floors(&community);
+        for set in [editions.clone(), editions.iter().rev().cloned().collect::<Vec<_>>()] {
+            let a = fold_authority(&community, &set, &floors);
+            assert_eq!(a.roles.role(&rlow).unwrap().name, "owner-pick", "role fork");
+            let mut held = a.roles.grants.iter().find(|g| g.member == member.to_hex()).expect("the owner's grant stands").role_ids.clone();
+            held.sort();
+            assert_eq!(held, vec![rlow.clone(), rextra.clone()], "grant fork");
+            assert!(a.banned.contains(&x) && !a.banned.contains(&y), "banlist fork");
+            let head = |eid: &[u8; 32]| a.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(eid)).map(|h| h.inner_id);
+            assert_eq!((head(&role_eid), head(&grant_eid), head(&ban_eid)), (Some(owner_role), Some(owner_grant), Some(owner_ban)));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withheld_owner_role_head_is_not_replaced_by_a_served_admin_sibling() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let community = create_community(&full, "RoleHold", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let (radmin, rlow) = ("d1".repeat(32), "f1".repeat(32));
+        let mut low = admin_role(&rlow, Permissions::KICK);
+        low.position = 5;
+        publish_role(&full, &community, &owner, &admin_role(&radmin, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&full, &community, &owner, &admin.public_key(), vec![radmin.clone()], 1).await;
+        publish_role(&full, &community, &owner, &low, 1).await;
+        // The thin relay gets everything the full one has so far.
+        let thin = MemoryRelay::new();
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+        for w in full.fetch(&query, &community.relays).await.unwrap() {
+            thin.publish(&w, &community.relays).await.unwrap();
+        }
+        let role_eid = crate::simd::hex::hex_to_bytes_32_checked(&rlow).unwrap();
+        let rv1 = head_hash_on_relay(&full, &community, &role_eid).await;
+        let named = |name: &str| {
+            let mut r = low.clone();
+            r.name = name.into();
+            crate::community::v2::roles::role_content_json(&r).unwrap()
+        };
+        let owner_id = publish_fork(&[&full], &community, &owner, vsk::ROLE, &role_eid, 2, rv1, &named("owner-pick"), None).await;
+        let admin_id = publish_fork(&[&full, &thin], &community, &admin, vsk::ROLE, &role_eid, 2, rv1, &named("admin-pick"), Some((std::cmp::Ordering::Less, owner_id))).await;
+        follow_control(&full, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &role_eid).1, Some(owner_id));
+
+        let editions = fetch_control(&thin, &community).await;
+        let a = fold_authority(&community, &editions, &load_floors(&community));
+        let head = a.heads.iter().find(|h| h.entity_hex == rlow).map(|h| h.inner_id);
+        assert_ne!(head, Some(admin_id), "the admin's sibling never heads over the held owner edition");
+        assert_ne!(a.roles.role(&rlow).map(|r| r.name.as_str()), Some("admin-pick"));
+    }
+
+    /// Owner grants a senior admin (position 1) and a junior admin (position 2), both full
+    /// admins, plus a role beneath both held by a member.
+    async fn two_admins(relay: &MemoryRelay, name: &str, owner: &Keys) -> (CommunityV2, Keys, Keys, String, PublicKey) {
+        let community = create_community(relay, name, vec!["wss://r".into()], None).await.unwrap();
+        let (senior, junior) = (Keys::generate(), Keys::generate());
+        let (rs, rj, rlow) = ("e1".repeat(32), "e2".repeat(32), "f1".repeat(32));
+        let mut jr = admin_role(&rj, Permissions::ADMIN_ALL);
+        jr.position = 2;
+        let mut low = admin_role(&rlow, Permissions::KICK);
+        low.position = 5;
+        publish_role(relay, &community, owner, &admin_role(&rs, Permissions::ADMIN_ALL), 1).await;
+        publish_role(relay, &community, owner, &jr, 1).await;
+        publish_role(relay, &community, owner, &low, 1).await;
+        publish_grant(relay, &community, owner, &senior.public_key(), vec![rs], 1).await;
+        publish_grant(relay, &community, owner, &junior.public_key(), vec![rj], 1).await;
+        let member = Keys::generate().public_key();
+        publish_grant(relay, &community, owner, &member, vec![rlow.clone()], 1).await;
+        (community, senior, junior, rlow, member)
+    }
+
+    #[tokio::test]
+    async fn admin_versus_admin_role_grant_and_banlist_forks_go_to_the_higher_position() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, senior, junior, rlow, member) = two_admins(&relay, "ForkPositions", &owner).await;
+        let low_eid = crate::simd::hex::hex_to_bytes_32_checked(&rlow).unwrap();
+        let rv1 = head_hash_on_relay(&relay, &community, &low_eid).await;
+        let named = |name: &str| {
+            let mut r = admin_role(&rlow, Permissions::KICK);
+            r.position = 5;
+            r.name = name.into();
+            crate::community::v2::roles::role_content_json(&r).unwrap()
+        };
+        let senior_role = publish_fork(&[&relay], &community, &senior, vsk::ROLE, &low_eid, 2, rv1, &named("senior-pick"), None).await;
+        publish_fork(&[&relay], &community, &junior, vsk::ROLE, &low_eid, 2, rv1, &named("junior-pick"), Some((std::cmp::Ordering::Less, senior_role))).await;
+
+        let grant_eid = crate::community::v2::derive::grant_locator(community.id(), &member.to_bytes());
+        let gv1 = head_hash_on_relay(&relay, &community, &grant_eid).await;
+        let grant_json = |ids: Vec<String>| crate::community::v2::roles::grant_content_json_with_wrap(&MemberGrant { member: member.to_hex(), role_ids: ids }, None).unwrap();
+        let senior_grant = publish_fork(&[&relay], &community, &senior, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![rlow.clone()]), None).await;
+        publish_fork(&[&relay], &community, &junior, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![]), Some((std::cmp::Ordering::Less, senior_grant))).await;
+
+        let (x, y) = ("aa".repeat(32), "bb".repeat(32));
+        let ban_eid = crate::community::v2::derive::banlist_locator(community.id());
+        let ban_json = |t: &str| crate::community::v2::roles::banlist_content_json(&[t.to_string()]).unwrap();
+        let senior_ban = publish_fork(&[&relay], &community, &senior, vsk::BANLIST, &ban_eid, 1, None, &ban_json(&x), None).await;
+        publish_fork(&[&relay], &community, &junior, vsk::BANLIST, &ban_eid, 1, None, &ban_json(&y), Some((std::cmp::Ordering::Less, senior_ban))).await;
+
+        let editions = fetch_control(&relay, &community).await;
+        let floors = load_floors(&community);
+        for set in [editions.clone(), editions.iter().rev().cloned().collect::<Vec<_>>()] {
+            let a = fold_authority(&community, &set, &floors);
+            assert_eq!(a.roles.role(&rlow).unwrap().name, "senior-pick", "role fork");
+            assert_eq!(a.roles.grants.iter().find(|g| g.member == member.to_hex()).map(|g| g.role_ids.clone()), Some(vec![rlow.clone()]), "grant fork");
+            assert!(a.banned.contains(&x) && !a.banned.contains(&y), "banlist fork");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withheld_owner_grant_head_is_not_replaced_by_a_served_admin_revocation() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let (community, _senior, junior, rlow, member) = two_admins(&full, "GrantHold", &owner).await;
+        let thin = MemoryRelay::new();
+        mirror_control(&full, &thin, &community).await;
+        let grant_eid = crate::community::v2::derive::grant_locator(community.id(), &member.to_bytes());
+        let gv1 = head_hash_on_relay(&full, &community, &grant_eid).await;
+        let grant_json = |ids: Vec<String>| crate::community::v2::roles::grant_content_json_with_wrap(&MemberGrant { member: member.to_hex(), role_ids: ids }, None).unwrap();
+        let owner_id = publish_fork(&[&full], &community, &owner, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![rlow.clone()]), None).await;
+        let junior_id = publish_fork(&[&full, &thin], &community, &junior, vsk::GRANT, &grant_eid, 2, gv1, &grant_json(vec![]), Some((std::cmp::Ordering::Less, owner_id))).await;
+        follow_control(&full, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &grant_eid).1, Some(owner_id));
+
+        let editions = fetch_control(&thin, &community).await;
+        let a = fold_authority(&community, &editions, &load_floors(&community));
+        let head = a.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(&grant_eid)).map(|h| h.inner_id);
+        assert_ne!(head, Some(junior_id), "the junior's revocation never heads over the held owner grant");
+        // Without the guard the junior's empty grant would stand: prove it is admissible on its own.
+        let mut unfloored = load_floors(&community);
+        unfloored.remove(&crate::simd::hex::bytes_to_hex_32(&grant_eid));
+        let free = fold_authority(&community, &editions, &unfloored);
+        assert_eq!(free.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(&grant_eid)).map(|h| h.inner_id), Some(junior_id));
+    }
+
+    #[test]
+    fn a_held_key_ranks_rivals_by_what_the_row_recorded() {
+        let (lo, hi) = ([1u8; 32], [9u8; 32]);
+        let floor = |inner, author| -> Floor { (2, [0u8; 32], inner, author) };
+        let owner_ranked = |_: &[u8; 32]| 0u32;
+        assert!(HeldKey::of(&floor(None, None), &owner_ranked).beaten_by(u32::MAX, &hi), "an unkeyed row yields to anyone");
+        let legacy = HeldKey::of(&floor(Some(hi), None), &owner_ranked);
+        assert!(legacy.beaten_by(u32::MAX, &lo) && !legacy.beaten_by(0, &[0xFF; 32]), "a row without an author compares ids only");
+        let ranked = HeldKey::of(&floor(Some(hi), Some([7u8; 32])), &owner_ranked);
+        assert!(!ranked.beaten_by(1, &lo), "the owner's held head beats a lower-id admin");
+        assert!(ranked.beaten_by(0, &lo), "and loses only to a lower id at the same rank");
+    }
+
     /// A canonical (order-independent) fingerprint of an AuthoritySet's authorized
     /// roster + banlist — two clients converge iff these match.
     fn authority_fingerprint(a: &AuthoritySet) -> String {
@@ -12378,7 +12903,7 @@ mod tests {
         // would not — the fold only visits entities it sees.
         let rid2 = "c7".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid2, Permissions::BAN), 5).await;
-        crate::db::community::set_edition_head_at_epoch(&cid_hex, &rid2, 3, &[9u8; 32], &[9u8; 32], community.root_epoch.0).unwrap();
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &rid2, 3, &[9u8; 32], &[9u8; 32], &owner.keys.public_key().to_bytes(), community.root_epoch.0).unwrap();
 
         follow_control(&bed.relay, &community).await.unwrap();
 
@@ -14494,7 +15019,7 @@ mod tests {
         });
         crate::db::community::set_community_roles(&cid_hex, &seeded, 0).unwrap();
         // A floor for the ghost is what turns `stored_complete` false.
-        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost, 1, &[0u8; 32], &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
 
         follow_control(&bed.relay, &community).await.unwrap().updated;
 
@@ -16135,7 +16660,7 @@ mod tests {
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(e, f)| (e, (f.1, f.2, f.3)))
+            .map(|(e, f)| (e, (f.1, f.2, f.3, f.4)))
             .collect()
     }
 
@@ -19025,7 +19550,7 @@ mod tests {
             let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) else { continue };
             let eid = super::super::derive::grant_locator(community.id(), &m);
             let entity_hex = crate::simd::hex::bytes_to_hex_32(&eid);
-            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, 1, &[0xA1; 32], &[0xA2; 32], community.root_epoch.0).unwrap();
+            crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, 1, &[0xA1; 32], &[0xA2; 32], &[0xA3; 32], community.root_epoch.0).unwrap();
         }
     }
 

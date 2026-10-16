@@ -1657,15 +1657,15 @@ pub fn get_community_roles_at(community_id: &str) -> Result<i64, String> {
 /// Record the current head (version + self_hash) of a control entity's edition chain (keyless model).
 /// The send side reads this to emit the next edition as `version+1` citing `self_hash` as `prev_hash`;
 /// the fold uses it as the per-entity refuse-downgrade floor + anchor. Upserts per (community, entity).
-/// `inner_id` is the head edition's deterministic tiebreak key (used only by [`converge_edition_head`]).
+/// `inner_id` and `author` are the head edition's fork tiebreak key (see [`converge_edition_head_at_epoch`]).
 pub fn set_edition_head(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32]) -> Result<(), String> {
-    set_edition_head_inner(community_id, entity_id, version, self_hash, None, None)
+    set_edition_head_inner(community_id, entity_id, version, self_hash, None, None, None)
 }
 
 /// As [`set_edition_head`], but also records the head edition's `inner_id` (the deterministic tiebreak
 /// key), so a later same-version convergence can rank against it. A plain advance carries it through.
 pub fn set_edition_head_with_id(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32]) -> Result<(), String> {
-    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), None)
+    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), None, None)
 }
 
 /// As [`set_edition_head_with_id`], stamping an EXPLICIT epoch — the epoch the caller's fold actually
@@ -1691,11 +1691,11 @@ pub fn delete_edition_head(community_id: &str, entity_id: &str) -> Result<(), St
     Ok(())
 }
 
-pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
-    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(epoch))
+pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64) -> Result<(), String> {
+    set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(author), Some(epoch))
 }
 
-fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>, epoch: Option<u64>) -> Result<(), String> {
+fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>, author: Option<&[u8; 32]>, epoch: Option<u64>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC, EPOCH-PRIMARY: the head IS the refuse-downgrade floor. The recorded `epoch` is
     // the fold's epoch when given explicitly, else the community's current server-root epoch
@@ -1703,62 +1703,44 @@ fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, sel
     // re-founding's v1 lands over a held v21); within an epoch, version still only advances. So a
     // stale/hostile rollback can lower neither the epoch nor the in-epoch version.
     conn.execute(
-        "INSERT INTO community_edition_heads (community_id, entity_id, version, self_hash, inner_id, epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, (SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0))
+        "INSERT INTO community_edition_heads (community_id, entity_id, version, self_hash, inner_id, epoch, author)
+         VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, (SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0), ?7)
          ON CONFLICT(community_id, entity_id) DO UPDATE SET
             version = excluded.version,
             self_hash = excluded.self_hash,
             inner_id = excluded.inner_id,
-            epoch = excluded.epoch
+            epoch = excluded.epoch,
+            author = excluded.author
          WHERE excluded.epoch > community_edition_heads.epoch
             OR (excluded.epoch = community_edition_heads.epoch AND excluded.version > community_edition_heads.version)",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.map(|i| i.as_slice()), epoch.map(|e| e as i64)],
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.map(|i| i.as_slice()), epoch.map(|e| e as i64), author.map(|a| a.as_slice())],
     )
     .map_err(|e| format!("set edition head: {e}"))?;
     Ok(())
 }
 
-/// Converge the head to a same-version fork winner (concurrent-edit resolution). Unlike
-/// [`set_edition_head`] (which only ADVANCES the version), this resolves a fork AT the current version:
-/// two authorized editors editing concurrently from the same base both produce `version`, and every
-/// client must adopt the SAME one. The winner is the lower deterministic `inner_id`, so this update
-/// fires only when the incoming edition ties the stored version AND carries a strictly lower `inner_id`
-/// — monotonic toward the global minimum, so it can never flip-flop (a relay can't churn the head by
-/// reordering, and a held row with a NULL `inner_id`, pre-migration, is treated as "always replaceable"
-/// so it heals to a ranked id). The version-advance path is unchanged and still handled by
-/// [`set_edition_head_with_id`]; callers run BOTH (advance covers v+1, converge covers a same-v fork).
-pub fn converge_edition_head(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32]) -> Result<(), String> {
-    converge_edition_head_inner(community_id, entity_id, version, self_hash, inner_id, None)
-}
-
-/// As [`converge_edition_head`], scoped to an EXPLICIT epoch (the epoch the caller's fold ran under)
-/// rather than the community row's write-time value — same TOCTOU rationale as
-/// [`set_edition_head_at_epoch`].
-pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
-    converge_edition_head_inner(community_id, entity_id, version, self_hash, inner_id, Some(epoch))
-}
-
-fn converge_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: Option<u64>) -> Result<(), String> {
+/// Replace the held head with a same-version fork winner (concurrent-edit resolution). Two
+/// authorized editors working from one base both produce `version`, and every client must land on
+/// the same edition. The winner is decided by the CALLER, which alone can rank authors against its
+/// roster (CORD-04 §1: authority first, then the lower inner id) and which compares against the
+/// held key from [`get_all_edition_heads_full`]. This only refuses what the caller cannot judge:
+/// another version, or another epoch (a Refounding is the advance path's job).
+pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    // Scoped to the CURRENT epoch's head: a fork is resolved within an epoch, never across one (an epoch
-    // bump is a re-founding, handled by the advance path). `epoch` matches the community's current epoch.
     conn.execute(
         "UPDATE community_edition_heads
-            SET self_hash = ?4, inner_id = ?5
+            SET self_hash = ?4, inner_id = ?5, author = ?7
           WHERE community_id = ?1 AND entity_id = ?2
             AND version = ?3
-            AND epoch = COALESCE(?6, (SELECT server_root_epoch FROM communities WHERE community_id = ?1), 0)
-            AND (inner_id IS NULL OR ?5 < inner_id)",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch.map(|e| e as i64)],
+            AND epoch = ?6
+            AND (self_hash IS NOT ?4 OR inner_id IS NOT ?5 OR author IS NOT ?7)",
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice()],
     )
     .map_err(|e| format!("converge edition head: {e}"))?;
     Ok(())
 }
 
-/// The held head's tiebreak key (`inner_id`), or `None` if unheld or pre-migration (NULL). The consumer
-/// uses this to decide a same-version convergence exactly as [`converge_edition_head`]'s SQL does (a
-/// NULL/None held id is "always replaceable") — so it never applies a display edit the head write would
-/// then refuse.
+/// The held head's inner id, or `None` if unheld or pre-migration (NULL).
 pub fn get_edition_head_inner_id(community_id: &str, entity_id: &str) -> Result<Option<[u8; 32]>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let row: Option<Option<Vec<u8>>> = conn
@@ -1827,36 +1809,45 @@ pub fn edition_head_entity_ids(community_id: &str) -> Result<std::collections::H
 /// genesis). This is what lets a re-founding's compacted v1 plane land without a version-only downgrade.
 /// Every tracked head as `entity_hex → (epoch, version, self_hash, inner_id)` — the epoch-primary
 /// floor INCLUDING the deterministic tiebreak key, so a fold can resolve a same-version fork at the
-/// floor (converge to the lower inner id) instead of wedging on it.
-/// `(epoch, version, self_hash, inner_id)`.
-type EditionHeadFull = (u64, u64, [u8; 32], Option<[u8; 32]>);
+/// floor (converge to the fork winner) instead of wedging on it.
+/// `(epoch, version, self_hash, inner_id, author)`.
+type EditionHeadFull = (u64, u64, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>);
 /// `(epoch, version, self_hash)`.
 type EditionHead = (u64, u64, [u8; 32]);
 
 pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections::HashMap<String, EditionHeadFull>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
-        .prepare("SELECT entity_id, epoch, version, self_hash, inner_id FROM community_edition_heads WHERE community_id = ?1")
+        .prepare("SELECT entity_id, epoch, version, self_hash, inner_id, author FROM community_edition_heads WHERE community_id = ?1")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![community_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Vec<u8>>(3)?, r.get::<_, Option<Vec<u8>>>(4)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, Option<Vec<u8>>>(4)?,
+                r.get::<_, Option<Vec<u8>>>(5)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
+    let blob32 = |b: Option<Vec<u8>>| {
+        b.and_then(|b| {
+            (b.len() == 32).then(|| {
+                let mut i = [0u8; 32];
+                i.copy_from_slice(&b);
+                i
+            })
+        })
+    };
     let mut out = std::collections::HashMap::new();
     for row in rows {
-        let (entity, epoch, version, hash, inner) = row.map_err(|e| e.to_string())?;
+        let (entity, epoch, version, hash, inner, author) = row.map_err(|e| e.to_string())?;
         if hash.len() == 32 {
             let mut h = [0u8; 32];
             h.copy_from_slice(&hash);
-            let inner_id = inner.and_then(|b| {
-                (b.len() == 32).then(|| {
-                    let mut i = [0u8; 32];
-                    i.copy_from_slice(&b);
-                    i
-                })
-            });
-            out.insert(entity, (epoch as u64, version as u64, h, inner_id));
+            out.insert(entity, (epoch as u64, version as u64, h, blob32(inner), blob32(author)));
         }
     }
     Ok(out)
@@ -2776,6 +2767,30 @@ mod tests {
         // A different entity is tracked independently.
         let other = "b".repeat(64);
         assert_eq!(get_edition_head(&cid, &other).unwrap(), None);
+    }
+
+    #[test]
+    fn a_floor_keeps_the_author_of_the_head_it_holds() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "c".repeat(64);
+        let entity = "e".repeat(64);
+        let author = |b: u8| [b; 32];
+        let held = |cid: &str| get_all_edition_heads_full(cid).unwrap()[&entity];
+        set_edition_head_at_epoch(&cid, &entity, 1, &[0x11; 32], &[0x01; 32], &author(0xA1), 0).unwrap();
+        set_edition_head_at_epoch(&cid, &entity, 2, &[0x22; 32], &[0x02; 32], &author(0xB2), 0).unwrap();
+        assert_eq!(held(&cid), (0, 2, [0x22; 32], Some([0x02; 32]), Some(author(0xB2))), "an advance records its own author");
+
+        // Convergence is the caller's verdict: it replaces the held edition whatever the ids,
+        // but only at the same version and epoch.
+        converge_edition_head_at_epoch(&cid, &entity, 2, &[0x33; 32], &[0xFF; 32], &author(0xC3), 0).unwrap();
+        assert_eq!(held(&cid), (0, 2, [0x33; 32], Some([0xFF; 32]), Some(author(0xC3))), "a higher id can win on authority");
+        converge_edition_head_at_epoch(&cid, &entity, 3, &[0x44; 32], &[0x00; 32], &author(0xD4), 0).unwrap();
+        converge_edition_head_at_epoch(&cid, &entity, 2, &[0x55; 32], &[0x00; 32], &author(0xE5), 1).unwrap();
+        assert_eq!(held(&cid).2, [0x33; 32], "another version or epoch is never converged onto");
+
+        // A Refounding's advance into a new epoch takes the new head's author too.
+        set_edition_head_at_epoch(&cid, &entity, 1, &[0x66; 32], &[0x06; 32], &author(0xF6), 1).unwrap();
+        assert_eq!(held(&cid), (1, 1, [0x66; 32], Some([0x06; 32]), Some(author(0xF6))));
     }
 
     #[test]

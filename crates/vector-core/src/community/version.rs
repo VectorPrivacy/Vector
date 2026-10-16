@@ -6,9 +6,9 @@
 //! signed content, not the outer wrap. Clients fold the fetched set into the current
 //! head by the rules:
 //!   - **refuse-downgrade** on the version integer (never accept a version below the floor already held);
-//!   - **equal-version fork** resolves by a deterministic tiebreak: the lower **inner edition id** (a
-//!     commitment hash over author+content+tags+time, NOT the author-settable `created_at`, so it can't
-//!     be cheaply biased — the authority-first lens is layered on by the caller via the roster);
+//!   - **equal-version fork** resolves authority first (CORD-04 §1): the author's [`Edition::rank`], which
+//!     the caller resolves against its roster, then the lower **inner edition id** (a commitment hash over
+//!     author+content+tags+time, NOT the author-settable `created_at`, so it can't be cheaply biased);
 //!   - a **gap** (a higher version whose `prev_hash` doesn't link contiguously to what we hold) leaves
 //!     the head at the highest *contiguous* version and is reported, so the caller can fail closed for
 //!     that entity and refetch the missing prereqs from the quorum (H1/M8) rather than fail open.
@@ -75,6 +75,17 @@ pub struct Edition {
     pub created_at: u64,
     /// Inner event id; the deterministic final tiebreak (same for every member).
     pub tiebreak_id: [u8; 32],
+    /// The author's authority at fold time, lower outranking: 0 for the owner, else their highest
+    /// role's position, `u32::MAX` roleless. Equal-version forks compare this before the id.
+    pub rank: u32,
+}
+
+impl Edition {
+    /// Whether this edition wins an equal-version fork against `other`: authority first, then the
+    /// lower inner id (CORD-04 §1).
+    pub fn wins_fork_over(&self, other: &Edition) -> bool {
+        (self.rank, self.tiebreak_id) < (other.rank, other.tiebreak_id)
+    }
 }
 
 /// The outcome of folding one entity's editions.
@@ -108,66 +119,69 @@ pub struct FoldResult {
 /// state was re-anchored under a later epoch) may accept the head despite `gap` *only* after
 /// independently verifying its author's current authority against the roster + owner attestation.
 pub fn fold(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>) -> FoldResult {
-    use std::collections::BTreeMap;
-    // Per-version winner (equal-version fork → lower tiebreak_id). Skip anything below the floor:
-    // refuse-downgrade.
-    let mut by_version: BTreeMap<u64, usize> = BTreeMap::new();
-    for (i, e) in editions.iter().enumerate() {
-        if e.version < floor {
-            continue;
-        }
-        match by_version.get(&e.version) {
-            Some(&j) => {
-                let cur = &editions[j];
-                // Equal-version fork → lower inner edition id wins. The id is a commitment hash over
-                // (author, content, tags, time), NOT the author-settable `created_at`, so the winner is
-                // deterministic for every client and can't be cheaply gamed (no `created_at=0` always-win).
-                if e.tiebreak_id < cur.tiebreak_id {
-                    by_version.insert(e.version, i);
-                }
-            }
-            None => {
-                by_version.insert(e.version, i);
-            }
-        }
-    }
-    let versions: Vec<u64> = by_version.keys().copied().collect();
-    if versions.is_empty() {
+    fold_with_rivals(editions, floor, floor_hash, &|_| false)
+}
+
+/// [`fold`], taking the head at the **highest version whose chain is intact** (CORD-04 §1): every
+/// edition reachable by `prev_hash` links from the anchor counts, so a fork's sibling that the chain
+/// went on to extend is followed rather than stranded, and the authority tiebreak decides only
+/// among the reachable editions at the top version.
+///
+/// The anchor is the held floor edition and its same-version rivals, or the genesis siblings at
+/// `floor == 0`. While the held edition is served, a rival competes on the tiebreak like any
+/// sibling. While it is withheld, `admit_rival` decides whether a rival may stand in for it: the
+/// caller knows the held head's rank, which this function does not.
+pub fn fold_with_rivals(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>, admit_rival: &dyn Fn(&Edition) -> bool) -> FoldResult {
+    let present: Vec<usize> = (0..editions.len()).filter(|&i| editions[i].version >= floor).collect();
+    if present.is_empty() {
         return FoldResult { head: None, gap: false, anchored: false };
     }
-    // Anchor the lowest edition — the chain must be rooted, not merely internally linked. Without
-    // this a lone high-version edition with a forged prev_hash would be trusted as a contiguous head.
-    let lo = &editions[by_version[&versions[0]]];
-    let anchored = if floor == 0 {
-        // No prior head held → only a genuine genesis (v1, no predecessor) anchors the chain.
-        versions[0] == 1 && lo.prev_hash.is_none()
-    } else if versions[0] == floor {
-        // Re-presenting the held edition (e.g. re-anchored under a new epoch — which re-seals the SAME
-        // inner edition, so its self_hash is identical). It MUST be the exact edition we committed to:
-        // otherwise a relay that withholds ours and serves a DIFFERENT, same-version fork would silently
-        // replace our floor. The hash check rejects the fork → gap → fail closed → refetch.
-        floor_hash == Some(&lo.self_hash)
-    } else if versions[0] == floor + 1 {
-        floor_hash.is_some() && lo.prev_hash.as_ref() == floor_hash
-    } else {
-        false // a jump past the floor with the linking edition(s) missing
-    };
-    let mut gap = !anchored;
-    // Walk upward; advance only across a contiguous link (version == prev+1 AND prev_hash matches).
-    let mut head_idx = by_version[&versions[0]];
-    for pair in versions.windows(2) {
-        let lo_idx = by_version[&pair[0]];
-        let hi_idx = by_version[&pair[1]];
-        let linked = pair[1] == pair[0] + 1
-            && editions[hi_idx].prev_hash == Some(editions[lo_idx].self_hash);
-        if linked {
-            head_idx = hi_idx;
+    let held_served = floor > 0 && present.iter().any(|&i| editions[i].version == floor && Some(&editions[i].self_hash) == floor_hash);
+    let mut reached = vec![false; editions.len()];
+    for &i in &present {
+        let e = &editions[i];
+        reached[i] = if floor == 0 {
+            // No prior head held → only a genuine genesis (v1, no predecessor) anchors the chain.
+            e.version == 1 && e.prev_hash.is_none()
+        } else if e.version == floor {
+            Some(&e.self_hash) == floor_hash || held_served || admit_rival(e)
         } else {
-            gap = true; // a higher version exists but isn't contiguously linked
-            break;
+            e.version == floor + 1 && floor_hash.is_some() && e.prev_hash.as_ref() == floor_hash
+        };
+    }
+    // Follow every link upward: an edition is reached when its predecessor was.
+    let mut order = present.clone();
+    order.sort_by_key(|&i| editions[i].version);
+    let mut reached_hashes: std::collections::HashMap<u64, std::collections::HashSet<[u8; 32]>> = Default::default();
+    for &i in &order {
+        let e = &editions[i];
+        if !reached[i] {
+            let links = e.version.checked_sub(1).is_some_and(|pv| {
+                e.prev_hash.is_some_and(|p| reached_hashes.get(&pv).is_some_and(|set| set.contains(&p)))
+            });
+            reached[i] = links;
+        }
+        if reached[i] {
+            reached_hashes.entry(e.version).or_default().insert(e.self_hash);
         }
     }
-    FoldResult { head: Some(head_idx), gap, anchored }
+    let head = order
+        .iter()
+        .copied()
+        .filter(|&i| reached[i])
+        .max_by(|&a, &b| {
+            let (ea, eb) = (&editions[a], &editions[b]);
+            // Highest version first; at the top, the fork winner (authority, then the lower id).
+            // Identical copies resolve to the first served.
+            ea.version.cmp(&eb.version).then_with(|| (eb.rank, eb.tiebreak_id, b).cmp(&(ea.rank, ea.tiebreak_id, a)))
+        });
+    let Some(head) = head else {
+        // Nothing links to what we hold: withholding, or a forged base. Fail closed.
+        return FoldResult { head: None, gap: true, anchored: false };
+    };
+    // A higher version that nothing reached is a withheld middle (or a forged link): page for it.
+    let gap = present.iter().any(|&i| editions[i].version > editions[head].version);
+    FoldResult { head: Some(head), gap, anchored: true }
 }
 
 /// The head a **bootstrapping** client accepts: the per-version winner at the HIGHEST present
@@ -187,9 +201,8 @@ pub fn bootstrap_head(editions: &[Edition], floor: u64) -> Option<usize> {
         match best {
             Some(b) => {
                 let cur = &editions[b];
-                // Higher version wins; at equal version, the lower inner edition id (see `fold`).
-                let take = e.version > cur.version
-                    || (e.version == cur.version && e.tiebreak_id < cur.tiebreak_id);
+                // Higher version wins; at equal version, authority then the lower inner id (see `fold`).
+                let take = e.version > cur.version || (e.version == cur.version && e.wins_fork_over(cur));
                 if take {
                     best = Some(i);
                 }
@@ -206,6 +219,21 @@ mod tests {
 
     fn id(b: u8) -> [u8; 32] {
         [b; 32]
+    }
+
+    #[test]
+    fn an_equal_version_fork_goes_to_authority_before_the_lower_id() {
+        let admin = Edition { version: 1, prev_hash: None, self_hash: id(0xAA), created_at: 1, tiebreak_id: id(0x01), rank: 5 };
+        let owner = Edition { version: 1, prev_hash: None, self_hash: id(0xBB), created_at: 1, tiebreak_id: id(0xF0), rank: 0 };
+        for eds in [[admin.clone(), owner.clone()], [owner.clone(), admin.clone()]] {
+            let head = eds[fold(&eds, 0, None).head.unwrap()].self_hash;
+            assert_eq!(head, id(0xBB), "the owner's edition wins despite the higher id");
+            assert_eq!(eds[bootstrap_head(&eds, 0).unwrap()].self_hash, id(0xBB));
+        }
+        // Peers fall back to the lower id.
+        let peer = Edition { rank: 5, tiebreak_id: id(0x00), self_hash: id(0xCC), ..admin.clone() };
+        let eds = [admin, peer];
+        assert_eq!(eds[fold(&eds, 0, None).head.unwrap()].self_hash, id(0xCC));
     }
 
     /// Golden vector — the frozen edition canonicalization must never drift (a change reshuffles
@@ -235,9 +263,9 @@ mod tests {
     /// A linked v1→v2→v3 chain folds to v3 with no gap.
     #[test]
     fn contiguous_chain_folds_to_latest() {
-        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1) };
-        let e2 = Edition { version: 2, prev_hash: Some(id(1)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2) };
-        let e3 = Edition { version: 3, prev_hash: Some(id(2)), self_hash: id(3), created_at: 102, tiebreak_id: id(0xa3) };
+        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1), rank: 0 };
+        let e2 = Edition { version: 2, prev_hash: Some(id(1)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2), rank: 0 };
+        let e3 = Edition { version: 3, prev_hash: Some(id(2)), self_hash: id(3), created_at: 102, tiebreak_id: id(0xa3), rank: 0 };
         let r = fold(&[e1, e2, e3], 0, None);
         assert_eq!(r, FoldResult { head: Some(2), gap: false, anchored: true });
     }
@@ -250,6 +278,7 @@ mod tests {
             self_hash: id(v as u8),
             created_at: 100 + v,
             tiebreak_id: id(0xa0 + v as u8),
+            rank: 0,
         };
         // GroupRoot shape: 1,2,3,4,(no 5),6..11 — strict fold stops at v4; bootstrap takes v11.
         let groot: Vec<Edition> = [1u64, 2, 3, 4, 6, 7, 8, 9, 10, 11].iter().map(|&v| ed(v)).collect();
@@ -266,8 +295,8 @@ mod tests {
         assert_eq!(bootstrap_head(&grant, 9), None, "all below floor → no head");
 
         // Equal-version fork resolves to the deterministic tiebreak winner: lower inner id (a: 0xa1 < b: 0xb1).
-        let a = Edition { version: 5, prev_hash: None, self_hash: id(0xAA), created_at: 200, tiebreak_id: id(0xa1) };
-        let b = Edition { version: 5, prev_hash: None, self_hash: id(0xBB), created_at: 100, tiebreak_id: id(0xb1) };
+        let a = Edition { version: 5, prev_hash: None, self_hash: id(0xAA), created_at: 200, tiebreak_id: id(0xa1), rank: 0 };
+        let b = Edition { version: 5, prev_hash: None, self_hash: id(0xBB), created_at: 100, tiebreak_id: id(0xb1), rank: 0 };
         assert_eq!(bootstrap_head(&[a, b], 0), Some(0), "lower inner id wins at equal version (not created_at)");
     }
 
@@ -279,6 +308,7 @@ mod tests {
             self_hash: id(v as u8),
             created_at: 100 + v,
             tiebreak_id: id(0xc0u8.wrapping_add(v as u8)),
+            rank: 0,
         }
     }
 
@@ -344,7 +374,7 @@ mod tests {
     #[test]
     fn forged_middle_edition_does_not_advance_the_head() {
         let e1 = linked(1);
-        let e2_bad = Edition { version: 2, prev_hash: Some(id(0xFF)), self_hash: id(2), created_at: 102, tiebreak_id: id(0xc2) };
+        let e2_bad = Edition { version: 2, prev_hash: Some(id(0xFF)), self_hash: id(2), created_at: 102, tiebreak_id: id(0xc2), rank: 0 };
         let e3 = linked(3); // links to id(2) — but v2's link to v1 is forged
         let r = fold(&[e1, e2_bad, e3], 0, None);
         assert_eq!(r.head.map(|i| [1u64, 2, 3][i]), Some(1), "head stays at v1 — the v1→v2 link is broken");
@@ -355,7 +385,7 @@ mod tests {
     /// anchor — without the hash we can't prove the incoming edition links to what we hold.
     #[test]
     fn floor_plus_one_without_a_floor_hash_is_a_gap() {
-        let e6 = Edition { version: 6, prev_hash: Some(id(5)), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6) };
+        let e6 = Edition { version: 6, prev_hash: Some(id(5)), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6), rank: 0 };
         assert!(fold(&[e6], 5, None).gap, "floor+1 with no floor_hash can't be anchored → gap (fail closed)");
     }
 
@@ -372,14 +402,14 @@ mod tests {
     #[test]
     fn fold_version_zero_does_not_panic() {
         // v0 is invalid (chains start at v1) but a relay could serve one. Unanchored → gap, no panic.
-        let e0 = Edition { version: 0, prev_hash: None, self_hash: id(0), created_at: 1, tiebreak_id: id(0xe0) };
+        let e0 = Edition { version: 0, prev_hash: None, self_hash: id(0), created_at: 1, tiebreak_id: id(0xe0), rank: 0 };
         assert!(fold(&[e0], 0, None).gap, "a v0 'genesis' is not a valid anchor → gap, no panic");
     }
 
     #[test]
     fn fold_genesis_with_a_spurious_prev_is_unanchored() {
         // A v1 carrying a prev_hash (a real genesis has none) is a forged "genesis" → unanchored.
-        let e1 = Edition { version: 1, prev_hash: Some(id(0xFF)), self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1) };
+        let e1 = Edition { version: 1, prev_hash: Some(id(0xFF)), self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1), rank: 0 };
         assert!(fold(&[e1], 0, None).gap, "v1 with a prev is not a real genesis → gap");
     }
 
@@ -387,7 +417,7 @@ mod tests {
     fn fold_near_u64_max_version_does_not_panic() {
         // A relay serves a wildly high version. fold uses it as a key; the +1 increment lives in the
         // producer, not here, so no overflow. Must not panic from any floor.
-        let big = Edition { version: u64::MAX, prev_hash: None, self_hash: id(9), created_at: 1, tiebreak_id: id(0xff) };
+        let big = Edition { version: u64::MAX, prev_hash: None, self_hash: id(9), created_at: 1, tiebreak_id: id(0xff), rank: 0 };
         assert!(fold(&[big.clone()], 0, None).gap, "u64::MAX is not a genesis → gap, no overflow");
         let r = fold(&[big], u64::MAX, Some(&id(9)));
         assert!(!r.gap, "re-presenting the held u64::MAX floor is anchored, no overflow in the walk");
@@ -395,7 +425,7 @@ mod tests {
 
     #[test]
     fn fold_a_million_version_gap_holds_at_the_prefix() {
-        let far = Edition { version: 1_000_000, prev_hash: Some(id(2)), self_hash: id(0x77), created_at: 200, tiebreak_id: id(0xb7) };
+        let far = Edition { version: 1_000_000, prev_hash: Some(id(2)), self_hash: id(0x77), created_at: 200, tiebreak_id: id(0xb7), rank: 0 };
         let r = fold(&[linked(1), far], 0, None);
         assert_eq!(r.head.map(|i| [1u64, 1_000_000][i]), Some(1), "head stays at the genesis prefix");
         assert!(r.gap, "a million-version jump is a gap, not a silent advance");
@@ -424,7 +454,7 @@ mod tests {
     fn bootstrap_head_on_pathological_inputs() {
         assert_eq!(bootstrap_head(&[], 0), None, "empty → None");
         assert_eq!(bootstrap_head(&[linked(1), linked(2)], 999), None, "all below floor → None");
-        let v0 = Edition { version: 0, prev_hash: None, self_hash: id(0), created_at: 1, tiebreak_id: id(0xe0) };
+        let v0 = Edition { version: 0, prev_hash: None, self_hash: id(0), created_at: 1, tiebreak_id: id(0xe0), rank: 0 };
         assert!(bootstrap_head(&[v0], 0).is_some(), "a v0 edition still surfaces (≥ floor 0), no panic");
     }
 
@@ -433,17 +463,17 @@ mod tests {
         // A hostile relay serves only v5 with a forged prev_hash, withholding v1..v4. The head is
         // returned but MUST be flagged gap=true — it isn't anchored to genesis, so a tracking client
         // fails closed instead of installing a possibly forged/rolled-back edition.
-        let e5 = Edition { version: 5, prev_hash: Some(id(0xFF)), self_hash: id(5), created_at: 500, tiebreak_id: id(0xa5) };
+        let e5 = Edition { version: 5, prev_hash: Some(id(0xFF)), self_hash: id(5), created_at: 500, tiebreak_id: id(0xa5), rank: 0 };
         assert!(fold(&[e5], 0, None).gap, "a lone non-genesis edition is unanchored → gap");
 
         // With the held floor + its hash, a genuine v6 linking to v5 IS anchored (no gap).
         let floor_hash = id(0x55);
-        let e6 = Edition { version: 6, prev_hash: Some(floor_hash), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6) };
+        let e6 = Edition { version: 6, prev_hash: Some(floor_hash), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6), rank: 0 };
         let r = fold(&[e6], 5, Some(&floor_hash));
         assert_eq!(r, FoldResult { head: Some(0), gap: false, anchored: true }, "v6 linking to the held v5 hash is anchored");
 
         // A v6 whose prev_hash does NOT match the held floor is unanchored → gap.
-        let e6_bad = Edition { version: 6, prev_hash: Some(id(0xAB)), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6) };
+        let e6_bad = Edition { version: 6, prev_hash: Some(id(0xAB)), self_hash: id(6), created_at: 600, tiebreak_id: id(0xa6), rank: 0 };
         assert!(fold(&[e6_bad], 5, Some(&floor_hash)).gap, "v6 not linking to the floor is a gap");
     }
 
@@ -455,18 +485,18 @@ mod tests {
     fn tracking_rejects_a_forked_floor_edition() {
         let a_hash = id(0xAA);
         // Re-presenting OUR floor edition (same self_hash) → anchored, no gap (the legit re-anchor path).
-        let a = Edition { version: 5, prev_hash: Some(id(4)), self_hash: a_hash, created_at: 500, tiebreak_id: id(0xa5) };
+        let a = Edition { version: 5, prev_hash: Some(id(4)), self_hash: a_hash, created_at: 500, tiebreak_id: id(0xa5), rank: 0 };
         assert!(!fold(&[a], 5, Some(&a_hash)).gap, "re-presenting our own floor edition is anchored");
         // A DIFFERENT edition at the floor version (a withheld-original fork) → gap, fail closed.
-        let b = Edition { version: 5, prev_hash: Some(id(4)), self_hash: id(0xBB), created_at: 600, tiebreak_id: id(0xb5) };
+        let b = Edition { version: 5, prev_hash: Some(id(4)), self_hash: id(0xBB), created_at: 600, tiebreak_id: id(0xb5), rank: 0 };
         assert!(fold(&[b], 5, Some(&a_hash)).gap, "a different same-version edition is a fork → rejected, not anchored");
     }
 
     /// Refuse-downgrade: an edition below the floor is ignored entirely.
     #[test]
     fn refuses_to_downgrade_below_floor() {
-        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1) };
-        let e2 = Edition { version: 2, prev_hash: Some(id(1)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2) };
+        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1), rank: 0 };
+        let e2 = Edition { version: 2, prev_hash: Some(id(1)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2), rank: 0 };
         // Floor already at 2 (we hold v2 = self_hash id(2)) → only v2 is a candidate; v1 is a downgrade and
         // dropped. Pass the held floor hash, as production does — the ==floor anchor now verifies it.
         let r = fold(&[e1, e2], 2, Some(&id(2)));
@@ -481,8 +511,8 @@ mod tests {
         // Two distinct v1 editions. Winner = lower inner edition id; `created_at` is IGNORED, so an author
         // can't set created_at=0 to force a win. `a` has the LATER created_at but the LOWER id → `a` wins,
         // proving created_at is not the lever (the anti-gaming fix).
-        let a = Edition { version: 1, prev_hash: None, self_hash: id(0xAA), created_at: 999, tiebreak_id: id(0x01) };
-        let b = Edition { version: 1, prev_hash: None, self_hash: id(0xBB), created_at: 0, tiebreak_id: id(0x02) };
+        let a = Edition { version: 1, prev_hash: None, self_hash: id(0xAA), created_at: 999, tiebreak_id: id(0x01), rank: 0 };
+        let b = Edition { version: 1, prev_hash: None, self_hash: id(0xBB), created_at: 0, tiebreak_id: id(0x02), rank: 0 };
         assert_eq!(fold(&[a.clone(), b.clone()], 0, None).head, Some(0), "lower id wins even though `a` has the later created_at");
         assert_eq!(fold(&[b, a], 0, None).head, Some(1), "and it's independent of arrival order");
     }
@@ -491,15 +521,15 @@ mod tests {
     /// and `gap` flags the break (caller fails closed + refetches).
     #[test]
     fn detects_a_gap_in_the_chain() {
-        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1) };
+        let e1 = Edition { version: 1, prev_hash: None, self_hash: id(1), created_at: 100, tiebreak_id: id(0xa1), rank: 0 };
         // v3 present but v2 missing → not contiguous from v1.
-        let e3 = Edition { version: 3, prev_hash: Some(id(2)), self_hash: id(3), created_at: 102, tiebreak_id: id(0xa3) };
+        let e3 = Edition { version: 3, prev_hash: Some(id(2)), self_hash: id(3), created_at: 102, tiebreak_id: id(0xa3), rank: 0 };
         let r = fold(&[e1.clone(), e3], 0, None);
         assert_eq!(r.head, Some(0), "head stays at the highest contiguous version (v1)");
         assert!(r.gap, "the v2 gap is reported");
 
         // Present-but-wrong prev_hash is also a gap (a forked/forged link).
-        let e2_bad = Edition { version: 2, prev_hash: Some(id(0xFF)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2) };
+        let e2_bad = Edition { version: 2, prev_hash: Some(id(0xFF)), self_hash: id(2), created_at: 101, tiebreak_id: id(0xa2), rank: 0 };
         let r2 = fold(&[e1.clone(), e2_bad], 0, None);
         assert_eq!(r2.head, Some(0));
         assert!(r2.gap, "a wrong prev_hash link does not advance the head");
