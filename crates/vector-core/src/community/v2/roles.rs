@@ -208,9 +208,15 @@ pub enum RoleV2 {
 pub struct EveryoneContent {
     #[serde(with = "perm_decimal_string")]
     pub permissions: u64,
+    /// The Channels that stood before the switch (CORD-04 §2), carried by every later edition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy: Option<std::collections::BTreeSet<String>>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
+
+/// The most Channels an activating `@everyone` lists.
+pub const MAX_LEGACY_CHANNELS: usize = 256;
 
 /// What `@everyone` starts with (CORD-04 §3): the chat and voice basics.
 pub const EVERYONE_DEFAULT: u64 = Permissions::VIEW_CHANNEL
@@ -267,13 +273,27 @@ pub fn role_v2_deleted_json(role_id: &str) -> String {
     serde_json::json!({ "role_id": role_id, "deleted": true }).to_string()
 }
 
-/// Parse `@everyone`'s content.
-pub fn parse_everyone_content(content: &str) -> Option<u64> {
-    serde_json::from_str::<EveryoneContent>(content).ok().map(|c| c.permissions)
+/// Parse `@everyone`'s content: its permissions, and the Channels that stood before the switch
+/// (lowercase hex, at most [`MAX_LEGACY_CHANNELS`]; a malformed id is dropped).
+pub fn parse_everyone_content(content: &str) -> Option<(u64, Option<std::collections::BTreeSet<String>>)> {
+    let c = serde_json::from_str::<EveryoneContent>(content).ok()?;
+    let legacy = c.legacy.map(|l| {
+        l.iter()
+            .filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h))
+            .map(|b| crate::simd::hex::bytes_to_hex_32(&b))
+            .take(MAX_LEGACY_CHANNELS)
+            .collect()
+    });
+    Some((c.permissions, legacy))
 }
 
 pub fn everyone_content_json(permissions: u64) -> String {
-    serde_json::to_string(&EveryoneContent { permissions, extra: Default::default() }).expect("plain struct")
+    everyone_content_json_with(permissions, None)
+}
+
+/// `@everyone`'s content, listing the Channels that stood before the switch.
+pub fn everyone_content_json_with(permissions: u64, legacy: Option<&std::collections::BTreeSet<String>>) -> String {
+    serde_json::to_string(&EveryoneContent { permissions, legacy: legacy.cloned(), extra: Default::default() }).expect("plain struct")
 }
 
 mod perm_decimal_string_opt {

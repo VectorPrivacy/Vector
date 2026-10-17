@@ -6,8 +6,11 @@ use crate::community::v2::derive::channel_writer_group_key;
 use crate::community::v2::writers::{self, Ledger, Spell};
 use sha2::Digest;
 
-/// How long a manager waits before cutting or re-minting for a writer again in one Channel.
+/// How long a manager waits before cutting one writer, or minting for itself, again in a Channel.
 const BACKSTOP_DAMP_MS: u64 = 6 * 3600 * 1000;
+
+/// How long a manager waits before moving a Channel's ledger in line with its permissions again.
+const BACKSTOP_MOVE_MS: u64 = 3600 * 1000;
 
 /// How long a manager who may post goes unserved before it mints a key it can use.
 const STARVED_MS: u64 = 10 * 60 * 1000;
@@ -129,22 +132,35 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
     let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
     let me = me_pk()?;
     let epoch = ledger.next_epoch().ok_or("this channel has no writer epochs left")?;
-    let (cid_hex, scope_hex) = (hex(&community.id().0), writers::secret_scope(&ch.id));
-    let secret = match crate::db::community::held_epoch_key(&cid_hex, &scope_hex, epoch.0)? {
+    let (cid_hex, minted_hex) = (hex(&community.id().0), writers::minted_scope(&ch.id));
+    let secret = match crate::db::community::held_epoch_key(&cid_hex, &minted_hex, epoch.0)? {
         Some(minted) => minted,
         None => {
             let fresh = crate::community::random_32();
-            crate::db::community::store_epoch_key(&cid_hex, &scope_hex, epoch.0, &fresh)?;
+            crate::db::community::store_epoch_key(&cid_hex, &minted_hex, epoch.0, &fresh)?;
             fresh
         }
     };
     let pk = writers::writer_address(&secret, &ch.id, epoch);
     let next = ledger
-        .appended(now_ms(), Spell::Writer { epoch, pk, root: community.root_epoch, by: me.to_bytes() })
+        .appended(entry_time(ch).await, Spell::Writer { epoch, pk, root: community.root_epoch, by: me.to_bytes() })
         .ok_or("this channel's writer ledger can't take another epoch")?;
     let recipients: Vec<PublicKey> = writer_candidates(community, posters.roster)?.into_iter().filter(|p| !cut.contains(p) && posters.writes(p, ch)).collect();
+    if recipients.contains(&me) {
+        crate::db::community::store_epoch_key(&cid_hex, &writers::secret_scope(&ch.id), epoch.0, &secret)?;
+    }
+    if !crate::db::current_session().is_live() {
+        return Err("account changed while minting a writer key".to_string());
+    }
     deliver_on_plane(transport, community, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(pk), &secret, &recipients).await?;
     publish_ledger(transport, community, ch, &next).await
+}
+
+/// When a new entry starts: now, but never before the newest post this device holds in the
+/// Channel, so a slow clock can't close a window on posts already made.
+async fn entry_time(ch: &ChannelV2) -> u64 {
+    let newest = crate::state::STATE.lock().await.get_chat(&hex(&ch.id.0)).and_then(|c| c.last_message_time());
+    now_ms().max(newest.map_or(0, |t| t.saturating_add(1)))
 }
 
 /// Append `open` to `ch`'s ledger: posts move back to the read address.
@@ -153,11 +169,14 @@ async fn reopen<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, c
         return Err("this channel's writer ledger can't be read; nothing appended to it".to_string());
     }
     let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
-    let next = ledger.appended(now_ms(), Spell::Open).ok_or("this channel's writer ledger can't take that")?;
+    let next = ledger.appended(entry_time(ch).await, Spell::Open).ok_or("this channel's writer ledger can't take that")?;
     publish_ledger(transport, community, ch, &next).await
 }
 
 async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, next: &Ledger) -> Result<(), String> {
+    if !crate::db::current_session().is_live() {
+        return Err("account changed while moving a channel's writers".to_string());
+    }
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
     let content = next.to_json();
     publish_control_edition(transport, community, vsk::WRITERS, &eid, &content).await?;
@@ -170,7 +189,14 @@ async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &Commun
 /// Read the Control Plane again and return the Channel as it stands, `None` when its ledger moved
 /// from `seen`: someone else acted, and a mint on the old head would fork it.
 async fn ledger_still<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, seen: &Option<Ledger>) -> Result<Option<(CommunityV2, ChannelV2)>, String> {
-    follow_control(transport, community).await?;
+    {
+        // The fold saves the whole row, so it reads the row as it stands, under the lock every
+        // other whole-row writer takes.
+        let lock = super::super::realtime::follow_lock(community.id());
+        let _guard = lock.lock().await;
+        let current = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        follow_control(transport, &current).await?;
+    }
     let fresh = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
     let Some(ch) = fresh.channel(channel).cloned() else { return Ok(None) };
     Ok((ch.writers == *seen).then_some((fresh, ch)))
@@ -218,8 +244,18 @@ pub(super) async fn settle_writers<T: Transport + ?Sized>(transport: &T, communi
             continue;
         }
         let gained: Vec<PublicKey> = candidates.iter().filter(|p| !was.writes(p, ch) && now.writes(p, ch)).copied().collect();
-        if let (false, Some((epoch, secret, writer))) = (gained.is_empty(), live_writer(&held, ch)) {
-            deliver_on_plane(transport, &held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained).await?;
+        if gained.is_empty() {
+            continue;
+        }
+        match live_writer(&held, ch) {
+            Some((epoch, secret, writer)) => deliver_on_plane(transport, &held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained).await?,
+            // Nothing to hand over: a manager mints one they can be given.
+            None if may_manage => {
+                if let Some((fresh, ch)) = ledger_still(transport, &held, &ch.id, &ch.writers).await? {
+                    mint(transport, &fresh, &ch, &now, &[]).await?;
+                }
+            }
+            None => {}
         }
     }
     Ok(())
@@ -240,14 +276,25 @@ pub struct WriterDuty {
 struct WriterSent;
 struct BackstopClock;
 
-/// Whether this device may cut or re-mint for a writer in `channel` now. Marks it.
-fn backstop_due(channel: &ChannelId) -> bool {
-    let clock = crate::db::current_session().scoped::<BackstopClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>();
+/// Whether this device may move `channel`'s ledger for the backstop now, or with `member`, cut
+/// them. Marks it.
+fn backstop_due(channel: &ChannelId, member: Option<&PublicKey>) -> bool {
+    backstop_clock(channel, member.map_or([0; 32], |m| m.to_bytes()), BACKSTOP_DAMP_MS)
+}
+
+/// Whether this device may bring `channel`'s ledger in line with its permissions now. Marks it.
+fn move_due(channel: &ChannelId) -> bool {
+    backstop_clock(channel, [1; 32], BACKSTOP_MOVE_MS)
+}
+
+fn backstop_clock(channel: &ChannelId, lane: [u8; 32], period: u64) -> bool {
+    let clock = crate::db::current_session().scoped::<BackstopClock, std::sync::Mutex<std::collections::HashMap<([u8; 32], [u8; 32]), u64>>>();
     let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (channel.0, lane);
     let now = now_ms();
-    let due = last.get(&channel.0).is_none_or(|t| now.saturating_sub(*t) > BACKSTOP_DAMP_MS);
+    let due = last.get(&key).is_none_or(|t| now.saturating_sub(*t) > period);
     if due {
-        last.insert(channel.0, now);
+        last.insert(key, now);
     }
     due
 }
@@ -285,7 +332,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let live = ch.writers.as_ref().and_then(|l| l.live());
     // A Refounding retires the live writer epoch: the members it removed may hold it.
     let retired = live.is_some_and(|(root, ..)| root < held.root_epoch);
-    if may_manage && ((restrict && retired) || restrict != ch.restricted()) {
+    if may_manage && ((restrict && retired) || (restrict != ch.restricted() && move_due(&ch.id))) {
         backstop(transport, held, ch, posters, &[]).await?;
         done.moved += 1;
         return Ok(());
@@ -298,8 +345,12 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let scope = writers::writer_rekey_scope(&ch.id);
     let deliveries = named_deliveries(transport, held, ch, ledger).await?;
     let minter = PublicKey::from_slice(&minter).ok();
-    let trusted = |d: &PublicKey| Some(*d) == minter || posters.writes(d, ch) || manager(&d.to_hex());
-    let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &trusted);
+    // Only an epoch's minter and the managers count: a writer's blob can neither vouch for
+    // someone nor have them cut.
+    let served = |p: &PublicKey, e: Epoch| {
+        let minted_by = ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
+        served_at(&deliveries, p, scope, e, &|d| Some(*d) == minted_by || manager(&d.to_hex()))
+    };
     if may_manage {
         let banned_pks: Vec<PublicKey> = posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
         let out: Vec<PublicKey> = candidates
@@ -310,21 +361,23 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
+            .filter(|p| backstop_due(&ch.id, Some(p)))
             .collect();
-        if !out.is_empty() && backstop_due(&ch.id) {
+        if !out.is_empty() {
             backstop(transport, held, ch, posters, &out).await?;
             done.cut += out.len();
             return Ok(());
         }
-        let starved = posters.writes(&me, ch) && live_writer(held, ch).is_none() && !served(&me, epoch) && now_ms().saturating_sub(began) > STARVED_MS;
-        if starved && backstop_due(&ch.id) {
+        // A key it can open, not a blob at its locator: anyone can leave a blob.
+        let starved = posters.writes(&me, ch) && live_writer(held, ch).is_none() && now_ms().saturating_sub(began) > STARVED_MS;
+        if starved && backstop_due(&ch.id, None) {
             backstop(transport, held, ch, posters, &[]).await?;
             done.moved += 1;
             return Ok(());
         }
     }
     let Some((_, secret, _)) = live_writer(held, ch) else { return Ok(()) };
-    if !trusted(&me) {
+    if !posters.writes(&me, ch) && !may_manage && minter != Some(me) {
         return Ok(());
     }
     // The epoch's mint is the minter's own delivery: whoever held the epoch before and it left
@@ -355,7 +408,12 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let me_hex = me_pk()?.to_hex();
     let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
     if steps > 0 {
-        crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64)).await;
+        // Managers of one rank spread out too.
+        let spread = rand::random::<u64>() % RANK_STAGGER_MS;
+        crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64 + spread)).await;
+    }
+    if !crate::db::current_session().is_live() {
+        return Ok(());
     }
     let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(()) };
     match (restricts(posters.roster, &ch), ch.restricted()) {

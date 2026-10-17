@@ -248,8 +248,8 @@ fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId
             continue;
         }
         let (old, new) = (was.map(|l| l.entries).unwrap_or_default(), ch.writers.as_ref().map(|l| l.entries.clone()).unwrap_or_default());
-        let same = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let Some(from_ms) = [old.get(same), new.get(same)].into_iter().flatten().map(|e| e.at).min() else { continue };
+        // Only what the ledger added can admit something new: a cap drop moves no window.
+        let Some(from_ms) = new.iter().filter(|e| !old.contains(e)).map(|e| e.at).min() else { continue };
         let (after, channel) = (after.clone(), ch.id);
         crate::db::spawn_bound(async move {
             let Some(me) = crate::state::my_public_key() else { return };

@@ -72,7 +72,7 @@ mod tests {
             MemberGrant { member: admin_b.to_string(), role_ids: vec![admin.role_id.clone()] },
             MemberGrant { member: mod_hex.to_string(), role_ids: vec![moderator.role_id.clone()] },
         ];
-        CommunityRoles { grants, roles: vec![admin, moderator], everyone: None, overwrites: Vec::new(), syncs: Default::default() }
+        CommunityRoles { grants, roles: vec![admin, moderator], everyone: None, overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None }
     }
 
     #[test]
@@ -102,7 +102,7 @@ mod tests {
             grants: vec![MemberGrant { member: admin.clone(), role_ids: vec![admin_role.role_id.clone()] }],
             roles: vec![admin_role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(),
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
         };
 
         assert!(!can_hide(None, &r, &owner, &admin), "the owner can't moderate anyone");

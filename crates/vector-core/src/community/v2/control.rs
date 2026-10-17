@@ -493,20 +493,23 @@ pub fn parse_sealed_channel_meta(content: &str) -> Option<SealedChannelMeta> {
     let serde_json::Value::Object(o) = serde_json::from_str(content).ok()? else { return None };
     let sealed = o.get("sealed")?.as_str()?.to_string();
     let epoch = o.get("epoch")?.as_str()?;
-    if !o.get("private")?.as_bool()? || (epoch != "0" && epoch.starts_with('0')) {
+    let canonical = !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()) && (epoch == "0" || !epoch.starts_with('0'));
+    if !o.get("private")?.as_bool()? || !canonical {
         return None;
     }
     Some(SealedChannelMeta { epoch: epoch.parse().ok()?, sealed, deleted: o.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) })
 }
 
-/// Seal a Private Channel's metadata under its conversation key at `epoch`.
-pub fn seal_channel_metadata(meta: &ChannelMetadata, conv_key: &ConversationKey, epoch: u64) -> Result<String, String> {
+/// Seal a Private Channel's metadata under its conversation key at `epoch`, naming the edition's
+/// predecessor so the seal can't be replayed as a newer edition.
+pub fn seal_channel_metadata(meta: &ChannelMetadata, conv_key: &ConversationKey, epoch: u64, prev: Option<&[u8; 32]>) -> Result<String, String> {
     validate_channel_metadata(meta).map_err(|e| e.to_string())?;
     let serde_json::Value::Object(mut inner) = serde_json::to_value(meta).map_err(|e| e.to_string())? else {
         return Err("channel metadata isn't an object".to_string());
     };
     inner.remove("private");
     inner.remove("deleted");
+    inner.insert(SEALED_PREV.into(), prev.map(crate::simd::hex::bytes_to_hex_32).into());
     let raw = crate::community::cipher::encrypt_with_random_nonce(conv_key, serde_json::Value::Object(inner).to_string().as_bytes())?;
     let mut out = serde_json::json!({ "private": true, "epoch": epoch.to_string(), "sealed": crate::simd::base64::STANDARD.encode_to_string(&raw) });
     if meta.deleted == Some(true) {
@@ -515,12 +518,21 @@ pub fn seal_channel_metadata(meta: &ChannelMetadata, conv_key: &ConversationKey,
     Ok(out.to_string())
 }
 
-/// Open sealed channel metadata with the conversation key of its epoch.
-pub fn open_sealed_channel_meta(s: &SealedChannelMeta, conv_key: &[u8; 32]) -> Option<ChannelMetadata> {
+/// What a seal names as its edition's predecessor.
+const SEALED_PREV: &str = "prev";
+
+/// Open sealed channel metadata with the conversation key of its epoch. `prev` is the carrying
+/// edition's predecessor, which the seal must name; a deletion carries an older seal verbatim
+/// and is exempt.
+pub fn open_sealed_channel_meta(s: &SealedChannelMeta, conv_key: &[u8; 32], prev: Option<&[u8; 32]>) -> Option<ChannelMetadata> {
     let conv = ConversationKey::from_slice(conv_key).ok()?;
     let raw = crate::simd::base64::STANDARD.decode_to_vec(s.sealed.as_bytes()).ok()?;
     let inner = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv, &raw).ok()?;
     let serde_json::Value::Object(mut o) = serde_json::from_slice(&inner).ok()? else { return None };
+    let named = o.remove(SEALED_PREV).and_then(|v| v.as_str().and_then(crate::simd::hex::hex_to_bytes_32_checked));
+    if !s.deleted && named.as_ref() != prev {
+        return None;
+    }
     o.insert("private".into(), true.into());
     o.remove("deleted");
     let mut meta: ChannelMetadata = serde_json::from_value(serde_json::Value::Object(o)).ok()?;
@@ -534,6 +546,29 @@ pub fn sealed_tombstone(content: &str) -> Option<String> {
     let serde_json::Value::Object(mut o) = serde_json::from_str(content).ok()? else { return None };
     o.insert("deleted".into(), true.into());
     Some(serde_json::Value::Object(o).to_string())
+}
+
+/// `meta` with whatever breaks the protocol caps dropped, the name cut to fit: what folds is
+/// shown, and what a writer re-seals must validate.
+pub fn sanitize_channel_metadata(mut meta: ChannelMetadata) -> ChannelMetadata {
+    if meta.name.len() > MAX_NAME_BYTES {
+        let mut end = MAX_NAME_BYTES;
+        while !meta.name.is_char_boundary(end) {
+            end -= 1;
+        }
+        meta.name.truncate(end);
+    }
+    let text = |m: &ChannelMetadata, k: &str| m.extra.get(k).map(|v| v.as_str().map(str::to_string));
+    if text(&meta, "topic").is_some_and(|t| t.is_none_or(|t| t.len() > MAX_TOPIC_BYTES)) {
+        meta.extra.remove("topic");
+    }
+    if text(&meta, "position").is_some_and(|k| k.is_none_or(|k| !crate::community::rank::is_rank_key(&k))) {
+        meta.extra.remove("position");
+    }
+    if text(&meta, "category").is_some_and(|c| c.is_none_or(|c| crate::simd::hex::hex_to_bytes_32_checked(&c).is_none())) {
+        meta.extra.remove("category");
+    }
+    meta
 }
 
 /// Enforce the protocol byte caps before an edition is built (a strict reader
@@ -715,19 +750,29 @@ mod tests {
         meta.extra.insert("category".into(), "11".repeat(32).into());
         let key = [7u8; 32];
         let conv = ConversationKey::from_slice(&key).unwrap();
-        let content = seal_channel_metadata(&meta, &conv, 4).unwrap();
+        let prev = [0x0f; 32];
+        let content = seal_channel_metadata(&meta, &conv, 4, Some(&prev)).unwrap();
         for leak in ["war room", "plans", &"11".repeat(32)] {
             assert!(!content.contains(leak), "{leak} must not show");
         }
         let s = parse_sealed_channel_meta(&content).unwrap();
         assert_eq!((s.epoch, s.deleted), (4, false));
-        assert_eq!(open_sealed_channel_meta(&s, &key), Some(meta.clone()));
-        assert_eq!(open_sealed_channel_meta(&s, &[8u8; 32]), None, "another epoch's key opens nothing");
+        assert_eq!(open_sealed_channel_meta(&s, &key, Some(&prev)), Some(meta.clone()));
+        assert_eq!(open_sealed_channel_meta(&s, &[8u8; 32], Some(&prev)), None, "another epoch's key opens nothing");
+        assert_eq!(open_sealed_channel_meta(&s, &key, Some(&[0x10; 32])), None, "nor does a seal replayed under another predecessor");
+        assert_eq!(open_sealed_channel_meta(&s, &key, None), None);
         let gone = parse_sealed_channel_meta(&sealed_tombstone(&content).unwrap()).unwrap();
         assert_eq!((gone.sealed.as_str(), gone.deleted), (s.sealed.as_str(), true), "the tombstone carries the seal verbatim");
-        assert_eq!(open_sealed_channel_meta(&gone, &key).unwrap().deleted, Some(true));
+        assert_eq!(open_sealed_channel_meta(&gone, &key, Some(&[0x11; 32])).unwrap().deleted, Some(true), "a deletion carries an older seal");
         assert!(parse_sealed_channel_meta(r#"{"name":"general","private":false}"#).is_none());
         assert!(parse_sealed_channel_meta(&content.replace("\"epoch\":\"4\"", "\"epoch\":\"04\"")).is_none(), "a non-canonical epoch");
+        assert!(parse_sealed_channel_meta(&content.replace("\"epoch\":\"4\"", "\"epoch\":\"+4\"")).is_none());
+        let mut wild = meta.clone();
+        wild.name = "é".repeat(MAX_NAME_BYTES);
+        wild.extra.insert("position".into(), "!!".into());
+        wild.extra.insert("topic".into(), "x".repeat(MAX_TOPIC_BYTES + 1).into());
+        let tame = sanitize_channel_metadata(wild);
+        assert!(validate_channel_metadata(&tame).is_ok() && tame.extra.get("position").is_none() && tame.extra.get("topic").is_none() && tame.extra.get("category").is_some());
         assert!(parse_sealed_channel_meta(&content.replace("\"private\":true", "\"private\":false")).is_none());
     }
 

@@ -42,6 +42,13 @@ pub struct SealedMeta {
     pub raw: String,
     /// The fields above came out of it.
     pub open: bool,
+    /// This device holds the key of its epoch and still couldn't open it: the fields above are
+    /// the last it read, and a manager seals them again.
+    #[serde(default)]
+    pub junk: bool,
+    /// The carrying edition's predecessor, which the seal must name.
+    #[serde(default)]
+    pub prev: Option<String>,
 }
 
 impl ChannelV2 {
