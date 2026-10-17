@@ -34,6 +34,7 @@ const LABEL_REKEY_PSEUDONYM: &str = "concord/rekey-pseudonym";
 const LABEL_BASE_REKEY_PSEUDONYM: &str = "concord/base-rekey-pseudonym";
 const LABEL_RECIPIENT_PSEUDONYM: &str = "concord/recipient-pseudonym";
 const LABEL_GUESTBOOK: &str = "concord/guestbook";
+const LABEL_CHANNEL_ACCESS: &str = "concord/channel-access";
 const LABEL_VOICE_SIGNER: &str = "concord/voice-signer";
 const LABEL_VOICE_MEDIA: &str = "concord/voice-media";
 const LABEL_VOICE_SENDER: &str = "concord/voice-sender";
@@ -228,6 +229,12 @@ pub fn control_signer_group_key(control_root: &[u8; 32], community_id: &Communit
 /// The Guestbook Plane's group key (community_root-keyed, community-id-bound).
 pub fn guestbook_group_key(community_root: &[u8; 32], community_id: &CommunityId, epoch: Epoch) -> GroupKey {
     GroupKey::derive(LABEL_GUESTBOOK, community_root, &community_id.0, Some(epoch.0))
+}
+
+/// A Channel's access plane for the root epoch, where any key holder delivers the key to
+/// an entitled member who lacks it (CORD-03 §5).
+pub fn channel_access_group_key(community_root: &[u8; 32], channel_id: &ChannelId, root_epoch: Epoch) -> GroupKey {
+    GroupKey::derive(LABEL_CHANNEL_ACCESS, community_root, &channel_id.0, Some(root_epoch.0))
 }
 
 /// A private Channel's rekey address for `new_epoch`, keyed by the

@@ -1096,6 +1096,28 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 }
             }
         }
+        // Keys delivered on an access plane park for the vend judge just below.
+        if let Ok(Some(current)) = crate::db::community::load_community_v2(id) {
+            match super::service::collect_access(&transport, &current).await {
+                Ok(0) => {}
+                Ok(n) => crate::log_info!("[v2:follow {}] {n} key(s) waiting on access planes", &community_id[..8.min(community_id.len())]),
+                Err(e) => crate::log_warn!("[v2:follow {}] access plane read failed: {e}", &community_id[..8.min(community_id.len())]),
+            }
+        }
+        if super::service::access_duty_due(id, control.authority_changed) {
+            let owed = *id;
+            crate::db::spawn_bound(async move {
+                // Every holder sees the same gap: a random wait lets the first delivery serve them all.
+                crate::rt::time::sleep(std::time::Duration::from_millis(3_000 + rand::random::<u64>() % 12_000)).await;
+                let Ok(Some(c)) = crate::db::community::load_community_v2(&owed) else { return };
+                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                match super::service::access_duty(&transport, &c).await {
+                    Ok(0) => {}
+                    Ok(n) => crate::log_info!("[v2:access] delivered {n} channel key(s) on access planes"),
+                    Err(e) => crate::log_warn!("[v2:access] access duty failed: {e}"),
+                }
+            });
+        }
         // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
         // vend that lands AFTER its Grant folded has nothing left to change the
         // control plane, so gating this on `changed` strands it until some unrelated

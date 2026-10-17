@@ -6072,6 +6072,147 @@ async fn settle_access<T: Transport + ?Sized>(
     Ok(())
 }
 
+/// A Channel's access plane at the community's root epoch (CORD-03 §5).
+fn access_group(community: &CommunityV2, channel: &ChannelId) -> super::derive::GroupKey {
+    super::derive::channel_access_group_key(&community.community_root, channel, community.root_epoch)
+}
+
+/// Every access delivery for a Channel on its plane.
+async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId) -> Result<Vec<rekey::AccessDelivery>, String> {
+    let group = access_group(community, channel);
+    let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+    let wraps = transport.fetch(&query, &community.relays).await?;
+    Ok(wraps
+        .iter()
+        .filter_map(|w| stream::open_wrap(w, &group).ok())
+        .filter_map(|o| rekey::parse_access_delivery(&o).ok())
+        .filter(|d| matches!(d.scope, rekey::RekeyScope::Channel(c) if c.0 == channel.0))
+        .collect())
+}
+
+/// Whether `member` already has a blob for `epoch` on the plane, from any deliverer.
+fn served_on_plane(deliveries: &[rekey::AccessDelivery], member: &PublicKey, channel: &ChannelId, epoch: Epoch) -> bool {
+    let scope = rekey::RekeyScope::Channel(*channel);
+    deliveries
+        .iter()
+        .filter(|d| d.epoch == epoch)
+        .any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &member.to_bytes(), scope, epoch).is_some())
+}
+
+/// Deliver the key this device holds for `channel` to `recipients` on its access plane.
+async fn deliver_access<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, recipients: &[PublicKey]) -> Result<(), String> {
+    let ch = community.channel(channel).ok_or("no such channel")?;
+    let key = ch.key.ok_or("this device doesn't hold that channel's key")?;
+    let (epoch, scope) = (ch.epoch, rekey::RekeyScope::Channel(*channel));
+    let signer = crate::signer::active_signer()?;
+    let me = me_pk()?;
+    let group = access_group(community, channel);
+    let mut blobs = Vec::with_capacity(recipients.len());
+    for r in recipients {
+        blobs.push(rekey::build_blob(&signer, &me.to_bytes(), r, scope, epoch, &key).await.map_err(|e| e.to_string())?);
+    }
+    let at = now_ms() / 1000;
+    for part in blobs.chunks(rekey::MAX_REKEY_BLOBS_PER_EVENT) {
+        let rumor = rekey::build_access_rumor(me, scope, epoch, part, at).map_err(|e| e.to_string())?;
+        let (wrap, _) = stream::seal_and_wrap_signed(&signer, me, &rumor, stream::SealForm::Encrypted, &group, stream::KIND_WRAP, Timestamp::from_secs(at), &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        transport.publish(&wrap, &community.relays).await?;
+    }
+    Ok(())
+}
+
+struct AccessDutyClock;
+
+/// How often a holder re-checks its channels' access planes when nothing in the roster moved.
+const ACCESS_DUTY_PERIOD_MS: u64 = 10 * 60 * 1000;
+
+/// Whether the access duty should run for a community now: whenever the roster moved, else
+/// once per period. Marks it run.
+pub(crate) fn access_duty_due(id: &crate::community::CommunityId, roster_moved: bool) -> bool {
+    let clock = crate::db::current_session().scoped::<AccessDutyClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>();
+    let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let due = roster_moved || last.get(&id.0).is_none_or(|t| now.saturating_sub(*t) > ACCESS_DUTY_PERIOD_MS);
+    if due {
+        last.insert(id.0, now);
+    }
+    due
+}
+
+/// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
+/// deliver the key to each entitled member the plane shows unserved at its epoch. Returns how
+/// many blobs went out.
+pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    if roster.everyone.is_none() {
+        return Ok(0);
+    }
+    let owner_hex = community.owner()?.to_hex();
+    let me = me_pk()?;
+    let candidates = access_candidates(community, &roster)?;
+    let mut sent = 0;
+    for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        // Readers adopt only from a deliverer their fold entitles.
+        if !roster.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[]) {
+            continue;
+        }
+        let entitled: Vec<PublicKey> = candidates.iter().filter(|pk| **pk != me && roster.is_entitled(Some(&owner_hex), &pk.to_hex(), &chan, &[], &[])).copied().collect();
+        if entitled.is_empty() {
+            continue;
+        }
+        let deliveries = fetch_access_deliveries(transport, community, &ch.id).await?;
+        let unserved: Vec<PublicKey> = entitled.into_iter().filter(|pk| !served_on_plane(&deliveries, pk, &ch.id, ch.epoch)).collect();
+        if unserved.is_empty() {
+            continue;
+        }
+        deliver_access(transport, community, &ch.id, &unserved).await?;
+        sent += unserved.len();
+    }
+    Ok(sent)
+}
+
+/// Fetch the keys delivered to me for every private Channel I'm entitled to but can't read,
+/// and park them for the vend judge to adopt (CORD-03 §5). Returns how many were parked.
+pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    if roster.everyone.is_none() {
+        return Ok(0);
+    }
+    let owner_hex = community.owner()?.to_hex();
+    let me = me_pk()?;
+    let signer = crate::signer::active_signer()?;
+    let mut parked = 0;
+    for ch in community.channels.iter().filter(|c| c.private && c.key.is_none()) {
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        if !roster.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[]) {
+            continue;
+        }
+        let scope = rekey::RekeyScope::Channel(ch.id);
+        // Only deliverers the channel lets in, and only their newest epoch: a keyless channel
+        // seats whatever it adopts first, so a stale key must never be on offer.
+        let deliveries: Vec<rekey::AccessDelivery> = fetch_access_deliveries(transport, community, &ch.id)
+            .await?
+            .into_iter()
+            .filter(|d| roster.is_entitled(Some(&owner_hex), &d.deliverer.to_hex(), &chan, &[], &[]))
+            .collect();
+        let Some(newest) = deliveries.iter().map(|d| d.epoch).max() else { continue };
+        for d in deliveries.iter().filter(|d| d.epoch == newest) {
+            for blob in rekey::find_my_blobs(&d.blobs, &d.deliverer.to_bytes(), &me.to_bytes(), scope, d.epoch) {
+                if let Ok(key) = rekey::open_blob(&signer, &d.deliverer, scope, d.epoch, blob).await {
+                    crate::db::community::park_channel_key(&cid_hex, &chan, d.epoch.0, &key, &d.deliverer.to_hex())?;
+                    parked += 1;
+                    break;
+                }
+            }
+        }
+    }
+    Ok(parked)
+}
+
 /// Everyone a Private Channel's key could be owed to: every Grant holder, every member an
 /// overwrite names, and every member this device knows.
 fn access_candidates(community: &CommunityV2, roster: &crate::community::roles::CommunityRoles) -> Result<Vec<PublicKey>, String> {
@@ -22765,6 +22906,57 @@ mod tests {
         follow_control(&bed.relay, &held()).await.unwrap();
         let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
         assert!(roster.roles_of(&m.to_hex()).any(|r| r.role_id == readers), "the admin's Grant stands");
+    }
+
+    #[tokio::test]
+    async fn a_holder_delivers_on_the_access_plane_and_the_member_adopts_it() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Access").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let (m, stranger) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers]).await.unwrap();
+        let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &stranger.public_key(), vec![others]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let served = |pk: PublicKey| {
+            let relay = &bed.relay;
+            let c = held();
+            async move { served_on_plane(&fetch_access_deliveries(relay, &c, &ch).await.unwrap(), &pk, &ch, c.channel(&ch).unwrap().epoch) }
+        };
+        act_as(&x);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a holder the channel doesn't let in delivers nothing readers would take");
+        act_as(&owner.keys);
+        assert!(access_duty(&bed.relay, &held()).await.unwrap() >= 1, "the holder serves who the plane shows unserved");
+        assert!(served(m.public_key()).await, "the entitled member is served");
+        assert!(!served(stranger.public_key()).await, "and nobody the channel doesn't let in");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a served member is served once");
+        // A new epoch is a new key: served at the last one says nothing about it.
+        let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        rekey_channel_excluding(&bed.relay, &held(), &ch, &roster, &[], &[]).await.unwrap();
+        assert!(access_duty(&bed.relay, &held()).await.unwrap() >= 1, "the new epoch is served afresh");
+        let key = held().channel(&ch).unwrap().key.unwrap();
+        // Someone the channel doesn't let in delivers a key of their own making.
+        let with_key = |k: Option<[u8; 32]>| {
+            let mut c = held();
+            c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap().key = k;
+            crate::db::community::save_community_v2(&c).unwrap();
+        };
+        with_key(Some([0x99; 32]));
+        act_as(&stranger);
+        deliver_access(&bed.relay, &held(), &ch, &[m.public_key()]).await.unwrap();
+        // The member's own device, without the key.
+        with_key(None);
+        act_as(&m);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1, "only the newest epoch, from a deliverer the channel lets in");
+        let adopted = absorb_parked_channel_keys(&held(), &crate::db::current_session());
+        assert_eq!(adopted.len(), 1);
+        assert_eq!(held().channel(&ch).unwrap().key, Some(key), "the delivered key is the channel's");
+        act_as(&stranger);
+        with_key(None);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 0, "a member it doesn't let in finds nothing");
+        act_as(&owner.keys);
     }
 
     #[tokio::test]

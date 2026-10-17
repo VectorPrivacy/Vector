@@ -70,6 +70,9 @@ const TAG_CHUNK: &str = "chunk";
 /// epoch. Grants no authority of its own — it rides a rotation the adopt gate
 /// has already verified.
 const TAG_SEVER: &str = "sever";
+/// Names how a 3303 delivers (CORD-03 §5); an access delivery is never a rotation.
+const TAG_DELIVERY: &str = "delivery";
+const DELIVERY_ACCESS: &str = "access";
 
 /// What a rekey rotates (CORD-06 §1). The 32-byte scope id is stamped into every
 /// blob's plaintext so a blob can't be spliced onto another coordinate.
@@ -781,6 +784,52 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
     })
 }
 
+/// A key delivery on a Channel's access plane (CORD-03 §5): blobs carrying the key of the
+/// Channel's current epoch. It carries no removal verdict, whatever it omits.
+#[derive(Debug, Clone)]
+pub struct AccessDelivery {
+    pub deliverer: PublicKey,
+    pub scope: RekeyScope,
+    pub epoch: Epoch,
+    pub blobs: Vec<RekeyBlob>,
+}
+
+/// The unsigned access-plane 3303 rumor.
+pub fn build_access_rumor(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
+    if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
+        return Err(RekeyError::TooManyBlobs(blobs.len()));
+    }
+    let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let tags = vec![
+        Tag::custom(TAG_SCOPE, [scope.to_hex()]),
+        Tag::custom(TAG_NEW_EPOCH, [epoch.0.to_string()]),
+        Tag::custom(TAG_DELIVERY, [DELIVERY_ACCESS]),
+    ];
+    Ok(stream::build_rumor_secs(super::kind::REKEY, deliverer, &content, tags, at_secs))
+}
+
+/// Parse an opened access-plane event. Anything not tagged as an access delivery is refused.
+pub fn parse_access_delivery(opened: &OpenedStream) -> Result<AccessDelivery, RekeyError> {
+    if opened.seal_form != SealForm::Encrypted {
+        return Err(RekeyError::Stream(StreamError::BadSealKind(stream::KIND_SEAL_PLAINTEXT)));
+    }
+    let rumor = &opened.rumor;
+    if rumor.kind.as_u16() != super::kind::REKEY {
+        return Err(RekeyError::NotARekey(rumor.kind.as_u16()));
+    }
+    if unique_tag(rumor, TAG_DELIVERY)?.as_deref() != Some(DELIVERY_ACCESS) {
+        return Err(RekeyError::BadTag(TAG_DELIVERY));
+    }
+    let scope = RekeyScope::from_hex(&unique_tag(rumor, TAG_SCOPE)?.ok_or(RekeyError::BadTag(TAG_SCOPE))?)
+        .ok_or(RekeyError::BadTag(TAG_SCOPE))?;
+    let epoch = Epoch(parse_u64(rumor, TAG_NEW_EPOCH)?);
+    let blobs: Vec<RekeyBlob> = serde_json::from_str(&rumor.content).map_err(|_| RekeyError::BadTag("blobs"))?;
+    if blobs.len() > MAX_REKEY_BLOBS_RECEIVED {
+        return Err(RekeyError::TooManyBlobs(blobs.len()));
+    }
+    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs })
+}
+
 // ── Continuity + removal + fork resolution (CORD-06 §2/§3) ───────────────────
 
 /// The verdict of the prevcommit continuity check (CORD-06 §2).
@@ -1182,6 +1231,27 @@ mod tests {
         assert_eq!(chunk.prev_commit, commit);
         assert_eq!(chunk.chunk, (1, 1));
         assert_eq!(chunk.blobs, vec![blob]);
+    }
+
+    #[test]
+    fn an_access_delivery_round_trips_and_never_reads_as_a_rotation() {
+        let (deliverer, recipient) = (keys(1), keys(8));
+        let group = crate::community::v2::derive::channel_access_group_key(&root(), &CHAN, Epoch(0));
+        let key = [0xABu8; 32];
+        let blob = build_blob_local(deliverer.secret_key(), &xonly(&deliverer), &recipient.public_key(), RekeyScope::Channel(CHAN), Epoch(3), &key).unwrap();
+        let rumor = build_access_rumor(deliverer.public_key(), RekeyScope::Channel(CHAN), Epoch(3), std::slice::from_ref(&blob), 100).unwrap();
+        let (wrap, _) = seal_rekey_chunk(&rumor, &group, &deliverer, Timestamp::from_secs(100)).unwrap();
+        let opened = stream::open_wrap(&wrap, &group).unwrap();
+        let delivery = parse_access_delivery(&opened).unwrap();
+        assert_eq!((delivery.deliverer, delivery.epoch), (deliverer.public_key(), Epoch(3)));
+        let mine = find_my_blob(&delivery.blobs, &xonly(&deliverer), &xonly(&recipient), delivery.scope, delivery.epoch).unwrap();
+        assert_eq!(open_blob_local(recipient.secret_key(), &deliverer.public_key(), delivery.scope, delivery.epoch, mine).unwrap(), key);
+        assert!(parse_rekey_chunk(&opened).is_err(), "a delivery is no rotation");
+        // Nor is a rotation a delivery.
+        let commit = epoch_key_commitment(Epoch(2), &[0xEEu8; 32]);
+        let rotation = build_rekey_rumor(deliverer.public_key(), RekeyScope::Channel(CHAN), Epoch(3), Epoch(2), &commit, &[blob], 1, 1, 100, None, false).unwrap();
+        let (wrap, _) = seal_rekey_chunk(&rotation, &group, &deliverer, Timestamp::from_secs(100)).unwrap();
+        assert!(parse_access_delivery(&stream::open_wrap(&wrap, &group).unwrap()).is_err());
     }
 
     #[test]
