@@ -728,6 +728,19 @@ mod tests {
     }
 
     #[test]
+    fn a_received_message_carries_its_role_mentions() {
+        let (author, me) = (Keys::generate(), Keys::generate().public_key());
+        let role = "ab".repeat(32);
+        let tags = crate::community::mentions::to_tags(std::slice::from_ref(&role)).collect();
+        let rumor = build_message_rumor(author.public_key(), &chan(), Epoch(0), "@Raid Team go", None, &[], tags, AT);
+        let ChatEvent::Message { opened, reply_to, emoji } = open(&seal(&rumor, &author)).unwrap() else {
+            panic!("expected a Message");
+        };
+        let msg = crate::community::v2::inbound::chat_message_to_message(&opened, &reply_to, &emoji, &me);
+        assert_eq!(msg.role_mentions, vec![role]);
+    }
+
+    #[test]
     fn message_without_q_has_no_reply() {
         let author = Keys::generate();
         let rumor = build_message_rumor(author.public_key(), &chan(), Epoch(0), "hi", None, &[], vec![], AT);

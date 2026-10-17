@@ -181,7 +181,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let community_id = vector_core::db::community::community_id_for_channel(chat_id).ok().flatten();
     // A post its readers collapse rings nobody.
-    if community_id.as_deref().is_some_and(|cid| vector_core::VectorCore.post_collapses(cid, chat_id, sender_npub, msg.at)) {
+    if community_id.as_deref().is_some_and(|cid| vector_core::VectorCore.post_silenced(cid, chat_id, sender_npub)) {
         return;
     }
 
@@ -195,7 +195,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
         });
     let role_ping = community_id
         .as_deref()
-        .is_some_and(|cid| vector_core::VectorCore.role_mentions_ping_me(cid, sender_npub, &msg.role_mentions));
+        .is_some_and(|cid| vector_core::VectorCore.role_mentions_ping_me(cid, sender_npub, &msg.content, &msg.role_mentions));
 
     // A reply to our own message is an implicit ping (same as a direct @mention). The inbound parse
     // doesn't resolve the reply's author, so check the target event's `mine` flag directly.

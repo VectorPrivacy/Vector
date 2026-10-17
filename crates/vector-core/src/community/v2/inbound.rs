@@ -61,6 +61,7 @@ pub fn chat_message_to_message(
             .map(|(shortcode, url)| EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
             .collect(),
         addressed_bots: crate::bot_interface::addressed_bots(opened.rumor.tags.iter()),
+        role_mentions: crate::community::mentions::from_tags(opened.rumor.tags.iter()),
         wrapper_event_id: Some(opened.wrapper_id.to_hex()),
         // Self-Destruct Timer: the sender's NIP-40 expiry drives our local purge.
         expiration: chat::message_expiration(&opened.rumor),

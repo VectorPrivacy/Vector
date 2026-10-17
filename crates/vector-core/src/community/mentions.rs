@@ -102,16 +102,19 @@ pub fn stands(roster: &CommunityRoles, owner_hex: Option<&str>, author_hex: &str
     })
 }
 
-/// Whether a message's Role mentions ping `reader_hex`: one names a Role they hold, and stands.
+/// Whether a message's Role mentions ping `reader_hex`: one names a Role they hold, in its
+/// text as well as its tags, and stands.
 pub fn pings(
     roster: &CommunityRoles,
     owner_hex: Option<&str>,
     author_hex: &str,
     reader_hex: &str,
+    content: &str,
     role_ids: &[String],
 ) -> bool {
     role_ids.iter().any(|id| {
-        roster.roles_of(reader_hex).any(|r| r.role_id == *id) && stands(roster, owner_hex, author_hex, id)
+        roster.roles_of(reader_hex).any(|r| r.role_id == *id && content.contains(&format!("@{}", r.name)))
+            && stands(roster, owner_hex, author_hex, id)
     })
 }
 
@@ -180,14 +183,16 @@ mod tests {
     fn a_mention_pings_holders_when_mentionable_or_its_author_may_ping_everyone() {
         let r = roster();
         let (a, b) = ("a".repeat(64), "b".repeat(64));
-        assert!(pings(&r, Some("owner"), "member", "reader", &[a.clone()]), "mentionable");
-        assert!(!pings(&r, Some("owner"), "member", "reader", &[b.clone()]), "not mentionable, plain author");
-        assert!(pings(&r, Some("owner"), "pinger", "reader", &[b.clone()]), "MENTION_EVERYONE reaches any Role");
-        assert!(pings(&r, Some("owner"), "owner", "reader", &[b.clone()]), "the owner may mention anything");
-        assert!(!pings(&r, Some("owner"), "pinger", "member", &[a.clone(), b.clone()]), "a Role the reader doesn't hold");
-        assert!(!pings(&r, Some("owner"), "pinger", "reader", &["d".repeat(64)]), "a Role that doesn't exist");
+        let text = "@Raid Team and @Staff";
+        assert!(pings(&r, Some("owner"), "member", "reader", text, &[a.clone()]), "mentionable");
+        assert!(!pings(&r, Some("owner"), "member", "reader", "hi", &[a.clone()]), "a tag the text doesn't name");
+        assert!(!pings(&r, Some("owner"), "member", "reader", text, &[b.clone()]), "not mentionable, plain author");
+        assert!(pings(&r, Some("owner"), "pinger", "reader", text, &[b.clone()]), "MENTION_EVERYONE reaches any Role");
+        assert!(pings(&r, Some("owner"), "owner", "reader", text, &[b.clone()]), "the owner may mention anything");
+        assert!(!pings(&r, Some("owner"), "pinger", "member", text, &[a.clone(), b.clone()]), "a Role the reader doesn't hold");
+        assert!(!pings(&r, Some("owner"), "pinger", "reader", text, &["d".repeat(64)]), "a Role that doesn't exist");
         let mut open = r.clone();
         open.everyone = Some(Permissions(Permissions::MENTION_EVERYONE));
-        assert!(pings(&open, Some("owner"), "member", "reader", &[b]), "@everyone holding the bit lets anyone");
+        assert!(pings(&open, Some("owner"), "member", "reader", text, &[b]), "@everyone holding the bit lets anyone");
     }
 }

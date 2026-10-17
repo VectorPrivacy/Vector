@@ -1695,6 +1695,49 @@ pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u
     set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(author), Some(epoch))
 }
 
+/// [`set_edition_head_at_epoch`] for a head of `family` ([`FLOOR_AUTHORITY`] or
+/// [`FLOOR_CONTROL`]). An authority head takes a coordinate a control row holds; a control
+/// head never takes one an authority row holds.
+#[allow(clippy::too_many_arguments)]
+pub fn set_family_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT INTO community_edition_heads (community_id, entity_id, version, self_hash, inner_id, epoch, author, family)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(community_id, entity_id) DO UPDATE SET
+            version = excluded.version,
+            self_hash = excluded.self_hash,
+            inner_id = excluded.inner_id,
+            epoch = excluded.epoch,
+            author = excluded.author,
+            family = excluded.family
+         WHERE NOT (community_edition_heads.family = 'a' AND excluded.family IS NOT 'a')
+           AND (excluded.epoch > community_edition_heads.epoch
+            OR (excluded.epoch = community_edition_heads.epoch AND excluded.version > community_edition_heads.version)
+            OR (excluded.family = 'a' AND community_edition_heads.family IS NOT NULL AND community_edition_heads.family IS NOT 'a'))",
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice(), family],
+    )
+    .map_err(|e| format!("set edition head: {e}"))?;
+    Ok(())
+}
+
+/// A floor of the authority fold: Roles, Grants, the Banlist, Tenures, overwrites, syncs.
+pub const FLOOR_AUTHORITY: &str = "a";
+/// A floor of the control fold: metadata, Channels, Categories, pins, the invite registry.
+pub const FLOOR_CONTROL: &str = "c";
+
+/// Entity → family, for the rows that record one.
+pub fn edition_head_families(community_id: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT entity_id, family FROM community_edition_heads WHERE community_id = ?1 AND family IS NOT NULL")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
 fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: Option<&[u8; 32]>, author: Option<&[u8; 32]>, epoch: Option<u64>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC, EPOCH-PRIMARY: the head IS the refuse-downgrade floor. The recorded `epoch` is
@@ -1726,6 +1769,12 @@ fn set_edition_head_inner(community_id: &str, entity_id: &str, version: u64, sel
 /// held key from [`get_all_edition_heads_full`]. This only refuses what the caller cannot judge:
 /// another version, or another epoch (a Refounding is the advance path's job).
 pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64) -> Result<(), String> {
+    converge_family_head_at_epoch(community_id, entity_id, version, self_hash, inner_id, author, epoch, None)
+}
+
+/// [`converge_edition_head_at_epoch`], touching only a row of `family` (or one that records none).
+#[allow(clippy::too_many_arguments)]
+pub fn converge_family_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: Option<&str>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE community_edition_heads
@@ -1733,8 +1782,9 @@ pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, versi
           WHERE community_id = ?1 AND entity_id = ?2
             AND version = ?3
             AND epoch = ?6
+            AND (?8 IS NULL OR family IS NULL OR family = ?8)
             AND (self_hash IS NOT ?4 OR inner_id IS NOT ?5 OR author IS NOT ?7)",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice()],
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice(), family],
     )
     .map_err(|e| format!("converge edition head: {e}"))?;
     Ok(())
@@ -1744,13 +1794,15 @@ pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, versi
 /// caller has proven the held head is served yet refused, on a complete authority fold
 /// (refuse-downgrade guards the newest authorized edition, CORD-04 §1); nothing else may
 /// lower a floor, and a different epoch is never touched.
-pub fn rebase_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64) -> Result<(), String> {
+/// Only a row of the head's own `family`, or one that records none, moves.
+#[allow(clippy::too_many_arguments)]
+pub fn rebase_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64, family: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
         "UPDATE community_edition_heads
-            SET version = ?3, self_hash = ?4, inner_id = ?5, author = ?7
-          WHERE community_id = ?1 AND entity_id = ?2 AND epoch = ?6",
-        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice()],
+            SET version = ?3, self_hash = ?4, inner_id = ?5, author = ?7, family = COALESCE(family, ?8)
+          WHERE community_id = ?1 AND entity_id = ?2 AND epoch = ?6 AND (family IS NULL OR family = ?8)",
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice(), family],
     )
     .map_err(|e| format!("rebase edition head: {e}"))?;
     Ok(())
@@ -2561,7 +2613,8 @@ pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::gu
 }
 
 struct TimeoutCache;
-type TimeoutMap = std::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>>>;
+/// Per community: the Guestbook write generation and, once read, the Timeouts at it.
+type TimeoutMap = std::sync::RwLock<std::collections::HashMap<String, (u64, Option<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>>)>>;
 
 fn timeout_cache() -> std::sync::Arc<TimeoutMap> {
     crate::db::current_session().scoped::<TimeoutCache, TimeoutMap>()
@@ -2569,14 +2622,22 @@ fn timeout_cache() -> std::sync::Arc<TimeoutMap> {
 
 /// The Guestbook's Timeout entries, held so every send doesn't reparse the whole book.
 pub fn get_guestbook_timeouts(community_id: &str) -> Result<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>, String> {
-    if let Some(held) = timeout_cache().read().unwrap_or_else(|e| e.into_inner()).get(community_id) {
-        return Ok(held.clone());
-    }
+    let generation = match timeout_cache().read().unwrap_or_else(|e| e.into_inner()).get(community_id) {
+        Some((_, Some(held))) => return Ok(held.clone()),
+        Some((generation, None)) => *generation,
+        None => 0,
+    };
     let (events, _) = get_guestbook(community_id)?;
     let timeouts: std::sync::Arc<Vec<_>> = std::sync::Arc::new(
         events.into_iter().filter(|e| matches!(e.entry, crate::community::v2::guestbook::GuestbookEntry::Timeout { .. })).collect(),
     );
-    timeout_cache().write().unwrap_or_else(|e| e.into_inner()).insert(community_id.to_string(), timeouts.clone());
+    // A write that landed during the read moved the generation on: keep what it left.
+    let map = timeout_cache();
+    let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
+    let entry = cache.entry(community_id.to_string()).or_insert((0, None));
+    if entry.0 == generation {
+        entry.1 = Some(timeouts.clone());
+    }
     Ok(timeouts)
 }
 
@@ -2599,7 +2660,10 @@ pub fn set_guestbook(
         params![community_id, enc, cursor_secs as i64],
     )
     .map_err(|e| format!("save guestbook: {e}"))?;
-    timeout_cache().write().unwrap_or_else(|e| e.into_inner()).remove(community_id);
+    let map = timeout_cache();
+    let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
+    let entry = cache.entry(community_id.to_string()).or_insert((0, None));
+    *entry = (entry.0 + 1, None);
     Ok(())
 }
 
@@ -2800,6 +2864,27 @@ mod tests {
         }
         crate::state::set_encryption_enabled(false);
         crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    #[test]
+    fn an_authority_floor_takes_a_squatted_coordinate_and_keeps_it() {
+        let (_tmp, _guard) = init_test_db();
+        let (cid, entity) = ("f".repeat(64), "a".repeat(64));
+        let head = |v: u64, b: u8, family: &str| set_family_head_at_epoch(&cid, &entity, v, &[b; 32], &[b; 32], &[b; 32], 0, family).unwrap();
+        let held = || (get_edition_head(&cid, &entity).unwrap().unwrap(), edition_head_families(&cid).unwrap().get(&entity).cloned());
+        head(50, 0xC0, FLOOR_CONTROL);
+        head(1, 0xA1, FLOOR_AUTHORITY);
+        assert_eq!(held(), ((1, [0xA1; 32]), Some("a".into())), "an authority head replaces a control row at any version");
+        head(99, 0xC1, FLOOR_CONTROL);
+        assert_eq!(held().0, (1, [0xA1; 32]), "a control head never takes it back");
+        converge_family_head_at_epoch(&cid, &entity, 1, &[0xC2; 32], &[0xC2; 32], &[0xC2; 32], 0, Some(FLOOR_CONTROL)).unwrap();
+        assert_eq!(held().0, (1, [0xA1; 32]), "nor converges it");
+        rebase_edition_head_at_epoch(&cid, &entity, 0, &[0xC3; 32], &[0xC3; 32], &[0xC3; 32], 0, FLOOR_CONTROL).unwrap();
+        assert_eq!(held().0, (1, [0xA1; 32]), "nor moves it down");
+        head(1, 0xA0, FLOOR_AUTHORITY);
+        assert_eq!(held().0, (1, [0xA1; 32]), "within the family the version still only advances");
+        head(2, 0xA2, FLOOR_AUTHORITY);
+        assert_eq!(held().0, (2, [0xA2; 32]));
     }
 
     #[test]

@@ -1010,9 +1010,14 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         };
         // Serialize against an inline (headless) follow of the same community — the
         // queue only serializes triggers routed THROUGH it.
+        let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
+        // Owed ban rotations take this lock themselves: queued now, they run after this pass.
+        if super::service::has_read_cuts(&community_id) {
+            let owed = *id;
+            crate::db::spawn_bound(async move { super::service::retry_read_cuts(&owed).await });
+        }
         let lock = follow_lock(id);
         let _guard = lock.lock().await;
-        let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
         // Rekey first (fresh DB state).

@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 105;
+pub const HIGHEST_MIGRATION_ID: u32 = 106;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1473,6 +1473,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 105, "Edition head author", |tx| {
         tx.execute("ALTER TABLE community_edition_heads ADD COLUMN author BLOB", [])
             .map_err(|e| format!("add community_edition_heads.author: {e}"))?;
+        Ok(())
+    })?;
+
+    // Which fold a floor belongs to, so an edition of one kind squatting another kind's
+    // coordinate can't hold that entity to a version it never had.
+    run_atomic_migration(conn, 106, "Edition head family", |tx| {
+        tx.execute("ALTER TABLE community_edition_heads ADD COLUMN family TEXT", [])
+            .map_err(|e| format!("add community_edition_heads.family: {e}"))?;
         Ok(())
     })?;
 

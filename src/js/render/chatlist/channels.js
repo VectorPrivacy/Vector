@@ -130,13 +130,13 @@ function mayMentionEveryone(chat, npub) {
     return !!(chat?.metadata?.admins?.includes(npub) || chat?.metadata?.custom_fields?.owner_npub === npub);
 }
 
-/** The Roles `msg` mentions that stand: mentionable, or named by someone who may mention everyone. */
+/** The Roles `msg` names in its text and tags that stand: mentionable, or named by someone who may mention everyone. */
 function standingRoleMentions(msg, chat) {
     const ids = msg.role_mentions;
     const m = ids?.length && communityMentionsCache.get(communityIdOfChat(chat));
     if (!m) return [];
     const byAnyone = mayMentionEveryone(chat, msg.npub || (msg.mine ? strPubkey : ''));
-    return m.roles.filter(r => ids.includes(r.id) && (r.mentionable || byAnyone));
+    return m.roles.filter(r => ids.includes(r.id) && (msg.content || '').includes('@' + r.name) && (r.mentionable || byAnyone));
 }
 
 /** Whether `msg` pings me through a Role I hold. */
@@ -155,6 +155,8 @@ function mentionableRoles(chat) {
 function communityTimeoutsFor(communityId) {
     return communityId ? communityTimeoutsCache.get(communityId) : null;
 }
+
+let timeoutLockTimer = 0;
 
 /**
  * Read the open chat's community's Timeouts: the rows of what a timed-out member posted
@@ -180,6 +182,9 @@ async function refreshTimeoutLock(chat) {
     const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
     VectorSvelte.setLock('timeout', `You're timed out until ${until}`);
     VectorSvelte.flushSync();
+    // Read again as it ends, which reopens the composer; a timer can't wait past ~24.8 days.
+    clearTimeout(timeoutLockTimer);
+    timeoutLockTimer = setTimeout(() => { if (strOpenChat === chat.id) refreshTimeoutLock(chat); }, Math.min(mine.until * 1000 - Date.now() + 1000, 2 ** 31 - 1));
 }
 
 /** The open channel's topic, '' when it has none. */

@@ -4235,7 +4235,7 @@ impl VectorCore {
     }
 
     /// Whether a message's Role mentions ping me (CORD-04 §8). False on any read failure.
-    pub fn role_mentions_ping_me(&self, community_id: &str, author_npub: &str, role_ids: &[String]) -> bool {
+    pub fn role_mentions_ping_me(&self, community_id: &str, author_npub: &str, content: &str, role_ids: &[String]) -> bool {
         if role_ids.is_empty() {
             return false;
         }
@@ -4251,20 +4251,17 @@ impl VectorCore {
         if crate::db::community::get_community_banlist(community_id).unwrap_or_default().contains(&author) {
             return false;
         }
-        crate::community::mentions::pings(&roster, Some(&owner.to_hex()), &author, &me.to_hex(), role_ids)
+        crate::community::mentions::pings(&roster, Some(&owner.to_hex()), &author, &me.to_hex(), content, role_ids)
     }
 
-    /// Whether readers collapse `author_npub`'s post at `at_ms` in a channel (CORD-04 §8):
-    /// they can't send there, or it falls inside their Timeout.
-    pub fn post_collapses(&self, community_id: &str, channel_id: &str, author_npub: &str, at_ms: u64) -> bool {
+    /// Whether a fresh post by `author_npub` in a channel stays silent (CORD-04 §8): they can't
+    /// send there, or a Timeout of theirs is running, whatever date they put on the post.
+    pub fn post_silenced(&self, community_id: &str, channel_id: &str, author_npub: &str) -> bool {
         if self.channel_send_denied(community_id, channel_id, &[author_npub.to_string()]).is_ok_and(|d| !d.is_empty()) {
             return true;
         }
         let (Ok(v2), Ok(author)) = (Self::held_v2(community_id), nostr_sdk::prelude::PublicKey::parse(author_npub)) else { return false };
-        crate::community::v2::service::community_timeouts(&v2)
-            .ok()
-            .and_then(|t| t.get(&author).copied())
-            .is_some_and(|(from, until)| (from..until).contains(&(at_ms / 1000)))
+        crate::community::v2::service::community_timeouts(&v2).is_ok_and(|t| t.contains_key(&author))
     }
 
     /// The Timeouts running in a community: npub → { from, until } (unix seconds).
