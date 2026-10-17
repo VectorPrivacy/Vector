@@ -84,21 +84,23 @@
     <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget && !st.busy) closeChannelEditor(); }}>
         <div class="modal-box cmt-modal ce-modal" class:cmt-busy={st.busy}>
             <div class="cmt-header">
-                <div class="cmt-header-icon"><span class="icon icon-channel-hash"></span></div>
+                <div class="cmt-header-icon"><span class="icon {st.isCategory ? 'icon-folder' : 'icon-channel-hash'}"></span></div>
                 <div class="cmt-header-text">
-                    <h3 class="cmt-title">Edit Channel</h3>
-                    <p class="cmt-subtitle">How it shows and how it opens.</p>
+                    <h3 class="cmt-title">{st.isCategory ? `${st.name} Permissions` : 'Edit Channel'}</h3>
+                    <p class="cmt-subtitle">{st.isCategory ? 'Channels synced to this category follow these rules.' : 'How it shows and how it opens.'}</p>
                 </div>
                 <button class="relay-dialog-close cmt-close-x" disabled={st.busy} onclick={closeChannelEditor}>&times;</button>
             </div>
             <div class="cmt-body">
-                {#if permsTab}
+                {#if permsTab && !st.isCategory}
                     <div class="ce-tabs">
                         <button class="ce-tab" class:on={st.tab === 'overview'} onclick={() => setChannelEditorTab('overview')}>Overview</button>
                         <button class="ce-tab" class:on={st.tab === 'permissions'} onclick={() => setChannelEditorTab('permissions')}>Permissions</button>
                     </div>
                 {/if}
-                {#if st.tab === 'permissions' && permsTab}
+                {#if st.isCategory && st.perms && !permsTab}
+                    <p class="cs-lede">Category permissions are part of the new roles, and need Manage Roles.</p>
+                {:else if st.tab === 'permissions' && permsTab}
                     <div class="ce-perms">
                         <div class="ce-targets">
                             {#each targets as t (t.key)}

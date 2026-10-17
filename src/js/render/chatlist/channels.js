@@ -206,6 +206,7 @@ function openCategoryMenu(communityId, category, x, y) {
     showContextMenu({ x, y, items: [
         { label: 'Create Channel', icon: 'plus', onClick: () => promptCreateChannel(communityId, false, category.id) },
         { label: 'Create Private Channel', icon: 'locked', onClick: () => promptCreateChannel(communityId, true, category.id) },
+        { label: 'Edit Permissions', icon: 'shield-filled', onClick: () => openChannelEditorFor(communityId, { id: category.id, name: category.name }, true) },
         { divider: true },
         { label: 'Rename Category', icon: 'edit', onClick: () => promptRenameCategory(communityId, category) },
         { label: 'Delete Category', icon: 'x', danger: true, onClick: () => promptDeleteCategory(communityId, category) },
@@ -213,8 +214,8 @@ function openCategoryMenu(communityId, category, x, y) {
 }
 
 /** The channel editor, with its permissions read alongside on the new roles. */
-function openChannelEditorFor(communityId, channel) {
-    VectorSvelte.openChannelEditor(communityId, channel);
+function openChannelEditorFor(communityId, channel, isCategory = false) {
+    VectorSvelte.openChannelEditor(communityId, channel, isCategory);
     loadChannelPerms(communityId, channel.id);
 }
 

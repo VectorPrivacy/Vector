@@ -4,6 +4,8 @@
 const s = $state({
     open: false, communityId: null, channelId: null, name: '', topic: '', view: 'chat', busy: false, error: '',
     tab: 'overview',
+    // A Category opens on its permissions alone: it has no topic or view.
+    isCategory: false,
     // perms: the channel's overwrites as read ({ activated, can_manage, roles, overwrites, grantable });
     // target: the overwrite open ('everyone', 'role:<id>', 'member:<hex>'); draft its { allow, deny } as decimal strings.
     perms: null, target: 'everyone', draft: null,
@@ -11,11 +13,12 @@ const s = $state({
 
 export function channelEditorState() { return s; }
 
-/** Open on `channel` ({ id, name, topic, view }) of `communityId`. */
-export function openChannelEditor(communityId, channel) {
+/** Open on `channel` ({ id, name, topic, view }) of `communityId`, or on a Category's permissions. */
+export function openChannelEditor(communityId, channel, isCategory = false) {
     Object.assign(s, {
         open: true, communityId, channelId: channel.id, name: channel.name || '', topic: channel.topic || '',
-        view: channel.view || 'chat', busy: false, error: '', tab: 'overview', perms: null, target: 'everyone', draft: null,
+        view: channel.view || 'chat', busy: false, error: '', tab: isCategory ? 'permissions' : 'overview',
+        perms: null, target: 'everyone', draft: null, isCategory,
     });
 }
 export function closeChannelEditor() { s.open = false; s.busy = false; s.error = ''; }
