@@ -233,6 +233,16 @@ function loadChannelPerms(communityId, channelId) {
 
 VectorSvelte.setScreen('channelEditor', {
     h: {
+        setSync: async ({ communityId, channelId, categoryId }) => {
+            VectorSvelte.setChannelEditorBusy(true);
+            try {
+                await invoke('set_channel_sync', { communityId, channelId, categoryId });
+                VectorSvelte.setChannelEditorBusy(false);
+                loadChannelPerms(communityId, channelId);
+            } catch (e) {
+                VectorSvelte.setChannelEditorBusy(false, String(e));
+            }
+        },
         saveOverwrite: async ({ communityId, channelId, kind, id, allow, deny }) => {
             VectorSvelte.setChannelEditorBusy(true);
             try {

@@ -25989,6 +25989,9 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 .ce-view:disabled { opacity: 0.6; cursor: default; }
 .cmt-modal.ce-modal { max-width: 620px; }
+.ce-sync { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.ce-sync p { margin: 0; }
+.ce-sync .cs-btn-text { flex-shrink: 0; color: var(--icon-color-primary); }
 .ce-modal .cmt-footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .ce-modal .cmt-status { flex: 1; min-width: 0; }
 @media (max-width: 520px) { .ce-views { grid-template-columns: 1fr; } }

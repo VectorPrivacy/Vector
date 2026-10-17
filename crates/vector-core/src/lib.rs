@@ -4127,8 +4127,16 @@ impl VectorCore {
                 serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string() })
             })
             .collect();
+        let category = crate::simd::hex::hex_to_bytes_32_checked(&chan)
+            .and_then(|b| v2.channel(&crate::community::ChannelId(b)))
+            .and_then(|c| c.category())
+            .filter(|k| v2.categories.iter().any(|x| x.id == *k))
+            .map(|k| crate::simd::hex::bytes_to_hex_32(&k));
         Ok(serde_json::json!({
             "activated": Self::roles_v2_active(community_id, &roster),
+            // The Category the channel files under, and whether it takes that Category's rules.
+            "category": category,
+            "synced": roster.syncs.get(&chan),
             "can_manage": is_owner || roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_ROLES),
             "grantable": if is_owner { u64::MAX.to_string() } else { roster.effective_permissions(&me).0.to_string() },
             "roles": roles.iter().map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position })).collect::<Vec<_>>(),
@@ -4154,6 +4162,17 @@ impl VectorCore {
         crate::community::v2::service::set_overwrite(&transport, &v2, Self::id32(scope_id, "scope_id")?, target, allow, deny)
             .await
             .map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
+    }
+
+    /// Sync a channel to a Category's permissions, or (`None`) back to its own.
+    pub async fn set_channel_sync(&self, community_id: &str, channel_id: &str, category_id: Option<&str>) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let channel = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let category = category_id.map(|c| Self::id32(c, "category_id")).transpose()?;
+        let transport = Self::short_transport();
+        crate::community::v2::service::set_channel_sync(&transport, &v2, &channel, category).await.map_err(VectorError::Other)?;
         Self::converge_v2_authority(&transport, community_id).await;
         Ok(())
     }

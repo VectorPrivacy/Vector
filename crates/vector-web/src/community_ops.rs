@@ -59,6 +59,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "move_community_category" => move_category(a).await,
             "get_channel_permissions" => with_id(a, |id| a.str("channelId").and_then(|ch| core(VectorCore.channel_permissions_view(id, &ch)))),
             "set_channel_overwrite" => set_overwrite(a).await,
+            "set_channel_sync" => set_sync(a).await,
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
@@ -268,6 +269,11 @@ async fn set_overwrite(a: &Args) -> Result<Value, String> {
     let (id, scope, kind, target) = (a.str("communityId")?, a.str("scopeId")?, a.str("kind")?, a.opt_str("targetId"));
     let (allow, deny) = (a.str("allow")?, a.str("deny")?);
     db::scoped(async move { core(VectorCore.set_channel_overwrite(&id, &scope, &kind, target.as_deref(), &allow, &deny).await) }).await
+}
+
+async fn set_sync(a: &Args) -> Result<Value, String> {
+    let (id, channel, category) = (a.str("communityId")?, a.str("channelId")?, a.opt_str("categoryId"));
+    db::scoped(async move { core(VectorCore.set_channel_sync(&id, &channel, category.as_deref()).await) }).await
 }
 
 async fn delete_role(a: &Args) -> Result<Value, String> {

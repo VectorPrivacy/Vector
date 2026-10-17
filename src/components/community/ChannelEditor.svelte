@@ -7,7 +7,8 @@
         overwriteDirty, overwriteKey, storedOverwrite,
     } from '../lib/channel-editor.svelte.js';
 
-    // h: save({ communityId, channelId, name, topic, view }), saveOverwrite({ communityId, channelId, target, allow, deny })
+    // h: save({ communityId, channelId, name, topic, view }), saveOverwrite({ communityId, channelId, target, allow, deny }),
+    //    setSync({ communityId, channelId, categoryId })
     let { h } = $props();
     const st = channelEditorState();
     const BIT = (n) => 1n << BigInt(n);
@@ -100,7 +101,18 @@
                 {/if}
                 {#if st.isCategory && st.perms && !permsTab}
                     <p class="cs-lede">Category permissions are part of the new roles, and need Manage Roles.</p>
+                {:else if st.tab === 'permissions' && permsTab && st.perms.synced}
+                    <div class="ce-sync">
+                        <p class="cs-lede">This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own.</p>
+                        <button class="cs-btn-text" disabled={st.busy} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: null })}>Stop syncing</button>
+                    </div>
                 {:else if st.tab === 'permissions' && permsTab}
+                    {#if !st.isCategory && st.perms.category}
+                        <div class="ce-sync">
+                            <p class="cs-hint">This channel sets its own permissions.</p>
+                            <button class="cs-btn-text" disabled={st.busy} onclick={() => h.setSync({ communityId: st.communityId, channelId: st.channelId, categoryId: st.perms.category })}>Sync with its category</button>
+                        </div>
+                    {/if}
                     <div class="ce-perms">
                         <div class="ce-targets">
                             {#each targets as t (t.key)}

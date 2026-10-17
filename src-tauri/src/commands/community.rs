@@ -3208,6 +3208,20 @@ pub async fn set_channel_overwrite(
     .await
 }
 
+/// Sync a channel to a category's permissions, or (no category) back to its own.
+#[tauri::command]
+pub async fn set_channel_sync(community_id: String, channel_id: String, category_id: Option<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .set_channel_sync(&community_id, &channel_id, category_id.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister_channels(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
 /// Everything the role editor needs, read locally.
 #[tauri::command]
 pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {

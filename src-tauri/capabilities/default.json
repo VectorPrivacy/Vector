@@ -118,6 +118,7 @@
     "allow-activate-community-roles-v2",
     "allow-get-channel-permissions",
     "allow-set-channel-overwrite",
+    "allow-set-channel-sync",
     "allow-create-community-channel",
     "allow-delete-community-channel",
     "allow-set-community-image",
