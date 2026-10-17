@@ -5776,8 +5776,8 @@ async fn move_role_in<T: Transport + ?Sized>(transport: &T, community: &Communit
         require_activated(view)?;
         let author = role_author(community, view)?;
         let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
-        require_role_head(&view, role_id)?;
-        let others: Vec<&crate::community::roles::Role> = ranked(&view).into_iter().filter(|r| r.role_id != current.role_id).collect();
+        require_role_head(view, role_id)?;
+        let others: Vec<&crate::community::roles::Role> = ranked(view).into_iter().filter(|r| r.role_id != current.role_id).collect();
         let index = index.min(others.len());
         let (above, below) = (index.checked_sub(1).map(|i| others[i]), others.get(index).copied());
         // The new spot sits just beneath `above`: the author must outrank it and the old one,
