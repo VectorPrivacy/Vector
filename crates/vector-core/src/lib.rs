@@ -3872,7 +3872,10 @@ impl VectorCore {
                     "permissions": r.permissions.0.to_string(),
                     "channel_id": match &r.scope { RoleScope::Channel(c) => Some(c.to_ascii_lowercase()), RoleScope::Server => None },
                     "holders": holders,
-                    "manageable": can_manage && (is_owner || rank.is_some_and(|p| p < r.position)),
+                    "manageable": can_manage && (is_owner || {
+                        let support = roster.permissions_above(&me, r.position);
+                        support.contains(Permissions::MANAGE_ROLES) && r.permissions.0 & !support.0 == 0
+                    }),
                 })
             })
             .collect();

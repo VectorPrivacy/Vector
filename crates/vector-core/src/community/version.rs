@@ -132,6 +132,19 @@ pub fn fold(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>) -> 
 /// sibling. While it is withheld, `admit_rival` decides whether a rival may stand in for it: the
 /// caller knows the held head's rank, which this function does not.
 pub fn fold_with_rivals(editions: &[Edition], floor: u64, floor_hash: Option<&[u8; 32]>, admit_rival: &dyn Fn(&Edition) -> bool) -> FoldResult {
+    fold_linked(editions, floor, floor_hash, admit_rival, &|_| true)
+}
+
+/// [`fold_with_rivals`] with the head taken only among the editions `eligible` admits,
+/// while every served edition carries the chain: an edition the Roster refuses still
+/// links what was built on it.
+pub fn fold_linked(
+    editions: &[Edition],
+    floor: u64,
+    floor_hash: Option<&[u8; 32]>,
+    admit_rival: &dyn Fn(&Edition) -> bool,
+    eligible: &dyn Fn(usize) -> bool,
+) -> FoldResult {
     let present: Vec<usize> = (0..editions.len()).filter(|&i| editions[i].version >= floor).collect();
     if present.is_empty() {
         return FoldResult { head: None, gap: false, anchored: false };
@@ -168,7 +181,7 @@ pub fn fold_with_rivals(editions: &[Edition], floor: u64, floor_hash: Option<&[u
     let head = order
         .iter()
         .copied()
-        .filter(|&i| reached[i])
+        .filter(|&i| reached[i] && eligible(i))
         .max_by(|&a, &b| {
             let (ea, eb) = (&editions[a], &editions[b]);
             // Highest version first; at the top, the fork winner (authority, then the lower id).
@@ -176,11 +189,12 @@ pub fn fold_with_rivals(editions: &[Edition], floor: u64, floor_hash: Option<&[u
             ea.version.cmp(&eb.version).then_with(|| (eb.rank, eb.tiebreak_id, b).cmp(&(ea.rank, ea.tiebreak_id, a)))
         });
     let Some(head) = head else {
-        // Nothing links to what we hold: withholding, or a forged base. Fail closed.
-        return FoldResult { head: None, gap: true, anchored: false };
+        // Nothing eligible links to what we hold: withholding, or a forged base. Fail closed,
+        // paging only when an eligible edition is there to be reached.
+        return FoldResult { head: None, gap: present.iter().any(|&i| eligible(i)), anchored: false };
     };
     // A higher version that nothing reached is a withheld middle (or a forged link): page for it.
-    let gap = present.iter().any(|&i| editions[i].version > editions[head].version);
+    let gap = present.iter().any(|&i| eligible(i) && editions[i].version > editions[head].version);
     FoldResult { head: Some(head), gap, anchored: true }
 }
 

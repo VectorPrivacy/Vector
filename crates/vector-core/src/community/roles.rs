@@ -198,6 +198,15 @@ impl CommunityRoles {
             .fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
     }
 
+    /// The permissions a member holds through Roles positioned strictly above `bound`: the only
+    /// standing an action on something at `bound` may draw on (CORD-04 §3). Authority then flows
+    /// strictly downward, so no Role can prop up the authority that admits it.
+    pub fn permissions_above(&self, member_hex: &str, bound: u32) -> Permissions {
+        self.roles_of(member_hex)
+            .filter(|r| r.position < bound)
+            .fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
+    }
+
     /// True iff the member's effective permissions include every bit in `bits`.
     pub fn has_permission(&self, member_hex: &str, bits: u64) -> bool {
         self.effective_permissions(member_hex).contains(bits)

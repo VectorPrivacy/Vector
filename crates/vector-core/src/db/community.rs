@@ -1740,6 +1740,22 @@ pub fn converge_edition_head_at_epoch(community_id: &str, entity_id: &str, versi
     Ok(())
 }
 
+/// Move a floor DOWN to the newest edition the Roster still admits, within one epoch. The
+/// caller has proven the held head is served yet refused, on a complete authority fold
+/// (refuse-downgrade guards the newest authorized edition, CORD-04 §1); nothing else may
+/// lower a floor, and a different epoch is never touched.
+pub fn rebase_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], author: &[u8; 32], epoch: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE community_edition_heads
+            SET version = ?3, self_hash = ?4, inner_id = ?5, author = ?7
+          WHERE community_id = ?1 AND entity_id = ?2 AND epoch = ?6",
+        params![community_id, entity_id, version as i64, self_hash.as_slice(), inner_id.as_slice(), epoch as i64, author.as_slice()],
+    )
+    .map_err(|e| format!("rebase edition head: {e}"))?;
+    Ok(())
+}
+
 /// The held head's inner id, or `None` if unheld or pre-migration (NULL).
 pub fn get_edition_head_inner_id(community_id: &str, entity_id: &str) -> Result<Option<[u8; 32]>, String> {
     let conn = super::get_db_connection_guard_static()?;
