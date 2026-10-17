@@ -223,6 +223,19 @@ impl Ledger {
         !matches!(self.entries.iter().rev().find(|e| e.at <= at_ms), Some(Entry { spell: Spell::Writer { .. }, .. }))
     }
 
+    /// The writer epoch whose window holds `at_ms`, or failing any, the one that opened within a
+    /// slow clock's few minutes after it.
+    pub fn writer_at(&self, at_ms: u64) -> Option<Epoch> {
+        let windows: Vec<(u64, Epoch, Option<u64>)> = self.writers().filter_map(|(e, _, end)| self.writer_start(e).map(|start| (start, e, end))).collect();
+        let holds = |start: u64, end: Option<u64>| start <= at_ms && end.is_none_or(|end| at_ms < end);
+        windows
+            .iter()
+            .filter(|(start, _, end)| holds(*start, *end))
+            .max_by_key(|(start, ..)| *start)
+            .or_else(|| windows.iter().filter(|(start, ..)| *start > at_ms && *start - at_ms <= ENTRY_SKEW_MS).min_by_key(|(start, ..)| *start))
+            .map(|(_, e, _)| *e)
+    }
+
     /// Whether a post at writer `epoch`'s address dated `at_ms` stands: before its entry ends.
     pub fn writer_address_takes(&self, epoch: Epoch, at_ms: u64) -> bool {
         self.writers().any(|(e, _, end)| e == epoch && end.is_none_or(|end| at_ms < end))
@@ -284,6 +297,12 @@ impl Ledger {
     pub fn not_ahead(&self, now_ms: u64) -> bool {
         self.entries.last().is_some_and(|e| e.at <= now_ms.saturating_add(HORIZON_MS))
     }
+}
+
+/// Whether a reader keeps `event`: what [`admits`] takes, and any post a ledger's windows
+/// don't, which a client shows only to those who manage the Channel, marked.
+pub fn keeps(ledger: Option<&Ledger>, wepoch: Option<Epoch>, event: &super::chat::ChatEvent) -> bool {
+    admits(ledger, wepoch, event) || (ledger.is_some() && matches!(event, super::chat::ChatEvent::Message { .. }))
 }
 
 /// [`Ledger::admits`] for a Channel that may have no ledger, where only the read address serves.

@@ -24,7 +24,7 @@ use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
 
 mod writing;
-pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
+pub use writing::{can_post, collect_writers, outbound_rumor, unauthorized_posts, WriterDuty};
 pub(crate) use writing::live_writer as live_writer_of;
 
 /// The active signer for v2 authority actions: the live client's signer — which
@@ -747,7 +747,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                         };
                         chat::open_writer_chat_event(wrap, address, *wepoch, conv, channel_id, *epoch).ok().map(|ev| (ev, *epoch))
                     });
-                    if let Some((event, epoch)) = opened.filter(|(ev, _)| super::writers::admits(Some(ledger), Some(*wepoch), ev)) {
+                    if let Some((event, epoch)) = opened.filter(|(ev, _)| super::writers::keeps(Some(ledger), Some(*wepoch), ev)) {
                         if seen_rumors.insert(event.opened().rumor_id) {
                             page_events.push(FetchedEvent { event, epoch });
                         }
@@ -763,8 +763,8 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                         ReadPlane::Keyed(group) => chat::open_chat_event(wrap, group, channel_id, *epoch),
                         ReadPlane::View(address, conv_key) => chat::open_chat_event_at(wrap, address, conv_key, channel_id, *epoch),
                     };
-                    // Inside a writer window the read address takes only what stays there.
-                    let opened = opened.ok().filter(|ev| super::writers::admits(ch.writers.as_ref(), None, ev));
+                    // Inside a writer window the read address keeps only what stays there, and the posts a client marks.
+                    let opened = opened.ok().filter(|ev| super::writers::keeps(ch.writers.as_ref(), None, ev));
                     if let Some(event) = opened {
                         let id = event.opened().rumor_id;
                         if seen_rumors.insert(id) {
@@ -23964,7 +23964,8 @@ mod tests {
         post_raw(&bed.relay, &held(&community), &m, &general, &read, community.root_epoch, None, "sneaky", now_ms()).await;
         let texts = channel_texts(&bed.relay, &held(&community), &general).await;
         assert!(texts.contains(&"before".to_string()) && texts.contains(&"announcement".to_string()), "a reader without the key reads the writers: {texts:?}");
-        assert!(!texts.contains(&"sneaky".to_string()), "the read address takes nothing inside a writer window");
+        // The read address keeps what it got inside a writer window, for managers to see marked.
+        assert_eq!(marked_texts(&bed.relay, &held(&community), &general).await, vec!["sneaky".to_string()], "only what the windows don't stand behind");
 
         // Let the member post: the change's author hands them the live key.
         bed.swap_to(&owner);
@@ -23992,7 +23993,7 @@ mod tests {
         send_message(&bed.relay, &held(&community), &general, "second").await.unwrap();
         let texts = channel_texts(&bed.relay, &held(&community), &general).await;
         assert!(texts.contains(&"in time".to_string()) && texts.contains(&"from m".to_string()), "a writer's past posts stay theirs: {texts:?}");
-        assert!(!texts.contains(&"late".to_string()), "nothing new through a key they kept");
+        assert_eq!(marked_texts(&bed.relay, &held(&community), &general).await, vec!["sneaky".to_string(), "late".to_string()], "nothing new through a key they kept stands");
         assert!(!texts.contains(&"wrong epoch".to_string()), "a post commits the epoch whose address served it");
         assert!(texts.contains(&"second".to_string()));
         let (live, live_secret, _) = writing::live_writer(&held(&community), held(&community).channel(&general).unwrap()).unwrap();
@@ -24020,7 +24021,7 @@ mod tests {
         bed.swap_to(&owner);
         let texts = channel_texts(&bed.relay, &held(&community), &general).await;
         assert!(texts.contains(&"open again".to_string()), "{texts:?}");
-        assert!(!texts.contains(&"sneaky".to_string()), "a closed window stays closed");
+        assert!(marked_texts(&bed.relay, &held(&community), &general).await.contains(&"sneaky".to_string()), "what a closed window got stays marked");
     }
 
     /// Publish an overwrite the way another client would: no settle follows it here.
@@ -24396,7 +24397,7 @@ mod tests {
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         let now = now_ms();
         send_chat_message_at(&bed.relay, &held(), &general, "a writer's post", None, &[], vec![], now + 1_000).await.unwrap();
-        // Anyone with the read key fills the read address, inside the window, with posts it drops.
+        // Anyone with the read key fills the read address, inside the window.
         let read = channel_group_key(&community.community_root, &general, community.root_epoch);
         let spammer = Keys::generate();
         for i in 0..25u64 {
@@ -24406,7 +24407,7 @@ mod tests {
             bed.relay.publish(&wrap, &community.relays).await.unwrap();
         }
         let (got, cursor) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
-        assert!(got.is_empty() && cursor.is_some_and(|c| c > (now + 1_000) / 1000), "nothing below where the relay walk stopped");
+        assert!(!got.iter().any(|f| f.event.opened().rumor.content == "a writer's post") && cursor.is_some_and(|c| c > (now + 1_000) / 1000), "nothing below where the relay walk stopped");
         let (got, _) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 4, None, cursor, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         assert!(got.iter().any(|f| f.event.opened().rumor.content == "a writer's post"), "paging on from the cursor reaches it");
     }
@@ -24779,6 +24780,18 @@ mod tests {
         // A fresh joiner folds the ledger from the join walk itself.
         let joiner = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
         assert!(joiner.writers.iter().any(|(c, content, ..)| *c == crate::simd::hex::bytes_to_hex_32(&general.0) && *content == second.to_json()));
+    }
+
+    /// The texts of a channel's posts its writers' rules don't stand behind, oldest first.
+    async fn marked_texts<T: Transport + ?Sized>(relay: &T, community: &CommunityV2, channel: &ChannelId) -> Vec<String> {
+        let posts: Vec<(String, PublicKey, u64, bool)> = fetch_channel_history(relay, community, channel, 100, 8, None, Some(now_ms() / 1000 + 3600), crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default())
+            .await
+            .unwrap()
+            .iter()
+            .filter(|f| matches!(f.event, ChatEvent::Message { .. }))
+            .map(|f| (f.event.opened().rumor.content.clone(), f.event.opened().author, f.event.opened().at_ms, chat::carries_writer_epoch(&f.event.opened().rumor)))
+            .collect();
+        unauthorized_posts(relay, community, channel, &posts).await.unwrap()
     }
 
     /// [`publish_marked`], returning the edition's hash.
@@ -25171,6 +25184,37 @@ mod tests {
         let restricted = |id: &ChannelId| held().channel(id).unwrap().restricted();
         assert!(!restricted(&general));
         assert!(restricted(&other), "the next channel still moved");
+    }
+
+    #[tokio::test]
+    async fn a_post_signed_with_a_leaked_writer_key_is_marked() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _x, community) = v2_bed_with_admin("Leaked").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let (w, n) = (Keys::generate(), Keys::generate());
+        let plain = create_role_v2(&bed.relay, &held(), "Member", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![plain.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &n.public_key(), vec![plain]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let (live, secret, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        // w hands the key to n, who may not post; both post with it.
+        act_as(&w);
+        deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(writer.pk().to_bytes()), &secret, &[n.public_key()]).await.unwrap();
+        act_as(&owner.keys);
+        post_raw(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some(live), "from the writer", now_ms()).await;
+        post_raw(&bed.relay, &held(), &n, &general, &signed, community.root_epoch, Some(live), "through a leaked key", now_ms()).await;
+        assert_eq!(marked_texts(&bed.relay, &held(), &general).await, vec!["through a leaked key".to_string()]);
+        // A manager hands n the key after that read, then n loses Send where nobody settles it:
+        // the read is taken again, and the manager's hand vouches.
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(n.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(n.public_key().to_hex()), 0, 0).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        writing::age_vouching_retry(&general);
+        assert_eq!(marked_texts(&bed.relay, &held(), &general).await, Vec::<String>::new());
     }
 
     #[tokio::test]

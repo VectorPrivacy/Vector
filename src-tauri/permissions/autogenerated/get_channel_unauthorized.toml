@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-channel-unauthorized"
+description = "Enables the get_channel_unauthorized command without any pre-configured scope."
+commands.allow = ["get_channel_unauthorized"]
+
+[[permission]]
+identifier = "deny-get-channel-unauthorized"
+description = "Denies the get_channel_unauthorized command without any pre-configured scope."
+commands.deny = ["get_channel_unauthorized"]

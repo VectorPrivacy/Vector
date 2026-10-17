@@ -168,6 +168,7 @@
     data-replying-to={mode.kind === 'reply' && mode.id === current.id ? 'true' : undefined}
     data-reply-pending={pendingReply || undefined}
     style:opacity={ctx.revealedBlocked ? '0.4' : null}
+    style:display={ctx.hidden ? 'none' : null}
     class:new-anim={arrival.id === current.id}
     onanimationend={() => { if (arrival.id === current.id) setArrival(null); }}
     use:expando={current}
@@ -210,7 +211,7 @@
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <span style="color: rgba(255,255,255,0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;"
                       onclick={(e) => { e.stopPropagation(); h.revealBlocked(msg); }}>
-                    <span class="icon {isTimedOut ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{ctx.timedOut === 'nosend' ? "Posted where they can't send" : isTimedOut ? 'Sent while timed out' : 'Blocked message'}</span>
+                    <span class="icon {isTimedOut && ctx.timedOut !== 'unauthorized' ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{ctx.timedOut === 'unauthorized' ? 'Unauthorized poster' : ctx.timedOut === 'nosend' ? "Posted where they can't send" : isTimedOut ? 'Sent while timed out' : 'Blocked message'}</span>
             </div>
         </div>
     {:else}

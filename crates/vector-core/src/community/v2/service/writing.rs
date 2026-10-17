@@ -606,6 +606,101 @@ pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community:
     backstop(transport, community, &ch, &posters, &[]).await
 }
 
+struct VouchingDeliveries;
+/// Per Channel: when its writer deliveries were read, when a miss last read them again, and them.
+type VouchingCache = std::sync::Mutex<std::collections::HashMap<[u8; 32], (u64, u64, std::sync::Arc<Vec<rekey::AccessDelivery>>)>>;
+
+/// How long a read of a Channel's writer deliveries vouches for its posts before it is read again.
+const VOUCHING_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// How often a post the held read doesn't vouch for may send it back to the relays.
+const VOUCHING_RETRY_MS: u64 = 15 * 1000;
+
+/// Of `posts` in `channel` (id, author, its date in ms, whether a writer address carried it),
+/// those its writers' rules don't stand behind (CORD-03 §1): one at the read address dated inside
+/// a writer entry, or at a writer address by someone neither that epoch's minter nor a manager
+/// handed its key. A post by someone who manages it, or while it is restricted may post there,
+/// always stands.
+pub async fn unauthorized_posts<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, posts: &[(String, PublicKey, u64, bool)]) -> Result<Vec<String>, String> {
+    crate::db::scoped(async move {
+        let Some(ch) = community.channel(channel) else { return Ok(Vec::new()) };
+        let Some(ledger) = ch.writers.as_ref() else { return Ok(Vec::new()) };
+        let cid_hex = hex(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex)?;
+        if roster.everyone.is_none() {
+            return Ok(Vec::new());
+        }
+        let owner_hex = community.owner()?.to_hex();
+        let banned: std::collections::BTreeSet<String> = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().into_iter().collect();
+        let manager = |h: &str| h == owner_hex || (!banned.contains(h) && roster.is_authorized(h, Some(&owner_hex), Permissions::MANAGE_CHANNELS));
+        let mut out = Vec::new();
+        let mut vouch: Vec<(&String, &PublicKey, Epoch)> = Vec::new();
+        // A writer now stands while the Channel is restricted: once it opens, everyone may post,
+        // and what was slipped in while it wasn't open stays marked.
+        let writer_now = |h: &str| ch.restricted() && !banned.contains(h) && may_write(&roster, &owner_hex, h, ch);
+        for (id, author, at, writer) in posts {
+            let h = author.to_hex();
+            if manager(&h) || writer_now(&h) {
+                continue;
+            }
+            match (writer, ledger.writer_at(*at)) {
+                (false, _) if ledger.read_address_takes(*at) => {}
+                (true, Some(epoch)) => vouch.push((id, author, epoch)),
+                _ => out.push(id.clone()),
+            }
+        }
+        let scope = writers::writer_rekey_scope(&ch.id);
+        let unvouched = |deliveries: &[rekey::AccessDelivery], vouch: &[(&String, &PublicKey, Epoch)]| -> Vec<(String, PublicKey, Epoch)> {
+            vouch
+                .iter()
+                .filter(|(_, author, epoch)| {
+                    let minter = ledger.minter(*epoch).and_then(|m| PublicKey::from_slice(&m).ok());
+                    Some(**author) != minter && !served_at(deliveries, author, scope, *epoch, &|d| Some(*d) == minter || manager(&d.to_hex()))
+                })
+                .map(|(id, author, epoch)| ((*id).clone(), **author, *epoch))
+                .collect()
+        };
+        if !vouch.is_empty() {
+            let mut missed = unvouched(&vouching_deliveries(transport, community, ch, ledger, false).await?, &vouch);
+            // A key handed on since the last read vouches too.
+            if !missed.is_empty() {
+                let fresh = vouching_deliveries(transport, community, ch, ledger, true).await?;
+                let again: Vec<(&String, &PublicKey, Epoch)> = missed.iter().map(|(id, a, e)| (id, a, *e)).collect();
+                missed = unvouched(&fresh, &again);
+            }
+            out.extend(missed.into_iter().map(|(id, ..)| id));
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// `ch`'s writer deliveries, read again when the held read is older than [`VOUCHING_TTL_MS`], or
+/// for a `missed` post, unless one did that within [`VOUCHING_RETRY_MS`].
+async fn vouching_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, ledger: &Ledger, missed: bool) -> Result<std::sync::Arc<Vec<rekey::AccessDelivery>>, String> {
+    let cache = crate::db::current_session().scoped::<VouchingDeliveries, VouchingCache>();
+    let now = now_ms();
+    let held = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&ch.id.0).cloned();
+    let retried = held.as_ref().map_or(0, |(_, r, _)| *r);
+    if let Some((at, _, deliveries)) = held {
+        let stale = now.saturating_sub(at) >= VOUCHING_TTL_MS;
+        if !stale && (!missed || now.saturating_sub(retried) < VOUCHING_RETRY_MS) {
+            return Ok(deliveries);
+        }
+    }
+    let fresh = std::sync::Arc::new(named_deliveries(transport, community, ch, ledger).await?);
+    let retried = if missed { now } else { retried };
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(ch.id.0, (now, retried, fresh.clone()));
+    Ok(fresh)
+}
+
+#[cfg(test)]
+pub(super) fn age_vouching_retry(channel: &ChannelId) {
+    if let Some(held) = crate::db::current_session().scoped::<VouchingDeliveries, VouchingCache>().lock().unwrap().get_mut(&channel.0) {
+        held.1 = 0;
+    }
+}
+
 struct OpenedWriterBlobs;
 
 /// Fetch the live writer secret of every restricted Channel this member may post in but can't

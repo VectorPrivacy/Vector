@@ -3243,6 +3243,26 @@ pub fn get_community_mentions(community_id: String) -> Result<serde_json::Value,
 }
 
 /// Of `npubs`, those who can't send in a channel: their posts there collapse.
+/// One rendered post, as the frontend holds it, for [`get_channel_unauthorized`].
+#[derive(serde::Deserialize)]
+pub struct PostRef {
+    id: String,
+    npub: String,
+    at: u64,
+    #[serde(default)]
+    writer: bool,
+}
+
+/// Of `posts` in a restricted channel, the ids its writers' rules don't stand behind (CORD-03 §1).
+#[tauri::command]
+pub async fn get_channel_unauthorized(community_id: String, channel_id: String, posts: Vec<PostRef>) -> Result<Vec<String>, String> {
+    vector_core::db::scoped(async move {
+        let posts: Vec<(String, String, u64, bool)> = posts.into_iter().map(|p| (p.id, p.npub, p.at, p.writer)).collect();
+        vector_core::VectorCore.channel_unauthorized(&community_id, &channel_id, &posts).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 #[tauri::command]
 pub fn get_channel_send_denied(community_id: String, channel_id: String, npubs: Vec<String>) -> Result<Vec<String>, String> {
     vector_core::VectorCore.channel_send_denied(&community_id, &channel_id, &npubs).map_err(|e| e.to_string())

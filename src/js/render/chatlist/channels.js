@@ -122,6 +122,12 @@ const channelSendDeniedCache = new Map();
 function channelSendDenied(channelId) {
     return channelSendDeniedCache.get(channelId) || null;
 }
+
+/** Posts a restricted channel's writers' rules don't stand behind (CORD-03 §1), by channel. */
+const channelUnauthorizedCache = new Map();
+function channelUnauthorized(channelId) {
+    return channelUnauthorizedCache.get(channelId) || null;
+}
 /** Per community: who may mention everyone, and its Roles for mentioning (CORD-04 §8). */
 const communityMentionsCache = new Map();
 
@@ -196,7 +202,15 @@ async function refreshTimeoutLock(chat) {
     try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
     const hadDenied = (channelSendDeniedCache.get(chat.id) || []).join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
-    const changed = had !== JSON.stringify(running || {}) || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
+    // A restricted channel's writers' rules mark what they don't stand behind.
+    const posts = (chat.messages || []).filter(m => !m.mine && m.npub && m.id).map(m => ({ id: m.id, npub: m.npub, at: m.at || 0, writer: !!m.writer }));
+    let unauthorized = [];
+    if (posts.length) {
+        try { unauthorized = await invoke('get_channel_unauthorized', { communityId, channelId: chat.id, posts }); } catch { /* nothing to mark */ }
+    }
+    const hadUnauthorized = [...(channelUnauthorizedCache.get(chat.id) || [])].join();
+    channelUnauthorizedCache.set(chat.id, new Set(unauthorized));
+    const changed = had !== JSON.stringify(running || {}) || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join() || hadUnauthorized !== unauthorized.join();
     if (changed && strOpenChat === chat.id) openChat(strOpenChat);
     const mine = running?.[strPubkey];
     if (!mine || strOpenChat !== chat.id) return;

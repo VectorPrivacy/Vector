@@ -541,7 +541,7 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        if !super::writers::admits(ch.writers.as_ref(), None, &event) {
+        if !super::writers::keeps(ch.writers.as_ref(), None, &event) {
             return DispatchedV2::Ignored;
         }
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
@@ -560,7 +560,7 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, group.conv_key(), &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        if !super::writers::admits(Some(ledger), Some(wepoch), &event) {
+        if !super::writers::keeps(Some(ledger), Some(wepoch), &event) {
             return DispatchedV2::Ignored;
         }
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restricted_channel_dispatches_its_writers_and_drops_the_rest() {
+    async fn a_restricted_channel_dispatches_its_writers_and_keeps_the_rest_for_marking() {
         use super::super::writers::{writer_address, Ledger, Spell};
         use crate::community::Epoch;
         use nostr_sdk::prelude::Timestamp;
@@ -875,10 +875,11 @@ mod tests {
         assert!(as_message(&post(&w2, Some(Epoch(2)), "signed by the key", 30_000)).writer);
         assert!(!as_message(&post(&read, None, "said in the open", 5_000)).writer);
         assert!(chat(&post(&w1, Some(Epoch(1)), "past", 15_000)), "a writer's past posts stay");
-        assert!(!chat(&post(&w1, Some(Epoch(1)), "late", 25_000)), "nothing after its entry ends");
+        // What the windows don't stand behind is kept, for a client to show only to managers.
+        assert!(chat(&post(&w1, Some(Epoch(1)), "late", 25_000)), "kept after its entry ends");
         assert!(!chat(&post(&w2, Some(Epoch(1)), "spliced", 30_000)), "the epoch must be the address's");
         assert!(!chat(&post(&w2, None, "untagged", 30_000)));
-        assert!(!chat(&post(&read, None, "flood", 30_000)), "the read address takes no posts inside a writer window");
+        assert!(chat(&post(&read, None, "flood", 30_000)), "kept inside a writer window");
         assert!(chat(&post(&read, None, "earlier", 5_000)), "before the window it was open");
         assert!(!chat(&post(&read, Some(Epoch(2)), "dressed up", 5_000)), "a read-address post claims no writer epoch");
         let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &crate::simd::hex::bytes_to_hex_32(&[0x33; 32]), &me.public_key().to_hex(), 9, "+", None, 30_000);

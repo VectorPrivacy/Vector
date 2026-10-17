@@ -64,7 +64,7 @@ impl Job {
             Some(w) => chat::open_writer_chat_event(wrap, &self.address, w, self.group.conv_key(), &self.channel_id, self.epoch),
             None => chat::open_chat_event(wrap, &self.group, &self.channel_id, self.epoch),
         };
-        opened.ok().filter(|ev| crate::community::v2::writers::admits(self.ledger.as_ref(), wepoch, ev))
+        opened.ok().filter(|ev| crate::community::v2::writers::keeps(self.ledger.as_ref(), wepoch, ev))
     }
 
     /// The keys a relay that gates reads must see this connection authenticated as.
