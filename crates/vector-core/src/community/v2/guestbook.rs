@@ -571,9 +571,11 @@ pub fn coalesce(
 /// Returns target → (from, until) in unix seconds.
 pub fn active_timeouts(events: &[GuestbookEvent], now_secs: u64, may_time_out: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool) -> BTreeMap<PublicKey, (u64, u64)> {
     let mut newest: BTreeMap<PublicKey, (u64, [u8; 32], u64)> = BTreeMap::new();
+    // Newest wins, so a date far ahead would outrank every honest edit until it arrives.
+    let horizon = now_secs.saturating_mul(1000).saturating_add(MAX_FUTURE_MS);
     for ev in events {
         let GuestbookEntry::Timeout { actor, target, until_secs, citation, at_ms } = &ev.entry else { continue };
-        if !may_time_out(actor, target, citation.as_ref()) {
+        if *at_ms > horizon || !may_time_out(actor, target, citation.as_ref()) {
             continue;
         }
         let from = at_ms / 1000;
@@ -735,6 +737,13 @@ mod tests {
         assert!(got.contains_key(&target), "an unauthorized lift lifts nothing");
         let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(mod_, 1_200, 1_100, 3)], 2_000, &may);
         assert!(got.is_empty(), "the newest authorized Timeout stands, here one already over");
+        let ahead = 2_000 + MAX_FUTURE_MS / 1000 + 1;
+        let got = active_timeouts(&[ev(mod_, ahead + 100, ahead, 4)], 2_000, &may);
+        assert!(got.is_empty(), "a Timeout dated past the horizon is ignored");
+        let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(mod_, 0, ahead, 5)], 2_000, &may);
+        assert!(got.contains_key(&target), "and so is a lift dated past it");
+        let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(mod_, 0, ahead - 1, 5)], 2_000, &may);
+        assert!(got.is_empty(), "one inside the horizon counts");
     }
 
     use super::super::super::{CommunityId, Epoch};

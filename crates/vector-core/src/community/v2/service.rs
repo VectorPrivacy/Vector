@@ -182,10 +182,7 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     at_ms: u64,
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
-    // A member timed out doesn't post until it ends (CORD-04 §8).
-    if let Some((_, until)) = community_timeouts(community)?.get(&author_pk) {
-        return Err(format!("you're timed out here until {until}"));
-    }
+    refuse_while_timed_out(community, &author_pk)?;
     // An honest client posts only where it holds Send Messages (CORD-04 §8).
     let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or_default();
     let owner = community.owner().ok().map(|o| o.to_hex());
@@ -198,6 +195,14 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     }
     let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+}
+
+/// A member timed out doesn't post, edit or react until it ends (CORD-04 §8).
+fn refuse_while_timed_out(community: &CommunityV2, author: &PublicKey) -> Result<(), String> {
+    match community_timeouts(community)?.get(author) {
+        Some((_, until)) => Err(format!("you're timed out here until {until}")),
+        None => Ok(()),
+    }
 }
 
 /// React to a channel message (kind 7, NIP-25 shape). `target_id_hex` /
@@ -216,6 +221,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
     emoji: Option<(&str, &str)>,
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    refuse_while_timed_out(community, &author_pk)?;
     let at_ms = next_send_ms();
     let rumor =
         chat::build_reaction_rumor(author_pk, channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
@@ -247,6 +253,7 @@ pub async fn send_edit_tagged<T: Transport + ?Sized>(
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    refuse_while_timed_out(community, &author_pk)?;
     let expiration = crate::self_destruct::edit_expiry(target_id_hex).await?;
     let at_ms = next_send_ms();
     let rumor = chat::build_edit_rumor_tagged(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, expiration, extra_tags, at_ms);
@@ -2106,13 +2113,16 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
 pub fn community_timeouts(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, (u64, u64)>, String> {
     use crate::community::roles::Permissions;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let (events, _) = crate::db::community::get_guestbook(&cid_hex)?;
-    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let events = crate::db::community::get_guestbook_timeouts(&cid_hex)?;
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let owner = community.owner()?.to_hex();
-    let may = |actor: &PublicKey, target: &PublicKey, _vac: Option<&crate::community::edition::AuthorityCitation>| {
+    let may = |actor: &PublicKey, target: &PublicKey, vac: Option<&crate::community::edition::AuthorityCitation>| {
         let (a, t) = (actor.to_hex(), target.to_hex());
-        t != owner && !banned.contains(&a) && roster.can_act_on_member(&a, Some(&owner), &t, Permissions::MODERATE_MEMBERS)
+        t != owner
+            && !banned.contains(&a)
+            && citation_is_synced(&cid_hex, &owner, &a, vac)
+            && roster.can_act_on_member(&a, Some(&owner), &t, Permissions::MODERATE_MEMBERS)
     };
     Ok(guestbook::active_timeouts(&events, now_ms() / 1000, &may))
 }
@@ -2129,7 +2139,8 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
         if !authority.roles.can_act_on_member(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::MODERATE_MEMBERS) {
             return Err("you can only time out members beneath you, with Timeout Members".to_string());
         }
-        let at_ms = now_ms();
+        // Strictly after this device's last Timeout: a lift must never tie the one it lifts.
+        let at_ms = next_send_ms();
         let until = (at_ms / 1000).saturating_add(seconds.min(guestbook::MAX_TIMEOUT_SECS));
         let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
         let citation = required_authority_citation(community, &my_pk)?;
@@ -3279,6 +3290,19 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             let (rewrapped, _) = super::stream::rewrap_seal(&head_os.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
             carried.push((h, rewrapped));
         }
+        // A sync is judged against the Category its predecessor names, so that predecessor
+        // crosses beside it. The floor stays on the head.
+        let mut beside: Vec<Event> = Vec::new();
+        for (h, _) in &carried {
+            let Some(group) = by_eid.get(&h.entity_hex) else { continue };
+            let Some(head) = group.iter().map(|&i| &opened[i].0).find(|e| e.inner_id == h.inner_id) else { continue };
+            let (true, Some(prev)) = (head.vsk == vsk::CHANNEL_SYNC, head.prev_hash) else { continue };
+            let Some(&pi) = group.iter().find(|&&i| opened[i].0.self_hash == prev) else {
+                return Err(format!("re-founding aborted: the predecessor of channel sync {} was not served; no state published", h.entity_hex));
+            };
+            let (rewrapped, _) = super::stream::rewrap_seal(&opened[pi].1.seal, &new_control, Timestamp::from_secs(at_secs)).map_err(|e| e.to_string())?;
+            beside.push(rewrapped);
+        }
 
         // Recipients: the current members minus `removed`, plus me (multi-device).
         //
@@ -3532,7 +3556,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                 transport.publish_durable(c, &community.relays).await?;
             }
         }
-        for (_, wrap) in &carried {
+        for wrap in carried.iter().map(|(_, w)| w).chain(&beside) {
             transport.publish_durable(wrap, &community.relays).await?;
         }
         // Guestbook snapshot at the new epoch — best-effort (a Refounding succeeds without
@@ -3540,6 +3564,21 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         let gb_group = super::derive::guestbook_group_key(&new_root, cid, new_epoch);
         let snap_id = crate::community::random_32();
         for rumor in guestbook::build_snapshot_rumors(my_pk, &recipients, snap_id, at) {
+            if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
+                let _ = transport.publish(&wrap, &community.relays).await;
+            }
+        }
+        // A running Timeout lives on the old Guestbook: the refounder re-issues, in its own
+        // name, those it may issue itself. Best-effort, like the snapshot.
+        let owner_hex = community.owner()?.to_hex();
+        let citation = required_authority_citation(community, &my_pk).ok().flatten();
+        for (target, (_, until)) in community_timeouts(community).unwrap_or_default() {
+            if removed_set.contains(&target.to_bytes())
+                || !decided_authority.roles.can_act_on_member(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::MODERATE_MEMBERS)
+            {
+                continue;
+            }
+            let rumor = guestbook::build_timeout_rumor(my_pk, target, until, citation.as_ref(), at);
             if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
                 let _ = transport.publish(&wrap, &community.relays).await;
             }
@@ -5606,8 +5645,7 @@ pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &Comm
         let mut view = fetch_authority(transport, community).await;
         let before = view.roles.clone();
         move_role_in(transport, community, &mut view, role_id, index).await?;
-        // Readers re-judge every overwrite against the new ranks: settle against their fold.
-        let after = fetch_authority(transport, community).await.roles;
+        let after = roster_after_moves(transport, community, &view, &[role_id.to_string()]).await;
         settle_access(transport, community, &before, &after).await
     })
     .await
@@ -5643,7 +5681,7 @@ pub async fn reorder_roles_v2<T: Transport + ?Sized>(transport: &T, community: &
             at = (prev[k] != usize::MAX).then_some(prev[k]);
         }
         // Each moved Role lands just after its predecessor in the target order.
-        let mut moved = 0;
+        let mut moved = Vec::new();
         for i in (0..n).filter(|&i| !keep[i]) {
             let id = target[i].clone();
             let index = match i.checked_sub(1) {
@@ -5652,16 +5690,29 @@ pub async fn reorder_roles_v2<T: Transport + ?Sized>(transport: &T, community: &
             };
             move_role_in(transport, community, &mut view, &id, index).await?;
             cur.retain(|c| *c != id);
-            cur.insert(index.min(cur.len()), id);
-            moved += 1;
+            cur.insert(index.min(cur.len()), id.clone());
+            moved.push(id);
         }
-        if moved > 0 {
-            let after = fetch_authority(transport, community).await.roles;
+        if !moved.is_empty() {
+            let after = roster_after_moves(transport, community, &view, &moved).await;
             settle_access(transport, community, &before, &after).await?;
         }
-        Ok(moved)
+        Ok(moved.len())
     })
     .await
+}
+
+/// The Roster to settle Role moves against. Readers re-judge every overwrite against the
+/// new ranks, so their fold when a fresh read is whole and serves every move; else `local`,
+/// carried forward from a whole read, which a failed read can't empty.
+async fn roster_after_moves<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, local: &AuthorityView, moved: &[String]) -> crate::community::roles::CommunityRoles {
+    let fresh = fetch_authority(transport, community).await;
+    let serves = |id: &String| fresh.roles.role(id).is_some_and(|r| local.roles.role(id).is_some_and(|l| l.rank == r.rank));
+    if fresh.everyone_served && !fresh.gapped && moved.iter().all(serves) {
+        return fresh.roles;
+    }
+    crate::log_warn!("[Concord] role move settled against the local fold: the fresh read was partial");
+    local.roles.clone()
 }
 
 async fn move_role_in<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, view: &mut AuthorityView, role_id: &str, index: usize) -> Result<(), String> {
@@ -5794,13 +5845,14 @@ pub async fn set_overwrite<T: Transport + ?Sized>(
         if !community.channels.iter().any(|c| c.id.0 == scope) && !community.categories.iter().any(|k| k.id == scope) {
             return Err("no such channel or category".to_string());
         }
-        // Keys follow the change: a private channel this device can't key can't be settled.
-        if community.channels.iter().any(|c| c.id.0 == scope && c.private && c.key.is_none()) {
+        // Keys follow the change: a private channel this device can't key can't be settled,
+        // whether the rule is its own or its Category's.
+        let scope_hex = crate::simd::hex::bytes_to_hex_32(&scope);
+        if community.channels.iter().any(|c| c.private && c.key.is_none() && (c.id.0 == scope || view.roles.syncs.get(&crate::simd::hex::bytes_to_hex_32(&c.id.0)) == Some(&scope_hex))) {
             return Err("you can only change who reads a private channel you can read".to_string());
         }
         // Who might gain or lose a key must be readable before anything is published.
         access_candidates(community, &view.roles)?;
-        let scope_hex = crate::simd::hex::bytes_to_hex_32(&scope);
         let rank = match &target {
             OverwriteTarget::Everyone => u32::MAX,
             OverwriteTarget::Role(id) => view.roles.role(id).map(|r| r.position).ok_or("no such role")?,
@@ -5836,7 +5888,10 @@ pub async fn set_channel_sync<T: Transport + ?Sized>(transport: &T, community: &
         let view = fetch_authority(transport, community).await;
         require_activated(&view)?;
         let author = role_author(community, &view)?;
-        community.channel(channel_id).ok_or("no such channel")?;
+        let channel = community.channel(channel_id).ok_or("no such channel")?;
+        if channel.private && channel.key.is_none() {
+            return Err("you can only change who reads a private channel you can read".to_string());
+        }
         if category.is_some_and(|k| !community.categories.iter().any(|c| c.id == k)) {
             return Err("no such category".to_string());
         }
@@ -6080,7 +6135,13 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
             // Authority heads first: a budget cut drops a channel edit before a Grant. A Tenure
             // of theirs listing an edition nobody has seen is left out: sealing it would let
             // whoever signed that edition publish it later on this standing.
-            let served: std::collections::HashSet<[u8; 32]> = editions.iter().map(|e| e.self_hash).collect();
+            // A decided head's predecessor was seen too, served or compacted away.
+            let decided: std::collections::HashSet<[u8; 32]> = authority.heads.iter().chain(control.heads.iter()).map(|h| h.inner_id).collect();
+            let served: std::collections::HashSet<[u8; 32]> = editions
+                .iter()
+                .map(|e| e.self_hash)
+                .chain(editions.iter().filter(|e| decided.contains(&e.inner_id)).filter_map(|e| e.prev_hash))
+                .collect();
             let vouches_only_for_served = |h: &FoldedHead| {
                 editions
                     .iter()
@@ -7168,6 +7229,15 @@ pub async fn edit_channel_details<T: Transport + ?Sized>(
 
 /// Create a Channel inside `category` (or uncategorized), at the end of its group.
 pub async fn create_channel_in<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str, private: bool, category: Option<[u8; 32]>) -> Result<ChannelId, String> {
+    // Unsynced, a public Channel in a Category with its own rules would sit open to everyone.
+    if let Some(cat) = category.filter(|_| !private && roles_v2_held(community)) {
+        let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+        let cat_hex = crate::simd::hex::bytes_to_hex_32(&cat);
+        let owner = community.owner()?.to_hex();
+        if roster.overwrites.iter().any(|o| o.scope == cat_hex) && !may_swap_overwrites(&roster, Some(&owner), &me_pk()?.to_hex(), &[cat_hex.as_str()], &|_| 0) {
+            return Err("this category sets its own permissions, so a channel in it takes Manage Roles over them".to_string());
+        }
+    }
     let id = if private { create_private_channel(transport, community, name).await? } else { create_public_channel(transport, community, name).await? };
     // A keyless Channel already sorts last in its group.
     if category.is_some() {
@@ -7910,7 +7980,14 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
         // Recipients need the CURRENT entitlement view — fetched, then merged over the
         // cache so entitlements we published ourselves survive a lagging fold (the same
         // two-strand merge as `revoke_channel_access`).
-        let mut roster = fetch_authority(transport, community).await.roles;
+        let fresh = fetch_authority(transport, community).await;
+        let v2 = before_ban.is_some_and(|b| b.everyone.is_some()) || fresh.activated;
+        // On Roles v2 recipients are whoever the channel resolves View for: a partial read
+        // would leave out the very members a rotation must keep.
+        if v2 && !fresh.everyone_served {
+            return Err("the roster couldn't be read whole, so no channel was rotated yet".to_string());
+        }
+        let mut roster = fresh.roles;
         let cached = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
         for r in cached.roles {
             if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
@@ -7922,6 +7999,14 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
                 roster.grants.push(g);
             }
         }
+        for o in cached.overwrites {
+            if !roster.overwrites.iter().any(|x| x.scope == o.scope && x.target == o.target) {
+                roster.overwrites.push(o);
+            }
+        }
+        for (channel, category) in cached.syncs {
+            roster.syncs.entry(channel).or_insert(category);
+        }
         let owner_hex = community.owner().ok().map(|o| o.to_hex());
         let mut rotated = 0usize;
         let mut failures: Vec<String> = Vec::new();
@@ -7931,7 +8016,6 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
             }
             let chan_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
             // Everyone in the wave who could read this channel, cut in ONE rotation.
-            let v2 = roster.everyone.is_some();
             let judge = before_ban.filter(|_| v2).unwrap_or(&roster);
             let excluded: Vec<PublicKey> = targets
                 .iter()
@@ -22317,20 +22401,28 @@ mod tests {
         let cat = create_category(&bed.relay, &held(), "Lobby").await.unwrap();
         set_overwrite(&bed.relay, &held(), cat, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         let news = create_channel_in(&bed.relay, &held(), "news", false, Some(cat)).await.unwrap();
+        // A sync past its first edition is judged against its predecessor, which must cross too.
+        set_channel_sync(&bed.relay, &held(), &news, None).await.unwrap();
+        set_channel_sync(&bed.relay, &held(), &news, Some(cat)).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        set_members_banned(&bed.relay, held().id(), &[Keys::generate().public_key()], true).await.unwrap();
-        follow_control(&bed.relay, &held()).await.unwrap();
-        let now = held();
-        assert_ne!(now.root_epoch, community.root_epoch, "the ban re-founded");
-        let eds = fetch_control(&bed.relay, &now).await;
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == now.root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
         let (chan, news_hex) = (crate::simd::hex::bytes_to_hex_32(&ch.0), crate::simd::hex::bytes_to_hex_32(&news.0));
-        let probe = Keys::generate().public_key().to_hex();
-        for (who, f) in [("cold", fold_authority(&now, &eds, &Floors::default())), ("floored", fold_authority(&now, &eds, &floors))] {
-            assert!(f.roles.is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "{who}: the role's allow crossed");
-            assert!(!f.roles.is_entitled(Some(&owner_hex), &probe, &chan, &[], &[]), "{who}: and nobody else got in");
-            assert!(!f.roles.channel_permissions(Some(&owner_hex), &probe, &news_hex, false).contains(Permissions::SEND_MESSAGES), "{who}: the sync crossed");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let mut epoch = community.root_epoch;
+        for round in 0..2 {
+            set_members_banned(&bed.relay, held().id(), &[Keys::generate().public_key()], true).await.unwrap();
+            follow_control(&bed.relay, &held()).await.unwrap();
+            let now = held();
+            assert_ne!(now.root_epoch, epoch, "the ban re-founded");
+            epoch = now.root_epoch;
+            let eds = fetch_control(&bed.relay, &now).await;
+            let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == now.root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+            let probe = Keys::generate().public_key().to_hex();
+            for (who, f) in [("cold", fold_authority(&now, &eds, &Floors::default())), ("floored", fold_authority(&now, &eds, &floors))] {
+                assert!(f.roles.is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "{round} {who}: the role's allow crossed");
+                assert!(!f.roles.is_entitled(Some(&owner_hex), &probe, &chan, &[], &[]), "{round} {who}: and nobody else got in");
+                assert_eq!(f.roles.syncs.get(&news_hex), Some(&crate::simd::hex::bytes_to_hex_32(&cat)), "{round} {who}: the sync crossed");
+                assert!(!f.roles.channel_permissions(Some(&owner_hex), &probe, &news_hex, false).contains(Permissions::SEND_MESSAGES), "{round} {who}: and it binds");
+            }
         }
     }
 
@@ -22349,6 +22441,11 @@ mod tests {
         act_as(&m);
         let err = send_chat_message(&relay, &held(), &ch, "hi", None, &[], vec![]).await.unwrap_err();
         assert!(err.contains("timed out"), "{err}");
+        let target = "ab".repeat(32);
+        let err = send_reaction(&relay, &held(), &ch, &target, &owner.public_key().to_hex(), super::super::kind::MESSAGE, "+", None).await.unwrap_err();
+        assert!(err.contains("timed out"), "nor react: {err}");
+        let err = send_edit(&relay, &held(), &ch, &target, "rewritten", &[]).await.unwrap_err();
+        assert!(err.contains("timed out"), "nor edit: {err}");
         // A peer with no standing can't lift it, nor time anyone out.
         act_as(&peer);
         assert!(timeout_member(&relay, &held(), &m.public_key(), 0).await.is_err());
@@ -22358,6 +22455,83 @@ mod tests {
         act_as(&m);
         assert!(send_chat_message(&relay, &held(), &ch, "back", None, &[], vec![]).await.is_ok());
         act_as(&owner);
+    }
+
+    #[tokio::test]
+    async fn a_running_timeout_crosses_a_refounding() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("TimeoutCarry").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, ended) = (Keys::generate().public_key(), Keys::generate().public_key());
+        timeout_member(&bed.relay, &held(), &m, 600).await.unwrap();
+        timeout_member(&bed.relay, &held(), &ended, 600).await.unwrap();
+        timeout_member(&bed.relay, &held(), &ended, 0).await.unwrap();
+        set_members_banned(&bed.relay, held().id(), &[Keys::generate().public_key()], true).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_ne!(held().root_epoch, community.root_epoch, "the ban re-founded");
+        // A device that never read the old Guestbook.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_guestbook(&cid_hex, &[], 0).unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        let t = community_timeouts(&held()).unwrap();
+        assert!(t.contains_key(&m), "the running Timeout crossed");
+        assert!(!t.contains_key(&ended), "and a lifted one stayed lifted");
+        let _ = owner;
+    }
+
+    #[tokio::test]
+    async fn a_builder_cant_open_a_channel_in_a_restricted_category() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Builder").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let builders = create_role_v2(&bed.relay, &held(), "Builders", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        let y = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![builders]).await.unwrap();
+        let (open, staff) = (create_category(&bed.relay, &held(), "Open").await.unwrap(), create_category(&bed.relay, &held(), "Staff").await.unwrap());
+        set_overwrite(&bed.relay, &held(), staff, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::VIEW_CHANNEL).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&y);
+        let err = create_channel_in(&bed.relay, &held(), "leak", false, Some(staff)).await.unwrap_err();
+        assert!(err.contains("Manage Roles"), "{err}");
+        assert!(create_channel_in(&bed.relay, &held(), "fine", false, Some(open)).await.is_ok(), "a Category with no rules of its own takes anyone who may make channels");
+    }
+
+    #[tokio::test]
+    async fn rules_reaching_a_private_channel_this_device_cant_read_are_refused() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Keyless").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "dark").await.unwrap();
+        let cat = create_category(&bed.relay, &held(), "Vault").await.unwrap();
+        set_channel_sync(&bed.relay, &held(), &ch, Some(cat)).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let mut keyless = held();
+        keyless.channels.iter_mut().find(|c| c.id.0 == ch.0).unwrap().key = None;
+        crate::db::community::save_community_v2(&keyless).unwrap();
+        let err = set_overwrite(&bed.relay, &held(), cat, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap_err();
+        assert!(err.contains("can read"), "through its Category: {err}");
+        let err = set_channel_sync(&bed.relay, &held(), &ch, None).await.unwrap_err();
+        assert!(err.contains("can read"), "or its sync: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_counts_only_with_the_grant_it_cites() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Cited").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MODERATE_MEMBERS).await.unwrap();
+        let (y, m) = (Keys::generate(), Keys::generate().public_key());
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&y);
+        timeout_member(&bed.relay, &held(), &m, 600).await.unwrap();
+        assert!(community_timeouts(&held()).unwrap().contains_key(&m), "a cited Timeout stands");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        events.push(guestbook::GuestbookEvent {
+            rumor_id: [9; 32],
+            entry: guestbook::GuestbookEntry::Timeout { actor: y.public_key(), target: m, until_secs: 0, citation: None, at_ms: now_ms() + 1_000 },
+            epoch: Some(held().root_epoch.0),
+            observed_at: None,
+        });
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        assert!(community_timeouts(&held()).unwrap().contains_key(&m), "an uncited lift lifts nothing");
     }
 
     async fn invites_to(relay: &MemoryRelay, community: &CommunityV2, pk: &PublicKey) -> usize {
@@ -22380,12 +22554,38 @@ mod tests {
         let (wrap, _) = control::seal_control_edition(&rumor, &group, &b, Timestamp::from_secs(1_000)).unwrap();
         let (pre, _) = control::open_control_edition(&wrap, &group).unwrap();
         publish_tenure(&bed.relay, &held(), &w, &b.public_key(), vec![entry("y", Permissions::MANAGE_ROLES, &[pre.self_hash])], 1).await;
+        // A refused successor naming it doesn't make it seen.
+        let next = control::build_edition_rumor_bound(b.public_key(), vsk::ROLE_V2, &eid_of(&made), 2, Some(&pre.self_hash), &content, 1_001, None, binding);
+        let (next, _) = control::seal_control_edition(&next, &group, &b, Timestamp::from_secs(1_001)).unwrap();
+        bed.relay.publish(&next, &held().relays).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
         set_member_roles(&bed.relay, &held(), &w.public_key(), vec![]).await.unwrap();
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         let f = fold_authority(&held(), &fetch_control(&bed.relay, &held()).await, &Floors::default());
         assert!(f.roles.role(&made).is_none(), "the late edition stands on nothing");
         let _ = owner;
+    }
+
+    #[tokio::test]
+    async fn a_tenure_listing_a_superseded_edition_is_still_resealed() {
+        let (bed, owner, w, community) = v2_bed_with_admin("Superseded").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let r = create_role_v2(&bed.relay, &held(), "Old", 0, 0).await.unwrap();
+        let first = fetch_control(&bed.relay, &held()).await.into_iter().find(|e| e.entity_id == eid_of(&r)).unwrap();
+        let rank = fetch_authority(&bed.relay, &held()).await.roles.role(&r).unwrap().rank.clone().unwrap();
+        publish_role_v2(&bed.relay, &held(), &owner.keys, &role_v2(&r, "New", &rank, 0), 2).await;
+        let b = Keys::generate().public_key();
+        publish_tenure(&bed.relay, &held(), &w, &b, vec![entry("y", Permissions::MANAGE_ROLES, &[first.self_hash])], 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let tenure = super::super::derive::tenure_locator(community.id(), &b.to_bytes(), &w.public_key().to_bytes());
+        let w_tenure = fetch_control(&bed.relay, &held()).await.into_iter().find(|e| e.entity_id == tenure).unwrap().self_hash;
+        // The superseded edition is compacted away; its successor still names it.
+        let compacted = Hiding { inner: &bed.relay, group: control::ControlPlane::of(&held()).write_group().unwrap(), hide: Box::new(move |e| e.self_hash == first.self_hash) };
+        set_member_roles(&compacted, &held(), &w.public_key(), vec![]).await.unwrap();
+        let seal = super::super::derive::tenure_locator(community.id(), &w.public_key().to_bytes(), &owner.keys.public_key().to_bytes());
+        let mine = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.entity_id == seal).max_by_key(|e| e.version).expect("W's standing was sealed");
+        let listed = crate::community::v2::roles::parse_tenure_content(&mine.content).unwrap();
+        assert!(listed.sealed.iter().any(|x| x.heads.contains(&crate::simd::hex::bytes_to_hex_32(&w_tenure))), "W's Tenure is kept");
     }
 
     #[tokio::test]
@@ -22426,6 +22626,77 @@ mod tests {
         let f = fold_authority(&held(), &fetch_control(&bed.relay, &held()).await, &Floors::default());
         assert!(!f.roles.is_entitled(Some(&owner.keys.public_key().to_hex()), &m.to_hex(), &chan, &[], &[]), "readers drop the allow");
         assert!(held().channel(&ch).unwrap().epoch > epoch, "and the channel rotated without M");
+    }
+
+    /// Serves reads until the first publish, then refuses every one.
+    struct BreaksAfterPublish<'a> {
+        inner: &'a MemoryRelay,
+        broken: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Transport for BreaksAfterPublish<'_> {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?))
+        }
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.publish(e, r).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.inner.publish_durable(e, r).await
+        }
+        async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
+            if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("offline".into());
+            }
+            self.inner.fetch(q, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn ban_severance_on_roles_v2_refuses_a_partial_read() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("SeverBlind").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let b = Keys::generate().public_key();
+        grant_channel_access(&bed.relay, &held(), &ch, &b).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let before = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        let epoch = held().channel(&ch).unwrap().epoch;
+        let blind = BreaksAfterPublish { inner: &bed.relay, broken: true.into() };
+        let err = sever_banned_private_reads(&blind, &held(), &[(b, Vec::new())], Some(&before)).await.unwrap_err();
+        assert!(err.contains("read whole"), "{err}");
+        assert_eq!(held().channel(&ch).unwrap().epoch, epoch, "nothing rotated on half a roster");
+    }
+
+    #[tokio::test]
+    async fn a_role_move_settles_on_what_it_knows_when_the_reread_fails() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("MoveOffline").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let (r, other) = (create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap(), create_role_v2(&bed.relay, &held(), "Other", 0, 0).await.unwrap());
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(r.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let m = Keys::generate().public_key();
+        set_member_roles(&bed.relay, &held(), &m, vec![r]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let epoch = held().channel(&ch).unwrap().epoch;
+        let flaky = BreaksAfterPublish { inner: &bed.relay, broken: false.into() };
+        for (i, mv) in [(0usize, true), (1, false)] {
+            flaky.broken.store(false, std::sync::atomic::Ordering::SeqCst);
+            if mv {
+                move_role_v2(&flaky, &held(), &other, i).await.unwrap();
+            } else {
+                let ranked: Vec<String> = { let v = fetch_authority(&bed.relay, &held()).await; ranked(&v).into_iter().map(|r| r.role_id.clone()).collect() };
+                let mut order = ranked.clone();
+                order.rotate_left(1);
+                reorder_roles_v2(&flaky, &held(), &order).await.unwrap();
+            }
+            assert_eq!(held().channel(&ch).unwrap().epoch, epoch, "a failed reread evicts no one");
+            let stored = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+            assert!(stored.is_entitled(Some(&owner.keys.public_key().to_hex()), &m.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.0), &[], &[]), "nor drops them from the roster");
+            assert!(stored.role(&other).is_some(), "nor its Roles");
+        }
     }
 
     #[tokio::test]

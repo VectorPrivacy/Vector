@@ -90,14 +90,17 @@ function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
 }
 /**
  * Why a community post collapses (CORD-04 §8): 'nosend' when its author can't send in
- * the channel, 'timeout' when it was made during their Timeout, '' when it doesn't.
+ * the channel, 'timeout' when it was made or last edited during their Timeout, '' when it doesn't.
  */
 function _dmsgPostedTimedOut(msg, currentChat) {
     if (msg.mine || !msg.npub) return '';
     if (channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
     const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
-    const at = (msg.at || 0) / 1000;
-    return t && at >= t.from && at < t.until ? 'timeout' : '';
+    if (!t) return '';
+    const inside = (ms) => ms / 1000 >= t.from && ms / 1000 < t.until;
+    const edits = msg.edit_history || [];
+    const edited = edits.length > 1 && inside(edits[edits.length - 1].edited_at || 0);
+    return inside(msg.at || 0) || edited ? 'timeout' : '';
 }
 function _dmsgRowCtx(msg) {
     {

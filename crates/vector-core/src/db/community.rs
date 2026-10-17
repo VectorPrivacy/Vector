@@ -2560,6 +2560,26 @@ pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::gu
     Ok((events, cursor.max(0) as u64))
 }
 
+struct TimeoutCache;
+type TimeoutMap = std::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>>>;
+
+fn timeout_cache() -> std::sync::Arc<TimeoutMap> {
+    crate::db::current_session().scoped::<TimeoutCache, TimeoutMap>()
+}
+
+/// The Guestbook's Timeout entries, held so every send doesn't reparse the whole book.
+pub fn get_guestbook_timeouts(community_id: &str) -> Result<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>, String> {
+    if let Some(held) = timeout_cache().read().unwrap_or_else(|e| e.into_inner()).get(community_id) {
+        return Ok(held.clone());
+    }
+    let (events, _) = get_guestbook(community_id)?;
+    let timeouts: std::sync::Arc<Vec<_>> = std::sync::Arc::new(
+        events.into_iter().filter(|e| matches!(e.entry, crate::community::v2::guestbook::GuestbookEntry::Timeout { .. })).collect(),
+    );
+    timeout_cache().write().unwrap_or_else(|e| e.into_inner()).insert(community_id.to_string(), timeouts.clone());
+    Ok(timeouts)
+}
+
 /// Persist a community's Guestbook events + cursor (encrypted at rest, like the
 /// community row itself). The caller owns dedup/merge — this is a plain replace.
 pub fn set_guestbook(
@@ -2579,6 +2599,7 @@ pub fn set_guestbook(
         params![community_id, enc, cursor_secs as i64],
     )
     .map_err(|e| format!("save guestbook: {e}"))?;
+    timeout_cache().write().unwrap_or_else(|e| e.into_inner()).remove(community_id);
     Ok(())
 }
 
