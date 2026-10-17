@@ -469,6 +469,7 @@ mod tests {
     const GOLDEN_CONTROL_SIGNER_E0_PK: &str = "718aef388257f3fd9f1bfae5cf2cbd0594a2ffc31adb5c1fe22c502c046acaee";
     const GOLDEN_CONTROL_SIGNER_EMULTI_PK: &str = "e27235cc13be2f9ad65648e01ff2b63402846469c8638b5386c625688194ec7d";
     const GOLDEN_GUESTBOOK_E0_PK: &str = "ad09de582026fa7a052db18bb5827fa24c15e929d59aadcc91efb8508f5368ad";
+    const GOLDEN_CHANNEL_ACCESS_E0_PK: &str = "901126284c4d1dfd5e753aa866e28b498825c3382611d1f5d5e929de0bcae15e";
     const GOLDEN_CHANNEL_REKEY_E1_PK: &str = "7c55cdb957e9db2b4800d687b2a07d3f7066b1a35824a1e86ba871f55e87e8b5";
     const GOLDEN_BASE_REKEY_E1_PK: &str = "fb2fa44fba66ba15595f784255a1cb569531db8784432ac0e4fe838498dd9dea";
     const GOLDEN_DISSOLVED_PK: &str = "4d3d55d88fdf9d9c2089651e5cbb0dfa93b6b9b10cdcb2319b0dce1a1398096a";
@@ -524,6 +525,11 @@ mod tests {
     #[test]
     fn guestbook_group_key_golden_vector() {
         assert_eq!(guestbook_group_key(&secret(), &cid(), Epoch(0)).pk_hex(), GOLDEN_GUESTBOOK_E0_PK);
+    }
+
+    #[test]
+    fn channel_access_group_key_golden_vector() {
+        assert_eq!(channel_access_group_key(&secret(), &chan(), Epoch(0)).pk_hex(), GOLDEN_CHANNEL_ACCESS_E0_PK);
     }
 
     #[test]

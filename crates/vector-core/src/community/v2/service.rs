@@ -6077,35 +6077,102 @@ fn access_group(community: &CommunityV2, channel: &ChannelId) -> super::derive::
     super::derive::channel_access_group_key(&community.community_root, channel, community.root_epoch)
 }
 
-/// Every access delivery for a Channel on its plane.
+/// Every access delivery for a Channel on its plane, paged as the plane key: the address is
+/// root-derived, so any root holder can bury the real deliveries under a single page.
 async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId) -> Result<Vec<rekey::AccessDelivery>, String> {
+    const PAGE: usize = 200;
+    const MAX_PAGES: usize = 6;
     let group = access_group(community, channel);
-    let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
-    let wraps = transport.fetch(&query, &community.relays).await?;
-    Ok(wraps
-        .iter()
-        .filter_map(|w| stream::open_wrap(w, &group).ok())
-        .filter_map(|o| rekey::parse_access_delivery(&o).ok())
-        .filter(|d| matches!(d.scope, rekey::RekeyScope::Channel(c) if c.0 == channel.0))
-        .collect())
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+    let (mut until, mut oldest): (Option<u64>, Option<u64>) = (None, None);
+    for _ in 0..MAX_PAGES {
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], until, limit: Some(PAGE), ..Default::default() };
+        let page = transport.fetch_plane(group.keys(), &query, &community.relays).await?;
+        let complete = page.is_complete();
+        let wraps = page.events;
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            oldest = Some(oldest.map_or(w.created_at.as_secs(), |o| o.min(w.created_at.as_secs())));
+            if let Some(d) = stream::open_wrap(w, &group).ok().and_then(|o| rekey::parse_access_delivery(&o).ok()) {
+                if matches!(d.scope, rekey::RekeyScope::Channel(c) if c.0 == channel.0) {
+                    out.push(d);
+                }
+            }
+        }
+        if fresh == 0 || (wraps.len() < PAGE && complete) {
+            break;
+        }
+        match oldest {
+            Some(o) if o > 0 => until = Some(o),
+            _ => break,
+        }
+    }
+    Ok(out)
 }
 
-/// Whether `member` already has a blob for `epoch` on the plane, from any deliverer.
-fn served_on_plane(deliveries: &[rekey::AccessDelivery], member: &PublicKey, channel: &ChannelId, epoch: Epoch) -> bool {
+/// Whether `member` holds a blob for `epoch` on the plane from a deliverer `trusted` admits:
+/// anyone can put a blob at anyone's locator, so only a delivery a reader would take counts.
+fn served_on_plane(deliveries: &[rekey::AccessDelivery], member: &PublicKey, channel: &ChannelId, epoch: Epoch, trusted: &dyn Fn(&PublicKey) -> bool) -> bool {
     let scope = rekey::RekeyScope::Channel(*channel);
     deliveries
         .iter()
-        .filter(|d| d.epoch == epoch)
+        .filter(|d| d.epoch == epoch && trusted(&d.deliverer))
         .any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &member.to_bytes(), scope, epoch).is_some())
+}
+
+struct MintedRotations;
+type MintedMap = std::sync::Mutex<std::collections::HashMap<([u8; 32], u64), std::sync::Arc<Vec<(PublicKey, Vec<rekey::RekeyBlob>)>>>>;
+
+/// The complete rotations that minted a Channel's `epoch`, each as its rotator and blobs.
+/// A complete rotation never changes, so a found set is held for the session.
+async fn minting_rotations<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, epoch: Epoch) -> Result<std::sync::Arc<Vec<(PublicKey, Vec<rekey::RekeyBlob>)>>, String> {
+    let cache = crate::db::current_session().scoped::<MintedRotations, MintedMap>();
+    if let Some(held) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&(channel.0, epoch.0)) {
+        return Ok(held.clone());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let mut out = Vec::new();
+    for root in channel_rekey_addressing_roots(community.community_root, &cid_hex) {
+        let group = channel_rekey_group_key(&root, channel, epoch);
+        for r in rekey::collect_rotations(&fetch_rekey_chunks(transport, &community.relays, &group).await?) {
+            if r.is_complete() && r.new_epoch == epoch && matches!(r.scope, rekey::RekeyScope::Channel(c) if c.0 == channel.0) {
+                out.push((r.rotator, r.blobs));
+            }
+        }
+    }
+    let out = std::sync::Arc::new(out);
+    if !out.is_empty() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).insert((channel.0, epoch.0), out.clone());
+    }
+    Ok(out)
+}
+
+/// Whether an authorized one of `rotations` carried `member` a blob.
+fn rotation_carries(rotations: &[(PublicKey, Vec<rekey::RekeyBlob>)], authorized: &dyn Fn(&PublicKey) -> bool, member: &PublicKey, channel: &ChannelId, epoch: Epoch) -> bool {
+    let scope = rekey::RekeyScope::Channel(*channel);
+    rotations
+        .iter()
+        .filter(|(rotator, _)| authorized(rotator))
+        .any(|(rotator, blobs)| rekey::find_my_blob(blobs, &rotator.to_bytes(), &member.to_bytes(), scope, epoch).is_some())
 }
 
 /// Deliver the key this device holds for `channel` to `recipients` on its access plane.
 async fn deliver_access<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, recipients: &[PublicKey]) -> Result<(), String> {
+    use nostr_sdk::prelude::AsyncGetPublicKey;
     let ch = community.channel(channel).ok_or("no such channel")?;
     let key = ch.key.ok_or("this device doesn't hold that channel's key")?;
     let (epoch, scope) = (ch.epoch, rekey::RekeyScope::Channel(*channel));
     let signer = crate::signer::active_signer()?;
     let me = me_pk()?;
+    // The signer is resolved process-wide; never let another account's sign for this one.
+    if signer.get_public_key_async().await.map_err(|e| e.to_string())? != me {
+        return Err("the active signer isn't this account".to_string());
+    }
     let group = access_group(community, channel);
     let mut blobs = Vec::with_capacity(recipients.len());
     for r in recipients {
@@ -6140,35 +6207,74 @@ pub(crate) fn access_duty_due(id: &crate::community::CommunityId, roster_moved: 
     due
 }
 
+struct AccessLedger;
+
 /// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
-/// deliver the key to each entitled member the plane shows unserved at its epoch. Returns how
-/// many blobs went out.
+/// deliver the key to each entitled member nobody has served at its epoch: not a reader-trusted
+/// delivery on the plane, not the rotation that minted it, and not this device before. A member
+/// who held the previous epoch and that rotation left out was cut, whatever the roster says.
+/// Returns how many blobs went out.
 pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let roster = crate::db::community::get_community_roles(&cid_hex)?;
-    if roster.everyone.is_none() {
+    if crate::db::community::get_community_roles(&cid_hex)?.everyone.is_none() {
         return Ok(0);
     }
+    // Judged on a whole read, never the stored roster: a stale entitlement would hand a new
+    // epoch's key to someone its rotation just cut.
+    let fresh = fetch_authority(transport, community).await;
+    if !fresh.everyone_served || fresh.gapped {
+        return Err("the roster couldn't be read whole; no key was delivered".to_string());
+    }
+    let (roster, banned) = (fresh.roles, fresh.banned);
     let owner_hex = community.owner()?.to_hex();
     let me = me_pk()?;
     let candidates = access_candidates(community, &roster)?;
+    let rotator_ok = |r: &PublicKey| {
+        let h = r.to_hex();
+        h == owner_hex || (!banned.contains(&h) && roster.is_authorized(&h, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS))
+    };
+    let ledger = crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
     let mut sent = 0;
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        let entitled_here = |pk: &PublicKey| pk.to_hex() == owner_hex || (!banned.contains(&pk.to_hex()) && roster.is_entitled(Some(&owner_hex), &pk.to_hex(), &chan, &[], &[]));
         // Readers adopt only from a deliverer their fold entitles.
-        if !roster.is_entitled(Some(&owner_hex), &me.to_hex(), &chan, &[], &[]) {
+        if !entitled_here(&me) {
             continue;
         }
-        let entitled: Vec<PublicKey> = candidates.iter().filter(|pk| **pk != me && roster.is_entitled(Some(&owner_hex), &pk.to_hex(), &chan, &[], &[])).copied().collect();
+        let epoch = ch.epoch;
+        let held = ledger.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let entitled: Vec<PublicKey> = candidates
+            .iter()
+            .filter(|pk| **pk != me && entitled_here(pk) && !held.contains(&(ch.id.0, epoch.0, pk.to_bytes())))
+            .copied()
+            .collect();
         if entitled.is_empty() {
             continue;
         }
         let deliveries = fetch_access_deliveries(transport, community, &ch.id).await?;
-        let unserved: Vec<PublicKey> = entitled.into_iter().filter(|pk| !served_on_plane(&deliveries, pk, &ch.id, ch.epoch)).collect();
+        let minted = minting_rotations(transport, community, &ch.id, epoch).await?;
+        let prior = match epoch.0.checked_sub(1) {
+            Some(p) if p > 0 => minting_rotations(transport, community, &ch.id, Epoch(p)).await?,
+            _ => Default::default(),
+        };
+        let prev = Epoch(epoch.0.saturating_sub(1));
+        let unserved: Vec<PublicKey> = entitled
+            .into_iter()
+            .filter(|pk| {
+                let carried = rotation_carries(&minted, &rotator_ok, pk, &ch.id, epoch);
+                let cut = !carried
+                    && minted.iter().any(|(r, _)| rotator_ok(r))
+                    && (rotation_carries(&prior, &rotator_ok, pk, &ch.id, prev) || served_on_plane(&deliveries, pk, &ch.id, prev, &entitled_here));
+                !carried && !cut && !served_on_plane(&deliveries, pk, &ch.id, epoch, &entitled_here)
+            })
+            .collect();
         if unserved.is_empty() {
             continue;
         }
         deliver_access(transport, community, &ch.id, &unserved).await?;
+        let mut held = ledger.lock().unwrap_or_else(|e| e.into_inner());
+        held.extend(unserved.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
         sent += unserved.len();
     }
     Ok(sent)
@@ -6183,6 +6289,7 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
         return Ok(0);
     }
     let owner_hex = community.owner()?.to_hex();
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me = me_pk()?;
     let signer = crate::signer::active_signer()?;
     let mut parked = 0;
@@ -6192,12 +6299,18 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
             continue;
         }
         let scope = rekey::RekeyScope::Channel(ch.id);
-        // Only deliverers the channel lets in, and only their newest epoch: a keyless channel
-        // seats whatever it adopts first, so a stale key must never be on offer.
+        // Only deliverers the channel lets in, and only an epoch the keyless walk has reached
+        // or its next: a keyless channel seats whatever it adopts first, so neither a stale key
+        // nor one claimed far ahead may ever be on offer.
+        let window = ch.epoch.0..=ch.epoch.0.saturating_add(1);
         let deliveries: Vec<rekey::AccessDelivery> = fetch_access_deliveries(transport, community, &ch.id)
             .await?
             .into_iter()
-            .filter(|d| roster.is_entitled(Some(&owner_hex), &d.deliverer.to_hex(), &chan, &[], &[]))
+            .filter(|d| window.contains(&d.epoch.0))
+            .filter(|d| {
+                let h = d.deliverer.to_hex();
+                h == owner_hex || (!banned.contains(&h) && roster.is_entitled(Some(&owner_hex), &h, &chan, &[], &[]))
+            })
             .collect();
         let Some(newest) = deliveries.iter().map(|d| d.epoch).max() else { continue };
         for d in deliveries.iter().filter(|d| d.epoch == newest) {
@@ -7580,22 +7693,8 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
         if roles_v2_held(community) {
             // On Roles v2 a Private Channel is closed to everyone but the owner until they let
             // a Role or a member in, so it opens nothing before its rules exist.
-            use crate::community::roles::{Overwrite, Permissions};
             let chan = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
-            let view_bit = Permissions(Permissions::VIEW_CHANNEL);
-            let written: Vec<Overwrite> = Vec::new();
-            let _ = view_bit;
-            for o in &written {
-                let target = super::roles::overwrite_target_bytes(community.id(), &o.target).ok_or("malformed target")?;
-                publish_control_edition(transport, community, vsk::CHANNEL_ACL, &super::derive::acl_locator(community.id(), &channel_id.0, &target), &super::roles::overwrite_content_json(o)).await?;
-            }
             let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-            let mut stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-            stored.overwrites.extend(written);
-            let at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
-            if let Err(e) = crate::db::community::set_community_roles(&cid_hex, &stored, at) {
-                crate::log_warn!("v2: local roster merge failed (heals on the next control fold): {e}");
-            }
             if !crate::db::community::community_held(community.id())? {
                 return Err("community removed during channel create".to_string());
             }
@@ -22915,48 +23014,81 @@ mod tests {
         let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
         let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
         set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
-        let (m, stranger) = (Keys::generate(), Keys::generate());
-        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers]).await.unwrap();
+        let (m, d, f, stranger) = (Keys::generate(), Keys::generate(), Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &d.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &f.public_key(), vec![readers]).await.unwrap();
         let others = create_role_v2(&bed.relay, &held(), "Others", 0, 0).await.unwrap();
         set_member_roles(&bed.relay, &held(), &stranger.public_key(), vec![others]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
+        let key = held().channel(&ch).unwrap().key.unwrap();
+        let epoch = held().channel(&ch).unwrap().epoch;
+        let with_channel = |k: Option<[u8; 32]>, e: Epoch| {
+            let mut c = held();
+            let slot = c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap();
+            slot.key = k;
+            slot.epoch = e;
+            crate::db::community::save_community_v2(&c).unwrap();
+        };
+        let trusted = |pk: &PublicKey| *pk == owner.keys.public_key();
         let served = |pk: PublicKey| {
             let relay = &bed.relay;
             let c = held();
-            async move { served_on_plane(&fetch_access_deliveries(relay, &c, &ch).await.unwrap(), &pk, &ch, c.channel(&ch).unwrap().epoch) }
+            async move { served_on_plane(&fetch_access_deliveries(relay, &c, &ch).await.unwrap(), &pk, &ch, c.channel(&ch).unwrap().epoch, &trusted) }
         };
+        // Someone the channel doesn't let in stakes blobs at every member's locator first.
+        with_channel(Some([0x99; 32]), epoch);
+        act_as(&stranger);
+        deliver_access(&bed.relay, &held(), &ch, &[m.public_key(), d.public_key(), f.public_key()]).await.unwrap();
+        // An entitled member offers a key far past the channel's epoch.
+        with_channel(Some([0x77; 32]), Epoch(epoch.0 + 1000));
+        act_as(&f);
+        deliver_access(&bed.relay, &held(), &ch, &[m.public_key()]).await.unwrap();
+        with_channel(Some(key), epoch);
+        act_as(&owner.keys);
+
+        let blind = BreaksAfterPublish { inner: &bed.relay, broken: true.into() };
+        assert!(access_duty(&blind, &held()).await.is_err(), "nothing goes out on a partial read");
         act_as(&x);
         assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a holder the channel doesn't let in delivers nothing readers would take");
         act_as(&owner.keys);
-        assert!(access_duty(&bed.relay, &held()).await.unwrap() >= 1, "the holder serves who the plane shows unserved");
-        assert!(served(m.public_key()).await, "the entitled member is served");
-        assert!(!served(stranger.public_key()).await, "and nobody the channel doesn't let in");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 3, "a stranger's blobs serve nobody: every member is owed");
+        assert!(served(m.public_key()).await && served(d.public_key()).await);
+        assert!(!served(stranger.public_key()).await, "nobody the channel doesn't let in");
         assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a served member is served once");
-        // A new epoch is a new key: served at the last one says nothing about it.
-        let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
-        rekey_channel_excluding(&bed.relay, &held(), &ch, &roster, &[], &[]).await.unwrap();
-        assert!(access_duty(&bed.relay, &held()).await.unwrap() >= 1, "the new epoch is served afresh");
-        let key = held().channel(&ch).unwrap().key.unwrap();
-        // Someone the channel doesn't let in delivers a key of their own making.
-        let with_key = |k: Option<[u8; 32]>| {
-            let mut c = held();
-            c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap().key = k;
-            crate::db::community::save_community_v2(&c).unwrap();
-        };
-        with_key(Some([0x99; 32]));
-        act_as(&stranger);
+        // D, later banned, also serves M a key of D's own at the channel's epoch.
+        with_channel(Some([0x66; 32]), epoch);
+        act_as(&d);
         deliver_access(&bed.relay, &held(), &ch, &[m.public_key()]).await.unwrap();
-        // The member's own device, without the key.
-        with_key(None);
+        act_as(&owner.keys);
+
+        // The member's own device, without the key; D is banned there.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_community_banlist(&cid_hex, &[d.public_key().to_hex()], 1).unwrap();
+        with_channel(None, epoch);
         act_as(&m);
-        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1, "only the newest epoch, from a deliverer the channel lets in");
-        let adopted = absorb_parked_channel_keys(&held(), &crate::db::current_session());
-        assert_eq!(adopted.len(), 1);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1, "only the honest delivery: not the banned member's, nor one far ahead");
+        crate::db::community::set_community_banlist(&cid_hex, &[], 2).unwrap();
+        assert_eq!(absorb_parked_channel_keys(&held(), &crate::db::current_session()).len(), 1);
         assert_eq!(held().channel(&ch).unwrap().key, Some(key), "the delivered key is the channel's");
         act_as(&stranger);
-        with_key(None);
+        with_channel(None, epoch);
         assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 0, "a member it doesn't let in finds nothing");
         act_as(&owner.keys);
+        with_channel(Some(key), epoch);
+
+        // A rotation that carries a member serves them; one that leaves out a member who held the
+        // last epoch has cut them, whatever the roster still says.
+        let readers = crate::db::community::get_community_roles(&cid_hex).unwrap().roles.iter().find(|r| r.name == "Readers").unwrap().role_id.clone();
+        let (rider, fresh_member) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &rider.public_key(), vec![readers.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        rekey_channel_excluding(&bed.relay, &held(), &ch, &roster, &[], &[d.public_key()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &fresh_member.public_key(), vec![readers]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 1, "only the member entitled since: the rotation carried m and the rider, and cut d");
+        assert!(served(fresh_member.public_key()).await && !served(d.public_key()).await && !served(rider.public_key()).await);
     }
 
     #[tokio::test]

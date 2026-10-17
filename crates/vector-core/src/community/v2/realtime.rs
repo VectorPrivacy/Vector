@@ -1024,7 +1024,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return; // community gone (left / removed).
         };
-        match super::service::follow_rekeys(&transport, &current, session).await {
+        let rekeys = super::service::follow_rekeys(&transport, &current, session).await;
+        let rekeys_ok = rekeys.is_ok();
+        match rekeys {
             // A tombstone surfaced during catch-up (an offline member learning of a
             // death) — the flag is set; seal + surface, and stop following.
             Ok(follow) if follow.dissolved => {
@@ -1066,7 +1068,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
         };
-        let control = match super::service::follow_control(&transport, &current).await {
+        let followed = super::service::follow_control(&transport, &current).await;
+        let control_ok = followed.is_ok();
+        let control = match followed {
             Ok(c) => c,
             Err(e) => {
                 // Never swallowed: a control failure stops the roster and the floors
@@ -1104,17 +1108,32 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 Err(e) => crate::log_warn!("[v2:follow {}] access plane read failed: {e}", &community_id[..8.min(community_id.len())]),
             }
         }
-        if super::service::access_duty_due(id, control.authority_changed) {
+        // A holder delivers only off a pass that read both planes: a failed one may hold a key
+        // its roster hasn't caught up with.
+        if rekeys_ok && control_ok && super::service::access_duty_due(id, control.authority_changed) {
             let owed = *id;
             crate::db::spawn_bound(async move {
                 // Every holder sees the same gap: a random wait lets the first delivery serve them all.
                 crate::rt::time::sleep(std::time::Duration::from_millis(3_000 + rand::random::<u64>() % 12_000)).await;
+                if !crate::db::current_session().is_live() {
+                    return;
+                }
                 let Ok(Some(c)) = crate::db::community::load_community_v2(&owed) else { return };
                 let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
                 match super::service::access_duty(&transport, &c).await {
                     Ok(0) => {}
                     Ok(n) => crate::log_info!("[v2:access] delivered {n} channel key(s) on access planes"),
                     Err(e) => crate::log_warn!("[v2:access] access duty failed: {e}"),
+                }
+            });
+        }
+        if control.authority_changed {
+            // Holders deliver a few seconds after the change that entitled us: look again then.
+            let again = *id;
+            crate::db::spawn_bound(async move {
+                crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
+                if crate::db::current_session().is_live() {
+                    enqueue_follow(&again);
                 }
             });
         }
