@@ -365,6 +365,7 @@ fn process_text_message(
         text_spans,
         role_mentions: crate::community::mentions::from_tags(rumor.tags.iter()),
         writer: false,
+        unauthorized: false,
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -617,6 +618,7 @@ fn process_file_attachment(
         text_spans: Vec::new(),
         role_mentions: Vec::new(),
         writer: false,
+        unauthorized: false,
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))

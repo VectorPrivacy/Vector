@@ -51,6 +51,7 @@ const LABEL_SYNC: &str = "concord/sync";
 const LABEL_WRITERS: &str = "concord/writers";
 /// A restricted Channel's writer scope prefix — plain SHA-256.
 const LABEL_WRITER_SCOPE: &[u8] = b"concord/writer-scope";
+const LABEL_CERTIFIER_SCOPE: &[u8] = b"concord/certifier-scope";
 const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -347,6 +348,11 @@ pub fn writers_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u
 /// What a Channel's writer blobs bind to (CORD-03 §1), so one is never a read key.
 pub fn writer_scope(channel_id: &ChannelId) -> [u8; 32] {
     Sha256::new().chain_update(LABEL_WRITER_SCOPE).chain_update(channel_id.0).finalize().into()
+}
+
+/// What a Channel's writer certifier blobs bind to (CORD-03 §1): never a read or a writer key.
+pub fn certifier_scope(channel_id: &ChannelId) -> [u8; 32] {
+    Sha256::new().chain_update(LABEL_CERTIFIER_SCOPE).chain_update(channel_id.0).finalize().into()
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).

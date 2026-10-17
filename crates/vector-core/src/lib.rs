@@ -4226,20 +4226,6 @@ impl VectorCore {
             .collect())
     }
 
-    /// Of `posts` (id, npub, date in ms, carried by a writer address) in a restricted channel,
-    /// the ids its writers' rules don't stand behind (CORD-03 §1): a client shows them only to
-    /// those who manage it, marked.
-    pub async fn channel_unauthorized(&self, community_id: &str, channel_id: &str, posts: &[(String, String, u64, bool)]) -> Result<Vec<String>> {
-        let v2 = Self::held_v2(community_id)?;
-        let channel = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
-        let posts: Vec<(String, nostr_sdk::prelude::PublicKey, u64, bool)> = posts
-            .iter()
-            .filter_map(|(id, npub, at, writer)| nostr_sdk::prelude::PublicKey::parse(npub).ok().map(|pk| (id.clone(), pk, *at, *writer)))
-            .collect();
-        let transport = Self::short_transport();
-        crate::community::v2::service::unauthorized_posts(&transport, &v2, &channel, &posts).await.map_err(VectorError::Other)
-    }
-
     /// What mentions in a community need (CORD-04 §8): who may mention everyone, and so any
     /// Role (`anyone` when `@everyone` itself may), and its Roles top first, each with
     /// whether any member may mention it and whether I hold it.

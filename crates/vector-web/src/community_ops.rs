@@ -63,7 +63,6 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_community_timeouts" => with_id(a, |id| core(VectorCore.community_timeouts(id))),
             "timeout_community_member" => timeout_member(a).await,
             "get_channel_send_denied" => send_denied(a),
-            "get_channel_unauthorized" => unauthorized(a).await,
             "get_community_mentions" => mentions(a),
 
             // --- Images & pins ---
@@ -278,20 +277,6 @@ async fn set_overwrite(a: &Args) -> Result<Value, String> {
 
 fn mentions(a: &Args) -> Result<Value, String> {
     core(VectorCore.community_mentions(&a.str("communityId")?))
-}
-
-async fn unauthorized(a: &Args) -> Result<Value, String> {
-    #[derive(serde::Deserialize)]
-    struct PostRef {
-        id: String,
-        npub: String,
-        at: u64,
-        #[serde(default)]
-        writer: bool,
-    }
-    let (id, channel, posts) = (a.str("communityId")?, a.str("channelId")?, a.de::<Vec<PostRef>>("posts")?);
-    let posts: Vec<(String, String, u64, bool)> = posts.into_iter().map(|p| (p.id, p.npub, p.at, p.writer)).collect();
-    db::scoped(async move { core(VectorCore.channel_unauthorized(&id, &channel, &posts).await) }).await
 }
 
 fn send_denied(a: &Args) -> Result<Value, String> {

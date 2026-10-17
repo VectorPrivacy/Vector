@@ -168,7 +168,6 @@
     data-replying-to={mode.kind === 'reply' && mode.id === current.id ? 'true' : undefined}
     data-reply-pending={pendingReply || undefined}
     style:opacity={ctx.revealedBlocked ? '0.4' : null}
-    style:display={ctx.hidden ? 'none' : null}
     class:new-anim={arrival.id === current.id}
     onanimationend={() => { if (arrival.id === current.id) setArrival(null); }}
     use:expando={current}

@@ -156,6 +156,8 @@ pub struct OpenedStream {
     pub wrapper_id: EventId,
     /// True event time in ms: `created_at * 1000 + ms-tag` (tag absent = 0).
     pub at_ms: u64,
+    /// Its Channel's writers' rules don't stand behind it (CORD-03 §1): kept for managers, marked.
+    pub held: bool,
 }
 
 // ── millisecond ordering (CORD-02 §4) ────────────────────────────────────────
@@ -420,6 +422,7 @@ pub fn open_wrap_at(
         wrapper_id: wrap.id,
         at_ms,
         rumor,
+        held: false,
     })
 }
 

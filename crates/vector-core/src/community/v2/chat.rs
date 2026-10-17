@@ -426,6 +426,13 @@ pub enum ChatEvent {
 
 impl ChatEvent {
     /// The verified envelope facts (author, ms, rumor id) behind any variant.
+    /// Mark a post its Channel's writers' rules don't stand behind.
+    pub fn mark_held(&mut self) {
+        if let ChatEvent::Message { opened, .. } = self {
+            opened.held = true;
+        }
+    }
+
     pub fn opened(&self) -> &OpenedStream {
         match self {
             ChatEvent::Message { opened, .. }
@@ -515,10 +522,26 @@ pub fn carries_writer_epoch(rumor: &UnsignedEvent) -> bool {
     writer_epoch_of(rumor).is_ok_and(|e| e.is_some())
 }
 
+const TAG_WCERT: &str = "wcert";
+
+/// The writer certificate a rumor carries, if a well-formed one.
+pub fn writer_cert_of(rumor: &UnsignedEvent) -> Option<[u8; 64]> {
+    let s = rumor.tags.iter().map(|t| t.as_slice()).find(|s| s.first().map(String::as_str) == Some(TAG_WCERT))?;
+    crate::simd::hex::hex_string_to_bytes_checked(s.get(1)?)?.try_into().ok()
+}
+
 /// `rumor` committing writer epoch `wepoch` (CORD-03 §3), its id recomputed.
 pub fn with_writer_epoch(rumor: UnsignedEvent, wepoch: Epoch) -> UnsignedEvent {
+    with_writer(rumor, wepoch, None)
+}
+
+/// [`with_writer_epoch`], carrying the author's writer certificate for that epoch.
+pub fn with_writer(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<&[u8; 64]>) -> UnsignedEvent {
     let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
     tags.push(Tag::custom(TAG_WEPOCH, [wepoch.0.to_string()]));
+    if let Some(cert) = cert {
+        tags.push(Tag::custom(TAG_WCERT, [crate::simd::hex::bytes_to_hex_string(cert)]));
+    }
     let mut out = EventBuilder::new(rumor.kind, rumor.content).tags(tags).custom_created_at(rumor.created_at).finalize_unsigned_with_id(rumor.pubkey);
     out.ensure_id();
     out

@@ -60,6 +60,10 @@ pub const MAX_REKEY_BLOBS_PER_EVENT: usize = 80;
 /// with a larger `maxEventSize`) still parses. An array over this is rejected.
 pub const MAX_REKEY_BLOBS_RECEIVED: usize = 120;
 
+/// [`MAX_REKEY_BLOBS_PER_EVENT`] for a writer delivery, whose recipients' certificates ride the
+/// same event (size-guarded by test).
+pub const MAX_CERTIFIED_BLOBS_PER_EVENT: usize = 48;
+
 const TAG_SCOPE: &str = "scope";
 const TAG_NEW_EPOCH: &str = "newepoch";
 const TAG_PREV_EPOCH: &str = "prevepoch";
@@ -795,10 +799,15 @@ pub struct AccessDelivery {
     pub blobs: Vec<RekeyBlob>,
     /// The writer address a writer-scope delivery's key claims to derive to (CORD-03 §1).
     pub writer: Option<[u8; 32]>,
+    /// Writer certificates it hands its recipients, by recipient (CORD-03 §1).
+    pub certs: Vec<([u8; 32], [u8; 64])>,
 }
 
 /// A writer-scope delivery's claimed address.
 const TAG_WRITER: &str = "writer";
+
+/// A writer certificate for one recipient: `["cert", <recipient hex>, <signature hex>]`.
+const TAG_CERT: &str = "cert";
 
 /// The unsigned access-plane 3303 rumor.
 pub fn build_access_rumor(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
@@ -807,6 +816,11 @@ pub fn build_access_rumor(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch,
 
 /// [`build_access_rumor`] naming, for a writer key, the address it derives to.
 pub fn build_access_rumor_for(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, writer: Option<[u8; 32]>, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
+    build_access_rumor_certified(deliverer, scope, epoch, writer, blobs, &[], at_secs)
+}
+
+/// [`build_access_rumor_for`], handing writer certificates to its recipients.
+pub fn build_access_rumor_certified(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, writer: Option<[u8; 32]>, blobs: &[RekeyBlob], certs: &[([u8; 32], [u8; 64])], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
     if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
@@ -818,6 +832,9 @@ pub fn build_access_rumor_for(deliverer: PublicKey, scope: RekeyScope, epoch: Ep
     ];
     if let Some(pk) = writer {
         tags.push(Tag::custom(TAG_WRITER, [crate::simd::hex::bytes_to_hex_32(&pk)]));
+    }
+    for (who, cert) in certs {
+        tags.push(Tag::custom(TAG_CERT, [crate::simd::hex::bytes_to_hex_32(who), crate::simd::hex::bytes_to_hex_string(cert)]));
     }
     Ok(stream::build_rumor_secs(super::kind::REKEY, deliverer, &content, tags, at_secs))
 }
@@ -845,7 +862,20 @@ pub fn parse_access_delivery(opened: &OpenedStream) -> Result<AccessDelivery, Re
         None => None,
         Some(hex) => Some(crate::simd::hex::hex_to_bytes_32_checked(&hex).ok_or(RekeyError::BadTag(TAG_WRITER))?),
     };
-    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs, writer })
+    // A malformed certificate is no certificate; it never refuses the delivery it rides.
+    let certs = rumor
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            (s.first().map(String::as_str) == Some(TAG_CERT) && s.len() == 3).then_some(())?;
+            let who = crate::simd::hex::hex_to_bytes_32_checked(&s[1])?;
+            let cert: [u8; 64] = crate::simd::hex::hex_string_to_bytes_checked(&s[2])?.try_into().ok()?;
+            Some((who, cert))
+        })
+        .take(MAX_REKEY_BLOBS_RECEIVED)
+        .collect();
+    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs, writer, certs })
 }
 
 /// A Channel's history scope (CORD-03 §5): what history blobs bind to, so one can never be
@@ -1492,6 +1522,20 @@ mod tests {
         let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None, false).unwrap();
         assert_eq!(chunks.len(), 1, "a full send chunk is exactly one event");
         assert!(chunks[0].as_json().len() <= 65_536, "a full chunk must fit a 64KB relay event");
+    }
+
+    #[test]
+    fn a_full_certified_delivery_stays_under_the_relay_size_limit() {
+        let deliverer = keys(1);
+        let group = base_rekey_group(&root(), &CommunityId([9u8; 32]), Epoch(1));
+        let scope = RekeyScope::Channel(crate::community::ChannelId([3; 32]));
+        let recipients: Vec<Keys> = (0..MAX_CERTIFIED_BLOBS_PER_EVENT).map(|i| keys((i % 200 + 20) as u8)).collect();
+        let blobs: Vec<RekeyBlob> = recipients.iter().map(|r| build_blob_local(deliverer.secret_key(), &xonly(&deliverer), &r.public_key(), scope, Epoch(1), &[0xCD; 32]).unwrap()).collect();
+        let certs: Vec<([u8; 32], [u8; 64])> = recipients.iter().map(|r| (r.public_key().to_bytes(), [0xEE; 64])).collect();
+        let rumor = build_access_rumor_certified(deliverer.public_key(), scope, Epoch(1), Some([0x42; 32]), &blobs, &certs, 100).unwrap();
+        let seal = stream::build_seal(&rumor, SealForm::Encrypted, &group, &deliverer).unwrap();
+        let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, nostr_sdk::prelude::Timestamp::from_secs(100)).unwrap();
+        assert!(wrap.as_json().len() <= 65_536, "{} bytes: a full certified chunk must fit a 64KB relay event", wrap.as_json().len());
     }
 
     #[test]

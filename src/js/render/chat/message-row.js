@@ -94,7 +94,8 @@ function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
  */
 function _dmsgPostedTimedOut(msg, currentChat) {
     if (msg.mine || !msg.npub) return '';
-    if (channelUnauthorized(currentChat?.id)?.has(msg.id)) return 'unauthorized';
+    // Only a device that manages the channel keeps these (CORD-03 §1).
+    if (msg.unauthorized) return 'unauthorized';
     // A writer address's post stands on the writer key that signed it (CORD-03 §1).
     if (!msg.writer && channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
     const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
@@ -111,9 +112,7 @@ function _dmsgRowCtx(msg) {
         const blocked = _dmsgAuthorBlocked(msg, currentChat, isGroupChat);
         const revealed = revealedBlockedMessages.has(msg.id);
         const timedOut = !blocked && !revealed ? _dmsgPostedTimedOut(msg, currentChat) : '';
-        // An unauthorized post shows only to those who manage the channel, marked.
-        const unauthorized = !blocked && channelUnauthorized(currentChat?.id)?.has(msg.id);
-        const manages = unauthorized && communityCanManageChannels(communityIdOfChat(currentChat));
+        const unauthorized = !blocked && !!msg.unauthorized;
         return {
             myNpub: strPubkey,
             isGroupChat,
@@ -121,7 +120,6 @@ function _dmsgRowCtx(msg) {
             pinged: !unauthorized && _dmsgIsPinged(msg, currentChat, isGroupChat),
             blocked: blocked && !revealed,
             revealedBlocked: (blocked || unauthorized) && revealed,
-            hidden: unauthorized && !manages,
             // A reader collapses, never drops, what a timed-out member posted.
             timedOut,
         };

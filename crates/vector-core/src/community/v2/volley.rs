@@ -50,7 +50,8 @@ struct Job {
     address: PublicKey,
     /// A writer address's epoch, and its keys when this device is a writer.
     writer: Option<(Epoch, Option<Keys>)>,
-    ledger: Option<crate::community::v2::writers::Ledger>,
+    /// How the Channel's writers' rules judge what it reads, when it keeps a ledger.
+    judge: Option<std::sync::Arc<crate::community::v2::service::Judge>>,
 }
 
 impl Job {
@@ -64,7 +65,7 @@ impl Job {
             Some(w) => chat::open_writer_chat_event(wrap, &self.address, w, self.group.conv_key(), &self.channel_id, self.epoch),
             None => chat::open_chat_event(wrap, &self.group, &self.channel_id, self.epoch),
         };
-        opened.ok().filter(|ev| crate::community::v2::writers::keeps(self.ledger.as_ref(), wepoch, ev))
+        crate::community::v2::service::sort_arrival(self.judge.as_deref(), opened.ok()?, wepoch)
     }
 
     /// The keys a relay that gates reads must see this connection authenticated as.
@@ -212,8 +213,8 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 if plane_index.contains_key(&group.pk()) {
                     continue;
                 }
-                let ledger = ch.writers.clone();
-                let writer = ledger.as_ref().and_then(|l| l.current_writer()).and_then(|(we, pk)| PublicKey::from_slice(&pk).ok().map(|a| (we, a)));
+                let judge = crate::community::v2::service::Judge::of(&community, ch).map(std::sync::Arc::new);
+                let writer = ch.writers.as_ref().and_then(|l| l.current_writer()).and_then(|(we, pk)| PublicKey::from_slice(&pk).ok().map(|a| (we, a)));
                 if let Some((wepoch, address)) = writer.filter(|(_, a)| !plane_index.contains_key(a)) {
                     let keys = crate::community::v2::service::live_writer_of(&community, ch).filter(|(e, ..)| *e == wepoch).map(|(_, _, g)| g.keys().clone());
                     plane_index.insert(address, jobs.len());
@@ -226,7 +227,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                         relay_set,
                         address,
                         writer: Some((wepoch, keys)),
-                        ledger: ledger.clone(),
+                        judge: judge.clone(),
                     });
                 }
                 plane_index.insert(group.pk(), jobs.len());
@@ -239,7 +240,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                     since: t.since,
                     relay_set,
                     writer: None,
-                    ledger,
+                    judge,
                 });
             }
         }

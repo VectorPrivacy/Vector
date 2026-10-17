@@ -76,6 +76,13 @@ fn carried_by_writer(tags: &[Vec<String>]) -> bool {
     tags.iter().any(|t| t.len() == 1 && t[0] == WRITER_TAG)
 }
 
+/// A stored community message its writers' rules don't stand behind, kept for managers.
+const UNAUTHORIZED_TAG: &str = "unauthorized";
+
+fn held_unauthorized(tags: &[Vec<String>]) -> bool {
+    tags.iter().any(|t| t.len() == 1 && t[0] == UNAUTHORIZED_TAG)
+}
+
 /// Save a StoredEvent to the events table, its message content sealed at rest.
 pub async fn save_event(event: &StoredEvent) -> Result<(), String> {
     let tags_json = serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string());
@@ -422,6 +429,9 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
     tags.extend(crate::community::mentions::to_stored(&message.role_mentions));
     if message.writer {
         tags.push(vec![WRITER_TAG.to_string()]);
+    }
+    if message.unauthorized {
+        tags.push(vec![UNAUTHORIZED_TAG.to_string()]);
     }
 
     // Bot routing targets (npubs) — persist so the passive "ran /cmd with
@@ -1533,6 +1543,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             text_spans,
             role_mentions: crate::community::mentions::from_stored(&event.tags),
             writer: carried_by_writer(&event.tags),
+            unauthorized: held_unauthorized(&event.tags),
         });
     }
 
@@ -1894,6 +1905,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 text_spans,
                 role_mentions: crate::community::mentions::from_stored(&stored_tags),
                 writer: carried_by_writer(&stored_tags),
+                unauthorized: held_unauthorized(&stored_tags),
             });
         }
     });

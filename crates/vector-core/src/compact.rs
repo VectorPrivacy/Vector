@@ -150,6 +150,8 @@ impl MessageFlags {
     pub const FAILED: Self = Self(0b00100);
     /// A restricted Channel's writer address carried it.
     pub const WRITER: Self = Self(0b100000);
+    /// Its writers' rules don't stand behind it.
+    pub const UNAUTHORIZED: Self = Self(0b1000000);
     // Bits 3-4 for replied_to_has_attachment:
     // 00 = None, 01 = Some(false), 10 = Some(true)
     const REPLY_ATTACH_MASK: u8 = 0b11000;
@@ -181,6 +183,20 @@ impl MessageFlags {
             self.0 |= Self::WRITER.0;
         } else {
             self.0 &= !Self::WRITER.0;
+        }
+    }
+
+    #[inline]
+    pub fn is_unauthorized(self) -> bool {
+        self.0 & Self::UNAUTHORIZED.0 != 0
+    }
+
+    #[inline]
+    pub fn set_unauthorized(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::UNAUTHORIZED.0;
+        } else {
+            self.0 &= !Self::UNAUTHORIZED.0;
         }
     }
 
@@ -2316,6 +2332,7 @@ impl CompactMessage {
             flags: {
                 let mut flags = MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment);
                 flags.set_writer(msg.writer);
+                flags.set_unauthorized(msg.unauthorized);
                 flags
             },
         }
@@ -2361,6 +2378,7 @@ impl CompactMessage {
                 .map(|x| x.role_mentions.iter().map(crate::simd::hex::bytes_to_hex_32).collect())
                 .unwrap_or_default(),
             writer: self.flags.is_writer(),
+            unauthorized: self.flags.is_unauthorized(),
         }
     }
 }
@@ -2577,6 +2595,7 @@ mod tests {
                     text_spans: Vec::new(),
                     role_mentions: Vec::new(),
                     writer: false,
+                    unauthorized: false,
                 }
             })
             .collect();
@@ -3873,6 +3892,7 @@ mod tests {
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
             role_mentions: vec!["ab".repeat(32), "cd".repeat(32)],
             writer: true,
+            unauthorized: true,
             text_spans: vec![crate::text_spans::TextSpan::Color(crate::text_color::ColorSpan { from: 0, to: 2, effect: crate::text_color::Effect::Rainbow, colors: Vec::new() })],
         }
     }
@@ -4029,6 +4049,7 @@ mod tests {
         assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
         assert_eq!(restored.role_mentions, msg.role_mentions, "role_mentions mismatch");
         assert_eq!(restored.writer, msg.writer, "writer mismatch");
+        assert_eq!(restored.unauthorized, msg.unauthorized, "unauthorized mismatch");
     }
 
     // The compact form deliberately keeps only the "replied-to has an attachment"

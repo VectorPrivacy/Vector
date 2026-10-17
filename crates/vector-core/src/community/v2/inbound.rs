@@ -64,6 +64,7 @@ pub fn chat_message_to_message(
         role_mentions: crate::community::mentions::from_tags(opened.rumor.tags.iter()),
         // Only a writer address opens a rumor carrying a writer epoch.
         writer: chat::carries_writer_epoch(&opened.rumor),
+        unauthorized: opened.held,
         wrapper_event_id: Some(opened.wrapper_id.to_hex()),
         // Self-Destruct Timer: the sender's NIP-40 expiry drives our local purge.
         expiration: chat::message_expiration(&opened.rumor),
@@ -541,9 +542,9 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        if !super::writers::keeps(ch.writers.as_ref(), None, &event) {
+        let Some(event) = super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, None) else {
             return DispatchedV2::Ignored;
-        }
+        };
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
         return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
     }
@@ -560,9 +561,9 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, group.conv_key(), &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        if !super::writers::keeps(Some(ledger), Some(wepoch), &event) {
+        let Some(event) = super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, Some(wepoch)) else {
             return DispatchedV2::Ignored;
-        }
+        };
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
         return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
     }
@@ -845,9 +846,9 @@ mod tests {
         let w1 = super::super::derive::channel_writer_group_key(&s1, &general, Epoch(1));
         let w2 = super::super::derive::channel_writer_group_key(&s2, &general, Epoch(2));
         let ledger = Ledger::new(&general)
-            .appended(10_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&s1, &general, Epoch(1)), root: Epoch(0), by: [0x0b; 32] })
+            .appended(10_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&s1, &general, Epoch(1)), root: Epoch(0), by: [0x0b; 32], certifier: None })
             .unwrap()
-            .appended(20_000, Spell::Writer { epoch: Epoch(2), pk: writer_address(&s2, &general, Epoch(2)), root: Epoch(0), by: [0x0b; 32] })
+            .appended(20_000, Spell::Writer { epoch: Epoch(2), pk: writer_address(&s2, &general, Epoch(2)), root: Epoch(0), by: [0x0b; 32], certifier: None })
             .unwrap();
         community.channels[0].writers = Some(ledger);
         assert!(super::super::realtime::plane_authors(std::slice::from_ref(&community)).contains(&w2.pk()), "the live writer is subscribed");

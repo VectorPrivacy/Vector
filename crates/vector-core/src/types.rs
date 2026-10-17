@@ -70,6 +70,10 @@ pub struct Message {
     /// collapses for a Send its author has since lost (CORD-03 §1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub writer: bool,
+    /// A restricted Channel's writers' rules don't stand behind it: shown only to those who
+    /// manage the Channel, marked (CORD-03 §1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unauthorized: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -701,6 +705,7 @@ mod tests {
             text_spans: Vec::new(),
             role_mentions: Vec::new(),
             writer: false,
+            unauthorized: false,
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

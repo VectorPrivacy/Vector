@@ -8,10 +8,10 @@ use super::derive::{channel_writer_group_key, writer_scope};
 use crate::community::{ChannelId, Epoch};
 
 /// The most entries a ledger holds; a longer one is malformed.
-pub const MAX_LEDGER: usize = 128;
+pub const MAX_LEDGER: usize = 64;
 
 /// The most writer entries the cap retires before the oldest goes for good.
-pub const MAX_RETIRED: usize = 128;
+pub const MAX_RETIRED: usize = 64;
 
 /// Writer epochs stay below this, so every reader's arithmetic agrees.
 pub const MAX_EPOCH: u64 = 1 << 53;
@@ -25,8 +25,9 @@ pub const HORIZON_MS: u64 = 60 * 60 * 1000;
 /// What one ledger entry moves the Channel to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spell {
-    /// Posts land at this writer epoch's address, minted under root epoch `root` by `by`.
-    Writer { epoch: Epoch, pk: [u8; 32], root: Epoch, by: [u8; 32] },
+    /// Posts land at this writer epoch's address, minted under root epoch `root` by `by`, whose
+    /// writers carry a certificate from `certifier`.
+    Writer { epoch: Epoch, pk: [u8; 32], root: Epoch, by: [u8; 32], certifier: Option<[u8; 32]> },
     /// Posts land at the read address again.
     Open,
 }
@@ -40,13 +41,15 @@ pub struct Entry {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A writer entry the cap dropped: its address still reads, its window stays closed.
+/// A writer entry the cap dropped: its address still reads, its window stays closed, and its
+/// writers' certificates still check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retired {
     pub epoch: Epoch,
     pub pk: [u8; 32],
     pub from: u64,
     pub to: u64,
+    pub certifier: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -89,8 +92,12 @@ impl Ledger {
             Some(serde_json::Value::Array(r)) => r
                 .iter()
                 .map(|x| {
-                    let x = x.as_array().filter(|x| x.len() == 4)?;
-                    Some(Retired { epoch: epoch_of(&x[0])?, pk: writer_pk(&x[1])?, from: x[2].as_u64()?, to: x[3].as_u64()? })
+                    let x = x.as_array().filter(|x| x.len() == 4 || x.len() == 5)?;
+                    let certifier = match x.get(4) {
+                        None => None,
+                        Some(c) => Some(writer_pk(c)?),
+                    };
+                    Some(Retired { epoch: epoch_of(&x[0])?, pk: writer_pk(&x[1])?, from: x[2].as_u64()?, to: x[3].as_u64()?, certifier })
                 })
                 .collect::<Option<Vec<_>>>()?,
             Some(_) => return None,
@@ -104,7 +111,13 @@ impl Ledger {
             let at = e.remove("at")?.as_u64()?;
             let spell = match (e.remove("open"), e.remove("epoch"), e.remove("writer"), e.remove("root"), e.remove("by")) {
                 (Some(serde_json::Value::Bool(true)), None, None, None, None) => Spell::Open,
-                (None, Some(epoch), Some(writer), Some(root), Some(by)) => Spell::Writer { epoch: epoch_of(&epoch)?, pk: writer_pk(&writer)?, root: Epoch(root.as_u64()?), by: hex32(&by)? },
+                (None, Some(epoch), Some(writer), Some(root), Some(by)) => {
+                    let certifier = match e.remove("certifier") {
+                        None => None,
+                        Some(c) => Some(writer_pk(&c)?),
+                    };
+                    Spell::Writer { epoch: epoch_of(&epoch)?, pk: writer_pk(&writer)?, root: Epoch(root.as_u64()?), by: hex32(&by)?, certifier }
+                }
                 _ => return None,
             };
             entries.push(Entry { at, spell, extra: e });
@@ -128,11 +141,14 @@ impl Ledger {
                 let mut o = e.extra.clone();
                 o.insert("at".into(), e.at.into());
                 match e.spell {
-                    Spell::Writer { epoch, pk, root, by } => {
+                    Spell::Writer { epoch, pk, root, by, certifier } => {
                         o.insert("epoch".into(), epoch.0.into());
                         o.insert("writer".into(), crate::simd::hex::bytes_to_hex_32(&pk).into());
                         o.insert("root".into(), root.0.into());
                         o.insert("by".into(), crate::simd::hex::bytes_to_hex_32(&by).into());
+                        if let Some(c) = certifier {
+                            o.insert("certifier".into(), crate::simd::hex::bytes_to_hex_32(&c).into());
+                        }
                     }
                     Spell::Open => {
                         o.insert("open".into(), true.into());
@@ -145,7 +161,14 @@ impl Ledger {
         top.insert("channel".into(), crate::simd::hex::bytes_to_hex_32(&self.channel).into());
         top.insert("ledger".into(), entries.into());
         if !self.retired.is_empty() {
-            let retired: Vec<serde_json::Value> = self.retired.iter().map(|r| serde_json::json!([r.epoch.0, crate::simd::hex::bytes_to_hex_32(&r.pk), r.from, r.to])).collect();
+            let retired: Vec<serde_json::Value> = self
+                .retired
+                .iter()
+                .map(|r| match r.certifier {
+                    Some(c) => serde_json::json!([r.epoch.0, crate::simd::hex::bytes_to_hex_32(&r.pk), r.from, r.to, crate::simd::hex::bytes_to_hex_32(&c)]),
+                    None => serde_json::json!([r.epoch.0, crate::simd::hex::bytes_to_hex_32(&r.pk), r.from, r.to]),
+                })
+                .collect();
             top.insert("retired".into(), retired.into());
         }
         serde_json::Value::Object(top).to_string()
@@ -223,6 +246,21 @@ impl Ledger {
         !matches!(self.entries.iter().rev().find(|e| e.at <= at_ms), Some(Entry { spell: Spell::Writer { .. }, .. }))
     }
 
+    /// The key that certifies writer `epoch`'s writers, live or retired.
+    pub fn certifier(&self, epoch: Epoch) -> Option<[u8; 32]> {
+        self.retired.iter().find(|r| r.epoch == epoch).and_then(|r| r.certifier).or_else(|| {
+            self.entries.iter().find_map(|e| match e.spell {
+                Spell::Writer { epoch: w, certifier, .. } if w == epoch => certifier,
+                _ => None,
+            })
+        })
+    }
+
+    /// Whether `cert` is the certifier of writer `epoch` vouching for `writer` in this Channel.
+    pub fn certifies(&self, community: &[u8; 32], epoch: Epoch, writer: &[u8; 32], cert: &[u8; 64]) -> bool {
+        self.certifier(epoch).is_some_and(|c| verify_writer_cert(&c, &cert_digest(community, &self.channel, epoch, writer), cert))
+    }
+
     /// The writer epoch whose window holds `at_ms`, or failing any, the one that opened within a
     /// slow clock's few minutes after it.
     pub fn writer_at(&self, at_ms: u64) -> Option<Epoch> {
@@ -257,8 +295,8 @@ impl Ledger {
         next.entries.push(entry);
         if next.entries.len() > MAX_LEDGER {
             let gone = next.entries.remove(0);
-            if let Spell::Writer { epoch, pk, .. } = gone.spell {
-                next.retired.push(Retired { epoch, pk, from: gone.at, to: next.entries[0].at });
+            if let Spell::Writer { epoch, pk, certifier, .. } = gone.spell {
+                next.retired.push(Retired { epoch, pk, from: gone.at, to: next.entries[0].at, certifier });
                 if next.retired.len() > MAX_RETIRED {
                     next.retired.remove(0);
                 }
@@ -314,6 +352,48 @@ pub fn admits(ledger: Option<&Ledger>, wepoch: Option<Epoch>, event: &super::cha
     }
 }
 
+/// What a writer certificate signs: one member's place among a Channel's writers at one epoch.
+pub fn cert_digest(community: &[u8; 32], channel: &[u8; 32], epoch: Epoch, writer: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"concord/writer-cert");
+    h.update(community);
+    h.update(channel);
+    h.update(epoch.0.to_be_bytes());
+    h.update(writer);
+    h.finalize().into()
+}
+
+/// The never-published event a writer certificate signs: [`cert_digest`] under the certifier.
+fn cert_event(certifier: nostr_sdk::prelude::PublicKey, digest: &[u8; 32]) -> nostr_sdk::prelude::UnsignedEvent {
+    use nostr_sdk::prelude::{Kind, Tag, Timestamp, UnsignedEvent};
+    UnsignedEvent::new(certifier, Timestamp::from_secs(0), Kind::Custom(CERT_KIND), [Tag::custom("digest", [crate::simd::hex::bytes_to_hex_32(digest)])], "")
+}
+
+/// The kind of the event a writer certificate signs; never published.
+const CERT_KIND: u16 = 3320;
+
+/// A certifier's signature over [`cert_digest`].
+pub fn sign_writer_cert(certifier: &[u8; 32], digest: &[u8; 32]) -> Option<[u8; 64]> {
+    let keys = nostr_sdk::prelude::Keys::new(nostr_sdk::prelude::SecretKey::from_slice(certifier).ok()?);
+    let e = cert_event(keys.public_key(), digest);
+    let id = nostr_sdk::prelude::EventId::compute(&e.pubkey, &e.created_at, &e.kind, &e.tags, &e.content);
+    Some(keys.sign_schnorr(id.as_bytes()).to_bytes())
+}
+
+pub fn verify_writer_cert(certifier: &[u8; 32], digest: &[u8; 32], cert: &[u8; 64]) -> bool {
+    use nostr_sdk::prelude::{Event, EventId, PublicKey, Signature};
+    let (Ok(pk), Ok(sig)) = (PublicKey::from_slice(certifier), Signature::from_slice(cert)) else { return false };
+    let unsigned = cert_event(pk, digest);
+    let id = EventId::compute(&pk, &unsigned.created_at, &unsigned.kind, &unsigned.tags, &unsigned.content);
+    Event::new(id, pk, unsigned.created_at, unsigned.kind, unsigned.tags, unsigned.content, sig).verify_signature()
+}
+
+/// The certifier key a certifier secret yields.
+pub fn certifier_of(secret: &[u8; 32]) -> Option<[u8; 32]> {
+    nostr_sdk::prelude::SecretKey::from_slice(secret).ok().map(|s| nostr_sdk::prelude::Keys::new(s).public_key().to_bytes())
+}
+
 /// The writer address a secret yields for `epoch`.
 pub fn writer_address(secret: &[u8; 32], channel: &ChannelId, epoch: Epoch) -> [u8; 32] {
     channel_writer_group_key(secret, channel, epoch).pk().to_bytes()
@@ -322,6 +402,11 @@ pub fn writer_address(secret: &[u8; 32], channel: &ChannelId, epoch: Epoch) -> [
 /// The rekey scope writer blobs bind to.
 pub fn writer_rekey_scope(channel: &ChannelId) -> super::rekey::RekeyScope {
     super::rekey::RekeyScope::Channel(ChannelId(writer_scope(channel)))
+}
+
+/// The access-plane scope a Channel's writer certifier secrets ride to its managers.
+pub fn certifier_rekey_scope(channel: &ChannelId) -> super::rekey::RekeyScope {
+    super::rekey::RekeyScope::Channel(ChannelId(super::derive::certifier_scope(channel)))
 }
 
 /// Where a Channel's writer secrets are archived, by writer epoch.
@@ -333,6 +418,11 @@ pub fn secret_scope(channel: &ChannelId) -> String {
 /// was delivered.
 pub fn minted_scope(channel: &ChannelId) -> String {
     format!("wrmint:{}", crate::simd::hex::bytes_to_hex_32(&channel.0))
+}
+
+/// Where a minter keeps the secret that certifies its epoch's writers.
+pub fn certifier_scope(channel: &ChannelId) -> String {
+    format!("wrcert:{}", crate::simd::hex::bytes_to_hex_32(&channel.0))
 }
 
 #[cfg(test)]
@@ -347,7 +437,58 @@ mod tests {
     }
 
     fn w(e: u64, n: u8) -> Spell {
-        Spell::Writer { epoch: Epoch(e), pk: pk(n), root: Epoch(0), by: BY }
+        Spell::Writer { epoch: Epoch(e), pk: pk(n), root: Epoch(0), by: BY, certifier: None }
+    }
+
+    #[test]
+    fn a_writer_certificate_vouches_for_one_member_at_one_epoch_in_one_channel() {
+        let secret = [0x31; 32];
+        let certifier = certifier_of(&secret).unwrap();
+        let (community, channel, writer) = ([1; 32], [2; 32], pk(5));
+        let cert = sign_writer_cert(&secret, &cert_digest(&community, &channel, Epoch(3), &writer)).unwrap();
+        assert!(verify_writer_cert(&certifier, &cert_digest(&community, &channel, Epoch(3), &writer), &cert));
+        for (why, digest) in [
+            ("another member", cert_digest(&community, &channel, Epoch(3), &pk(6))),
+            ("another epoch", cert_digest(&community, &channel, Epoch(4), &writer)),
+            ("another channel", cert_digest(&community, &[9; 32], Epoch(3), &writer)),
+            ("another community", cert_digest(&[8; 32], &channel, Epoch(3), &writer)),
+        ] {
+            assert!(!verify_writer_cert(&certifier, &digest, &cert), "{why}");
+        }
+        assert!(!verify_writer_cert(&certifier_of(&[0x32; 32]).unwrap(), &cert_digest(&community, &channel, Epoch(3), &writer), &cert), "another certifier");
+    }
+
+    #[test]
+    fn a_full_ledger_fits_one_relay_event() {
+        let c = certifier_of(&[0x41; 32]).unwrap();
+        let mut l = Ledger { channel: [7; 32], ..Default::default() };
+        let mut epoch = 0u64;
+        while l.retired.len() < MAX_RETIRED || l.entries.len() < MAX_LEDGER {
+            epoch += 1;
+            let spell = Spell::Writer { epoch: Epoch(epoch), pk: pk((epoch % 200) as u8 + 1), root: Epoch(epoch), by: BY, certifier: Some(c) };
+            l = l.appended(1_792_256_141_843 + epoch * 1_000, spell).unwrap();
+        }
+        let keys = nostr_sdk::prelude::Keys::generate();
+        let group = super::super::derive::channel_group_key(&[1; 32], &ChannelId([7; 32]), Epoch(1));
+        let rumor = super::super::control::build_edition_rumor_bound(keys.public_key(), super::super::vsk::WRITERS, &[8; 32], 999, Some(&[9; 32]), &l.to_json(), 1_792_256_141, None, Some([10; 32]));
+        let (wrap, _) = super::super::control::seal_control_edition(&rumor, &group, &keys, nostr_sdk::prelude::Timestamp::from_secs(1_792_256_141)).unwrap();
+        assert!(wrap.as_json().len() <= 65_536, "{} bytes: a full ledger must fit a 64KB relay event", wrap.as_json().len());
+    }
+
+    #[test]
+    fn a_ledger_carries_its_certifiers_live_and_retired() {
+        let c = certifier_of(&[0x41; 32]).unwrap();
+        let mut l = Ledger { channel: [7; 32], ..Default::default() };
+        for i in 0..MAX_LEDGER as u64 + 1 {
+            let spell = Spell::Writer { epoch: Epoch(i + 1), pk: pk((i % 200) as u8 + 1), root: Epoch(0), by: BY, certifier: Some(c) };
+            l = l.appended(1_000 + i, spell).unwrap();
+        }
+        assert_eq!(l.retired.len(), 1);
+        assert_eq!((l.certifier(Epoch(1)), l.certifier(Epoch(2))), (Some(c), Some(c)), "retired and live");
+        let back = Ledger::parse(&l.to_json()).unwrap();
+        assert_eq!(back, l, "a round trip keeps every certifier");
+        let old = ledger(&[(100, w(1, 1))]);
+        assert_eq!(Ledger::parse(&old.to_json()).unwrap().certifier(Epoch(1)), None, "an entry from before certifiers reads");
     }
 
     fn ledger(entries: &[(u64, Spell)]) -> Ledger {
@@ -358,10 +499,10 @@ mod tests {
 
     #[test]
     fn a_ledger_round_trips_with_its_unknown_fields() {
-        let mut l = ledger(&[(100, w(2, 1)), (200, Spell::Open), (300, Spell::Writer { epoch: Epoch(3), pk: pk(2), root: Epoch(3), by: BY })]);
+        let mut l = ledger(&[(100, w(2, 1)), (200, Spell::Open), (300, Spell::Writer { epoch: Epoch(3), pk: pk(2), root: Epoch(3), by: BY, certifier: None })]);
         l.extra.insert("future".into(), serde_json::json!({"x": 1}));
         l.entries[1].extra.insert("note".into(), "kept".into());
-        l.retired = vec![Retired { epoch: Epoch(1), pk: pk(3), from: 10, to: 50 }];
+        l.retired = vec![Retired { epoch: Epoch(1), pk: pk(3), from: 10, to: 50, certifier: None }];
         let back = Ledger::parse(&l.to_json()).unwrap();
         assert_eq!(back, l);
         assert!(back.restricted() && back.current_writer() == Some((Epoch(3), pk(2))) && back.next_epoch() == Some(Epoch(4)));
@@ -374,7 +515,7 @@ mod tests {
         let ok = ledger(&[(100, w(1, 1)), (100, Spell::Open), (150, w(2, 2))]);
         assert!(Ledger::parse(&ok.to_json()).is_some(), "equal times keep order");
         let mut stale = ok.clone();
-        stale.retired = vec![Retired { epoch: Epoch(5), pk: pk(5), from: 1, to: 2 }];
+        stale.retired = vec![Retired { epoch: Epoch(5), pk: pk(5), from: 1, to: 2, certifier: None }];
         for (why, bad) in [
             ("out of order", ledger(&[(200, w(1, 1)), (100, Spell::Open)])),
             ("epoch repeats", ledger(&[(100, w(1, 1)), (200, w(1, 2))])),
@@ -423,7 +564,7 @@ mod tests {
         entries.extend((2..MAX_LEDGER as u64).map(|i| (1_000 + i * 1_000, Spell::Open)));
         let at_cap = ledger(&entries);
         let once = at_cap.appended(500_000, w(2, 2)).unwrap();
-        assert_eq!(once.retired, vec![Retired { epoch: Epoch(1), pk: pk(1), from: 1_000, to: 2_000 }]);
+        assert_eq!(once.retired, vec![Retired { epoch: Epoch(1), pk: pk(1), from: 1_000, to: 2_000, certifier: None }]);
         assert!(!once.read_address_takes(1_500), "the dropped writer entry's window stays closed");
         assert!(once.writer_address_takes(Epoch(1), 1_500) && !once.writer_address_takes(Epoch(1), 2_000), "and its address still reads, up to its end");
         assert!(once.writers().any(|(e, ..)| e == Epoch(1)), "history still fetches it");

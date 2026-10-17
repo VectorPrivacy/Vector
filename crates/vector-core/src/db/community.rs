@@ -238,6 +238,18 @@ pub fn store_epoch_key(community_id: &str, scope_id: &str, epoch: u64, key: &[u8
     store_epoch_key_tx(&conn, community_id, scope_id, epoch, key)
 }
 
+/// Forget one held epoch key, as a device that never held it.
+#[cfg(test)]
+pub fn delete_epoch_key(community_id: &str, scope_id: &str, epoch: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_epoch_keys WHERE community_id = ?1 AND scope_id = ?2 AND epoch = ?3",
+        params![community_id, scope_id, epoch as i64],
+    )
+    .map_err(|e| format!("delete epoch key: {e}"))?;
+    Ok(())
+}
+
 /// Shared INSERT body so `save_community` can archive keys inside its own transaction and the
 /// standalone [`store_epoch_key`] can run on a borrowed connection. `C: Deref<Target=Connection>`
 /// covers both a `Connection` and a `Transaction`.
@@ -964,6 +976,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
         Some("DELETE FROM community_writers WHERE community_id = ?1"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
+        Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
     ]
     .into_iter()
     .flatten()
