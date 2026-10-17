@@ -784,6 +784,11 @@ function _dmsgContentSig(msg) {
     // An edit's authoritative update can carry new emoji tags under unchanged text.
     if (msg.emoji_tags?.length) parts.push(...msg.emoji_tags.map(t => t.shortcode + '=' + t.url));
     if (msg.text_spans?.length) parts.push(JSON.stringify(msg.text_spans));
+    // Role and @everyone chips follow who may mention what, which can land after the row.
+    if (msg.role_mentions?.length || /@everyone\b/.test(msg.content || '')) {
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        parts.push(standingRoleMentions(msg, chat).map(r => r.id + ':' + r.color).join(','), mayMentionEveryone(chat, msg.npub || ''));
+    }
     // Link-preview metadata arrives async via message_update.
     const pm = msg.preview_metadata;
     if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);

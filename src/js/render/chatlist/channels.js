@@ -120,7 +120,19 @@ async function loadCommunityMentions(communityId) {
     if (!communityId) return;
     let m;
     try { m = await invoke('get_community_mentions', { communityId }); } catch { return; }
+    const print = (x) => x && JSON.stringify([x.anyone, [...x.pingers], x.roles]);
+    const had = print(communityMentionsCache.get(communityId));
     communityMentionsCache.set(communityId, { anyone: !!m.anyone, pingers: new Set(m.pingers || []), roles: m.roles || [] });
+    if (had !== print(communityMentionsCache.get(communityId))) refreshMentionRows(communityId);
+}
+
+/** Repaint the open channel's rows whose chips depend on who may mention what. */
+function refreshMentionRows(communityId) {
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat || communityIdOfChat(chat) !== communityId) return;
+    for (const msg of chat.messages || []) {
+        if (msg.role_mentions?.length || /@everyone\b/.test(msg.content || '')) updateMessageRow(msg, msg.id);
+    }
 }
 
 /** Whether `npub` may mention everyone, and so any Role, where `chat` sits. */

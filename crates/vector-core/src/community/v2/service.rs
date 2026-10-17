@@ -6620,6 +6620,8 @@ pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: 
             if next.permissions.contains(crate::community::roles::Permissions::MANAGE_ROLES) {
                 next.permissions = crate::community::roles::Permissions(next.permissions.0 | super::roles::EVERYONE_DEFAULT);
             }
+            // The legacy member list set admins apart; they stay apart.
+            next.display |= role.permissions.is_management();
             set_role_v2(transport, community, &next).await?;
             last = Some(rank);
             prev_position = Some(role.position);
@@ -19975,6 +19977,7 @@ mod tests {
             let gained = if b.permissions.contains(Permissions::MANAGE_ROLES) { crate::community::v2::roles::EVERYONE_DEFAULT } else { 0 };
             assert_eq!((&b.name, b.permissions.0 | gained, b.color), (&a.name, a.permissions.0, a.color));
             assert!(a.rank.is_some());
+            assert_eq!(a.display, b.permissions.is_management(), "managing roles stay apart in the member list, as they were");
         }
         assert_eq!(after.roles.roles_of(&member.keys.public_key().to_hex()).count(), 2, "grants keep resolving");
         assert!(activate_roles_v2(&bed.relay, &community, 0).await.is_err(), "once is enough");
