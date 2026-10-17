@@ -271,8 +271,10 @@ impl CommunityRoles {
     /// A member's permissions in one Channel (CORD-04 §8), holding `role_ids` (their Grant,
     /// or one about to replace it): server permissions, then the Channel's `@everyone`
     /// overwrite, its Roles' denies then allows, and their own overwrite last. Without
-    /// VIEW_CHANNEL they hold nothing there. The owner holds everything.
-    pub fn channel_permissions_holding(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, role_ids: &[String]) -> Permissions {
+    /// VIEW_CHANNEL they hold nothing there. The owner holds everything. A private Channel
+    /// is closed to `@everyone` whatever its overwrites say: only a Role's or a member's
+    /// allow opens it, so no overwrite a manager can clear is all that keeps it private.
+    pub fn channel_permissions_holding(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, role_ids: &[String], private: bool) -> Permissions {
         if owner_hex == Some(member_hex) {
             return Permissions(u64::MAX);
         }
@@ -284,6 +286,9 @@ impl CommunityRoles {
         let here = || self.overwrites.iter().filter(|o| o.scope == scope);
         if let Some(o) = here().find(|o| o.target == OverwriteTarget::Everyone) {
             p = (p & !o.deny.0) | o.allow.0;
+        }
+        if private {
+            p &= !Permissions::VIEW_CHANNEL;
         }
         let (mut deny, mut allow) = (0u64, 0u64);
         for o in here() {
@@ -305,9 +310,9 @@ impl CommunityRoles {
     }
 
     /// [`Self::channel_permissions_holding`] for the Roles the member holds now.
-    pub fn channel_permissions(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str) -> Permissions {
+    pub fn channel_permissions(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, private: bool) -> Permissions {
         let held: Vec<String> = self.roles_of(member_hex).map(|r| r.role_id.clone()).collect();
-        self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held)
+        self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held, private)
     }
 
     /// Effective permissions for a member: `@everyone` and every granted Role's bits.
@@ -496,7 +501,7 @@ impl CommunityRoles {
         // On Roles v2 the key follows View Channel as the Channel resolves it (CORD-03 §5).
         if self.everyone.is_some() {
             let held: Vec<String> = held.into_iter().map(String::from).collect();
-            return self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held).contains(Permissions::VIEW_CHANNEL);
+            return self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held, true).contains(Permissions::VIEW_CHANNEL);
         }
         self.channel_role_ids(channel_hex).iter().any(|id| held.contains(id.as_str()))
     }
@@ -548,7 +553,7 @@ mod tests {
             overwrites: vec![ow(OverwriteTarget::Everyone, 0, view | send), ow(OverwriteTarget::Role(r1.clone()), view, 0), ow(OverwriteTarget::Role(r2.clone()), 0, view)],
             syncs: Default::default(),
         };
-        let at = |r: &CommunityRoles, who: &str| r.channel_permissions(Some("o"), who, &ch).0;
+        let at = |r: &CommunityRoles, who: &str| r.channel_permissions(Some("o"), who, &ch, false).0;
         assert_eq!(at(&r, &m), view, "one role's allow beats another's deny; @everyone's deny of Send stands");
         assert_eq!(at(&r, &n), 0, "without View a member holds nothing there");
         assert_eq!(at(&r, "o"), u64::MAX, "the owner holds everything");

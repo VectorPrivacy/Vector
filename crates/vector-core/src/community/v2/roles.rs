@@ -369,12 +369,16 @@ pub struct OverwriteContent {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// The 32 bytes an overwrite target contributes to its coordinate.
+/// The 32 bytes an overwrite target contributes to its coordinate: its kind and its id, so
+/// a Role and a member that share 32 bytes never share an overwrite.
 pub fn overwrite_target_bytes(community_id: &crate::community::CommunityId, target: &OverwriteTarget) -> Option<[u8; 32]> {
-    match target {
-        OverwriteTarget::Everyone => Some(super::derive::everyone_locator(community_id)),
-        OverwriteTarget::Role(id) | OverwriteTarget::Member(id) => crate::simd::hex::hex_to_bytes_32_checked(id),
-    }
+    use sha2::{Digest, Sha256};
+    let (kind, id): (&[u8], [u8; 32]) = match target {
+        OverwriteTarget::Everyone => (b"everyone", super::derive::everyone_locator(community_id)),
+        OverwriteTarget::Role(id) => (b"role", crate::simd::hex::hex_to_bytes_32_checked(id)?),
+        OverwriteTarget::Member(id) => (b"member", crate::simd::hex::hex_to_bytes_32_checked(id)?),
+    };
+    Some(Sha256::new().chain_update(kind).chain_update(id).finalize().into())
 }
 
 /// Parse an overwrite, keeping only the bits an overwrite may touch.

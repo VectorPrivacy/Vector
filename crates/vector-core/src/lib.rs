@@ -1468,7 +1468,7 @@ impl VectorCore {
         community
             .channels
             .iter()
-            .map(|c| (c.id.0, roster.channel_permissions(owner.as_deref(), &me.to_hex(), &crate::simd::hex::bytes_to_hex_32(&c.id.0)).0))
+            .map(|c| (c.id.0, roster.channel_permissions(owner.as_deref(), &me.to_hex(), &crate::simd::hex::bytes_to_hex_32(&c.id.0), c.private).0))
             .collect()
     }
 
