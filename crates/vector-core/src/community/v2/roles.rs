@@ -302,7 +302,8 @@ pub struct TenureEntry {
     pub heads: Vec<String>,
 }
 
-/// A member's Tenure (vsk 16 at `tenure_locator(community_id, member)`), replaced entire.
+/// A member's Tenure from one writer (vsk 16 at `tenure_locator(community_id, member,
+/// writer)`), replaced entire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenureContent {
     pub member: String,

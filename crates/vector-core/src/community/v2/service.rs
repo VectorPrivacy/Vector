@@ -2197,6 +2197,8 @@ pub struct AuthorityView {
     pub banned_at: std::collections::BTreeMap<String, u64>,
     /// Roles v2 is active (CORD-04 §2): Roles are vsk 13, ordered by rank key.
     pub activated: bool,
+    /// Who signed each member's Grant head, by member hex.
+    pub grant_authors: std::collections::BTreeMap<String, String>,
 }
 
 /// Fetch + fold the community's current authority (CORD-04), paging older like
@@ -2260,6 +2262,17 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         until = oldest;
     }
     let head_entities = a.settled().into_iter().map(String::from).collect();
+    let grant_authors = a
+        .roles
+        .grants
+        .iter()
+        .filter_map(|g| {
+            let member = crate::simd::hex::hex_to_bytes_32_checked(&g.member)?;
+            let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &member));
+            let head = a.heads.iter().find(|h| h.entity_hex == eid)?;
+            Some((g.member.clone(), crate::simd::hex::bytes_to_hex_32(&head.author)))
+        })
+        .collect();
     AuthorityView {
         roles: a.roles,
         banned: a.banned,
@@ -2268,6 +2281,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         head_entities,
         banned_at: a.banned_at,
         activated: a.activated,
+        grant_authors,
     }
 }
 
@@ -5051,7 +5065,8 @@ async fn grant_roles_with_roster_sealing<T: Transport + ?Sized>(
     seal: Seal,
 ) -> Result<(), String> {
     // Every Role a Grant takes away seals what the member decided with it first (CORD-04 §9).
-    if roster.roles_of(&member.to_hex()).any(|r| !role_ids.contains(&r.role_id)) {
+    // A strip to nothing seals whatever the plane says they held, stale roster or not.
+    if role_ids.is_empty() || roster.roles_of(&member.to_hex()).any(|r| !role_ids.contains(&r.role_id)) {
         seal_standing(transport, community, std::slice::from_ref(member), seal).await?;
     }
     // A grant that leaves the member staff carries the staff write key in the
@@ -5529,9 +5544,29 @@ pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &Comm
         if current.rank.as_deref().is_some_and(|old| old.as_bytes() < rank.as_bytes()) {
             seal_standing(transport, community, &holders_of(&view, role_id), Seal::Strict).await?;
         }
+        // A Grant is judged on the Role's rank as it stands, so moving the Role up past the
+        // Grant's signer would take it from the member: re-sign those Grants as the mover.
+        let resign: Vec<&crate::community::roles::MemberGrant> = view
+            .roles
+            .grants
+            .iter()
+            .filter(|g| g.role_ids.iter().any(|r| r == role_id))
+            .filter(|g| view.grant_authors.get(&g.member).is_some_and(|a| *a != author.owner_hex && view.roles.highest_position(a).is_none_or(|p| p >= spot)))
+            .collect();
+        for g in &resign {
+            let reach = g.role_ids.iter().filter_map(|r| view.roles.role(r).map(|x| x.position)).chain([spot, view.roles.highest_position(&g.member).unwrap_or(u32::MAX)]).min().unwrap_or(spot);
+            if !author.outranks(view.roles.highest_position(&g.member).unwrap_or(u32::MAX)) || !author.supports(reach.min(spot), 0) {
+                return Err(format!("moving \"{}\" there would take it from members you can't give it to", current.name));
+            }
+        }
         let mut next = current;
         next.rank = Some(rank);
-        set_role_v2(transport, community, &next).await
+        set_role_v2(transport, community, &next).await?;
+        for g in resign {
+            let member = PublicKey::from_hex(&g.member).map_err(|e| e.to_string())?;
+            grant_roles_with_roster(transport, community, &member, g.role_ids.clone(), &view.roles).await?;
+        }
+        Ok(())
     })
     .await
 }
@@ -5633,12 +5668,15 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
             .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
             .collect();
         let Some(editions) = fetch_control_plane_whole(transport, community).await else {
-            // Nothing to seal before Roles v2; a device that has seen it can't skip the seal.
+            // Nothing to seal before Roles v2, and a removal never waits on a read.
             let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(cid));
-            return match floors.contains_key(&everyone_hex) {
-                true => Err("the control plane couldn't be read whole; nothing was changed".to_string()),
-                false => Ok(()),
-            };
+            if floors.contains_key(&everyone_hex) && mode == Seal::Strict {
+                return Err("the control plane couldn't be read whole; nothing was changed".to_string());
+            }
+            if floors.contains_key(&everyone_hex) {
+                crate::log_warn!("[v2:tenure] the control plane couldn't be read whole; removing without sealing");
+            }
+            return Ok(());
         };
         let authority = fold_authority(community, &editions, &floors);
         if !authority.activated {
@@ -5681,9 +5719,16 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
                 }
                 mine.truncate(super::roles::TENURE_HEAD_BUDGET);
             }
-            let eid = super::derive::tenure_locator(cid, &member.to_bytes());
+            let eid = super::derive::tenure_locator(cid, &member.to_bytes(), &me.to_bytes());
             let eid_hex = crate::simd::hex::bytes_to_hex_32(&eid);
             let held = authority.heads.iter().find(|h| h.entity_hex == eid_hex).and_then(|h| editions.iter().find(|e| e.inner_id == h.inner_id));
+            // Replacing a Tenure this fold can't see would drop what it sealed.
+            if held.is_none() && floors.contains_key(&eid_hex) && !authority.refused.contains(&eid_hex) {
+                match mode {
+                    Seal::Strict => return Err("this member's earlier record isn't being served; nothing was changed, try again shortly".to_string()),
+                    Seal::BestEffort => continue,
+                }
+            }
             let prior = held.and_then(|e| super::roles::parse_tenure_content(&e.content)).map(|t| t.sealed).unwrap_or_default();
             let entry = super::roles::TenureEntry { rank: top.rank.clone().expect("a ranked role"), permissions: bits, heads: mine.iter().map(crate::simd::hex::bytes_to_hex_32).collect() };
             let Some(sealed) = super::roles::tenure_with(prior, entry, &mine) else { continue };
@@ -8170,7 +8215,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 let author = e.author.to_hex();
                 // A banned npub's edits are dropped (CORD-04 §4), even if they still
                 // held a bit via a not-yet-stripped grant, unless a Tenure sealed them.
-                let sealed = seal_of(&authority.sealed, &author, &e.self_hash).is_some_and(|(_, b)| b & required == required);
+                let sealed = seal_of(&authority.sealed, &author, &e.self_hash, u32::MAX) & required == required;
                 (sealed || !authority.banned.contains(&author))
                     && (sealed || authority.roles.is_authorized(&author, owner_hex.as_deref(), required))
                     // …and the CORD-04 §5 sync floor. Resolved against the Grant heads
@@ -8350,7 +8395,7 @@ fn roster_stamp(editions: &[ParsedEdition], heads: &[FoldedHead]) -> i64 {
     let ceiling = roster_stamp_ceiling();
     editions
         .iter()
-        .filter(|e| (e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST) && ids.contains(&e.inner_id))
+        .filter(|e| [vsk::ROLE, vsk::ROLE_V2, vsk::GRANT, vsk::BANLIST, vsk::TENURE].contains(&e.vsk.as_str()) && ids.contains(&e.inner_id))
         .map(|e| (e.created_at as i64).min(ceiling))
         .max()
         .unwrap_or(0)
@@ -8475,7 +8520,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     },
                     vsk::TENURE if activated && p.binding.is_some() => {
                         if let Some(t) = super::roles::parse_tenure_content(&p.content) {
-                            let bound = crate::simd::hex::hex_to_bytes_32_checked(&t.member).is_some_and(|m| super::derive::tenure_locator(cid, &m) == *eid);
+                            let bound = crate::simd::hex::hex_to_bytes_32_checked(&t.member).is_some_and(|m| super::derive::tenure_locator(cid, &m, &p.author.to_bytes()) == *eid);
                             if bound {
                                 let entries = t
                                     .sealed
@@ -8513,8 +8558,22 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // head the Roster refuses is refused on the evidence. The stored roster names the
     // floored entities a plane might have stopped serving entirely.
     let stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let complete_of = |role_cands: &BTreeMap<String, Vec<AuthorityCand>>, grant_cands: &BTreeMap<String, Vec<AuthorityCand>>| {
-        let mut tracked: std::collections::BTreeSet<String> = role_cands.keys().chain(grant_cands.keys()).cloned().collect();
+    // A Tenure this device floors is tracked too, or withholding it would refuse what it
+    // seals "on evidence". Its coordinate names member and writer, so the candidates are the
+    // authors of floored heads, each against everyone who could have reduced them.
+    let tenure_floors: Vec<String> = {
+        let mut writers: std::collections::BTreeSet<[u8; 32]> = owner.iter().map(|o| o.to_bytes()).collect();
+        writers.extend(stored.grants.iter().filter(|g| stored.is_authorized(&g.member, owner_hex.as_deref(), Permissions::MANAGE_ROLES)).filter_map(|g| crate::simd::hex::hex_to_bytes_32_checked(&g.member)));
+        let authors: std::collections::BTreeSet<[u8; 32]> = floors.values().filter_map(|f| f.3).collect();
+        authors
+            .iter()
+            .flat_map(|a| writers.iter().map(move |w| crate::simd::hex::bytes_to_hex_32(&super::derive::tenure_locator(cid, a, w))))
+            .filter(|eid| floors.contains_key(eid))
+            .collect()
+    };
+    let complete_of = |role_cands: &BTreeMap<String, Vec<AuthorityCand>>, grant_cands: &BTreeMap<String, Vec<AuthorityCand>>, tenure_cands: &BTreeMap<String, Vec<AuthorityCand>>| {
+        let mut tracked: std::collections::BTreeSet<String> = role_cands.keys().chain(grant_cands.keys()).chain(tenure_cands.keys()).cloned().collect();
+        tracked.extend(tenure_floors.iter().cloned());
         tracked.extend(stored.roles.iter().map(|r| r.role_id.clone()));
         tracked.extend(stored.grants.iter().filter_map(|g| {
             crate::simd::hex::hex_to_bytes_32_checked(&g.member)
@@ -8527,11 +8586,11 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         || (some_v2 && {
             let (rc, gc, tc, _) = build(true);
             let none: std::collections::BTreeSet<String> = Default::default();
-            select_authorized(cid, &rc, &gc, &tc, owner_hex.as_deref(), &none, complete_of(&rc, &gc), None).heads.iter().any(|h| h.entity_hex == everyone_hex)
+            select_authorized(cid, &rc, &gc, &tc, owner_hex.as_deref(), &none, complete_of(&rc, &gc, &tc), None).heads.iter().any(|h| h.entity_hex == everyone_hex)
         });
     let (role_cands, grant_cands, tenure_cands, withheld) = build(activated);
     let mut gapped = withheld;
-    let complete = complete_of(&role_cands, &grant_cands);
+    let complete = complete_of(&role_cands, &grant_cands, &tenure_cands);
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
@@ -8565,7 +8624,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                 .copied()
                 .filter(|e| {
                     let ah = e.author.to_hex();
-                    let sealed_ban = seal_of(&prelim_sealed, &ah, &e.self_hash).is_some_and(|(_, b)| b & Permissions::BAN != 0);
+                    let sealed_ban = seal_of(&prelim_sealed, &ah, &e.self_hash, u32::MAX) & Permissions::BAN != 0;
                     (!banned_authors.contains(ah.as_str()) || sealed_ban)
                         // From the author's Roles: @everyone's bits author no banlist.
                         && (owner_hex.as_deref() == Some(ah.as_str()) || sealed_ban || prelim.permissions_above(&ah, u32::MAX).contains(Permissions::BAN))
@@ -8609,9 +8668,8 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                     .into_iter()
                     .filter(|t| {
                         prelim.can_act_on_member(&ah, owner_hex.as_deref(), t, Permissions::BAN)
-                            || seal_of(&prelim_sealed, &ah, &head.self_hash).is_some_and(|(at, bits)| {
-                                bits & Permissions::BAN != 0 && owner_hex.as_deref() != Some(t.as_str()) && prelim.highest_position(t).unwrap_or(u32::MAX) > at
-                            })
+                            || (owner_hex.as_deref() != Some(t.as_str())
+                                && seal_of(&prelim_sealed, &ah, &head.self_hash, prelim.highest_position(t).unwrap_or(u32::MAX)) & Permissions::BAN != 0)
                     })
                     .take(super::roles::MAX_BANLIST)
                     .collect();
@@ -8687,12 +8745,15 @@ struct Sealed {
 /// Each member's sealed standings, from the Tenures the fold admits.
 type SealedBy = std::collections::BTreeMap<String, Vec<Sealed>>;
 
-/// The strongest standing sealed for `author` over `hash`: the lowest position, with every
-/// bit sealed there.
-fn seal_of(sealed: &SealedBy, author_hex: &str, hash: &[u8; 32]) -> Option<(u32, u64)> {
-    let entries: Vec<&Sealed> = sealed.get(author_hex)?.iter().filter(|e| e.heads.contains(hash)).collect();
-    let top = entries.iter().map(|e| e.position).min()?;
-    Some((top, entries.iter().filter(|e| e.position == top).fold(0, |acc, e| acc | e.bits)))
+/// The bits sealed for `author` over `hash` by every standing ranked above `reach`, as
+/// Roles above it would lend them.
+fn seal_of(sealed: &SealedBy, author_hex: &str, hash: &[u8; 32], reach: u32) -> u64 {
+    sealed.get(author_hex).into_iter().flatten().filter(|e| e.position < reach && e.heads.contains(hash)).fold(0, |acc, e| acc | e.bits)
+}
+
+/// Some Tenure lists `hash` as `author`'s, at whatever standing.
+fn is_listed(sealed: &SealedBy, author_hex: &str, hash: &[u8; 32]) -> bool {
+    sealed.get(author_hex).is_some_and(|es| es.iter().any(|e| e.heads.contains(hash)))
 }
 
 /// What a role-entity edition is, in a Community that folds Roles v2 or doesn't.
@@ -8862,16 +8923,12 @@ fn select_authorized(
         let cite_heads = entity_heads(&heads);
         // A ban takes what its target wrote, but not what a Tenure sealed (CORD-04 §9).
         let voided = |cands: &[AuthorityCand]| {
-            held_banned(cands, excluded) && !cands.first().and_then(|c| c.floor).is_some_and(|f| f.3.is_some_and(|a| seal_of(&sealed, &crate::simd::hex::bytes_to_hex_32(&a), &f.1).is_some()))
+            held_banned(cands, excluded) && !cands.first().and_then(|c| c.floor).is_some_and(|f| f.3.is_some_and(|a| is_listed(&sealed, &crate::simd::hex::bytes_to_hex_32(&a), &f.1)))
         };
         // What an author holds above `reach` for this edition: their Roles, and the standing a
         // Tenure sealed it at.
         let support_for = |ah: &str, c: &AuthorityCand, reach: u32| -> Permissions {
-            let roles = accepted.permissions_above(ah, reach);
-            match seal_of(&sealed, ah, &c.head.self_hash) {
-                Some((at, bits)) if at < reach => Permissions(roles.0 | bits),
-                _ => roles,
-            }
+            Permissions(accepted.permissions_above(ah, reach).0 | seal_of(&sealed, ah, &c.head.self_hash, reach))
         };
 
         for (entity, cands) in tenure_cands {
@@ -8879,7 +8936,7 @@ fn select_authorized(
             let mut judge = |c: &AuthorityCand, _reach: u32| -> Option<Option<u32>> {
                 let (member, entries) = c.tenure.as_ref()?;
                 let ah = c.author.to_hex();
-                let is_sealed = seal_of(&sealed, &ah, &c.head.self_hash).is_some();
+                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
                 if excluded.contains(&ah) && !is_sealed {
                     return refuse(&mut why, c, "tenure: author banned");
                 }
@@ -8940,7 +8997,7 @@ fn select_authorized(
                 if c.kind == RoleKind::History {
                     return refuse(&mut why, c, "role: a vsk-1 edition after Roles v2 activated");
                 }
-                let is_sealed = seal_of(&sealed, &ah, &c.head.self_hash).is_some();
+                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
                 if (excluded.contains(&ah) && !is_sealed) || role.position == 0 {
                     return refuse(&mut why, c, "role: author banned or position 0");
                 }
@@ -9031,7 +9088,7 @@ fn select_authorized(
             let mut judge = |c: &AuthorityCand, reach: u32| -> Option<Option<u32>> {
                 let grant = c.grant.as_ref()?;
                 let ah = c.author.to_hex();
-                let is_sealed = seal_of(&sealed, &ah, &c.head.self_hash).is_some();
+                let is_sealed = is_listed(&sealed, &ah, &c.head.self_hash);
                 if (excluded.contains(&ah) && !is_sealed) || excluded.contains(&grant.member) {
                     return refuse(&mut why, c, "grant: author or member banned");
                 }
@@ -18643,7 +18700,7 @@ mod tests {
     }
 
     async fn publish_tenure(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, member: &PublicKey, sealed: Vec<crate::community::v2::roles::TenureEntry>, version: u64) {
-        let eid = crate::community::v2::derive::tenure_locator(community.id(), &member.to_bytes());
+        let eid = crate::community::v2::derive::tenure_locator(community.id(), &member.to_bytes(), &signer.public_key().to_bytes());
         let content = crate::community::v2::roles::tenure_content_json(&crate::community::v2::roles::TenureContent { member: member.to_hex(), sealed }).unwrap();
         let group = control::ControlPlane::of(community).write_group().unwrap();
         let prev = head_hash_on_relay(relay, community, &eid).await;
@@ -18760,7 +18817,7 @@ mod tests {
         publish_tenure(&relay, &community, &x, &y.public_key(), vec![entry("F", mr, &[hash_at(&eds, eid_of(&made))])], 1).await;
         publish_grant(&relay, &community, &x, &y.public_key(), vec![], 2).await;
         let eds = fetch_control(&relay, &community).await;
-        let tenure_y = crate::community::v2::derive::tenure_locator(community.id(), &y.public_key().to_bytes());
+        let tenure_y = crate::community::v2::derive::tenure_locator(community.id(), &y.public_key().to_bytes(), &x.public_key().to_bytes());
         let strip_y = crate::community::v2::derive::grant_locator(community.id(), &y.public_key().to_bytes());
         publish_tenure(&relay, &community, &owner, &x.public_key(), vec![entry("C", mr, &[hash_at(&eds, tenure_y), hash_at(&eds, strip_y)])], 1).await;
         publish_banlist(&relay, &community, &owner, &[x.public_key().to_hex()], 1).await;
@@ -18970,6 +19027,209 @@ mod tests {
         assert!(f.roles.role(&made).is_none_or(|r| r.name != "by C"), "the sealed floor holds against a non-owner rival");
         // Withheld is not refused: a relay that drops a sealed head can't settle it absent.
         assert!(!f.refused.contains(&crate::simd::hex::bytes_to_hex_32(&held.entity_id)), "the withheld sealed head isn't settled absent");
+    }
+
+    /// Serves everything but the wraps whose edition `hide` picks.
+    struct Hiding<'a> {
+        inner: &'a MemoryRelay,
+        group: crate::community::v2::derive::GroupKey,
+        hide: Box<dyn Fn(&ParsedEdition) -> bool + Send + Sync + 'a>,
+    }
+    #[async_trait::async_trait]
+    impl Transport for Hiding<'_> {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?))
+        }
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.inner.publish(e, r).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.inner.publish_durable(e, r).await
+        }
+        async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
+            let all = self.inner.fetch(q, r).await?;
+            Ok(all.into_iter().filter(|w| control::open_control_edition(w, &self.group).ok().is_none_or(|(ed, _)| !(self.hide)(&ed))).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withheld_tenure_leaves_what_it_seals_unsettled() {
+        // A device tracking a Tenure must not read its absence as evidence: what it sealed
+        // is neither refused nor stepped down while a relay withholds it.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Withheld", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = Keys::generate();
+        let admin = create_role_v2(&bed.relay, &held(), "Admin", 0, Permissions::MANAGE_ROLES).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![admin]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let made = "a9".repeat(32);
+        publish_role_v2(&bed.relay, &held(), &a, &role_v2(&made, "by A", "z", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == held().root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+        let served: Vec<ParsedEdition> = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.vsk != vsk::TENURE).collect();
+        let f = fold_authority(&held(), &served, &floors);
+        let entity = crate::simd::hex::bytes_to_hex_32(&eid_of(&made));
+        assert!(!f.refused.contains(&entity), "not settled absent");
+        assert!(f.heads.iter().any(|h| h.entity_hex == entity && !h.rebased), "the held head stays the head");
+        assert!(!f.complete, "and the fold knows it read short");
+    }
+
+    #[tokio::test]
+    async fn a_writer_never_replaces_a_tenure_it_cant_see() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Clobber", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = Keys::generate();
+        let r1 = create_role_v2(&bed.relay, &held(), "One", 0, Permissions::MANAGE_ROLES).await.unwrap();
+        let r2 = create_role_v2(&bed.relay, &held(), "Two", 0, Permissions::MANAGE_ROLES).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![r1.clone(), r2.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        publish_role_v2(&bed.relay, &held(), &a, &role_v2(&"b9".repeat(32), "by A", "z", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![r2.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let hiding = Hiding { inner: &bed.relay, group: control::ControlPlane::of(&held()).write_group().unwrap(), hide: Box::new(|e| e.vsk == vsk::TENURE) };
+        let before = fetch_control(&bed.relay, &held()).await.len();
+        let err = set_member_roles(&hiding, &held(), &a.public_key(), vec![]).await.unwrap_err();
+        assert!(err.contains("isn't being served"), "{err}");
+        assert_eq!(fetch_control(&bed.relay, &held()).await.len(), before, "nothing was published");
+        // A removal goes ahead, leaving the unseen Tenure as it was.
+        kick_member(&hiding, &held(), &a.public_key()).await.unwrap();
+        let eds = fetch_control(&bed.relay, &held()).await;
+        assert_eq!(eds.iter().filter(|e| e.vsk == vsk::TENURE).count(), 1, "the earlier Tenure stands alone");
+    }
+
+    #[tokio::test]
+    async fn a_weaker_writer_seals_beside_a_stronger_one() {
+        // The owner demoted M from the top; later an admin beneath M's old rank strips M's
+        // last role. Each seals in a Tenure of their own, so both standings hold.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "TwoWriters", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mr = Permissions::MANAGE_ROLES;
+        let (m, x) = (Keys::generate(), Keys::generate());
+        let top = create_role_v2(&bed.relay, &held(), "Top", 0, mr | Permissions::BAN).await.unwrap();
+        let admin = create_role_v2(&bed.relay, &held(), "Admin", 0, mr).await.unwrap();
+        let helper = create_role_v2(&bed.relay, &held(), "Helper", 0, mr).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![top.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![admin]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let (early, late) = ("c7".repeat(32), "c8".repeat(32));
+        publish_role_v2(&bed.relay, &held(), &m, &role_v2(&early, "early", "z", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![helper.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        publish_role_v2(&bed.relay, &held(), &m, &role_v2(&late, "late", "z", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        crate::state::MY_SECRET_KEY.store_from_keys(&x, &[]);
+        crate::state::set_my_public_key(x.public_key());
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![]).await.unwrap();
+        let eds = fetch_control(&bed.relay, &held()).await;
+        assert_eq!(eds.iter().filter(|e| e.vsk == vsk::TENURE).count(), 2, "one Tenure per writer");
+        let f = fold_authority(&held(), &eds, &Floors::default());
+        assert!(f.roles.role(&early).is_some() && f.roles.role(&late).is_some(), "both standings hold");
+    }
+
+    #[tokio::test]
+    async fn a_tenure_at_another_writers_coordinate_is_ignored() {
+        // Each writer's Tenure lives at a coordinate naming them: an admin can't replace the
+        // owner's Tenure of a member with one of their own.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Squat", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        let (a, x) = (Keys::generate(), Keys::generate());
+        let mr = Permissions::MANAGE_ROLES;
+        let (ra, rx, made) = ("d7".repeat(32), "d8".repeat(32), "d9".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rx, "X", "B", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&ra, "A", "C", mr), 1).await;
+        publish_grant(&relay, &community, &owner, &x.public_key(), vec![rx.clone()], 1).await;
+        publish_grant(&relay, &community, &owner, &a.public_key(), vec![ra.clone()], 1).await;
+        publish_role_v2(&relay, &community, &a, &role_v2(&made, "by A", "V", 0), 1).await;
+        let hash = fetch_control(&relay, &community).await.into_iter().find(|e| e.entity_id == eid_of(&made)).unwrap().self_hash;
+        publish_tenure(&relay, &community, &owner, &a.public_key(), vec![entry("C", mr, &[hash])], 1).await;
+        publish_grant(&relay, &community, &owner, &a.public_key(), vec![], 2).await;
+        // X writes v2 at the owner's coordinate, sealing nothing of note.
+        let eid = crate::community::v2::derive::tenure_locator(community.id(), &a.public_key().to_bytes(), &owner.public_key().to_bytes());
+        let prev = head_hash_on_relay(&relay, &community, &eid).await;
+        let content = crate::community::v2::roles::tenure_content_json(&crate::community::v2::roles::TenureContent { member: a.public_key().to_hex(), sealed: vec![entry("V", 0, &[[0x11; 32]])] }).unwrap();
+        publish_marked(&relay, &community, &x, vsk::TENURE, &eid, 2, prev, &content).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(f.roles.role(&made).is_some(), "the owner's seal still holds");
+    }
+
+    #[tokio::test]
+    async fn moving_a_role_up_past_its_grantor_keeps_it_with_its_holders() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "MoveUp", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (x, m) = (Keys::generate(), Keys::generate());
+        let admin = create_role_v2(&bed.relay, &held(), "Admin", 0, Permissions::MANAGE_ROLES).await.unwrap();
+        let vip = create_role_v2(&bed.relay, &held(), "VIP", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![admin]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        crate::state::MY_SECRET_KEY.store_from_keys(&x, &[]);
+        crate::state::set_my_public_key(x.public_key());
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![vip.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        bed.swap_to(&owner);
+        move_role_v2(&bed.relay, &held(), &vip, 0).await.unwrap();
+        let f = fold_authority(&held(), &fetch_control(&bed.relay, &held()).await, &Floors::default());
+        assert_eq!(f.roles.highest_position(&m.public_key().to_hex()), Some(1), "M still holds VIP, now at the top");
+    }
+
+    #[tokio::test]
+    async fn a_seal_lends_every_standing_above_what_it_touches() {
+        // Two entries list one Banlist edition: MANAGE_ROLES high, BAN lower. A target beneath
+        // both is banned on the union, as Roles above it would lend.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Union", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        let (a, t) = (Keys::generate(), Keys::generate());
+        let ra = "d3".repeat(32);
+        publish_role_v2(&relay, &community, &owner, &role_v2(&ra, "Mod", "C", Permissions::MANAGE_ROLES | Permissions::BAN), 1).await;
+        publish_grant(&relay, &community, &owner, &a.public_key(), vec![ra.clone()], 1).await;
+        publish_banlist(&relay, &community, &a, &[t.public_key().to_hex()], 1).await;
+        let banlist = fetch_control(&relay, &community).await.into_iter().find(|e| e.entity_id == crate::community::v2::derive::banlist_locator(community.id())).unwrap().self_hash;
+        publish_tenure(&relay, &community, &owner, &a.public_key(), vec![entry("C", Permissions::MANAGE_ROLES, &[banlist]), entry("F", Permissions::BAN, &[banlist])], 1).await;
+        publish_grant(&relay, &community, &owner, &a.public_key(), vec![], 2).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(f.banned.contains(&t.public_key().to_hex()));
+    }
+
+    #[tokio::test]
+    async fn a_strip_to_nothing_seals_even_on_a_stale_roster() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Stale", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = Keys::generate();
+        // Granted on the plane, never folded here.
+        let ra = "d5".repeat(32);
+        publish_role_v2(&bed.relay, &held(), &owner.keys, &role_v2(&ra, "Admin", "C", Permissions::MANAGE_ROLES), 1).await;
+        publish_grant(&bed.relay, &held(), &owner.keys, &a.public_key(), vec![ra], 1).await;
+        publish_role_v2(&bed.relay, &held(), &a, &role_v2(&"d6".repeat(32), "by A", "z", 0), 1).await;
+        grant_roles(&bed.relay, &held(), &a.public_key(), vec![]).await.unwrap();
+        assert_eq!(fetch_control(&bed.relay, &held()).await.iter().filter(|e| e.vsk == vsk::TENURE).count(), 1);
     }
 
     #[tokio::test]

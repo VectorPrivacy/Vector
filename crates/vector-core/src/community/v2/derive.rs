@@ -299,9 +299,11 @@ pub fn edition_binding(community_id: &CommunityId) -> [u8; 32] {
     hkdf32(&community_id.0, &build_info(LABEL_EDITION_BINDING, &ZERO32, None))
 }
 
-/// A member's Tenure coordinate (CORD-04 §9).
-pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8; 32] {
-    hkdf32(&community_id.0, &build_info(LABEL_TENURE, member_xonly, None))
+/// A member's Tenure from one writer (CORD-04 §9): each writer seals in an entity of their
+/// own, so nobody re-signs a standing another writer sealed.
+pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32], writer_xonly: &[u8; 32]) -> [u8; 32] {
+    let pair: [u8; 32] = Sha256::new().chain_update(member_xonly).chain_update(writer_xonly).finalize().into();
+    hkdf32(&community_id.0, &build_info(LABEL_TENURE, &pair, None))
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).
