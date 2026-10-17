@@ -675,6 +675,9 @@ const proceduralScrollState = {
 // at a time, and a set of channels whose network history-start has been reached (stop trying).
 const _communityOlderInFlight = new Set();
 const _communityOlderExhausted = new Set();
+// Where each channel's relay walk last stopped with history unread below (ms): a scroll goes on
+// from the lower of that and the oldest row held.
+const _communityOlderCursor = new Map();
 
 /**
  * When a Community channel's LOCAL (DB) history is exhausted on scroll-up, fetch an older
@@ -697,7 +700,7 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
     _communityOlderInFlight.add(chatId);
     try {
         const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
-        let beforeMs = oldestMs;
+        let beforeMs = Math.min(oldestMs, _communityOlderCursor.get(chatId) ?? Infinity);
         for (let hop = 0; hop < 8; hop++) {
             const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
             // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
@@ -710,6 +713,8 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
             // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
             // returned just already-known events (no count growth) does NOT mean history's start.
             if (res && res.reached_start) _communityOlderExhausted.add(chatId);
+            if (res && res.oldest_ms != null) _communityOlderCursor.set(chatId, res.oldest_ms);
+            else _communityOlderCursor.delete(chatId);
             if (newTotal > prevTotal || !res || res.reached_start || strOpenChat !== chatId) break;
             // A page that added nothing still moved the relay walk down: go on from there.
             if (res.oldest_ms == null || res.oldest_ms >= beforeMs) break;

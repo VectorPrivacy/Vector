@@ -963,6 +963,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
         Some("DELETE FROM community_writers WHERE community_id = ?1"),
+        Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
     ]
     .into_iter()
     .flatten()

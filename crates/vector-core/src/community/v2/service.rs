@@ -7732,12 +7732,28 @@ fn merge_channel_metadata(base: &control::ChannelMetadata, ours: &control::Chann
             };
         }
     }
+    let custom = match (&base.custom, &ours.custom, &theirs.custom) {
+        (b, o, t) if o == b => t.clone(),
+        (b, Some(o), t) => {
+            let (b, mut out) = (b.clone().unwrap_or_default(), t.clone().unwrap_or_default());
+            for key in b.keys().chain(o.keys()) {
+                if b.get(key) != o.get(key) {
+                    match o.get(key) {
+                        Some(v) => out.insert(key.clone(), v.clone()),
+                        None => out.remove(key),
+                    };
+                }
+            }
+            Some(out)
+        }
+        (_, None, _) => None,
+    };
     control::ChannelMetadata {
         name: pick(&base.name, &ours.name, &theirs.name),
         private: pick(&base.private, &ours.private, &theirs.private),
         voice: pick(&base.voice, &ours.voice, &theirs.voice),
         deleted: pick(&base.deleted, &ours.deleted, &theirs.deleted),
-        custom: pick(&base.custom, &ours.custom, &theirs.custom),
+        custom,
         extra,
     }
 }
@@ -9873,10 +9889,6 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             })
             .collect();
         if !ok.contains(&true) {
-            // A manager's ledger this reader refuses whole: nobody but the owner mints over it.
-            if let Some(channel_hex) = writers_channel.filter(|_| authorized.contains(&true)) {
-                writers_persist.push((channel_hex.clone(), String::new(), 0, false));
-            }
             continue;
         }
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
@@ -9964,10 +9976,6 @@ const EVERYONE_LEGACY: &str = "legacy";
 /// Store a folded Writers ledger head. A rebased head, the fold stepping down from one it
 /// refused, replaces whatever was held; when the live writer moves, writers look for its key.
 fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64, rebased: bool) {
-    if content.is_empty() {
-        let _ = crate::db::community::set_community_writers(cid_hex, channel_hex, content, 0, false);
-        return;
-    }
     let held = crate::db::community::get_community_writers(cid_hex, channel_hex).ok().flatten();
     if held.as_ref().is_some_and(|(c, v)| c == content && *v as u64 == version) {
         return;
@@ -9988,9 +9996,9 @@ fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64
 /// Which of a Writers ledger's editions stand on their content (CORD-03 §1), judged along the
 /// whole chain: each well formed for its Channel, its one new entry its signer's own, dated with
 /// the edition and not past this reader's horizon, and extending a predecessor that itself
-/// stands. Chains grow from the head this reader holds (`anchor`) and from one root: of the first
-/// editions (version 1, one entry) an `authorized` edition builds on, the one the fork `key`
-/// ranks first, or failing any, the carried head a Refounding left whose predecessor isn't served.
+/// stands. Chains grow from the head this reader holds (`anchor`) and from one root: of those an
+/// `authorized` edition builds on (a first edition, version 1 with one entry, or the head a
+/// Refounding carried, whose predecessor isn't served), the one with the longest history.
 fn ledger_chain_ok(
     group: &[&ParsedEdition],
     authorized: &[bool],
@@ -9998,7 +10006,7 @@ fn ledger_chain_ok(
     key: &dyn Fn(&ParsedEdition) -> (u32, [u8; 32]),
     anchor: Option<&([u8; 32], super::writers::Ledger)>,
 ) -> std::collections::HashMap<[u8; 32], bool> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let parsed: HashMap<[u8; 32], super::writers::Ledger> = group
         .iter()
         .filter_map(|e| super::writers::Ledger::parse(&e.content).filter(|l| crate::simd::hex::bytes_to_hex_32(&l.channel) == channel_hex).map(|l| (e.self_hash, l)))
@@ -10012,8 +10020,8 @@ fn ledger_chain_ok(
         None => own(e) && e.version == 1 && parsed.get(&e.self_hash).is_some_and(|l| l.is_first()),
         Some(p) => !by_hash.contains_key(&p) && !anchored(e) && own(e),
     };
-    // The roots an authorized edition builds on, walking its predecessors up.
-    let mut endorsed: HashSet<[u8; 32]> = HashSet::new();
+    // The roots an authorized edition builds on, each with the highest version one reaches.
+    let mut endorsed: HashMap<[u8; 32], u64> = HashMap::new();
     for (e, _) in group.iter().zip(authorized).filter(|(_, &a)| a) {
         let mut at = *e;
         for _ in 0..group.len() {
@@ -10023,11 +10031,16 @@ fn ledger_chain_ok(
             }
         }
         if root(at) {
-            endorsed.insert(at.self_hash);
+            let tip = endorsed.entry(at.self_hash).or_default();
+            *tip = (*tip).max(e.version);
         }
     }
-    let pick = |first: bool| endorsed.iter().filter_map(|h| by_hash.get(h)).filter(|e| e.prev_hash.is_none() == first).min_by_key(|e| key(e)).map(|e| e.self_hash);
-    let chosen = pick(true).or_else(|| pick(false));
+    // The longest history wins, as for every Control entity; the fork key settles a tie.
+    let chosen = endorsed
+        .iter()
+        .filter_map(|(h, tip)| by_hash.get(h).map(|e| (*tip, e)))
+        .min_by_key(|(tip, e)| (std::cmp::Reverse(*tip), key(e)))
+        .map(|(_, e)| e.self_hash);
     let mut ok: HashMap<[u8; 32], bool> = HashMap::new();
     if let Some((h, _)) = anchor.filter(|(h, _)| by_hash.contains_key(h)) {
         ok.insert(*h, true);
@@ -10490,7 +10503,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         // The switch fixes the list (CORD-04 §2): an @everyone edition after it can't change it.
         let switched = role_cands
             .get(&everyone_hex)
-            .and_then(|cands| cands.iter().filter(|c| c.kind == RoleKind::Everyone && Some(c.author) == owner).min_by_key(|c| (c.head.version, c.head.inner_id)))
+            .and_then(|cands| cands.iter().filter(|c| c.kind == RoleKind::Everyone && Some(c.author) == owner && c.prev.is_none()).min_by_key(|c| (c.head.version, c.head.inner_id)))
             .and_then(|c| c.role.as_ref())
             .and_then(|r| r.extra.get(EVERYONE_LEGACY))
             .and_then(|l| serde_json::from_value(l.clone()).ok());
@@ -24451,6 +24464,12 @@ mod tests {
         crate::db::community::set_community_roles(&cid_hex, &other, 0).unwrap();
         follow_control(&relay, &held()).await.unwrap();
         assert_eq!(crate::db::community::get_community_roles(&cid_hex).unwrap().legacy_channels, Some(listed.clone()));
+        // After a Refounding the switch itself isn't served: the list held stays, whatever a later
+        // owner edition says.
+        let newest = head.0 + 1;
+        let carried = Hiding { inner: &relay, group: control::ControlPlane::of(&held()).write_group().unwrap(), hide: Box::new(move |e| e.entity_id == everyone && e.version < newest) };
+        follow_control(&carried, &held()).await.unwrap();
+        assert_eq!(crate::db::community::get_community_roles(&cid_hex).unwrap().legacy_channels, Some(listed.clone()));
         let mut forgot = crate::db::community::get_community_roles(&cid_hex).unwrap();
         forgot.legacy_channels = None;
         crate::db::community::set_community_roles(&cid_hex, &forgot, 0).unwrap();
@@ -24774,9 +24793,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_ledger_rooted_beside_the_chain_takes_no_reader() {
+    async fn the_longest_ledger_history_takes_every_reader() {
         use crate::community::v2::writers::{writer_address, Ledger, Spell};
-        let (bed, owner, x, community) = v2_bed_with_admin("Rooted").await;
+        let (bed, owner, x, community) = v2_bed_with_admin("Longest").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let general = held().channels[0].id;
         let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
@@ -24785,30 +24804,34 @@ mod tests {
             let epoch = base.next_epoch().unwrap();
             base.appended(at, Spell::Writer { epoch, pk: writer_address(&[n; 32], &general, epoch), root: Epoch(0), by: by.public_key().to_bytes() }).unwrap()
         };
-        let first = mint(&Ledger::new(&general), at(1), 1, &owner.keys);
-        let h1 = publish_marked_hash(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 1, None, &first.to_json()).await;
+        // x's chain, three long, against the owner's lone first edition: rank settles only a tie.
+        let first = mint(&Ledger::new(&general), at(1), 1, &x);
+        let h1 = publish_marked_hash(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 1, None, &first.to_json()).await;
         let second = first.appended(at(2), Spell::Open).unwrap();
-        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 2, Some(h1), &second.to_json()).await;
-        follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(held().channel(&general).unwrap().writers, Some(second.clone()));
+        let h2 = publish_marked_hash(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 2, Some(h1), &second.to_json()).await;
+        let third = mint(&second, at(3), 3, &x);
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 3, Some(h2), &third.to_json()).await;
+        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 1, None, &mint(&Ledger::new(&general), at(1), 9, &owner.keys).to_json()).await;
         // A first edition is version 1: one that names no predecessor higher up roots nothing.
-        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 5, None, &mint(&Ledger::new(&general), at(5), 7, &x).to_json()).await;
-        let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == second.to_json()), "a late first edition");
-        // x roots a ledger of its own below the chain's version, then builds high on it.
-        let forged = mint(&Ledger::new(&general), at(1), 9, &x);
-        let hf = publish_marked_hash(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 1, Some([0x3c; 32]), &forged.to_json()).await;
-        let built = forged.appended(at(10), Spell::Open).unwrap();
-        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 10, Some(hf), &built.to_json()).await;
-        let _ = follow_control(&bed.relay, &held()).await;
-        assert_eq!(held().channel(&general).unwrap().writers, Some(second.clone()), "a reader that holds the chain keeps it");
-        let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(!fresh.writers.iter().any(|(_, content, ..)| *content == built.to_json()), "a fresh fold takes no second root");
-        // With x's standing gone, the one root left stands again.
-        publish_grant(&bed.relay, &held(), &owner.keys, &x.public_key(), vec![], 2).await;
+        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 7, None, &mint(&Ledger::new(&general), at(7), 7, &owner.keys).to_json()).await;
         follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers, Some(third.clone()));
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == second.to_json()));
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == third.to_json()), "a fresh reader takes the same");
+        // After a Refounding, the head it carried outlasts a first edition made after it.
+        let carried_ch = create_public_channel(&bed.relay, &held(), "carried").await.unwrap();
+        let eid2 = crate::community::v2::derive::writers_locator(community.id(), &carried_ch);
+        let mint2 = |base: &Ledger, at: u64, n: u8, by: &Keys| {
+            let epoch = base.next_epoch().unwrap();
+            base.appended(at, Spell::Writer { epoch, pk: writer_address(&[n; 32], &carried_ch, epoch), root: Epoch(0), by: by.public_key().to_bytes() }).unwrap()
+        };
+        let head = mint2(&mint2(&Ledger::new(&carried_ch), at(1), 1, &owner.keys), at(9), 2, &owner.keys);
+        let hc = publish_marked_hash(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid2, 9, Some([0x5a; 32]), &head.to_json()).await;
+        let grown = head.appended(at(10), Spell::Open).unwrap();
+        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid2, 10, Some(hc), &grown.to_json()).await;
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid2, 1, None, &mint2(&Ledger::new(&carried_ch), at(1), 8, &x).to_json()).await;
+        let fresh = verify_owner_root_and_reconcile(&bed.relay, held()).await.unwrap();
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == grown.to_json()));
     }
 
     #[tokio::test]
@@ -24992,7 +25015,7 @@ mod tests {
         let stale = crate::db::community::get_community_roles(&cid_hex).unwrap();
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
-        assert!(!writing::backstop_on(&bed.relay, &held(), &general, &stale).await.unwrap(), "a roster from before the restrict reopens nothing");
+        assert_eq!(writing::backstop_on(&bed.relay, &held(), &general, &stale).await.unwrap(), writing::Backstop::StoodDown, "a roster from before the restrict reopens nothing");
         assert_eq!(held().channel(&general).unwrap().writers, Some(ledger));
     }
 
@@ -25033,10 +25056,23 @@ mod tests {
         follow_control(&bed.relay, &held()).await.unwrap();
         let ch = held().channel(&general).cloned().unwrap();
         assert_eq!((ch.name.as_str(), ch.meta_extra.get("topic").and_then(|t| t.as_str())), ("renamed", Some("news")));
+        // A client's own fields merge one by one too.
+        let stale = held();
+        act_as(&x);
+        let mut theirs = held().channel(&general).unwrap().metadata();
+        theirs.custom.get_or_insert_with(Default::default).insert("a".into(), 1.into());
+        edit_channel_metadata(&bed.relay, &held(), &general, &theirs).await.unwrap();
+        act_as(&owner.keys);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let mut mine = stale.channel(&general).unwrap().metadata();
+        mine.custom.get_or_insert_with(Default::default).insert("b".into(), 2.into());
+        edit_channel_metadata(&bed.relay, &stale, &general, &mine).await.unwrap();
+        let custom = held().channel(&general).unwrap().meta_custom.clone().unwrap_or_default();
+        assert_eq!((custom.get("a"), custom.get("b")), (Some(&1.into()), Some(&2.into())));
     }
 
     #[tokio::test]
-    async fn a_ledger_this_device_refuses_is_minted_over_only_by_the_owner() {
+    async fn a_ledger_nobody_can_fold_blocks_nobody() {
         use crate::community::roles::OverwriteTarget;
         use crate::community::v2::writers::{writer_address, Ledger, Spell};
         let (bed, owner, x, community) = v2_bed_with_admin("Refused").await;
@@ -25064,15 +25100,77 @@ mod tests {
         act_as(&x);
         set_overwrite(&bed.relay, &held(), two.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         assert!(held().channel(&two).unwrap().restricted());
-        let before = fetch_control(&bed.relay, &held()).await.iter().filter(|e| e.vsk == vsk::WRITERS).count();
-        let _ = set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await;
-        assert_eq!(fetch_control(&bed.relay, &held()).await.iter().filter(|e| e.vsk == vsk::WRITERS).count(), before, "a manager mints nothing over it");
+        // Nor does a ledger nobody can fold yet: a manager restricts over it.
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         act_as(&owner.keys);
-        assert!(access_duty(&bed.relay, &held()).await.is_ok());
-        assert!(held().channel(&general).unwrap().restricted(), "the owner's mint stands over it");
+        let mine = held().channel(&general).unwrap().writers.clone().expect("restricted");
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        let mine = held().channel(&general).unwrap().writers.clone().unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == mine.to_json()));
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == mine.to_json()), "another reader takes it");
+    }
+
+    #[tokio::test]
+    async fn a_settled_race_stays_settled_when_ranks_change() {
+        use crate::community::v2::writers::{writer_address, Ledger, Spell};
+        let (bed, _owner, x, community) = v2_bed_with_admin("Settled").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
+        let y = Keys::generate();
+        let mods = create_role_v2(&bed.relay, &held(), "Mod", 0, Permissions::MANAGE_CHANNELS | crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
+        let at = |version: u64| (2_000 + version) * 1000;
+        let mint = |at: u64, n: u8, by: &Keys| Ledger::new(&general).appended(at, Spell::Writer { epoch: Epoch(1), pk: writer_address(&[n; 32], &general, Epoch(1)), root: Epoch(0), by: by.public_key().to_bytes() }).unwrap();
+        // x and y restrict at once; x's goes on.
+        publish_marked(&bed.relay, &held(), &y, vsk::WRITERS, &eid, 1, None, &mint(at(1), 2, &y).to_json()).await;
+        let xs = mint(at(1), 1, &x);
+        let h1 = publish_marked_hash(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 1, None, &xs.to_json()).await;
+        let grown = xs.appended(at(2), Spell::Open).unwrap();
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 2, Some(h1), &grown.to_json()).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers, Some(grown.clone()));
+        // x steps down, its decisions sealed: y now outranks it, and nothing flips.
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers, Some(grown.clone()));
+        let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == grown.to_json()), "a fresh reader takes the longer history");
+    }
+
+    #[tokio::test]
+    async fn an_edition_on_a_hidden_held_head_must_extend_it() {
+        use crate::community::v2::writers::{writer_address, Ledger, Spell};
+        let (bed, owner, _x, community) = v2_bed_with_admin("Extend").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
+        let at = |version: u64| (2_000 + version) * 1000;
+        let first = Ledger::new(&general).appended(at(1), Spell::Writer { epoch: Epoch(1), pk: writer_address(&[1; 32], &general, Epoch(1)), root: Epoch(0), by: owner.keys.public_key().to_bytes() }).unwrap();
+        let h1 = publish_marked_hash(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 1, None, &first.to_json()).await;
+        let second = first.appended(at(2), Spell::Open).unwrap();
+        let h2 = publish_marked_hash(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 2, Some(h1), &second.to_json()).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        // Names the held head, but drops what it carried.
+        let skipped = first.appended(at(3), Spell::Writer { epoch: Epoch(2), pk: writer_address(&[2; 32], &general, Epoch(2)), root: Epoch(0), by: owner.keys.public_key().to_bytes() }).unwrap();
+        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 3, Some(h2), &skipped.to_json()).await;
+        let window = Hiding { inner: &bed.relay, group: control::ControlPlane::of(&held()).write_group().unwrap(), hide: Box::new(move |e| e.self_hash == h2) };
+        let _ = follow_control(&window, &held()).await;
+        assert_eq!(held().channel(&general).unwrap().writers, Some(second));
+    }
+
+    #[tokio::test]
+    async fn one_channel_that_cant_settle_never_holds_back_the_rest() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Isolated").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let other = create_public_channel(&bed.relay, &held(), "other").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        // general's ledger head isn't one this device can chain from.
+        let eid_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::writers_locator(community.id(), &general));
+        crate::db::community::set_edition_head(&cid_hex, &eid_hex, 7, &[0x42; 32]).unwrap();
+        let _ = set_everyone(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT & !Permissions::SEND_MESSAGES).await;
+        let restricted = |id: &ChannelId| held().channel(id).unwrap().restricted();
+        assert!(!restricted(&general));
+        assert!(restricted(&other), "the next channel still moved");
     }
 
     #[tokio::test]

@@ -550,6 +550,9 @@ pub enum CatchUp {
     External,
 }
 
+/// How many times a count-only backfill pages on from where the relay walk stopped.
+const BACKFILL_CONTINUATIONS: usize = 3;
+
 /// What one catch-up page cost and what it yielded.
 ///
 /// `fetched` is the relay's answer — zero means there is genuinely nothing
@@ -3495,9 +3498,18 @@ impl VectorCore {
         evidence: crate::community::transport::Evidence,
         transport_secs: u64,
     ) -> usize {
-        Self::v2_backfill_channel_counted(id, channel_id, limit, max_pages, since, until, evidence, transport_secs)
-            .await
-            .new_messages
+        // A caller that takes only a count can't page on from where the relay walk stopped: go on
+        // from there a few times, or what a quieter address held below it would wait for a scroll.
+        let (mut new, mut until) = (0, until);
+        for _ in 0..BACKFILL_CONTINUATIONS {
+            let count = Self::v2_backfill_channel_counted(id, channel_id, limit, max_pages, since, until, evidence, transport_secs).await;
+            new += count.new_messages;
+            match count.next_before {
+                Some(next) if until.is_none_or(|u| next < u) => until = Some(next),
+                _ => break,
+            }
+        }
+        new
     }
 
     /// [`v2_backfill_channel`](Self::v2_backfill_channel) reporting what the RELAY

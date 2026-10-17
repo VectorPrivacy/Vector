@@ -119,14 +119,11 @@ async fn named_deliveries<T: Transport + ?Sized>(transport: &T, community: &Comm
         .collect())
 }
 
-/// Whether `ch`'s ledger has a head this device couldn't read, or a manager's that it refused:
-/// minting over it would erase every writer address it names. The owner's mint outranks it.
+/// Whether `ch`'s ledger has a head this device couldn't read: minting over it would erase every
+/// writer address it names.
 fn ledger_unread(community: &CommunityV2, ch: &ChannelV2) -> bool {
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
-    let cid_hex = hex(&community.id().0);
-    let seen = crate::db::community::get_edition_head(&cid_hex, &hex(&eid)).ok().flatten().is_some()
-        || crate::db::community::get_community_writers(&cid_hex, &hex(&ch.id.0)).ok().flatten().is_some();
-    ch.writers.is_none() && seen && community.owner().ok() != me_pk().ok()
+    ch.writers.is_none() && crate::db::community::get_edition_head(&hex(&community.id().0), &hex(&eid)).ok().flatten().is_some()
 }
 
 /// Mint writer epoch `ledger.next_epoch()` for `ch`, deliver it to every writer `posters` lets
@@ -202,10 +199,10 @@ fn chains_from_head(community: &CommunityV2, ch: &ChannelV2, base: &Ledger) -> R
 /// Append `spell` to `base` as `ch`'s ledger, dated now, once the edition passes the rules every
 /// reader holds it to: an edition they'd refuse would leave this device alone on it.
 async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell) -> Result<(), String> {
+    let next = base.appended(entry_time(ch).await, spell).ok_or("this channel's writer ledger can't take that")?;
     if !crate::db::current_session().is_live() {
         return Err("account changed while moving a channel's writers".to_string());
     }
-    let next = base.appended(entry_time(ch).await, spell).ok_or("this channel's writer ledger can't take that")?;
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
     let cid_hex = hex(&community.id().0);
     let now = now_ms();
@@ -258,43 +255,59 @@ async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &
             candidates.push(pk);
         }
     }
+    // One Channel's failure never stops the rest; the first is reported.
+    let mut failed: Option<String> = None;
     for ch in &held.channels {
-        let moved = restricts(before, ch) != restricts(after, ch);
-        let lost: Vec<PublicKey> = candidates.iter().filter(|p| was.writes(p, ch) && !now.writes(p, ch)).copied().collect();
-        let acts = match (restricts(after, ch), ch.restricted()) {
-            (true, false) => may_manage && moved,
-            (false, true) => may_manage && moved,
-            (true, true) => may_manage && !lost.is_empty(),
-            (false, false) => false,
-        };
-        if acts {
-            let Some((fresh, ch)) = ledger_still(transport, &held, &ch.id, &ch.writers).await? else { continue };
-            match ch.restricted() {
-                false => mint(transport, &fresh, &ch, &now, &lost).await?,
-                true if restricts(after, &ch) => mint(transport, &fresh, &ch, &now, &lost).await?,
-                true => reopen(transport, &fresh, &ch).await?,
-            }
-            continue;
-        }
-        if !ch.restricted() || !restricts(after, ch) {
-            continue;
-        }
-        let gained: Vec<PublicKey> = candidates.iter().filter(|p| !was.writes(p, ch) && now.writes(p, ch)).copied().collect();
-        if gained.is_empty() {
-            continue;
-        }
-        match live_writer(&held, ch) {
-            Some((epoch, secret, writer)) => deliver_on_plane(transport, &held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained).await?,
-            // Nothing to hand over: a manager mints one they can be given.
-            None if may_manage => {
-                if let Some((fresh, ch)) = ledger_still(transport, &held, &ch.id, &ch.writers).await? {
-                    mint(transport, &fresh, &ch, &now, &[]).await?;
-                }
-            }
-            None => {}
+        if let Err(e) = settle_one(transport, &held, ch, before, after, (&was, &now), &candidates, may_manage).await {
+            failed.get_or_insert(e);
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_one<T: Transport + ?Sized>(
+    transport: &T,
+    held: &CommunityV2,
+    ch: &ChannelV2,
+    before: &CommunityRoles,
+    after: &CommunityRoles,
+    (was, now): (&Posters<'_>, &Posters<'_>),
+    candidates: &[PublicKey],
+    may_manage: bool,
+) -> Result<(), String> {
+    let moved = restricts(before, ch) != restricts(after, ch);
+    let lost: Vec<PublicKey> = candidates.iter().filter(|p| was.writes(p, ch) && !now.writes(p, ch)).copied().collect();
+    let acts = match (restricts(after, ch), ch.restricted()) {
+        (true, false) => may_manage && moved,
+        (false, true) => may_manage && moved,
+        (true, true) => may_manage && !lost.is_empty(),
+        (false, false) => false,
+    };
+    if acts {
+        let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(()) };
+        return match ch.restricted() {
+            false => mint(transport, &fresh, &ch, now, &lost).await,
+            true if restricts(after, &ch) => mint(transport, &fresh, &ch, now, &lost).await,
+            true => reopen(transport, &fresh, &ch).await,
+        };
+    }
+    if !ch.restricted() || !restricts(after, ch) {
+        return Ok(());
+    }
+    let gained: Vec<PublicKey> = candidates.iter().filter(|p| !was.writes(p, ch) && now.writes(p, ch)).copied().collect();
+    if gained.is_empty() {
+        return Ok(());
+    }
+    match live_writer(held, ch) {
+        Some((epoch, secret, writer)) => deliver_on_plane(transport, held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained).await,
+        // Nothing to hand over: a manager mints one they can be given.
+        None if may_manage => match ledger_still(transport, held, &ch.id, &ch.writers).await? {
+            Some((fresh, ch)) => mint(transport, &fresh, &ch, now, &[]).await,
+            None => Ok(()),
+        },
+        None => Ok(()),
+    }
 }
 
 /// What one run of the writer duty did.
@@ -424,6 +437,8 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let manager = |h: &str| h == owner_hex || (!posters.banned.contains(h) && roster.is_authorized(h, Some(owner_hex), Permissions::MANAGE_CHANNELS));
     let may_manage = manager(&me_hex);
     let restrict = restricts(roster, ch);
+    let keyless = may_manage && restrict && ch.restricted() && posters.writes(&me, ch) && live_writer(held, ch).is_none();
+    let since = postable_since(held, ch, keyless);
     let live = ch.writers.as_ref().and_then(|l| l.live());
     // A Refounding retires the live writer epoch: the members it removed may hold it.
     let retired = live.is_some_and(|(root, ..)| root < held.root_epoch);
@@ -470,8 +485,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             return Ok(());
         }
         // A key it can open, not a blob at its locator: anyone can leave a blob.
-        let keyless = posters.writes(&me, ch) && live_writer(held, ch).is_none();
-        let starved = now_ms().saturating_sub(began.max(postable_since(held, ch, keyless))) > STARVED_MS;
+        let starved = now_ms().saturating_sub(began.max(since)) > STARVED_MS;
         if keyless && starved && due(&ch.id, Lane::Starved) {
             if backstop_damped(transport, held, ch, posters, &[], &[Lane::Starved]).await? {
                 done.moved += 1;
@@ -508,16 +522,26 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
 /// attempt, or every pass would mint and deliver again.
 async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey], lanes: &[Lane]) -> Result<bool, String> {
     let result = backstop(transport, held, ch, posters, cut).await;
-    if !matches!(result, Ok(false)) {
+    if !matches!(result, Ok(Backstop::Moved)) {
         acted(&ch.id, lanes);
     }
-    result
+    result.map(|b| b == Backstop::Acted)
+}
+
+/// How a backstop ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Backstop {
+    Acted,
+    /// The ledger moved, or the read came back short: nothing to damp.
+    Moved,
+    /// A fresh read of the roster disagrees with the pass's.
+    StoodDown,
 }
 
 /// A manager's mint or reopen on another's behalf: wait by rank so the highest acts first, read
-/// the Control Plane again, and act only if the ledger is where this pass saw it. Returns
-/// whether it acted.
-async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<bool, String> {
+/// the Control Plane again, and act only if the ledger is where this pass saw it and the roster,
+/// read whole again, agrees with the one the pass judged by.
+async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<Backstop, String> {
     let me_hex = me_pk()?.to_hex();
     let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
     if steps > 0 {
@@ -526,21 +550,23 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64 + spread)).await;
     }
     if !crate::db::current_session().is_live() {
-        return Ok(false);
+        return Ok(Backstop::Moved);
     }
-    let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(false) };
-    // The roster this pass read may predate the change that moved the ledger: act only where the
-    // one folded with the ledger agrees.
-    let folded = crate::db::community::get_community_roles(&hex(&fresh.id().0))?;
-    if restricts(&folded, &ch) != restricts(posters.roster, &ch) {
-        return Ok(false);
+    let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(Backstop::Moved) };
+    // The roster the pass read may predate the change that moved the ledger.
+    let now = fetch_authority(transport, &fresh).await;
+    if !now.everyone_served || now.gapped {
+        return Ok(Backstop::Moved);
+    }
+    if restricts(&now.roles, &ch) != restricts(posters.roster, &ch) {
+        return Ok(Backstop::StoodDown);
     }
     match (restricts(posters.roster, &ch), ch.restricted()) {
         (false, true) => reopen(transport, &fresh, &ch).await?,
-        (false, false) => return Ok(false),
+        (false, false) => return Ok(Backstop::Moved),
         _ => mint(transport, &fresh, &ch, posters, cut).await?,
     }
-    Ok(true)
+    Ok(Backstop::Acted)
 }
 
 /// Who of `pool` the deliveries show holding writer epoch `epoch`, each marked when only a
@@ -573,7 +599,7 @@ fn holders(deliveries: &[rekey::AccessDelivery], pool: &[PublicKey], scope: reke
 }
 
 #[cfg(test)]
-pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, roster: &CommunityRoles) -> Result<bool, String> {
+pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, roster: &CommunityRoles) -> Result<Backstop, String> {
     let banned = Default::default();
     let posters = Posters::of(community, roster, &banned)?;
     let ch = community.channel(channel).cloned().ok_or("no such channel")?;
