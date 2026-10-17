@@ -3923,8 +3923,6 @@ impl VectorCore {
             "everyone": roster.everyone.map(|p| p.0.to_string()),
             "everyone_editable": activated && (is_owner || roster.permissions_above(&me, u32::MAX).contains(Permissions::MANAGE_ROLES)),
             "everyone_default": crate::community::v2::roles::EVERYONE_DEFAULT.to_string(),
-            // Private channels' access roles move with channel permissions, which come first.
-            "activation_blocked": roster.roles.iter().any(|r| matches!(r.scope, RoleScope::Channel(_))),
             "roles": roles,
             "channels": channels,
             "max_roles": crate::community::v2::roles::MAX_ROLES_PER_COMMUNITY,
@@ -4063,6 +4061,63 @@ impl VectorCore {
 
     fn id32(hex: &str, what: &str) -> Result<[u8; 32]> {
         crate::simd::hex::hex_to_bytes_32_checked(hex).ok_or_else(|| VectorError::Other(format!("{what} must be 32-byte hex")))
+    }
+
+    /// A channel's permission overwrites and what an editor needs to change them, read
+    /// locally. Bits ride as decimal strings.
+    pub fn channel_permissions_view(&self, community_id: &str, channel_id: &str) -> Result<serde_json::Value> {
+        use crate::community::roles::{OverwriteTarget, Permissions};
+        let v2 = Self::held_v2(community_id)?;
+        let me = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?.to_hex();
+        let owner_hex = v2.owner().map_err(VectorError::Other)?.to_hex();
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let is_owner = me == owner_hex;
+        let chan = channel_id.to_ascii_lowercase();
+        let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().collect();
+        roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+        let overwrites: Vec<serde_json::Value> = roster
+            .overwrites
+            .iter()
+            .filter(|o| o.scope == chan)
+            .map(|o| {
+                let (kind, id) = match &o.target {
+                    OverwriteTarget::Everyone => ("everyone", None),
+                    OverwriteTarget::Role(id) => ("role", Some(id.clone())),
+                    OverwriteTarget::Member(m) => ("member", Some(m.clone())),
+                };
+                let npub = (kind == "member").then(|| id.as_deref().and_then(|m| nostr_sdk::prelude::PublicKey::from_hex(m).ok()).and_then(|pk| ToBech32::to_bech32(&pk).ok())).flatten();
+                serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string() })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "activated": Self::roles_v2_active(community_id, &roster),
+            "can_manage": is_owner || roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_ROLES),
+            "grantable": if is_owner { u64::MAX.to_string() } else { roster.effective_permissions(&me).0.to_string() },
+            "roles": roles.iter().map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position })).collect::<Vec<_>>(),
+            "overwrites": overwrites,
+        }))
+    }
+
+    /// Set, or with no bits clear, one overwrite on a Channel or Category. `kind` is
+    /// `everyone`, `role` (a role id) or `member` (an npub or hex key).
+    pub async fn set_channel_overwrite(&self, community_id: &str, scope_id: &str, kind: &str, target_id: Option<&str>, allow: &str, deny: &str) -> Result<()> {
+        use crate::community::roles::OverwriteTarget;
+        let v2 = Self::held_v2(community_id)?;
+        let target = match (kind, target_id) {
+            ("everyone", _) => OverwriteTarget::Everyone,
+            ("role", Some(id)) => OverwriteTarget::Role(crate::simd::hex::bytes_to_hex_32(&Self::id32(id, "role_id")?)),
+            ("member", Some(m)) => OverwriteTarget::Member(
+                nostr_sdk::prelude::PublicKey::parse(m).map_err(|_| VectorError::Other("invalid member key".into()))?.to_hex(),
+            ),
+            _ => return Err(VectorError::Other("an overwrite targets everyone, a role or a member".into())),
+        };
+        let (allow, deny) = (Self::parse_permissions(allow)?, Self::parse_permissions(deny)?);
+        let transport = Self::short_transport();
+        crate::community::v2::service::set_overwrite(&transport, &v2, Self::id32(scope_id, "scope_id")?, target, allow, deny)
+            .await
+            .map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
     }
 
     /// Delete a Role (Roles v2 only): terminal, it leaves every holder.

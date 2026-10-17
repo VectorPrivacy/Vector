@@ -207,6 +207,47 @@ pub struct CommunityRoles {
     /// What every member holds before any Role (CORD-04 §2), once Roles v2 is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub everyone: Option<Permissions>,
+    /// Channel permission overwrites (CORD-04 §8), on Roles v2.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overwrites: Vec<Overwrite>,
+}
+
+/// The bits an overwrite may touch (CORD-04 §8): the channel permissions and
+/// `MANAGE_MESSAGES`. Everything else, staff bits above all, means the same in every Channel.
+pub const OVERWRITABLE: u64 = Permissions::MANAGE_MESSAGES
+    | Permissions::VIEW_CHANNEL
+    | Permissions::SEND_MESSAGES
+    | Permissions::SEND_IN_THREADS
+    | Permissions::ATTACH_FILES
+    | Permissions::ADD_REACTIONS
+    | Permissions::READ_MESSAGE_HISTORY
+    | Permissions::CONNECT
+    | Permissions::SPEAK
+    | Permissions::VIDEO
+    | Permissions::PRIORITY_SPEAKER
+    | Permissions::MUTE_MEMBERS
+    | Permissions::DEAFEN_MEMBERS
+    | Permissions::MOVE_MEMBERS
+    | Permissions::MODERATE_MEMBERS;
+
+/// Who an overwrite applies to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub enum OverwriteTarget {
+    Everyone,
+    Role(String),
+    Member(String),
+}
+
+/// One overwrite in one Channel or Category: bits allowed and bits denied on top of what
+/// the target holds server-wide (CORD-04 §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overwrite {
+    /// The Channel or Category id, lowercase hex.
+    pub scope: String,
+    pub target: OverwriteTarget,
+    pub allow: Permissions,
+    pub deny: Permissions,
 }
 
 impl CommunityRoles {
@@ -222,6 +263,46 @@ impl CommunityRoles {
             .filter(move |g| g.member == member_hex)
             .flat_map(move |g| g.role_ids.iter())
             .filter_map(move |rid| self.role(rid))
+    }
+
+    /// A member's permissions in one Channel (CORD-04 §8), holding `role_ids` (their Grant,
+    /// or one about to replace it): server permissions, then the Channel's `@everyone`
+    /// overwrite, its Roles' denies then allows, and their own overwrite last. Without
+    /// VIEW_CHANNEL they hold nothing there. The owner holds everything.
+    pub fn channel_permissions_holding(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, role_ids: &[String]) -> Permissions {
+        if owner_hex == Some(member_hex) {
+            return Permissions(u64::MAX);
+        }
+        let roles: Vec<&Role> = role_ids.iter().filter_map(|id| self.role(id)).collect();
+        let mut p = roles.iter().fold(self.everyone.unwrap_or_default(), |acc, r| acc.union(r.permissions)).0;
+        let scope = channel_hex.to_ascii_lowercase();
+        let here = || self.overwrites.iter().filter(|o| o.scope == scope);
+        if let Some(o) = here().find(|o| o.target == OverwriteTarget::Everyone) {
+            p = (p & !o.deny.0) | o.allow.0;
+        }
+        let (mut deny, mut allow) = (0u64, 0u64);
+        for o in here() {
+            if let OverwriteTarget::Role(id) = &o.target {
+                if roles.iter().any(|r| r.role_id == *id) {
+                    deny |= o.deny.0;
+                    allow |= o.allow.0;
+                }
+            }
+        }
+        p = (p & !deny) | allow;
+        if let Some(o) = here().find(|o| matches!(&o.target, OverwriteTarget::Member(m) if m == member_hex)) {
+            p = (p & !o.deny.0) | o.allow.0;
+        }
+        if p & Permissions::VIEW_CHANNEL == 0 {
+            return Permissions::empty();
+        }
+        Permissions(p)
+    }
+
+    /// [`Self::channel_permissions_holding`] for the Roles the member holds now.
+    pub fn channel_permissions(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str) -> Permissions {
+        let held: Vec<String> = self.roles_of(member_hex).map(|r| r.role_id.clone()).collect();
+        self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held)
     }
 
     /// Effective permissions for a member: `@everyone` and every granted Role's bits.
@@ -407,6 +488,11 @@ impl CommunityRoles {
         for id in without {
             held.remove(id.as_str());
         }
+        // On Roles v2 the key follows View Channel as the Channel resolves it (CORD-03 §5).
+        if self.everyone.is_some() {
+            let held: Vec<String> = held.into_iter().map(String::from).collect();
+            return self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held).contains(Permissions::VIEW_CHANNEL);
+        }
         self.channel_role_ids(channel_hex).iter().any(|id| held.contains(id.as_str()))
     }
 
@@ -442,6 +528,32 @@ impl CommunityRoles {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_channel_resolves_everyone_then_roles_then_the_member() {
+        let (r1, r2) = ("1".repeat(64), "2".repeat(64));
+        let (m, n) = ("a".repeat(64), "b".repeat(64));
+        let role = |id: &str, bits: u64| Role { role_id: id.into(), position: 1, permissions: Permissions(bits), ..Role::admin(id.into()) };
+        let ch = "c".repeat(64);
+        let ow = |target, allow: u64, deny: u64| Overwrite { scope: ch.clone(), target, allow: Permissions(allow), deny: Permissions(deny) };
+        let (view, send) = (Permissions::VIEW_CHANNEL, Permissions::SEND_MESSAGES);
+        let mut r = CommunityRoles {
+            roles: vec![role(&r1, 0), role(&r2, 0)],
+            grants: vec![MemberGrant { member: m.clone(), role_ids: vec![r1.clone(), r2.clone()] }],
+            everyone: Some(Permissions(view | send)),
+            overwrites: vec![ow(OverwriteTarget::Everyone, 0, view | send), ow(OverwriteTarget::Role(r1.clone()), view, 0), ow(OverwriteTarget::Role(r2.clone()), 0, view)],
+        };
+        let at = |r: &CommunityRoles, who: &str| r.channel_permissions(Some("o"), who, &ch).0;
+        assert_eq!(at(&r, &m), view, "one role's allow beats another's deny; @everyone's deny of Send stands");
+        assert_eq!(at(&r, &n), 0, "without View a member holds nothing there");
+        assert_eq!(at(&r, "o"), u64::MAX, "the owner holds everything");
+        r.overwrites.push(ow(OverwriteTarget::Member(m.clone()), send, view));
+        assert_eq!(at(&r, &m), 0, "the member's own overwrite has the last word");
+        assert!(!r.is_entitled(Some("o"), &m, &ch, &[], &[]), "and the key follows View");
+        r.overwrites.pop();
+        assert!(r.is_entitled(Some("o"), &m, &ch, &[], &[]));
+        assert!(!r.is_entitled(Some("o"), &m, &ch, &[], std::slice::from_ref(&r1)), "losing the allowing role loses the key");
+    }
+
     fn admin_roster(member: &str) -> CommunityRoles {
         let role = Role::admin("a".repeat(64));
         CommunityRoles {
@@ -451,6 +563,7 @@ mod tests {
             }],
             roles: vec![role],
             everyone: None,
+            overwrites: Vec::new(),
         }
     }
 
@@ -492,6 +605,7 @@ mod tests {
             grants: vec![MemberGrant { member: alice.clone(), role_ids: vec![role.role_id.clone()] }],
             roles: vec![role],
             everyone: None,
+            overwrites: Vec::new(),
         };
         assert!(!r.is_admin(&alice), "a social-only role holder is not an admin");
         assert!(r.is_privileged(&alice), "though they do hold a role");
@@ -522,6 +636,7 @@ mod tests {
             ],
             roles: vec![admin_role, mod_role],
             everyone: None,
+            overwrites: Vec::new(),
         };
         let owner_ref = Some(owner.as_str());
 
@@ -568,6 +683,7 @@ mod tests {
             ],
             roles: vec![admin_role, kick_role],
             everyone: None,
+            overwrites: Vec::new(),
         };
         let o = Some(owner.as_str());
         use Permissions as P;
@@ -625,6 +741,7 @@ mod tests {
             }],
             roles: vec![admin, mod_role],
             everyone: None,
+            overwrites: Vec::new(),
         };
         // Union of both roles' bits, and the *highest* (lowest index) position wins.
         assert!(r.has_permission(&alice, Permissions::BAN)); // from Admin
@@ -654,7 +771,7 @@ mod tests {
         // A member with no role (Bob) is not — and neither is Alice once demoted (no grant).
         let bob = "bb".repeat(32);
         assert!(!r.is_authorized(&bob, Some(&owner), Permissions::BAN));
-        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None };
+        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None, overwrites: Vec::new() };
         assert!(!demoted.is_authorized(&alice, Some(&owner), Permissions::BAN));
         // ...but the owner stays authorized even with an empty grant set.
         assert!(demoted.is_authorized(&owner, Some(&owner), Permissions::BAN));
@@ -689,6 +806,7 @@ mod tests {
             ],
             roles: vec![scoped, server],
             everyone: None,
+            overwrites: Vec::new(),
         }
     }
 

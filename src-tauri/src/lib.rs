@@ -1135,6 +1135,8 @@ pub fn run() {
             commands::community::delete_community_role,
             commands::community::set_community_everyone,
             commands::community::activate_community_roles_v2,
+            commands::community::get_channel_permissions,
+            commands::community::set_channel_overwrite,
             commands::community::create_community_channel,
             commands::community::delete_community_channel,
             commands::community::set_community_image,

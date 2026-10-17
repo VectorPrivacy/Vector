@@ -5513,7 +5513,12 @@ pub async fn edit_role_v2<T: Transport + ?Sized>(
         next.permissions = Permissions(permissions);
         next.display = display;
         next.mentionable = mentionable;
-        set_role_v2(transport, community, &next).await
+        set_role_v2(transport, community, &next).await?;
+        let mut after = view.roles.clone();
+        if let Some(slot) = after.roles.iter_mut().find(|r| r.role_id == next.role_id) {
+            *slot = next;
+        }
+        settle_access(transport, community, &view.roles, &after).await
     })
     .await
 }
@@ -5651,7 +5656,10 @@ pub async fn delete_role_v2<T: Transport + ?Sized>(transport: &T, community: &Co
         }
         seal_standing(transport, community, &holders_of(&view, role_id), Seal::Strict).await?;
         let eid = crate::simd::hex::hex_to_bytes_32_checked(role_id).ok_or("role_id must be 32-byte hex")?;
-        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::role_v2_deleted_json(&current.role_id)).await
+        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::role_v2_deleted_json(&current.role_id)).await?;
+        let mut after = view.roles.clone();
+        after.roles.retain(|r| r.role_id != current.role_id);
+        settle_access(transport, community, &view.roles, &after).await
     })
     .await
 }
@@ -5666,9 +5674,140 @@ pub async fn set_everyone<T: Transport + ?Sized>(transport: &T, community: &Comm
             return Err("you can't give everyone permissions you don't hold".to_string());
         }
         let eid = super::derive::everyone_locator(community.id());
-        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::everyone_content_json(permissions)).await
+        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::everyone_content_json(permissions)).await?;
+        let mut after = view.roles.clone();
+        after.everyone = Some(crate::community::roles::Permissions(permissions));
+        settle_access(transport, community, &view.roles, &after).await
     })
     .await
+}
+
+/// Set, or with no bits clear, one overwrite on a Channel or Category (CORD-04 §8): judged
+/// as readers judge it, on MANAGE_ROLES and every bit it touches held through Roles above
+/// its target. Keys then follow View Channel in every Private Channel it reaches.
+pub async fn set_overwrite<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    scope: [u8; 32],
+    target: crate::community::roles::OverwriteTarget,
+    allow: u64,
+    deny: u64,
+) -> Result<(), String> {
+    use crate::community::roles::{Overwrite, OverwriteTarget, Permissions, OVERWRITABLE};
+    crate::db::scoped(async move {
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        if (allow | deny) & !OVERWRITABLE != 0 {
+            return Err("only channel permissions can be set per channel".to_string());
+        }
+        if !community.channels.iter().any(|c| c.id.0 == scope) && !community.categories.iter().any(|k| k.id == scope) {
+            return Err("no such channel or category".to_string());
+        }
+        let scope_hex = crate::simd::hex::bytes_to_hex_32(&scope);
+        let rank = match &target {
+            OverwriteTarget::Everyone => u32::MAX,
+            OverwriteTarget::Role(id) => view.roles.role(id).map(|r| r.position).ok_or("no such role")?,
+            OverwriteTarget::Member(m) if *m == author.owner_hex => return Err("the owner holds every permission everywhere".to_string()),
+            OverwriteTarget::Member(m) => view.roles.highest_position(m).unwrap_or(u32::MAX),
+        };
+        let current = view.roles.overwrites.iter().find(|o| o.scope == scope_hex && o.target == target);
+        let (was_allow, was_deny) = current.map_or((0, 0), |o| (o.allow.0, o.deny.0));
+        if !author.supports(rank, allow | deny | ((was_allow ^ allow) | (was_deny ^ deny))) {
+            return Err("you can only set permissions you hold, for roles and members beneath you".to_string());
+        }
+        let target_bytes = super::roles::overwrite_target_bytes(community.id(), &target).ok_or("malformed target")?;
+        let eid = super::derive::acl_locator(community.id(), &scope, &target_bytes);
+        require_role_head(&view, &crate::simd::hex::bytes_to_hex_32(&eid))?;
+        let o = Overwrite { scope: scope_hex.clone(), target: target.clone(), allow: Permissions(allow), deny: Permissions(deny) };
+        publish_control_edition(transport, community, vsk::CHANNEL_ACL, &eid, &super::roles::overwrite_content_json(&o)).await?;
+        let mut after = view.roles.clone();
+        after.overwrites.retain(|x| !(x.scope == scope_hex && x.target == target));
+        if allow != 0 || deny != 0 {
+            after.overwrites.push(o);
+        }
+        settle_access(transport, community, &view.roles, &after).await
+    })
+    .await
+}
+
+/// Move Private Channel keys from what `before` entitled to what `after` does (CORD-03 §5):
+/// the newly entitled get one Direct Invite carrying every key they gained, and a Channel
+/// anyone lost is rekeyed without them. The roster this device holds is brought forward
+/// first, so the invite and the rekey are built from `after`.
+async fn settle_access<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    before: &crate::community::roles::CommunityRoles,
+    after: &crate::community::roles::CommunityRoles,
+) -> Result<(), String> {
+    if after.everyone.is_none() {
+        return Ok(());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let owner_hex = community.owner()?.to_hex();
+    let me = me_pk()?;
+    {
+        let mut stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        stored.everyone = after.everyone;
+        stored.overwrites = after.overwrites.clone();
+        for r in &after.roles {
+            match stored.roles.iter_mut().find(|x| x.role_id == r.role_id) {
+                Some(slot) => *slot = r.clone(),
+                None => stored.roles.push(r.clone()),
+            }
+        }
+        stored.roles.retain(|r| after.role(&r.role_id).is_some());
+        let at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
+        if let Err(e) = crate::db::community::set_community_roles(&cid_hex, &stored, at) {
+            crate::log_warn!("v2: local roster merge failed (heals on the next control fold): {e}");
+        }
+    }
+    let candidates = access_candidates(community, after);
+    let mut gained: std::collections::BTreeMap<PublicKey, ()> = Default::default();
+    for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        let mut lost = Vec::new();
+        for pk in &candidates {
+            let hex = pk.to_hex();
+            if *pk == me || hex == owner_hex {
+                continue;
+            }
+            let (was, now) = (before.is_entitled(Some(&owner_hex), &hex, &chan, &[], &[]), after.is_entitled(Some(&owner_hex), &hex, &chan, &[], &[]));
+            if now && !was {
+                gained.insert(*pk, ());
+            } else if was && !now {
+                lost.push(*pk);
+            }
+        }
+        if !lost.is_empty() {
+            let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+            rekey_channel_excluding(transport, &held, &ch.id, after, &[], &lost).await?;
+        }
+    }
+    if !gained.is_empty() {
+        let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        let signer = crate::signer::active_signer()?;
+        for pk in gained.keys() {
+            let bundle = bundle_of_with_overlay(&held, BundleAudience::Member(*pk), Some(me), None, None, &[], &[]);
+            let wrap = invite::build_direct_invite_signed(&signer, me, pk, &bundle).await.map_err(|e| e.to_string())?;
+            transport.publish(&wrap, &held.relays).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Everyone a Private Channel's key could be owed to: every Grant holder, every member an
+/// overwrite names, and every member this device knows.
+fn access_candidates(community: &CommunityV2, roster: &crate::community::roles::CommunityRoles) -> Vec<PublicKey> {
+    use crate::community::roles::OverwriteTarget;
+    let mut out: std::collections::BTreeSet<PublicKey> = stored_memberlist(community).unwrap_or_default().into_iter().collect();
+    out.extend(roster.grants.iter().filter_map(|g| PublicKey::from_hex(&g.member).ok()));
+    out.extend(roster.overwrites.iter().filter_map(|o| match &o.target {
+        OverwriteTarget::Member(m) => PublicKey::from_hex(m).ok(),
+        _ => None,
+    }));
+    out.into_iter().collect()
 }
 
 /// Move a Community to Roles v2 (CORD-04 §2), owner only: each legacy Role is carried
@@ -5683,9 +5822,6 @@ pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: 
         if view.activated {
             return Err("this community already uses the new roles".to_string());
         }
-        if view.roles.roles.iter().any(|r| matches!(r.scope, crate::community::roles::RoleScope::Channel(_))) {
-            return Err("channel access roles move with channel permissions, which aren't here yet".to_string());
-        }
         let mut legacy: Vec<crate::community::roles::Role> = view.roles.roles.clone();
         legacy.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
         let mut last: Option<String> = None;
@@ -5699,9 +5835,30 @@ pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: 
             };
             let mut next = role.clone();
             next.rank = Some(rank.clone());
+            next.scope = crate::community::roles::RoleScope::Server;
             set_role_v2(transport, community, &next).await?;
             last = Some(rank);
             prev_position = Some(role.position);
+        }
+        // A channel access role becomes a Role the Channel lets through: @everyone loses
+        // View Channel there, each access role gets it back. Who holds the key is unchanged.
+        use crate::community::roles::{Overwrite, OverwriteTarget, Permissions, RoleScope};
+        let view_bit = Permissions(Permissions::VIEW_CHANNEL);
+        let mut scoped: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for role in &legacy {
+            if let RoleScope::Channel(c) = &role.scope {
+                scoped.entry(c.to_ascii_lowercase()).or_default().push(role.role_id.clone());
+            }
+        }
+        for (chan, role_ids) in &scoped {
+            let Some(scope) = crate::simd::hex::hex_to_bytes_32_checked(chan) else { continue };
+            let targets = std::iter::once((OverwriteTarget::Everyone, Permissions(0), view_bit))
+                .chain(role_ids.iter().map(|id| (OverwriteTarget::Role(id.clone()), view_bit, Permissions(0))));
+            for (target, allow, deny) in targets {
+                let bytes = super::roles::overwrite_target_bytes(community.id(), &target).ok_or("malformed target")?;
+                let o = Overwrite { scope: chan.clone(), target, allow, deny };
+                publish_control_edition(transport, community, vsk::CHANNEL_ACL, &super::derive::acl_locator(community.id(), &scope, &bytes), &super::roles::overwrite_content_json(&o)).await?;
+            }
         }
         let eid = super::derive::everyone_locator(community.id());
         publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::everyone_content_json(everyone)).await?;
@@ -5887,6 +6044,13 @@ async fn settle_channel_keys<T: Transport + ?Sized>(
     after: &[String],
 ) -> Result<(), String> {
     use crate::community::roles::RoleScope;
+    if view.roles.everyone.is_some() {
+        let mut next = view.roles.clone();
+        let member_hex = member.to_hex();
+        next.grants.retain(|g| g.member != member_hex);
+        next.grants.push(crate::community::roles::MemberGrant { member: member_hex, role_ids: after.to_vec() });
+        return settle_access(transport, community, &view.roles, &next).await;
+    }
     let added: Vec<String> = after.iter().filter(|id| !before.contains(id)).cloned().collect();
     let removed: Vec<String> = before.iter().filter(|id| !after.contains(id)).cloned().collect();
     let owner_hex = community.owner()?.to_hex();
@@ -6956,6 +7120,36 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
             transport.publish_durable(c, &community.relays).await?;
         }
         publish_control_edition(transport, community, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
+        if roles_v2_held(community) {
+            // On Roles v2 a Private Channel is one @everyone can't view, its creator can.
+            use crate::community::roles::{Overwrite, OverwriteTarget, Permissions};
+            let chan = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+            let view_bit = Permissions(Permissions::VIEW_CHANNEL);
+            let mut written = vec![Overwrite { scope: chan.clone(), target: OverwriteTarget::Everyone, allow: Permissions(0), deny: view_bit }];
+            if owner != my_pk {
+                written.push(Overwrite { scope: chan.clone(), target: OverwriteTarget::Member(my_pk.to_hex()), allow: view_bit, deny: Permissions(0) });
+            }
+            for o in &written {
+                let target = super::roles::overwrite_target_bytes(community.id(), &o.target).ok_or("malformed target")?;
+                publish_control_edition(transport, community, vsk::CHANNEL_ACL, &super::derive::acl_locator(community.id(), &channel_id.0, &target), &super::roles::overwrite_content_json(o)).await?;
+            }
+            let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+            let mut stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+            stored.overwrites.extend(written);
+            let at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
+            if let Err(e) = crate::db::community::set_community_roles(&cid_hex, &stored, at) {
+                crate::log_warn!("v2: local roster merge failed (heals on the next control fold): {e}");
+            }
+            if !crate::db::community::community_held(community.id())? {
+                return Err("community removed during channel create".to_string());
+            }
+            let mut updated = community.clone();
+            updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+            crate::db::community::save_community_v2(&updated)?;
+            crate::db::community::store_epoch_key(&cid_hex, &chan, epoch.0, &channel_key)?;
+            let _ = refresh_public_links(transport, &updated).await;
+            return Ok(());
+        }
         // Publish the access list AFTER the channel exists, so a peer folding the
         // Role always resolves the channel it scopes to. A failure here leaves a
         // channel only its creator can read — recoverable by re-granting, never a
@@ -7168,12 +7362,41 @@ pub fn absorb_parked_channel_keys(community: &CommunityV2, session: &std::sync::
 /// it cannot be forged; the vend is only delivery. A recipient accepts the key
 /// solely on the strength of their OWN fold showing this grant — the bundle can
 /// never introduce a channel their control plane doesn't define.
+/// This device has folded the community onto Roles v2.
+fn roles_v2_held(community: &CommunityV2) -> bool {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let everyone = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
+    crate::db::community::get_community_roles(&cid_hex).is_ok_and(|r| r.everyone.is_some())
+        || crate::db::community::get_edition_head(&cid_hex, &everyone).ok().flatten().is_some()
+}
+
+/// On Roles v2 a member's access to one Private Channel is their own overwrite there:
+/// View Channel allowed to let them in, denied to keep them out, other bits kept.
+async fn member_view_overwrite<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, member: &PublicKey, grant: bool) -> Result<(), String> {
+    use crate::community::roles::{OverwriteTarget, Permissions};
+    let ch = community.channel(channel_id).ok_or("unknown channel")?;
+    if !ch.private {
+        return Err("channel is public: every member already reads it".to_string());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let chan = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    let target = OverwriteTarget::Member(member.to_hex());
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let (allow, deny) = roster.overwrites.iter().find(|o| o.scope == chan && o.target == target).map_or((0, 0), |o| (o.allow.0, o.deny.0));
+    let v = Permissions::VIEW_CHANNEL;
+    let (allow, deny) = if grant { (allow | v, deny & !v) } else { (allow & !v, deny | v) };
+    set_overwrite(transport, community, channel_id.0, target, allow, deny).await
+}
+
 pub async fn grant_channel_access<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     channel_id: &ChannelId,
     member: &PublicKey,
 ) -> Result<(), String> {
+    if roles_v2_held(community) {
+        return member_view_overwrite(transport, community, channel_id, member, true).await;
+    }
     crate::db::scoped(async move {
         let my_pk = me_pk()?;
         let ch = community.channel(channel_id).ok_or("unknown channel")?;
@@ -7272,6 +7495,9 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     member: &PublicKey,
 ) -> Result<(), String> {
+    if roles_v2_held(community) {
+        return member_view_overwrite(transport, community, channel_id, member, false).await;
+    }
     crate::db::scoped(async move {
         let my_pk = me_pk()?;
         let ch = community.channel(channel_id).ok_or("unknown channel")?;
@@ -7374,7 +7600,19 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
         if owner != my_pk {
             recipients.push(owner);
         }
-        for g in &roster.grants {
+        if roster.everyone.is_some() {
+            // On Roles v2, everyone the Channel resolves View Channel for.
+            for pk in access_candidates(community, roster) {
+                let hex = pk.to_hex();
+                if removed_hexes.contains(&hex) || hex == owner_hex || recipients.contains(&pk) {
+                    continue;
+                }
+                if roster.is_entitled(Some(&owner_hex), &hex, &chan_hex, &[], &[]) {
+                    recipients.push(pk);
+                }
+            }
+        }
+        for g in roster.grants.iter().filter(|_| roster.everyone.is_none()) {
             if removed_hexes.contains(&g.member) || g.member == owner_hex {
                 continue;
             }
@@ -8458,7 +8696,7 @@ fn roster_stamp(editions: &[ParsedEdition], heads: &[FoldedHead]) -> i64 {
     let ceiling = roster_stamp_ceiling();
     editions
         .iter()
-        .filter(|e| [vsk::ROLE, vsk::ROLE_V2, vsk::GRANT, vsk::BANLIST, vsk::TENURE].contains(&e.vsk.as_str()) && ids.contains(&e.inner_id))
+        .filter(|e| [vsk::ROLE, vsk::ROLE_V2, vsk::GRANT, vsk::BANLIST, vsk::TENURE, vsk::CHANNEL_ACL].contains(&e.vsk.as_str()) && ids.contains(&e.inner_id))
         .map(|e| (e.created_at as i64).min(ceiling))
         .max()
         .unwrap_or(0)
@@ -8771,7 +9009,80 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         authorized.grants.retain(|g| !g.role_ids.is_empty());
     }
 
+    if activated {
+        authorized.overwrites = fold_overwrites(community, editions, floors, &authorized, &banned, &sealed, &mut heads, &mut gapped);
+    }
+
     AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, complete, refused, carried, admitted, activated, sealed, converged }
+}
+
+/// Fold the Channel and Category overwrites (vsk 14, CORD-04 §8) against the settled
+/// Roster. Each is judged on itself: its signer holds MANAGE_ROLES and every bit it allows
+/// or denies through Roles ranked strictly above its target (a Role's rank, a member's,
+/// beneath every Role for `@everyone`). The head is the newest admitted edition, chained
+/// from the floor like any Control entity.
+#[allow(clippy::too_many_arguments)]
+fn fold_overwrites(
+    community: &CommunityV2,
+    editions: &[ParsedEdition],
+    floors: &Floors,
+    roles: &crate::community::roles::CommunityRoles,
+    banned: &std::collections::BTreeSet<String>,
+    sealed: &SealedBy,
+    heads: &mut Vec<FoldedHead>,
+    gapped: &mut bool,
+) -> Vec<crate::community::roles::Overwrite> {
+    use crate::community::roles::{OverwriteTarget, Permissions};
+    let cid = community.id();
+    let owner_hex = community.owner().ok().map(|o| o.to_hex());
+    let mut groups: std::collections::BTreeMap<[u8; 32], Vec<(&ParsedEdition, crate::community::roles::Overwrite)>> = Default::default();
+    for e in editions.iter().filter(|e| e.vsk == vsk::CHANNEL_ACL && e.binding.is_some()) {
+        let Some(o) = super::roles::parse_overwrite_content(&e.content) else { continue };
+        let scope = crate::simd::hex::hex_to_bytes_32_checked(&o.scope).expect("parsed");
+        let Some(target) = super::roles::overwrite_target_bytes(cid, &o.target) else { continue };
+        if super::derive::acl_locator(cid, &scope, &target) == e.entity_id {
+            groups.entry(e.entity_id).or_default().push((e, o));
+        }
+    }
+    let mut out = Vec::new();
+    for (eid, group) in groups {
+        let ok: Vec<bool> = group
+            .iter()
+            .map(|(e, o)| {
+                let ah = e.author.to_hex();
+                if owner_hex.as_deref() == Some(ah.as_str()) {
+                    return true;
+                }
+                if banned.contains(&ah) && !is_listed(sealed, &ah, &e.self_hash) {
+                    return false;
+                }
+                let rank = match &o.target {
+                    OverwriteTarget::Everyone => u32::MAX,
+                    OverwriteTarget::Role(id) => roles.role(id).map_or(u32::MAX, |r| r.position),
+                    // The owner holds everything, in every Channel: nothing to overwrite.
+                    OverwriteTarget::Member(m) if owner_hex.as_deref() == Some(m.as_str()) => return false,
+                    OverwriteTarget::Member(m) => roles.highest_position(m).unwrap_or(u32::MAX),
+                };
+                let support = roles.permissions_above(&ah, rank).0 | seal_of(sealed, &ah, &e.self_hash, rank);
+                support & Permissions::MANAGE_ROLES != 0 && (o.allow.0 | o.deny.0) & !support == 0
+            })
+            .collect();
+        if !ok.contains(&true) {
+            continue;
+        }
+        let entity_hex = crate::simd::hex::bytes_to_hex_32(&eid);
+        let rank = |a: &str| fork_rank(roles, owner_hex.as_deref(), a);
+        let fold_eds: Vec<version::Edition> = group.iter().map(|(p, _)| p.to_fold_edition_ranked(rank(&p.author.to_hex()))).collect();
+        let (hi, gap) = fold_head_among(&fold_eds, floors.get(&entity_hex), &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)), &|i| ok[i]);
+        *gapped |= gap;
+        let Some(hi) = hi else { continue };
+        let (head, o) = &group[hi];
+        heads.push(FoldedHead { entity_hex, version: head.version, self_hash: head.self_hash, inner_id: head.inner_id, author: head.author.to_bytes(), rebased: false });
+        if o.allow.0 != 0 || o.deny.0 != 0 {
+            out.push(o.clone());
+        }
+    }
+    out
 }
 
 /// One candidate edition of a role/grant entity — the pool [`select_authorized`]
@@ -12756,6 +13067,7 @@ mod tests {
                 MemberGrant { member: revoked.to_hex(), role_ids: Vec::new() },
             ],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roles, 1).unwrap();
 
@@ -13755,6 +14067,7 @@ mod tests {
             roles: vec![role("mod", 3, Permissions::MANAGE_ROLES | Permissions::KICK), role("low", 8, Permissions::BAN)],
             grants: vec![MemberGrant { member: "m".into(), role_ids: vec!["mod".into(), "low".into()] }],
             everyone: None,
+            overwrites: Vec::new(),
         };
         let moderator = RoleAuthor { me_hex: "m".into(), owner_hex: "o".into(), is_owner: false, rank: 3, roles };
         assert!(moderator.supports(4, Permissions::KICK), "a bit they hold, beneath them");
@@ -18474,7 +18787,7 @@ mod tests {
     #[tokio::test]
     async fn the_owner_carries_a_legacy_roster_across_to_roles_v2() {
         // Order, names, colours, bits and peers survive; Grants keep resolving; nothing reads
-        // vsk 13 until @everyone lands last; and a channel access role blocks the move.
+        // vsk 13 until @everyone lands last; and a channel access role becomes overwrites.
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "Carry", bed.relays.clone(), None).await.unwrap();
@@ -18507,8 +18820,12 @@ mod tests {
         let other = create_community(&bed.relay, "Scoped", bed.relays.clone(), None).await.unwrap();
         let scoped = Role { role_id: "b1".repeat(32), name: "Access".into(), position: 5, permissions: Permissions(0), scope: RoleScope::Channel(crate::simd::hex::bytes_to_hex_32(&other.channels[0].id.0)), color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
         publish_role(&bed.relay, &other, &owner.keys, &scoped, 1).await;
-        let err = activate_roles_v2(&bed.relay, &other, 0).await.unwrap_err();
-        assert!(err.contains("channel"), "{err}");
+        follow_control(&bed.relay, &other).await.unwrap();
+        activate_roles_v2(&bed.relay, &other, 0).await.unwrap();
+        let moved = fetch_authority(&bed.relay, &other).await;
+        let access = moved.roles.role(&scoped.role_id).unwrap();
+        assert_eq!(access.scope, RoleScope::Server, "an access role carries across unscoped");
+        assert_eq!(moved.roles.overwrites.len(), 2, "its Channel denies @everyone View and allows it to the role");
     }
 
     #[tokio::test]
@@ -21437,6 +21754,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn roles_v2_carries_private_access_as_overwrites_and_keys_follow_them() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "AclCarry", vec!["wss://r".into()], None).await.unwrap();
+        let priv_id = create_private_channel(&relay, &community, "mods").await.unwrap();
+        let (chan, cid_hex) = (crate::simd::hex::bytes_to_hex_32(&priv_id.0), crate::simd::hex::bytes_to_hex_32(&community.id().0));
+        let owner_hex = community.owner().unwrap().to_hex();
+        let (s, t) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        grant_channel_access(&relay, &held(), &priv_id, &s).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+
+        activate_roles_v2(&relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &held()).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster.everyone.is_some() && roster.channel_roles(&chan).is_empty(), "on Roles v2, no scoped roles");
+        assert!(roster.is_entitled(Some(&owner_hex), &s.to_hex(), &chan, &[], &[]), "the access holder still reads it");
+        assert!(!roster.is_entitled(Some(&owner_hex), &t.to_hex(), &chan, &[], &[]), "nobody else does");
+        assert_eq!(held().channel(&priv_id).unwrap().epoch, Epoch(1), "nobody lost access, so nothing rotated");
+
+        // A member overwrite lets T in: their bundle carries the key, and S's deny rotates.
+        grant_channel_access(&relay, &held(), &priv_id, &t).await.unwrap();
+        assert!(bundle_of(&held(), BundleAudience::Member(t), None, None, None).channels.iter().any(|c| c.id == chan));
+        revoke_channel_access(&relay, &held(), &priv_id, &s).await.unwrap();
+        assert_eq!(held().channel(&priv_id).unwrap().epoch, Epoch(2), "the revoke rotated the channel");
+        // The new key reaches who the Channel lets through, and not who it doesn't.
+        let group = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
+        let blobs: Vec<String> = fetch_rekey_chunks(&relay, &community.relays, &group).await.unwrap().into_iter().flat_map(|c| c.blobs).map(|b| b.locator).collect();
+        let me = me_pk().unwrap().to_bytes();
+        let at = |pk: &PublicKey| rekey::blob_locator(&me, &pk.to_bytes(), RekeyScope::Channel(priv_id), Epoch(2));
+        assert!(blobs.contains(&at(&t)) && !blobs.contains(&at(&s)), "T is keyed, S is not");
+        // A peer folding the plane cold agrees.
+        let eds = fetch_control(&relay, &held()).await;
+        let f = fold_authority(&held(), &eds, &Floors::default());
+        assert!(f.roles.is_entitled(Some(&owner_hex), &t.to_hex(), &chan, &[], &[]));
+        assert!(!f.roles.is_entitled(Some(&owner_hex), &s.to_hex(), &chan, &[], &[]));
+    }
+
+    #[tokio::test]
+    async fn on_roles_v2_keys_follow_roles_through_the_channel() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "AclRoles", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let priv_id = create_private_channel(&relay, &held(), "staff").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&priv_id.0);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner_hex = community.owner().unwrap().to_hex();
+        let m = Keys::generate().public_key();
+        let roster = || crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster().channel_roles(&chan).is_empty(), "no access role on Roles v2");
+        assert!(!roster().is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "@everyone can't view it");
+
+        let staff = create_role_v2(&relay, &held(), "Staff", 0, 0).await.unwrap();
+        set_overwrite(&relay, &held(), priv_id.0, crate::community::roles::OverwriteTarget::Role(staff.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        set_member_roles(&relay, &held(), &m, vec![staff.clone()]).await.unwrap();
+        assert!(roster().is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "the role the channel lets through");
+        assert!(bundle_of(&held(), BundleAudience::Member(m), None, None, None).channels.iter().any(|c| c.id == chan));
+        assert_eq!(held().channel(&priv_id).unwrap().epoch, Epoch(1));
+        set_member_roles(&relay, &held(), &m, vec![]).await.unwrap();
+        assert_eq!(held().channel(&priv_id).unwrap().epoch, Epoch(2), "losing the role rotates the channel");
+        // Deleting the allow overwrite's role does the same for its holders.
+        let n = Keys::generate().public_key();
+        set_member_roles(&relay, &held(), &n, vec![staff.clone()]).await.unwrap();
+        delete_role_v2(&relay, &held(), &staff).await.unwrap();
+        assert_eq!(held().channel(&priv_id).unwrap().epoch, Epoch(3));
+        assert!(!roster().is_entitled(Some(&owner_hex), &n.to_hex(), &chan, &[], &[]));
+    }
+
+    #[tokio::test]
+    async fn an_overwrite_stands_only_on_authority_above_its_target() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "AclJudge", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, crate::community::v2::roles::EVERYONE_DEFAULT, 1).await;
+        let (a, b) = (Keys::generate(), Keys::generate());
+        let mr = Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES;
+        let (ra, rb) = ("e3".repeat(32), "e4".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&ra, "A", "C", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rb, "B", "F", Permissions::VIEW_CHANNEL), 1).await;
+        publish_grant(&relay, &community, &owner, &a.public_key(), vec![ra.clone()], 1).await;
+        let ch = community.channels[0].id.0;
+        let put = |target: crate::community::roles::OverwriteTarget, allow: u64, deny: u64| {
+            let o = crate::community::roles::Overwrite { scope: crate::simd::hex::bytes_to_hex_32(&ch), target, allow: Permissions(allow), deny: Permissions(deny) };
+            let t = crate::community::v2::roles::overwrite_target_bytes(community.id(), &o.target).unwrap();
+            (crate::community::v2::derive::acl_locator(community.id(), &ch, &t), crate::community::v2::roles::overwrite_content_json(&o))
+        };
+        use crate::community::roles::OverwriteTarget as T;
+        // A, above B, denies B Send: stands. A denying A's own role: refused (not above it).
+        let (e1, c1) = put(T::Role(rb.clone()), 0, Permissions::SEND_MESSAGES);
+        publish_marked(&relay, &community, &a, vsk::CHANNEL_ACL, &e1, 1, None, &c1).await;
+        let (e2, c2) = put(T::Role(ra.clone()), 0, Permissions::SEND_MESSAGES);
+        publish_marked(&relay, &community, &a, vsk::CHANNEL_ACL, &e2, 1, None, &c2).await;
+        // A allowing @everyone a bit A lacks: refused.
+        let (e3, c3) = put(T::Everyone, Permissions::ATTACH_FILES, 0);
+        publish_marked(&relay, &community, &a, vsk::CHANNEL_ACL, &e3, 1, None, &c3).await;
+        // The owner's, at another target's coordinate: ignored. Unmarked: ignored.
+        let (_, c4) = put(T::Everyone, 0, Permissions::ADD_REACTIONS);
+        publish_marked(&relay, &community, &owner, vsk::CHANNEL_ACL, &e1, 2, None, &c4).await;
+        let (e5, c5) = put(T::Member(b.public_key().to_hex()), Permissions::ATTACH_FILES, 0);
+        publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_ACL, &e5, 1, None, &c5, None).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        let got: Vec<(T, u64, u64)> = f.roles.overwrites.iter().map(|o| (o.target.clone(), o.allow.0, o.deny.0)).collect();
+        assert_eq!(got, vec![(T::Role(rb), 0, Permissions::SEND_MESSAGES)]);
+    }
+
+    #[tokio::test]
     async fn a_private_channel_mints_its_access_role_and_entitlement_follows_the_grant() {
         // CORD-03/04: the roles scoped to a channel ARE its access list. Proven
         // against a NON-owner so the owner-is-always-entitled rule can't carry it.
@@ -21724,6 +22150,7 @@ mod tests {
             grants: vec![crate::community::roles::MemberGrant { member: me.clone(), role_ids: vec![access.role_id.clone()] }],
             roles: vec![access],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &folded, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -21781,6 +22208,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -21860,6 +22288,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &vended, &owner_hex).unwrap();
@@ -21921,6 +22350,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -22070,6 +22500,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -22461,6 +22892,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
             everyone: None,
+            overwrites: Vec::new(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -22518,6 +22950,7 @@ mod tests {
                 MemberGrant { member: member.keys.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
             ],
             everyone: None,
+            overwrites: Vec::new(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
 
@@ -22809,6 +23242,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
             everyone: None,
+            overwrites: Vec::new(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -22861,6 +23295,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: [&a, &b].iter().map(|k| MemberGrant { member: k.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }).collect(),
             everyone: None,
+            overwrites: Vec::new(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 

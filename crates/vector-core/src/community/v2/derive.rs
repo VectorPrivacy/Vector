@@ -44,6 +44,7 @@ const LABEL_PINS: &str = "concord/pins";
 const LABEL_INVITE_LINKS: &str = "concord/invite-links";
 const LABEL_EVERYONE: &str = "concord/everyone";
 const LABEL_TENURE: &str = "concord/tenure";
+const LABEL_ACL: &str = "concord/acl";
 const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -304,6 +305,14 @@ pub fn edition_binding(community_id: &CommunityId) -> [u8; 32] {
 pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32], writer_xonly: &[u8; 32]) -> [u8; 32] {
     let pair: [u8; 32] = Sha256::new().chain_update(member_xonly).chain_update(writer_xonly).finalize().into();
     hkdf32(&community_id.0, &build_info(LABEL_TENURE, &pair, None))
+}
+
+/// One overwrite's coordinate (CORD-04 §8): a Channel or Category `scope` and the Role,
+/// member or `@everyone` locator it applies to. One entity per pair, so editors of
+/// different overwrites never race on one document.
+pub fn acl_locator(community_id: &CommunityId, scope: &[u8; 32], target: &[u8; 32]) -> [u8; 32] {
+    let pair: [u8; 32] = Sha256::new().chain_update(scope).chain_update(target).finalize().into();
+    hkdf32(&community_id.0, &build_info(LABEL_ACL, &pair, None))
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).

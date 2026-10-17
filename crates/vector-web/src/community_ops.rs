@@ -57,6 +57,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "rename_community_category" => rename_category(a).await,
             "delete_community_category" => delete_category(a).await,
             "move_community_category" => move_category(a).await,
+            "get_channel_permissions" => with_id(a, |id| a.str("channelId").and_then(|ch| core(VectorCore.channel_permissions_view(id, &ch)))),
+            "set_channel_overwrite" => set_overwrite(a).await,
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
@@ -260,6 +262,12 @@ async fn edit_role(a: &Args) -> Result<Value, String> {
     let (color, perms, channel) = (a.de::<u32>("color")?, a.str("permissions")?, a.opt_str("channelId"));
     let (display, mentionable) = (a.de::<Option<bool>>("display")?, a.de::<Option<bool>>("mentionable")?);
     db::scoped(async move { core(VectorCore.edit_role_shown(&id, &role, &name, color, &perms, channel.as_deref(), display, mentionable).await) }).await
+}
+
+async fn set_overwrite(a: &Args) -> Result<Value, String> {
+    let (id, scope, kind, target) = (a.str("communityId")?, a.str("scopeId")?, a.str("kind")?, a.opt_str("targetId"));
+    let (allow, deny) = (a.str("allow")?, a.str("deny")?);
+    db::scoped(async move { core(VectorCore.set_channel_overwrite(&id, &scope, &kind, target.as_deref(), &allow, &deny).await) }).await
 }
 
 async fn delete_role(a: &Args) -> Result<Value, String> {

@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::community::roles::{MemberGrant, Permissions, Role, RoleScope};
+use crate::community::roles::{MemberGrant, Overwrite, OverwriteTarget, Permissions, Role, RoleScope};
 
 /// A member holds at most this many Roles (CORD-04 §2); a Community folds at most
 /// [`MAX_ROLES_PER_COMMUNITY`] Roles (the lowest role_ids win, the same deterministic
@@ -356,6 +356,49 @@ pub fn tenure_with(prior: Vec<TenureEntry>, entry: TenureEntry, current: &[[u8; 
     Some(sealed)
 }
 
+/// An overwrite's content (vsk 14 at `acl_locator(community_id, scope, target)`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverwriteContent {
+    pub scope: String,
+    pub target: OverwriteTarget,
+    #[serde(with = "perm_decimal_string")]
+    pub allow: u64,
+    #[serde(with = "perm_decimal_string")]
+    pub deny: u64,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The 32 bytes an overwrite target contributes to its coordinate.
+pub fn overwrite_target_bytes(community_id: &crate::community::CommunityId, target: &OverwriteTarget) -> Option<[u8; 32]> {
+    match target {
+        OverwriteTarget::Everyone => Some(super::derive::everyone_locator(community_id)),
+        OverwriteTarget::Role(id) | OverwriteTarget::Member(id) => crate::simd::hex::hex_to_bytes_32_checked(id),
+    }
+}
+
+/// Parse an overwrite, keeping only the bits an overwrite may touch.
+pub fn parse_overwrite_content(content: &str) -> Option<Overwrite> {
+    let c: OverwriteContent = serde_json::from_str(content).ok()?;
+    let scope = crate::simd::hex::hex_to_bytes_32_checked(&c.scope)?;
+    let target = match c.target {
+        OverwriteTarget::Role(id) => OverwriteTarget::Role(id.to_ascii_lowercase()),
+        OverwriteTarget::Member(id) => OverwriteTarget::Member(id.to_ascii_lowercase()),
+        OverwriteTarget::Everyone => OverwriteTarget::Everyone,
+    };
+    Some(Overwrite {
+        scope: crate::simd::hex::bytes_to_hex_32(&scope),
+        target,
+        allow: Permissions(c.allow & crate::community::roles::OVERWRITABLE),
+        deny: Permissions(c.deny & crate::community::roles::OVERWRITABLE),
+    })
+}
+
+pub fn overwrite_content_json(o: &Overwrite) -> String {
+    serde_json::to_string(&OverwriteContent { scope: o.scope.clone(), target: o.target.clone(), allow: o.allow.0, deny: o.deny.0, extra: Default::default() })
+        .expect("plain struct")
+}
+
 pub fn tenure_content_json(t: &TenureContent) -> Result<String, String> {
     serde_json::to_string(t).map_err(|e| e.to_string())
 }
@@ -391,6 +434,17 @@ mod perm_decimal_string {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_overwrite_touches_only_channel_bits() {
+        let scope = "c".repeat(64);
+        let content = format!(r#"{{"scope":"{scope}","target":{{"kind":"everyone"}},"allow":"{}","deny":"{}"}}"#,
+            Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL, Permissions::BAN | Permissions::SEND_MESSAGES);
+        let o = parse_overwrite_content(&content).unwrap();
+        assert_eq!((o.allow.0, o.deny.0), (Permissions::VIEW_CHANNEL, Permissions::SEND_MESSAGES), "staff bits mean the same everywhere");
+        assert_eq!(parse_overwrite_content(&overwrite_content_json(&o)).unwrap(), o);
+    }
+
 
     fn te(rank: &str, bits: u64, heads: &[u8]) -> TenureEntry {
         TenureEntry { rank: rank.into(), permissions: bits, heads: heads.iter().map(|b| crate::simd::hex::bytes_to_hex_32(&[*b; 32])).collect() }

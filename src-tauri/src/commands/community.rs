@@ -3177,6 +3177,33 @@ pub async fn activate_community_roles_v2(community_id: String, everyone: String)
     vector_core::db::scoped(async move { vector_core::VectorCore.activate_roles_v2(&community_id, &everyone).await.map_err(|e| e.to_string()) }).await
 }
 
+/// A channel's permission overwrites, read locally.
+#[tauri::command]
+pub fn get_channel_permissions(community_id: String, channel_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.channel_permissions_view(&community_id, &channel_id).map_err(|e| e.to_string())
+}
+
+/// Set, or with no bits clear, one overwrite on a channel or category. Bits are decimal strings.
+#[tauri::command]
+pub async fn set_channel_overwrite(
+    community_id: String,
+    scope_id: String,
+    kind: String,
+    target_id: Option<String>,
+    allow: String,
+    deny: String,
+) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .set_channel_overwrite(&community_id, &scope_id, &kind, target_id.as_deref(), &allow, &deny)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister_channels(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
 /// Everything the role editor needs, read locally.
 #[tauri::command]
 pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {

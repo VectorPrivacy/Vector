@@ -2952,6 +2952,7 @@ mod tests {
                 MemberGrant { member: social.to_hex(), role_ids: vec!["bb".repeat(32)] },
             ],
             everyone: None,
+            overwrites: Vec::new(),
         };
         set_community_roles(&cid, &roles, 1).unwrap();
         assert!(is_owner_or_admin(&cid, &owner.public_key().to_hex()), "a v2 owner proves itself from the id");
