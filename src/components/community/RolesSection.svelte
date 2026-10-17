@@ -79,7 +79,7 @@
         {
             title: 'Chat',
             perms: [
-                { bit: BIT.MENTION_EVERYONE, name: 'Mention @everyone', desc: 'Notify everyone in the community at once.' },
+                { bit: BIT.MENTION_EVERYONE, name: 'Mention @everyone', desc: 'Notify everyone at once, and mention any role.' },
             ],
         },
     ];
