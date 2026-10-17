@@ -57,6 +57,8 @@ pub struct ChannelSummary {
     pub topic: Option<String>,
     /// `chat`, `forum` or `voice`.
     pub view: &'static str,
+    /// What the local user may do here, as a decimal string; absent on the legacy roster.
+    pub my_permissions: Option<String>,
 }
 
 /// The [`CommunitySummary`] for a **v2** community — the owner is the
@@ -66,6 +68,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
     use nostr_sdk::prelude::ToBech32;
     let me = vector_core::my_public_key();
     let owner = c.owner().ok();
+    let mine = vector_core::VectorCore::my_channel_permissions(c);
     CommunitySummary {
         community_id: vector_core::simd::hex::bytes_to_hex_32(&c.identity.community_id.0),
         name: c.name.clone(),
@@ -84,6 +87,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
                 category_id: cat.map(|k| vector_core::simd::hex::bytes_to_hex_32(&k.id)),
                 topic: ch.topic().map(String::from),
                 view: ch.view().as_str(),
+                my_permissions: mine.get(&ch.id.0).map(|p| p.to_string()),
             })
             .collect(),
         categories: vector_core::VectorCore::categories_json(c),

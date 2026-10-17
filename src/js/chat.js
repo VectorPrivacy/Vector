@@ -1363,6 +1363,9 @@ async function openChat(contact, { reread = true } = {}) {
         VectorSvelte.flushSync();
     } else if (isDissolvedChat) {
         applyDissolvedChatUI(chat);
+    } else if (!channelAllowsSend(chat)) {
+        VectorSvelte.setLock('perms', "You can't send messages in this channel");
+        VectorSvelte.flushSync();
     } else {
         VectorSvelte.setLock(null);
         VectorSvelte.flushSync();

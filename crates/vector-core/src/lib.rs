@@ -1455,6 +1455,23 @@ impl VectorCore {
         })
     }
 
+    /// What the local user may do in each channel, on Roles v2 (CORD-04 §8): `None` on the
+    /// legacy roster, where channels carry no permissions of their own.
+    pub fn my_channel_permissions(community: &crate::community::v2::community::CommunityV2) -> std::collections::HashMap<[u8; 32], u64> {
+        let Some(me) = state::my_public_key() else { return Default::default() };
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        if roster.everyone.is_none() {
+            return Default::default();
+        }
+        let owner = community.owner().ok().map(|o| o.to_hex());
+        community
+            .channels
+            .iter()
+            .map(|c| (c.id.0, roster.channel_permissions(owner.as_deref(), &me.to_hex(), &crate::simd::hex::bytes_to_hex_32(&c.id.0)).0))
+            .collect()
+    }
+
     /// A community's Categories in sidebar order, as the summaries carry them.
     pub fn categories_json(community: &crate::community::v2::community::CommunityV2) -> serde_json::Value {
         community

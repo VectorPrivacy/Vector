@@ -182,6 +182,14 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     at_ms: u64,
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    // An honest client posts only where it holds Send Messages (CORD-04 §8).
+    let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or_default();
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    if roster.everyone.is_some()
+        && !roster.channel_permissions(owner.as_deref(), &author_pk.to_hex(), &crate::simd::hex::bytes_to_hex_32(&channel_id.0)).contains(crate::community::roles::Permissions::SEND_MESSAGES)
+    {
+        return Err("you can't send messages in this channel".to_string());
+    }
     let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
@@ -21790,6 +21798,26 @@ mod tests {
         let f = fold_authority(&held(), &eds, &Floors::default());
         assert!(f.roles.is_entitled(Some(&owner_hex), &t.to_hex(), &chan, &[], &[]));
         assert!(!f.roles.is_entitled(Some(&owner_hex), &s.to_hex(), &chan, &[], &[]));
+    }
+
+    #[tokio::test]
+    async fn a_member_denied_send_cannot_post() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "NoSend", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = community.channels[0].id;
+        set_overwrite(&relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        assert!(send_chat_message(&relay, &held(), &ch, "owner speaks", None, &[], vec![]).await.is_ok(), "the owner holds everything");
+        let member = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&member, &[]);
+        crate::state::set_my_public_key(member.public_key());
+        let err = send_chat_message(&relay, &held(), &ch, "hi", None, &[], vec![]).await.unwrap_err();
+        assert!(err.contains("can't send"), "{err}");
+        crate::state::MY_SECRET_KEY.store_from_keys(&owner, &[]);
+        crate::state::set_my_public_key(owner.public_key());
     }
 
     #[tokio::test]

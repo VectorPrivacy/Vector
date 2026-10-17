@@ -33,6 +33,7 @@ pub(crate) fn load_v2(community_id: &str) -> Result<CommunityV2, String> {
 
 pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
     let me = vector_core::my_public_key();
+    let mine = VectorCore::my_channel_permissions(c);
     let owner = c.owner().ok();
     json!({
         "community_id": bytes_to_hex_32(&c.identity.community_id.0),
@@ -48,6 +49,7 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
             "category_id": cat.map(|k| bytes_to_hex_32(&k.id)),
             "topic": ch.topic(),
             "view": ch.view().as_str(),
+            "my_permissions": mine.get(&ch.id.0).map(|p| p.to_string()),
         })).collect::<Vec<_>>(),
         "categories": VectorCore::categories_json(c),
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),

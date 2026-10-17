@@ -20,10 +20,20 @@
 function visibleChannels(channels) {
     return (channels || [])
         .filter(c => !(c.private && c.readable === false))
+        // On the new roles a channel you can't view is hidden like a private one you lack.
+        .filter(c => c.my_permissions == null || (BigInt(c.my_permissions) & (1n << 13n)) !== 0n)
         .map(c => ({
             id: c.channel_id, name: c.name, private: !!c.private, readable: true,
             category: c.category_id || null, topic: c.topic || '', view: c.view || 'chat',
+            perms: c.my_permissions ?? null,
         }));
+}
+
+/** Whether the local user may post in a channel: always on the legacy roster. */
+function channelAllowsSend(chat) {
+    const communityId = communityIdOfChat(chat);
+    const perms = communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id)?.perms;
+    return perms == null || (BigInt(perms) & (1n << 14n)) !== 0n;
 }
 
 function lockedChannels(channels) {
