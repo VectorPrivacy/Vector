@@ -3842,6 +3842,7 @@ impl VectorCore {
                     "position": r.position,
                     "color": r.color,
                     "channel_id": channel_id,
+                    "display": r.display,
                 })
             })
             .collect();
@@ -3854,7 +3855,27 @@ impl VectorCore {
                 Some(serde_json::json!({ "npub": npub, "role_ids": g.role_ids }))
             })
             .collect();
-        Ok(serde_json::json!({ "roles": roles, "grants": grants }))
+        // On Roles v2 a Private Channel's readers are whoever it resolves View Channel for.
+        let activated = roster.everyone.is_some();
+        let mut readers = serde_json::Map::new();
+        if activated {
+            if let Some(v2) = Self::load_held(community_id)? {
+                let owner_hex = v2.owner().ok().map(|o| o.to_hex());
+                let mut candidates: std::collections::BTreeSet<PublicKey> =
+                    crate::community::v2::service::stored_memberlist(&v2).unwrap_or_default().into_iter().collect();
+                candidates.extend(roster.grants.iter().filter_map(|g| PublicKey::from_hex(&g.member).ok()));
+                for ch in v2.channels.iter().filter(|c| c.private) {
+                    let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+                    let npubs: Vec<String> = candidates
+                        .iter()
+                        .filter(|pk| !banned.contains(&pk.to_hex()) && roster.is_entitled(owner_hex.as_deref(), &pk.to_hex(), &chan, &[], &[]))
+                        .filter_map(|pk| pk.to_bech32().ok())
+                        .collect();
+                    readers.insert(chan, npubs.into());
+                }
+            }
+        }
+        Ok(serde_json::json!({ "roles": roles, "grants": grants, "activated": activated, "readers": readers }))
     }
 
     /// Everything a role editor needs, in one local read: every role in display order

@@ -122,13 +122,13 @@
     function mayRole(npub) {
         if (!caps.manage_roles || npub === ownerNpub || npub === myNpub) return false;
         if (iAmOwner) return true;
-        const mine = heldBy.get(myNpub)?.position ?? Infinity;
-        return mine < (heldBy.get(npub)?.position ?? Infinity);
+        const mine = topBy.get(myNpub)?.position ?? Infinity;
+        return mine < (topBy.get(npub)?.position ?? Infinity);
     }
 
-    // A member's section is their HIGHEST role (lowest position number).
-    const heldBy = $derived.by(() => {
-        const roleById = new Map((graph?.roles || []).map((r) => [r.role_id, r]));
+    // Each member's highest role (lowest position number) among those `pick` admits.
+    function highest(pick) {
+        const roleById = new Map((graph?.roles || []).filter(pick).map((r) => [r.role_id, r]));
         const out = new Map();
         for (const g of graph?.grants || []) {
             let best = null;
@@ -139,13 +139,18 @@
             if (best) out.set(g.npub, best);
         }
         return out;
-    });
+    }
+    // On the new roles only a role shown separately heads a section; rank still counts them all.
+    const sectionRole = (r) => !graph?.activated || r.display;
+    const topBy = $derived(highest(() => true));
+    // A member's section is their highest role that heads one.
+    const heldBy = $derived(highest(sectionRole));
 
     // Sections are ROLES in hierarchy order; Admin/Members is the fallback pair when
     // the graph defines nothing.
     const sectionOrder = $derived.by(() => {
         const order = [];
-        for (const role of [...(graph?.roles || [])].sort((a, b) => a.position - b.position)) {
+        for (const role of [...(graph?.roles || [])].filter(sectionRole).sort((a, b) => a.position - b.position)) {
             order.push({ id: role.role_id, label: role.name, role: true });
         }
         if (!order.length) order.push({ id: 'admin', label: 'Admin' });
@@ -160,6 +165,7 @@
     // until the graph lands, so a slow read shows everyone rather than a false empty.
     const scope = $derived.by(() => {
         if (!scopeChannel || !graph) return null;
+        if (graph.activated) return new Set([...(ownerNpub ? [ownerNpub] : []), ...(graph.readers?.[scopeChannel] || [])]);
         const access = new Set((graph.roles || []).filter((r) => r.channel_id === scopeChannel).map((r) => r.role_id));
         const out = new Set();
         if (ownerNpub) out.add(ownerNpub);
