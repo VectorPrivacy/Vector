@@ -22507,6 +22507,13 @@ mod tests {
         assert!(send_chat_message(&relay, &held(), &open, "fine here", None, &[], vec![]).await.is_ok(), "where Send stands, they post");
         let err = send_chat_message(&relay, &held(), &ch, "hi", None, &[], vec![]).await.unwrap_err();
         assert!(err.contains("can't send"), "{err}");
+        // Readers collapse that member's posts there, not the owner's.
+        use nostr_sdk::prelude::ToBech32;
+        let (mn, on) = (member.public_key().to_bech32().unwrap(), owner.public_key().to_bech32().unwrap());
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let denied = crate::VectorCore.channel_send_denied(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0), &[mn.clone(), on]).unwrap();
+        assert_eq!(denied, vec![mn.clone()]);
+        assert!(crate::VectorCore.channel_send_denied(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&open.0), &[mn]).unwrap().is_empty());
         crate::state::MY_SECRET_KEY.store_from_keys(&owner, &[]);
         crate::state::set_my_public_key(owner.public_key());
     }

@@ -108,6 +108,11 @@ function setCommunityChannels(communityId, channels, categories) {
 
 /** communityId → the Timeouts running there, npub → { from, until }, as last read. */
 const communityTimeoutsCache = new Map();
+/** channelId → the authors who can't send there, as last read. */
+const channelSendDeniedCache = new Map();
+function channelSendDenied(channelId) {
+    return channelSendDeniedCache.get(channelId) || null;
+}
 function communityTimeoutsFor(communityId) {
     return communityId ? communityTimeoutsCache.get(communityId) : null;
 }
@@ -123,7 +128,14 @@ async function refreshTimeoutLock(chat) {
     try { running = await invoke('get_community_timeouts', { communityId }); } catch { return; }
     const had = JSON.stringify(communityTimeoutsCache.get(communityId) || {});
     communityTimeoutsCache.set(communityId, running || {});
-    if (had !== JSON.stringify(running || {}) && strOpenChat === chat.id) openChat(strOpenChat);
+    // In an open channel a post whose author can't send there collapses too.
+    const authors = [...new Set((chat.messages || []).filter(m => !m.mine && m.npub).map(m => m.npub))];
+    let denied = [];
+    try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
+    const hadDenied = (channelSendDeniedCache.get(chat.id) || []).join();
+    channelSendDeniedCache.set(chat.id, new Set(denied));
+    const changed = had !== JSON.stringify(running || {}) || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
+    if (changed && strOpenChat === chat.id) openChat(strOpenChat);
     const mine = running?.[strPubkey];
     if (!mine || strOpenChat !== chat.id) return;
     const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });

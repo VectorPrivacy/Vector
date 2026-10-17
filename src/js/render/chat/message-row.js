@@ -73,7 +73,7 @@ const _dmsgListHelpers = {
             const isBlocked = _dmsgAuthorBlocked(msg, ctx.currentChat, ctx.isGroupChat);
             const timedOut = _dmsgPostedTimedOut(msg, ctx.currentChat);
             if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)
-                && ctx.timedOut === (timedOut && !revealed)) return ctx;
+                && ctx.timedOut === (!isBlocked && !revealed ? timedOut : '')) return ctx;
         }
         const fresh = _dmsgRowCtx(msg);
         _dmsgRowCtxCache.set(msg, fresh);
@@ -88,12 +88,16 @@ function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
     const p = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
     return !!p?.is_blocked;
 }
-/** Whether a community post was made while its author was timed out there (CORD-04 §8). */
+/**
+ * Why a community post collapses (CORD-04 §8): 'nosend' when its author can't send in
+ * the channel, 'timeout' when it was made during their Timeout, '' when it doesn't.
+ */
 function _dmsgPostedTimedOut(msg, currentChat) {
-    if (msg.mine || !msg.npub) return false;
+    if (msg.mine || !msg.npub) return '';
+    if (channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
     const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
     const at = (msg.at || 0) / 1000;
-    return !!t && at >= t.from && at < t.until;
+    return t && at >= t.from && at < t.until ? 'timeout' : '';
 }
 function _dmsgRowCtx(msg) {
     {
@@ -109,7 +113,7 @@ function _dmsgRowCtx(msg) {
             blocked: blocked && !revealed,
             revealedBlocked: blocked && revealed,
             // A reader collapses, never drops, what a timed-out member posted.
-            timedOut: !blocked && _dmsgPostedTimedOut(msg, currentChat) && !revealed,
+            timedOut: !blocked && !revealed ? _dmsgPostedTimedOut(msg, currentChat) : '',
         };
     }
 }

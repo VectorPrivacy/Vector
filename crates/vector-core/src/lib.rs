@@ -4179,6 +4179,28 @@ impl VectorCore {
         Ok(())
     }
 
+    /// Of `npubs`, those who can't send in a channel by the roster as it stands (CORD-04 §8):
+    /// a reader collapses their posts there. Empty on the legacy roster.
+    pub fn channel_send_denied(&self, community_id: &str, channel_id: &str, npubs: &[String]) -> Result<Vec<String>> {
+        use crate::community::roles::Permissions;
+        let v2 = Self::held_v2(community_id)?;
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        if roster.everyone.is_none() {
+            return Ok(Vec::new());
+        }
+        let owner = v2.owner().ok().map(|o| o.to_hex());
+        let chan = channel_id.to_ascii_lowercase();
+        let private = Self::id32(channel_id, "channel_id").ok().and_then(|b| v2.channel(&crate::community::ChannelId(b))).is_some_and(|c| c.private);
+        Ok(npubs
+            .iter()
+            .filter(|n| {
+                nostr_sdk::prelude::PublicKey::parse(n.as_str())
+                    .is_ok_and(|pk| !roster.channel_permissions(owner.as_deref(), &pk.to_hex(), &chan, private).contains(Permissions::SEND_MESSAGES))
+            })
+            .cloned()
+            .collect())
+    }
+
     /// The Timeouts running in a community: npub → { from, until } (unix seconds).
     pub fn community_timeouts(&self, community_id: &str) -> Result<serde_json::Value> {
         let v2 = Self::held_v2(community_id)?;
