@@ -6555,6 +6555,11 @@ fn access_collect_clock() -> std::sync::Arc<std::sync::Mutex<std::collections::H
     crate::db::current_session().scoped::<AccessCollectClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>()
 }
 
+/// Make the next follow pass run the access duty.
+pub(crate) fn access_duty_now(id: &crate::community::CommunityId) {
+    crate::db::current_session().scoped::<AccessDutyClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>().lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+}
+
 /// Let the next follow read a community's access planes whatever the period says.
 pub(crate) fn access_collect_now(id: &crate::community::CommunityId) {
     access_collect_clock().lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
@@ -24934,10 +24939,11 @@ mod tests {
         assert_eq!(held().channel(&general).unwrap().writers, Some(third));
     }
 
-    /// Refuses every Control Plane publish: what a manager without the plane's write key meets.
+    /// Refuses Control Plane publishes after the first `allow`: a relay that goes away mid-change.
     struct RefusesControl<'a> {
         inner: &'a MemoryRelay,
         control: String,
+        allow: std::sync::atomic::AtomicUsize,
     }
     #[async_trait::async_trait]
     impl Transport for RefusesControl<'_> {
@@ -24945,7 +24951,7 @@ mod tests {
             self.inner.fetch_plane(plane, query, relays).await
         }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
-            if e.pubkey.to_hex() == self.control {
+            if e.pubkey.to_hex() == self.control && self.allow.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| n.checked_sub(1)).is_err() {
                 return Err("refused".into());
             }
             self.inner.publish(e, r).await
@@ -24959,6 +24965,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_change_whose_ledger_failed_to_publish_is_finished_by_the_next_pass() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Unfinished").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        assert!(access_duty_due(community.id(), false));
+        assert!(!access_duty_due(community.id(), false), "not again within the period");
+        // The overwrite lands; the ledger edition after it doesn't.
+        let flaky = RefusesControl { inner: &bed.relay, control: control::ControlPlane::of(&held()).write_group().unwrap().pk_hex(), allow: 1.into() };
+        assert!(set_overwrite(&flaky, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.is_err());
+        assert!(!held().channel(&general).unwrap().restricted());
+        assert!(access_duty_due(community.id(), false), "making the change again would move nothing, so the duty runs next pass");
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 1);
+        assert!(held().channel(&general).unwrap().restricted());
+    }
+
+    #[tokio::test]
+    async fn a_backstop_on_a_roster_read_before_the_change_stands_down() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Stale").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let stale = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert!(!writing::backstop_on(&bed.relay, &held(), &general, &stale).await.unwrap(), "a roster from before the restrict reopens nothing");
+        assert_eq!(held().channel(&general).unwrap().writers, Some(ledger));
+    }
+
+    #[tokio::test]
     async fn a_backstop_that_fails_waits_like_one_that_acted() {
         use crate::community::roles::OverwriteTarget;
         let (bed, _owner, _x, community) = v2_bed_with_admin("Fails").await;
@@ -24966,7 +25004,7 @@ mod tests {
         let general = held().channels[0].id;
         publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await;
         follow_control(&bed.relay, &held()).await.unwrap();
-        let refusing = RefusesControl { inner: &bed.relay, control: control::ControlPlane::of(&held()).write_group().unwrap().pk_hex() };
+        let refusing = RefusesControl { inner: &bed.relay, control: control::ControlPlane::of(&held()).write_group().unwrap().pk_hex(), allow: 0.into() };
         let scope = crate::community::v2::writers::writer_rekey_scope(&general);
         let delivered = || async { fetch_plane_deliveries(&bed.relay, &held(), &general, scope).await.unwrap().len() };
         let _ = access_duty(&refusing, &held()).await;

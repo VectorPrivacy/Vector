@@ -233,6 +233,16 @@ async fn ledger_still<T: Transport + ?Sized>(transport: &T, community: &Communit
 /// and a writer hands the live key to those who gained it. A ledger already out of line is the
 /// duty's.
 pub(super) async fn settle_writers<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, before: &CommunityRoles, after: &CommunityRoles) -> Result<(), String> {
+    let settled = settle_writers_moved(transport, community, before, after).await;
+    // The change already stands, so making it again moves nothing: the duty finishes it, soon.
+    if settled.is_err() {
+        access_duty_now(community.id());
+        super::super::realtime::enqueue_follow(community.id());
+    }
+    settled
+}
+
+async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, before: &CommunityRoles, after: &CommunityRoles) -> Result<(), String> {
     let owner_hex = community.owner()?.to_hex();
     let me_hex = me_pk()?.to_hex();
     let may_manage = me_hex == owner_hex || after.is_authorized(&me_hex, Some(&owner_hex), Permissions::MANAGE_CHANNELS);
@@ -519,6 +529,12 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         return Ok(false);
     }
     let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(false) };
+    // The roster this pass read may predate the change that moved the ledger: act only where the
+    // one folded with the ledger agrees.
+    let folded = crate::db::community::get_community_roles(&hex(&fresh.id().0))?;
+    if restricts(&folded, &ch) != restricts(posters.roster, &ch) {
+        return Ok(false);
+    }
     match (restricts(posters.roster, &ch), ch.restricted()) {
         (false, true) => reopen(transport, &fresh, &ch).await?,
         (false, false) => return Ok(false),
@@ -554,6 +570,14 @@ fn holders(deliveries: &[rekey::AccessDelivery], pool: &[PublicKey], scope: reke
         }
     }
     held
+}
+
+#[cfg(test)]
+pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, roster: &CommunityRoles) -> Result<bool, String> {
+    let banned = Default::default();
+    let posters = Posters::of(community, roster, &banned)?;
+    let ch = community.channel(channel).cloned().ok_or("no such channel")?;
+    backstop(transport, community, &ch, &posters, &[]).await
 }
 
 struct OpenedWriterBlobs;

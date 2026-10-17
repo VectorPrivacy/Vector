@@ -1465,6 +1465,9 @@ pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json
                 "epoch": ch.epoch.0,
                 "key_held": ch.key.is_some(),
                 "held_epoch_keys": held_epochs,
+                // The Writers ledger names public addresses only; the sealed form only its epoch.
+                "writers": ch.writers.as_ref().and_then(|l| serde_json::from_str::<serde_json::Value>(&l.to_json()).ok()),
+                "sealed": ch.sealed.as_ref().map(|s| serde_json::json!({ "epoch": s.epoch, "open": s.open, "junk": s.junk })),
             })
         })
         .collect();
