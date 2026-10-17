@@ -2916,7 +2916,7 @@ mod tests {
         let (admin, social, stranger) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
         let role = |id: &str, perms: u64| Role {
             role_id: id.repeat(32), name: id.into(), position: 1, permissions: Permissions(perms),
-            scope: RoleScope::Server, color: 0, extra: Default::default(),
+            scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let roles = CommunityRoles {
             roles: vec![role("aa", Permissions::ADMIN_ALL), role("bb", 0)],
@@ -2924,6 +2924,7 @@ mod tests {
                 MemberGrant { member: admin.to_hex(), role_ids: vec!["aa".repeat(32)] },
                 MemberGrant { member: social.to_hex(), role_ids: vec!["bb".repeat(32)] },
             ],
+            everyone: None,
         };
         set_community_roles(&cid, &roles, 1).unwrap();
         assert!(is_owner_or_admin(&cid, &owner.public_key().to_hex()), "a v2 owner proves itself from the id");

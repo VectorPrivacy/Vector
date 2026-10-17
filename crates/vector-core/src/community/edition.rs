@@ -148,6 +148,9 @@ pub struct ParsedEdition {
     /// The pinned authority proof, if the actor cited one. `None` when the OWNER signs (supreme)
     /// or a non-authority edition carries no citation. Verified separately against the roster (#3c).
     pub authority: Option<AuthorityCitation>,
+    /// The Community a marked edition binds itself to (CORD-02), or `None` for an unmarked
+    /// edition, whose hash covers no signer.
+    pub binding: Option<[u8; 32]>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -214,6 +217,7 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
         created_at: inner.created_at.as_secs(),
         inner_id: inner.id.to_bytes(),
         authority: AuthorityCitation::from_tags(&inner.tags),
+        binding: None,
     })
 }
 

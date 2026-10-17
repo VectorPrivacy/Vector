@@ -32,6 +32,10 @@ const TAG_SUBKIND: &str = "vsk";
 const TAG_ENTITY: &str = "eid";
 const TAG_EVERSION: &str = "ev";
 const TAG_EPREV: &str = "ep";
+/// Marks an edition whose hash covers its signer (CORD-04 §1); the only value is "2".
+const TAG_EHASH: &str = "eh";
+/// A marked edition's Community binding (CORD-02): `community_binding(community_id)`.
+const TAG_EBIND: &str = "eb";
 
 /// Protocol-wide UTF-8 byte cap on names (community, channel, role).
 pub const MAX_NAME_BYTES: usize = 64;
@@ -122,6 +126,23 @@ pub fn build_edition_rumor(
     created_at_secs: u64,
     authority: Option<&AuthorityCitation>,
 ) -> UnsignedEvent {
+    build_edition_rumor_bound(author, vsk, entity_id, version, prev_hash, content, created_at_secs, authority, None)
+}
+
+/// [`build_edition_rumor`], marked and bound to a Community (`binding`) when one is given:
+/// what every edition of a Community on Roles v2 carries.
+#[allow(clippy::too_many_arguments)]
+pub fn build_edition_rumor_bound(
+    author: PublicKey,
+    vsk: &str,
+    entity_id: &[u8; 32],
+    version: u64,
+    prev_hash: Option<&[u8; 32]>,
+    content: &str,
+    created_at_secs: u64,
+    authority: Option<&AuthorityCitation>,
+    binding: Option<[u8; 32]>,
+) -> UnsignedEvent {
     let mut tags = vec![
         Tag::custom(TAG_SUBKIND, [vsk.to_string()]),
         Tag::custom(TAG_ENTITY, [crate::simd::hex::bytes_to_hex_32(entity_id)]),
@@ -132,6 +153,10 @@ pub fn build_edition_rumor(
     }
     if let Some(a) = authority {
         tags.push(a.to_tag());
+    }
+    if let Some(b) = binding {
+        tags.push(Tag::custom(TAG_EHASH, ["2".to_string()]));
+        tags.push(Tag::custom(TAG_EBIND, [crate::simd::hex::bytes_to_hex_32(&b)]));
     }
     stream::build_rumor_secs(kind::CONTROL, author, content, tags, created_at_secs)
 }
@@ -146,7 +171,7 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
     }
     // Duplicate machinery tags make signed-bytes → canonical-fields ambiguous
     // (two clients could pick different duplicates and fork on self_hash).
-    for name in [TAG_SUBKIND, TAG_ENTITY, TAG_EVERSION, TAG_EPREV, TAG_AUTHORITY_CITATION] {
+    for name in [TAG_SUBKIND, TAG_ENTITY, TAG_EVERSION, TAG_EPREV, TAG_AUTHORITY_CITATION, TAG_EHASH, TAG_EBIND] {
         let count = rumor
             .tags
             .iter()
@@ -183,7 +208,17 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
         Some(h) => Some(decode_hash(&h, "ep")?),
         None => None,
     };
-    let self_hash = version::edition_hash(&entity_id, version, prev_hash.as_ref(), rumor.content.as_bytes());
+    // A marked edition is bound to its Community and its hash covers its signer; anything
+    // else in the marker is a form this reader doesn't know, and refused.
+    let binding = match get(TAG_EHASH) {
+        None => None,
+        Some(v) if v == "2" => Some(decode_hash(&get(TAG_EBIND).ok_or(ControlError::Edition(EditionError::MissingField("eb")))?, "eb")?),
+        Some(_) => return Err(ControlError::Edition(EditionError::BadField("eh"))),
+    };
+    let self_hash = match binding {
+        Some(_) => version::edition_hash_signed(&entity_id, version, prev_hash.as_ref(), rumor.content.as_bytes(), &rumor.pubkey.to_bytes()),
+        None => version::edition_hash(&entity_id, version, prev_hash.as_ref(), rumor.content.as_bytes()),
+    };
     Ok(ParsedEdition {
         author: rumor.pubkey,
         vsk,
@@ -195,6 +230,7 @@ pub fn parse_edition_rumor(rumor: &UnsignedEvent) -> Result<ParsedEdition, Contr
         created_at: rumor.created_at.as_secs(),
         inner_id: rumor.id.expect("verified rumors carry their id").to_bytes(),
         authority: AuthorityCitation::from_tags(&rumor.tags),
+        binding,
     })
 }
 
@@ -214,6 +250,8 @@ pub struct ControlPlane {
     conv_key: ConversationKey,
     signer: Option<Keys>,
     restricted: bool,
+    /// What a marked edition here must be bound to (`None`: a bare group view, unchecked).
+    binding: Option<[u8; 32]>,
 }
 
 impl ControlPlane {
@@ -226,6 +264,7 @@ impl ControlPlane {
                 conv_key: *read.conv_key(),
                 signer: Some(read.keys().clone()),
                 restricted: false,
+                binding: Some(super::derive::edition_binding(community.id())),
             },
             Some(pk) => {
                 // A held secret that does not derive to the held address is
@@ -235,7 +274,7 @@ impl ControlPlane {
                     let s = control_signer_group_key(&cr, community.id(), community.root_epoch);
                     (s.pk() == pk).then(|| s.keys().clone())
                 });
-                ControlPlane { pk, conv_key: *read.conv_key(), signer, restricted: true }
+                ControlPlane { pk, conv_key: *read.conv_key(), signer, restricted: true, binding: Some(super::derive::edition_binding(community.id())) }
             }
         }
     }
@@ -247,6 +286,7 @@ impl ControlPlane {
             conv_key: *group.conv_key(),
             signer: Some(group.keys().clone()),
             restricted: false,
+            binding: None,
         }
     }
 
@@ -290,6 +330,10 @@ impl ControlPlane {
             return Err(ControlError::NotPlaintextSealed);
         }
         let edition = parse_edition_rumor(&opened.rumor)?;
+        // A marked edition from another Community, re-wrapped here, is not this Community's.
+        if edition.binding.is_some_and(|b| self.binding.is_some_and(|mine| mine != b)) {
+            return Err(ControlError::Edition(EditionError::BadField("eb")));
+        }
         Ok((edition, opened))
     }
 }

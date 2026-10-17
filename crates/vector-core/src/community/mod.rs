@@ -10,6 +10,7 @@ pub mod moderation;
 pub mod edition;
 pub mod version;
 pub mod raid;
+pub mod rank;
 pub mod roles;
 pub mod transport;
 pub mod v2;

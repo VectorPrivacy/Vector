@@ -59,6 +59,7 @@ impl RoleContent {
             permissions: Permissions(self.permissions),
             scope: self.scope,
             color: self.color,
+            rank: None, display: false, mentionable: false,
             extra: self.extra,
         }
     }
@@ -169,6 +170,127 @@ pub fn validate_banlist(banned: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+
+/// CORD-04 §2 Role content (vsk 13), `eid == role_id`: a rank key in place of a position,
+/// no scope, and a terminal deleted form `{ role_id, deleted: true }`. Every field the
+/// live form carries is written even at its default; readers default what's absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleV2Content {
+    pub role_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    #[serde(default, with = "perm_decimal_string_opt", skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentionable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One vsk-13 edition, read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RoleV2 {
+    Live(Role),
+    /// Terminal: the Role leaves every holder and its slot frees.
+    Deleted { role_id: String },
+}
+
+/// `@everyone`'s content (vsk 13 at `everyone_locator`): its permissions alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EveryoneContent {
+    #[serde(with = "perm_decimal_string")]
+    pub permissions: u64,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What `@everyone` starts with (CORD-04 §3): the chat and voice basics.
+pub const EVERYONE_DEFAULT: u64 = Permissions::VIEW_CHANNEL
+    | Permissions::SEND_MESSAGES
+    | Permissions::SEND_IN_THREADS
+    | Permissions::ATTACH_FILES
+    | Permissions::ADD_REACTIONS
+    | Permissions::READ_MESSAGE_HISTORY
+    | Permissions::CONNECT
+    | Permissions::SPEAK
+    | Permissions::VIDEO;
+
+/// Parse a vsk-13 Role edition. A live Role needs a well-formed rank key; the position is
+/// assigned at fold time from the keys in play (`rank::dense_ranks`).
+pub fn parse_role_v2_content(content: &str) -> Option<RoleV2> {
+    let c: RoleV2Content = serde_json::from_str(content).ok()?;
+    if c.deleted == Some(true) {
+        return Some(RoleV2::Deleted { role_id: c.role_id });
+    }
+    let rank = c.rank.filter(|k| crate::community::rank::is_rank_key(k))?;
+    Some(RoleV2::Live(Role {
+        role_id: c.role_id,
+        name: c.name.unwrap_or_default(),
+        position: u32::MAX,
+        permissions: Permissions(c.permissions.unwrap_or(0)),
+        scope: RoleScope::Server,
+        color: c.color.unwrap_or(0),
+        rank: Some(rank),
+        display: c.display.unwrap_or(false),
+        mentionable: c.mentionable.unwrap_or(false),
+        extra: c.extra,
+    }))
+}
+
+/// Serialize a live Role as a vsk-13 edition; `rank` must be set.
+pub fn role_v2_content_json(r: &Role) -> Result<String, String> {
+    let rank = r.rank.clone().filter(|k| crate::community::rank::is_rank_key(k)).ok_or("a Role needs a rank key")?;
+    let c = RoleV2Content {
+        role_id: r.role_id.clone(),
+        name: Some(r.name.clone()),
+        rank: Some(rank),
+        permissions: Some(r.permissions.0),
+        color: Some(r.color),
+        display: Some(r.display),
+        mentionable: Some(r.mentionable),
+        deleted: None,
+        extra: r.extra.clone(),
+    };
+    serde_json::to_string(&c).map_err(|e| e.to_string())
+}
+
+/// The terminal deletion edition of a Role.
+pub fn role_v2_deleted_json(role_id: &str) -> String {
+    serde_json::json!({ "role_id": role_id, "deleted": true }).to_string()
+}
+
+/// Parse `@everyone`'s content.
+pub fn parse_everyone_content(content: &str) -> Option<u64> {
+    serde_json::from_str::<EveryoneContent>(content).ok().map(|c| c.permissions)
+}
+
+pub fn everyone_content_json(permissions: u64) -> String {
+    serde_json::to_string(&EveryoneContent { permissions, extra: Default::default() }).expect("plain struct")
+}
+
+mod perm_decimal_string_opt {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => super::perm_decimal_string::serialize(v, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+        super::perm_decimal_string::deserialize(d).map(Some)
+    }
+}
+
 /// CORD-04 §3 permissions: a decimal string on the wire, accepting either a string or
 /// a legacy bare number on read, and always writing the string. Digit-only (a leading
 /// `+`/`-` or whitespace is rejected, matching the strict `ms`/`ev` discipline).
@@ -233,7 +355,7 @@ mod tests {
             position: pos,
             permissions: Permissions(perms),
             scope: RoleScope::Server,
-            color: 15158332, extra: Default::default(),
+            color: 15158332, rank: None, display: false, mentionable: false, extra: Default::default(),
         }
     }
 

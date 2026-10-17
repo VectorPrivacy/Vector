@@ -42,6 +42,9 @@ const LABEL_GRANT: &str = "concord/grant";
 const LABEL_BANLIST: &str = "concord/banlist";
 const LABEL_PINS: &str = "concord/pins";
 const LABEL_INVITE_LINKS: &str = "concord/invite-links";
+const LABEL_EVERYONE: &str = "concord/everyone";
+const LABEL_TENURE: &str = "concord/tenure";
+const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
 const LABEL_COMMUNITY: &str = "concord/community";
@@ -283,6 +286,22 @@ pub fn grant_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8
 /// The community-wide Banlist coordinate.
 pub fn banlist_locator(community_id: &CommunityId) -> [u8; 32] {
     hkdf32(&community_id.0, &build_info(LABEL_BANLIST, &ZERO32, None))
+}
+
+/// The `@everyone` Role's coordinate (CORD-04 §2); an owner edition here activates Roles v2.
+pub fn everyone_locator(community_id: &CommunityId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_EVERYONE, &ZERO32, None))
+}
+
+/// What a marked edition names to bind itself to its Community (CORD-02): derived, so the
+/// rumor never carries the `community_id` itself.
+pub fn edition_binding(community_id: &CommunityId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_EDITION_BINDING, &ZERO32, None))
+}
+
+/// A member's Tenure coordinate (CORD-04 §9).
+pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_TENURE, member_xonly, None))
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).

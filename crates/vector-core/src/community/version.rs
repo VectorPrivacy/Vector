@@ -50,6 +50,23 @@ pub fn edition_signing_bytes(
     out
 }
 
+/// A marked edition's identity (CORD-04 §1): the same bytes, then the signer's key, so a
+/// copy re-signed under another key is another edition, and nothing built on the original
+/// links to it.
+pub fn edition_hash_signed(
+    entity_id: &[u8; 32],
+    version: u64,
+    prev_hash: Option<&[u8; 32]>,
+    content: &[u8],
+    signer: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(edition_signing_bytes(entity_id, version, prev_hash, content));
+    h.update(b"concord/edition-signer");
+    h.update(signer);
+    h.finalize().into()
+}
+
 /// SHA-256 of [`edition_signing_bytes`] — the edition's identity in the chain. The next edition's
 /// `prev_hash` cites this value.
 pub fn edition_hash(

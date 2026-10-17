@@ -2195,6 +2195,8 @@ pub struct AuthorityView {
     pub head_entities: std::collections::BTreeSet<String>,
     /// Ban history (npub hex → secs), outliving the ban so an un-ban raises no phantom.
     pub banned_at: std::collections::BTreeMap<String, u64>,
+    /// Roles v2 is active (CORD-04 §2): Roles are vsk 13, ordered by rank key.
+    pub activated: bool,
 }
 
 /// Fetch + fold the community's current authority (CORD-04), paging older like
@@ -2265,6 +2267,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
         floored: floors.keys().cloned().collect(),
         head_entities,
         banned_at: a.banned_at,
+        activated: a.activated,
     }
 }
 
@@ -4895,7 +4898,12 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         // None). The owner cites nothing; their rank is the community id itself.
         let citation = required_authority_citation(community, &my_pk)?;
         let at = now_ms() / 1000;
-        let rumor = control::build_edition_rumor(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref());
+        // On Roles v2 every edition is marked: its hash covers its signer and it names its
+        // Community (CORD-04 §1). A Roles v2 kind is marked even while the switch is under way.
+        let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
+        let marked = vsk == super::vsk::ROLE_V2 || vsk == super::vsk::TENURE || crate::db::community::get_edition_head(&cid_hex, &everyone_hex)?.is_some();
+        let binding = marked.then(|| super::derive::edition_binding(community.id()));
+        let rumor = control::build_edition_rumor_bound(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref(), binding);
         let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
         transport.publish(&wrap, &community.relays).await?;
         // Advance our own floor so a follow-up edit chains from this head and refuse-
@@ -5254,6 +5262,7 @@ pub async fn create_role<T: Transport + ?Sized>(
             permissions: Permissions(permissions),
             scope,
             color,
+            rank: None, display: false, mentionable: false,
             extra: Default::default(),
         };
         set_role(transport, community, &role).await?;
@@ -5355,6 +5364,209 @@ pub async fn reorder_roles<T: Transport + ?Sized>(
             set_role(transport, community, role).await?;
         }
         Ok(changed.len())
+    })
+    .await
+}
+
+/// Publish a Roles v2 edition of `role` (vsk 13, CORD-04 §2).
+pub async fn set_role_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, role: &crate::community::roles::Role) -> Result<(), String> {
+    if role.name.len() > super::roles::MAX_ROLE_NAME_BYTES {
+        return Err("role name over 64 bytes".to_string());
+    }
+    let content = super::roles::role_v2_content_json(role)?;
+    let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).ok_or("role_id must be 32-byte hex")?;
+    publish_control_edition(transport, community, vsk::ROLE_V2, &role_id, &content).await
+}
+
+/// The live Roles in rank order, top first, as the fold ordered them.
+fn ranked(view: &AuthorityView) -> Vec<&crate::community::roles::Role> {
+    let mut roles: Vec<&crate::community::roles::Role> = view.roles.roles.iter().filter(|r| r.rank.is_some()).collect();
+    roles.sort_by(|a, b| a.rank.as_deref().unwrap_or("").as_bytes().cmp(b.rank.as_deref().unwrap_or("").as_bytes()).then_with(|| a.role_id.cmp(&b.role_id)));
+    roles
+}
+
+fn require_activated(view: &AuthorityView) -> Result<(), String> {
+    if !view.activated {
+        return Err("this community still uses the legacy roster".to_string());
+    }
+    Ok(())
+}
+
+/// Mint a Roles v2 Role at the bottom, beneath everything, as in Discord. Returns its id.
+pub async fn create_role_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str, color: u32, permissions: u64) -> Result<String, String> {
+    crate::db::scoped(async move {
+        use crate::community::roles::{Permissions, Role, RoleScope};
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        if view.roles.roles.len() >= super::roles::MAX_ROLES_PER_COMMUNITY {
+            return Err(format!("a community holds at most {} roles", super::roles::MAX_ROLES_PER_COMMUNITY));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a role needs a name".to_string());
+        }
+        let order = ranked(&view);
+        let bottom = order.iter().map(|r| r.position).max().unwrap_or(0).saturating_add(1);
+        if !author.supports(bottom, permissions) {
+            return Err("you can't give a role permissions you don't hold".to_string());
+        }
+        let rank = crate::community::rank::between(order.last().and_then(|r| r.rank.as_deref()), None).ok_or("no room left at the bottom; reorder the roles first")?;
+        let role = Role {
+            role_id: crate::simd::hex::bytes_to_hex_32(&super::super::random_32()),
+            name: name.to_string(),
+            position: bottom,
+            permissions: Permissions(permissions),
+            scope: RoleScope::Server,
+            color,
+            rank: Some(rank),
+            display: false,
+            mentionable: false,
+            extra: Default::default(),
+        };
+        set_role_v2(transport, community, &role).await?;
+        Ok(role.role_id)
+    })
+    .await
+}
+
+/// Edit a Roles v2 Role in place, keeping its rank and every field another client wrote.
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_role_v2<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    role_id: &str,
+    name: &str,
+    color: u32,
+    permissions: u64,
+    display: bool,
+    mentionable: bool,
+) -> Result<(), String> {
+    crate::db::scoped(async move {
+        use crate::community::roles::Permissions;
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
+        require_role_head(&view, role_id)?;
+        if !author.outranks(current.position) {
+            return Err("you can only edit roles beneath your own".to_string());
+        }
+        if !author.supports(current.position, permissions) {
+            return Err("you can't give a role permissions you don't hold".to_string());
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a role needs a name".to_string());
+        }
+        let mut next = current;
+        next.name = name.to_string();
+        next.color = color;
+        next.permissions = Permissions(permissions);
+        next.display = display;
+        next.mentionable = mentionable;
+        set_role_v2(transport, community, &next).await
+    })
+    .await
+}
+
+/// Move a Roles v2 Role to `index` in the rank order (0 is the top): one edition, on the
+/// moved Role alone, its key minted between its new neighbours.
+pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, role_id: &str, index: usize) -> Result<(), String> {
+    crate::db::scoped(async move {
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
+        require_role_head(&view, role_id)?;
+        let others: Vec<&crate::community::roles::Role> = ranked(&view).into_iter().filter(|r| r.role_id != current.role_id).collect();
+        let index = index.min(others.len());
+        let (above, below) = (index.checked_sub(1).map(|i| others[i]), others.get(index).copied());
+        // The new spot sits just beneath `above`: the author must outrank it and the old one,
+        // and hold the Role's bits through Roles above both.
+        let spot = above.map_or(1, |a| a.position.saturating_add(1));
+        if !author.outranks(current.position) || !(author.is_owner || above.is_some_and(|a| author.rank <= a.position)) {
+            return Err("you can only move roles beneath your own, to a place beneath your own".to_string());
+        }
+        if !author.supports(current.position.min(spot), current.permissions.0) {
+            return Err(format!("you can't move \"{}\": it has permissions you don't hold", current.name));
+        }
+        let rank = crate::community::rank::between(above.and_then(|r| r.rank.as_deref()), below.and_then(|r| r.rank.as_deref()))
+            .ok_or("no room between those roles; move a neighbour first")?;
+        let mut next = current;
+        next.rank = Some(rank);
+        set_role_v2(transport, community, &next).await
+    })
+    .await
+}
+
+/// Delete a Roles v2 Role: terminal, it leaves every holder and frees its slot.
+pub async fn delete_role_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, role_id: &str) -> Result<(), String> {
+    crate::db::scoped(async move {
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
+        require_role_head(&view, role_id)?;
+        if !author.outranks(current.position) || !author.supports(current.position, 0) {
+            return Err("you can only delete roles beneath your own".to_string());
+        }
+        let eid = crate::simd::hex::hex_to_bytes_32_checked(role_id).ok_or("role_id must be 32-byte hex")?;
+        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::role_v2_deleted_json(&current.role_id)).await
+    })
+    .await
+}
+
+/// Set what `@everyone` holds. Its editor holds every bit it carries through their Roles.
+pub async fn set_everyone<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, permissions: u64) -> Result<(), String> {
+    crate::db::scoped(async move {
+        let view = fetch_authority(transport, community).await;
+        require_activated(&view)?;
+        let author = role_author(community, &view)?;
+        if !author.supports(u32::MAX, permissions) {
+            return Err("you can't give everyone permissions you don't hold".to_string());
+        }
+        let eid = super::derive::everyone_locator(community.id());
+        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::everyone_content_json(permissions)).await
+    })
+    .await
+}
+
+/// Move a Community to Roles v2 (CORD-04 §2), owner only: each legacy Role is carried
+/// across in the same order, names, colours and bits, continuing its own chain so its
+/// Grants keep resolving, then `@everyone` is published, which is the switch itself.
+pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, everyone: u64) -> Result<usize, String> {
+    crate::db::scoped(async move {
+        if me_pk()? != community.owner()? {
+            return Err("only the owner moves a community to the new roles".to_string());
+        }
+        let view = fetch_authority(transport, community).await;
+        if view.activated {
+            return Err("this community already uses the new roles".to_string());
+        }
+        if view.roles.roles.iter().any(|r| matches!(r.scope, crate::community::roles::RoleScope::Channel(_))) {
+            return Err("channel access roles move with channel permissions, which aren't here yet".to_string());
+        }
+        let mut legacy: Vec<crate::community::roles::Role> = view.roles.roles.clone();
+        legacy.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+        let mut last: Option<String> = None;
+        let mut prev_position: Option<u32> = None;
+        for role in &legacy {
+            require_role_head(&view, &role.role_id)?;
+            // Legacy peers stay peers.
+            let rank = match (&last, prev_position) {
+                (Some(k), Some(p)) if p == role.position => k.clone(),
+                _ => crate::community::rank::between(last.as_deref(), None).ok_or("too many roles to carry across")?,
+            };
+            let mut next = role.clone();
+            next.rank = Some(rank.clone());
+            set_role_v2(transport, community, &next).await?;
+            last = Some(rank);
+            prev_position = Some(role.position);
+        }
+        let eid = super::derive::everyone_locator(community.id());
+        publish_control_edition(transport, community, vsk::ROLE_V2, &eid, &super::roles::everyone_content_json(everyone)).await?;
+        Ok(legacy.len())
     })
     .await
 }
@@ -6282,7 +6494,7 @@ pub fn channel_access_role(channel_id: &ChannelId, name: &str) -> crate::communi
         position: ACCESS_ROLE_POSITION,
         permissions: Permissions::empty(),
         scope: RoleScope::Channel(crate::simd::hex::bytes_to_hex_32(&channel_id.0)),
-        color: 0, extra: Default::default(),
+        color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
     }
 }
 
@@ -7620,7 +7832,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     // at that entity: floor rows key on the coordinate alone.
     let banlist_eid = super::derive::banlist_locator(community.id());
     let taken: std::collections::HashSet<[u8; 32]> =
-        groups.keys().filter(|(v, _)| v != vsk::CHANNEL_METADATA).map(|(_, e)| *e).chain([banlist_eid]).collect();
+        groups.keys().filter(|(v, _)| v != vsk::CHANNEL_METADATA).map(|(_, e)| *e).chain([banlist_eid, super::derive::everyone_locator(community.id())]).collect();
     for ((vsk_code, eid), group) in &groups {
         // This fold applies three entities: community metadata (eid ==
         // community_id), channel metadata, and per-channel Pin Lists. A vsk-2
@@ -7775,6 +7987,8 @@ struct AuthoritySet {
     carried: std::collections::BTreeSet<String>,
     /// Every role and grant edition the fold admitted.
     admitted: std::collections::HashSet<[u8; 32]>,
+    /// Roles v2 is active (CORD-04 §2).
+    activated: bool,
     /// The authority fixpoint converged.
     converged: bool,
 }
@@ -7801,6 +8015,7 @@ impl AuthoritySet {
             refused: Default::default(),
             carried: Default::default(),
             admitted: Default::default(),
+            activated: false,
             converged: true,
         }
     }
@@ -7836,7 +8051,7 @@ fn held_is(floor: &Floor, e: &ParsedEdition) -> bool {
 /// cap at the 100 lowest role_ids, a member at 64 roles, the banlist at 500. The
 /// banlist is enforced only if its head's signer held BAN in the authorized roster.
 fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &Floors) -> AuthoritySet {
-    use crate::community::roles::Permissions;
+    use crate::community::roles::{Permissions, Role};
     use std::collections::BTreeMap;
 
     let cid = community.id();
@@ -7848,7 +8063,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 
     let mut groups: BTreeMap<[u8; 32], Vec<&ParsedEdition>> = BTreeMap::new();
     for e in editions {
-        if e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST {
+        if e.vsk == vsk::ROLE || e.vsk == vsk::ROLE_V2 || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST {
             groups.entry(e.entity_id).or_default().push(e);
         }
     }
@@ -7860,55 +8075,98 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // authorized head beneath it (the author-blind collapse-to-one-head it replaces
     // let any member vanish a role or a member's grant). `gapped` (drives older-
     // paging) stays fold_head's per-entity flag.
-    let mut role_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
-    let mut grant_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
-    let mut gapped = false;
+    // Roles v2 (CORD-04 §2): Roles fold from vsk 13 alone once @everyone stands there, judged
+    // in a vsk-13 fold, which traces to the owner because a vsk-1 Role confers nothing in it.
+    // So an admin's later edit of @everyone keeps the Community on Roles v2 across a
+    // Refounding, and once floored it stays. A vsk-1 edition then links the chain a migrated
+    // Role continues, and stands for nothing. Rank keys map to dense positions.
+    let everyone_eid = super::derive::everyone_locator(cid);
+    let everyone_hex = crate::simd::hex::bytes_to_hex_32(&everyone_eid);
+    let build = |activated: bool| {
+        let mut role_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
+        let mut grant_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
+        let mut gapped = false;
+        let ranks: std::collections::HashMap<String, u32> = if activated {
+            let keys: Vec<String> = editions
+                .iter()
+                .filter(|e| e.vsk == vsk::ROLE_V2 && e.binding.is_some())
+                .filter_map(|e| match super::roles::parse_role_v2_content(&e.content) {
+                    Some(super::roles::RoleV2::Live(r)) => r.rank,
+                    _ => None,
+                })
+                .collect();
+            crate::community::rank::dense_ranks(keys.iter().map(String::as_str)).into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+        } else {
+            Default::default()
+        };
+        for (eid, group) in &groups {
+            // The banlist is folded author-aware AFTER the roster is known (below).
+            if *eid == banlist_eid {
+                continue;
+            }
+            let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
+            let floor = floors.get(&entity_hex).copied();
+            let held_served = floor.is_some_and(|f| group.iter().any(|p| held_is(&f, p)));
+            // Nothing above a withheld held head can be judged on the rank it acts on: page for it.
+            gapped |= floor.is_some_and(|f| !held_served && group.iter().any(|p| p.version > f.0));
 
-    for (eid, group) in &groups {
-        // The banlist is folded author-aware AFTER the roster is known (below).
-        if *eid == banlist_eid {
-            continue;
-        }
-        let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
-        let floor = floors.get(&entity_hex).copied();
-        let held_served = floor.is_some_and(|f| group.iter().any(|p| held_is(&f, p)));
-        // Nothing above a withheld held head can be judged on the rank it acts on: page for it.
-        gapped |= floor.is_some_and(|f| !held_served && group.iter().any(|p| p.version > f.0));
-
-        for p in group {
-            let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id, author: p.author.to_bytes(), rebased: false };
-            match p.vsk.as_str() {
-                vsk::ROLE => {
-                    // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
-                    if let Some(role) = super::roles::parse_role_content(&p.content) {
-                        if role.role_id == entity_hex && role.position != 0 {
-                            role_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: Some(role), grant: None, author: p.author, head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
-                        }
-                    }
-                }
-                vsk::GRANT => {
-                    if let Some(mut grant) = super::roles::parse_grant_content(&p.content) {
-                        if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
-                            if super::derive::grant_locator(cid, &member) == *eid {
-                                grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
-                                grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), author: p.author, head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
+            for p in group {
+                let head = FoldedHead { entity_hex: entity_hex.clone(), version: p.version, self_hash: p.self_hash, inner_id: p.inner_id, author: p.author.to_bytes(), rebased: false };
+                let cand = |role: Role, kind: RoleKind| AuthorityCand { role: Some(role), grant: None, kind, author: p.author, head: head.clone(), citation: p.authority.clone(), prev: p.prev_hash, floor, held_served };
+                match p.vsk.as_str() {
+                    // The @everyone coordinate holds @everyone alone.
+                    vsk::ROLE if *eid == everyone_eid => {}
+                    vsk::ROLE => {
+                        // Bind: the content's role_id IS the coordinate; position 0 is the owner's.
+                        if let Some(role) = super::roles::parse_role_content(&p.content) {
+                            if role.role_id == entity_hex && role.position != 0 {
+                                let kind = if activated { RoleKind::History } else { RoleKind::Live };
+                                role_cands.entry(entity_hex.clone()).or_default().push(cand(role, kind));
                             }
                         }
                     }
+                    vsk::ROLE_V2 if p.binding.is_none() => {}
+                    vsk::ROLE_V2 if activated && *eid == everyone_eid => {
+                        if let Some(bits) = super::roles::parse_everyone_content(&p.content) {
+                            let role = Role { role_id: everyone_hex.clone(), name: "@everyone".into(), position: u32::MAX, permissions: Permissions(bits), scope: crate::community::roles::RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
+                            role_cands.entry(entity_hex.clone()).or_default().push(cand(role, RoleKind::Everyone));
+                        }
+                    }
+                    vsk::ROLE_V2 if activated => match super::roles::parse_role_v2_content(&p.content) {
+                        Some(super::roles::RoleV2::Live(mut role)) if role.role_id == entity_hex => {
+                            role.position = role.rank.as_ref().and_then(|k| ranks.get(k)).copied().unwrap_or(u32::MAX);
+                            role_cands.entry(entity_hex.clone()).or_default().push(cand(role, RoleKind::Live));
+                        }
+                        Some(super::roles::RoleV2::Deleted { role_id }) if role_id == entity_hex => {
+                            let role = Role { role_id, name: String::new(), position: u32::MAX, permissions: Permissions(0), scope: crate::community::roles::RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
+                            role_cands.entry(entity_hex.clone()).or_default().push(cand(role, RoleKind::Deleted));
+                        }
+                        _ => {}
+                    },
+                    vsk::GRANT => {
+                        if let Some(mut grant) = super::roles::parse_grant_content(&p.content) {
+                            if let Some(member) = crate::simd::hex::hex_to_bytes_32_checked(&grant.member) {
+                                if super::derive::grant_locator(cid, &member) == *eid {
+                                    grant.role_ids.truncate(super::roles::MAX_ROLES_PER_MEMBER);
+                                    grant_cands.entry(entity_hex.clone()).or_default().push(AuthorityCand { role: None, grant: Some(grant), kind: RoleKind::Live, author: p.author, head, citation: p.authority.clone(), prev: p.prev_hash, floor, held_served });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-    }
-    for cands in role_cands.values_mut().chain(grant_cands.values_mut()) {
-        cands.sort_by(|a, b| b.head.version.cmp(&a.head.version).then(a.head.inner_id.cmp(&b.head.inner_id)));
-    }
-
+        for cands in role_cands.values_mut().chain(grant_cands.values_mut()) {
+            cands.sort_by(|a, b| b.head.version.cmp(&a.head.version).then(a.head.inner_id.cmp(&b.head.inner_id)));
+        }
+        (role_cands, grant_cands, gapped)
+    };
     // Complete: every role and grant this device floors served its held head, so a held
     // head the Roster refuses is refused on the evidence. The stored roster names the
     // floored entities a plane might have stopped serving entirely.
     let stored = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let complete = {
+    let complete_of = |role_cands: &BTreeMap<String, Vec<AuthorityCand>>, grant_cands: &BTreeMap<String, Vec<AuthorityCand>>| {
         let mut tracked: std::collections::BTreeSet<String> = role_cands.keys().chain(grant_cands.keys()).cloned().collect();
         tracked.extend(stored.roles.iter().map(|r| r.role_id.clone()));
         tracked.extend(stored.grants.iter().filter_map(|g| {
@@ -7917,6 +8175,16 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         }));
         tracked.iter().all(|eid| floors.get(eid).is_none_or(|f| editions.iter().any(|e| held_is(f, e))))
     };
+    let some_v2 = groups.get(&everyone_eid).is_some_and(|g| g.iter().any(|e| e.vsk == vsk::ROLE_V2 && e.binding.is_some()));
+    let activated = floors.contains_key(&everyone_hex)
+        || (some_v2 && {
+            let (rc, gc, _) = build(true);
+            let none: std::collections::BTreeSet<String> = Default::default();
+            select_authorized(cid, &rc, &gc, owner_hex.as_deref(), &none, complete_of(&rc, &gc), None).heads.iter().any(|h| h.entity_hex == everyone_hex)
+        });
+    let (role_cands, grant_cands, withheld) = build(activated);
+    let mut gapped = withheld;
+    let complete = complete_of(&role_cands, &grant_cands);
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
@@ -7951,7 +8219,8 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
                 .filter(|e| {
                     let ah = e.author.to_hex();
                     !banned_authors.contains(ah.as_str())
-                        && prelim.is_authorized(&ah, owner_hex.as_deref(), Permissions::BAN)
+                        // From the author's Roles: @everyone's bits author no banlist.
+                        && (owner_hex.as_deref() == Some(ah.as_str()) || prelim.permissions_above(&ah, u32::MAX).contains(Permissions::BAN))
                         && citation_ok_in_fold(cid, &prelim_heads, owner_hex.as_deref(), &e.author, e.authority.as_ref())
                 })
                 .collect()
@@ -8028,7 +8297,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         authorized.grants.retain(|g| !g.role_ids.is_empty());
     }
 
-    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, complete, refused, carried, admitted, converged }
+    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, complete, refused, carried, admitted, activated, converged }
 }
 
 /// One candidate edition of a role/grant entity — the pool [`select_authorized`]
@@ -8036,6 +8305,8 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 struct AuthorityCand {
     role: Option<crate::community::roles::Role>,
     grant: Option<crate::community::roles::MemberGrant>,
+    /// What a role candidate stands for (grants are always `Live`).
+    kind: RoleKind,
     author: PublicKey,
     head: FoldedHead,
     /// The `vac` this edition carried (CORD-04 §5). `None` for an owner edition
@@ -8047,6 +8318,18 @@ struct AuthorityCand {
     floor: Option<Floor>,
     /// The entity's held floor edition is among the served candidates.
     held_served: bool,
+}
+
+/// What a role-entity edition is, in a Community that folds Roles v2 or doesn't.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RoleKind {
+    Live,
+    /// A Role's terminal deletion: it acts on the Role at the rank it stood at.
+    Deleted,
+    /// `@everyone`, beneath every Role.
+    Everyone,
+    /// A vsk-1 edition after activation: it links what was built on it, and confers nothing.
+    History,
 }
 
 impl AuthorityCand {
@@ -8187,6 +8470,7 @@ fn select_authorized(
     let mut gapped = false;
     let mut admitted: std::collections::HashSet<[u8; 32]> = Default::default();
     let mut converged = false;
+    let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(cid));
     let bound = 2 * (role_cands.len() + grant_cands.len()) + 8;
     for _ in 0..bound {
         let mut next = CommunityRoles::default();
@@ -8198,10 +8482,17 @@ fn select_authorized(
         let cite_heads = entity_heads(&heads);
 
         for (entity, cands) in role_cands {
-            let claims = |c: &AuthorityCand| c.role.iter().map(|r| r.position).collect::<Vec<u32>>();
+            // A deletion and a legacy edition claim no rank: they act at the one the Role stood at.
+            let claims = |c: &AuthorityCand| match c.kind {
+                RoleKind::Deleted | RoleKind::History => Vec::new(),
+                _ => c.role.iter().map(|r| r.position).collect::<Vec<u32>>(),
+            };
             let mut judge = |c: &AuthorityCand, reach: u32| -> Option<Option<u32>> {
                 let role = c.role.as_ref()?;
                 let ah = c.author.to_hex();
+                if c.kind == RoleKind::History {
+                    return refuse(&mut why, c, "role: a vsk-1 edition after Roles v2 activated");
+                }
                 if excluded.contains(&ah) || role.position == 0 {
                     return refuse(&mut why, c, "role: author banned or position 0");
                 }
@@ -8224,17 +8515,49 @@ fn select_authorized(
                 if !citation_ok_against(cid, &cite_heads, owner_hex, &c.author, c.citation.as_ref()) && c.citation.is_some() {
                     return refuse(&mut why, c, "role: cited a grant we cannot resolve");
                 }
-                Some(Some(role.position))
+                Some((c.kind != RoleKind::Deleted).then_some(role.position))
             };
             let (picked, gap) = replay(cands, &accepted, owner_hex, complete, held_banned(cands, excluded), &claims, &mut judge, &mut next_admitted);
             next_gapped |= gap;
+            // Deletion is terminal over the authorized chain, not the head alone (CORD-04 §2):
+            // once one stands, the Role is gone whatever was written after it.
+            // A deletion acts on the Role at every rank it holds from the deletion on, so one
+            // backdated beneath a Role's later life can't reach above its signer.
+            let deletion = cands
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == RoleKind::Deleted && next_admitted.contains(&c.head.inner_id))
+                .filter(|(_, d)| {
+                    let later = cands
+                        .iter()
+                        .filter(|c| c.kind == RoleKind::Live && c.head.version >= d.head.version && next_admitted.contains(&c.head.inner_id))
+                        .filter_map(|c| c.role.as_ref().map(|r| r.position))
+                        .min();
+                    later.is_none_or(|reach| judge(d, reach).is_some())
+                })
+                .max_by_key(|(_, c)| (c.head.version, std::cmp::Reverse(c.head.inner_id)))
+                .map(|(j, _)| j);
+            if let Some(j) = deletion {
+                let below = cands[j].floor.is_some_and(|f| cands[j].head.version < f.0 || (cands[j].head.version == f.0 && !cands[j].is_held()));
+                next_heads.push(FoldedHead { rebased: below, ..cands[j].head.clone() });
+                continue;
+            }
+            let keep = |j: usize, next: &mut CommunityRoles| {
+                let role = cands[j].role.clone().expect("a role candidate");
+                match cands[j].kind {
+                    RoleKind::Everyone => next.everyone = Some(role.permissions),
+                    RoleKind::Live => next.roles.push(role),
+                    // Kept as the head, standing for nothing.
+                    RoleKind::Deleted | RoleKind::History => {}
+                }
+            };
             match picked {
                 Picked::Head(j, rebased) => {
-                    next.roles.push(cands[j].role.clone().expect("a role candidate"));
+                    keep(j, &mut next);
                     next_heads.push(FoldedHead { rebased, ..cands[j].head.clone() });
                 }
                 Picked::Carried(j) => {
-                    next.roles.push(cands[j].role.clone().expect("a role candidate"));
+                    keep(j, &mut next);
                     next_heads.push(cands[j].head.clone());
                     next_carried.insert(entity.clone());
                 }
@@ -8252,6 +8575,7 @@ fn select_authorized(
                 c.grant
                     .iter()
                     .flat_map(|g| g.role_ids.iter())
+                    .filter(|rid| **rid != everyone_hex)
                     .filter_map(|rid| accepted.role(rid).map(|r| (rid.clone(), r.position)))
                     .collect()
             };
@@ -8268,7 +8592,7 @@ fn select_authorized(
                     if c.citation.is_some() {
                         return refuse(&mut why, c, "grant: cited a grant we cannot resolve");
                     }
-                    if grant.role_ids.iter().all(|rid| !role_cands.contains_key(rid)) {
+                    if grant.role_ids.iter().all(|rid| *rid == everyone_hex || !role_cands.contains_key(rid)) {
                         return refuse(&mut why, c, "grant: UNCITED revocation — a strip must cite its authority");
                     }
                 }
@@ -8314,7 +8638,7 @@ fn select_authorized(
         // Heads count too: a citation is judged against the heads of the round before.
         let same_heads = next_heads.len() == heads.len()
             && next_heads.iter().zip(&heads).all(|(a, b)| (&a.entity_hex, a.self_hash, a.inner_id, a.rebased) == (&b.entity_hex, b.self_hash, b.inner_id, b.rebased));
-        let settled = same_heads && next.roles == accepted.roles && next.grants == accepted.grants;
+        let settled = same_heads && next.roles == accepted.roles && next.grants == accepted.grants && next.everyone == accepted.everyone;
         accepted = next;
         heads = next_heads;
         refused = next_refused;
@@ -11220,7 +11544,7 @@ mod tests {
     }
 
     fn admin_role(role_id: &str, perms: u64) -> Role {
-        Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0, extra: Default::default() }
+        Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }
     }
 
     /// Hand-roll a LEGACY (pre-split) community exactly as a pre-0.4.2 build
@@ -11834,6 +12158,7 @@ mod tests {
                 MemberGrant { member: staff.to_hex(), role_ids: vec!["ab".repeat(32)] },
                 MemberGrant { member: revoked.to_hex(), role_ids: Vec::new() },
             ],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roles, 1).unwrap();
 
@@ -12160,7 +12485,7 @@ mod tests {
             &bed.relay,
             &community,
             &attacker.keys,
-            &Role { role_id: admin_rid.clone(), name: "pwned".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, extra: Default::default() },
+            &Role { role_id: admin_rid.clone(), name: "pwned".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() },
             2,
         )
         .await;
@@ -12827,11 +13152,12 @@ mod tests {
     #[test]
     fn a_role_author_carries_only_bits_they_hold_and_acts_only_beneath_themselves() {
         use crate::community::roles::{CommunityRoles, MemberGrant, Permissions, Role, RoleScope};
-        let role = |id: &str, position: u32, bits: u64| Role { role_id: id.into(), name: id.into(), position, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, extra: Default::default() };
+        let role = |id: &str, position: u32, bits: u64| Role { role_id: id.into(), name: id.into(), position, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
         // A moderator at 3 holding MANAGE_ROLES|KICK, plus a low role at 8 carrying BAN.
         let roles = CommunityRoles {
             roles: vec![role("mod", 3, Permissions::MANAGE_ROLES | Permissions::KICK), role("low", 8, Permissions::BAN)],
             grants: vec![MemberGrant { member: "m".into(), role_ids: vec!["mod".into(), "low".into()] }],
+            everyone: None,
         };
         let moderator = RoleAuthor { me_hex: "m".into(), owner_hex: "o".into(), is_owner: false, rank: 3, roles };
         assert!(moderator.supports(4, Permissions::KICK), "a bit they hold, beneath them");
@@ -13490,8 +13816,8 @@ mod tests {
         let moder = Keys::generate();
         let stranger = Keys::generate();
         let (admin_rid, mod_rid) = ("a1".repeat(32), "b2".repeat(32));
-        publish_role(&relay, &community, &owner, &Role { role_id: admin_rid.clone(), name: "Admin".into(), position: 1, permissions: Permissions(Permissions::ADMIN_ALL), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
-        publish_role(&relay, &community, &owner, &Role { role_id: mod_rid.clone(), name: "Mod".into(), position: 2, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
+        publish_role(&relay, &community, &owner, &Role { role_id: admin_rid.clone(), name: "Admin".into(), position: 1, permissions: Permissions(Permissions::ADMIN_ALL), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 1).await;
+        publish_role(&relay, &community, &owner, &Role { role_id: mod_rid.clone(), name: "Mod".into(), position: 2, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 1).await;
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![admin_rid], 1).await;
         publish_grant(&relay, &community, &owner, &moder.public_key(), vec![mod_rid], 1).await;
         publish_banlist(&relay, &community, &moder, &[admin.public_key().to_hex(), owner.public_key().to_hex(), stranger.public_key().to_hex()], 1).await;
@@ -15833,7 +16159,7 @@ mod tests {
     }
 
     fn role_at(id: &str, name: &str, position: u32, bits: u64) -> Role {
-        Role { role_id: id.into(), name: name.into(), position, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, extra: Default::default() }
+        Role { role_id: id.into(), name: name.into(), position, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }
     }
 
     #[tokio::test]
@@ -17317,6 +17643,528 @@ mod tests {
         assert!(!carried.is_empty() && carried.iter().all(|e| e.author == owner.keys.public_key()), "the creator's registry is carried, not the copy");
     }
 
+    fn role_v2(id: &str, name: &str, rank: &str, bits: u64) -> Role {
+        Role { role_id: id.into(), name: name.into(), position: u32::MAX, permissions: Permissions(bits), scope: RoleScope::Server, color: 0, rank: Some(rank.into()), display: false, mentionable: false, extra: Default::default() }
+    }
+
+    /// Publish a vsk-13 edition with `content` at `eid`, chained to the relay's head there.
+    async fn publish_v2(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, eid: &[u8; 32], content: &str, version: u64) {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let prev = head_hash_on_relay(relay, community, eid).await;
+        let cite = cite_on_relay(relay, community, signer).await;
+        let binding = Some(crate::community::v2::derive::edition_binding(community.id()));
+        let rumor = control::build_edition_rumor_bound(signer.public_key(), vsk::ROLE_V2, eid, version, prev.as_ref(), content, 1_000, cite.as_ref(), binding);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    async fn publish_role_v2(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64) {
+        let content = crate::community::v2::roles::role_v2_content_json(role).unwrap();
+        publish_v2(relay, community, signer, &eid_of(&role.role_id), &content, version).await;
+    }
+
+    async fn publish_everyone(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, bits: u64, version: u64) {
+        let eid = crate::community::v2::derive::everyone_locator(community.id());
+        publish_v2(relay, community, signer, &eid, &crate::community::v2::roles::everyone_content_json(bits), version).await;
+    }
+
+    #[tokio::test]
+    async fn roles_v2_activate_when_the_owner_publishes_everyone() {
+        // Before @everyone, vsk 13 is noise and the legacy roster stands; after, Roles fold from
+        // vsk 13 alone and a vsk-1 Role is history.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Activate", vec!["wss://r".into()], None).await.unwrap();
+        let m = Keys::generate().public_key();
+        let (legacy, fresh) = ("a1".repeat(32), "a2".repeat(32));
+        publish_role(&relay, &community, &owner, &role_at(&legacy, "Legacy", 3, Permissions::KICK), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&fresh, "Fresh", "V", Permissions::KICK), 1).await;
+        publish_grant(&relay, &community, &owner, &m, vec![legacy.clone(), fresh.clone()], 1).await;
+        let before = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(before.roles.role(&legacy).is_some() && before.roles.role(&fresh).is_none() && before.roles.everyone.is_none());
+
+        // A non-owner's @everyone activates nothing.
+        let stranger = Keys::generate();
+        publish_everyone(&relay, &community, &stranger, crate::community::v2::roles::EVERYONE_DEFAULT, 1).await;
+        let still = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(still.roles.role(&legacy).is_some() && still.roles.everyone.is_none());
+
+        publish_everyone(&relay, &community, &owner, crate::community::v2::roles::EVERYONE_DEFAULT | Permissions::CREATE_INVITE, 2).await;
+        let after = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(after.converged);
+        assert!(after.roles.role(&legacy).is_none(), "vsk 1 is history");
+        assert!(after.roles.role(&fresh).is_some(), "vsk 13 folds");
+        assert_eq!(after.roles.everyone.map(|p| p.0), Some(crate::community::v2::roles::EVERYONE_DEFAULT | Permissions::CREATE_INVITE));
+        assert!(after.roles.effective_permissions(&Keys::generate().public_key().to_hex()).contains(Permissions::CREATE_INVITE), "every member holds @everyone");
+        assert_eq!(after.roles.roles_of(&m.to_hex()).count(), 1, "the grant resolves against vsk 13");
+        // Once seen, activation outlives the edition that made it: a relay dropping @everyone
+        // can't flip a tracker back to the legacy roster.
+        follow_control(&relay, &community).await.unwrap();
+        let thin = MemoryRelay::new();
+        let everyone_eid = crate::community::v2::derive::everyone_locator(community.id());
+        mirror_control_except(&relay, &thin, &community, &|e| e.entity_id == everyone_eid).await;
+        let tracked = fold_authority(&community, &fetch_control(&thin, &community).await, &load_floors(&community));
+        assert!(tracked.roles.role(&legacy).is_none() && tracked.roles.role(&fresh).is_some(), "still Roles v2");
+    }
+
+    #[tokio::test]
+    async fn legacy_ranks_bind_nothing_after_activation() {
+        // An admin carries a legacy Role that sat at position 1 across to vsk 13. Legacy
+        // positions mean nothing once Roles v2 is active, so only vsk-13 ranks judge the edit.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "LegacyRank", vec!["wss://r".into()], None).await.unwrap();
+        let admin = Keys::generate();
+        let (radm, rr) = ("f1".repeat(32), "f2".repeat(32));
+        publish_role(&relay, &community, &owner, &role_at(&rr, "R", 1, 0), 1).await;
+        // A device holding the legacy edition reads the same.
+        follow_control(&relay, &community).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&radm, "Admin", "B", Permissions::MANAGE_ROLES), 1).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![radm.clone()], 1).await;
+        publish_role_v2(&relay, &community, &admin, &role_v2(&rr, "R carried", "V", 0), 2).await;
+        let editions = fetch_control(&relay, &community).await;
+        for floors in [Floors::default(), load_floors(&community)] {
+            let f = fold_authority(&community, &editions, &floors);
+            assert_eq!(f.roles.role(&rr).map(|r| r.name.as_str()), Some("R carried"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_floor_steps_down_to_a_deletion_it_learns_of_late() {
+        // A device that took the owner's v3 before it saw the deletion at v2 beneath it: the
+        // deletion stands, and the floor moves down to it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let community = create_community(&full, "LateDelete", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&full, &community, &owner, 0, 1).await;
+        let rr = "f6".repeat(32);
+        publish_role_v2(&full, &community, &owner, &role_v2(&rr, "R", "V", 0), 1).await;
+        publish_v2(&full, &community, &owner, &eid_of(&rr), &crate::community::v2::roles::role_v2_deleted_json(&rr), 2).await;
+        let d = head_hash_on_relay(&full, &community, &eid_of(&rr)).await.unwrap();
+        publish_role_v2(&full, &community, &owner, &role_v2(&rr, "R again", "V", 0), 3).await;
+        let thin = MemoryRelay::new();
+        mirror_control_except(&full, &thin, &community, &|e| e.self_hash == d).await;
+        follow_control(&thin, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &eid_of(&rr)).0, 3);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&full, &held).await.unwrap();
+        assert_eq!(floor_of(&community, &eid_of(&rr)).0, 2, "the floor moves down to the deletion");
+        let cached = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        assert!(cached.role(&rr).is_none());
+    }
+
+    #[tokio::test]
+    async fn rank_keys_order_authority_and_equal_keys_are_peers() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ranks", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        let (hi, lo, peer) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let mr = Permissions::MANAGE_ROLES;
+        let (rhi, rlo, rpeer, rtarget) = ("b1".repeat(32), "b2".repeat(32), "b3".repeat(32), "b4".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rhi, "Hi", "B", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rlo, "Lo", "V", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rpeer, "Peer", "V", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rtarget, "Target", "VV", 0), 1).await;
+        for (k, r) in [(&hi, &rhi), (&lo, &rlo), (&peer, &rpeer)] {
+            publish_grant(&relay, &community, &owner, &k.public_key(), vec![r.clone()], 1).await;
+        }
+        // Lo renames the role beneath it, and tries to rename Hi's and its peer's.
+        publish_role_v2(&relay, &community, &lo, &role_v2(&rtarget, "Target by Lo", "VV", 0), 2).await;
+        publish_role_v2(&relay, &community, &lo, &role_v2(&rhi, "Hi by Lo", "B", mr), 2).await;
+        publish_role_v2(&relay, &community, &lo, &role_v2(&rpeer, "Peer by Lo", "V", mr), 2).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        let name = |id: &String| f.roles.role(id).map(|r| r.name.clone());
+        assert_eq!(name(&rtarget).as_deref(), Some("Target by Lo"), "a lower key is beneath");
+        assert_eq!(name(&rhi).as_deref(), Some("Hi"), "a higher key isn't");
+        assert_eq!(name(&rpeer).as_deref(), Some("Peer"), "equal keys are peers");
+        let (p_hi, p_lo, p_peer) = (f.roles.role(&rhi).unwrap().position, f.roles.role(&rlo).unwrap().position, f.roles.role(&rpeer).unwrap().position);
+        assert!(p_hi < p_lo && p_lo == p_peer, "positions follow the keys");
+    }
+
+    #[tokio::test]
+    async fn a_migrated_role_continues_its_legacy_chain() {
+        // The owner carries a vsk-1 Role across as vsk 13 on top of its last legacy edition: a
+        // tracker holding that edition advances, and the role's grants keep resolving.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Migrate", vec!["wss://r".into()], None).await.unwrap();
+        let (admin, m) = (Keys::generate(), Keys::generate().public_key());
+        let (radm, rr) = ("c1".repeat(32), "c5".repeat(32));
+        publish_role(&relay, &community, &owner, &role_at(&radm, "Admin", 1, Permissions::MANAGE_ROLES | Permissions::KICK), 1).await;
+        publish_role(&relay, &community, &owner, &role_at(&rr, "R", 5, Permissions::KICK), 1).await;
+        publish_role(&relay, &community, &owner, &role_at(&rr, "R renamed", 5, Permissions::KICK), 2).await;
+        publish_grant(&relay, &community, &owner, &admin.public_key(), vec![radm.clone()], 1).await;
+        publish_grant(&relay, &community, &owner, &m, vec![rr.clone()], 1).await;
+        follow_control(&relay, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &eid_of(&rr)).0, 2);
+
+        publish_role_v2(&relay, &community, &owner, &role_v2(&radm, "Admin", "B", Permissions::MANAGE_ROLES | Permissions::KICK), 2).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rr, "R renamed", "V", Permissions::KICK), 3).await;
+        publish_everyone(&relay, &community, &owner, crate::community::v2::roles::EVERYONE_DEFAULT, 1).await;
+        // The migrated admin edits on top.
+        publish_role_v2(&relay, &community, &admin, &role_v2(&rr, "R by admin", "V", Permissions::KICK), 4).await;
+        let editions = fetch_control(&relay, &community).await;
+        for floors in [load_floors(&community), Floors::default()] {
+            let f = fold_authority(&community, &editions, &floors);
+            assert!(f.converged);
+            assert_eq!(f.roles.role(&rr).map(|r| r.name.as_str()), Some("R by admin"));
+            assert_eq!(f.roles.roles_of(&m.to_hex()).count(), 1, "the grant keeps resolving");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_role_is_gone_whatever_comes_after() {
+        // Deletion is terminal over the authorized chain; it takes authority over the rank the
+        // Role stood at, so someone beneath it can't delete it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Delete", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        let (adm, low) = (Keys::generate(), Keys::generate());
+        let mr = Permissions::MANAGE_ROLES;
+        let (radm, rlow, gone, kept) = ("d1".repeat(32), "d9".repeat(32), "d5".repeat(32), "d6".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&radm, "Adm", "B", mr), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rlow, "Low", "y", mr), 1).await;
+        publish_grant(&relay, &community, &owner, &adm.public_key(), vec![radm.clone()], 1).await;
+        publish_grant(&relay, &community, &owner, &low.public_key(), vec![rlow.clone()], 1).await;
+        let m = Keys::generate().public_key();
+        for id in [&gone, &kept] {
+            publish_role_v2(&relay, &community, &owner, &role_v2(id, "R", "V", 0), 1).await;
+        }
+        publish_grant(&relay, &community, &owner, &m, vec![gone.clone(), kept.clone()], 1).await;
+        let del = |id: &str| crate::community::v2::roles::role_v2_deleted_json(id);
+        publish_v2(&relay, &community, &adm, &eid_of(&gone), &del(&gone), 2).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&gone, "R again", "V", 0), 3).await;
+        publish_v2(&relay, &community, &low, &eid_of(&kept), &del(&kept), 2).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(f.roles.role(&gone).is_none(), "deleted, and the later edition doesn't revive it");
+        assert!(f.heads.iter().any(|h| h.entity_hex == gone && h.version == 2), "the deletion is the head");
+        assert!(f.roles.role(&kept).is_some(), "a Role above its deleter stands");
+        assert_eq!(f.roles.roles_of(&m.to_hex()).count(), 1, "the grant naming the deleted Role confers the rest");
+    }
+
+    #[tokio::test]
+    async fn everyone_carries_only_bits_its_editor_holds_and_no_grant_names_it() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Everyone", vec!["wss://r".into()], None).await.unwrap();
+        let base = crate::community::v2::roles::EVERYONE_DEFAULT;
+        publish_everyone(&relay, &community, &owner, base, 1).await;
+        let (full, partial) = (Keys::generate(), Keys::generate());
+        let (rfull, rpart) = ("e1".repeat(32), "e2".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rfull, "Full", "B", Permissions::MANAGE_ROLES | base | Permissions::PIN_MESSAGES), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rpart, "Partial", "C", Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL), 1).await;
+        publish_grant(&relay, &community, &owner, &full.public_key(), vec![rfull.clone()], 1).await;
+        publish_grant(&relay, &community, &owner, &partial.public_key(), vec![rpart.clone()], 1).await;
+        // Partial can't carry bits it lacks; Full can add a bit it holds.
+        publish_everyone(&relay, &community, &partial, base & !Permissions::VIDEO, 2).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert_eq!(f.roles.everyone.map(|p| p.0), Some(base), "the partial manager's edit carries bits it lacks");
+        publish_everyone(&relay, &community, &full, base | Permissions::PIN_MESSAGES, 2).await;
+        let g = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert_eq!(g.roles.everyone.map(|p| p.0), Some(base | Permissions::PIN_MESSAGES));
+        // A grant naming @everyone's coordinate confers nothing.
+        let everyone_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::everyone_locator(community.id()));
+        let m = Keys::generate().public_key();
+        publish_grant(&relay, &community, &owner, &m, vec![everyone_hex], 1).await;
+        let h = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert_eq!(h.roles.roles_of(&m.to_hex()).count(), 0);
+        assert!(!h.roles.roles.iter().any(|r| r.name == "@everyone"), "@everyone is no Role in the list");
+    }
+
+    #[tokio::test]
+    async fn the_owner_carries_a_legacy_roster_across_to_roles_v2() {
+        // Order, names, colours, bits and peers survive; Grants keep resolving; nothing reads
+        // vsk 13 until @everyone lands last; and a channel access role blocks the move.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Carry", bed.relays.clone(), None).await.unwrap();
+        let mr = Permissions::MANAGE_ROLES;
+        let (radm, rmod, rpeer, rlow) = ("a1".repeat(32), "a3".repeat(32), "a4".repeat(32), "a9".repeat(32));
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&radm, "Admin", 1, mr | Permissions::KICK), 1).await;
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&rmod, "Mod", 3, Permissions::KICK), 1).await;
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&rpeer, "Peer", 3, Permissions::KICK), 1).await;
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&rlow, "Low", 9, 0), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rmod.clone(), rlow.clone()], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let before = fetch_authority(&bed.relay, &community).await;
+        assert!(!before.activated);
+
+        let carried = activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        assert_eq!(carried, 4);
+        let after = fetch_authority(&bed.relay, &community).await;
+        assert!(after.activated);
+        assert_eq!(after.roles.everyone.map(|p| p.0), Some(crate::community::v2::roles::EVERYONE_DEFAULT));
+        let pos = |id: &str| after.roles.role(id).map(|r| r.position).unwrap();
+        assert!(pos(&radm) < pos(&rmod) && pos(&rmod) == pos(&rpeer) && pos(&rpeer) < pos(&rlow), "order and peers kept");
+        for id in [&radm, &rmod, &rpeer, &rlow] {
+            let (b, a) = (before.roles.role(id).unwrap(), after.roles.role(id).unwrap());
+            assert_eq!((&b.name, b.permissions, b.color), (&a.name, a.permissions, a.color));
+            assert!(a.rank.is_some());
+        }
+        assert_eq!(after.roles.roles_of(&member.keys.public_key().to_hex()).count(), 2, "grants keep resolving");
+        assert!(activate_roles_v2(&bed.relay, &community, 0).await.is_err(), "once is enough");
+
+        let other = create_community(&bed.relay, "Scoped", bed.relays.clone(), None).await.unwrap();
+        let scoped = Role { role_id: "b1".repeat(32), name: "Access".into(), position: 5, permissions: Permissions(0), scope: RoleScope::Channel(crate::simd::hex::bytes_to_hex_32(&other.channels[0].id.0)), color: 0, rank: None, display: false, mentionable: false, extra: Default::default() };
+        publish_role(&bed.relay, &other, &owner.keys, &scoped, 1).await;
+        let err = activate_roles_v2(&bed.relay, &other, 0).await.unwrap_err();
+        assert!(err.contains("channel"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_roles_v2_editor_refuses_exactly_what_readers_would_drop() {
+        let (bed, owner, mgr) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "V2Editor", bed.relays.clone(), None).await.unwrap();
+        publish_everyone(&bed.relay, &community, &owner.keys, Permissions::VIEW_CHANNEL, 1).await;
+        let mr = Permissions::MANAGE_ROLES;
+        let (rtop, rmgr) = ("c1".repeat(32), "c2".repeat(32));
+        publish_role_v2(&bed.relay, &community, &owner.keys, &role_v2(&rtop, "Top", "B", Permissions::BAN), 1).await;
+        publish_role_v2(&bed.relay, &community, &owner.keys, &role_v2(&rmgr, "Mgr", "F", mr | Permissions::KICK | Permissions::VIEW_CHANNEL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &mgr.keys.public_key(), vec![rmgr.clone()], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        bed.swap_to(&mgr);
+        crate::db::community::save_community_v2(&community).unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let a = create_role_v2(&bed.relay, &community, "A", 0, Permissions::KICK).await.unwrap();
+        let b = create_role_v2(&bed.relay, &community, "B", 0, 0).await.unwrap();
+        assert!(create_role_v2(&bed.relay, &community, "Banner", 0, Permissions::BAN).await.unwrap_err().contains("don't hold"));
+        let v = fetch_authority(&bed.relay, &community).await;
+        let pos = |v: &AuthorityView, id: &str| v.roles.role(id).map(|r| r.position).unwrap();
+        assert!(pos(&v, &rmgr) < pos(&v, &a) && pos(&v, &a) < pos(&v, &b), "new roles go to the bottom, in order");
+
+        // Moving B above A is one edition, on B alone.
+        move_role_v2(&bed.relay, &community, &b, 2).await.unwrap();
+        let w = fetch_authority(&bed.relay, &community).await;
+        assert!(pos(&w, &b) < pos(&w, &a) && pos(&w, &rmgr) < pos(&w, &b));
+        assert_eq!(w.roles.role(&a).unwrap().rank, v.roles.role(&a).unwrap().rank, "A wasn't touched");
+        // Not above itself, and not the role above it.
+        assert!(move_role_v2(&bed.relay, &community, &b, 0).await.is_err());
+        assert!(move_role_v2(&bed.relay, &community, &rtop, 3).await.is_err());
+        assert!(edit_role_v2(&bed.relay, &community, &rtop, "Top!", 0, Permissions::BAN, false, false).await.is_err());
+        // @everyone carries only what the manager holds.
+        assert!(set_everyone(&bed.relay, &community, Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).await.unwrap_err().contains("don't hold"));
+        set_everyone(&bed.relay, &community, Permissions::VIEW_CHANNEL | Permissions::KICK).await.unwrap();
+        // Delete beneath, never above.
+        delete_role_v2(&bed.relay, &community, &a).await.unwrap();
+        assert!(delete_role_v2(&bed.relay, &community, &rtop).await.is_err());
+        let x = fetch_authority(&bed.relay, &community).await;
+        assert!(x.roles.role(&a).is_none() && x.roles.role(&rtop).is_some());
+        assert_eq!(x.roles.everyone.map(|p| p.0), Some(Permissions::VIEW_CHANNEL | Permissions::KICK));
+        edit_role_v2(&bed.relay, &community, &b, "B shown", 7, 0, true, true).await.unwrap();
+        let y = fetch_authority(&bed.relay, &community).await;
+        let rb = y.roles.role(&b).unwrap();
+        assert!(rb.display && rb.mentionable && rb.name == "B shown" && rb.color == 7);
+    }
+
+    #[tokio::test]
+    async fn a_marked_edition_is_its_signers_and_its_communitys_alone() {
+        // SC-6: a marked edition's hash covers its signer, so a re-signed copy is a different
+        // edition; an unmarked one keeps the content hash. A marked edition re-wrapped into
+        // another Community is refused there.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let a = create_community(&relay, "A", vec!["wss://r".into()], None).await.unwrap();
+        let b = create_community(&relay, "B", vec!["wss://r".into()], None).await.unwrap();
+        let rid = eid_of(&"a1".repeat(32));
+        let content = crate::community::v2::roles::role_v2_content_json(&role_v2(&"a1".repeat(32), "R", "V", 0)).unwrap();
+        let bind_a = Some(crate::community::v2::derive::edition_binding(a.id()));
+        let copier = Keys::generate();
+        let seal = |c: &CommunityV2, signer: &Keys, binding: Option<[u8; 32]>| {
+            let group = control::ControlPlane::of(c).write_group().unwrap();
+            let rumor = control::build_edition_rumor_bound(signer.public_key(), vsk::ROLE_V2, &rid, 1, None, &content, 1_000, None, binding);
+            control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap().0
+        };
+        let (genuine, _) = control::ControlPlane::of(&a).open(&seal(&a, &owner, bind_a)).unwrap();
+        let (copy, _) = control::ControlPlane::of(&a).open(&seal(&a, &copier, bind_a)).unwrap();
+        assert_ne!(genuine.self_hash, copy.self_hash, "a copy under another key is another edition");
+        let (plain, _) = control::ControlPlane::of(&a).open(&seal(&a, &owner, None)).unwrap();
+        let (plain_copy, _) = control::ControlPlane::of(&a).open(&seal(&a, &copier, None)).unwrap();
+        assert_eq!(plain.self_hash, plain_copy.self_hash, "unmarked editions keep the content hash");
+        // Bound to A, wrapped at B: refused at B.
+        let mut wrong = a.clone();
+        wrong.community_root = b.community_root;
+        wrong.control_pk = b.control_pk;
+        wrong.control_root = b.control_root;
+        let foreign = {
+            let group = control::ControlPlane::of(&b).write_group().unwrap();
+            let rumor = control::build_edition_rumor_bound(owner.public_key(), vsk::ROLE_V2, &rid, 1, None, &content, 1_000, None, bind_a);
+            control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(1_000)).unwrap().0
+        };
+        assert!(control::ControlPlane::of(&b).open(&foreign).is_err(), "A's edition is no edition of B");
+        let _ = wrong;
+    }
+
+    #[tokio::test]
+    async fn on_roles_v2_every_edition_is_marked_and_an_unmarked_role_is_none() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Marked", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = held.channels[0].id;
+        edit_channel_metadata(&bed.relay, &held, &ch, &control::ChannelMetadata { name: "renamed".into(), private: false, ..Default::default() }).await.unwrap();
+        let eds = fetch_control(&bed.relay, &held).await;
+        let rename = eds.iter().filter(|e| e.entity_id == ch.0).max_by_key(|e| e.version).unwrap();
+        assert!(rename.binding.is_some(), "a channel edit after activation is marked");
+        assert!(eds.iter().filter(|e| e.vsk == vsk::ROLE_V2).all(|e| e.binding.is_some()));
+        // An unmarked vsk-13 Role from a writer that skipped the mark folds nothing.
+        let rid = "b1".repeat(32);
+        let content = crate::community::v2::roles::role_v2_content_json(&role_v2(&rid, "Unmarked", "x", 0)).unwrap();
+        let group = control::ControlPlane::of(&held).write_group().unwrap();
+        let rumor = control::build_edition_rumor(owner.keys.public_key(), vsk::ROLE_V2, &eid_of(&rid), 1, None, &content, 1_000, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner.keys, Timestamp::from_secs(1_000)).unwrap();
+        bed.relay.publish(&wrap, &held.relays).await.unwrap();
+        let f = fold_authority(&held, &fetch_control(&bed.relay, &held).await, &load_floors(&held));
+        assert!(f.roles.role(&rid).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_backdated_deletion_never_reaches_above_its_signer() {
+        // A deletion acts on the Role at every rank it holds from the deletion on: published as
+        // an early version beneath a Role's later life, it doesn't reach above its signer.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Backdate", vec!["wss://r".into()], None).await.unwrap();
+        let m = Keys::generate();
+        let mr = Permissions::MANAGE_ROLES;
+        let (rtop, rm, rlegacy) = ("a1".repeat(32), "a5".repeat(32), "a7".repeat(32));
+        // A legacy Role carried across at the top, and a v2 Role moved to the top by the owner.
+        publish_role(&relay, &community, &owner, &role_at(&rlegacy, "Legacy", 2, 0), 1).await;
+        publish_role(&relay, &community, &owner, &role_at(&rlegacy, "Legacy", 2, 0), 2).await;
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rlegacy, "Legacy", "1", 0), 3).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rtop, "Top", "z", 0), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rtop, "Top", "2", 0), 2).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rm, "M", "V", mr), 1).await;
+        publish_grant(&relay, &community, &owner, &m.public_key(), vec![rm.clone()], 1).await;
+        let del = |id: &str| crate::community::v2::roles::role_v2_deleted_json(id);
+        // Each deletion is a genesis, beneath the Role's whole later life.
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        for id in [&rtop, &rlegacy] {
+            let rumor = control::build_edition_rumor_bound(m.public_key(), vsk::ROLE_V2, &eid_of(id), 1, None, &del(id), 9_000, cite_on_relay(&relay, &community, &m).await.as_ref(), Some(crate::community::v2::derive::edition_binding(community.id())));
+            let (wrap, _) = control::seal_control_edition(&rumor, &group, &m, Timestamp::from_secs(9_000)).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(f.roles.role(&rtop).is_some(), "M can't delete the Role the owner moved above it");
+        assert!(f.roles.role(&rlegacy).is_some(), "nor the one carried across above it");
+    }
+
+    #[tokio::test]
+    async fn only_everyone_activates_and_nothing_squats_its_coordinate() {
+        // A manager's legacy Role or channel at @everyone's coordinate floors nothing there, so
+        // no tracker reads the Community as Roles v2 before the owner moves it.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Squat2", vec!["wss://r".into()], None).await.unwrap();
+        let staff = Keys::generate();
+        let rs = "b1".repeat(32);
+        publish_role(&relay, &community, &owner, &role_at(&rs, "Staff", 1, Permissions::MANAGE_ROLES | Permissions::MANAGE_CHANNELS), 1).await;
+        publish_grant(&relay, &community, &owner, &staff.public_key(), vec![rs.clone()], 1).await;
+        let everyone_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::everyone_locator(community.id()));
+        // Each squat on its own: either one alone would floor the coordinate.
+        let other = create_community(&relay, "Squat3", vec!["wss://r".into()], None).await.unwrap();
+        publish_role(&relay, &other, &owner, &role_at(&rs, "Staff", 1, Permissions::MANAGE_ROLES | Permissions::MANAGE_CHANNELS), 1).await;
+        publish_grant(&relay, &other, &owner, &staff.public_key(), vec![rs.clone()], 1).await;
+        let other_everyone = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::everyone_locator(other.id()));
+        publish_role(&relay, &community, &staff, &role_at(&everyone_hex, "Squat", 5, 0), 1).await;
+        publish_fork(&[&relay], &other, &staff, vsk::CHANNEL_METADATA, &eid_of(&other_everyone), 1, None, &channel_meta_json("squat"), None).await;
+        for (c, e) in [(&community, &everyone_hex), (&other, &other_everyone)] {
+            follow_control(&relay, c).await.unwrap();
+            assert!(!load_floors(c).contains_key(e), "nothing floors @everyone's coordinate");
+            let held = crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+            let a = fold_authority(&held, &fetch_control(&relay, &held).await, &load_floors(&held));
+            assert!(!a.activated && a.roles.role(&rs).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn roles_v2_survives_a_refounding_after_an_admin_edits_everyone() {
+        // Compaction carries @everyone's head, here an admin's: a reader at the new epoch
+        // still folds Roles v2, since activation reads the head the vsk-13 fold admits.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Survive", bed.relays.clone(), None).await.unwrap();
+        let admin = Keys::generate();
+        let ra = "c1".repeat(32);
+        publish_everyone(&bed.relay, &community, &owner.keys, Permissions::VIEW_CHANNEL, 1).await;
+        publish_role_v2(&bed.relay, &community, &owner.keys, &role_v2(&ra, "Admin", "B", Permissions::MANAGE_ROLES | Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![ra.clone()], 1).await;
+        publish_everyone(&bed.relay, &community, &admin, Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES, 2).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        let fresh = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &Floors::default());
+        assert!(fresh.activated, "still Roles v2 at the new epoch");
+        assert!(fresh.roles.role(&ra).is_some() && fresh.roles.is_admin(&admin.public_key().to_hex()));
+    }
+
+    #[tokio::test]
+    async fn a_kept_legacy_head_stands_for_nothing_after_activation() {
+        // A device holding a legacy Role whose migration it can't read keeps that edition as the
+        // head, but a vsk-1 Role confers nothing once Roles v2 is active.
+        let (_tmp, _guard, owner) = init_test_db();
+        let full = MemoryRelay::new();
+        let community = create_community(&full, "KeptLegacy", vec!["wss://r".into()], None).await.unwrap();
+        let m = Keys::generate().public_key();
+        let rr = "d3".repeat(32);
+        publish_role(&full, &community, &owner, &role_at(&rr, "Legacy", 3, Permissions::BAN), 1).await;
+        publish_role(&full, &community, &owner, &role_at(&rr, "Legacy", 3, Permissions::BAN), 2).await;
+        publish_grant(&full, &community, &owner, &m, vec![rr.clone()], 1).await;
+        follow_control(&full, &community).await.unwrap();
+        publish_role_v2(&full, &community, &owner, &role_v2(&rr, "Legacy", "V", Permissions::BAN), 3).await;
+        let migrated = head_hash_on_relay(&full, &community, &eid_of(&rr)).await.unwrap();
+        publish_everyone(&full, &community, &owner, 0, 1).await;
+        let thin = MemoryRelay::new();
+        mirror_control_except(&full, &thin, &community, &|e| e.self_hash == migrated).await;
+        let a = fold_authority(&community, &fetch_control(&thin, &community).await, &load_floors(&community));
+        assert!(a.activated && a.carried.contains(&rr), "kept, with nothing proven to step down to");
+        assert!(a.roles.role(&rr).is_none() && !a.roles.has_permission(&m.to_hex(), Permissions::BAN), "the legacy edition confers nothing");
+    }
+
+    #[tokio::test]
+    async fn everyones_bits_author_no_banlist() {
+        // Removals from a banlist aren't checked by rank, so who may author one is read from
+        // Roles alone: @everyone holding BAN doesn't let any member lift every ban.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "EveryoneBan", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, Permissions::BAN, 1).await;
+        let x = Keys::generate().public_key().to_hex();
+        publish_banlist(&relay, &community, &owner, &[x.clone()], 1).await;
+        let member = Keys::generate();
+        let rc = "e7".repeat(32);
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rc, "Cosmetic", "V", 0), 1).await;
+        publish_grant(&relay, &community, &owner, &member.public_key(), vec![rc.clone()], 1).await;
+        publish_banlist(&relay, &community, &member, &[], 2).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert!(f.banned.contains(&x), "a member without BAN in a Role unbans nobody");
+    }
+
+    #[tokio::test]
+    async fn an_uncited_grant_naming_only_everyone_is_a_strip() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "UncitedEveryone", vec!["wss://r".into()], None).await.unwrap();
+        publish_everyone(&relay, &community, &owner, 0, 1).await;
+        let mgr = Keys::generate();
+        let m = Keys::generate().public_key();
+        let (rmgr, rlow) = ("e5".repeat(32), "e9".repeat(32));
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rmgr, "Mgr", "F", Permissions::MANAGE_ROLES), 1).await;
+        publish_role_v2(&relay, &community, &owner, &role_v2(&rlow, "Low", "V", 0), 1).await;
+        publish_grant(&relay, &community, &owner, &mgr.public_key(), vec![rmgr.clone()], 1).await;
+        publish_grant(&relay, &community, &owner, &m, vec![rlow.clone()], 1).await;
+        let everyone_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::everyone_locator(community.id()));
+        publish_grant_citing(&relay, &community, &mgr, &m, vec![everyone_hex], 2, None).await;
+        let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
+        assert_eq!(f.roles.roles_of(&m.to_hex()).count(), 1, "the member keeps Low");
+    }
+
     #[tokio::test]
     async fn a_grant_draws_only_on_authority_above_what_it_touches() {
         let (_tmp, _guard, owner) = init_test_db();
@@ -17451,14 +18299,14 @@ mod tests {
         let senior = "a1".repeat(32);
         let mid = "a5".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys,
-            &Role { role_id: senior.clone(), name: "Senior".into(), position: 1, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 1, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 1).await;
         publish_role(&bed.relay, &community, &owner.keys,
-            &Role { role_id: mid.clone(), name: "Mid".into(), position: 5, permissions: Permissions(Permissions::MANAGE_ROLES | Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
+            &Role { role_id: mid.clone(), name: "Mid".into(), position: 5, permissions: Permissions(Permissions::MANAGE_ROLES | Permissions::BAN), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &attacker.keys.public_key(), vec![mid.clone()], 1).await;
 
         // The attacker republishes the SENIOR role, dropping it beneath themselves.
         publish_role(&bed.relay, &community, &attacker.keys,
-            &Role { role_id: senior.clone(), name: "Senior".into(), position: 9, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 2).await;
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 9, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 2).await;
 
         let authority = fetch_authority(&bed.relay, &community).await;
         let folded_senior = authority.roles.role(&senior).expect("the senior role survives the fold");
@@ -17831,7 +18679,7 @@ mod tests {
         assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member.keys.public_key().to_hex()), "member is admin pre-attack");
 
         // The attacker (a non-owner) forges v2 of the admin role, chaining onto v1.
-        publish_role(&bed.relay, &community, &attacker, &Role { role_id: rid.clone(), name: "pwn".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, extra: Default::default() }, 2).await;
+        publish_role(&bed.relay, &community, &attacker, &Role { role_id: rid.clone(), name: "pwn".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, rank: None, display: false, mentionable: false, extra: Default::default() }, 2).await;
 
         // Owner refounds (keeping everyone).
         let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
@@ -19187,7 +20035,7 @@ mod tests {
             position,
             permissions,
             scope: crate::community::roles::RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         set_role(relay, community, &role).await.unwrap();
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -19601,11 +20449,12 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let folded = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant { member: me.clone(), role_ids: vec![access.role_id.clone()] }],
             roles: vec![access],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &folded, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -19654,7 +20503,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -19662,6 +20511,7 @@ mod tests {
                 role_ids: vec![access.role_id.clone()],
             }],
             roles: vec![access],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -19732,7 +20582,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -19740,6 +20590,7 @@ mod tests {
                 role_ids: vec![access.role_id.clone()],
             }],
             roles: vec![access],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &vended, &owner_hex).unwrap();
@@ -19792,7 +20643,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -19800,6 +20651,7 @@ mod tests {
                 role_ids: vec![access.role_id.clone()],
             }],
             roles: vec![access],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -19940,7 +20792,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -19948,6 +20800,7 @@ mod tests {
                 role_ids: vec![access.role_id.clone()],
             }],
             roles: vec![access],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -20338,6 +21191,7 @@ mod tests {
         let roster = CommunityRoles {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
+            everyone: None,
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -20394,6 +21248,7 @@ mod tests {
                 MemberGrant { member: peer.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
                 MemberGrant { member: member.keys.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
             ],
+            everyone: None,
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
 
@@ -20684,6 +21539,7 @@ mod tests {
         let roster = CommunityRoles {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
+            everyone: None,
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -20735,6 +21591,7 @@ mod tests {
         let roster = CommunityRoles {
             roles: vec![role.clone()],
             grants: [&a, &b].iter().map(|k| MemberGrant { member: k.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }).collect(),
+            everyone: None,
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -22415,7 +23272,7 @@ mod tests {
             position: 1,
             permissions: Permissions(Permissions::ADMIN_FOUNDING_MASK),
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         publish_role(&relay, &community, &owner, &legacy, 1).await;
         follow_control(&relay, &community).await.unwrap().updated;

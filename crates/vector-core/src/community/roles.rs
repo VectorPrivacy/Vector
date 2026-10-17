@@ -36,6 +36,25 @@ impl Permissions {
     /// Curate a Channel's Pin List (CORD-04 §7) — editorial power: a pin makes
     /// its message permanently attributable to every future member.
     pub const PIN_MESSAGES: u64 = 1 << 11;
+    // Channel permissions (CORD-04 §3): what a member may do in a Channel, adjusted per
+    // Channel by its overwrites.
+    pub const VIEW_CHANNEL: u64 = 1 << 13;
+    pub const SEND_MESSAGES: u64 = 1 << 14;
+    pub const SEND_IN_THREADS: u64 = 1 << 15;
+    pub const ATTACH_FILES: u64 = 1 << 16;
+    pub const ADD_REACTIONS: u64 = 1 << 17;
+    pub const READ_MESSAGE_HISTORY: u64 = 1 << 18;
+    pub const CONNECT: u64 = 1 << 19;
+    pub const SPEAK: u64 = 1 << 20;
+    pub const VIDEO: u64 = 1 << 21;
+    pub const PRIORITY_SPEAKER: u64 = 1 << 22;
+    pub const MUTE_MEMBERS: u64 = 1 << 23;
+    pub const DEAFEN_MEMBERS: u64 = 1 << 24;
+    pub const MOVE_MEMBERS: u64 = 1 << 25;
+    /// Timeouts (CORD-04 §6).
+    pub const MODERATE_MEMBERS: u64 = 1 << 26;
+    // 1 << 27 ..= 1 << 31 reserved: BYPASS_SLOWMODE, MANAGE_NICKNAMES, CHANGE_NICKNAME,
+    // CREATE_PRIVATE_THREADS, MANAGE_THREADS.
     // Reserved / retired (claim the bit so it's never reassigned):
     // `1 << 7` was MANAGE_INVITES — RETIRED (per-creator ownership: no one can manage another's
     // links, so there is nothing to grant; `CREATE_INVITE` mints your own, `BAN` owns the revoking rekey).
@@ -135,6 +154,16 @@ pub struct Role {
     /// UI badge color (e.g. the Admin crown); 0 = theme default. Cosmetic.
     #[serde(default)]
     pub color: u32,
+    /// The Roles v2 rank key (CORD-04 §3), from which `position` is assigned at fold time.
+    /// `None` for a legacy Role, whose `position` is its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    /// Holders list under this Role's own heading.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub display: bool,
+    /// Any member may @mention it (CORD-03 §3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mentionable: bool,
     /// Fields another client wrote that this one doesn't model. An edition replaces the
     /// whole entity, so they ride every republish untouched (CORD-02 §6): dropping them
     /// would erase another client's data for every member.
@@ -152,7 +181,7 @@ impl Role {
             position: 1,
             permissions: Permissions::admin(),
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         }
     }
 }
@@ -175,6 +204,9 @@ pub struct CommunityRoles {
     pub roles: Vec<Role>,
     #[serde(default)]
     pub grants: Vec<MemberGrant>,
+    /// What every member holds before any Role (CORD-04 §2), once Roles v2 is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub everyone: Option<Permissions>,
 }
 
 impl CommunityRoles {
@@ -192,10 +224,10 @@ impl CommunityRoles {
             .filter_map(move |rid| self.role(rid))
     }
 
-    /// Effective permissions for a member = union of their granted roles' bits.
+    /// Effective permissions for a member: `@everyone` and every granted Role's bits.
     pub fn effective_permissions(&self, member_hex: &str) -> Permissions {
         self.roles_of(member_hex)
-            .fold(Permissions::empty(), |acc, r| acc.union(r.permissions))
+            .fold(self.everyone.unwrap_or_default(), |acc, r| acc.union(r.permissions))
     }
 
     /// The permissions a member holds through Roles positioned strictly above `bound`: the only
@@ -418,6 +450,7 @@ mod tests {
                 role_ids: vec![role.role_id.clone()],
             }],
             roles: vec![role],
+            everyone: None,
         }
     }
 
@@ -452,12 +485,13 @@ mod tests {
             position: 5,
             permissions: social,
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let alice = "aa".repeat(32);
         let r = CommunityRoles {
             grants: vec![MemberGrant { member: alice.clone(), role_ids: vec![role.role_id.clone()] }],
             roles: vec![role],
+            everyone: None,
         };
         assert!(!r.is_admin(&alice), "a social-only role holder is not an admin");
         assert!(r.is_privileged(&alice), "though they do hold a role");
@@ -477,7 +511,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::MANAGE_ROLES | Permissions::KICK),
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let admin_pos = admin_role.position; // 1
         let mod_pos = mod_role.position; // 2
@@ -487,6 +521,7 @@ mod tests {
                 MemberGrant { member: moderator.clone(), role_ids: vec![mod_role.role_id.clone()] },
             ],
             roles: vec![admin_role, mod_role],
+            everyone: None,
         };
         let owner_ref = Some(owner.as_str());
 
@@ -524,7 +559,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::KICK), // KICK only — NO ban, NO manage-messages
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let r = CommunityRoles {
             grants: vec![
@@ -532,6 +567,7 @@ mod tests {
                 MemberGrant { member: kicker.clone(), role_ids: vec![kick_role.role_id.clone()] },
             ],
             roles: vec![admin_role, kick_role],
+            everyone: None,
         };
         let o = Some(owner.as_str());
         use Permissions as P;
@@ -579,7 +615,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::MANAGE_MESSAGES | Permissions::KICK),
             scope: RoleScope::Server,
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let admin = Role::admin("a".repeat(64));
         let r = CommunityRoles {
@@ -588,6 +624,7 @@ mod tests {
                 role_ids: vec![admin.role_id.clone(), mod_role.role_id.clone()],
             }],
             roles: vec![admin, mod_role],
+            everyone: None,
         };
         // Union of both roles' bits, and the *highest* (lowest index) position wins.
         assert!(r.has_permission(&alice, Permissions::BAN)); // from Admin
@@ -617,7 +654,7 @@ mod tests {
         // A member with no role (Bob) is not — and neither is Alice once demoted (no grant).
         let bob = "bb".repeat(32);
         assert!(!r.is_authorized(&bob, Some(&owner), Permissions::BAN));
-        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![] };
+        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None };
         assert!(!demoted.is_authorized(&alice, Some(&owner), Permissions::BAN));
         // ...but the owner stays authorized even with an empty grant set.
         assert!(demoted.is_authorized(&owner, Some(&owner), Permissions::BAN));
@@ -642,7 +679,7 @@ mod tests {
             position: 5,
             permissions: Permissions(Permissions::MANAGE_MESSAGES),
             scope: RoleScope::Channel(chan.to_string()),
-            color: 0, extra: Default::default(),
+            color: 0, rank: None, display: false, mentionable: false, extra: Default::default(),
         };
         let server = Role::admin("22".repeat(32));
         CommunityRoles {
@@ -651,6 +688,7 @@ mod tests {
                 MemberGrant { member: admin.to_string(), role_ids: vec![server.role_id.clone()] },
             ],
             roles: vec![scoped, server],
+            everyone: None,
         }
     }
 
