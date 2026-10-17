@@ -510,6 +510,11 @@ fn writer_epoch_of(rumor: &UnsignedEvent) -> Result<Option<Epoch>, ChatError> {
     Ok(found)
 }
 
+/// Whether a rumor commits a writer epoch.
+pub fn carries_writer_epoch(rumor: &UnsignedEvent) -> bool {
+    writer_epoch_of(rumor).is_ok_and(|e| e.is_some())
+}
+
 /// `rumor` committing writer epoch `wepoch` (CORD-03 §3), its id recomputed.
 pub fn with_writer_epoch(rumor: UnsignedEvent, wepoch: Epoch) -> UnsignedEvent {
     let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();

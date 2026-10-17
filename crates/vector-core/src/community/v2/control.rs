@@ -479,6 +479,63 @@ pub struct ChannelMetadata {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A Private Channel's sealed metadata edition (CORD-03 §2): what every member needs to resolve
+/// access stays plain; the rest is sealed under the Channel's key at `epoch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedChannelMeta {
+    pub epoch: u64,
+    pub sealed: String,
+    pub deleted: bool,
+}
+
+/// The sealed form of a channel edition, `None` for the plain form or a malformed one.
+pub fn parse_sealed_channel_meta(content: &str) -> Option<SealedChannelMeta> {
+    let serde_json::Value::Object(o) = serde_json::from_str(content).ok()? else { return None };
+    let sealed = o.get("sealed")?.as_str()?.to_string();
+    let epoch = o.get("epoch")?.as_str()?;
+    if !o.get("private")?.as_bool()? || (epoch != "0" && epoch.starts_with('0')) {
+        return None;
+    }
+    Some(SealedChannelMeta { epoch: epoch.parse().ok()?, sealed, deleted: o.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) })
+}
+
+/// Seal a Private Channel's metadata under its conversation key at `epoch`.
+pub fn seal_channel_metadata(meta: &ChannelMetadata, conv_key: &ConversationKey, epoch: u64) -> Result<String, String> {
+    validate_channel_metadata(meta).map_err(|e| e.to_string())?;
+    let serde_json::Value::Object(mut inner) = serde_json::to_value(meta).map_err(|e| e.to_string())? else {
+        return Err("channel metadata isn't an object".to_string());
+    };
+    inner.remove("private");
+    inner.remove("deleted");
+    let raw = crate::community::cipher::encrypt_with_random_nonce(conv_key, serde_json::Value::Object(inner).to_string().as_bytes())?;
+    let mut out = serde_json::json!({ "private": true, "epoch": epoch.to_string(), "sealed": crate::simd::base64::STANDARD.encode_to_string(&raw) });
+    if meta.deleted == Some(true) {
+        out["deleted"] = true.into();
+    }
+    Ok(out.to_string())
+}
+
+/// Open sealed channel metadata with the conversation key of its epoch.
+pub fn open_sealed_channel_meta(s: &SealedChannelMeta, conv_key: &[u8; 32]) -> Option<ChannelMetadata> {
+    let conv = ConversationKey::from_slice(conv_key).ok()?;
+    let raw = crate::simd::base64::STANDARD.decode_to_vec(s.sealed.as_bytes()).ok()?;
+    let inner = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv, &raw).ok()?;
+    let serde_json::Value::Object(mut o) = serde_json::from_slice(&inner).ok()? else { return None };
+    o.insert("private".into(), true.into());
+    o.remove("deleted");
+    let mut meta: ChannelMetadata = serde_json::from_value(serde_json::Value::Object(o)).ok()?;
+    meta.deleted = s.deleted.then_some(true);
+    Some(meta)
+}
+
+/// A sealed edition's content republished verbatim beside `"deleted": true`: deleting a Private
+/// Channel takes only the bit, never the key.
+pub fn sealed_tombstone(content: &str) -> Option<String> {
+    let serde_json::Value::Object(mut o) = serde_json::from_str(content).ok()? else { return None };
+    o.insert("deleted".into(), true.into());
+    Some(serde_json::Value::Object(o).to_string())
+}
+
 /// Enforce the protocol byte caps before an edition is built (a strict reader
 /// may drop over-cap state; never publish what peers would refuse).
 pub fn validate_community_metadata(meta: &CommunityMetadata) -> Result<(), ControlError> {
@@ -651,6 +708,29 @@ pub async fn genesis_signed<S: crate::signer::VectorSigner + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sealed_channel_metadata_round_trips_and_hides_everything_but_access() {
+        let mut meta = ChannelMetadata { name: "war room".into(), private: true, voice: None, deleted: None, custom: Some(serde_json::Map::from_iter([("x".to_string(), 1.into())])), extra: Default::default() };
+        meta.extra.insert("topic".into(), "plans".into());
+        meta.extra.insert("category".into(), "11".repeat(32).into());
+        let key = [7u8; 32];
+        let conv = ConversationKey::from_slice(&key).unwrap();
+        let content = seal_channel_metadata(&meta, &conv, 4).unwrap();
+        for leak in ["war room", "plans", &"11".repeat(32)] {
+            assert!(!content.contains(leak), "{leak} must not show");
+        }
+        let s = parse_sealed_channel_meta(&content).unwrap();
+        assert_eq!((s.epoch, s.deleted), (4, false));
+        assert_eq!(open_sealed_channel_meta(&s, &key), Some(meta.clone()));
+        assert_eq!(open_sealed_channel_meta(&s, &[8u8; 32]), None, "another epoch's key opens nothing");
+        let gone = parse_sealed_channel_meta(&sealed_tombstone(&content).unwrap()).unwrap();
+        assert_eq!((gone.sealed.as_str(), gone.deleted), (s.sealed.as_str(), true), "the tombstone carries the seal verbatim");
+        assert_eq!(open_sealed_channel_meta(&gone, &key).unwrap().deleted, Some(true));
+        assert!(parse_sealed_channel_meta(r#"{"name":"general","private":false}"#).is_none());
+        assert!(parse_sealed_channel_meta(&content.replace("\"epoch\":\"4\"", "\"epoch\":\"04\"")).is_none(), "a non-canonical epoch");
+        assert!(parse_sealed_channel_meta(&content.replace("\"private\":true", "\"private\":false")).is_none());
+    }
+
     use nostr_sdk::prelude::FinalizeEvent;
     use super::super::super::edition::build_edition_inner;
     use super::*;

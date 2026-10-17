@@ -94,7 +94,8 @@ function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
  */
 function _dmsgPostedTimedOut(msg, currentChat) {
     if (msg.mine || !msg.npub) return '';
-    if (channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
+    // A writer address's post stands on the writer key that signed it (CORD-03 §1).
+    if (!msg.writer && channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
     const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
     if (!t) return '';
     const inside = (ms) => ms / 1000 >= t.from && ms / 1000 < t.until;

@@ -793,19 +793,32 @@ pub struct AccessDelivery {
     pub scope: RekeyScope,
     pub epoch: Epoch,
     pub blobs: Vec<RekeyBlob>,
+    /// The writer address a writer-scope delivery's key claims to derive to (CORD-03 §1).
+    pub writer: Option<[u8; 32]>,
 }
+
+/// A writer-scope delivery's claimed address.
+const TAG_WRITER: &str = "writer";
 
 /// The unsigned access-plane 3303 rumor.
 pub fn build_access_rumor(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
+    build_access_rumor_for(deliverer, scope, epoch, None, blobs, at_secs)
+}
+
+/// [`build_access_rumor`] naming, for a writer key, the address it derives to.
+pub fn build_access_rumor_for(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, writer: Option<[u8; 32]>, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
     if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let tags = vec![
+    let mut tags = vec![
         Tag::custom(TAG_SCOPE, [scope.to_hex()]),
         Tag::custom(TAG_NEW_EPOCH, [epoch.0.to_string()]),
         Tag::custom(TAG_DELIVERY, [DELIVERY_ACCESS]),
     ];
+    if let Some(pk) = writer {
+        tags.push(Tag::custom(TAG_WRITER, [crate::simd::hex::bytes_to_hex_32(&pk)]));
+    }
     Ok(stream::build_rumor_secs(super::kind::REKEY, deliverer, &content, tags, at_secs))
 }
 
@@ -828,7 +841,11 @@ pub fn parse_access_delivery(opened: &OpenedStream) -> Result<AccessDelivery, Re
     if blobs.len() > MAX_REKEY_BLOBS_RECEIVED {
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
-    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs })
+    let writer = match unique_tag(rumor, TAG_WRITER)? {
+        None => None,
+        Some(hex) => Some(crate::simd::hex::hex_to_bytes_32_checked(&hex).ok_or(RekeyError::BadTag(TAG_WRITER))?),
+    };
+    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs, writer })
 }
 
 /// A Channel's history scope (CORD-03 §5): what history blobs bind to, so one can never be

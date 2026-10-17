@@ -4200,10 +4200,6 @@ impl VectorCore {
         let owner = v2.owner().ok().map(|o| o.to_hex());
         let chan = channel_id.to_ascii_lowercase();
         let ch = Self::id32(channel_id, "channel_id").ok().and_then(|b| v2.channel(&crate::community::ChannelId(b)));
-        // A restricted Channel's writer key decided at posting time (CORD-03 §1).
-        if ch.is_some_and(|c| c.restricted()) {
-            return Ok(Vec::new());
-        }
         let private = ch.is_some_and(|c| c.private);
         Ok(npubs
             .iter()

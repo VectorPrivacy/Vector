@@ -364,6 +364,7 @@ fn process_text_message(
         addressed_bots,
         text_spans,
         role_mentions: crate::community::mentions::from_tags(rumor.tags.iter()),
+        writer: false,
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -615,6 +616,7 @@ fn process_file_attachment(
         addressed_bots: crate::bot_interface::addressed_bots(rumor.tags.iter()),
         text_spans: Vec::new(),
         role_mentions: Vec::new(),
+        writer: false,
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))

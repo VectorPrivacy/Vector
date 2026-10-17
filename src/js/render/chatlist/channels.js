@@ -23,7 +23,7 @@ function visibleChannels(channels) {
         // On the new roles a channel you can't view is hidden like a private one you lack.
         .filter(c => c.my_permissions == null || (BigInt(c.my_permissions) & (1n << 13n)) !== 0n)
         .map(c => ({
-            id: c.channel_id, name: c.name, private: !!c.private, readable: true,
+            id: c.channel_id, name: c.name || 'Private channel', private: !!c.private, readable: true,
             category: c.category_id || null, topic: c.topic || '', view: c.view || 'chat',
             perms: c.my_permissions ?? null,
             restricted: !!c.restricted, writer: c.can_post !== false,
@@ -47,7 +47,8 @@ function channelAwaitsWriterKey(chat) {
 function lockedChannels(channels) {
     return (channels || [])
         .filter(c => c.private && c.readable === false)
-        .map(c => ({ id: c.channel_id, name: c.name }));
+        // A private channel's name is sealed from members without its key.
+        .map(c => ({ id: c.channel_id, name: c.name || 'Private channel' }));
 }
 
 /**

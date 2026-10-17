@@ -2317,6 +2317,8 @@ struct ChannelMetaStash {
     custom: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed: Option<crate::community::v2::community::SealedMeta>,
 }
 
 /// Persist a v2 community + its channels atomically. UPSERT so a metadata
@@ -2406,9 +2408,9 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         let stored_key = ch.key.unwrap_or(c.community_root);
         let enc_ch_key = enc_key(&stored_key)?;
         let enc_ch_name = enc_txt(&ch.name)?;
-        let ch_stash_json = (ch.voice.is_some() || ch.meta_custom.is_some() || !ch.meta_extra.is_empty())
+        let ch_stash_json = (ch.voice.is_some() || ch.meta_custom.is_some() || !ch.meta_extra.is_empty() || ch.sealed.is_some())
             .then(|| {
-                serde_json::to_string(&ChannelMetaStash { voice: ch.voice, custom: ch.meta_custom.clone(), extra: ch.meta_extra.clone() })
+                serde_json::to_string(&ChannelMetaStash { voice: ch.voice, custom: ch.meta_custom.clone(), extra: ch.meta_extra.clone(), sealed: ch.sealed.clone() })
                     .map_err(|e| e.to_string())
             })
             .transpose()?;
@@ -2548,6 +2550,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     meta_custom: ch_stash.custom,
                     meta_extra: ch_stash.extra,
                     writers: None,
+                    sealed: ch_stash.sealed,
                 });
             }
         }
@@ -2785,6 +2788,7 @@ mod tests {
             meta_custom: None,
             meta_extra: Default::default(),
             writers: None,
+            sealed: None,
         }
     }
 
@@ -4405,7 +4409,7 @@ pub fn set_community_pins(community_id: &str, channel_id: &str, content: &str, v
 }
 
 /// Persist a channel's folded Writers ledger head (CORD-03 §1), monotonic on version.
-pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str, version: i64) -> Result<bool, String> {
+pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str, version: i64, replace: bool) -> Result<bool, String> {
     let _seal = crate::crypto::gate::sealing();
     let enc = enc_txt(content)?;
     let conn = super::get_write_connection_guard_static()?;
@@ -4414,8 +4418,8 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
             "INSERT INTO community_writers (community_id, channel_id, content, version) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(community_id, channel_id) DO UPDATE SET
                  content = excluded.content, version = excluded.version
-             WHERE excluded.version >= community_writers.version",
-            params![community_id, channel_id, enc, version],
+             WHERE ?5 OR excluded.version >= community_writers.version",
+            params![community_id, channel_id, enc, version, replace],
         )
         .map_err(|e| format!("set writers: {e}"))?;
     Ok(changed > 0)

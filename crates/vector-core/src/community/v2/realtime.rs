@@ -238,6 +238,30 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     out
 }
 
+/// A Writers ledger that moved can admit posts a stale one dropped live: read each such channel
+/// again from the earliest entry that changed (CORD-03 §1).
+fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId) {
+    let Ok(Some(after)) = crate::db::community::load_community_v2(id) else { return };
+    for ch in &after.channels {
+        let was = before.channel(&ch.id).and_then(|c| c.writers.clone());
+        if was == ch.writers {
+            continue;
+        }
+        let (old, new) = (was.map(|l| l.entries).unwrap_or_default(), ch.writers.as_ref().map(|l| l.entries.clone()).unwrap_or_default());
+        let same = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let Some(from_ms) = [old.get(same), new.get(same)].into_iter().flatten().map(|e| e.at).min() else { continue };
+        let (after, channel) = (after.clone(), ch.id);
+        crate::db::spawn_bound(async move {
+            let Some(me) = crate::state::my_public_key() else { return };
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            let since = from_ms.saturating_sub(60_000) / 1000;
+            if let Ok(page) = super::service::fetch_channel_history(&transport, &after, &channel, 200, 3, Some(since), None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await {
+                crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
+            }
+        });
+    }
+}
+
 /// One community's plane addresses: the subscription's author set and the dispatch routes are
 /// both built from this, so what is subscribed and what is recognized can't drift.
 fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
@@ -1084,6 +1108,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         };
         let control_changed = control.updated.is_some();
+        if control_changed {
+            reread_moved_ledgers(&current, id);
+        }
         // The authority half is what the rekey walk gates on, and the walk ran BEFORE
         // this fold. Re-walk once, in-process, on the freshly-written state — a queue
         // re-enqueue would be both slower and, on a coalesced queue, droppable.
@@ -1854,6 +1881,7 @@ mod tests {
             meta_custom: None,
             meta_extra: Default::default(),
             writers: None,
+            sealed: None,
         });
         let authors = plane_authors(std::slice::from_ref(&c));
         // A private channel is read under its OWN key/epoch (not the root).

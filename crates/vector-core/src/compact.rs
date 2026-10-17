@@ -148,6 +148,8 @@ impl MessageFlags {
     pub const MINE: Self = Self(0b00001);
     pub const PENDING: Self = Self(0b00010);
     pub const FAILED: Self = Self(0b00100);
+    /// A restricted Channel's writer address carried it.
+    pub const WRITER: Self = Self(0b100000);
     // Bits 3-4 for replied_to_has_attachment:
     // 00 = None, 01 = Some(false), 10 = Some(true)
     const REPLY_ATTACH_MASK: u8 = 0b11000;
@@ -166,6 +168,20 @@ impl MessageFlags {
     #[inline]
     pub fn is_failed(self) -> bool {
         self.0 & Self::FAILED.0 != 0
+    }
+
+    #[inline]
+    pub fn is_writer(self) -> bool {
+        self.0 & Self::WRITER.0 != 0
+    }
+
+    #[inline]
+    pub fn set_writer(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::WRITER.0;
+        } else {
+            self.0 &= !Self::WRITER.0;
+        }
     }
 
     /// Get replied_to_has_attachment as Option<bool>
@@ -2297,7 +2313,11 @@ impl CompactMessage {
             extras: (!extras.is_empty()).then(|| Box::new(extras)),
             expiration_secs: msg.expiration.map(|e| e as u32).unwrap_or(0),
             npub_idx: interner.intern_opt(msg.npub.as_deref()),
-            flags: MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment),
+            flags: {
+                let mut flags = MessageFlags::from_all(msg.mine, msg.pending, msg.failed, msg.replied_to_has_attachment);
+                flags.set_writer(msg.writer);
+                flags
+            },
         }
     }
 
@@ -2340,6 +2360,7 @@ impl CompactMessage {
             role_mentions: extras
                 .map(|x| x.role_mentions.iter().map(crate::simd::hex::bytes_to_hex_32).collect())
                 .unwrap_or_default(),
+            writer: self.flags.is_writer(),
         }
     }
 }
@@ -2555,6 +2576,7 @@ mod tests {
                     addressed_bots: Vec::new(),
                     text_spans: Vec::new(),
                     role_mentions: Vec::new(),
+                    writer: false,
                 }
             })
             .collect();
@@ -3850,6 +3872,7 @@ mod tests {
             emoji_tags: Vec::new(),
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
             role_mentions: vec!["ab".repeat(32), "cd".repeat(32)],
+            writer: true,
             text_spans: vec![crate::text_spans::TextSpan::Color(crate::text_color::ColorSpan { from: 0, to: 2, effect: crate::text_color::Effect::Rainbow, colors: Vec::new() })],
         }
     }
@@ -4005,6 +4028,7 @@ mod tests {
         // Bot routing targets round-trip through the interner.
         assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
         assert_eq!(restored.role_mentions, msg.role_mentions, "role_mentions mismatch");
+        assert_eq!(restored.writer, msg.writer, "writer mismatch");
     }
 
     // The compact form deliberately keeps only the "replied-to has an attachment"

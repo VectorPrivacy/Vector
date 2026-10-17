@@ -66,6 +66,10 @@ pub struct Message {
     /// Roles a community message mentions, as hex ids (`["role", …]` tags, CORD-03 §3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub role_mentions: Vec<String>,
+    /// A restricted Channel's writer address carried it: the writer key decided, so it never
+    /// collapses for a Send its author has since lost (CORD-03 §1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writer: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -696,6 +700,7 @@ mod tests {
             addressed_bots: Vec::new(),
             text_spans: Vec::new(),
             role_mentions: Vec::new(),
+            writer: false,
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

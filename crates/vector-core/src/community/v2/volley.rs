@@ -273,8 +273,12 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         let fetch_budget = crate::relay_request_timeout(std::time::Duration::from_secs(4));
         let mut fetches = FuturesUnordered::new();
         for (set, idxs) in by_set {
-            let chunks: Vec<Vec<Filter>> = idxs
+            // A reader holds no key to authenticate as a writer address, and a gating relay fails
+            // a whole filter set over one plane it can't: those ride their own chunks.
+            let (authed, keyless): (Vec<usize>, Vec<usize>) = idxs.into_iter().partition(|&i| jobs[i].auth_keys().is_some());
+            let chunks: Vec<Vec<Filter>> = authed
                 .chunks(BATCH_FILTERS)
+                .chain(keyless.chunks(BATCH_FILTERS))
                 .map(|chunk| {
                     chunk
                         .iter()

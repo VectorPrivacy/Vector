@@ -62,6 +62,8 @@ pub fn chat_message_to_message(
             .collect(),
         addressed_bots: crate::bot_interface::addressed_bots(opened.rumor.tags.iter()),
         role_mentions: crate::community::mentions::from_tags(opened.rumor.tags.iter()),
+        // Only a writer address opens a rumor carrying a writer epoch.
+        writer: chat::carries_writer_epoch(&opened.rumor),
         wrapper_event_id: Some(opened.wrapper_id.to_hex()),
         // Self-Destruct Timer: the sender's NIP-40 expiry drives our local purge.
         expiration: chat::message_expiration(&opened.rumor),
@@ -843,9 +845,9 @@ mod tests {
         let w1 = super::super::derive::channel_writer_group_key(&s1, &general, Epoch(1));
         let w2 = super::super::derive::channel_writer_group_key(&s2, &general, Epoch(2));
         let ledger = Ledger::new(&general)
-            .appended(10_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&s1, &general, Epoch(1)), root: Epoch(0) })
+            .appended(10_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&s1, &general, Epoch(1)), root: Epoch(0), by: [0x0b; 32] })
             .unwrap()
-            .appended(20_000, Spell::Writer { epoch: Epoch(2), pk: writer_address(&s2, &general, Epoch(2)), root: Epoch(0) })
+            .appended(20_000, Spell::Writer { epoch: Epoch(2), pk: writer_address(&s2, &general, Epoch(2)), root: Epoch(0), by: [0x0b; 32] })
             .unwrap();
         community.channels[0].writers = Some(ledger);
         assert!(super::super::realtime::plane_authors(std::slice::from_ref(&community)).contains(&w2.pk()), "the live writer is subscribed");
@@ -862,6 +864,16 @@ mod tests {
         let rec = Recorder::default();
         let chat = |wrap: &nostr_sdk::prelude::Event| matches!(dispatch_wrap(wrap, &community, &me.public_key(), &rec), DispatchedV2::Chat { .. });
         assert!(chat(&post(&w2, Some(Epoch(2)), "live", 30_000)));
+        // A writer address's post carries that provenance; a read-address one doesn't.
+        let as_message = |wrap: &nostr_sdk::prelude::Event| match dispatch_wrap(wrap, &community, &me.public_key(), &rec) {
+            DispatchedV2::Chat { event, .. } => match *event {
+                chat::ChatEvent::Message { opened, reply_to, emoji } => chat_message_to_message(&opened, &reply_to, &emoji, &me.public_key()),
+                _ => panic!("not a message"),
+            },
+            _ => panic!("not dispatched as chat"),
+        };
+        assert!(as_message(&post(&w2, Some(Epoch(2)), "signed by the key", 30_000)).writer);
+        assert!(!as_message(&post(&read, None, "said in the open", 5_000)).writer);
         assert!(chat(&post(&w1, Some(Epoch(1)), "past", 15_000)), "a writer's past posts stay");
         assert!(!chat(&post(&w1, Some(Epoch(1)), "late", 25_000)), "nothing after its entry ends");
         assert!(!chat(&post(&w2, Some(Epoch(1)), "spliced", 30_000)), "the epoch must be the address's");
