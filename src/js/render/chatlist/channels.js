@@ -202,8 +202,36 @@ function openCategoryMenu(communityId, category, x, y) {
     ] });
 }
 
+/** The channel editor, with its permissions read alongside on the new roles. */
+function openChannelEditorFor(communityId, channel) {
+    VectorSvelte.openChannelEditor(communityId, channel);
+    loadChannelPerms(communityId, channel.id);
+}
+
+function loadChannelPerms(communityId, channelId) {
+    invoke('get_channel_permissions', { communityId, channelId })
+        .then((perms) => {
+            const names = {};
+            for (const o of perms.overwrites || []) {
+                if (o.kind === 'member') names[o.id] = getName(getProfile(o.npub) || o.npub);
+            }
+            VectorSvelte.setChannelPerms({ ...perms, member_names: names });
+        })
+        .catch(() => {});
+}
+
 VectorSvelte.setScreen('channelEditor', {
     h: {
+        saveOverwrite: async ({ communityId, channelId, kind, id, allow, deny }) => {
+            VectorSvelte.setChannelEditorBusy(true);
+            try {
+                await invoke('set_channel_overwrite', { communityId, scopeId: channelId, kind, targetId: id, allow, deny });
+                VectorSvelte.setChannelEditorBusy(false);
+                loadChannelPerms(communityId, channelId);
+            } catch (e) {
+                VectorSvelte.setChannelEditorBusy(false, String(e));
+            }
+        },
         save: async ({ communityId, channelId, name, topic, view }) => {
             VectorSvelte.setChannelEditorBusy(true);
             try {
@@ -523,7 +551,7 @@ async function openChannelMenu(communityId, channel, x, y) {
     items.push(...await notifyMenuItems(channel.id, communityId));
     if (communityCanAddChannels(communityId)) {
         items.push({ divider: true });
-        items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => VectorSvelte.openChannelEditor(communityId, channel) });
+        items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => openChannelEditorFor(communityId, channel) });
     }
     items.push(...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
     items.push(...copyIdItems('Channel', channel.id));

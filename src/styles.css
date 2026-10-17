@@ -25988,9 +25988,75 @@ body.profile-switcher-editing .profile-switcher-add {
   background-color: color-mix(in srgb, var(--icon-color-primary) 8%, #0c0c0c);
 }
 .ce-view:disabled { opacity: 0.6; cursor: default; }
+.cmt-modal.ce-modal { max-width: 620px; }
 .ce-modal .cmt-footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .ce-modal .cmt-status { flex: 1; min-width: 0; }
 @media (max-width: 520px) { .ce-views { grid-template-columns: 1fr; } }
+
+/* Channel editor: Overview and Permissions tabs, then targets beside their bits. */
+.ce-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid #262626; }
+.ce-tab {
+  padding: 8px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #9a9a9a;
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.ce-tab.on { color: #fff; border-bottom-color: var(--icon-color-primary); }
+.ce-perms { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; min-height: 260px; }
+.ce-targets { display: flex; flex-direction: column; gap: 2px; }
+.ce-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: #cfcfcf;
+  font-family: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.ce-target:hover { background-color: #131313; }
+.ce-target.on { background-color: #1b1b1b; color: #fff; }
+.ce-add { margin-top: 6px; height: 34px; padding: 0 10px; font-size: 13px; line-height: normal; }
+.ce-bits { max-height: 360px; overflow-y: auto; padding-right: 4px; }
+.ce-bit { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+.ce-bit + .ce-bit { border-top: 1px solid #1a1a1a; }
+.ce-bit.disabled { opacity: 0.5; }
+.ce-bit .cs-perm-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.ce-tri { display: flex; flex-shrink: 0; border: 1px solid #262626; border-radius: 8px; overflow: hidden; }
+.ce-tri button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background-color: #0c0c0c;
+  color: #6f6f6f;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ce-tri button + button { border-left: 1px solid #262626; }
+.ce-tri button:disabled { cursor: default; }
+.ce-tri .icon { width: 12px; height: 12px; background-color: currentColor; }
+.ce-tri-deny.on { background-color: color-mix(in srgb, var(--danger-color) 22%, #0c0c0c); color: var(--danger-color); }
+.ce-tri-inherit.on { background-color: #1b1b1b; color: #cfcfcf; }
+.ce-tri-allow.on { background-color: color-mix(in srgb, var(--icon-color-primary) 22%, #0c0c0c); color: var(--icon-color-primary); }
+@media (max-width: 520px) { .ce-perms { grid-template-columns: 1fr; } }
 
 /* @everyone: the list's fixed foot, beneath every role. */
 .cs-role-everyone .cs-role-dot { background-color: #99aab5; }

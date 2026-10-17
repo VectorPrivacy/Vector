@@ -231,15 +231,9 @@
             <div class="cs-role-upgrade">
                 <div class="cs-role-upgrade-text">
                     <span class="cs-perm-name">New roles are available</span>
-                    {#if view.activation_blocked}
-                        <span class="cs-perm-desc">Not yet for a community with private channels: their access moves to channel permissions first.</span>
-                    {:else}
-                        <span class="cs-perm-desc">@everyone, channel and voice permissions, and roles you can delete. Every role carries over.</span>
-                    {/if}
+                    <span class="cs-perm-desc">@everyone, channel and voice permissions, and roles you can delete. Every role carries over, and private channels keep who can read them.</span>
                 </div>
-                {#if !view.activation_blocked}
-                    <button class="cs-btn-save" disabled={st.roles.busy} onclick={() => h.activateRoles()}>Switch</button>
-                {/if}
+                <button class="cs-btn-save" disabled={st.roles.busy} onclick={() => h.activateRoles()}>Switch</button>
             </div>
         {/if}
         <div class="cs-roles">
