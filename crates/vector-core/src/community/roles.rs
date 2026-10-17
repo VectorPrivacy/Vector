@@ -309,6 +309,17 @@ impl CommunityRoles {
         Permissions(p)
     }
 
+    /// Whether `@everyone`, resolved up to the View Channel step, may post in a Channel: one
+    /// where it can't is restricted (CORD-03 §1). A legacy Roster restricts nothing.
+    pub fn everyone_sends(&self, channel_hex: &str) -> bool {
+        let Some(everyone) = self.everyone else { return true };
+        let channel = channel_hex.to_ascii_lowercase();
+        let scope = self.syncs.get(&channel).cloned().unwrap_or(channel);
+        let row = self.overwrites.iter().find(|o| o.scope == scope && o.target == OverwriteTarget::Everyone);
+        let p = row.map_or(everyone.0, |o| (everyone.0 & !o.deny.0) | o.allow.0);
+        p & Permissions::SEND_MESSAGES != 0
+    }
+
     /// [`Self::channel_permissions_holding`] for the Roles the member holds now.
     pub fn channel_permissions(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, private: bool) -> Permissions {
         let held: Vec<String> = self.roles_of(member_hex).map(|r| r.role_id.clone()).collect();

@@ -23,6 +23,10 @@ use super::rekey::{self, Continuity, RekeyScope};
 use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
 
+mod writing;
+pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
+pub(crate) use writing::live_writer as live_writer_of;
+
 /// The active signer for v2 authority actions: the live client's signer — which
 /// covers a NIP-46 bunker / NIP-55 offline signer — falling back to the local
 /// vault keys when there is no client or no signer attached (local accounts,
@@ -416,6 +420,13 @@ async fn publish_chat<T: Transport + ?Sized>(
     ephemeral: bool,
 ) -> Result<String, String> {
     crate::db::scoped(async move {
+        let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
+        let (sending, wepoch) = writing::send_group(community, ch, group, rumor.kind.as_u16())?;
+        let group = &sending;
+        let rumor = match wepoch {
+            Some(w) => chat::with_writer_epoch(rumor, w),
+            None => rumor,
+        };
         let rumor_id = rumor.id.ok_or("rumor has no id")?.to_hex();
         let signer = crate::signer::active_signer()?;
         let (wrap, _p_tag_keys) = chat::seal_chat_rumor_signed(&signer, author_pk, &rumor, group, Timestamp::from_secs(at_ms / 1000), ephemeral).await
@@ -434,7 +445,11 @@ async fn publish_chat<T: Transport + ?Sized>(
         // against this row instead of re-firing callbacks. Best-effort — the publish
         // already succeeded. Ephemeral kinds (typing) apply to nothing and skip out.
         if !ephemeral {
-            if let Ok(event) = chat::open_chat_event(&wrap, group, channel_id, epoch) {
+            let echo = match wepoch {
+                Some(w) => chat::open_writer_chat_event(&wrap, &group.pk(), w, group.conv_key(), channel_id, epoch),
+                None => chat::open_chat_event(&wrap, group, channel_id, epoch),
+            };
+            if let Ok(event) = echo {
                 let channel_hex = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
                 super::inbound::hydrate_target(&event, &channel_hex).await;
                 let outcome = {
@@ -602,6 +617,19 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
         // the only one anyone should be speaking on; reaching back through a
         // rotation is what back-paging (`start_until`) is for — the same division
         // the boot volley already draws.
+        // A restricted Channel's writer addresses, opened under the read epochs above. A catch-up
+        // wants the live one and the one it closed; back-paging reads them all.
+        let mut writer_planes: Vec<(PublicKey, Epoch)> = ch
+            .writers
+            .iter()
+            .flat_map(|l| l.writers())
+            .filter_map(|(e, pk, _)| PublicKey::from_slice(&pk).ok().map(|a| (a, e)))
+            .collect();
+        if start_until.is_none() {
+            writer_planes.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
+            writer_planes.truncate(2);
+        }
+        let live_writer = writing::live_writer(community, ch);
         if start_until.is_none() && planes.len() > LIVE_COORD_EPOCHS {
             planes.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
             planes.truncate(LIVE_COORD_EPOCHS);
@@ -643,6 +671,19 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                     }
                 }
             }
+            for (address, wepoch) in &writer_planes {
+                let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![address.to_hex()], since, until, limit: Some(page), evidence, ..Default::default() };
+                // Only a writer can authenticate as the address.
+                let fetched = match &live_writer {
+                    Some((e, _, group)) if e == wepoch => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| f.events),
+                    _ => transport.fetch(&q, &community.relays).await,
+                };
+                for e in fetched.unwrap_or_default() {
+                    if wrap_ids.insert(e.id) {
+                        wraps.push(e);
+                    }
+                }
+            }
             if wraps.is_empty() {
                 break;
             }
@@ -664,6 +705,22 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                     held += 1;
                     continue;
                 }
+                if let Some((address, wepoch)) = writer_planes.iter().find(|(a, _)| *a == wrap.pubkey) {
+                    let Some(ledger) = ch.writers.as_ref() else { continue };
+                    let opened = planes.iter().find_map(|(plane, epoch)| {
+                        let conv = match plane {
+                            ReadPlane::Keyed(group) => group.conv_key(),
+                            ReadPlane::View(_, conv) => conv,
+                        };
+                        chat::open_writer_chat_event(wrap, address, *wepoch, conv, channel_id, *epoch).ok().map(|ev| (ev, *epoch))
+                    });
+                    if let Some((event, epoch)) = opened.filter(|(ev, _)| super::writers::admits(Some(ledger), Some(*wepoch), ev)) {
+                        if seen_rumors.insert(event.opened().rumor_id) {
+                            page_events.push(FetchedEvent { event, epoch });
+                        }
+                    }
+                    continue;
+                }
                 // Select the epoch whose group key authored this wrap (no trial decrypt).
                 for (plane, epoch) in &planes {
                     if wrap.pubkey != plane.address() {
@@ -673,7 +730,9 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                         ReadPlane::Keyed(group) => chat::open_chat_event(wrap, group, channel_id, *epoch),
                         ReadPlane::View(address, conv_key) => chat::open_chat_event_at(wrap, address, conv_key, channel_id, *epoch),
                     };
-                    if let Ok(event) = opened {
+                    // Inside a writer window the read address takes only what stays there.
+                    let opened = opened.ok().filter(|ev| super::writers::admits(ch.writers.as_ref(), None, ev));
+                    if let Some(event) = opened {
                         let id = event.opened().rumor_id;
                         if seen_rumors.insert(id) {
                             if let ReadPlane::Keyed(group) = plane {
@@ -1524,17 +1583,17 @@ async fn accept_bundle<T: Transport + ?Sized>(
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
         });
-        let (community, join_heads, join_banlist, join_pins, join_banlist_content, join_roles, join_authority_heads) =
+        let (community, join_heads, join_banlist, (join_pins, join_writers), join_banlist_content, join_roles, join_authority_heads) =
             match handoff {
                 Some(v) => {
                     let mut c = v.folded;
                     // The preview holds no acquisition time — stamp the JOIN's.
                     c.created_at_ms = at_ms;
-                    (c, v.heads, v.banned, v.pins, v.banlist_persist, v.roles, v.authority_heads)
+                    (c, v.heads, v.banned, (v.pins, v.writers), v.banlist_persist, v.roles, v.authority_heads)
                 }
                 None => {
                     let vj = verify_owner_root_and_reconcile(transport, community).await?;
-                    (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist, vj.roles, vj.authority_heads)
+                    (vj.community, vj.heads, vj.banned, (vj.pins, vj.writers), vj.banlist_persist, vj.roles, vj.authority_heads)
                 }
             };
 
@@ -1589,6 +1648,9 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // fresh member until the follow worker's queued re-walk landed.
         if let Some((roles, at)) = &join_roles {
             let _ = crate::db::community::set_community_roles(&cid_hex, roles, *at);
+        }
+        for (channel_hex, content, version) in &join_writers {
+            persist_writers(&cid_hex, channel_hex, content, *version);
         }
         for (channel_hex, content, version, _author, _at) in &join_pins {
             if matches!(
@@ -1673,6 +1735,8 @@ struct VerifiedJoin {
     /// Pin List heads folded under the FULL join-time authority (curators included,
     /// same §5 gate as any later follow): `(channel_hex, content, version, author_npub, created_at)`.
     pins: Vec<(String, String, u64, String, u64)>,
+    /// Writers ledger heads from the same fold: `(channel_hex, content, version)`.
+    writers: Vec<(String, String, u64)>,
     /// The authorized banlist head's content + version, for local persistence.
     banlist_persist: Option<(Vec<String>, u64)>,
     /// The FULL authorized roster (admins included) from the same walk, with the
@@ -1848,7 +1912,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // as on any later follow (same PIN_MESSAGES + citation gate, same owner-chained
     // roster). Only the pins are taken from this pass — the DOCUMENT adoption above
     // stays owner-only, its stricter envelope unchanged.
-    let pins = apply_control_fold(&community, &all_editions, &empty_floors, &authority_full).pins_persist;
+    let ControlFold { pins_persist: pins, writers_persist: writers, .. } = apply_control_fold(&community, &all_editions, &empty_floors, &authority_full);
     // The newest roster edition's stamp, exactly as follow_control computes it, so
     // the follow's own freshness gate composes with a join-seeded roster.
     let newest_roster_at = roster_stamp(&all_editions, &authority_full.heads);
@@ -1861,6 +1925,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
         heads: fold.heads,
         banned: authority_full.banned,
         pins,
+        writers,
         banlist_persist: authority_full.banlist_persist,
         roles,
         authority_heads: if authority_full.converged { authority_full.heads } else { Vec::new() },
@@ -1985,6 +2050,7 @@ struct VerifiedPreview {
     /// Folded pins + banlist content from the same walk, so a preview-handoff join
     /// persists them exactly like a direct join.
     pins: Vec<(String, String, u64, String, u64)>,
+    writers: Vec<(String, String, u64)>,
     banlist_persist: Option<(Vec<String>, u64)>,
     roles: Option<(crate::community::roles::CommunityRoles, i64)>,
     authority_heads: Vec<FoldedHead>,
@@ -2046,6 +2112,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
                 heads: vj.heads,
                 banned: vj.banned,
                 pins: vj.pins,
+                writers: vj.writers,
                 banlist_persist: vj.banlist_persist,
                 roles: vj.roles,
                 authority_heads: vj.authority_heads,
@@ -5083,7 +5150,7 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         // On Roles v2 every edition is marked: its hash covers its signer and it names its
         // Community (CORD-04 §1). A Roles v2 kind is marked even while the switch is under way.
         let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
-        let marked = [super::vsk::ROLE_V2, super::vsk::TENURE, super::vsk::CATEGORY, super::vsk::CHANNEL_ACL, super::vsk::CHANNEL_SYNC].contains(&vsk)
+        let marked = [super::vsk::ROLE_V2, super::vsk::TENURE, super::vsk::CATEGORY, super::vsk::CHANNEL_ACL, super::vsk::CHANNEL_SYNC, super::vsk::WRITERS].contains(&vsk)
             || crate::db::community::get_edition_head(&cid_hex, &everyone_hex)?.is_some();
         let binding = marked.then(|| super::derive::edition_binding(community.id()));
         let rumor = control::build_edition_rumor_bound(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref(), binding);
@@ -6105,7 +6172,7 @@ async fn settle_access<T: Transport + ?Sized>(
             transport.publish(&wrap, &held.relays).await?;
         }
     }
-    Ok(())
+    writing::settle_writers(transport, community, before, after).await
 }
 
 /// A Channel's access plane at the community's root epoch (CORD-03 §5).
@@ -6116,6 +6183,11 @@ fn access_group(community: &CommunityV2, channel: &ChannelId) -> super::derive::
 /// Every access delivery for a Channel on its plane, paged as the plane key: the address is
 /// root-derived, so any root holder can bury the real deliveries under a single page.
 async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId) -> Result<Vec<rekey::AccessDelivery>, String> {
+    fetch_plane_deliveries(transport, community, channel, rekey::RekeyScope::Channel(*channel)).await
+}
+
+/// The deliveries of `scope`'s keys on a Channel's access plane.
+async fn fetch_plane_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, scope: rekey::RekeyScope) -> Result<Vec<rekey::AccessDelivery>, String> {
     const PAGE: usize = 200;
     const MAX_PAGES: usize = 6;
     let group = access_group(community, channel);
@@ -6135,7 +6207,7 @@ async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community
             fresh += 1;
             oldest = Some(oldest.map_or(w.created_at.as_secs(), |o| o.min(w.created_at.as_secs())));
             if let Some(d) = stream::open_wrap(w, &group).ok().and_then(|o| rekey::parse_access_delivery(&o).ok()) {
-                if matches!(d.scope, rekey::RekeyScope::Channel(c) if c.0 == channel.0) {
+                if d.scope.id32() == scope.id32() {
                     out.push(d);
                 }
             }
@@ -6154,7 +6226,10 @@ async fn fetch_access_deliveries<T: Transport + ?Sized>(transport: &T, community
 /// Whether `member` holds a blob for `epoch` on the plane from a deliverer `trusted` admits:
 /// anyone can put a blob at anyone's locator, so only a delivery a reader would take counts.
 fn served_on_plane(deliveries: &[rekey::AccessDelivery], member: &PublicKey, channel: &ChannelId, epoch: Epoch, trusted: &dyn Fn(&PublicKey) -> bool) -> bool {
-    let scope = rekey::RekeyScope::Channel(*channel);
+    served_at(deliveries, member, rekey::RekeyScope::Channel(*channel), epoch, trusted)
+}
+
+fn served_at(deliveries: &[rekey::AccessDelivery], member: &PublicKey, scope: rekey::RekeyScope, epoch: Epoch, trusted: &dyn Fn(&PublicKey) -> bool) -> bool {
     deliveries
         .iter()
         .filter(|d| d.epoch == epoch && trusted(&d.deliverer))
@@ -6199,10 +6274,14 @@ fn rotation_carries(rotations: &[(PublicKey, Vec<rekey::RekeyBlob>)], authorized
 
 /// Deliver the key this device holds for `channel` to `recipients` on its access plane.
 async fn deliver_access<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, recipients: &[PublicKey]) -> Result<(), String> {
-    use nostr_sdk::prelude::AsyncGetPublicKey;
     let ch = community.channel(channel).ok_or("no such channel")?;
     let key = ch.key.ok_or("this device doesn't hold that channel's key")?;
-    let (epoch, scope) = (ch.epoch, rekey::RekeyScope::Channel(*channel));
+    deliver_on_plane(transport, community, channel, rekey::RekeyScope::Channel(*channel), ch.epoch, &key, recipients).await
+}
+
+/// Deliver `key`, `scope`'s at `epoch`, to `recipients` on `channel`'s access plane.
+async fn deliver_on_plane<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, scope: rekey::RekeyScope, epoch: Epoch, key: &[u8; 32], recipients: &[PublicKey]) -> Result<(), String> {
+    use nostr_sdk::prelude::AsyncGetPublicKey;
     let signer = crate::signer::active_signer()?;
     let me = me_pk()?;
     // The signer is resolved process-wide; never let another account's sign for this one.
@@ -6212,7 +6291,7 @@ async fn deliver_access<T: Transport + ?Sized>(transport: &T, community: &Commun
     let group = access_group(community, channel);
     let mut blobs = Vec::with_capacity(recipients.len());
     for r in recipients {
-        blobs.push(rekey::build_blob(&signer, &me.to_bytes(), r, scope, epoch, &key).await.map_err(|e| e.to_string())?);
+        blobs.push(rekey::build_blob(&signer, &me.to_bytes(), r, scope, epoch, key).await.map_err(|e| e.to_string())?);
     }
     let at = now_ms() / 1000;
     for part in blobs.chunks(rekey::MAX_REKEY_BLOBS_PER_EVENT) {
@@ -6420,6 +6499,8 @@ pub struct AccessDuty {
     pub delivered: usize,
     /// Holders cut by a rotation because the channel no longer lets them in.
     pub cut: usize,
+    /// What the writer duty did for restricted Channels (CORD-03 §1).
+    pub writers: WriterDuty,
 }
 
 /// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
@@ -6520,6 +6601,7 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
         held.extend(unserved.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
         done.delivered += unserved.len();
     }
+    done.writers = writing::writer_duty(transport, community, &roster, &banned).await?;
     Ok(done)
 }
 
@@ -7635,7 +7717,7 @@ pub async fn create_public_channel_with_id<T: Transport + ?Sized>(transport: &T,
         publish_control_edition(transport, community, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
         // Add locally + persist so the creator can post immediately (peers fold it in).
         let mut updated = community.clone();
-        updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: false, key: None, epoch: updated.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+        updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: false, key: None, epoch: updated.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         crate::db::community::save_community_v2(&updated)?;
         Ok(())
     })
@@ -7950,7 +8032,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
                 return Err("community removed during channel create".to_string());
             }
             let mut updated = community.clone();
-            updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+            updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
             crate::db::community::save_community_v2(&updated)?;
             crate::db::community::store_epoch_key(&cid_hex, &chan, epoch.0, &channel_key)?;
             let _ = refresh_public_links(transport, &updated).await;
@@ -7981,7 +8063,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
             return Err("community removed during channel create".to_string());
         }
         let mut updated = community.clone();
-        updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+        updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         crate::db::community::save_community_v2(&updated)?;
         // Archive the epoch-1 key so this channel's history stays readable across its
         // future rotations (CORD-03 §3).
@@ -8818,7 +8900,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
         let mut editions: Vec<ParsedEdition> = Vec::new();
         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-        let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new() };
+        let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new() };
         let mut authority = AuthoritySet::owner_only();
         // Whether this round gave up with editions still unread. The follow is
         // procedural by design — process what arrives, converge with everyone else —
@@ -9197,6 +9279,9 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // Folded Pin List heads (CORD-04 §7): raw content per channel. The write
         // itself is monotonic on version (atomic in the statement), so a stale
         // window racing a publish echo can never regress a newer held head.
+        for (channel_hex, content, version) in &fold.writers_persist {
+            persist_writers(&cid_hex, channel_hex, content, *version);
+        }
         for (channel_hex, content, version, author_npub, created_at) in &fold.pins_persist {
             match crate::db::community::set_community_pins(&cid_hex, channel_hex, content, *version as i64) {
                 Ok(true) => {
@@ -9332,6 +9417,8 @@ struct ControlFold {
     /// `(channel_hex, raw content, version, author_npub, created_at)`.
     /// Raw carried bytes on purpose — republishing must not re-serialize.
     pins_persist: Vec<(String, String, u64, String, u64)>,
+    /// Folded Writers ledger heads to persist: `(channel_hex, raw content, version)`.
+    writers_persist: Vec<(String, String, u64)>,
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id, author)` of the committed head. The id and
@@ -9430,6 +9517,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut heads = Vec::new();
     let mut gapped = false;
     let mut pins_persist = Vec::new();
+    let mut writers_persist = Vec::new();
     // Pin List eids are one-way HKDF locators, so attribution runs the other
     // direction: precompute every known channel's locator. An eid matching no
     // channel folds nothing this round — once the channel's metadata lands, the
@@ -9438,6 +9526,11 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         .channels
         .iter()
         .map(|ch| (super::derive::pins_locator(community.id(), &ch.id), crate::simd::hex::bytes_to_hex_32(&ch.id.0)))
+        .collect();
+    let writers_by_eid: std::collections::HashMap<[u8; 32], String> = community
+        .channels
+        .iter()
+        .map(|ch| (super::derive::writers_locator(community.id(), &ch.id), crate::simd::hex::bytes_to_hex_32(&ch.id.0)))
         .collect();
     // A channel id is minted at random, so one shared with another entity's coordinate is aimed
     // at that entity: floor rows key on the coordinate alone.
@@ -9456,11 +9549,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         let is_channel = vsk_code == vsk::CHANNEL_METADATA && *eid != community.id().0 && !taken.contains(eid);
         let pins_channel = (vsk_code == vsk::PINS).then(|| pins_by_eid.get(eid)).flatten();
         let is_category = vsk_code == vsk::CATEGORY && *eid != community.id().0 && !taken_cat.contains(eid);
-        if !is_meta && !is_channel && !is_category && pins_channel.is_none() {
+        let writers_channel = (vsk_code == vsk::WRITERS).then(|| writers_by_eid.get(eid)).flatten();
+        if !is_meta && !is_channel && !is_category && pins_channel.is_none() && writers_channel.is_none() {
             continue;
         }
         // A new kind is read marked only (CORD-04 §1): nothing older ever wrote one.
-        let group: Vec<&ParsedEdition> = group.iter().copied().filter(|e| !is_category || e.binding.is_some()).collect();
+        let group: Vec<&ParsedEdition> = group.iter().copied().filter(|e| !(is_category || writers_channel.is_some()) || e.binding.is_some()).collect();
         if group.is_empty() {
             continue;
         }
@@ -9471,7 +9565,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         // highest AUTHORIZED head wins. The owner is supreme.
         let required = if is_meta {
             Permissions::MANAGE_METADATA
-        } else if is_channel || is_category {
+        } else if is_channel || is_category || writers_channel.is_some() {
             Permissions::MANAGE_CHANNELS
         } else {
             Permissions::PIN_MESSAGES
@@ -9555,9 +9649,31 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 .to_bech32()
                 .unwrap_or_else(|_| head.author.to_hex());
             pins_persist.push((channel_hex.clone(), head.content.clone(), head.version, author_npub, head.created_at));
+        } else if let Some(channel_hex) = writers_channel {
+            let ledger = super::writers::Ledger::parse(&head.content).filter(|l| crate::simd::hex::bytes_to_hex_32(&l.channel) == *channel_hex);
+            if let Some(ch) = out.channels.iter_mut().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == *channel_hex) {
+                if ch.writers != ledger {
+                    ch.writers = ledger;
+                    changed = true;
+                }
+            }
+            writers_persist.push((channel_hex.clone(), head.content.clone(), head.version));
         }
     }
-    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist }
+    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist, writers_persist }
+}
+
+/// Store a folded Writers ledger head, telling the UI when what it says changed.
+fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64) {
+    let held = crate::db::community::get_community_writers(cid_hex, channel_hex).ok().flatten();
+    if held.as_ref().is_some_and(|(c, v)| c == content && *v as u64 == version) {
+        return;
+    }
+    match crate::db::community::set_community_writers(cid_hex, channel_hex, content, version as i64) {
+        Ok(true) => crate::emit_event("community_writers_updated", &serde_json::json!({ "community_id": cid_hex, "channel_id": channel_hex })),
+        Ok(false) => {}
+        Err(e) => crate::log_warn!("[writers] fold persist failed: {e}"),
+    }
 }
 
 /// Fold one entity's editions against its persisted floor into a head index (into the
@@ -11020,6 +11136,7 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
                 voice: meta.voice,
                 meta_custom: meta.custom,
                 meta_extra: meta.extra,
+                writers: None,
             });
             true
         }
@@ -11038,6 +11155,7 @@ fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::C
                 voice: meta.voice,
                 meta_custom: meta.custom,
                 meta_extra: meta.extra,
+                writers: None,
             });
             true
         }
@@ -13646,7 +13764,7 @@ mod tests {
             meta_custom: None,
             meta_extra: Default::default(),
             relays,
-            channels: vec![ChannelV2 { id: ch_id, name: "general".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() }],
+            channels: vec![ChannelV2 { id: ch_id, name: "general".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default(), writers: None }],
             categories: Vec::new(),
             dissolved: false,
             created_at_ms: 1_000_000,
@@ -23307,6 +23425,296 @@ mod tests {
         assert!(roster.roles_of(&m.to_hex()).any(|r| r.role_id == readers), "the admin's Grant stands");
     }
 
+    /// Post `text` straight to a plane, as a client ignoring the ledger would.
+    #[allow(clippy::too_many_arguments)]
+    async fn post_raw(relay: &MemoryRelay, community: &CommunityV2, author: &Keys, channel: &ChannelId, group: &GroupKey, epoch: Epoch, wepoch: Option<Epoch>, text: &str, at_ms: u64) {
+        let rumor = chat::build_message_rumor(author.public_key(), channel, epoch, text, None, &[], vec![], at_ms);
+        let rumor = match wepoch {
+            Some(w) => chat::with_writer_epoch(rumor, w),
+            None => rumor,
+        };
+        let (wrap, _) = chat::seal_chat_rumor(&rumor, group, author, Timestamp::from_secs(at_ms / 1000), false).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    async fn channel_texts(relay: &MemoryRelay, community: &CommunityV2, channel: &ChannelId) -> Vec<String> {
+        fetch_channel(relay, community, channel, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|f| match f.event {
+                ChatEvent::Message { opened, .. } => Some(opened.rumor.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_restricted_channel_takes_posts_only_from_its_writers() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Announce", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let general = community.channels[0].id;
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let m = member.keys.clone();
+        let plain = create_role_v2(&bed.relay, &held(&community), "Member", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(&community), &m.public_key(), vec![plain]).await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &m.public_key(), None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &m.public_key()).await).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        send_chat_message_at(&bed.relay, &held(&community), &general, "before", None, &[], vec![], now_ms() - 20_000).await.unwrap();
+
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let ch = held(&community).channel(&general).unwrap().clone();
+        assert!(ch.restricted() && ch.writers.as_ref().unwrap().current_writer().unwrap().0 == Epoch(1), "restricting mints the ledger");
+        assert!(can_post(&held(&community), &general), "the owner writes");
+        send_message(&bed.relay, &held(&community), &general, "announcement").await.unwrap();
+
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(held(&community).channel(&general).unwrap().restricted(), "every member folds the ledger");
+        assert!(!can_post(&held(&community), &general));
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 0, "nothing for a member the channel doesn't let post");
+        assert!(send_message(&bed.relay, &held(&community), &general, "denied").await.is_err());
+        post_raw(&bed.relay, &held(&community), &m, &general, &read, community.root_epoch, None, "sneaky", now_ms()).await;
+        let texts = channel_texts(&bed.relay, &held(&community), &general).await;
+        assert!(texts.contains(&"before".to_string()) && texts.contains(&"announcement".to_string()), "a reader without the key reads the writers: {texts:?}");
+        assert!(!texts.contains(&"sneaky".to_string()), "the read address takes nothing inside a writer window");
+
+        // Let the member post: the change's author hands them the live key.
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 1);
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 0, "held now");
+        assert!(can_post(&held(&community), &general));
+        send_message(&bed.relay, &held(&community), &general, "from m").await.unwrap();
+        let (_, old_secret, old_writer) = writing::live_writer(&held(&community), held(&community).channel(&general).unwrap()).unwrap();
+        bed.swap_to(&owner);
+        assert!(channel_texts(&bed.relay, &held(&community), &general).await.contains(&"from m".to_string()));
+
+        // Take it back: a fresh writer epoch without them closes the address they hold.
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.public_key().to_hex()), 0, 0).await.unwrap();
+        let ledger = held(&community).channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(ledger.current_writer().unwrap().0, Epoch(2));
+        let closed_at = ledger.writers().find(|(e, ..)| *e == Epoch(1)).and_then(|(.., end)| end).unwrap();
+        let stale = GroupKey::from_parts(old_writer.keys().clone(), read.conv_key().clone());
+        assert_eq!(crate::community::v2::derive::channel_writer_group_key(&old_secret, &general, Epoch(1)).pk(), stale.pk());
+        post_raw(&bed.relay, &held(&community), &m, &general, &stale, community.root_epoch, Some(Epoch(1)), "late", closed_at + 5_000).await;
+        post_raw(&bed.relay, &held(&community), &m, &general, &stale, community.root_epoch, Some(Epoch(1)), "in time", closed_at - 1).await;
+        post_raw(&bed.relay, &held(&community), &m, &general, &stale, community.root_epoch, Some(Epoch(2)), "wrong epoch", closed_at - 2).await;
+        send_message(&bed.relay, &held(&community), &general, "second").await.unwrap();
+        let texts = channel_texts(&bed.relay, &held(&community), &general).await;
+        assert!(texts.contains(&"in time".to_string()) && texts.contains(&"from m".to_string()), "a writer's past posts stay theirs: {texts:?}");
+        assert!(!texts.contains(&"late".to_string()), "nothing new through a key they kept");
+        assert!(!texts.contains(&"wrong epoch".to_string()), "a post commits the epoch whose address served it");
+        assert!(texts.contains(&"second".to_string()));
+        let (live, live_secret, _) = writing::live_writer(&held(&community), held(&community).channel(&general).unwrap()).unwrap();
+        // Even handed the live key, a member the channel doesn't let post never takes it.
+        deliver_on_plane(&bed.relay, &held(&community), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, &live_secret, &[m.public_key()]).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 0, "the channel no longer lets them post");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::store_epoch_key(&cid_hex, &crate::community::v2::writers::secret_scope(&general), live.0, &[0x42; 32]).unwrap();
+        assert!(!can_post(&held(&community), &general), "a held secret that doesn't derive to the ledger's address writes nothing");
+        assert!(!can_post(&held(&community), &general) && send_message(&bed.relay, &held(&community), &general, "denied").await.is_err());
+        assert!(channel_texts(&bed.relay, &held(&community), &general).await.contains(&"second".to_string()), "still a reader");
+
+        // Reopen: posts move back to the read address.
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        assert!(!held(&community).channel(&general).unwrap().restricted());
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(can_post(&held(&community), &general));
+        send_message(&bed.relay, &held(&community), &general, "open again").await.unwrap();
+        bed.swap_to(&owner);
+        let texts = channel_texts(&bed.relay, &held(&community), &general).await;
+        assert!(texts.contains(&"open again".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"sneaky".to_string()), "a closed window stays closed");
+    }
+
+    /// Publish an overwrite the way another client would: no settle follows it here.
+    async fn publish_overwrite_raw<T: Transport + ?Sized>(relay: &T, community: &CommunityV2, scope: [u8; 32], target: crate::community::roles::OverwriteTarget, allow: u64, deny: u64) {
+        let bytes = crate::community::v2::roles::overwrite_target_bytes(community.id(), &target).unwrap();
+        let o = crate::community::roles::Overwrite { scope: crate::simd::hex::bytes_to_hex_32(&scope), target, allow: Permissions(allow), deny: Permissions(deny) };
+        publish_control_edition(relay, community, vsk::CHANNEL_ACL, &crate::community::v2::derive::acl_locator(community.id(), &scope, &bytes), &crate::community::v2::roles::overwrite_content_json(&o)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_writer_duty_backs_up_a_change_made_elsewhere() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Backstop", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let general = community.channels[0].id;
+        let m = member.keys.public_key();
+        let plain = create_role_v2(&bed.relay, &held(&community), "Member", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(&community), &m, vec![plain]).await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &m, None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &m).await).await.unwrap();
+        bed.swap_to(&owner);
+
+        publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await;
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(!held(&community).channel(&general).unwrap().restricted(), "nobody moved the ledger yet");
+        let blind = BreaksAfterPublish { inner: &bed.relay, broken: true.into() };
+        assert!(access_duty(&blind, &held(&community)).await.is_err(), "nothing moves on a partial read");
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty { moved: 1, ..Default::default() });
+        assert!(held(&community).channel(&general).unwrap().restricted());
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "in line now");
+
+        publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), Permissions::SEND_MESSAGES, 0).await;
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        // A stranger hands the new writer a key the ledger never named.
+        let stranger = Keys::generate();
+        act_as(&stranger);
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
+        deliver_on_plane(&bed.relay, &held(&community), &general, scope, Epoch(1), &[0x99; 32], &[m]).await.unwrap();
+        act_as(&owner.keys);
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 0, "a key that derives elsewhere is never taken");
+        assert!(!can_post(&held(&community), &general));
+        bed.swap_to(&owner);
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.delivered, 1, "the new writer is owed the live key");
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.delivered, 0, "once");
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 1);
+        assert!(can_post(&held(&community), &general));
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "a member served already owes nobody");
+        bed.swap_to(&owner);
+
+        publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), 0, 0).await;
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 1, "a served writer the channel no longer lets post");
+        assert_eq!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "cut once");
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(!can_post(&held(&community), &general));
+        bed.swap_to(&owner);
+
+        publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, 0).await;
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.moved, 1);
+        assert!(!held(&community).channel(&general).unwrap().restricted());
+    }
+
+    #[tokio::test]
+    async fn a_refounding_retires_the_writer_key() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Retire", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let general = community.channels[0].id;
+        let m = member.keys.public_key();
+        let plain = create_role_v2(&bed.relay, &held(&community), "Member", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(&community), &m, vec![plain]).await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &m, None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &m).await).await.unwrap();
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 1, "a writer before the ban");
+        bed.swap_to(&owner);
+        assert_eq!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().live_root(), Some(Epoch(0)));
+
+        set_members_banned(&bed.relay, community.id(), &[m], true).await.unwrap();
+        let after = held(&community);
+        assert!(after.root_epoch > community.root_epoch, "a ban refounds");
+        follow_control(&bed.relay, &after).await.unwrap();
+        let duty = access_duty(&bed.relay, &held(&community)).await.unwrap();
+        assert_eq!(duty.writers.moved, 1, "the live writer epoch was minted under the old root: {duty:?}");
+        let ledger = held(&community).channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!((ledger.current_writer().unwrap().0, ledger.live_root()), (Epoch(2), Some(after.root_epoch)));
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
+        let on_plane = fetch_plane_deliveries(&bed.relay, &held(&community), &general, scope).await.unwrap();
+        assert!(!served_at(&on_plane, &m, scope, Epoch(2), &|_| true), "the banned writer is left out");
+        assert!(served_at(&on_plane, &owner.keys.public_key(), scope, Epoch(2), &|_| true));
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "retired once");
+    }
+
+    #[tokio::test]
+    async fn a_manager_cuts_only_writers_it_outranks() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Ranks", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let bits = Permissions::MANAGE_CHANNELS | crate::community::v2::roles::EVERYONE_DEFAULT;
+        let senior = create_role_v2(&bed.relay, &held(), "Senior", 0, bits).await.unwrap();
+        let admin = create_role_v2(&bed.relay, &held(), "Admin", 0, bits).await.unwrap();
+        let (y, x) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![senior.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![admin]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Role(senior.clone()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Role(senior), 0, 0).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&x);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 0, "a writer who outranks this manager is someone else's to cut");
+        act_as(&owner.keys);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1);
+    }
+
+    #[tokio::test]
+    async fn a_writers_ledger_needs_manage_channels_and_the_mark() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Ledger").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
+        let w = |n: u8| crate::community::v2::writers::Ledger::new(&general).appended(1_000, crate::community::v2::writers::Spell::Writer { epoch: Epoch(1), pk: crate::community::v2::writers::writer_address(&[n; 32], &general, Epoch(1)), root: Epoch(0) }).unwrap();
+        let plain = create_role_v2(&bed.relay, &held(), "Member", 0, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        let nobody = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &nobody.public_key(), vec![plain]).await.unwrap();
+        publish_marked(&bed.relay, &held(), &nobody, vsk::WRITERS, &eid, 1, None, &w(1).to_json()).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(held().channel(&general).unwrap().writers.is_none(), "a member without Manage Channels moves nothing");
+        let group = control::ControlPlane::of(&held()).write_group().unwrap();
+        let rumor = control::build_edition_rumor(owner.keys.public_key(), vsk::WRITERS, &eid, 1, None, &w(2).to_json(), 2_100, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner.keys, Timestamp::from_secs(2_100)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(held().channel(&general).unwrap().writers.is_none(), "a new kind is read marked only");
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 1, None, &w(3).to_json()).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers, Some(w(3)), "a channel manager's ledger stands");
+        let other = crate::community::v2::writers::Ledger::new(&ChannelId([0x05; 32])).appended(1_000, crate::community::v2::writers::Spell::Open).unwrap();
+        let head = crate::db::community::get_edition_head(&crate::simd::hex::bytes_to_hex_32(&community.id().0), &crate::simd::hex::bytes_to_hex_32(&eid)).unwrap().unwrap();
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 2, Some(head.1), &other.to_json()).await;
+        let folded = follow_control(&bed.relay, &held()).await.unwrap().updated.expect("the head moved");
+        assert_eq!(folded.channel(&general).unwrap().writers, None, "a ledger naming another channel folds as none");
+        assert_eq!(held().channel(&general).unwrap().writers, None, "and loads as none");
+
+        // A fresh joiner folds the ledger from the join walk itself.
+        publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 3, Some(crate::db::community::get_edition_head(&crate::simd::hex::bytes_to_hex_32(&community.id().0), &crate::simd::hex::bytes_to_hex_32(&eid)).unwrap().unwrap().1), &w(4).to_json()).await;
+        let joiner = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
+        assert!(joiner.writers.iter().any(|(c, content, _)| *c == crate::simd::hex::bytes_to_hex_32(&general.0) && *content == w(4).to_json()));
+    }
+
     #[tokio::test]
     async fn a_holder_delivers_on_the_access_plane_and_the_member_adopts_it() {
         let (bed, owner, x, community) = v2_bed_with_admin("Access").await;
@@ -23804,18 +24212,24 @@ mod tests {
         assert!(send_chat_message(&relay, &held(), &ch, "owner speaks", None, &[], vec![]).await.is_ok(), "the owner holds everything");
         let member = Keys::generate();
         let open = create_public_channel(&relay, &held(), "open").await.unwrap();
+        let quiet = create_public_channel(&relay, &held(), "quiet").await.unwrap();
+        set_overwrite(&relay, &held(), quiet.0, crate::community::roles::OverwriteTarget::Member(member.public_key().to_hex()), 0, Permissions::SEND_MESSAGES).await.unwrap();
         crate::state::MY_SECRET_KEY.store_from_keys(&member, &[]);
         crate::state::set_my_public_key(member.public_key());
         assert!(send_chat_message(&relay, &held(), &open, "fine here", None, &[], vec![]).await.is_ok(), "where Send stands, they post");
         let err = send_chat_message(&relay, &held(), &ch, "hi", None, &[], vec![]).await.unwrap_err();
         assert!(err.contains("can't send"), "{err}");
-        // Readers collapse that member's posts there, not the owner's.
+        assert!(send_chat_message(&relay, &held(), &quiet, "hi", None, &[], vec![]).await.is_err());
+        // In an open channel readers collapse that member's posts, not the owner's.
         use nostr_sdk::prelude::ToBech32;
         let (mn, on) = (member.public_key().to_bech32().unwrap(), owner.public_key().to_bech32().unwrap());
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let denied = crate::VectorCore.channel_send_denied(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0), &[mn.clone(), on]).unwrap();
-        assert_eq!(denied, vec![mn.clone()]);
-        assert!(crate::VectorCore.channel_send_denied(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&open.0), &[mn]).unwrap().is_empty());
+        let denied = |c: &ChannelId, who: &[String]| crate::VectorCore.channel_send_denied(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&c.0), who).unwrap();
+        assert_eq!(denied(&quiet, &[mn.clone(), on.clone()]), vec![mn.clone()]);
+        assert!(denied(&open, &[mn.clone()]).is_empty());
+        // A restricted channel's writer key decided at posting time: nothing there collapses.
+        assert!(held().channel(&ch).unwrap().restricted());
+        assert!(denied(&ch, &[mn, on]).is_empty());
         crate::state::MY_SECRET_KEY.store_from_keys(&owner, &[]);
         crate::state::set_my_public_key(owner.public_key());
     }
@@ -24641,7 +25055,7 @@ mod tests {
 
     /// Attach a Private channel (key + epoch) to a held community and persist it.
     fn add_private_channel(community: &mut CommunityV2, id: ChannelId, key: [u8; 32], epoch: Epoch) {
-        community.channels.push(ChannelV2 { id, name: "mods".into(), private: true, key: Some(key), epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+        community.channels.push(ChannelV2 { id, name: "mods".into(), private: true, key: Some(key), epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         crate::db::community::save_community_v2(community).unwrap();
     }
 
@@ -24868,7 +25282,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let mut community = create_community(&relay, "Cursor", vec!["wss://r".into()], None).await.unwrap();
         let priv_id = ChannelId([0x66; 32]);
-        community.channels.push(ChannelV2 { id: priv_id, name: "vault".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
+        community.channels.push(ChannelV2 { id: priv_id, name: "vault".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         crate::db::community::save_community_v2(&community).unwrap();
         let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert!(community.channel(&priv_id).unwrap().key.is_none(), "keyless survives the round-trip");
@@ -25580,7 +25994,7 @@ mod tests {
         let mut b = create_community(&relay, "B", vec!["wss://r".into()], None).await.unwrap();
         let b_channel = b.channels[0].id;
         // B's set includes a phantom whose id collides with A's channel.
-        b.channels.push(ChannelV2 { id: a_channel, name: "phantom".into(), private: false, key: None, epoch: b.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default() });
+        b.channels.push(ChannelV2 { id: a_channel, name: "phantom".into(), private: false, key: None, epoch: b.root_epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
 
         crate::db::community::save_community_v2(&b).expect("save succeeds, the phantom is skipped");
         // A's channel row is untouched.

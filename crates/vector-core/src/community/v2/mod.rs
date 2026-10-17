@@ -29,6 +29,7 @@ pub mod roles;
 pub mod service;
 pub mod stream;
 pub mod streamauth;
+pub mod writers;
 
 /// Inner rumor kinds (CORD-02 Appendix B). The *outer* event is always a wrap
 /// ([`stream::KIND_WRAP`] / [`stream::KIND_WRAP_EPHEMERAL`]); these ride inside.
@@ -109,4 +110,6 @@ pub mod vsk {
     pub const TENURE: &str = "16";
     /// A Channel's sync to its Category's overwrites (CORD-04 §8).
     pub const CHANNEL_SYNC: &str = "17";
+    /// A restricted Channel's Writers ledger (CORD-03 §1).
+    pub const WRITERS: &str = "18";
 }

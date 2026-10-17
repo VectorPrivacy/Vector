@@ -256,6 +256,9 @@ fn community_addresses(c: &CommunityV2) -> Vec<PublicKey> {
         }
         let (secret, epoch) = c.channel_secret(ch);
         out.push(derive::channel_group_key(&secret, &ch.id, epoch).pk());
+        if let Some(pk) = ch.writers.as_ref().and_then(|l| l.current_writer()).and_then(|(_, pk)| PublicKey::from_slice(&pk).ok()) {
+            out.push(pk);
+        }
     }
     out.extend(rekey_authors(c));
     out
@@ -1108,6 +1111,15 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 Ok(n) => crate::log_info!("[v2:follow {}] {n} key(s) waiting on access planes", &community_id[..8.min(community_id.len())]),
                 Err(e) => crate::log_warn!("[v2:follow {}] access plane read failed: {e}", &community_id[..8.min(community_id.len())]),
             }
+            match super::service::collect_writers(&transport, &current).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    crate::log_info!("[v2:follow {}] took {n} writer key(s)", &community_id[..8.min(community_id.len())]);
+                    refresh_subscription(&client).await;
+                    handler.on_community_refreshed(&community_id);
+                }
+                Err(e) => crate::log_warn!("[v2:follow {}] writer key read failed: {e}", &community_id[..8.min(community_id.len())]),
+            }
         }
         // A holder delivers only off a pass that read both planes: a failed one may hold a key
         // its roster hasn't caught up with.
@@ -1123,7 +1135,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
                 match super::service::access_duty(&transport, &c).await {
                     Ok(done) if done == Default::default() => {}
-                    Ok(done) => crate::log_info!("[v2:access] delivered {} channel key(s), cut {} holder(s) a channel no longer lets in", done.delivered, done.cut),
+                    Ok(done) => crate::log_info!(
+                        "[v2:access] delivered {} channel key(s), cut {} holder(s) a channel no longer lets in; writers: {} delivered, {} cut, {} ledger(s) moved",
+                        done.delivered, done.cut, done.writers.delivered, done.writers.cut, done.writers.moved
+                    ),
                     Err(e) => crate::log_warn!("[v2:access] access duty failed: {e}"),
                 }
             });
@@ -1838,6 +1853,7 @@ mod tests {
             voice: None,
             meta_custom: None,
             meta_extra: Default::default(),
+            writers: None,
         });
         let authors = plane_authors(std::slice::from_ref(&c));
         // A private channel is read under its OWN key/epoch (not the root).

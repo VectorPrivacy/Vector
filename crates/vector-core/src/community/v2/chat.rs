@@ -26,10 +26,11 @@
 //! rumor kind govern meaning. Publishers still MUST put typing on 21059
 //! (relays MUST NOT store it) — that is a send-side duty, not a read gate.
 
-use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent,
+use nostr_sdk::prelude::{Event, EventBuilder, Keys, PublicKey, Tag, Timestamp, UnsignedEvent,
 };
 
 use super::super::{ChannelId, Epoch};
+use crate::event_ext::FinalizeUnsignedWithId;
 use super::derive::{channel_group_key, GroupKey};
 use super::kind;
 use super::stream::{self, OpenedStream, SealForm, StreamError};
@@ -58,6 +59,8 @@ pub enum ChatError {
     BadTag(&'static str),
     /// The wrap's author matches no held `(epoch, key)` — not ours to open.
     NoHeldEpoch,
+    /// The rumor's writer epoch isn't the one whose address served it (CORD-03 §3).
+    WriterEpochMismatch,
 }
 
 impl std::fmt::Display for ChatError {
@@ -70,6 +73,7 @@ impl std::fmt::Display for ChatError {
             ChatError::DuplicateTag(t) => write!(f, "duplicate chat tag: {t}"),
             ChatError::BadTag(t) => write!(f, "malformed chat tag: {t}"),
             ChatError::NoHeldEpoch => write!(f, "wrap author matches no held epoch key"),
+            ChatError::WriterEpochMismatch => write!(f, "writer epoch doesn't match the address"),
         }
     }
 }
@@ -460,7 +464,66 @@ pub fn open_chat_event_at(
         return Err(ChatError::NotEncryptedSealed);
     }
     stream::check_channel_binding(&opened.rumor, channel_id, epoch)?;
+    if writer_epoch_of(&opened.rumor)?.is_some() {
+        return Err(ChatError::WriterEpochMismatch);
+    }
     parse_chat_rumor(opened)
+}
+
+/// Open a post at a restricted Channel's writer address (CORD-03 §1): the wrap must verify as
+/// signed by writer epoch `wepoch`'s key, open under read epoch `epoch`'s conversation key, and
+/// its rumor commit the Channel and both epochs.
+pub fn open_writer_chat_event(
+    wrap: &Event,
+    writer: &PublicKey,
+    wepoch: Epoch,
+    conv_key: &nostr_sdk::prelude::nip44::v2::ConversationKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+) -> Result<ChatEvent, ChatError> {
+    let opened = stream::open_wrap_at(wrap, writer, conv_key, true)?;
+    if opened.seal_form != SealForm::Encrypted {
+        return Err(ChatError::NotEncryptedSealed);
+    }
+    stream::check_channel_binding(&opened.rumor, channel_id, epoch)?;
+    if writer_epoch_of(&opened.rumor)? != Some(wepoch) {
+        return Err(ChatError::WriterEpochMismatch);
+    }
+    parse_chat_rumor(opened)
+}
+
+const TAG_WEPOCH: &str = "wepoch";
+
+/// The writer epoch a rumor commits, if any.
+fn writer_epoch_of(rumor: &UnsignedEvent) -> Result<Option<Epoch>, ChatError> {
+    let mut found = None;
+    for t in rumor.tags.iter() {
+        let s = t.as_slice();
+        if s.first().map(String::as_str) != Some(TAG_WEPOCH) {
+            continue;
+        }
+        let n = s.get(1).and_then(|v| v.parse::<u64>().ok().filter(|n| n.to_string() == *v)).ok_or(ChatError::BadTag(TAG_WEPOCH))?;
+        if found.replace(Epoch(n)).is_some() {
+            return Err(ChatError::DuplicateTag(TAG_WEPOCH));
+        }
+    }
+    Ok(found)
+}
+
+/// `rumor` committing writer epoch `wepoch` (CORD-03 §3), its id recomputed.
+pub fn with_writer_epoch(rumor: UnsignedEvent, wepoch: Epoch) -> UnsignedEvent {
+    let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
+    tags.push(Tag::custom(TAG_WEPOCH, [wepoch.0.to_string()]));
+    let mut out = EventBuilder::new(rumor.kind, rumor.content).tags(tags).custom_created_at(rumor.created_at).finalize_unsigned_with_id(rumor.pubkey);
+    out.ensure_id();
+    out
+}
+
+/// Whether a rumor kind moves to a restricted Channel's writer address. Reactions, typing and
+/// deletions stay at the read address: a restricted Channel gates posting, not reacting, and a
+/// deletion is judged by its signer's authority wherever it lands.
+pub fn rides_writer_address(kind: u16) -> bool {
+    !matches!(kind, kind::REACTION | kind::TYPING | kind::DELETE)
 }
 
 /// Open a chat wrap against every `(epoch, secret)` a client holds for one

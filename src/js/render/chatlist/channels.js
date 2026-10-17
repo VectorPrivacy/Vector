@@ -26,6 +26,7 @@ function visibleChannels(channels) {
             id: c.channel_id, name: c.name, private: !!c.private, readable: true,
             category: c.category_id || null, topic: c.topic || '', view: c.view || 'chat',
             perms: c.my_permissions ?? null,
+            restricted: !!c.restricted, writer: c.can_post !== false,
         }));
 }
 
@@ -34,6 +35,13 @@ function channelAllowsSend(chat) {
     const communityId = communityIdOfChat(chat);
     const perms = communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id)?.perms;
     return perms == null || (BigInt(perms) & (1n << 14n)) !== 0n;
+}
+
+/** Whether the local user may post in a restricted channel but its writer key hasn't arrived. */
+function channelAwaitsWriterKey(chat) {
+    const communityId = communityIdOfChat(chat);
+    const ch = communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id);
+    return !!(ch?.restricted && !ch.writer);
 }
 
 function lockedChannels(channels) {

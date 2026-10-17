@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 106;
+pub const HIGHEST_MIGRATION_ID: u32 = 107;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1481,6 +1481,22 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 106, "Edition head family", |tx| {
         tx.execute("ALTER TABLE community_edition_heads ADD COLUMN family TEXT", [])
             .map_err(|e| format!("add community_edition_heads.family: {e}"))?;
+        Ok(())
+    })?;
+
+    // CORD-03 §1: a restricted Channel's Writers ledger, the folded head's raw content.
+    run_atomic_migration(conn, 107, "Writers ledgers", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_writers (
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                content      TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                PRIMARY KEY (community_id, channel_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 107: {e}"))?;
         Ok(())
     })?;
 

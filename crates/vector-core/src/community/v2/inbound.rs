@@ -539,6 +539,28 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
+        if !super::writers::admits(ch.writers.as_ref(), None, &event) {
+            return DispatchedV2::Ignored;
+        }
+        let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
+    }
+
+    // 1b. A restricted Channel's writer addresses (CORD-03 §1), opened under the read key.
+    for ch in &community.channels {
+        let Some(ledger) = ch.writers.as_ref() else { continue };
+        if ch.private && ch.key.is_none() {
+            continue;
+        }
+        let Some((wepoch, ..)) = ledger.writers().find(|(_, pk, _)| *pk == wrap.pubkey.to_bytes()) else { continue };
+        let (secret, epoch) = community.channel_secret(ch);
+        let group = super::derive::channel_group_key(&secret, &ch.id, epoch);
+        let Ok(event) = chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, group.conv_key(), &ch.id, epoch) else {
+            return DispatchedV2::NotOurs;
+        };
+        if !super::writers::admits(Some(ledger), Some(wepoch), &event) {
+            return DispatchedV2::Ignored;
+        }
         let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
         return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
     }
@@ -804,6 +826,56 @@ mod tests {
         crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
         crate::state::set_my_public_key(me.public_key());
         (tmp, guard, me)
+    }
+
+    #[tokio::test]
+    async fn a_restricted_channel_dispatches_its_writers_and_drops_the_rest() {
+        use super::super::writers::{writer_address, Ledger, Spell};
+        use crate::community::Epoch;
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let mut community = service::create_community(&relay, "Live", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let epoch = community.root_epoch;
+        let read = super::super::derive::channel_group_key(&community.community_root, &general, epoch);
+        let (s1, s2) = ([0x11; 32], [0x22; 32]);
+        let w1 = super::super::derive::channel_writer_group_key(&s1, &general, Epoch(1));
+        let w2 = super::super::derive::channel_writer_group_key(&s2, &general, Epoch(2));
+        let ledger = Ledger::new(&general)
+            .appended(10_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&s1, &general, Epoch(1)), root: Epoch(0) })
+            .unwrap()
+            .appended(20_000, Spell::Writer { epoch: Epoch(2), pk: writer_address(&s2, &general, Epoch(2)), root: Epoch(0) })
+            .unwrap();
+        community.channels[0].writers = Some(ledger);
+        assert!(super::super::realtime::plane_authors(std::slice::from_ref(&community)).contains(&w2.pk()), "the live writer is subscribed");
+        let member = Keys::generate();
+        let post = |group: &super::super::derive::GroupKey, wepoch: Option<Epoch>, text: &str, at_ms: u64| {
+            let rumor = chat::build_message_rumor(member.public_key(), &general, epoch, text, None, &[], vec![], at_ms);
+            let rumor = match wepoch {
+                Some(w) => chat::with_writer_epoch(rumor, w),
+                None => rumor,
+            };
+            let split = super::super::derive::GroupKey::from_parts(group.keys().clone(), read.conv_key().clone());
+            chat::seal_chat_rumor(&rumor, &split, &member, Timestamp::from_secs(at_ms / 1000), false).unwrap().0
+        };
+        let rec = Recorder::default();
+        let chat = |wrap: &nostr_sdk::prelude::Event| matches!(dispatch_wrap(wrap, &community, &me.public_key(), &rec), DispatchedV2::Chat { .. });
+        assert!(chat(&post(&w2, Some(Epoch(2)), "live", 30_000)));
+        assert!(chat(&post(&w1, Some(Epoch(1)), "past", 15_000)), "a writer's past posts stay");
+        assert!(!chat(&post(&w1, Some(Epoch(1)), "late", 25_000)), "nothing after its entry ends");
+        assert!(!chat(&post(&w2, Some(Epoch(1)), "spliced", 30_000)), "the epoch must be the address's");
+        assert!(!chat(&post(&w2, None, "untagged", 30_000)));
+        assert!(!chat(&post(&read, None, "flood", 30_000)), "the read address takes no posts inside a writer window");
+        assert!(chat(&post(&read, None, "earlier", 5_000)), "before the window it was open");
+        assert!(!chat(&post(&read, Some(Epoch(2)), "dressed up", 5_000)), "a read-address post claims no writer epoch");
+        let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &crate::simd::hex::bytes_to_hex_32(&[0x33; 32]), &me.public_key().to_hex(), 9, "+", None, 30_000);
+        let (wrap, _) = chat::seal_chat_rumor(&reaction, &read, &member, Timestamp::from_secs(30), false).unwrap();
+        assert!(chat(&wrap), "reactions stay at the read address");
+        // A forged wrap at the writer address fails the signature a reader checks there.
+        let mut forged = post(&w2, Some(Epoch(2)), "forged", 30_000);
+        forged.sig = post(&w2, Some(Epoch(2)), "other", 30_001).sig;
+        assert!(!chat(&forged));
     }
 
     #[tokio::test]

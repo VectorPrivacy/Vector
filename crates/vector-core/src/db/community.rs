@@ -962,6 +962,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         // anchors survive a leave/re-join and reject a legitimately reset chain.
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
+        Some("DELETE FROM community_writers WHERE community_id = ?1"),
     ]
     .into_iter()
     .flatten()
@@ -2546,7 +2547,21 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     voice: ch_stash.voice,
                     meta_custom: ch_stash.custom,
                     meta_extra: ch_stash.extra,
+                    writers: None,
                 });
+            }
+        }
+        {
+            let mut stmt = conn
+                .prepare("SELECT channel_id, content FROM community_writers WHERE community_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![id_hex], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (ch_hex, content) = row.map_err(|e| e.to_string())?;
+                let Some(ch) = channels.iter_mut().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == ch_hex) else { continue };
+                ch.writers = crate::community::v2::writers::Ledger::parse(&dt(o, &content)).filter(|l| l.channel == ch.id.0);
             }
         }
         // The held set keeps these resident; push-growth leaves up to half unused.
@@ -2769,6 +2784,7 @@ mod tests {
             voice: None,
             meta_custom: None,
             meta_extra: Default::default(),
+            writers: None,
         }
     }
 
@@ -4386,6 +4402,37 @@ pub fn set_community_pins(community_id: &str, channel_id: &str, content: &str, v
         )
         .map_err(|e| format!("set pins: {e}"))?;
     Ok(changed > 0)
+}
+
+/// Persist a channel's folded Writers ledger head (CORD-03 §1), monotonic on version.
+pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str, version: i64) -> Result<bool, String> {
+    let _seal = crate::crypto::gate::sealing();
+    let enc = enc_txt(content)?;
+    let conn = super::get_write_connection_guard_static()?;
+    let changed = conn
+        .execute(
+            "INSERT INTO community_writers (community_id, channel_id, content, version) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(community_id, channel_id) DO UPDATE SET
+                 content = excluded.content, version = excluded.version
+             WHERE excluded.version >= community_writers.version",
+            params![community_id, channel_id, enc, version],
+        )
+        .map_err(|e| format!("set writers: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// A channel's stored Writers ledger head: `(raw content, version)`.
+pub fn get_community_writers(community_id: &str, channel_id: &str) -> Result<Option<(String, i64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT content, version FROM community_writers WHERE community_id = ?1 AND channel_id = ?2",
+            params![community_id, channel_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get writers: {e}"))?;
+    Ok(row.map(|(content, version)| (dec_txt(&content), version)))
 }
 
 /// A channel's stored Pin List head: `(raw content, version)`, `None` when no

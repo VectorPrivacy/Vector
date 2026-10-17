@@ -28,6 +28,15 @@ pub struct ChannelV2 {
     pub voice: Option<bool>,
     pub meta_custom: Option<serde_json::Map<String, serde_json::Value>>,
     pub meta_extra: serde_json::Map<String, serde_json::Value>,
+    /// The folded Writers ledger of a restricted Channel (CORD-03 §1), held in its own table.
+    pub writers: Option<super::writers::Ledger>,
+}
+
+impl ChannelV2 {
+    /// Whether posts land at a writer address now (CORD-03 §1).
+    pub fn restricted(&self) -> bool {
+        self.writers.as_ref().is_some_and(|l| l.restricted())
+    }
 }
 
 /// A Category (CORD-03 §4): a sidebar group Channels file under by their `category`.
@@ -177,6 +186,7 @@ impl CommunityV2 {
                 voice: None,
                 meta_custom: None,
                 meta_extra: Default::default(),
+                writers: None,
             }],
             categories: Vec::new(),
             dissolved: false,
@@ -216,6 +226,7 @@ impl CommunityV2 {
                 voice: None,
                 meta_custom: None,
                 meta_extra: Default::default(),
+                writers: None,
             });
         }
 
@@ -454,11 +465,11 @@ mod tests {
         // A renamed general → the first READABLE channel wins; a keyless private
         // channel (unreadable) is skipped even when it sits first.
         c.channels[0].name = "lobby".into();
-        c.channels.insert(0, ChannelV2 { id: ChannelId([9u8; 32]), name: "sekrit".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
+        c.channels.insert(0, ChannelV2 { id: ChannelId([9u8; 32]), name: "sekrit".into(), private: true, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         assert_eq!(c.primary_channel().unwrap().name, "lobby");
 
         // A readable channel NAMED general beats position.
-        c.channels.push(ChannelV2 { id: ChannelId([8u8; 32]), name: "General".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() });
+        c.channels.push(ChannelV2 { id: ChannelId([8u8; 32]), name: "General".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default(), writers: None });
         assert_eq!(c.primary_channel().unwrap().name, "General");
     }
 

@@ -595,6 +595,7 @@ mod xform_tests {
              CREATE TABLE community_guestbook (community_id TEXT, events TEXT, cursor_secs INTEGER);
              CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);
              CREATE TABLE community_pins (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
+             CREATE TABLE community_writers (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
              CREATE TABLE attachments (key TEXT, nonce TEXT, name TEXT, url TEXT, fallback_urls TEXT, img_meta TEXT);
              CREATE TABLE events (preview_metadata TEXT);
              CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
@@ -921,6 +922,7 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_public_invites", &["token", "url", "label"]),
     ("community_invite_link_sets", &["creator", "locators"]),
     ("community_pins", &["content"]),
+    ("community_writers", &["content"]),
     ("community_bans", &["npub"]),
 ];
 

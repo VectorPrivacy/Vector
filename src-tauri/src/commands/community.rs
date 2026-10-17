@@ -59,6 +59,10 @@ pub struct ChannelSummary {
     pub view: &'static str,
     /// What the local user may do here, as a decimal string; absent on the legacy roster.
     pub my_permissions: Option<String>,
+    /// Posts land at a writer address (CORD-03 §1).
+    pub restricted: bool,
+    /// This device holds what posting here takes now.
+    pub can_post: bool,
 }
 
 /// The [`CommunitySummary`] for a **v2** community — the owner is the
@@ -88,6 +92,8 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
                 topic: ch.topic().map(String::from),
                 view: ch.view().as_str(),
                 my_permissions: mine.get(&ch.id.0).map(|p| p.to_string()),
+                restricted: ch.restricted(),
+                can_post: vector_core::community::v2::service::can_post(c, &ch.id),
             })
             .collect(),
         categories: vector_core::VectorCore::categories_json(c),
@@ -645,6 +651,7 @@ pub async fn send_community_message(
         let rumor = vector_core::community::v2::chat::build_message_rumor(
             author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms,
         );
+        let rumor = vector_core::community::v2::service::outbound_rumor(&community, &ch, rumor);
         let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
         // 1. Optimistic message — renders instantly, keyed by its real id.

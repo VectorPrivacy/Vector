@@ -1368,6 +1368,9 @@ async function openChat(contact, { reread = true } = {}) {
     } else if (!channelAllowsSend(chat)) {
         VectorSvelte.setLock('perms', "You can't send messages in this channel");
         VectorSvelte.flushSync();
+    } else if (channelAwaitsWriterKey(chat)) {
+        VectorSvelte.setLock('perms', 'Your key to post here is on its way');
+        VectorSvelte.flushSync();
     } else {
         VectorSvelte.setLock(null);
         VectorSvelte.flushSync();

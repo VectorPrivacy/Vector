@@ -41,10 +41,39 @@ const BATCH_FILTERS: usize = 20;
 struct Job {
     channel_hex: String,
     channel_id: ChannelId,
+    /// The read epoch's group: its conversation key opens every plane of the channel.
     group: GroupKey,
     epoch: Epoch,
     since: Option<u64>,
     relay_set: usize,
+    /// The address fetched: the read plane's, or a restricted Channel's live writer.
+    address: PublicKey,
+    /// A writer address's epoch, and its keys when this device is a writer.
+    writer: Option<(Epoch, Option<Keys>)>,
+    ledger: Option<crate::community::v2::writers::Ledger>,
+}
+
+impl Job {
+    /// Open one wrap fetched for this job, dropping what its Channel's ledger refuses.
+    fn open(&self, wrap: &Event) -> Option<chat::ChatEvent> {
+        if wrap.pubkey != self.address {
+            return None;
+        }
+        let wepoch = self.writer.as_ref().map(|(w, _)| *w);
+        let opened = match wepoch {
+            Some(w) => chat::open_writer_chat_event(wrap, &self.address, w, self.group.conv_key(), &self.channel_id, self.epoch),
+            None => chat::open_chat_event(wrap, &self.group, &self.channel_id, self.epoch),
+        };
+        opened.ok().filter(|ev| crate::community::v2::writers::admits(self.ledger.as_ref(), wepoch, ev))
+    }
+
+    /// The keys a relay that gates reads must see this connection authenticated as.
+    fn auth_keys(&self) -> Option<Keys> {
+        match &self.writer {
+            Some((_, keys)) => keys.clone(),
+            None => Some(self.group.keys().clone()),
+        }
+    }
 }
 
 /// Learned from live NIP-42 challenges (streamauth records the KV): a gating
@@ -183,14 +212,34 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 if plane_index.contains_key(&group.pk()) {
                     continue;
                 }
+                let ledger = ch.writers.clone();
+                let writer = ledger.as_ref().and_then(|l| l.current_writer()).and_then(|(we, pk)| PublicKey::from_slice(&pk).ok().map(|a| (we, a)));
+                if let Some((wepoch, address)) = writer.filter(|(_, a)| !plane_index.contains_key(a)) {
+                    let keys = crate::community::v2::service::live_writer_of(&community, ch).filter(|(e, ..)| *e == wepoch).map(|(_, _, g)| g.keys().clone());
+                    plane_index.insert(address, jobs.len());
+                    jobs.push(Job {
+                        channel_hex: t.channel_hex.clone(),
+                        channel_id: ch_id,
+                        group: group.clone(),
+                        epoch,
+                        since: t.since,
+                        relay_set,
+                        address,
+                        writer: Some((wepoch, keys)),
+                        ledger: ledger.clone(),
+                    });
+                }
                 plane_index.insert(group.pk(), jobs.len());
                 jobs.push(Job {
                     channel_hex: t.channel_hex,
                     channel_id: ch_id,
+                    address: group.pk(),
                     group,
                     epoch,
                     since: t.since,
                     relay_set,
+                    writer: None,
+                    ledger,
                 });
             }
         }
@@ -210,7 +259,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         // serve a multi-author REQ only when EVERY author is authed on the
         // connection (proven live: all-authed → EOSE; partial → CLOSED), and the
         // responder auths exactly the registered set.
-        crate::community::v2::streamauth::register(jobs.iter().map(|j| j.group.keys().clone()));
+        crate::community::v2::streamauth::register(jobs.iter().filter_map(Job::auth_keys));
         let shared = LiveTransport::warm_client(
             relay_sets.iter().flat_map(|r| r.iter().cloned()).collect::<Vec<_>>().as_slice(),
             std::time::Duration::from_secs(4),
@@ -233,7 +282,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                             let j = &jobs[i];
                             Query {
                                 kinds: vec![stream::KIND_WRAP],
-                                authors: vec![j.group.pk_hex()],
+                                authors: vec![j.address.to_hex()],
                                 since: j.since,
                                 limit: Some(50),
                                 ..Default::default()
@@ -333,7 +382,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 }
                 let Some(&job_idx) = plane_index.get(&wrap.pubkey) else { continue };
                 let j = &jobs[job_idx];
-                if let Ok(event) = chat::open_chat_event(&wrap, &j.group, &j.channel_id, j.epoch) {
+                if let Some(event) = j.open(&wrap) {
                     stats.batch_events += 1;
                     pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
                 }
@@ -404,10 +453,12 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 j.since.is_some_and(|s| now.saturating_sub(s) < RECENT_SECS)
                     && live.iter().any(|r| gating.contains(r.as_str()))
             })
-            .map(|(idx, j)| {
+            .filter_map(|(idx, j)| {
+                // The fallback authenticates as the plane; a reader holds no writer key.
+                let keys = j.auth_keys()?;
                 let q = Query {
                     kinds: vec![stream::KIND_WRAP],
-                    authors: vec![j.group.pk_hex()],
+                    authors: vec![j.address.to_hex()],
                     since: j.since,
                     limit: Some(50),
                     // Declared intent — fetch_plane does not consult evidence
@@ -421,7 +472,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 let gate_targets: Vec<String> =
                     live.iter().filter(|r| gating.contains(r.as_str())).cloned().collect();
                 let targets = if gate_targets.is_empty() { live.to_vec() } else { gate_targets };
-                (idx, j.group.keys().clone(), q, targets)
+                Some((idx, keys, q, targets))
             })
             .collect();
         let fallback_pages: Vec<(usize, Vec<Event>)> = futures_util::stream::iter(missed)
@@ -442,10 +493,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 if !seen_wraps.insert(wrap.id) {
                     continue;
                 }
-                if wrap.pubkey != j.group.pk() {
-                    continue;
-                }
-                if let Ok(event) = chat::open_chat_event(&wrap, &j.group, &j.channel_id, j.epoch) {
+                if let Some(event) = j.open(&wrap) {
                     stats.fallback_events += 1;
                     fb_pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
                 }

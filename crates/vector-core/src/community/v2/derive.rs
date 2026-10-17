@@ -35,6 +35,7 @@ const LABEL_BASE_REKEY_PSEUDONYM: &str = "concord/base-rekey-pseudonym";
 const LABEL_RECIPIENT_PSEUDONYM: &str = "concord/recipient-pseudonym";
 const LABEL_GUESTBOOK: &str = "concord/guestbook";
 const LABEL_CHANNEL_ACCESS: &str = "concord/channel-access";
+const LABEL_CHANNEL_WRITER: &str = "concord/channel-writer";
 const LABEL_VOICE_SIGNER: &str = "concord/voice-signer";
 const LABEL_VOICE_MEDIA: &str = "concord/voice-media";
 const LABEL_VOICE_SENDER: &str = "concord/voice-sender";
@@ -47,6 +48,9 @@ const LABEL_EVERYONE: &str = "concord/everyone";
 const LABEL_TENURE: &str = "concord/tenure";
 const LABEL_ACL: &str = "concord/acl";
 const LABEL_SYNC: &str = "concord/sync";
+const LABEL_WRITERS: &str = "concord/writers";
+/// A restricted Channel's writer scope prefix — plain SHA-256.
+const LABEL_WRITER_SCOPE: &[u8] = b"concord/writer-scope";
 const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -231,6 +235,13 @@ pub fn guestbook_group_key(community_root: &[u8; 32], community_id: &CommunityId
     GroupKey::derive(LABEL_GUESTBOOK, community_root, &community_id.0, Some(epoch.0))
 }
 
+/// A restricted Channel's writer keypair for a writer epoch (CORD-03 §1): its public key is the
+/// address posts land at, its secret signs their wraps. The wraps stay encrypted to the
+/// Channel's read key.
+pub fn channel_writer_group_key(writer_secret: &[u8; 32], channel_id: &ChannelId, writer_epoch: Epoch) -> GroupKey {
+    GroupKey::derive(LABEL_CHANNEL_WRITER, writer_secret, &channel_id.0, Some(writer_epoch.0))
+}
+
 /// A Channel's access plane for the root epoch, where any key holder delivers the key to
 /// an entitled member who lacks it (CORD-03 §5).
 pub fn channel_access_group_key(community_root: &[u8; 32], channel_id: &ChannelId, root_epoch: Epoch) -> GroupKey {
@@ -326,6 +337,16 @@ pub fn acl_locator(community_id: &CommunityId, scope: &[u8; 32], target: &[u8; 3
 /// A Channel's sync coordinate (CORD-04 §8).
 pub fn sync_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u8; 32] {
     hkdf32(&community_id.0, &build_info(LABEL_SYNC, &channel_id.0, None))
+}
+
+/// A restricted Channel's Writers ledger coordinate (CORD-03 §1).
+pub fn writers_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_WRITERS, &channel_id.0, None))
+}
+
+/// What a Channel's writer blobs bind to (CORD-03 §1), so one is never a read key.
+pub fn writer_scope(channel_id: &ChannelId) -> [u8; 32] {
+    Sha256::new().chain_update(LABEL_WRITER_SCOPE).chain_update(channel_id.0).finalize().into()
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).
@@ -470,6 +491,10 @@ mod tests {
     const GOLDEN_CONTROL_SIGNER_EMULTI_PK: &str = "e27235cc13be2f9ad65648e01ff2b63402846469c8638b5386c625688194ec7d";
     const GOLDEN_GUESTBOOK_E0_PK: &str = "ad09de582026fa7a052db18bb5827fa24c15e929d59aadcc91efb8508f5368ad";
     const GOLDEN_CHANNEL_ACCESS_E0_PK: &str = "901126284c4d1dfd5e753aa866e28b498825c3382611d1f5d5e929de0bcae15e";
+    const GOLDEN_CHANNEL_WRITER_E1_PK: &str = "7a5b45238020c162ffb7237c680934cf088ddfa47e1d5e2d630450672bc32555";
+    const GOLDEN_WRITER_SCOPE: &str = "211ceda4b4148fa644628adcc2fe6fd8db10878bcdf1cefe02e59ad5d85741a5";
+    const GOLDEN_WRITERS_LOCATOR: &str = "18b69b68718ea12d42ddc77692f72660c2320e7b5fadc0b671f9dfe265099a91";
+    const GOLDEN_SYNC_LOCATOR: &str = "c5ec430fce319555a3c7c0fad4800b8a245c644fc4ab17b8db3aa4e42605e882";
     const GOLDEN_CHANNEL_REKEY_E1_PK: &str = "7c55cdb957e9db2b4800d687b2a07d3f7066b1a35824a1e86ba871f55e87e8b5";
     const GOLDEN_BASE_REKEY_E1_PK: &str = "fb2fa44fba66ba15595f784255a1cb569531db8784432ac0e4fe838498dd9dea";
     const GOLDEN_DISSOLVED_PK: &str = "4d3d55d88fdf9d9c2089651e5cbb0dfa93b6b9b10cdcb2319b0dce1a1398096a";
@@ -530,6 +555,14 @@ mod tests {
     #[test]
     fn channel_access_group_key_golden_vector() {
         assert_eq!(channel_access_group_key(&secret(), &chan(), Epoch(0)).pk_hex(), GOLDEN_CHANNEL_ACCESS_E0_PK);
+    }
+
+    #[test]
+    fn writer_golden_vectors() {
+        assert_eq!(channel_writer_group_key(&secret(), &chan(), Epoch(1)).pk_hex(), GOLDEN_CHANNEL_WRITER_E1_PK);
+        assert_eq!(hex(&writer_scope(&chan())), GOLDEN_WRITER_SCOPE);
+        assert_eq!(hex(&writers_locator(&cid(), &chan())), GOLDEN_WRITERS_LOCATOR);
+        assert_eq!(hex(&sync_locator(&cid(), &chan())), GOLDEN_SYNC_LOCATOR);
     }
 
     #[test]

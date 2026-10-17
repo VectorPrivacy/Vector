@@ -50,6 +50,8 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
             "topic": ch.topic(),
             "view": ch.view().as_str(),
             "my_permissions": mine.get(&ch.id.0).map(|p| p.to_string()),
+            "restricted": ch.restricted(),
+            "can_post": vector_core::community::v2::service::can_post(c, &ch.id),
         })).collect::<Vec<_>>(),
         "categories": VectorCore::categories_json(c),
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
@@ -179,6 +181,7 @@ pub async fn send_community_message(channel_id: String, content: String, replied
         let rumor = vector_core::community::v2::chat::build_message_rumor(
             author, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms,
         );
+        let rumor = vector_core::community::v2::service::outbound_rumor(&community, &ch, rumor);
         let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
         let mut pending = Message {
