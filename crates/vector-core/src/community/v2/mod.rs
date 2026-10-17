@@ -99,6 +99,10 @@ pub mod vsk {
     pub const PINS: &str = "11";
     /// Roles v2 and `@everyone` (CORD-04 §2), replacing vsk 1 once a Community activates it.
     pub const ROLE_V2: &str = "13";
+    /// A Channel or Category permission overwrite (CORD-04 §8).
+    pub const CHANNEL_ACL: &str = "14";
+    /// A Category (CORD-03 §4).
+    pub const CATEGORY: &str = "15";
     /// A member's Tenure (CORD-04 §9).
     pub const TENURE: &str = "16";
 }

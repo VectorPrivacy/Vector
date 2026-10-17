@@ -4901,7 +4901,8 @@ async fn publish_control_edition<T: Transport + ?Sized>(
         // On Roles v2 every edition is marked: its hash covers its signer and it names its
         // Community (CORD-04 §1). A Roles v2 kind is marked even while the switch is under way.
         let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
-        let marked = vsk == super::vsk::ROLE_V2 || vsk == super::vsk::TENURE || crate::db::community::get_edition_head(&cid_hex, &everyone_hex)?.is_some();
+        let marked = [super::vsk::ROLE_V2, super::vsk::TENURE, super::vsk::CATEGORY, super::vsk::CHANNEL_ACL].contains(&vsk)
+            || crate::db::community::get_edition_head(&cid_hex, &everyone_hex)?.is_some();
         let binding = marked.then(|| super::derive::edition_binding(community.id()));
         let rumor = control::build_edition_rumor_bound(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref(), binding);
         let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
@@ -6586,6 +6587,179 @@ fn assert_channel_id_free(channel_id: &ChannelId, community_id: &crate::communit
     Ok(())
 }
 
+/// Publish a Category edition and apply it locally, as a channel edit does: the fold
+/// that would otherwise show it runs later.
+async fn set_category<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, id: [u8; 32], meta: &control::CategoryMetadata) -> Result<(), String> {
+    if meta.deleted != Some(true) && meta.name.trim().is_empty() {
+        return Err("a category needs a name".to_string());
+    }
+    control::validate_category_metadata(meta).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
+    publish_control_edition(transport, community, vsk::CATEGORY, &id, &content).await?;
+    let lock = super::realtime::follow_lock(community.id());
+    let _guard = lock.lock().await;
+    if let Ok(Some(mut held)) = crate::db::community::load_community_v2(community.id()) {
+        if apply_category_metadata(&mut held, id, meta.clone()) {
+            crate::db::community::save_community_v2(&held)?;
+        }
+    }
+    Ok(())
+}
+
+/// Create a Category at the bottom of the sidebar (CORD-03 §4).
+pub async fn create_category<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str) -> Result<[u8; 32], String> {
+    crate::db::scoped(async move {
+        ensure_channel_manager(community, &me_pk()?)?;
+        if community.categories.len() >= super::community::MAX_CATEGORIES {
+            return Err(format!("a community holds at most {} categories", super::community::MAX_CATEGORIES));
+        }
+        let last = community.categories.iter().filter_map(|c| c.position.as_deref()).max_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let position = crate::community::rank::between(last, None).ok_or("no room for another category")?;
+        let id = super::super::random_32();
+        set_category(transport, community, id, &control::CategoryMetadata { name: name.trim().to_string(), position: Some(position), deleted: None, extra: Default::default() }).await?;
+        Ok(id)
+    })
+    .await
+}
+
+pub async fn rename_category<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, id: [u8; 32], name: &str) -> Result<(), String> {
+    crate::db::scoped(async move {
+        ensure_channel_manager(community, &me_pk()?)?;
+        let current = community.categories.iter().find(|c| c.id == id).ok_or("no such category")?;
+        let meta = control::CategoryMetadata { name: name.trim().to_string(), position: current.position.clone(), deleted: None, extra: current.extra.clone() };
+        set_category(transport, community, id, &meta).await
+    })
+    .await
+}
+
+/// Delete a Category: terminal. Its Channels keep pointing at it and render uncategorized.
+pub async fn delete_category<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, id: [u8; 32]) -> Result<(), String> {
+    crate::db::scoped(async move {
+        ensure_channel_manager(community, &me_pk()?)?;
+        community.categories.iter().find(|c| c.id == id).ok_or("no such category")?;
+        set_category(transport, community, id, &control::CategoryMetadata { deleted: Some(true), ..Default::default() }).await
+    })
+    .await
+}
+
+/// Move a Category to `index` among the Categories (0 is the top).
+pub async fn move_category<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, id: [u8; 32], index: usize) -> Result<(), String> {
+    crate::db::scoped(async move {
+        ensure_channel_manager(community, &me_pk()?)?;
+        let current = community.categories.iter().find(|c| c.id == id).ok_or("no such category")?.clone();
+        let order: Vec<super::community::CategoryV2> = community.sidebar().into_iter().filter_map(|(c, _)| c.cloned()).filter(|c| c.id != id).collect();
+        let keys = keyed(transport, community, order.iter().map(|c| (c.position.clone(), Keyed::Category(c.clone()))).collect()).await?;
+        let index = index.min(keys.len());
+        let position = crate::community::rank::between(index.checked_sub(1).map(|i| keys[i].as_str()), keys.get(index).map(String::as_str))
+            .ok_or("no room between those categories")?;
+        let meta = control::CategoryMetadata { name: current.name, position: Some(position), deleted: None, extra: current.extra };
+        set_category(transport, community, id, &meta).await
+    })
+    .await
+}
+
+/// Move a Channel into `category` (`None` = uncategorized) at `index` among its
+/// Channels: one edition, on the moved Channel (CORD-03 §2).
+pub async fn move_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel_id: &ChannelId, category: Option<[u8; 32]>, index: usize) -> Result<(), String> {
+    crate::db::scoped(async move {
+        ensure_channel_manager(community, &me_pk()?)?;
+        let ch = community.channel(channel_id).ok_or("no such channel")?.clone();
+        if category.is_some_and(|c| !community.categories.iter().any(|x| x.id == c)) {
+            return Err("no such category".to_string());
+        }
+        let sidebar = community.sidebar();
+        let group: Vec<ChannelV2> = sidebar
+            .iter()
+            .find(|(c, _)| c.map(|c| c.id) == category)
+            .map(|(_, v)| v.iter().filter(|c| c.id.0 != channel_id.0).map(|c| (*c).clone()).collect())
+            .unwrap_or_default();
+        let keys = keyed(transport, community, group.iter().map(|c| (c.position().map(String::from), Keyed::Channel(c.clone()))).collect()).await?;
+        let index = index.min(keys.len());
+        let position = crate::community::rank::between(index.checked_sub(1).map(|i| keys[i].as_str()), keys.get(index).map(String::as_str))
+            .ok_or("no room between those channels")?;
+        let mut meta = ch.metadata();
+        meta.extra.insert("position".into(), position.into());
+        match category {
+            Some(c) => meta.extra.insert("category".into(), crate::simd::hex::bytes_to_hex_32(&c).into()),
+            None => meta.extra.remove("category"),
+        };
+        edit_channel_metadata(transport, community, channel_id, &meta).await
+    })
+    .await
+}
+
+/// Edit a Channel's name, topic and view, keeping every field another client wrote.
+pub async fn edit_channel_details<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    name: &str,
+    topic: Option<&str>,
+    view: super::community::ChannelView,
+) -> Result<(), String> {
+    let ch = community.channel(channel_id).ok_or("no such channel")?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a channel needs a name".to_string());
+    }
+    let mut meta = ch.metadata();
+    meta.name = name.to_string();
+    match topic.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => meta.extra.insert("topic".into(), t.into()),
+        None => meta.extra.remove("topic"),
+    };
+    match view {
+        super::community::ChannelView::Chat if ch.voice != Some(true) => meta.extra.remove("view"),
+        v => meta.extra.insert("view".into(), v.as_str().into()),
+    };
+    edit_channel_metadata(transport, community, channel_id, &meta).await
+}
+
+/// Create a Channel inside `category` (or uncategorized), at the end of its group.
+pub async fn create_channel_in<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, name: &str, private: bool, category: Option<[u8; 32]>) -> Result<ChannelId, String> {
+    let id = if private { create_private_channel(transport, community, name).await? } else { create_public_channel(transport, community, name).await? };
+    // A keyless Channel already sorts last in its group.
+    if category.is_some() {
+        let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        move_channel(transport, &held, &id, category, usize::MAX).await?;
+    }
+    Ok(id)
+}
+
+/// A sidebar entry a reorder may need to key first.
+enum Keyed {
+    Channel(ChannelV2),
+    Category(super::community::CategoryV2),
+}
+
+/// The keys of an ordered group, minting them for keyless entries (a Channel from before
+/// positions existed) so a move can land between any two. Each minted key is one edition.
+async fn keyed<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, group: Vec<(Option<String>, Keyed)>) -> Result<Vec<String>, String> {
+    let mut keys: Vec<String> = Vec::with_capacity(group.len());
+    for (key, entry) in group {
+        let last = keys.last().map(String::as_str);
+        let key = match key {
+            Some(k) if last.is_none_or(|l| l.as_bytes() < k.as_bytes()) => k,
+            _ => {
+                let k = crate::community::rank::between(last, None).ok_or("no room to order these")?;
+                match entry {
+                    Keyed::Channel(ch) => {
+                        let mut meta = ch.metadata();
+                        meta.extra.insert("position".into(), k.clone().into());
+                        edit_channel_metadata(transport, community, &ch.id, &meta).await?;
+                    }
+                    Keyed::Category(c) => {
+                        set_category(transport, community, c.id, &control::CategoryMetadata { name: c.name, position: Some(k.clone()), deleted: None, extra: c.extra }).await?;
+                    }
+                }
+                k
+            }
+        };
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
 /// Create a new PRIVATE channel (CORD-03 §2): mint a fresh id + an independent
 /// random key at channel-epoch 1, mint a companion channel-scoped Role that is
 /// the channel's access list (CORD-04 §2), deliver the key to the entitled over
@@ -7956,8 +8130,10 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     // A channel id is minted at random, so one shared with another entity's coordinate is aimed
     // at that entity: floor rows key on the coordinate alone.
     let banlist_eid = super::derive::banlist_locator(community.id());
-    let taken: std::collections::HashSet<[u8; 32]> =
-        groups.keys().filter(|(v, _)| v != vsk::CHANNEL_METADATA).map(|(_, e)| *e).chain([banlist_eid, super::derive::everyone_locator(community.id())]).collect();
+    let taken_by = |kind: &str| -> std::collections::HashSet<[u8; 32]> {
+        groups.keys().filter(|(v, _)| v != kind).map(|(_, e)| *e).chain([banlist_eid, super::derive::everyone_locator(community.id())]).collect()
+    };
+    let (taken, taken_cat) = (taken_by(vsk::CHANNEL_METADATA), taken_by(vsk::CATEGORY));
     for ((vsk_code, eid), group) in &groups {
         // This fold applies three entities: community metadata (eid ==
         // community_id), channel metadata, and per-channel Pin Lists. A vsk-2
@@ -7967,16 +8143,23 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         let is_meta = vsk_code == vsk::COMMUNITY_METADATA && *eid == community.id().0;
         let is_channel = vsk_code == vsk::CHANNEL_METADATA && *eid != community.id().0 && !taken.contains(eid);
         let pins_channel = (vsk_code == vsk::PINS).then(|| pins_by_eid.get(eid)).flatten();
-        if !is_meta && !is_channel && pins_channel.is_none() {
+        let is_category = vsk_code == vsk::CATEGORY && *eid != community.id().0 && !taken_cat.contains(eid);
+        if !is_meta && !is_channel && !is_category && pins_channel.is_none() {
             continue;
         }
+        // A new kind is read marked only (CORD-04 §1): nothing older ever wrote one.
+        let group: Vec<&ParsedEdition> = group.iter().copied().filter(|e| !is_category || e.binding.is_some()).collect();
+        if group.is_empty() {
+            continue;
+        }
+        let group = &group;
         // Authority gate (CORD-04 §5): only editions whose author CURRENTLY holds the
         // entity's management bit are eligible. Pre-filtering before the fold means a
         // demoted admin's (possibly higher-version) edition can't be the head; the
         // highest AUTHORIZED head wins. The owner is supreme.
         let required = if is_meta {
             Permissions::MANAGE_METADATA
-        } else if is_channel {
+        } else if is_channel || is_category {
             Permissions::MANAGE_CHANNELS
         } else {
             Permissions::PIN_MESSAGES
@@ -8017,7 +8200,12 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         // An authorized edition built on the held one moves the entity on, refused or not.
         let (linked, entity_gapped) = fold_head_among(&fold_eds, floor, &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)), &|i| ok[i]);
         gapped |= entity_gapped;
-        let (hi, rebased) = match linked {
+        // A Category's deletion is terminal over every authorized edition, not the head alone.
+        let deletion = (0..group.len())
+            .filter(|&i| is_category && ok[i])
+            .filter(|&i| serde_json::from_str::<control::CategoryMetadata>(&group[i].content).is_ok_and(|m| m.deleted == Some(true)))
+            .max_by_key(|&i| (group[i].version, std::cmp::Reverse(group[i].inner_id)));
+        let (hi, rebased) = match deletion.or(linked) {
             Some(hi) => (hi, false),
             None if refused => {
                 let prev = held.and_then(|h| h.prev_hash);
@@ -8040,6 +8228,10 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 // cross-community replay can inject a phantom PUBLIC channel (bounded:
                 // root-scoped key, eids don't collide). Binding is a deferred wire change.
                 changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
+            }
+        } else if is_category {
+            if let Ok(meta) = serde_json::from_str::<control::CategoryMetadata>(&head.content) {
+                changed |= apply_category_metadata(&mut out, *eid, meta);
             }
         } else if let Some(channel_hex) = pins_channel {
             // The RAW carried content, cap-violations included: readers judge
@@ -9202,6 +9394,32 @@ fn apply_community_metadata(out: &mut CommunityV2, meta: control::CommunityMetad
 /// updates an existing one, a brand-new PUBLIC channel is added, and a brand-new
 /// PRIVATE one is recorded KEYLESS (unreadable until its key arrives over the
 /// rekey plane or a fresh bundle). Returns whether anything changed.
+fn apply_category_metadata(out: &mut CommunityV2, id: [u8; 32], meta: control::CategoryMetadata) -> bool {
+    if meta.deleted == Some(true) {
+        let before = out.categories.len();
+        out.categories.retain(|c| c.id != id);
+        return out.categories.len() != before;
+    }
+    if meta.name.len() > control::MAX_NAME_BYTES {
+        return false;
+    }
+    let position = meta.position.filter(|k| crate::community::rank::is_rank_key(k));
+    let next = super::community::CategoryV2 { id, name: meta.name, position, extra: meta.extra };
+    let full = out.categories.len() >= super::community::MAX_CATEGORIES;
+    match out.categories.iter_mut().find(|c| c.id == id) {
+        Some(c) if *c == next => false,
+        Some(c) => {
+            *c = next;
+            true
+        }
+        None if full => false,
+        None => {
+            out.categories.push(next);
+            true
+        }
+    }
+}
+
 fn apply_channel_metadata(out: &mut CommunityV2, id: ChannelId, meta: control::ChannelMetadata) -> bool {
     let deleted = meta.deleted.unwrap_or(false);
     if deleted {
@@ -11836,6 +12054,7 @@ mod tests {
             meta_extra: Default::default(),
             relays,
             channels: vec![ChannelV2 { id: ch_id, name: "general".into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra: Default::default() }],
+            categories: Vec::new(),
             dissolved: false,
             created_at_ms: 1_000_000,
         };
@@ -18572,6 +18791,151 @@ mod tests {
         assert!(f.banned.contains(&t.public_key().to_hex()), "the ban A made stands on A's sealed standing");
     }
 
+    fn folded(base: &CommunityV2, eds: &[ParsedEdition]) -> CommunityV2 {
+        let f = fold_authority(base, eds, &Floors::default());
+        apply_control_fold(base, eds, &Floors::default(), &f).updated.unwrap_or_else(|| base.clone())
+    }
+
+    fn sidebar_names(c: &CommunityV2) -> Vec<(Option<String>, Vec<String>)> {
+        c.sidebar().into_iter().map(|(k, chans)| (k.map(|k| k.name.clone()), chans.into_iter().map(|c| c.name.clone()).collect())).collect()
+    }
+
+    fn held_of(c: &CommunityV2) -> CommunityV2 {
+        crate::db::community::load_community_v2(c.id()).unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn categories_order_and_delete_terminally() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Cats", vec!["wss://r".into()], None).await.unwrap();
+        let staff = create_category(&relay, &held_of(&community), "Staff").await.unwrap();
+        let social = create_category(&relay, &held_of(&community), "Social").await.unwrap();
+        move_category(&relay, &held_of(&community), social, 0).await.unwrap();
+        rename_category(&relay, &held_of(&community), staff, "Mods").await.unwrap();
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        assert_eq!(sidebar_names(&peer), vec![(None, vec!["general".into()]), (Some("Social".into()), vec![]), (Some("Mods".into()), vec![])]);
+        assert_eq!(sidebar_names(&held_of(&community)), sidebar_names(&peer), "this device shows what a peer folds, and keeps it across a reload");
+
+        delete_category(&relay, &held_of(&community), social).await.unwrap();
+        // A later edition can't bring a deleted Category back.
+        let eds = fetch_control(&relay, &community).await;
+        let head = eds.iter().filter(|e| e.entity_id == social).max_by_key(|e| e.version).unwrap();
+        let revive = serde_json::to_string(&control::CategoryMetadata { name: "Back".into(), position: Some("V".into()), ..Default::default() }).unwrap();
+        publish_marked(&relay, &community, &owner, vsk::CATEGORY, &social, head.version + 1, Some(head.self_hash), &revive).await;
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        assert_eq!(peer.categories.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Mods"]);
+    }
+
+    /// One marked edition at an explicit version and predecessor.
+    async fn publish_marked(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, vsk_code: &str, eid: &[u8; 32], version: u64, prev: Option<[u8; 32]>, content: &str) {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let cite = cite_on_relay(relay, community, signer).await;
+        let binding = Some(crate::community::v2::derive::edition_binding(community.id()));
+        let rumor = control::build_edition_rumor_bound(signer.public_key(), vsk_code, eid, version, prev.as_ref(), content, 2_000 + version, cite.as_ref(), binding);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(2_000 + version)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_category_needs_manage_channels_the_mark_and_its_own_coordinate() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "CatGate", vec!["wss://r".into()], None).await.unwrap();
+        let cat = |name: &str| serde_json::to_string(&control::CategoryMetadata { name: name.into(), position: Some("V".into()), ..Default::default() }).unwrap();
+        let stranger = Keys::generate();
+        publish_marked(&relay, &community, &stranger, vsk::CATEGORY, &[0x31; 32], 1, None, &cat("Stranger's")).await;
+        // Unmarked: nothing older ever wrote a Category, so an unmarked one is forged.
+        publish_fork(&[&relay], &community, &owner, vsk::CATEGORY, &[0x32; 32], 1, None, &cat("Unmarked"), None).await;
+        // At another entity's coordinate.
+        let general = community.channels[0].id.0;
+        publish_marked(&relay, &community, &owner, vsk::CATEGORY, &general, 1, None, &cat("On a channel")).await;
+        publish_marked(&relay, &community, &owner, vsk::CATEGORY, &crate::community::v2::derive::banlist_locator(community.id()), 1, None, &cat("On the banlist")).await;
+        publish_marked(&relay, &community, &owner, vsk::CATEGORY, &[0x33; 32], 1, None, &cat("Real")).await;
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        assert_eq!(peer.categories.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Real"]);
+    }
+
+    #[tokio::test]
+    async fn a_channel_moves_in_one_edition_once_its_group_is_keyed() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Moves", vec!["wss://r".into()], None).await.unwrap();
+        let alpha = create_public_channel(&relay, &held_of(&community), "alpha").await.unwrap();
+        let beta = create_public_channel(&relay, &held_of(&community), "beta").await.unwrap();
+        let gamma = create_public_channel(&relay, &held_of(&community), "gamma").await.unwrap();
+        let names = |c: &CommunityV2| sidebar_names(c)[0].1.clone();
+        assert_eq!(names(&held_of(&community)), vec!["alpha", "beta", "gamma", "general"], "keyless channels sort by name");
+        // The first move keys the group as it shows, then places gamma.
+        move_channel(&relay, &held_of(&community), &gamma, None, 0).await.unwrap();
+        assert_eq!(names(&held_of(&community)), vec!["gamma", "alpha", "beta", "general"]);
+        let before = fetch_control(&relay, &community).await.len();
+        move_channel(&relay, &held_of(&community), &gamma, None, 2).await.unwrap();
+        assert_eq!(fetch_control(&relay, &community).await.len(), before + 1, "a later move is one edition");
+        assert_eq!(names(&held_of(&community)), vec!["alpha", "beta", "gamma", "general"]);
+
+        let staff = create_category(&relay, &held_of(&community), "Staff").await.unwrap();
+        move_channel(&relay, &held_of(&community), &beta, Some(staff), 0).await.unwrap();
+        let delta = create_channel_in(&relay, &held_of(&community), "delta", false, Some(staff)).await.unwrap();
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        assert_eq!(sidebar_names(&peer), vec![(None, vec!["alpha".into(), "gamma".into(), "general".into()]), (Some("Staff".into()), vec!["beta".into(), "delta".into()])]);
+        assert_eq!(sidebar_names(&held_of(&community)), sidebar_names(&peer));
+        move_channel(&relay, &held_of(&community), &delta, None, usize::MAX).await.unwrap();
+        // A deleted Category unfiles its Channels, which keep pointing at it.
+        delete_category(&relay, &held_of(&community), staff).await.unwrap();
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        // Its key from inside Staff ties alpha's out here, and the name breaks the tie.
+        assert_eq!(sidebar_names(&peer), vec![(None, vec!["alpha".into(), "beta".into(), "gamma".into(), "general".into(), "delta".into()])]);
+        assert_eq!(peer.channel(&beta).unwrap().category(), Some(staff));
+        assert!(move_channel(&relay, &held_of(&community), &alpha, Some(staff), 0).await.is_err(), "nothing files under a deleted Category");
+    }
+
+    #[tokio::test]
+    async fn channel_details_round_trip_and_keep_what_others_wrote() {
+        use crate::community::v2::community::ChannelView;
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Details", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        // Another client's field, and its legacy voice flag.
+        let mut foreign = community.channels[0].metadata();
+        foreign.extra.insert("vnd".into(), 7.into());
+        foreign.voice = Some(true);
+        let v1 = head_hash_on_relay(&relay, &community, &general.0).await;
+        publish_fork(&[&relay], &community, &owner, vsk::CHANNEL_METADATA, &general.0, 2, v1, &serde_json::to_string(&foreign).unwrap(), None).await;
+        follow_control(&relay, &community).await.unwrap();
+        assert_eq!(held_of(&community).channel(&general).unwrap().view(), ChannelView::Voice, "the legacy flag reads as a voice view");
+
+        edit_channel_details(&relay, &held_of(&community), &general, "lobby", Some("  Say hi  "), ChannelView::Forum).await.unwrap();
+        let peer = folded(&community, &fetch_control(&relay, &community).await);
+        let ch = peer.channel(&general).unwrap();
+        assert_eq!((ch.name.as_str(), ch.topic(), ch.view()), ("lobby", Some("Say hi"), ChannelView::Forum));
+        assert_eq!(ch.meta_extra.get("vnd"), Some(&serde_json::Value::from(7)), "a field Vector doesn't drive rides through");
+        edit_channel_details(&relay, &held_of(&community), &general, "lobby", None, ChannelView::Chat).await.unwrap();
+        let ch = folded(&community, &fetch_control(&relay, &community).await).channel(&general).unwrap().clone();
+        assert_eq!((ch.topic(), ch.view()), (None, ChannelView::Chat), "chat over a legacy voice flag is written, not implied");
+        assert!(edit_channel_details(&relay, &held_of(&community), &general, "lobby", Some(&"x".repeat(1025)), ChannelView::Chat).await.is_err(), "the topic cap");
+    }
+
+    #[tokio::test]
+    async fn a_refounding_carries_categories_and_filing() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "CarryCats", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let staff = create_category(&bed.relay, &held_of(&community), "Staff").await.unwrap();
+        let general = community.channels[0].id;
+        move_channel(&bed.relay, &held_of(&community), &general, Some(staff), 0).await.unwrap();
+        follow_control(&bed.relay, &held_of(&community)).await.unwrap();
+        set_members_banned(&bed.relay, community.id(), &[Keys::generate().public_key()], true).await.unwrap();
+        let now = held_of(&community);
+        assert_ne!(now.root_epoch, community.root_epoch, "the ban re-founded");
+        let mut fresh = now.clone();
+        fresh.categories.clear();
+        let peer = folded(&fresh, &fetch_control(&bed.relay, &now).await);
+        assert_eq!(sidebar_names(&peer), vec![(None, vec![]), (Some("Staff".into()), vec!["general".into()])]);
+    }
+
     #[tokio::test]
     async fn a_ban_spares_the_floor_of_a_sealed_head() {
         // A ban voids a floor its target recorded, unless a Tenure sealed that head: then
@@ -22595,6 +22959,7 @@ mod tests {
             meta_extra: Default::default(),
             relays: vec!["wss://r".into()],
             channels: vec![],
+            categories: Vec::new(),
             dissolved: false,
             created_at_ms: 0,
         };

@@ -30,7 +30,70 @@ pub struct ChannelV2 {
     pub meta_extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A Category (CORD-03 §4): a sidebar group Channels file under by their `category`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CategoryV2 {
+    pub id: [u8; 32],
+    pub name: String,
+    pub position: Option<String>,
+    /// Fields Vector doesn't drive, carried through its own editions (CORD-02 §6).
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The most Categories a Community folds.
+pub const MAX_CATEGORIES: usize = 100;
+
+/// How a client opens a Channel (CORD-03 §2). It changes nothing on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelView {
+    Chat,
+    Forum,
+    Voice,
+}
+
+impl ChannelView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelView::Chat => "chat",
+            ChannelView::Forum => "forum",
+            ChannelView::Voice => "voice",
+        }
+    }
+
+    /// An unknown view reads as chat.
+    pub fn parse(s: &str) -> ChannelView {
+        match s {
+            "forum" => ChannelView::Forum,
+            "voice" => ChannelView::Voice,
+            _ => ChannelView::Chat,
+        }
+    }
+}
+
 impl ChannelV2 {
+    /// Its sidebar key, when it carries a well-formed one (CORD-03 §2).
+    pub fn position(&self) -> Option<&str> {
+        self.meta_extra.get("position").and_then(|v| v.as_str()).filter(|k| crate::community::rank::is_rank_key(k))
+    }
+
+    /// The Category it files under, whether or not that Category still stands.
+    pub fn category(&self) -> Option<[u8; 32]> {
+        self.meta_extra.get("category").and_then(|v| v.as_str()).and_then(crate::simd::hex::hex_to_bytes_32_checked)
+    }
+
+    pub fn topic(&self) -> Option<&str> {
+        self.meta_extra.get("topic").and_then(|v| v.as_str()).filter(|t| !t.is_empty() && t.len() <= super::control::MAX_TOPIC_BYTES)
+    }
+
+    /// The legacy `voice` flag reads as a voice view.
+    pub fn view(&self) -> ChannelView {
+        match self.meta_extra.get("view").and_then(|v| v.as_str()) {
+            Some(v) => ChannelView::parse(v),
+            None if self.voice == Some(true) => ChannelView::Voice,
+            None => ChannelView::Chat,
+        }
+    }
+
     /// The full vsk-2 document rebuilt from held state — the base every local
     /// channel edit MUST start from (CORD-02 §6 preservation).
     pub fn metadata(&self) -> super::control::ChannelMetadata {
@@ -81,6 +144,8 @@ pub struct CommunityV2 {
     pub meta_extra: serde_json::Map<String, serde_json::Value>,
     pub relays: Vec<String>,
     pub channels: Vec<ChannelV2>,
+    /// Folded Categories (CORD-03 §4), unordered: [`CommunityV2::sidebar`] orders them.
+    pub categories: Vec<CategoryV2>,
     pub dissolved: bool,
     /// Local wall-clock of first acquisition (ms), for display ordering.
     pub created_at_ms: u64,
@@ -113,6 +178,7 @@ impl CommunityV2 {
                 meta_custom: None,
                 meta_extra: Default::default(),
             }],
+            categories: Vec::new(),
             dissolved: false,
             created_at_ms,
         }
@@ -182,6 +248,7 @@ impl CommunityV2 {
             meta_extra: Default::default(),
             relays: bundle.relays.clone(),
             channels,
+            categories: Vec::new(),
             dissolved: false,
             created_at_ms,
         })
@@ -214,6 +281,28 @@ impl CommunityV2 {
 
     pub fn channel(&self, id: &ChannelId) -> Option<&ChannelV2> {
         self.channels.iter().find(|c| c.id.0 == id.0)
+    }
+
+    /// The sidebar (CORD-03 §2, §4): uncategorized Channels first, then each Category by
+    /// position with its Channels by position. A Channel filed under a Category that isn't
+    /// held renders uncategorized. A keyless entry sorts after every keyed one, then by
+    /// name, then by id.
+    pub fn sidebar(&self) -> Vec<(Option<&CategoryV2>, Vec<&ChannelV2>)> {
+        fn order<'a>(position: Option<&'a str>, name: &'a str, id: &'a [u8; 32]) -> (bool, &'a [u8], &'a str, &'a [u8; 32]) {
+            (position.is_none(), position.map_or(&[][..], str::as_bytes), name, id)
+        }
+        let mut categories: Vec<&CategoryV2> = self.categories.iter().collect();
+        categories.sort_by(|a, b| order(a.position.as_deref(), &a.name, &a.id).cmp(&order(b.position.as_deref(), &b.name, &b.id)));
+        let mut groups: Vec<(Option<&CategoryV2>, Vec<&ChannelV2>)> =
+            std::iter::once(None).chain(categories.iter().copied().map(Some)).map(|c| (c, Vec::new())).collect();
+        for ch in &self.channels {
+            let at = ch.category().and_then(|c| categories.iter().position(|x| x.id == c)).map_or(0, |i| i + 1);
+            groups[at].1.push(ch);
+        }
+        for (_, channels) in &mut groups {
+            channels.sort_by(|a, b| order(a.position(), &a.name, &a.id.0).cmp(&order(b.position(), &b.name, &b.id.0)));
+        }
+        groups
     }
 
     /// The channels an invite bundle may grant to `audience` (CORD-05 §1/§2).

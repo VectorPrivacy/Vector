@@ -495,6 +495,43 @@ pub fn validate_channel_metadata(meta: &ChannelMetadata) -> Result<(), ControlEr
     if meta.name.len() > MAX_NAME_BYTES {
         return Err(ControlError::OverCap("name"));
     }
+    let text = |k: &str| meta.extra.get(k).and_then(|v| v.as_str());
+    if text("topic").is_some_and(|t| t.len() > MAX_TOPIC_BYTES) {
+        return Err(ControlError::OverCap("topic"));
+    }
+    if text("position").is_some_and(|k| !crate::community::rank::is_rank_key(k)) {
+        return Err(ControlError::OverCap("position"));
+    }
+    if text("category").is_some_and(|c| crate::simd::hex::hex_to_bytes_32_checked(c).is_none()) {
+        return Err(ControlError::OverCap("category"));
+    }
+    Ok(())
+}
+
+/// A Channel's topic cap (CORD-03 §2).
+pub const MAX_TOPIC_BYTES: usize = 1024;
+
+/// A Category (vsk 15, CORD-03 §4), `eid == category_id`, gated by `MANAGE_CHANNELS`.
+/// Deletion is terminal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CategoryMetadata {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+pub fn validate_category_metadata(meta: &CategoryMetadata) -> Result<(), ControlError> {
+    if meta.name.len() > MAX_NAME_BYTES {
+        return Err(ControlError::OverCap("name"));
+    }
+    if meta.position.as_deref().is_some_and(|k| !crate::community::rank::is_rank_key(k)) {
+        return Err(ControlError::OverCap("position"));
+    }
     Ok(())
 }
 

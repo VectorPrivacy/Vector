@@ -2218,6 +2218,20 @@ struct CommunityMetaStash {
     custom: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     extra: serde_json::Map<String, serde_json::Value>,
+    /// The folded Categories ride here: a fold product like the channels, too small for a
+    /// table of their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    categories: Vec<CategoryStash>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CategoryStash {
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// As [`CommunityMetaStash`], for a channel row (vsk-2: + the voice flag).
@@ -2253,8 +2267,13 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     let banner_json = c.banner.as_ref().map(|b| serde_json::to_string(b).map_err(|e| e.to_string())).transpose()?;
     let enc_icon = enc_txt_opt(&icon_json)?;
     let enc_banner = enc_txt_opt(&banner_json)?;
-    let stash_json = (c.meta_custom.is_some() || !c.meta_extra.is_empty())
-        .then(|| serde_json::to_string(&CommunityMetaStash { custom: c.meta_custom.clone(), extra: c.meta_extra.clone() }).map_err(|e| e.to_string()))
+    let categories: Vec<CategoryStash> = c
+        .categories
+        .iter()
+        .map(|k| CategoryStash { id: crate::simd::hex::bytes_to_hex_32(&k.id), name: k.name.clone(), position: k.position.clone(), extra: k.extra.clone() })
+        .collect();
+    let stash_json = (c.meta_custom.is_some() || !c.meta_extra.is_empty() || !categories.is_empty())
+        .then(|| serde_json::to_string(&CommunityMetaStash { custom: c.meta_custom.clone(), extra: c.meta_extra.clone(), categories }).map_err(|e| e.to_string()))
         .transpose()?;
     let enc_stash = enc_txt_opt(&stash_json)?;
     // The split pair (CORD-02 §2): the address as encrypted hex (owner_pubkey's
@@ -2501,6 +2520,14 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
             meta_extra: stash.extra,
             relays,
             channels,
+            categories: stash
+                .categories
+                .into_iter()
+                .filter_map(|k| {
+                    let id = crate::simd::hex::hex_to_bytes_32_checked(&k.id)?;
+                    Some(crate::community::v2::community::CategoryV2 { id, name: k.name, position: k.position, extra: k.extra })
+                })
+                .collect(),
             dissolved: dissolved != 0,
             created_at_ms: (created as u64).saturating_mul(1000),
         }))
