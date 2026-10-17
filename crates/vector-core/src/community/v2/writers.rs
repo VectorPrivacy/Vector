@@ -261,31 +261,9 @@ impl Ledger {
         self.certifier(epoch).is_some_and(|c| verify_writer_cert(&c, &cert_digest(community, &self.channel, epoch, writer), cert))
     }
 
-    /// The writer epoch whose window holds `at_ms`, or failing any, the one that opened within a
-    /// slow clock's few minutes after it.
-    pub fn writer_at(&self, at_ms: u64) -> Option<Epoch> {
-        let windows: Vec<(u64, Epoch, Option<u64>)> = self.writers().filter_map(|(e, _, end)| self.writer_start(e).map(|start| (start, e, end))).collect();
-        let holds = |start: u64, end: Option<u64>| start <= at_ms && end.is_none_or(|end| at_ms < end);
-        windows
-            .iter()
-            .filter(|(start, _, end)| holds(*start, *end))
-            .max_by_key(|(start, ..)| *start)
-            .or_else(|| windows.iter().filter(|(start, ..)| *start > at_ms && *start - at_ms <= ENTRY_SKEW_MS).min_by_key(|(start, ..)| *start))
-            .map(|(_, e, _)| *e)
-    }
-
     /// Whether a post at writer `epoch`'s address dated `at_ms` stands: before its entry ends.
     pub fn writer_address_takes(&self, epoch: Epoch, at_ms: u64) -> bool {
         self.writers().any(|(e, _, end)| e == epoch && end.is_none_or(|end| at_ms < end))
-    }
-
-    /// Whether a post of `kind` dated `at_ms` stands where it was read: at writer `wepoch`'s
-    /// address, or at the read address when `None`.
-    pub fn admits(&self, wepoch: Option<Epoch>, kind: u16, at_ms: u64) -> bool {
-        match wepoch {
-            Some(w) => self.writer_address_takes(w, at_ms),
-            None => !super::chat::rides_writer_address(kind) || self.read_address_takes(at_ms),
-        }
     }
 
     /// This ledger with `entry` appended verbatim; at the cap the oldest entry goes, a writer one
@@ -334,21 +312,6 @@ impl Ledger {
     /// Whether the newest entry is dated within [`HORIZON_MS`] of `now_ms`: a later one waits.
     pub fn not_ahead(&self, now_ms: u64) -> bool {
         self.entries.last().is_some_and(|e| e.at <= now_ms.saturating_add(HORIZON_MS))
-    }
-}
-
-/// Whether a reader keeps `event`: what [`admits`] takes, and any post a ledger's windows
-/// don't, which a client shows only to those who manage the Channel, marked.
-pub fn keeps(ledger: Option<&Ledger>, wepoch: Option<Epoch>, event: &super::chat::ChatEvent) -> bool {
-    admits(ledger, wepoch, event) || (ledger.is_some() && matches!(event, super::chat::ChatEvent::Message { .. }))
-}
-
-/// [`Ledger::admits`] for a Channel that may have no ledger, where only the read address serves.
-pub fn admits(ledger: Option<&Ledger>, wepoch: Option<Epoch>, event: &super::chat::ChatEvent) -> bool {
-    let o = event.opened();
-    match ledger {
-        Some(l) => l.admits(wepoch, o.rumor.kind.as_u16(), o.at_ms),
-        None => wepoch.is_none(),
     }
 }
 
@@ -438,6 +401,22 @@ mod tests {
 
     fn w(e: u64, n: u8) -> Spell {
         Spell::Writer { epoch: Epoch(e), pk: pk(n), root: Epoch(0), by: BY, certifier: None }
+    }
+
+    /// The certificate test vector CORD-03 §1 publishes: what every client must compute alike.
+    #[test]
+    fn a_writer_certificate_matches_the_published_vector() {
+        let (community, channel, writer, secret) = ([0x01; 32], [0x02; 32], [0x04; 32], [0x05; 32]);
+        let d = cert_digest(&community, &channel, Epoch(3), &writer);
+        assert_eq!(crate::simd::hex::bytes_to_hex_32(&d), "f49b5c7359b09366b5b96e074d2b7c5a84bd714a04bf0e6270d13c02d453e619");
+        let certifier = certifier_of(&secret).unwrap();
+        assert_eq!(crate::simd::hex::bytes_to_hex_32(&certifier), "62c0a046dacce86ddd0343c6d3c7c79c2208ba0d9c9cf24a6d046d21d21f90f7");
+        let e = cert_event(nostr_sdk::prelude::PublicKey::from_slice(&certifier).unwrap(), &d);
+        let id = nostr_sdk::prelude::EventId::compute(&e.pubkey, &e.created_at, &e.kind, &e.tags, &e.content);
+        assert_eq!(id.to_hex(), "1b6fcc32de4a485d7b0109b0e5dd91b7c676fcb26f7dc41c8c2bdc7e3f2cbe90");
+        let published: [u8; 64] = crate::simd::hex::hex_string_to_bytes_checked("cd1c3030e1220c539f1efb50d32e5b83432baa20eaa8709aa935050dc11a6ac6e25c3f9555b729cee65829fdbf1ba5e7656865a4fca860e42b05c8341922895a").unwrap().try_into().unwrap();
+        assert!(verify_writer_cert(&certifier, &d, &published));
+        assert!(verify_writer_cert(&certifier, &d, &sign_writer_cert(&secret, &d).unwrap()));
     }
 
     #[test]
@@ -620,7 +599,8 @@ mod tests {
         let rumor = super::super::chat::build_message_rumor(k.public_key(), &CH, Epoch(0), "x", None, &[], vec![], 1_000);
         let (wrap, _) = super::super::chat::seal_chat_rumor(&rumor, &g, &k, Timestamp::from_secs(1), false).unwrap();
         let ev = super::super::chat::open_chat_event(&wrap, &g, &CH, Epoch(0)).unwrap();
-        assert!(admits(None, None, &ev));
-        assert!(!admits(None, Some(Epoch(1)), &ev), "no ledger names a writer address");
+        use crate::community::v2::service::{sort_arrival, Arrival};
+        assert!(matches!(sort_arrival(None, ev.clone(), None), Arrival::Stands(_)));
+        assert!(matches!(sort_arrival(None, ev, Some(Epoch(1))), Arrival::Held(None)), "no ledger names a writer address");
     }
 }

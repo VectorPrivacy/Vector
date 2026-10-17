@@ -961,6 +961,8 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         // later self-scrub of own past messages stays possible; dropped on an explicit delete/re-join reset
         // (else a re-join inherits stale rotated keys).
         (!retain_keys).then_some("DELETE FROM community_epoch_keys WHERE community_id = ?1"),
+        // Writer and certifier secrets let their holder post and vouch; a self-scrub needs neither.
+        Some("DELETE FROM community_epoch_keys WHERE community_id = ?1 AND (scope_id LIKE 'wr:%' OR scope_id LIKE 'wrmint:%' OR scope_id LIKE 'wrcert:%')"),
         Some("DELETE FROM community_public_invites WHERE community_id = ?1"),
         Some("DELETE FROM community_invite_link_sets WHERE community_id = ?1"),
         Some("DELETE FROM pending_community_invites WHERE community_id = ?1"),
@@ -975,6 +977,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
         Some("DELETE FROM community_writers WHERE community_id = ?1"),
+        Some("DELETE FROM community_held_wraps WHERE community_id = ?1"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
     ]
@@ -1054,6 +1057,29 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
         for row in rows {
             let (npub, at) = row.map_err(|e| e.to_string())?;
             active.insert(npub, at);
+        }
+    }
+
+    // A post its Channel's rules held, kept marked on a manager's device, is no sign of membership.
+    {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT e.npub FROM community_held_wraps h JOIN events e ON e.wrapper_event_id = h.wrap_id WHERE h.community_id = ?1 AND e.npub IS NOT NULL")
+            .map_err(|e| e.to_string())?;
+        let held_authors: Vec<String> = stmt.query_map(params![community_id], |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect();
+        let sql = format!(
+            "SELECT MAX(created_at) FROM events \
+             WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub = ? \
+             AND (wrapper_event_id IS NULL OR wrapper_event_id NOT IN (SELECT wrap_id FROM community_held_wraps WHERE community_id = ?))"
+        );
+        for npub in held_authors {
+            let mut args: Vec<rusqlite::types::Value> = chat_ints.iter().map(|i| rusqlite::types::Value::Integer(*i)).collect();
+            args.push(npub.clone().into());
+            args.push(community_id.to_string().into());
+            let newest: Option<i64> = conn.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0)).map_err(|e| e.to_string())?;
+            match newest {
+                Some(at) => active.insert(npub, at.max(0) as u64),
+                None => active.remove(&npub),
+            };
         }
     }
 
@@ -2757,6 +2783,24 @@ mod tests {
         (tmp, guard)
     }
 
+    #[test]
+    fn a_channel_holds_its_newest_dated_wraps_up_to_the_cap() {
+        let (_tmp, _guard) = init_test_db();
+        let (cid, ch) = ("c".repeat(64), "d".repeat(64));
+        for i in 0..MAX_HELD_WRAPS + 2 {
+            hold_wrap(&cid, &ch, &format!("{i:064x}"), &format!("wrap {i}"), 1_000 + i as u64).unwrap();
+        }
+        hold_wrap(&cid, &"e".repeat(64), &"f".repeat(64), "another channel's", 1).unwrap();
+        let held = held_wraps(&cid).unwrap();
+        assert_eq!(held.len(), MAX_HELD_WRAPS + 1, "each channel caps on its own");
+        assert!(!held.iter().any(|(id, ..)| *id == format!("{:064x}", 0) || *id == format!("{:064x}", 1)), "the oldest-dated go first");
+        assert!(held.iter().any(|(_, _, wrap)| wrap == "wrap 501"), "opened as it was held");
+        hold_wrap(&cid, &ch, &format!("{:064x}", 501), "again", 1).unwrap();
+        assert_eq!(held_wraps(&cid).unwrap().iter().filter(|(id, ..)| *id == format!("{:064x}", 501)).count(), 1, "once");
+        release_held_wrap(&format!("{:064x}", 501)).unwrap();
+        assert!(held_wrap_ids(&[format!("{:064x}", 501), format!("{:064x}", 500)]) == std::collections::HashSet::from([format!("{:064x}", 500)]));
+    }
+
     /// An unsaved v2 community fresh from genesis, holding one Public `#general` channel.
     fn v2_fixture(name: &str, relays: &[&str]) -> crate::community::v2::community::CommunityV2 {
         let owner = Keys::generate();
@@ -4451,6 +4495,61 @@ pub fn get_community_writers(community_id: &str, channel_id: &str) -> Result<Opt
         .optional()
         .map_err(|e| format!("get writers: {e}"))?;
     Ok(row.map(|(content, version)| (dec_txt(&content), version)))
+}
+
+/// How many held wraps one Channel keeps: past it the oldest-dated go first.
+pub const MAX_HELD_WRAPS: usize = 500;
+
+/// Hold `wrap`, a post `channel_id`'s rules didn't stand behind on arrival, dated `at_ms`.
+pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str, at_ms: u64) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let enc = enc_txt(wrap)?;
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO community_held_wraps (wrap_id, community_id, channel_id, wrap, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![wrap_id, community_id, channel_id, enc, at_ms as i64],
+    )
+    .map_err(|e| format!("hold wrap: {e}"))?;
+    conn.execute(
+        "DELETE FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 AND wrap_id NOT IN (
+            SELECT wrap_id FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 ORDER BY at_ms DESC LIMIT ?3)",
+        params![community_id, channel_id, MAX_HELD_WRAPS as i64],
+    )
+    .map_err(|e| format!("trim held wraps: {e}"))?;
+    Ok(())
+}
+
+/// Every wrap held for `community_id`, as `(wrap_id, channel_id, wrap)`, oldest-dated first.
+pub fn held_wraps(community_id: &str) -> Result<Vec<(String, String, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT wrap_id, channel_id, wrap FROM community_held_wraps WHERE community_id = ?1 ORDER BY at_ms")
+        .map_err(|e| format!("held wraps: {e}"))?;
+    let rows = stmt.query_map(params![community_id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))).map_err(|e| format!("held wraps: {e}"))?;
+    Ok(rows.flatten().map(|(id, ch, wrap)| (id, ch, dec_txt(&wrap))).collect())
+}
+
+/// Whether `community_id` holds any wrap.
+pub fn holds_wraps(community_id: &str) -> bool {
+    super::get_db_connection_guard_static()
+        .ok()
+        .and_then(|conn| conn.query_row("SELECT 1 FROM community_held_wraps WHERE community_id = ?1 LIMIT 1", params![community_id], |_| Ok(())).optional().ok().flatten())
+        .is_some()
+}
+
+/// Of `wrap_ids`, those held.
+pub fn held_wrap_ids(wrap_ids: &[String]) -> std::collections::HashSet<String> {
+    let Ok(conn) = super::get_db_connection_guard_static() else { return Default::default() };
+    let Ok(json) = serde_json::to_string(wrap_ids) else { return Default::default() };
+    let Ok(mut stmt) = conn.prepare("SELECT wrap_id FROM community_held_wraps WHERE wrap_id IN (SELECT value FROM json_each(?1))") else { return Default::default() };
+    stmt.query_map(params![json], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+/// Let `wrap_id` go: it stands now.
+pub fn release_held_wrap(wrap_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM community_held_wraps WHERE wrap_id = ?1", params![wrap_id]).map_err(|e| format!("release held wrap: {e}"))?;
+    Ok(())
 }
 
 /// A channel's stored Pin List head: `(raw content, version)`, `None` when no

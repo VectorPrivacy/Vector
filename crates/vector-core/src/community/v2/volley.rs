@@ -39,6 +39,7 @@ pub struct PaintTarget {
 const BATCH_FILTERS: usize = 20;
 
 struct Job {
+    community: CommunityId,
     channel_hex: String,
     channel_id: ChannelId,
     /// The read epoch's group: its conversation key opens every plane of the channel.
@@ -55,7 +56,7 @@ struct Job {
 }
 
 impl Job {
-    /// Open one wrap fetched for this job, dropping what its Channel's ledger refuses.
+    /// Open one wrap fetched for this job, holding what its Channel's rules don't stand behind.
     fn open(&self, wrap: &Event) -> Option<chat::ChatEvent> {
         if wrap.pubkey != self.address {
             return None;
@@ -65,7 +66,7 @@ impl Job {
             Some(w) => chat::open_writer_chat_event(wrap, &self.address, w, self.group.conv_key(), &self.channel_id, self.epoch),
             None => chat::open_chat_event(wrap, &self.group, &self.channel_id, self.epoch),
         };
-        crate::community::v2::service::sort_arrival(self.judge.as_deref(), opened.ok()?, wepoch)
+        crate::community::v2::service::judge_arrival(self.judge.as_deref(), &self.community.0, &self.channel_id, wrap, opened.ok()?, wepoch)
     }
 
     /// The keys a relay that gates reads must see this connection authenticated as.
@@ -219,6 +220,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                     let keys = crate::community::v2::service::live_writer_of(&community, ch).filter(|(e, ..)| *e == wepoch).map(|(_, _, g)| g.keys().clone());
                     plane_index.insert(address, jobs.len());
                     jobs.push(Job {
+                        community: t.community_id,
                         channel_hex: t.channel_hex.clone(),
                         channel_id: ch_id,
                         group: group.clone(),
@@ -232,6 +234,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 }
                 plane_index.insert(group.pk(), jobs.len());
                 jobs.push(Job {
+                    community: t.community_id,
                     channel_hex: t.channel_hex,
                     channel_id: ch_id,
                     address: group.pk(),

@@ -792,7 +792,29 @@ pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections
     ) else {
         return Default::default();
     };
-    stmt.query_map([ids], |row| row.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    let mut settled: std::collections::HashSet<String> = stmt.query_map([ids], |row| row.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default();
+    // A held wrap waits on this device for a later judgment, not on a relay.
+    settled.extend(super::community::held_wrap_ids(wrapper_event_ids));
+    settled
+}
+
+/// Mark a stored message as one its Channel's rules don't stand behind, or clear the mark.
+/// Returns whether the message is stored.
+pub fn set_event_unauthorized(event_id: &str, held: bool) -> Result<bool, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tags: Option<String> = conn
+        .query_row("SELECT tags FROM events WHERE id = ?1", rusqlite::params![event_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read tags: {e}"))?;
+    let Some(tags) = tags else { return Ok(false) };
+    let mut parsed: Vec<Vec<String>> = serde_json::from_str(&tags).unwrap_or_default();
+    parsed.retain(|t| !(t.len() == 1 && t[0] == UNAUTHORIZED_TAG));
+    if held {
+        parsed.push(vec![UNAUTHORIZED_TAG.to_string()]);
+    }
+    let json = serde_json::to_string(&parsed).map_err(|e| format!("tags: {e}"))?;
+    conn.execute("UPDATE events SET tags = ?1 WHERE id = ?2", rusqlite::params![json, event_id]).map_err(|e| format!("write tags: {e}"))?;
+    Ok(true)
 }
 
 /// Update the wrapper event ID for an existing event.
@@ -1751,7 +1773,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
              e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, e.preview_metadata \
              FROM chats c JOIN events e ON e.rowid = ( \
                  SELECT e2.rowid FROM events e2 WHERE e2.chat_id = c.id \
-                 AND e2.kind IN (?1, ?2, ?3) \
+                 AND e2.kind IN (?1, ?2, ?3) AND instr(e2.tags, '[\"unauthorized\"]') = 0 \
                  ORDER BY e2.created_at DESC, e2.received_at DESC LIMIT 1) \
              WHERE c.chat_type != 1"
         ).map_err(|e| format!("Failed to prepare: {}", e))?;
@@ -1979,6 +2001,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                     SELECT COUNT(*) FROM events e \
                     WHERE e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
                       AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
+                      AND instr(e.tags, '[\"unauthorized\"]') = 0 \
                       AND (e.npub IS NULL OR e.npub NOT IN ( \
                             SELECT chat_identifier FROM chats WHERE muted = 1 \
                             UNION \
@@ -2034,7 +2057,8 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
              ) \
              SELECT COUNT(*) FROM a JOIN events e ON e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
                AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
-             WHERE (e.npub IS NULL OR e.npub NOT IN ( \
+             WHERE instr(e.tags, '[\"unauthorized\"]') = 0 \
+               AND (e.npub IS NULL OR e.npub NOT IN ( \
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
@@ -3330,6 +3354,30 @@ mod tests {
         );
         let all = unread_counts().await.unwrap();
         assert_eq!(all.get(chat).copied().unwrap_or(0), 1, "and the all-chats sweep agrees");
+    }
+
+    #[tokio::test]
+    async fn a_held_post_is_stored_marked_and_never_badges_or_previews() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_held_unread";
+        link_channel_to_community(chat, "comm_held");
+        let (_, good) = ban_pair();
+        let (_, stranger) = ban_pair();
+        let real = Message { id: "real_held".into(), content: "hi".into(), at: 1_000, npub: Some(good.clone()), ..Default::default() };
+        save_message(chat, &real).await.unwrap();
+        let held = Message { id: "held_post".into(), content: "spam".into(), at: 2_000, npub: Some(stranger), unauthorized: true, ..Default::default() };
+        save_message(chat, &held).await.unwrap();
+        assert!(get_message_by_id("held_post").await.unwrap().unwrap().1.unauthorized, "the mark survives a reload");
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 1, "a held post rings nothing");
+        assert_eq!(unread_counts().await.unwrap().get(chat).copied().unwrap_or(0), 1);
+        let last = get_all_chats_last_messages().await.unwrap();
+        assert_eq!(last.get(chat).and_then(|m| m.last()).map(|m| m.id.as_str()), Some("real_held"), "nor previews the chat");
+        assert!(set_event_unauthorized("held_post", false).unwrap());
+        assert!(!get_message_by_id("held_post").await.unwrap().unwrap().1.unauthorized);
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 2, "standing, it counts");
+        assert!(set_event_unauthorized("held_post", true).unwrap());
+        assert!(get_message_by_id("held_post").await.unwrap().unwrap().1.unauthorized);
+        assert!(!set_event_unauthorized("missing", true).unwrap());
     }
 
     /// Join/leave lines have their OWN query — the chat page never sees them — so

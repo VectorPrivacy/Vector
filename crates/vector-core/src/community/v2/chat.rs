@@ -425,7 +425,6 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
-    /// The verified envelope facts (author, ms, rumor id) behind any variant.
     /// Mark a post its Channel's writers' rules don't stand behind.
     pub fn mark_held(&mut self) {
         if let ChatEvent::Message { opened, .. } = self {
@@ -433,6 +432,7 @@ impl ChatEvent {
         }
     }
 
+    /// The verified envelope facts (author, ms, rumor id) behind any variant.
     pub fn opened(&self) -> &OpenedStream {
         match self {
             ChatEvent::Message { opened, .. }
@@ -735,6 +735,21 @@ mod tests {
 
     fn open(wrap: &Event) -> Result<ChatEvent, ChatError> {
         open_chat_event(wrap, &group(), &chan(), Epoch(0))
+    }
+
+    #[test]
+    fn a_post_carries_its_first_writer_certificate_and_a_malformed_one_is_none() {
+        let author = Keys::generate();
+        let rumor = build_message_rumor(author.public_key(), &chan(), Epoch(0), "hi", None, &[], vec![], AT);
+        let first = with_writer(rumor.clone(), Epoch(1), Some(&[0x11; 64]));
+        let both = with_writer(first.clone(), Epoch(1), Some(&[0x22; 64]));
+        assert_eq!(writer_cert_of(&both), Some([0x11; 64]), "the first one");
+        let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
+        tags.push(Tag::custom(TAG_WCERT, ["zz"]));
+        tags.push(Tag::custom(TAG_WCERT, [crate::simd::hex::bytes_to_hex_string(&[0x33; 64])]));
+        let bad = EventBuilder::new(rumor.kind, rumor.content.clone()).tags(tags).custom_created_at(rumor.created_at).finalize_unsigned_with_id(rumor.pubkey);
+        assert_eq!(writer_cert_of(&bad), None, "a malformed first one hides nothing behind it");
+        assert_eq!(writer_cert_of(&rumor), None);
     }
 
     fn seal(rumor: &UnsignedEvent, author: &Keys) -> Event {

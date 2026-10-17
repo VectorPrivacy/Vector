@@ -821,8 +821,9 @@ pub fn build_access_rumor_for(deliverer: PublicKey, scope: RekeyScope, epoch: Ep
 
 /// [`build_access_rumor_for`], handing writer certificates to its recipients.
 pub fn build_access_rumor_certified(deliverer: PublicKey, scope: RekeyScope, epoch: Epoch, writer: Option<[u8; 32]>, blobs: &[RekeyBlob], certs: &[([u8; 32], [u8; 64])], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
-    if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
-        return Err(RekeyError::TooManyBlobs(blobs.len()));
+    let cap = if certs.is_empty() { MAX_REKEY_BLOBS_PER_EVENT } else { MAX_CERTIFIED_BLOBS_PER_EVENT };
+    if blobs.len() > cap || certs.len() > MAX_CERTIFIED_BLOBS_PER_EVENT {
+        return Err(RekeyError::TooManyBlobs(blobs.len().max(certs.len())));
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     let mut tags = vec![
@@ -1536,6 +1537,17 @@ mod tests {
         let seal = stream::build_seal(&rumor, SealForm::Encrypted, &group, &deliverer).unwrap();
         let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, nostr_sdk::prelude::Timestamp::from_secs(100)).unwrap();
         assert!(wrap.as_json().len() <= 65_536, "{} bytes: a full certified chunk must fit a 64KB relay event", wrap.as_json().len());
+    }
+
+    #[test]
+    fn a_certified_delivery_past_its_cap_is_refused() {
+        let deliverer = keys(1);
+        let scope = RekeyScope::Channel(crate::community::ChannelId([3; 32]));
+        let blobs: Vec<RekeyBlob> = (0..=MAX_CERTIFIED_BLOBS_PER_EVENT).map(|_| RekeyBlob { locator: "aa".repeat(32), wrapped: "x".into() }).collect();
+        let certs: Vec<([u8; 32], [u8; 64])> = (0..=MAX_CERTIFIED_BLOBS_PER_EVENT).map(|i| ([i as u8; 32], [0xEE; 64])).collect();
+        assert!(build_access_rumor_certified(deliverer.public_key(), scope, Epoch(1), None, &blobs, &certs, 100).is_err());
+        assert!(build_access_rumor_certified(deliverer.public_key(), scope, Epoch(1), None, &blobs, &[], 100).is_ok(), "keys alone fit more");
+        assert!(build_access_rumor_certified(deliverer.public_key(), scope, Epoch(1), None, &blobs[1..], &certs[1..], 100).is_ok());
     }
 
     #[test]

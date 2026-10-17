@@ -74,12 +74,18 @@ pub(crate) fn live_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Ep
     })
 }
 
-/// The live writer key, when the stored Roster lets this device post: a key a manager minted or
-/// a cut writer kept is no licence.
+/// The live writer key, when the stored Roster lets this device post and it holds the epoch's
+/// certificate: a key a manager minted or a cut writer kept is no licence, and a post without
+/// its proof would never stand.
 fn usable_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8; 32], GroupKey)> {
     let roster = crate::db::community::get_community_roles(&hex(&community.id().0)).ok()?;
     let me = me_pk().ok()?.to_hex();
-    may_write(&roster, &community.owner().ok()?.to_hex(), &me, ch).then(|| live_writer(community, ch)).flatten()
+    if !may_write(&roster, &community.owner().ok()?.to_hex(), &me, ch) {
+        return None;
+    }
+    let live = live_writer(community, ch)?;
+    let certified = ch.writers.as_ref()?.certifier(live.0).is_none() || my_cert(community, ch, live.0).is_some();
+    certified.then_some(live)
 }
 
 /// Where a send of `kind` lands in `ch`: the read group, or the live writer key signing with the
@@ -206,7 +212,8 @@ fn certify(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, certifying: &[
         .collect()
 }
 
-/// The certifier secret this device minted for `ch`'s writer `epoch`, when it did.
+/// The certifier secret this device holds for `ch`'s writer `epoch`, minted or handed to it,
+/// when it is the one the ledger names.
 fn certifier_held(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> Option<[u8; 32]> {
     let held = crate::db::community::held_epoch_key(&hex(&community.id().0), &writers::certifier_scope(&ch.id), epoch.0).ok()??;
     let named = ch.writers.as_ref()?.certifier(epoch)?;
@@ -221,10 +228,19 @@ fn store_my_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, cert: &[
     let _ = crate::db::settings::set_sql_setting(cert_key(community, ch, epoch), crate::simd::hex::bytes_to_hex_string(cert));
 }
 
-/// This device's writer certificate for `ch`'s writer `epoch`, when it holds one.
+/// This device's writer certificate for `ch`'s writer `epoch`, when it holds one the ledger's
+/// certifier signed. One it didn't, from a mint that lost its race, is dropped for a fresh one.
 pub(crate) fn my_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> Option<[u8; 64]> {
-    let held = crate::db::settings::get_sql_setting(cert_key(community, ch, epoch)).ok()??;
-    crate::simd::hex::hex_string_to_bytes_checked(&held)?.try_into().ok()
+    let key = cert_key(community, ch, epoch);
+    let held = crate::db::settings::get_sql_setting(key.clone()).ok()??;
+    let cert: [u8; 64] = crate::simd::hex::hex_string_to_bytes_checked(&held)?.try_into().ok()?;
+    let ledger = ch.writers.as_ref()?;
+    ledger.certifier(epoch)?;
+    if ledger.certifies(&community.id().0, epoch, &me_pk().ok()?.to_bytes(), &cert) {
+        return Some(cert);
+    }
+    let _ = crate::db::settings::remove_setting(&key);
+    None
 }
 
 /// When a new entry starts: now, but never before the newest post this device holds in the
@@ -232,7 +248,13 @@ pub(crate) fn my_cert(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> 
 /// ahead than any edition may be is its author's say, not a clock.
 async fn entry_time(ch: &ChannelV2) -> u64 {
     let now = now_ms();
-    let newest = crate::state::STATE.lock().await.get_chat(&hex(&ch.id.0)).and_then(|c| c.last_message_time()).filter(|t| *t < now + writers::ENTRY_SKEW_MS);
+    // What the rules held is no post made, whatever date it claims.
+    let newest = crate::state::STATE
+        .lock()
+        .await
+        .get_chat(&hex(&ch.id.0))
+        .and_then(|c| c.messages.iter().rev().find(|m| !m.flags.is_unauthorized()).map(|m| crate::compact::timestamp_from_compact(m.at)))
+        .filter(|t| *t < now + writers::ENTRY_SKEW_MS);
     now.max(newest.map_or(0, |t| t.saturating_add(1)))
 }
 
@@ -542,7 +564,12 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     // Only an epoch's minter and the managers serve someone: a writer's blob can't vouch that
     // they were served.
     let trusted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) || manager(&d.to_hex());
-    let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e));
+    // At a certified epoch, served means handed a certificate too.
+    let certified = |p: &PublicKey, e: Epoch| {
+        ledger.certifier(e).is_none()
+            || deliveries.iter().any(|d| d.epoch == e && trusted(&d.deliverer, e) && d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&held.id().0, e, w, c)))
+    };
+    let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e)) && certified(p, e);
     let banned_pks: Vec<PublicKey> = posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
     let pool: Vec<PublicKey> = candidates.iter().chain(banned_pks.iter()).copied().collect();
     let minter_of = |e: Epoch| ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
@@ -708,67 +735,208 @@ pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community:
 /// How a restricted Channel's writers' rules judge what reaches a reader (CORD-03 §1).
 pub(crate) struct Judge {
     ledger: Ledger,
-    community: [u8; 32],
+    community: CommunityV2,
     channel: ChannelV2,
     roster: CommunityRoles,
     owner_hex: String,
-    banned: Vec<String>,
+    members: std::sync::OnceLock<std::collections::HashSet<String>>,
     me_manages: bool,
 }
 
+/// What a reader does with a post on arrival (CORD-03 §1).
+pub(crate) enum Arrival {
+    Stands(chat::ChatEvent),
+    /// Its wrap waits on this device for a later judgment; a reader who manages the Channel
+    /// keeps this marked copy meanwhile.
+    Held(Option<chat::ChatEvent>),
+    /// A signal of the moment, typing or a Mini App's: nothing to judge later.
+    Dropped,
+}
+
+fn fleeting(event: &chat::ChatEvent) -> bool {
+    matches!(event, chat::ChatEvent::Typing { .. } | chat::ChatEvent::Webxdc { .. })
+}
+
 impl Judge {
-    /// `None` when the Channel keeps no ledger: everything there stands as it always did.
+    /// `None` when the Channel keeps no ledger. A Roster it can't read judges as an empty one:
+    /// what that holds waits for the next judgment rather than standing.
     pub(crate) fn of(community: &CommunityV2, ch: &ChannelV2) -> Option<Judge> {
         let ledger = ch.writers.clone()?;
         let cid_hex = hex(&community.id().0);
-        let roster = crate::db::community::get_community_roles(&cid_hex).ok()?;
-        let owner_hex = community.owner().ok()?.to_hex();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let owner_hex = community.owner().map(|o| o.to_hex()).unwrap_or_default();
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
-        let me = me_pk().ok()?.to_hex();
-        let me_manages = me == owner_hex || (!banned.contains(&me) && roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_CHANNELS));
-        Some(Judge { ledger, community: community.id().0, channel: ch.clone(), roster, owner_hex, banned, me_manages })
+        let me = me_pk().map(|p| p.to_hex()).unwrap_or_default();
+        let me_manages = !me.is_empty() && (me == owner_hex || (!banned.contains(&me) && roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_CHANNELS)));
+        Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, members: Default::default(), me_manages })
     }
 
-    /// A post by someone who manages the Channel, or while it is restricted may post there,
-    /// always stands.
-    fn vouched_by_roster(&self, author: &str) -> bool {
-        let unbanned = !self.banned.iter().any(|b| b == author);
-        author == self.owner_hex
-            || (unbanned && self.roster.is_authorized(author, Some(&self.owner_hex), Permissions::MANAGE_CHANNELS))
-            || (unbanned && self.channel.restricted() && may_write(&self.roster, &self.owner_hex, author, &self.channel))
+    fn member(&self, author: &str) -> bool {
+        self.members
+            .get_or_init(|| stored_memberlist(&self.community).unwrap_or_default().iter().map(|p| p.to_hex()).collect())
+            .contains(author)
     }
 
-    /// What a reader does with `event`, carried at writer `wepoch`'s address or the read address:
-    /// keeps it, keeps it marked for a reader who manages the Channel, or drops it.
-    pub(crate) fn sort(&self, mut event: chat::ChatEvent, wepoch: Option<Epoch>) -> Option<chat::ChatEvent> {
+    /// A post by a member who manages the Channel stands. So does one by a member who may post
+    /// there now, sent across a move of the ledger it hadn't read yet: dated within
+    /// [`writers::ENTRY_SKEW_MS`] past the entry that moved its address.
+    fn vouched_by_roster(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>) -> bool {
+        if author == self.owner_hex {
+            return true;
+        }
+        let manages = self.roster.is_authorized(author, Some(&self.owner_hex), Permissions::MANAGE_CHANNELS);
+        let writes = || self.channel.restricted() && self.crossed_a_move(at_ms, wepoch) && may_write(&self.roster, &self.owner_hex, author, &self.channel);
+        // The memberlist leaves out the banned.
+        (manages || writes()) && self.member(author)
+    }
+
+    /// Whether a post dated `at_ms` at writer `wepoch`'s address, or the read address, sits just
+    /// past the entry that closed that address to it.
+    fn crossed_a_move(&self, at_ms: u64, wepoch: Option<Epoch>) -> bool {
+        let just_past = |edge: u64| edge <= at_ms && at_ms - edge < writers::ENTRY_SKEW_MS;
+        self.ledger.writers().any(|(e, _, end)| match wepoch {
+            None => self.ledger.writer_start(e).is_some_and(just_past),
+            Some(w) => e == w && end.is_some_and(just_past),
+        })
+    }
+
+    /// Whether `event`, carried at writer `wepoch`'s address or the read address, stands by the
+    /// ledger alone: an open window takes anyone's, a writer window its certified writers'.
+    fn stands_by_ledger(&self, event: &chat::ChatEvent, wepoch: Option<Epoch>) -> bool {
         let o = event.opened();
-        let stands = self.vouched_by_roster(&o.author.to_hex())
-            || match wepoch {
-                None => self.ledger.admits(None, o.rumor.kind.as_u16(), o.at_ms),
-                Some(e) => {
-                    let certified = match self.ledger.certifier(e) {
-                        Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community, e, &o.author.to_bytes(), &c)),
-                        None => true,
-                    };
-                    certified && self.ledger.writer_address_takes(e, o.at_ms)
-                }
-            };
-        if stands {
-            return Some(event);
+        // Once the Channel is open, anyone may post at its read address: a writer still posting
+        // at its own takes nothing new.
+        let open = self.ledger.read_address_takes(o.at_ms);
+        match wepoch {
+            None => !chat::rides_writer_address(o.rumor.kind.as_u16()) || open,
+            Some(e) => {
+                let certified = match self.ledger.certifier(e) {
+                    Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community.id().0, e, &o.author.to_bytes(), &c)),
+                    None => true,
+                };
+                open || (certified && self.ledger.writer_address_takes(e, o.at_ms))
+            }
+        }
+    }
+
+    pub(crate) fn sort(&self, mut event: chat::ChatEvent, wepoch: Option<Epoch>) -> Arrival {
+        let o = event.opened();
+        if self.stands_by_ledger(&event, wepoch) || self.vouched_by_roster(&o.author.to_hex(), o.at_ms, wepoch) {
+            return Arrival::Stands(event);
+        }
+        if fleeting(&event) {
+            return Arrival::Dropped;
         }
         if self.me_manages && matches!(event, chat::ChatEvent::Message { .. }) {
             event.mark_held();
-            return Some(event);
+            return Arrival::Held(Some(event));
         }
-        None
+        Arrival::Held(None)
     }
 }
 
 /// [`Judge::sort`] for a Channel that may keep no ledger.
-pub(crate) fn sort_arrival(judge: Option<&Judge>, event: chat::ChatEvent, wepoch: Option<Epoch>) -> Option<chat::ChatEvent> {
+pub(crate) fn sort_arrival(judge: Option<&Judge>, event: chat::ChatEvent, wepoch: Option<Epoch>) -> Arrival {
     match judge {
         Some(j) => j.sort(event, wepoch),
-        None => wepoch.is_none().then_some(event),
+        None if wepoch.is_none() => Arrival::Stands(event),
+        None if fleeting(&event) => Arrival::Dropped,
+        None => Arrival::Held(None),
+    }
+}
+
+/// [`sort_arrival`] for `wrap` as it arrives: what stands, or a manager's marked copy of what
+/// doesn't, whose wrap waits for a later judgment.
+pub(crate) fn judge_arrival(judge: Option<&Judge>, community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::prelude::Event, event: chat::ChatEvent, wepoch: Option<Epoch>) -> Option<chat::ChatEvent> {
+    let at_ms = event.opened().at_ms;
+    match sort_arrival(judge, event, wepoch) {
+        Arrival::Stands(event) => Some(event),
+        Arrival::Held(marked) => {
+            hold(community, channel, wrap, at_ms);
+            marked
+        }
+        Arrival::Dropped => None,
+    }
+}
+
+/// Keep `wrap` for a later judgment of `channel`.
+pub(crate) fn hold(community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::prelude::Event, at_ms: u64) {
+    if let Err(e) = crate::db::community::hold_wrap(&hex(community), &hex(&channel.0), &wrap.id.to_hex(), &wrap.as_json(), at_ms) {
+        crate::log_warn!("[v2:writers] couldn't hold a post for later: {e}");
+    }
+}
+
+/// Judge again every post `community` holds (CORD-03 §1). What its rules now stand behind joins
+/// its Channel unrung, or loses its mark on a manager's device; a reader who now manages the
+/// Channel sees what still waits, marked, and one who no longer does stops seeing it. Returns
+/// how many posts it let go.
+pub async fn rejudge_held(community: &CommunityV2, handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+    crate::db::scoped(rejudge_held_bound(community, handler)).await
+}
+
+async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+    let cid_hex = hex(&community.id().0);
+    if !crate::db::community::holds_wraps(&cid_hex) {
+        return 0;
+    }
+    let (Ok(rows), Ok(me)) = (crate::db::community::held_wraps(&cid_hex), me_pk()) else { return 0 };
+    let session = crate::db::current_session();
+    let mut by_channel: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+    for (wrap_id, channel_hex, wrap) in rows {
+        by_channel.entry(channel_hex).or_default().push((wrap_id, wrap));
+    }
+    let mut released = 0;
+    for (channel_hex, wraps) in by_channel {
+        let Some(ch) = crate::community::id32_from_hex(&channel_hex).and_then(|id| community.channel(&ChannelId(id))) else { continue };
+        let judge = Judge::of(community, ch);
+        let planes = read_planes(community, ch);
+        for (wrap_id, json) in wraps {
+            if !session.is_live() {
+                return released;
+            }
+            let Ok(wrap) = nostr_sdk::prelude::Event::from_json(&json) else {
+                let _ = crate::db::community::release_held_wrap(&wrap_id);
+                continue;
+            };
+            // A key this device doesn't hold yet may come: the wrap waits for it.
+            let Some((event, wepoch)) = open_on_planes(ch, &planes, &wrap) else { continue };
+            let id = event.opened().rumor_id.to_hex();
+            let marked = crate::db::events::get_message_by_id(&id).await.ok().flatten().is_some_and(|(_, m)| m.unauthorized);
+            match sort_arrival(judge.as_ref(), event, wepoch) {
+                Arrival::Stands(event) => {
+                    if marked {
+                        let _ = crate::db::events::set_event_unauthorized(&id, false);
+                        let shown = crate::state::STATE.lock().await.update_message(&id, |m| m.flags.set_unauthorized(false));
+                        if let Some((chat, message)) = shown {
+                            handler.on_community_update(&chat, &id, &message);
+                        }
+                    } else {
+                        admit(&event, &channel_hex, community, &me, handler).await;
+                    }
+                    let _ = crate::db::community::release_held_wrap(&wrap_id);
+                    released += 1;
+                }
+                Arrival::Held(Some(copy)) if !marked => admit(&copy, &channel_hex, community, &me, handler).await,
+                Arrival::Held(None) if marked => {
+                    let _ = crate::state::STATE.lock().await.remove_message(&id);
+                    let _ = crate::db::events::delete_event(&id).await;
+                    handler.on_community_removed(&channel_hex, &id);
+                }
+                Arrival::Held(_) | Arrival::Dropped => {}
+            }
+        }
+    }
+    released
+}
+
+/// Apply a judged post to its Channel as a late arrival: shown, never rung.
+async fn admit(event: &chat::ChatEvent, channel_hex: &str, community: &CommunityV2, me: &PublicKey, handler: &dyn crate::event_handler::InboundEventHandler) {
+    use super::super::inbound::ChatPersist;
+    match super::super::inbound::persist_routed_chat_event(event, channel_hex, &community.id().0, me).await {
+        Some(ChatPersist::New(message)) => handler.on_community_message(channel_hex, &message, false),
+        Some(ChatPersist::Updated { message, .. }) | Some(ChatPersist::ReactionRemoved { message, .. }) => handler.on_community_update(channel_hex, &message.id, &message),
+        Some(ChatPersist::Removed(target)) => handler.on_community_removed(channel_hex, &target),
+        None => {}
     }
 }
 
@@ -800,7 +968,7 @@ async fn collect_writers_bound<T: Transport + ?Sized>(transport: &T, community: 
         let Some(ledger) = ch.writers.as_ref() else { continue };
         let Some((epoch, pk)) = ledger.current_writer() else { continue };
         let need_key = (writes || manages) && live_writer(community, ch).is_none();
-        let need_cert = writes && my_cert(community, ch, epoch).is_none() && ledger.certifier(epoch).is_some();
+        let need_cert = writes && ledger.certifier(epoch).is_some() && my_cert(community, ch, epoch).is_none();
         let need_certifier = manages && certifier_held(community, ch, epoch).is_none() && ledger.certifier(epoch).is_some();
         if !need_key && !need_cert && !need_certifier {
             continue;

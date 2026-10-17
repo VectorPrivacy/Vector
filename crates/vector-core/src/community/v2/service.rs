@@ -26,7 +26,7 @@ use crate::community::edition::ParsedEdition;
 mod writing;
 pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
 pub(crate) use writing::live_writer as live_writer_of;
-pub(crate) use writing::{sort_arrival, Judge};
+pub(crate) use writing::{hold as writing_hold, judge_arrival, rejudge_held, sort_arrival, Arrival, Judge};
 
 /// The active signer for v2 authority actions: the live client's signer — which
 /// covers a NIP-46 bunker / NIP-55 offline signer — falling back to the local
@@ -519,6 +519,67 @@ impl ReadPlane {
     }
 }
 
+impl ReadPlane {
+    fn conv(&self) -> &nostr_sdk::prelude::nip44::v2::ConversationKey {
+        match self {
+            ReadPlane::Keyed(group) => group.conv_key(),
+            ReadPlane::View(_, conv) => conv,
+        }
+    }
+}
+
+/// Every read plane this device holds for `ch`, with its epoch: a Public Channel's under every
+/// held root, a Private one's under its own keys and the past epochs it may only read.
+fn read_planes(community: &CommunityV2, ch: &ChannelV2) -> Vec<(ReadPlane, Epoch)> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let coords: Vec<([u8; 32], Epoch)> = if ch.private {
+        let Some(current) = ch.key else {
+            return Vec::new();
+        };
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        let mut held = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap_or_default();
+        if !held.iter().any(|(ep, _)| *ep == ch.epoch) {
+            held.push((ch.epoch, current));
+        }
+        // Only real grants are archived, but keep the invariant local: a private
+        // plane is never read with the root value.
+        held.into_iter().filter(|(_, k)| *k != community.community_root).map(|(ep, k)| (k, ep)).collect()
+    } else {
+        let mut roots = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
+        if !roots.iter().any(|(ep, _)| *ep == community.root_epoch) {
+            roots.push((community.root_epoch, community.community_root));
+        }
+        roots.into_iter().map(|(ep, root)| (root, ep)).collect()
+    };
+    let mut planes: Vec<(ReadPlane, Epoch)> = coords.into_iter().map(|(secret, epoch)| (ReadPlane::Keyed(channel_group_key(&secret, &ch.id, epoch)), epoch)).collect();
+    if ch.private {
+        // Past epochs delivered read-only with Read Message History (CORD-03 §5).
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        for (epoch, view) in crate::db::community::history_views(&cid_hex, &ch_hex).unwrap_or_default() {
+            if planes.iter().any(|(_, e)| *e == epoch) {
+                continue;
+            }
+            if let Ok(address) = PublicKey::from_slice(&view.address) {
+                planes.push((ReadPlane::View(address, nostr_sdk::prelude::nip44::v2::ConversationKey::new(view.conv_key)), epoch));
+            }
+        }
+    }
+    planes
+}
+
+/// Open `wrap` as a post in `ch` under `planes`, with the writer epoch whose address carried it.
+fn open_on_planes(ch: &ChannelV2, planes: &[(ReadPlane, Epoch)], wrap: &Event) -> Option<(chat::ChatEvent, Option<Epoch>)> {
+    if let Some((wepoch, ..)) = ch.writers.as_ref().and_then(|l| l.writers().find(|(_, pk, _)| *pk == wrap.pubkey.to_bytes())) {
+        return planes.iter().find_map(|(plane, epoch)| chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, plane.conv(), &ch.id, *epoch).ok()).map(|ev| (ev, Some(wepoch)));
+    }
+    let (plane, epoch) = planes.iter().find(|(p, _)| p.address() == wrap.pubkey)?;
+    let opened = match plane {
+        ReadPlane::Keyed(group) => chat::open_chat_event(wrap, group, &ch.id, *epoch),
+        ReadPlane::View(address, conv) => chat::open_chat_event_at(wrap, address, conv, &ch.id, *epoch),
+    };
+    opened.ok().map(|ev| (ev, None))
+}
+
 /// How many of the newest held epochs a newest-first catch-up reads. One: a
 /// rotation moves the conversation, so the live epoch is where it is. Rotated-past
 /// epochs are reached by back-paging, when a reader actually scrolls for them.
@@ -595,41 +656,9 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
         // across its OWN held epochs (CORD-03 §3), so history spanning a rotation stays
         // continuous either way. A keyless Private channel is unreadable — never derived
         // from the root (that would address the public plane).
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let coords: Vec<([u8; 32], Epoch)> = if ch.private {
-            let Some(current) = ch.key else {
-                return Ok((Vec::new(), None));
-            };
-            let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-            let mut held = crate::db::community::held_epoch_keys(&cid_hex, &ch_hex).unwrap_or_default();
-            if !held.iter().any(|(ep, _)| *ep == ch.epoch) {
-                held.push((ch.epoch, current));
-            }
-            // Only real grants are archived, but keep the invariant local: a private
-            // plane is never read with the root value.
-            held.into_iter().filter(|(_, k)| *k != community.community_root).map(|(ep, k)| (k, ep)).collect()
-        } else {
-            let mut roots = crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default();
-            if !roots.iter().any(|(ep, _)| *ep == community.root_epoch) {
-                roots.push((community.root_epoch, community.community_root));
-            }
-            roots.into_iter().map(|(ep, root)| (root, ep)).collect()
-        };
-        if coords.is_empty() {
+        let mut planes = read_planes(community, ch);
+        if planes.is_empty() {
             return Ok((Vec::new(), None));
-        }
-        let mut planes: Vec<(ReadPlane, Epoch)> = coords.into_iter().map(|(secret, epoch)| (ReadPlane::Keyed(channel_group_key(&secret, channel_id, epoch)), epoch)).collect();
-        if ch.private {
-            // Past epochs delivered read-only with Read Message History (CORD-03 §5).
-            let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-            for (epoch, view) in crate::db::community::history_views(&cid_hex, &ch_hex).unwrap_or_default() {
-                if planes.iter().any(|(_, e)| *e == epoch) {
-                    continue;
-                }
-                if let Ok(address) = PublicKey::from_slice(&view.address) {
-                    planes.push((ReadPlane::View(address, nostr_sdk::prelude::nip44::v2::ConversationKey::new(view.conv_key)), epoch));
-                }
-            }
         }
         // Every epoch is its own address on this plane, so the full set costs one
         // fetch per held epoch per page and grows with the community's whole
@@ -749,7 +778,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                         };
                         chat::open_writer_chat_event(wrap, address, *wepoch, conv, channel_id, *epoch).ok().map(|ev| (ev, *epoch))
                     });
-                    if let Some((event, epoch)) = opened.and_then(|(ev, e)| writing::sort_arrival(judge.as_ref(), ev, Some(*wepoch)).map(|ev| (ev, e))) {
+                    if let Some((event, epoch)) = opened.and_then(|(ev, e)| writing::judge_arrival(judge.as_ref(), &community.id().0, channel_id, wrap, ev, Some(*wepoch)).map(|ev| (ev, e))) {
                         if seen_rumors.insert(event.opened().rumor_id) {
                             page_events.push(FetchedEvent { event, epoch });
                         }
@@ -765,7 +794,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                         ReadPlane::Keyed(group) => chat::open_chat_event(wrap, group, channel_id, *epoch),
                         ReadPlane::View(address, conv_key) => chat::open_chat_event_at(wrap, address, conv_key, channel_id, *epoch),
                     };
-                    let opened = opened.ok().and_then(|ev| writing::sort_arrival(judge.as_ref(), ev, None));
+                    let opened = opened.ok().and_then(|ev| writing::judge_arrival(judge.as_ref(), &community.id().0, channel_id, wrap, ev, None));
                     if let Some(event) = opened {
                         let id = event.opened().rumor_id;
                         if seen_rumors.insert(id) {
@@ -23957,6 +23986,299 @@ mod tests {
             .collect()
     }
 
+    /// What a handler was shown: a message's text and whether it rang, an update's text after
+    /// `~` with its mark, a removal's id after `-`.
+    #[derive(Default)]
+    struct Shown(std::sync::Mutex<Vec<(String, bool)>>);
+
+    impl crate::event_handler::InboundEventHandler for Shown {
+        fn on_community_message(&self, _chat: &str, m: &crate::types::Message, is_new: bool) {
+            self.0.lock().unwrap().push((m.content.clone(), is_new));
+        }
+        fn on_community_update(&self, _chat: &str, _target: &str, m: &crate::types::Message) {
+            self.0.lock().unwrap().push((format!("~{}", m.content), m.unauthorized));
+        }
+        fn on_community_removed(&self, _chat: &str, target: &str) {
+            self.0.lock().unwrap().push((format!("-{target}"), false));
+        }
+    }
+
+    impl Shown {
+        fn take(&self) -> Vec<(String, bool)> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    /// An owner and a member (a manager when `manages`) in a community whose #general the owner
+    /// has restricted, both having read it so.
+    async fn restricted_bed(manages: bool) -> (TestBed, Actor, Actor, CommunityV2, ChannelId) {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member) = TestBed::new();
+        let held = |c: &CommunityV2| crate::db::community::load_community_v2(c.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Held", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let general = community.channels[0].id;
+        let bits = if manages { Permissions::MANAGE_CHANNELS } else { 0 };
+        let role = create_role_v2(&bed.relay, &held(&community), "Member", 0, bits).await.unwrap();
+        set_member_roles(&bed.relay, &held(&community), &member.keys.public_key(), vec![role]).await.unwrap();
+        send_direct_invite(&bed.relay, &held(&community), &member.keys.public_key(), None, None).await.unwrap();
+        bed.swap_to(&member);
+        accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await).await.unwrap();
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        collect_writers(&bed.relay, &held(&community)).await.unwrap();
+        assert!(held(&community).channel(&general).unwrap().restricted());
+        let community = held(&community);
+        (bed, owner, member, community, general)
+    }
+
+    #[tokio::test]
+    async fn a_post_held_on_rules_this_device_hadnt_read_stands_once_it_reads_them() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let (live, secret, _) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        assert!(!held().channel(&general).unwrap().restricted(), "the owner reopened it");
+        let p = Keys::generate();
+        post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "after the reopen", now_ms()).await;
+        // Once it is open anyone may post at the read address, so a post at a writer's takes nothing new.
+        let writer = GroupKey::from_parts(crate::community::v2::derive::channel_writer_group_key(&secret, &general, live).keys().clone(), read.conv_key().clone());
+        post_raw(&bed.relay, &held(), &p, &general, &writer, community.root_epoch, Some(live), "at the old writer address", now_ms() + 1).await;
+
+        bed.swap_to(&member);
+        let texts = channel_texts(&bed.relay, &held(), &general).await;
+        assert!(!texts.iter().any(|t| t == "after the reopen" || t == "at the old writer address"), "judged on the ledger this device holds: {texts:?}");
+        let waiting = crate::db::community::held_wraps(&cid_hex).unwrap();
+        assert_eq!(waiting.len(), 2, "held, not dropped");
+        let ids: Vec<String> = waiting.iter().map(|w| w.0.clone()).collect();
+        assert_eq!(crate::db::events::community_wraps_settled(&ids).len(), 2, "a catch-up takes held wraps as settled");
+        let shown = Shown::default();
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 0, "nothing stands on the old rules");
+        assert!(shown.take().is_empty());
+
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 2);
+        assert_eq!(sorted(shown.take().into_iter().map(|(t, rang)| { assert!(!rang, "a late arrival never rings"); t }).collect()), vec!["after the reopen".to_string(), "at the old writer address".to_string()]);
+        assert!(crate::db::community::held_wraps(&cid_hex).unwrap().is_empty(), "let go once they stand");
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_writer_in_flight_across_the_restrict_stands_only_while_a_member() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let (w, z) = (Keys::generate(), Keys::generate());
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        for k in [&w, &z] {
+            set_member_roles(&bed.relay, &held(), &k.public_key(), vec![plain.clone()]).await.unwrap();
+            set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(k.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        }
+        let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
+        let start = ledger.writer_start(ledger.current_writer().unwrap().0).unwrap();
+        // Sent before its client read the restrict, at the read address.
+        post_raw(&bed.relay, &held(), &w, &general, &read, community.root_epoch, None, "in flight", start + 1_000).await;
+        post_raw(&bed.relay, &held(), &w, &general, &read, community.root_epoch, None, "long after", start + crate::community::v2::writers::ENTRY_SKEW_MS + 1_000).await;
+        post_raw(&bed.relay, &held(), &z, &general, &read, community.root_epoch, None, "banned in flight", start + 1_500).await;
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let texts = channel_texts(&bed.relay, &held(), &general).await;
+        assert!(texts.contains(&"in flight".to_string()) && texts.contains(&"banned in flight".to_string()), "a writer whose client lagged the move keeps its post: {texts:?}");
+        assert!(!texts.contains(&"long after".to_string()), "past the skew, a writer posts at its own address");
+
+        bed.swap_to(&owner);
+        kick_member(&bed.relay, &held(), &w.public_key()).await.unwrap();
+        set_members_banned(&bed.relay, community.id(), &[z.public_key()], true).await.unwrap();
+        post_raw(&bed.relay, &held(), &w, &general, &read, community.root_epoch, None, "kicked in flight", start + 2_000).await;
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        let texts = channel_texts(&bed.relay, &held(), &general).await;
+        assert!(!texts.contains(&"kicked in flight".to_string()), "a writer no longer a member vouches for nothing: {texts:?}");
+        assert!(!texts.contains(&"banned in flight".to_string()), "nor one banned");
+    }
+
+    #[tokio::test]
+    async fn a_writers_certificate_the_ledger_disowns_is_collected_again() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(member.keys.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held()).await.unwrap(), 1);
+        assert!(can_post(&held(), &general));
+        let ch = held().channel(&general).unwrap().clone();
+        let live = ch.writers.as_ref().unwrap().current_writer().unwrap().0;
+        let real = writing::my_cert(&held(), &ch, live).unwrap();
+        // A mint that lost its race left a certificate its certifier never stood behind.
+        let key = format!("writer_cert:{}:{}:{}", crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0), live.0);
+        crate::db::settings::set_sql_setting(key.clone(), "77".repeat(64)).unwrap();
+        assert!(!can_post(&held(), &general), "a post it would carry could never stand");
+        assert!(crate::db::settings::get_sql_setting(key).unwrap().is_none(), "dropped for a fresh one");
+        collect_writers(&bed.relay, &held()).await.unwrap();
+        assert_eq!(writing::my_cert(&held(), &ch, live), Some(real), "the real one, collected again");
+        assert!(can_post(&held(), &general));
+    }
+
+    #[tokio::test]
+    async fn a_certified_delivery_past_one_event_keeps_each_writers_key_beside_their_certificate() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Many", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
+        let writers: Vec<PublicKey> = (0..rekey::MAX_CERTIFIED_BLOBS_PER_EVENT + 2).map(|_| Keys::generate().public_key()).collect();
+        let certs: std::collections::HashMap<PublicKey, [u8; 64]> = writers.iter().enumerate().map(|(i, w)| (*w, [i as u8; 64])).collect();
+        deliver_certified(&bed.relay, &community, &general, scope, Epoch(1), Some([0x42; 32]), &[0x5e; 32], &writers, &certs).await.unwrap();
+        let deliveries = fetch_plane_deliveries(&bed.relay, &community, &general, scope).await.unwrap();
+        assert_eq!(deliveries.len(), 2, "split at the certified cap");
+        assert!(deliveries.iter().all(|d| d.blobs.len() <= rekey::MAX_CERTIFIED_BLOBS_PER_EVENT));
+        for w in &writers {
+            let with_blob: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &w.to_bytes(), scope, Epoch(1)).is_some()).collect();
+            assert_eq!(with_blob.len(), 1);
+            assert!(with_blob[0].certs.contains(&(w.to_bytes(), certs[w])), "a writer's certificate rides with its key");
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_keeps_the_keys_a_self_scrub_needs_and_drops_the_writers() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Leave", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        for scope in [crate::community::v2::writers::secret_scope(&general), crate::community::v2::writers::minted_scope(&general), crate::community::v2::writers::certifier_scope(&general), chan_hex.clone()] {
+            crate::db::community::store_epoch_key(&cid_hex, &scope, 1, &[0x5e; 32]).unwrap();
+        }
+        crate::db::community::hold_wrap(&cid_hex, &chan_hex, &"ab".repeat(32), "{}", 1).unwrap();
+        crate::db::community::delete_community_retain_keys(&cid_hex).unwrap();
+        assert!(crate::db::community::held_epoch_key(&cid_hex, &chan_hex, 1).unwrap().is_some(), "a self-scrub signs with the read keys");
+        for scope in [crate::community::v2::writers::secret_scope(&general), crate::community::v2::writers::minted_scope(&general), crate::community::v2::writers::certifier_scope(&general)] {
+            assert!(crate::db::community::held_epoch_key(&cid_hex, &scope, 1).unwrap().is_none(), "nothing that posts or vouches outlives membership: {scope}");
+        }
+        assert!(crate::db::community::held_wraps(&cid_hex).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_writer_served_without_a_certificate_is_served_again_with_one() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let m = member.keys.public_key();
+        bed.swap_to(&owner);
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(m.to_hex()), Permissions::SEND_MESSAGES, 0).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        // An older client hands over the key alone.
+        let (live, secret, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(writer.pk().to_bytes()), &secret, &[m]).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(collect_writers(&bed.relay, &held()).await.unwrap(), 1, "the key");
+        assert!(!can_post(&held(), &general), "but no proof to post with");
+        bed.swap_to(&owner);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.delivered, 1, "a key without its certificate serves nobody");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.delivered, 0, "once");
+        bed.swap_to(&member);
+        collect_writers(&bed.relay, &held()).await.unwrap();
+        assert!(can_post(&held(), &general));
+    }
+
+    #[tokio::test]
+    async fn what_waits_shows_marked_to_a_new_manager_and_leaves_a_former_one() {
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let p = Keys::generate();
+        post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "spam", now_ms()).await;
+        bed.swap_to(&member);
+        assert!(!channel_texts(&bed.relay, &held(), &general).await.contains(&"spam".to_string()));
+        let shown = Shown::default();
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 0);
+        assert!(shown.take().is_empty(), "a member is shown nothing");
+
+        bed.swap_to(&owner);
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &member.keys.public_key(), vec![mods]).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 0, "still held");
+        assert_eq!(shown.take(), vec![("spam".to_string(), false)], "a new manager sees it, unrung");
+        let id = crate::db::community::held_wraps(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        assert_eq!(id.len(), 1, "it still waits");
+
+        bed.swap_to(&owner);
+        set_member_roles(&bed.relay, &held(), &member.keys.public_key(), vec![]).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        writing::rejudge_held(&held(), &shown).await;
+        let gone = shown.take();
+        assert_eq!(gone.len(), 1);
+        assert!(gone[0].0.starts_with('-'), "a former manager stops seeing it: {gone:?}");
+        assert!(channel_texts(&bed.relay, &held(), &general).await.iter().all(|t| t != "spam"));
+    }
+
+    #[tokio::test]
+    async fn a_held_post_dated_ahead_never_dates_a_managers_entry() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let p = Keys::generate();
+        post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "from the future", now_ms() + 5 * 60_000).await;
+        let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let copy = page.into_iter().find(|f| f.event.opened().rumor.content == "from the future").unwrap();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        crate::community::v2::inbound::persist_routed_chat_event(&copy.event, &chan_hex, &community.id().0, &owner.keys.public_key()).await.expect("kept marked");
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        let at = held().channel(&general).unwrap().writers.as_ref().unwrap().entries.last().unwrap().at;
+        assert!(at < now_ms() + 60_000, "the reopen is dated now, not by a post the rules held");
+    }
+
+    #[tokio::test]
+    async fn a_managers_marked_copy_loses_its_mark_once_the_post_stands() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(true).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        let p = Keys::generate();
+        post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "early", now_ms()).await;
+
+        bed.swap_to(&member);
+        let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let copy = page.into_iter().find(|f| f.event.opened().rumor.content == "early").expect("a manager keeps a copy");
+        assert!(copy.event.opened().held, "marked");
+        let id = copy.event.opened().rumor_id.to_hex();
+        crate::community::v2::inbound::persist_routed_chat_event(&copy.event, &chan_hex, &community.id().0, &member.keys.public_key()).await.expect("stored");
+        assert!(crate::db::events::get_message_by_id(&id).await.unwrap().unwrap().1.unauthorized);
+        assert!(crate::db::community::community_member_activity(&cid_hex).unwrap().iter().all(|(n, _)| PublicKey::parse(n).unwrap() != p.public_key()), "a held post is no sign of membership");
+
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let shown = Shown::default();
+        assert_eq!(writing::rejudge_held(&held(), &shown).await, 1);
+        assert_eq!(shown.take(), vec![("~early".to_string(), false)], "the copy shown loses its mark");
+        assert!(!crate::db::events::get_message_by_id(&id).await.unwrap().unwrap().1.unauthorized, "and so does the stored one");
+    }
+
     #[tokio::test]
     async fn a_restricted_channel_takes_posts_only_from_its_writers() {
         use crate::community::roles::OverwriteTarget;
@@ -25263,21 +25585,24 @@ mod tests {
         act_as(&w);
         deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(writer.pk().to_bytes()), &secret, &[n.public_key()]).await.unwrap();
         act_as(&owner.keys);
-        post_raw(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some(live), "from the writer", now_ms()).await;
+        let ws = cert_for(&held(), &general, live, &w.public_key());
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(ws))), "from the writer", now_ms()).await;
+        // A post carries its proof: a writer's without one is no different from a stranger's.
+        post_raw(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some(live), "w without its certificate", now_ms()).await;
         post_raw(&bed.relay, &held(), &n, &general, &signed, community.root_epoch, Some(live), "through a leaked key", now_ms()).await;
         // A manager's post stands wherever it lands, certificate or not.
         act_as(&x);
         post_raw(&bed.relay, &held(), &x, &general, &read, community.root_epoch, None, "a manager on an old client", now_ms()).await;
         act_as(&owner.keys);
         // Nor does another writer's certificate vouch for n.
-        let ws = cert_for(&held(), &general, live, &w.public_key());
         post_certified(&bed.relay, &held(), &n, &general, &signed, community.root_epoch, Some((live, Some(ws))), "with w's certificate", now_ms()).await;
-        assert_eq!(sorted(marked_texts(&bed.relay, &held(), &general).await), vec!["through a leaked key".to_string(), "with w's certificate".to_string()]);
+        let marked = vec!["through a leaked key".to_string(), "w without its certificate".to_string(), "with w's certificate".to_string()];
+        assert_eq!(sorted(marked_texts(&bed.relay, &held(), &general).await), marked);
         // A post carries its proof: a certificate n is handed later vouches for nothing n posted before.
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(n.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
         publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(n.public_key().to_hex()), 0, 0).await;
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(sorted(marked_texts(&bed.relay, &held(), &general).await), vec!["through a leaked key".to_string(), "with w's certificate".to_string()]);
+        assert_eq!(sorted(marked_texts(&bed.relay, &held(), &general).await), marked);
     }
 
     #[tokio::test]

@@ -804,6 +804,19 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
+                inbound::DispatchedV2::Held { channel_id, at_ms, marked } => {
+                    if let Some(ch) = crate::community::id32_from_hex(&channel_id) {
+                        super::service::writing_hold(&c.id().0, &crate::community::ChannelId(ch), &event, at_ms);
+                    }
+                    remember();
+                    // A manager sees what was held, marked, and is never rung for it.
+                    if let Some(marked) = marked {
+                        if let Some(inbound::ChatPersist::New(message)) = inbound::persist_routed_chat_event(&marked, &channel_id, &c.id().0, &my_pk).await {
+                            handler.on_community_message(&channel_id, &message, false);
+                        }
+                    }
+                    return;
+                }
                 inbound::DispatchedV2::Presence { .. } => {
                     // Live membership motion: fold it into the persisted Guestbook so
                     // the memberlist stays a local read (the presence callback already
@@ -1258,11 +1271,17 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             return;
         };
         if let Ok(fresh) = super::service::sync_guestbook(&transport, &current).await {
-            if fresh.is_empty() {
-                return;
+            if !fresh.is_empty() {
+                surface_presence(&current, &fresh, handler);
+                handler.on_community_refreshed(&community_id);
             }
-            surface_presence(&current, &fresh, handler);
-            handler.on_community_refreshed(&community_id);
+        }
+        // What waited on a Roster, ledger or memberlist this pass may have moved is judged again.
+        if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+            let released = super::service::rejudge_held(&folded, handler).await;
+            if released > 0 {
+                crate::log_info!("[v2:follow {}] {released} held post(s) stand now", &community_id[..8.min(community_id.len())]);
+            }
         }
     })
     .await
@@ -1520,6 +1539,67 @@ mod tests {
         assert_eq!(moved, 1, "the first message was stored under its outer id");
         dispatch_event(wrap2, rec.clone()).await;
         assert_eq!(rec.got.lock().unwrap().len(), 1, "a stored outer id never reaches the handler");
+    }
+
+    #[tokio::test]
+    async fn a_post_held_on_arrival_waits_and_a_manager_sees_it_unrung() {
+        use crate::community::v2::writers::{writer_address, Ledger, Spell};
+        use crate::types::Message;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            got: StdMutex<Vec<(String, bool, bool)>>,
+        }
+        impl InboundEventHandler for Recorder {
+            fn on_community_message(&self, _chat_id: &str, msg: &Message, is_new: bool) {
+                self.got.lock().unwrap().push((msg.content.clone(), is_new, msg.unauthorized));
+            }
+        }
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 11 + 9) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = crate::community::transport::memory::MemoryRelay::new();
+        let community = super::super::service::create_community(&relay, "Held live", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let (cid, chan) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0));
+        let ledger = Ledger::new(&general)
+            .appended(1_000, Spell::Writer { epoch: crate::community::Epoch(1), pk: writer_address(&[0x11; 32], &general, crate::community::Epoch(1)), root: community.root_epoch, by: me.public_key().to_bytes(), certifier: None })
+            .unwrap();
+        crate::db::community::set_community_writers(&cid, &chan, &ledger.to_json(), 1, true).unwrap();
+        invalidate_held_v2_cache();
+        let member = Keys::generate();
+        let group = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "not a writer", None, &[], vec![], 5_000);
+        let (wrap, _) = super::super::chat::seal_chat_rumor(&rumor, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(5), false).unwrap();
+
+        let rec = Arc::new(Recorder::default());
+        clear().await;
+        dispatch_event(wrap.clone(), rec.clone()).await;
+        dispatch_event(wrap.clone(), rec.clone()).await;
+        assert_eq!(rec.got.lock().unwrap().clone(), vec![("not a writer".to_string(), false, true)], "the owner sees it once, marked, and nothing rings");
+        let held = crate::db::community::held_wraps(&cid).unwrap();
+        assert_eq!(held.iter().map(|(id, ..)| id.clone()).collect::<Vec<_>>(), vec![wrap.id.to_hex()], "its wrap waits for a later judgment");
+        assert!(crate::db::wrappers::processed_wrapper_exists(&wrap.id.to_bytes()), "never opened again off a relay");
     }
 
     #[tokio::test]

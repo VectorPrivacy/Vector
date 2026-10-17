@@ -509,6 +509,10 @@ pub enum DispatchedV2 {
     /// A verified owner-signed tombstone at the dissolved plane (CORD-02 §9): the
     /// community is dead. The realtime layer seals it read-only. `community_id` is hex.
     Dissolved { community_id: String },
+    /// A post `channel_id`'s writers' rules don't stand behind on arrival: the realtime layer
+    /// holds the wrap for a later judgment, and keeps `marked`, the copy a reader who manages the
+    /// Channel sees, without ringing anything.
+    Held { channel_id: String, at_ms: u64, marked: Option<Box<ChatEvent>> },
     /// The wrap opened on a v2 plane but carries nothing the handler renders
     /// (e.g. a WebXDC signal, or a kick we don't surface in the first cut).
     Ignored,
@@ -542,11 +546,7 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_chat_event(wrap, &group, &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        let Some(event) = super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, None) else {
-            return DispatchedV2::Ignored;
-        };
-        let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
+        return dispatch_judged(event, community, ch, None, my_pubkey, handler);
     }
 
     // 1b. A restricted Channel's writer addresses (CORD-03 §1), opened under the read key.
@@ -561,11 +561,7 @@ pub fn dispatch_wrap(
         let Ok(event) = chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, group.conv_key(), &ch.id, epoch) else {
             return DispatchedV2::NotOurs;
         };
-        let Some(event) = super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, Some(wepoch)) else {
-            return DispatchedV2::Ignored;
-        };
-        let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        return dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler);
+        return dispatch_judged(event, community, ch, Some(wepoch), my_pubkey, handler);
     }
 
     // 2. Guestbook plane: join/leave presence.
@@ -604,6 +600,17 @@ pub fn dispatch_wrap(
     }
 
     DispatchedV2::NotOurs
+}
+
+/// Judge `event` by its Channel's writers' rules, then dispatch what stands.
+fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::community::ChannelV2, wepoch: Option<crate::community::Epoch>, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
+    let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+    let at_ms = event.opened().at_ms;
+    match super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, wepoch) {
+        super::service::Arrival::Stands(event) => dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler),
+        super::service::Arrival::Held(marked) => DispatchedV2::Held { channel_id, at_ms, marked: marked.map(Box::new) },
+        super::service::Arrival::Dropped => DispatchedV2::Ignored,
+    }
 }
 
 fn dispatch_chat_event(
@@ -832,7 +839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restricted_channel_dispatches_its_writers_and_keeps_the_rest_for_marking() {
+    async fn a_restricted_channel_dispatches_its_writers_and_holds_the_rest() {
         use super::super::writers::{writer_address, Ledger, Spell};
         use crate::community::Epoch;
         use nostr_sdk::prelude::Timestamp;
@@ -876,11 +883,12 @@ mod tests {
         assert!(as_message(&post(&w2, Some(Epoch(2)), "signed by the key", 30_000)).writer);
         assert!(!as_message(&post(&read, None, "said in the open", 5_000)).writer);
         assert!(chat(&post(&w1, Some(Epoch(1)), "past", 15_000)), "a writer's past posts stay");
-        // What the windows don't stand behind is kept, for a client to show only to managers.
-        assert!(chat(&post(&w1, Some(Epoch(1)), "late", 25_000)), "kept after its entry ends");
+        // What the windows don't stand behind is held, and the owner keeps a marked copy.
+        let held = |wrap: &nostr_sdk::prelude::Event| matches!(dispatch_wrap(wrap, &community, &me.public_key(), &rec), DispatchedV2::Held { marked: Some(ref e), .. } if e.opened().held);
+        assert!(held(&post(&w1, Some(Epoch(1)), "late", 25_000)), "held after its entry ends");
         assert!(!chat(&post(&w2, Some(Epoch(1)), "spliced", 30_000)), "the epoch must be the address's");
         assert!(!chat(&post(&w2, None, "untagged", 30_000)));
-        assert!(chat(&post(&read, None, "flood", 30_000)), "kept inside a writer window");
+        assert!(held(&post(&read, None, "flood", 30_000)), "held inside a writer window");
         assert!(chat(&post(&read, None, "earlier", 5_000)), "before the window it was open");
         assert!(!chat(&post(&read, Some(Epoch(2)), "dressed up", 5_000)), "a read-address post claims no writer epoch");
         let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &crate::simd::hex::bytes_to_hex_32(&[0x33; 32]), &me.public_key().to_hex(), 9, "+", None, 30_000);
@@ -902,6 +910,15 @@ mod tests {
         let mut forged = post(&w2, Some(Epoch(2)), "forged", 30_000);
         forged.sig = post(&w2, Some(Epoch(2)), "other", 30_001).sig;
         assert!(!chat(&forged));
+        // A member who manages nothing keeps no copy of what is held. An epoch whose entry
+        // named no certifier is judged on its window alone.
+        let reader = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&reader, &[]);
+        crate::state::set_my_public_key(reader.public_key());
+        assert!(matches!(dispatch_wrap(&post(&w1, Some(Epoch(1)), "late again", 25_000), &community, &reader.public_key(), &rec), DispatchedV2::Held { marked: None, .. }));
+        assert!(matches!(dispatch_wrap(&post(&read, None, "flood again", 30_000), &community, &reader.public_key(), &rec), DispatchedV2::Held { marked: None, .. }));
+        assert!(matches!(dispatch_wrap(&post(&w1, Some(Epoch(1)), "past again", 15_000), &community, &reader.public_key(), &rec), DispatchedV2::Chat { .. }));
+        assert!(matches!(dispatch_wrap(&typing(&read, None), &community, &reader.public_key(), &rec), DispatchedV2::Ignored), "a signal of the moment is never held");
     }
 
     #[tokio::test]

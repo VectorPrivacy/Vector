@@ -599,7 +599,8 @@ mod xform_tests {
              CREATE TABLE attachments (key TEXT, nonce TEXT, name TEXT, url TEXT, fallback_urls TEXT, img_meta TEXT);
              CREATE TABLE events (preview_metadata TEXT);
              CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
-             CREATE TABLE community_bans (community_id TEXT, npub TEXT);",
+             CREATE TABLE community_bans (community_id TEXT, npub TEXT);
+             CREATE TABLE community_held_wraps (wrap_id TEXT PRIMARY KEY, wrap TEXT);",
         ).unwrap();
     }
 
@@ -924,6 +925,7 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_pins", &["content"]),
     ("community_writers", &["content"]),
     ("community_bans", &["npub"]),
+    ("community_held_wraps", &["wrap"]),
 ];
 
 fn sweep_columns_in_tx(
