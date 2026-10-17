@@ -884,6 +884,18 @@ mod tests {
         let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &crate::simd::hex::bytes_to_hex_32(&[0x33; 32]), &me.public_key().to_hex(), 9, "+", None, 30_000);
         let (wrap, _) = chat::seal_chat_rumor(&reaction, &read, &member, Timestamp::from_secs(30), false).unwrap();
         assert!(chat(&wrap), "reactions stay at the read address");
+        // Typing signals posting: only a writer address carries it.
+        let typing = |group: &super::super::derive::GroupKey, wepoch: Option<Epoch>| {
+            let rumor = chat::build_typing_rumor(member.public_key(), &general, epoch, 30_000);
+            let rumor = match wepoch {
+                Some(w) => chat::with_writer_epoch(rumor, w),
+                None => rumor,
+            };
+            let split = super::super::derive::GroupKey::from_parts(group.keys().clone(), read.conv_key().clone());
+            chat::seal_chat_rumor(&rumor, &split, &member, Timestamp::from_secs(30), true).unwrap().0
+        };
+        assert!(matches!(dispatch_wrap(&typing(&read, None), &community, &me.public_key(), &rec), DispatchedV2::Ignored), "nobody shows as typing through the read address");
+        assert!(matches!(dispatch_wrap(&typing(&w2, Some(Epoch(2))), &community, &me.public_key(), &rec), DispatchedV2::Typing { .. }), "a writer does");
         // A forged wrap at the writer address fails the signature a reader checks there.
         let mut forged = post(&w2, Some(Epoch(2)), "forged", 30_000);
         forged.sig = post(&w2, Some(Epoch(2)), "other", 30_001).sig;

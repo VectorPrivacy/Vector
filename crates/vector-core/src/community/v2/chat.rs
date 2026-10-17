@@ -524,11 +524,11 @@ pub fn with_writer_epoch(rumor: UnsignedEvent, wepoch: Epoch) -> UnsignedEvent {
     out
 }
 
-/// Whether a rumor kind moves to a restricted Channel's writer address. Reactions, typing and
-/// deletions stay at the read address: a restricted Channel gates posting, not reacting, and a
-/// deletion is judged by its signer's authority wherever it lands.
+/// Whether a rumor kind moves to a restricted Channel's writer address. Reactions and deletions
+/// stay at the read address: a restricted Channel gates posting, not reacting, and a deletion is
+/// judged by its signer's authority wherever it lands. Typing signals posting, so it moves too.
 pub fn rides_writer_address(kind: u16) -> bool {
-    !matches!(kind, kind::REACTION | kind::TYPING | kind::DELETE)
+    !matches!(kind, kind::REACTION | kind::DELETE)
 }
 
 /// Open a chat wrap against every `(epoch, secret)` a client holds for one
