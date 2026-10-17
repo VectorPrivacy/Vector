@@ -6236,15 +6236,25 @@ pub(crate) fn access_collect_due(id: &crate::community::CommunityId, roster_move
     due
 }
 
+/// What one run of the access duty did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AccessDuty {
+    /// Keys delivered on access planes.
+    pub delivered: usize,
+    /// Holders cut by a rotation because the channel no longer lets them in.
+    pub cut: usize,
+}
+
 /// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
 /// deliver the key to each entitled member nobody has served at its epoch: not a reader-trusted
 /// delivery on the plane, not the rotation that minted it, and not this device before. A member
 /// who held the previous epoch and that rotation left out was cut, whatever the roster says.
-/// Returns how many blobs went out.
-pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+/// As the revocation backstop, a manager who outranks a holder the channel no longer lets in
+/// rotates them out.
+pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<AccessDuty, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_roles(&cid_hex)?.everyone.is_none() {
-        return Ok(0);
+        return Ok(AccessDuty::default());
     }
     // Judged on a whole read, never the stored roster: a stale entitlement would hand a new
     // epoch's key to someone its rotation just cut.
@@ -6261,7 +6271,10 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
         h == owner_hex || (!banned.contains(&h) && roster.is_authorized(&h, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS))
     };
     let ledger = crate::db::current_session().scoped::<AccessLedger, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
-    let mut sent = 0;
+    let me_hex = me.to_hex();
+    let may_rotate = me_hex == owner_hex || roster.is_authorized(&me_hex, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
+    let banned_pks: Vec<PublicKey> = banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
+    let mut done = AccessDuty::default();
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
         let entitled_here = |pk: &PublicKey| pk.to_hex() == owner_hex || (!banned.contains(&pk.to_hex()) && roster.is_entitled(Some(&owner_hex), &pk.to_hex(), &chan, &[], &[]));
@@ -6276,7 +6289,7 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
             .filter(|pk| **pk != me && entitled_here(pk) && !held.contains(&(ch.id.0, epoch.0, pk.to_bytes())))
             .copied()
             .collect();
-        if entitled.is_empty() {
+        if entitled.is_empty() && !may_rotate {
             continue;
         }
         let deliveries = fetch_access_deliveries(transport, community, &ch.id).await?;
@@ -6286,6 +6299,25 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
             _ => Default::default(),
         };
         let prev = Epoch(epoch.0.saturating_sub(1));
+        if may_rotate {
+            let out: Vec<PublicKey> = candidates
+                .iter()
+                .chain(banned_pks.iter())
+                .filter(|pk| **pk != me && !entitled_here(pk))
+                .filter(|pk| rotation_carries(&minted, &rotator_ok, pk, &ch.id, epoch) || served_on_plane(&deliveries, pk, &ch.id, epoch, &entitled_here))
+                .filter(|pk| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(&owner_hex), &pk.to_hex(), crate::community::roles::Permissions::MANAGE_CHANNELS))
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if !out.is_empty() {
+                let held_now = crate::db::community::load_community_v2(community.id())?.ok_or("community gone during the access duty")?;
+                rekey_channel_excluding(transport, &held_now, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &out).await?;
+                done.cut += out.len();
+                // Whoever is owed this channel is owed its next epoch now; the next run serves them.
+                continue;
+            }
+        }
         let unserved: Vec<PublicKey> = entitled
             .into_iter()
             .filter(|pk| {
@@ -6302,9 +6334,9 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
         deliver_access(transport, community, &ch.id, &unserved).await?;
         let mut held = ledger.lock().unwrap_or_else(|e| e.into_inner());
         held.extend(unserved.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
-        sent += unserved.len();
+        done.delivered += unserved.len();
     }
-    Ok(sent)
+    Ok(done)
 }
 
 /// Fetch the keys delivered to me for every private Channel I'm entitled to but can't read,
@@ -23083,12 +23115,12 @@ mod tests {
         let blind = BreaksAfterPublish { inner: &bed.relay, broken: true.into() };
         assert!(access_duty(&blind, &held()).await.is_err(), "nothing goes out on a partial read");
         act_as(&x);
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a holder the channel doesn't let in delivers nothing readers would take");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 0, "a holder the channel doesn't let in delivers nothing readers would take");
         act_as(&owner.keys);
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 3, "a stranger's blobs serve nobody: every member is owed");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 3, "a stranger's blobs serve nobody: every member is owed");
         assert!(served(m.public_key()).await && served(d.public_key()).await);
         assert!(!served(stranger.public_key()).await, "nobody the channel doesn't let in");
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 0, "a served member is served once");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 0, "a served member is served once");
         // D, later banned, also serves M a key of D's own at the channel's epoch.
         with_channel(Some([0x66; 32]), epoch);
         act_as(&d);
@@ -23121,8 +23153,45 @@ mod tests {
         rekey_channel_excluding(&bed.relay, &held(), &ch, &roster, &[], &[d.public_key()]).await.unwrap();
         set_member_roles(&bed.relay, &held(), &fresh_member.public_key(), vec![readers]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), 1, "only the member entitled since: the rotation carried m and the rider, and cut d");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 1, "only the member entitled since: the rotation carried m and the rider, and cut d");
         assert!(served(fresh_member.public_key()).await && !served(d.public_key()).await && !served(rider.public_key()).await);
+    }
+
+    #[tokio::test]
+    async fn a_manager_cuts_a_holder_the_channel_no_longer_lets_in() {
+        // A strip that rotated nothing (its author couldn't, or it came from another client)
+        // leaves the member holding the key: a manager's duty is the backstop.
+        let (bed, owner, x, community) = v2_bed_with_admin("Backstop").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let (m, kept) = (Keys::generate().public_key(), Keys::generate().public_key());
+        set_member_roles(&bed.relay, &held(), &m, vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &kept, vec![readers]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        rekey_channel_excluding(&bed.relay, &held(), &ch, &crate::db::community::get_community_roles(&cid_hex).unwrap(), &[], &[]).await.unwrap();
+        // A member who joined, then whose strip lands with no rotation behind it.
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        events.push(guestbook::GuestbookEvent { epoch: Some(held().root_epoch.0), observed_at: None, rumor_id: [12u8; 32], entry: guestbook::GuestbookEntry::Join { member: m, invited_by: None, at_ms: now_ms() } });
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        publish_grant(&bed.relay, &held(), &owner.keys, &m, vec![], 2).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let epoch = held().channel(&ch).unwrap().epoch;
+        act_as(&x);
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().cut, 0, "a manager who doesn't hold the channel's View delivers and cuts nothing");
+        act_as(&owner.keys);
+        act_as(&owner.keys);
+        let done = access_duty(&bed.relay, &held()).await.unwrap();
+        assert_eq!(done.cut, 1, "the holder the channel no longer lets in");
+        let now = held().channel(&ch).unwrap().epoch;
+        assert!(now > epoch, "the channel rotated");
+        let minted = minting_rotations(&bed.relay, &held(), &ch, now).await.unwrap();
+        let any = |_: &PublicKey| true;
+        assert!(!rotation_carries(&minted, &any, &m, &ch, now), "without them");
+        assert!(rotation_carries(&minted, &any, &kept, &ch, now), "and with whoever it still lets in");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), AccessDuty::default(), "and then there is nothing left to do");
     }
 
     #[tokio::test]

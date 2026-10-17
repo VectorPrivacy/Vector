@@ -1122,8 +1122,8 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 let Ok(Some(c)) = crate::db::community::load_community_v2(&owed) else { return };
                 let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
                 match super::service::access_duty(&transport, &c).await {
-                    Ok(0) => {}
-                    Ok(n) => crate::log_info!("[v2:access] delivered {n} channel key(s) on access planes"),
+                    Ok(done) if done == Default::default() => {}
+                    Ok(done) => crate::log_info!("[v2:access] delivered {} channel key(s), cut {} holder(s) a channel no longer lets in", done.delivered, done.cut),
                     Err(e) => crate::log_warn!("[v2:access] access duty failed: {e}"),
                 }
             });
