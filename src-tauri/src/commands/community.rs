@@ -1376,9 +1376,8 @@ async fn mark_attachment_send_failed(
 pub struct CommunitySyncResult {
     pub new_messages: u32,
     pub reached_start: bool,
-    /// Oldest event timestamp (ms) this page fetched — the relay-walk cursor for the next
-    /// older page. `None` when the page was empty. Lets a caller page contiguously backward
-    /// (e.g. the jump-to-unread gap fill) without trusting the local DB's offset contiguity.
+    /// Where the relay walk stopped (ms) with history still unread below: the cursor for the
+    /// next older page, which skips nothing. `None` when the page reached what it was after.
     pub oldest_ms: Option<u64>,
 }
 
@@ -1426,8 +1425,8 @@ async fn sync_community_channel_inner(
         // An older page is finished only when the RELAY had nothing at or before the cursor:
         // judged by new-count, the scroll would stop at the first page of already-held history,
         // which is exactly where a rotated channel's older epochs sit.
-        let reached_start = if is_older { count.fetched == 0 } else { count.new_messages < limit };
-        Ok(CommunitySyncResult { new_messages: count.new_messages as u32, reached_start, oldest_ms: None })
+        let reached_start = if is_older { count.fetched == 0 && count.next_before.is_none() } else { count.new_messages < limit };
+        Ok(CommunitySyncResult { new_messages: count.new_messages as u32, reached_start, oldest_ms: count.next_before.map(|s| s * 1000) })
     })
     .await
 }

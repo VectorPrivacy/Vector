@@ -133,8 +133,8 @@ pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) ->
         .await
         .map(|(c, _)| c)
         .unwrap_or_default();
-    let reached_start = if is_older { count.fetched == 0 } else { count.new_messages < LIMIT };
-    Ok(json!({ "new_messages": count.new_messages, "reached_start": reached_start, "oldest_ms": null }))
+    let reached_start = if is_older { count.fetched == 0 && count.next_before.is_none() } else { count.new_messages < LIMIT };
+    Ok(json!({ "new_messages": count.new_messages, "reached_start": reached_start, "oldest_ms": count.next_before.map(|s| s * 1000) }))
 }
 
 /// Send with an optimistic bubble whose id is the real one: the rumor is built

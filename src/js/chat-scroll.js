@@ -697,17 +697,24 @@ async function maybeLoadCommunityOlderFromNetwork(chatId) {
     _communityOlderInFlight.add(chatId);
     try {
         const prevTotal = (eventCache.getStats(chatId) || {}).totalInDb || 0;
-        const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs: oldestMs });
-        // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
-        // then load (prepend) them.
-        const newTotal = await invoke('get_chat_message_count', { chatId });
-        if (newTotal > prevTotal) {
-            eventCache.updateTotalCount(chatId, newTotal);
-            if (strOpenChat === chatId) loadMoreMessages();
+        let beforeMs = oldestMs;
+        for (let hop = 0; hop < 8; hop++) {
+            const res = await invoke('sync_community_channel', { channelId: chatId, beforeMs });
+            // Refresh the cache count so hasMoreEvents reflects any newly-ingested older rows,
+            // then load (prepend) them.
+            const newTotal = await invoke('get_chat_message_count', { chatId });
+            if (newTotal > prevTotal) {
+                eventCache.updateTotalCount(chatId, newTotal);
+                if (strOpenChat === chatId) loadMoreMessages();
+            }
+            // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
+            // returned just already-known events (no count growth) does NOT mean history's start.
+            if (res && res.reached_start) _communityOlderExhausted.add(chatId);
+            if (newTotal > prevTotal || !res || res.reached_start || strOpenChat !== chatId) break;
+            // A page that added nothing still moved the relay walk down: go on from there.
+            if (res.oldest_ms == null || res.oldest_ms >= beforeMs) break;
+            beforeMs = res.oldest_ms;
         }
-        // Terminate ONLY on the backend's authoritative "no more older" signal — a page that
-        // returned just already-known events (no count growth) does NOT mean history's start.
-        if (res && res.reached_start) _communityOlderExhausted.add(chatId);
     } catch (e) {
         console.warn('Community older-page fetch failed:', e);
     } finally {

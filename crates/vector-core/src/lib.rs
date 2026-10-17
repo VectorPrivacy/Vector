@@ -560,6 +560,9 @@ pub enum CatchUp {
 pub struct BackfillCount {
     pub fetched: usize,
     pub new_messages: usize,
+    /// Where an older page goes on from (Unix seconds) when this one stopped with relay history
+    /// still unread; `None` when it reached what it was after.
+    pub next_before: Option<u64>,
 }
 
 impl VectorCore {
@@ -3526,7 +3529,7 @@ impl VectorCore {
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(transport_secs));
         let held = std::sync::atomic::AtomicUsize::new(0);
-        let Ok(page) = crate::community::v2::service::fetch_channel_history(
+        let Ok((page, next_before)) = crate::community::v2::service::fetch_channel_history_paged(
             &transport,
             &community,
             &ch,
@@ -3570,7 +3573,7 @@ impl VectorCore {
         };
         let fetched = page.len() + held.into_inner();
         let new_messages = Self::v2_ingest_chat_page(channel_id, my_pk, session, page).await;
-        BackfillCount { fetched, new_messages }
+        BackfillCount { fetched, new_messages, next_before }
     }
 
     /// Ingest a fetched chat page: STATE apply, batched persist with delete

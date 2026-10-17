@@ -52,12 +52,16 @@ impl<'a> Posters<'a> {
     }
 }
 
-/// The writer secret this device holds for `ch`'s live writer epoch, checked against the ledger.
+/// The writer secret this device holds for `ch`'s live writer epoch, given or minted here,
+/// checked against the ledger.
 pub(crate) fn live_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8; 32], GroupKey)> {
     let (epoch, pk) = ch.writers.as_ref()?.current_writer()?;
-    let secret = crate::db::community::held_epoch_key(&hex(&community.id().0), &writers::secret_scope(&ch.id), epoch.0).ok()??;
-    let group = channel_writer_group_key(&secret, &ch.id, epoch);
-    (group.pk().to_bytes() == pk).then_some((epoch, secret, group))
+    let cid_hex = hex(&community.id().0);
+    [writers::secret_scope(&ch.id), writers::minted_scope(&ch.id)].iter().find_map(|scope| {
+        let secret = crate::db::community::held_epoch_key(&cid_hex, scope, epoch.0).ok()??;
+        let group = channel_writer_group_key(&secret, &ch.id, epoch);
+        (group.pk().to_bytes() == pk).then_some((epoch, secret, group))
+    })
 }
 
 /// The live writer key, when the stored Roster lets this device post: a key a manager minted or
@@ -115,11 +119,14 @@ async fn named_deliveries<T: Transport + ?Sized>(transport: &T, community: &Comm
         .collect())
 }
 
-/// Whether `ch`'s ledger has a head this device couldn't read: minting over it would erase
-/// every writer address it names.
+/// Whether `ch`'s ledger has a head this device couldn't read, or a manager's that it refused:
+/// minting over it would erase every writer address it names. The owner's mint outranks it.
 fn ledger_unread(community: &CommunityV2, ch: &ChannelV2) -> bool {
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
-    ch.writers.is_none() && crate::db::community::get_edition_head(&hex(&community.id().0), &hex(&eid)).ok().flatten().is_some()
+    let cid_hex = hex(&community.id().0);
+    let seen = crate::db::community::get_edition_head(&cid_hex, &hex(&eid)).ok().flatten().is_some()
+        || crate::db::community::get_community_writers(&cid_hex, &hex(&ch.id.0)).ok().flatten().is_some();
+    ch.writers.is_none() && seen && community.owner().ok() != me_pk().ok()
 }
 
 /// Mint writer epoch `ledger.next_epoch()` for `ch`, deliver it to every writer `posters` lets
@@ -142,9 +149,12 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
         }
     };
     let pk = writers::writer_address(&secret, &ch.id, epoch);
-    let next = ledger
-        .appended(entry_time(ch).await, Spell::Writer { epoch, pk, root: community.root_epoch, by: me.to_bytes() })
-        .ok_or("this channel's writer ledger can't take another epoch")?;
+    let spell = Spell::Writer { epoch, pk, root: community.root_epoch, by: me.to_bytes() };
+    ledger.appended(now_ms(), spell).ok_or("this channel's writer ledger can't take another epoch")?;
+    // Nothing goes out for a ledger this device couldn't publish over.
+    if !chains_from_head(community, ch, &ledger)? {
+        return Err(LEDGER_MOVED.to_string());
+    }
     let recipients: Vec<PublicKey> = writer_candidates(community, posters.roster)?.into_iter().filter(|p| !cut.contains(p) && posters.writes(p, ch)).collect();
     if recipients.contains(&me) {
         crate::db::community::store_epoch_key(&cid_hex, &writers::secret_scope(&ch.id), epoch.0, &secret)?;
@@ -153,14 +163,16 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
         return Err("account changed while minting a writer key".to_string());
     }
     deliver_on_plane(transport, community, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(pk), &secret, &recipients).await?;
-    publish_ledger(transport, community, ch, &next).await
+    publish_ledger(transport, community, ch, &ledger, spell).await
 }
 
 /// When a new entry starts: now, but never before the newest post this device holds in the
-/// Channel, so a slow clock can't close a window on posts already made.
+/// Channel, so a slow clock can't close a window on posts already made. A post dated further
+/// ahead than any edition may be is its author's say, not a clock.
 async fn entry_time(ch: &ChannelV2) -> u64 {
-    let newest = crate::state::STATE.lock().await.get_chat(&hex(&ch.id.0)).and_then(|c| c.last_message_time());
-    now_ms().max(newest.map_or(0, |t| t.saturating_add(1)))
+    let now = now_ms();
+    let newest = crate::state::STATE.lock().await.get_chat(&hex(&ch.id.0)).and_then(|c| c.last_message_time()).filter(|t| *t < now + writers::ENTRY_SKEW_MS);
+    now.max(newest.map_or(0, |t| t.saturating_add(1)))
 }
 
 /// Append `open` to `ch`'s ledger: posts move back to the read address.
@@ -169,18 +181,40 @@ async fn reopen<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, c
         return Err("this channel's writer ledger can't be read; nothing appended to it".to_string());
     }
     let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
-    let next = ledger.appended(entry_time(ch).await, Spell::Open).ok_or("this channel's writer ledger can't take that")?;
-    publish_ledger(transport, community, ch, &next).await
+    publish_ledger(transport, community, ch, &ledger, Spell::Open).await
 }
 
-async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, next: &Ledger) -> Result<(), String> {
+const LEDGER_MOVED: &str = "this channel's writer ledger moved; nothing published over it";
+
+/// Whether an edition appending to `base` would chain from the head this device holds: the
+/// stored ledger is `base` at the head's version, or there is neither.
+fn chains_from_head(community: &CommunityV2, ch: &ChannelV2, base: &Ledger) -> Result<bool, String> {
+    let eid = super::super::derive::writers_locator(community.id(), &ch.id);
+    let cid_hex = hex(&community.id().0);
+    let held = crate::db::community::get_community_writers(&cid_hex, &hex(&ch.id.0))?.and_then(|(c, v)| Ledger::parse(&c).map(|l| (l, v as u64)));
+    Ok(match (crate::db::community::get_edition_head(&cid_hex, &hex(&eid))?, held) {
+        (None, _) => base.entries.is_empty() && base.retired.is_empty(),
+        (Some((v, _)), Some((held, held_v))) => v == held_v && held == *base,
+        (Some(_), None) => false,
+    })
+}
+
+/// Append `spell` to `base` as `ch`'s ledger, dated now, once the edition passes the rules every
+/// reader holds it to: an edition they'd refuse would leave this device alone on it.
+async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, base: &Ledger, spell: Spell) -> Result<(), String> {
     if !crate::db::current_session().is_live() {
         return Err("account changed while moving a channel's writers".to_string());
     }
+    let next = base.appended(entry_time(ch).await, spell).ok_or("this channel's writer ledger can't take that")?;
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
-    let content = next.to_json();
-    publish_control_edition(transport, community, vsk::WRITERS, &eid, &content).await?;
     let cid_hex = hex(&community.id().0);
+    let now = now_ms();
+    let at = now.max(next.entries.last().map_or(0, |e| e.at)) / 1000;
+    if !chains_from_head(community, ch, base)? || !next.tail_fits(at, &me_pk()?.to_bytes()) || !next.not_ahead(now) {
+        return Err(LEDGER_MOVED.to_string());
+    }
+    let content = next.to_json();
+    publish_control_edition_at(transport, community, vsk::WRITERS, &eid, &content, at).await?;
     let version = crate::db::community::get_edition_head(&cid_hex, &hex(&eid))?.map_or(1, |(v, _)| v);
     persist_writers(&cid_hex, &hex(&ch.id.0), &content, version, false);
     Ok(())
@@ -189,15 +223,7 @@ async fn publish_ledger<T: Transport + ?Sized>(transport: &T, community: &Commun
 /// Read the Control Plane again and return the Channel as it stands, `None` when its ledger moved
 /// from `seen`: someone else acted, and a mint on the old head would fork it.
 async fn ledger_still<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, seen: &Option<Ledger>) -> Result<Option<(CommunityV2, ChannelV2)>, String> {
-    {
-        // The fold saves the whole row, so it reads the row as it stands, under the lock every
-        // other whole-row writer takes.
-        let lock = super::super::realtime::follow_lock(community.id());
-        let _guard = lock.lock().await;
-        let current = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
-        follow_control(transport, &current).await?;
-    }
-    let fresh = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+    let fresh = follow_fresh(transport, community.id()).await?.1;
     let Some(ch) = fresh.channel(channel).cloned() else { return Ok(None) };
     Ok((ch.writers == *seen).then_some((fresh, ch)))
 }
@@ -276,27 +302,86 @@ pub struct WriterDuty {
 struct WriterSent;
 struct BackstopClock;
 
-/// Whether this device may move `channel`'s ledger for the backstop now, or with `member`, cut
-/// them. Marks it.
-fn backstop_due(channel: &ChannelId, member: Option<&PublicKey>) -> bool {
-    backstop_clock(channel, member.map_or([0; 32], |m| m.to_bytes()), BACKSTOP_DAMP_MS)
+/// A backstop's lane in one Channel: cutting one member, minting for itself, or moving the ledger
+/// in line with the Channel's permissions. Each is damped on its own once it tried.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Lane {
+    Cut(PublicKey),
+    /// A cut only a writer's hand-on shows: one Channel-wide lane, so a writer can't force a
+    /// mint per member.
+    Relayed,
+    Starved,
+    Move,
 }
 
-/// Whether this device may bring `channel`'s ledger in line with its permissions now. Marks it.
-fn move_due(channel: &ChannelId) -> bool {
-    backstop_clock(channel, [1; 32], BACKSTOP_MOVE_MS)
-}
-
-fn backstop_clock(channel: &ChannelId, lane: [u8; 32], period: u64) -> bool {
-    let clock = crate::db::current_session().scoped::<BackstopClock, std::sync::Mutex<std::collections::HashMap<([u8; 32], [u8; 32]), u64>>>();
-    let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
-    let key = (channel.0, lane);
-    let now = now_ms();
-    let due = last.get(&key).is_none_or(|t| now.saturating_sub(*t) > period);
-    if due {
-        last.insert(key, now);
+impl Lane {
+    fn key(self) -> ([u8; 32], u64) {
+        match self {
+            Lane::Cut(m) => (m.to_bytes(), BACKSTOP_DAMP_MS),
+            Lane::Starved => ([0; 32], BACKSTOP_DAMP_MS),
+            Lane::Move => ([1; 32], BACKSTOP_MOVE_MS),
+            Lane::Relayed => ([2; 32], BACKSTOP_DAMP_MS),
+        }
     }
-    due
+}
+
+type Clock = std::sync::Mutex<std::collections::HashMap<([u8; 32], [u8; 32]), u64>>;
+
+fn backstop_clock() -> std::sync::Arc<Clock> {
+    crate::db::current_session().scoped::<BackstopClock, Clock>()
+}
+
+/// Whether this device's backstop may act in `lane` of `channel` now.
+fn due(channel: &ChannelId, lane: Lane) -> bool {
+    let (lane, period) = lane.key();
+    backstop_clock().lock().unwrap_or_else(|e| e.into_inner()).get(&(channel.0, lane)).is_none_or(|t| now_ms().saturating_sub(*t) > period)
+}
+
+/// Mark `lanes` of `channel` as tried now.
+fn acted(channel: &ChannelId, lanes: &[Lane]) {
+    let clock = backstop_clock();
+    let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
+    for lane in lanes {
+        last.insert((channel.0, lane.key().0), now_ms());
+    }
+}
+
+struct PostableSince;
+
+fn postable_key(community: &CommunityV2, channel: &ChannelId) -> String {
+    format!("writer_postable:{}:{}", hex(&community.id().0), hex(&channel.0))
+}
+
+/// Since when this device has seen itself able to post in `ch` without a key: a manager given
+/// Send a while into an epoch waits for the key its granter delivers. Kept across restarts.
+fn postable_since(community: &CommunityV2, ch: &ChannelV2, postable: bool) -> u64 {
+    let key = postable_key(community, &ch.id);
+    let cache = crate::db::current_session().scoped::<PostableSince, std::sync::Mutex<std::collections::HashMap<String, u64>>>();
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if !postable {
+        // u64::MAX marks one known absent, so a pass writes only when something changed.
+        if cache.insert(key.clone(), u64::MAX) != Some(u64::MAX) {
+            let _ = crate::db::settings::remove_setting(&key);
+        }
+        return u64::MAX;
+    }
+    if let Some(&t) = cache.get(&key).filter(|t| **t != u64::MAX) {
+        return t;
+    }
+    let t = crate::db::settings::get_sql_setting(key.clone()).ok().flatten().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+        let now = now_ms();
+        let _ = crate::db::settings::set_sql_setting(key.clone(), now.to_string());
+        now
+    });
+    cache.insert(key, t);
+    t
+}
+
+#[cfg(test)]
+pub(super) fn backdate_postable(community: &CommunityV2, channel: &ChannelId, ms: u64) {
+    let key = postable_key(community, channel);
+    crate::db::settings::set_sql_setting(key.clone(), ms.to_string()).unwrap();
+    crate::db::current_session().scoped::<PostableSince, std::sync::Mutex<std::collections::HashMap<String, u64>>>().lock().unwrap().insert(key, ms);
 }
 
 /// The writer duty (CORD-03 §1), judged on the whole-read `roster`. A manager brings a ledger
@@ -332,9 +417,10 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let live = ch.writers.as_ref().and_then(|l| l.live());
     // A Refounding retires the live writer epoch: the members it removed may hold it.
     let retired = live.is_some_and(|(root, ..)| root < held.root_epoch);
-    if may_manage && ((restrict && retired) || (restrict != ch.restricted() && move_due(&ch.id))) {
-        backstop(transport, held, ch, posters, &[]).await?;
-        done.moved += 1;
+    if may_manage && ((restrict && retired) || (restrict != ch.restricted() && due(&ch.id, Lane::Move))) {
+        if backstop_damped(transport, held, ch, posters, &[], &[Lane::Move]).await? {
+            done.moved += 1;
+        }
         return Ok(());
     }
     let (Some(ledger), Some((root_ok, minter, began))) = (ch.writers.as_ref(), live.map(|(r, by, at)| (r >= held.root_epoch, by, at))) else { return Ok(()) };
@@ -345,34 +431,41 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let scope = writers::writer_rekey_scope(&ch.id);
     let deliveries = named_deliveries(transport, held, ch, ledger).await?;
     let minter = PublicKey::from_slice(&minter).ok();
-    // Only an epoch's minter and the managers count: a writer's blob can neither vouch for
-    // someone nor have them cut.
-    let served = |p: &PublicKey, e: Epoch| {
-        let minted_by = ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
-        served_at(&deliveries, p, scope, e, &|d| Some(*d) == minted_by || manager(&d.to_hex()))
-    };
+    // Only an epoch's minter and the managers serve someone: a writer's blob can't vouch that
+    // they were served.
+    let trusted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) || manager(&d.to_hex());
+    let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e));
+    let banned_pks: Vec<PublicKey> = posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
+    let pool: Vec<PublicKey> = candidates.iter().chain(banned_pks.iter()).copied().collect();
+    let minter_of = |e: Epoch| ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
+    let held_now = holders(&deliveries, &pool, scope, epoch, minter_of(epoch), &trusted);
+    let held_before = ledger.previous_writer().map(|e| holders(&deliveries, &pool, scope, e, minter_of(e), &trusted));
     if may_manage {
-        let banned_pks: Vec<PublicKey> = posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
-        let out: Vec<PublicKey> = candidates
+        // A manager may hold the key by design: it can mint one whenever it likes.
+        let out: Vec<(PublicKey, Lane)> = pool
             .iter()
-            .chain(banned_pks.iter())
-            .filter(|p| **p != me && !posters.writes(p, ch) && served(p, epoch))
+            .filter(|p| **p != me && !posters.writes(p, ch) && !manager(&p.to_hex()))
             .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
+            .filter_map(|p| held_now.get(p).map(|&relayed| (*p, if relayed { Lane::Relayed } else { Lane::Cut(*p) })))
+            .collect::<std::collections::BTreeMap<_, _>>()
             .into_iter()
-            .filter(|p| backstop_due(&ch.id, Some(p)))
+            .filter(|(_, lane)| due(&ch.id, *lane))
             .collect();
         if !out.is_empty() {
-            backstop(transport, held, ch, posters, &out).await?;
-            done.cut += out.len();
+            let lanes: Vec<Lane> = out.iter().map(|(_, lane)| *lane).collect();
+            let cut: Vec<PublicKey> = out.iter().map(|(p, _)| *p).collect();
+            if backstop_damped(transport, held, ch, posters, &cut, &lanes).await? {
+                done.cut += cut.len();
+            }
             return Ok(());
         }
         // A key it can open, not a blob at its locator: anyone can leave a blob.
-        let starved = posters.writes(&me, ch) && live_writer(held, ch).is_none() && now_ms().saturating_sub(began) > STARVED_MS;
-        if starved && backstop_due(&ch.id, None) {
-            backstop(transport, held, ch, posters, &[]).await?;
-            done.moved += 1;
+        let keyless = posters.writes(&me, ch) && live_writer(held, ch).is_none();
+        let starved = now_ms().saturating_sub(began.max(postable_since(held, ch, keyless))) > STARVED_MS;
+        if keyless && starved && due(&ch.id, Lane::Starved) {
+            if backstop_damped(transport, held, ch, posters, &[], &[Lane::Starved]).await? {
+                done.moved += 1;
+            }
             return Ok(());
         }
     }
@@ -384,8 +477,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     // out was cut, whatever a lagging Roster says.
     let minting: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch).collect();
     let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
-    let previous = ledger.previous_writer();
-    let cut = |p: &PublicKey| !minting.is_empty() && !minted_to(p) && previous.is_some_and(|e| served(p, e));
+    let cut = |p: &PublicKey| !minting.is_empty() && !minted_to(p) && held_before.as_ref().is_some_and(|h| h.contains_key(p));
     let sent = crate::db::current_session().scoped::<WriterSent, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
     let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let unserved: Vec<PublicKey> = candidates
@@ -402,9 +494,20 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     Ok(())
 }
 
+/// [`backstop`], then damping `lanes` unless it found the ledger moved: a failure counts as an
+/// attempt, or every pass would mint and deliver again.
+async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey], lanes: &[Lane]) -> Result<bool, String> {
+    let result = backstop(transport, held, ch, posters, cut).await;
+    if !matches!(result, Ok(false)) {
+        acted(&ch.id, lanes);
+    }
+    result
+}
+
 /// A manager's mint or reopen on another's behalf: wait by rank so the highest acts first, read
-/// the Control Plane again, and act only if the ledger is where this pass saw it.
-async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<(), String> {
+/// the Control Plane again, and act only if the ledger is where this pass saw it. Returns
+/// whether it acted.
+async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<bool, String> {
     let me_hex = me_pk()?.to_hex();
     let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
     if steps > 0 {
@@ -413,14 +516,44 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         crate::rt::time::sleep(std::time::Duration::from_millis(RANK_STAGGER_MS * steps as u64 + spread)).await;
     }
     if !crate::db::current_session().is_live() {
-        return Ok(());
+        return Ok(false);
     }
-    let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(()) };
+    let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(false) };
     match (restricts(posters.roster, &ch), ch.restricted()) {
-        (false, true) => reopen(transport, &fresh, &ch).await,
-        (false, false) => Ok(()),
-        _ => mint(transport, &fresh, &ch, posters, cut).await,
+        (false, true) => reopen(transport, &fresh, &ch).await?,
+        (false, false) => return Ok(false),
+        _ => mint(transport, &fresh, &ch, posters, cut).await?,
     }
+    Ok(true)
+}
+
+/// Who of `pool` the deliveries show holding writer epoch `epoch`, each marked when only a
+/// writer's hand-on shows it: the epoch's minter and those `trusted` served, then those a holder
+/// served in turn. Any holder can hand the key on, so a cut reaches them all.
+fn holders(deliveries: &[rekey::AccessDelivery], pool: &[PublicKey], scope: rekey::RekeyScope, epoch: Epoch, minter: Option<PublicKey>, trusted: &dyn Fn(&PublicKey, Epoch) -> bool) -> std::collections::HashMap<PublicKey, bool> {
+    let sent: Vec<(PublicKey, Vec<PublicKey>)> = deliveries
+        .iter()
+        .filter(|d| d.epoch == epoch)
+        .map(|d| (d.deliverer, pool.iter().filter(|p| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some()).copied().collect()))
+        .collect();
+    let mut held: std::collections::HashMap<PublicKey, bool> = minter.into_iter().map(|m| (m, false)).collect();
+    for (_, to) in sent.iter().filter(|(d, _)| trusted(d, epoch)) {
+        for p in to {
+            held.insert(*p, false);
+        }
+    }
+    let mut next: Vec<PublicKey> = held.keys().copied().collect();
+    while let Some(holder) = next.pop() {
+        for (_, to) in sent.iter().filter(|(d, _)| *d == holder) {
+            for p in to {
+                if !held.contains_key(p) {
+                    held.insert(*p, true);
+                    next.push(*p);
+                }
+            }
+        }
+    }
+    held
 }
 
 struct OpenedWriterBlobs;
