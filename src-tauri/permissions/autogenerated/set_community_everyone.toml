@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-community-everyone"
+description = "Enables the set_community_everyone command without any pre-configured scope."
+commands.allow = ["set_community_everyone"]
+
+[[permission]]
+identifier = "deny-set-community-everyone"
+description = "Denies the set_community_everyone command without any pre-configured scope."
+commands.deny = ["set_community_everyone"]

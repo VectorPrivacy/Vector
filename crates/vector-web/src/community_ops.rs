@@ -46,6 +46,17 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             // --- Roles ---
             "create_community_role" => create_role(a).await,
             "edit_community_role" => edit_role(a).await,
+            "delete_community_role" => delete_role(a).await,
+            "set_community_everyone" => set_everyone(a).await,
+            "activate_community_roles_v2" => activate_roles_v2(a).await,
+
+            // --- Channels and categories ---
+            "edit_community_channel" => edit_channel(a).await,
+            "move_community_channel" => move_channel(a).await,
+            "create_community_category" => create_category(a).await,
+            "rename_community_category" => rename_category(a).await,
+            "delete_community_category" => delete_category(a).await,
+            "move_community_category" => move_category(a).await,
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
@@ -247,7 +258,61 @@ async fn create_role(a: &Args) -> Result<Value, String> {
 async fn edit_role(a: &Args) -> Result<Value, String> {
     let (id, role, name) = (a.str("communityId")?, a.str("roleId")?, a.str("name")?);
     let (color, perms, channel) = (a.de::<u32>("color")?, a.str("permissions")?, a.opt_str("channelId"));
-    db::scoped(async move { core(VectorCore.edit_role(&id, &role, &name, color, &perms, channel.as_deref()).await) }).await
+    let (display, mentionable) = (a.de::<Option<bool>>("display")?, a.de::<Option<bool>>("mentionable")?);
+    db::scoped(async move { core(VectorCore.edit_role_shown(&id, &role, &name, color, &perms, channel.as_deref(), display, mentionable).await) }).await
+}
+
+async fn delete_role(a: &Args) -> Result<Value, String> {
+    let (id, role) = (a.str("communityId")?, a.str("roleId")?);
+    db::scoped(async move { core(VectorCore.delete_role(&id, &role).await) }).await
+}
+
+async fn set_everyone(a: &Args) -> Result<Value, String> {
+    let (id, perms) = (a.str("communityId")?, a.str("permissions")?);
+    db::scoped(async move { core(VectorCore.set_everyone_permissions(&id, &perms).await) }).await
+}
+
+async fn activate_roles_v2(a: &Args) -> Result<Value, String> {
+    let (id, everyone) = (a.str("communityId")?, a.str("everyone")?);
+    db::scoped(async move { core(VectorCore.activate_roles_v2(&id, &everyone).await) }).await
+}
+
+async fn move_channel(a: &Args) -> Result<Value, String> {
+    let (id, channel, category, index) = (a.str("communityId")?, a.str("channelId")?, a.opt_str("categoryId"), a.de::<u32>("index")?);
+    db::scoped(async move { core(VectorCore.move_channel(&id, &channel, category.as_deref(), index as usize).await) }).await
+}
+
+async fn create_category(a: &Args) -> Result<Value, String> {
+    let (id, name) = (a.str("communityId")?, a.str("name")?);
+    db::scoped(async move { core(VectorCore.create_category(&id, &name).await) }).await
+}
+
+async fn rename_category(a: &Args) -> Result<Value, String> {
+    let (id, category, name) = (a.str("communityId")?, a.str("categoryId")?, a.str("name")?);
+    db::scoped(async move { core(VectorCore.rename_category(&id, &category, &name).await) }).await
+}
+
+async fn delete_category(a: &Args) -> Result<Value, String> {
+    let (id, category) = (a.str("communityId")?, a.str("categoryId")?);
+    db::scoped(async move { core(VectorCore.delete_category(&id, &category).await) }).await
+}
+
+async fn move_category(a: &Args) -> Result<Value, String> {
+    let (id, category, index) = (a.str("communityId")?, a.str("categoryId")?, a.de::<u32>("index")?);
+    db::scoped(async move { core(VectorCore.move_category(&id, &category, index as usize).await) }).await
+}
+
+async fn edit_channel(a: &Args) -> Result<Value, String> {
+    let (id, channel, name) = (a.str("communityId")?, a.str("channelId")?, a.str("name")?);
+    let (topic, view) = (a.opt_str("topic"), a.str("view")?);
+    db::scoped(async move {
+        VectorCore.edit_channel_details(&id, &channel, &name, topic.as_deref(), &view).await.map_err(|e| e.to_string())?;
+        if let Ok(c) = load_v2(&id) {
+            VectorCore.register_v2_chats(&c, &db::current_session()).await;
+        }
+        Ok(Value::Null)
+    })
+    .await
 }
 
 pub(crate) use vector_core::image_crop::CropRect;

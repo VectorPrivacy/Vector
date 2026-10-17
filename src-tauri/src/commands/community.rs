@@ -38,6 +38,8 @@ pub struct CommunitySummary {
     pub dissolved: bool,
     /// The relays hosting the community, for the settings view.
     pub relays: Vec<String>,
+    /// The categories in sidebar order; `channels` is in sidebar order too.
+    pub categories: serde_json::Value,
 }
 
 #[derive(serde::Serialize)]
@@ -50,6 +52,11 @@ pub struct ChannelSummary {
     /// granted reads false — the UI must not default to one, since it renders
     /// empty and refuses every send.
     pub readable: bool,
+    /// The category it shows under, if that category stands.
+    pub category_id: Option<String>,
+    pub topic: Option<String>,
+    /// `chat`, `forum` or `voice`.
+    pub view: &'static str,
 }
 
 /// The [`CommunitySummary`] for a **v2** community — the owner is the
@@ -66,15 +73,20 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         is_owner: matches!((me, owner), (Some(m), Some(o)) if m == o),
         has_icon: c.icon.is_some(),
         channels: c
-            .channels
-            .iter()
-            .map(|ch| ChannelSummary {
+            .layout()
+            .1
+            .into_iter()
+            .map(|(ch, cat)| ChannelSummary {
                 channel_id: vector_core::simd::hex::bytes_to_hex_32(&ch.id.0),
                 name: ch.name.clone(),
                 private: ch.private,
                 readable: !ch.private || ch.key.is_some(),
+                category_id: cat.map(|k| vector_core::simd::hex::bytes_to_hex_32(&k.id)),
+                topic: ch.topic().map(String::from),
+                view: ch.view().as_str(),
             })
             .collect(),
+        categories: vector_core::VectorCore::categories_json(c),
         primary_channel: c.primary_channel().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
         owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
         dissolved: c.dissolved,
@@ -2499,14 +2511,16 @@ pub async fn create_community_channel(
     community_id: String,
     name: String,
     private: Option<bool>,
+    category_id: Option<String>,
 ) -> Result<String, String> {
-    vector_core::db::scoped_result(create_community_channel_inner(community_id, name, private)).await
+    vector_core::db::scoped_result(create_community_channel_inner(community_id, name, private, category_id)).await
 }
 
 async fn create_community_channel_inner(
     community_id: String,
     name: String,
     private: Option<bool>,
+    category_id: Option<String>,
 ) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -2516,11 +2530,8 @@ async fn create_community_channel_inner(
     let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
         .ok_or("Community not found")?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(20));
-    let channel_id = if private.unwrap_or(false) {
-        vector_core::community::v2::service::create_private_channel(&transport, &community, trimmed).await?
-    } else {
-        vector_core::community::v2::service::create_public_channel(&transport, &community, trimmed).await?
-    };
+    let category = category_id.as_deref().map(hex_to_id32).transpose()?;
+    let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, trimmed, private.unwrap_or(false), category).await?;
     // Re-load: the create wrote the new channel onto the held document, and registering
     // from the stale in-memory copy would drop it again.
     if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
@@ -3080,6 +3091,92 @@ pub async fn ban_community_members(community_id: String, npubs: Vec<String>) -> 
     .await
 }
 
+/// Re-register a community's chat rows after its channel document changed here.
+async fn reregister_channels(community_id: &str) {
+    if let Ok(id) = hex_to_id32(community_id) {
+        if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id)) {
+            vector_core::VectorCore.register_v2_chats(&c, &vector_core::db::current_session()).await;
+        }
+    }
+}
+
+/// Edit a channel's name, topic and view (`chat`, `forum` or `voice`), keeping every
+/// field another client wrote.
+#[tauri::command]
+pub async fn edit_community_channel(community_id: String, channel_id: String, name: String, topic: Option<String>, view: String) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .edit_channel_details(&community_id, &channel_id, &name, topic.as_deref(), &view)
+            .await
+            .map_err(|e| e.to_string())?;
+        reregister_channels(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+/// Move a channel into a category (none = uncategorized) at `index` among its channels.
+#[tauri::command]
+pub async fn move_community_channel(community_id: String, channel_id: String, category_id: Option<String>, index: u32) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .move_channel(&community_id, &channel_id, category_id.as_deref(), index as usize)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Create a category at the bottom of the sidebar; returns its id.
+#[tauri::command]
+pub async fn create_community_category(community_id: String, name: String) -> Result<String, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.create_category(&community_id, &name).await.map_err(|e| e.to_string()) }).await
+}
+
+#[tauri::command]
+pub async fn rename_community_category(community_id: String, category_id: String, name: String) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.rename_category(&community_id, &category_id, &name).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Delete a category; its channels render uncategorized.
+#[tauri::command]
+pub async fn delete_community_category(community_id: String, category_id: String) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.delete_category(&community_id, &category_id).await.map_err(|e| e.to_string()) }).await
+}
+
+/// Move a category to `index` among the categories (0 is the top).
+#[tauri::command]
+pub async fn move_community_category(community_id: String, category_id: String, index: u32) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.move_category(&community_id, &category_id, index as usize).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Delete a role (new roles only): it leaves every holder.
+#[tauri::command]
+pub async fn delete_community_role(community_id: String, role_id: String) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.delete_role(&community_id, &role_id).await.map_err(|e| e.to_string()) }).await
+}
+
+/// Set what `@everyone` holds; `permissions` is a decimal string.
+#[tauri::command]
+pub async fn set_community_everyone(community_id: String, permissions: String) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_everyone_permissions(&community_id, &permissions).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Move a community to the new roles (owner only); returns how many roles carried over.
+#[tauri::command]
+pub async fn activate_community_roles_v2(community_id: String, everyone: String) -> Result<usize, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.activate_roles_v2(&community_id, &everyone).await.map_err(|e| e.to_string()) }).await
+}
+
 /// Everything the role editor needs, read locally.
 #[tauri::command]
 pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {
@@ -3106,6 +3203,7 @@ pub async fn create_community_role(
 
 /// Edit a Role's name, colour, permissions and channel scope.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn edit_community_role(
     community_id: String,
     role_id: String,
@@ -3113,10 +3211,12 @@ pub async fn edit_community_role(
     color: u32,
     permissions: String,
     channel_id: Option<String>,
+    display: Option<bool>,
+    mentionable: Option<bool>,
 ) -> Result<(), String> {
     vector_core::db::scoped(async move {
         vector_core::VectorCore
-            .edit_role(&community_id, &role_id, &name, color, &permissions, channel_id.as_deref())
+            .edit_role_shown(&community_id, &role_id, &name, color, &permissions, channel_id.as_deref(), display, mentionable)
             .await
             .map_err(|e| e.to_string())
     })

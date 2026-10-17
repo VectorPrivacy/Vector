@@ -283,6 +283,15 @@ impl CommunityV2 {
         self.channels.iter().find(|c| c.id.0 == id.0)
     }
 
+    /// What a channel list renders: the Categories in order, and every Channel in order
+    /// with the Category it shows under.
+    pub fn layout(&self) -> (Vec<&CategoryV2>, Vec<(&ChannelV2, Option<&CategoryV2>)>) {
+        let groups = self.sidebar();
+        let categories = groups.iter().filter_map(|(c, _)| *c).collect();
+        let channels = groups.iter().flat_map(|(c, chans)| chans.iter().map(move |ch| (*ch, *c))).collect();
+        (categories, channels)
+    }
+
     /// The sidebar (CORD-03 §2, §4): uncategorized Channels first, then each Category by
     /// position with its Channels by position. A Channel filed under a Category that isn't
     /// held renders uncategorized. A keyless entry sorts after every keyed one, then by

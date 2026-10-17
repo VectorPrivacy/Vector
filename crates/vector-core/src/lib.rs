@@ -1371,15 +1371,19 @@ impl VectorCore {
                 // hold no key for is enumerable-but-unreadable, which
                 // is what distinguishes "not a member" from "member
                 // awaiting the key vend".
-                "channels": c.channels.iter()
-                    .map(|ch| serde_json::json!({
+                "channels": c.layout().1.into_iter()
+                    .map(|(ch, cat)| serde_json::json!({
                         "channel_id": crate::simd::hex::bytes_to_hex_32(&ch.id.0),
                         "name": ch.name,
                         "private": ch.private,
                         "readable": !(ch.private && ch.key.is_none()),
                         "epoch": ch.epoch.0,
+                        "category_id": cat.map(|k| crate::simd::hex::bytes_to_hex_32(&k.id)),
+                        "topic": ch.topic(),
+                        "view": ch.view().as_str(),
                     }))
                     .collect::<Vec<_>>(),
+                "categories": Self::categories_json(&c),
             }));
         }
         out
@@ -1437,10 +1441,28 @@ impl VectorCore {
             // channel claimed primary via the render fallback and a multi-channel
             // community drew one list row per channel until the next full reload.
             "primary_channel": community.primary_channel().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
-            "channels": community.channels.iter()
-                .map(|c| serde_json::json!({ "channel_id": crate::simd::hex::bytes_to_hex_32(&c.id.0), "name": c.name, "private": c.private }))
+            "channels": community.layout().1.into_iter()
+                .map(|(c, cat)| serde_json::json!({
+                    "channel_id": crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                    "name": c.name,
+                    "private": c.private,
+                    "category_id": cat.map(|k| crate::simd::hex::bytes_to_hex_32(&k.id)),
+                    "topic": c.topic(),
+                    "view": c.view().as_str(),
+                }))
                 .collect::<Vec<_>>(),
+            "categories": Self::categories_json(community),
         })
+    }
+
+    /// A community's Categories in sidebar order, as the summaries carry them.
+    pub fn categories_json(community: &crate::community::v2::community::CommunityV2) -> serde_json::Value {
+        community
+            .layout()
+            .0
+            .into_iter()
+            .map(|k| serde_json::json!({ "category_id": crate::simd::hex::bytes_to_hex_32(&k.id), "name": k.name }))
+            .collect()
     }
 
     /// Register each of a v2 community's channels as a chat row (so it surfaces in
@@ -3854,6 +3876,7 @@ impl VectorCore {
         let grantable = if is_owner { u64::MAX } else { roster.effective_permissions(&me).0 };
         let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().collect();
         roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+        let activated = Self::roles_v2_active(community_id, &roster);
         let roles: Vec<serde_json::Value> = roles
             .into_iter()
             .map(|r| {
@@ -3872,6 +3895,8 @@ impl VectorCore {
                     "permissions": r.permissions.0.to_string(),
                     "channel_id": match &r.scope { RoleScope::Channel(c) => Some(c.to_ascii_lowercase()), RoleScope::Server => None },
                     "holders": holders,
+                    "display": r.display,
+                    "mentionable": r.mentionable,
                     "manageable": can_manage && (is_owner || {
                         let support = roster.permissions_above(&me, r.position);
                         support.contains(Permissions::MANAGE_ROLES) && r.permissions.0 & !support.0 == 0
@@ -3893,6 +3918,11 @@ impl VectorCore {
             "can_manage": can_manage,
             "rank": rank,
             "grantable": grantable.to_string(),
+            // Roles v2 (CORD-04 §2): deletable Roles, `@everyone`, and the channel bits.
+            "activated": activated,
+            "everyone": roster.everyone.map(|p| p.0.to_string()),
+            "everyone_editable": activated && (is_owner || roster.permissions_above(&me, u32::MAX).contains(Permissions::MANAGE_ROLES)),
+            "everyone_default": crate::community::v2::roles::EVERYONE_DEFAULT.to_string(),
             "roles": roles,
             "channels": channels,
             "max_roles": crate::community::v2::roles::MAX_ROLES_PER_COMMUNITY,
@@ -3923,15 +3953,60 @@ impl VectorCore {
         let perms = Self::parse_permissions(permissions)?;
         let scope = Self::role_scope(channel_id)?;
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let id = crate::community::v2::service::create_role(&transport, &v2, name, color, perms, scope)
-            .await
-            .map_err(VectorError::Other)?;
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let id = if Self::roles_v2_active(community_id, &roster) {
+            if channel_id.is_some() {
+                return Err(VectorError::Other("on the new roles, channel access is set on the channel".into()));
+            }
+            crate::community::v2::service::create_role_v2(&transport, &v2, name, color, perms).await
+        } else {
+            crate::community::v2::service::create_role(&transport, &v2, name, color, perms, scope).await
+        }
+        .map_err(VectorError::Other)?;
         Self::converge_v2_authority(&transport, community_id).await;
         Ok(id)
     }
 
     /// Edit a Role's name, colour, permissions and scope.
     pub async fn edit_role(&self, community_id: &str, role_id: &str, name: &str, color: u32, permissions: &str, channel_id: Option<&str>) -> Result<()> {
+        self.edit_role_shown(community_id, role_id, name, color, permissions, channel_id, None, None).await
+    }
+
+    /// [`Self::edit_role`], plus whether a Roles v2 Role shows apart in the member list and
+    /// can be mentioned (`None` keeps what it has).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn edit_role_shown(
+        &self,
+        community_id: &str,
+        role_id: &str,
+        name: &str,
+        color: u32,
+        permissions: &str,
+        channel_id: Option<&str>,
+        display: Option<bool>,
+        mentionable: Option<bool>,
+    ) -> Result<()> {
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        if Self::roles_v2_active(community_id, &roster) {
+            let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+            let perms = Self::parse_permissions(permissions)?;
+            let current = roster.role(role_id).ok_or_else(|| VectorError::Other("no such role".into()))?;
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            crate::community::v2::service::edit_role_v2(
+                &transport,
+                &v2,
+                role_id,
+                name,
+                color,
+                perms,
+                display.unwrap_or(current.display),
+                mentionable.unwrap_or(current.mentionable),
+            )
+            .await
+            .map_err(VectorError::Other)?;
+            Self::converge_v2_authority(&transport, community_id).await;
+            return Ok(());
+        }
         let v2 = Self::load_held(community_id)?
             .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
         let perms = Self::parse_permissions(permissions)?;
@@ -3949,6 +4024,14 @@ impl VectorCore {
         let v2 = Self::load_held(community_id)?
             .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        if Self::roles_v2_active(community_id, &roster) {
+            let moved = crate::community::v2::service::reorder_roles_v2(&transport, &v2, ordered).await.map_err(VectorError::Other)?;
+            if moved > 0 {
+                Self::converge_v2_authority(&transport, community_id).await;
+            }
+            return Ok(moved);
+        }
         let moved = crate::community::v2::service::reorder_roles(&transport, &v2, ordered)
             .await
             .map_err(VectorError::Other)?;
@@ -3956,6 +4039,97 @@ impl VectorCore {
             Self::converge_v2_authority(&transport, community_id).await;
         }
         Ok(moved)
+    }
+
+    /// Roles v2 is active here (CORD-04 §2), by what this device has folded.
+    fn roles_v2_active(community_id: &str, roster: &crate::community::roles::CommunityRoles) -> bool {
+        if roster.everyone.is_some() {
+            return true;
+        }
+        let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(community_id) else { return false };
+        let everyone = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::everyone_locator(&crate::community::CommunityId(cid)));
+        crate::db::community::get_edition_head(community_id, &everyone).ok().flatten().is_some()
+    }
+
+    fn held_v2(community_id: &str) -> Result<crate::community::v2::community::CommunityV2> {
+        Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("this needs a Concord v2 community".into()))
+    }
+
+    fn short_transport() -> crate::community::transport::LiveTransport {
+        crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12))
+    }
+
+    fn id32(hex: &str, what: &str) -> Result<[u8; 32]> {
+        crate::simd::hex::hex_to_bytes_32_checked(hex).ok_or_else(|| VectorError::Other(format!("{what} must be 32-byte hex")))
+    }
+
+    /// Delete a Role (Roles v2 only): terminal, it leaves every holder.
+    pub async fn delete_role(&self, community_id: &str, role_id: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let transport = Self::short_transport();
+        crate::community::v2::service::delete_role_v2(&transport, &v2, role_id).await.map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
+    }
+
+    /// Set what `@everyone` holds. `permissions` is a decimal string.
+    pub async fn set_everyone_permissions(&self, community_id: &str, permissions: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let perms = Self::parse_permissions(permissions)?;
+        let transport = Self::short_transport();
+        crate::community::v2::service::set_everyone(&transport, &v2, perms).await.map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
+    }
+
+    /// Move the community to Roles v2 (owner only). Returns how many Roles it carried over.
+    pub async fn activate_roles_v2(&self, community_id: &str, everyone: &str) -> Result<usize> {
+        let v2 = Self::held_v2(community_id)?;
+        let perms = Self::parse_permissions(everyone)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        let carried = crate::community::v2::service::activate_roles_v2(&transport, &v2, perms).await.map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(carried)
+    }
+
+    /// Create a Category at the bottom of the sidebar. Returns its id.
+    pub async fn create_category(&self, community_id: &str, name: &str) -> Result<String> {
+        let v2 = Self::held_v2(community_id)?;
+        let id = crate::community::v2::service::create_category(&Self::short_transport(), &v2, name).await.map_err(VectorError::Other)?;
+        Ok(crate::simd::hex::bytes_to_hex_32(&id))
+    }
+
+    pub async fn rename_category(&self, community_id: &str, category_id: &str, name: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        crate::community::v2::service::rename_category(&Self::short_transport(), &v2, Self::id32(category_id, "category_id")?, name).await.map_err(VectorError::Other)
+    }
+
+    /// Delete a Category; its Channels render uncategorized.
+    pub async fn delete_category(&self, community_id: &str, category_id: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        crate::community::v2::service::delete_category(&Self::short_transport(), &v2, Self::id32(category_id, "category_id")?).await.map_err(VectorError::Other)
+    }
+
+    /// Move a Category to `index` among the Categories (0 is the top).
+    pub async fn move_category(&self, community_id: &str, category_id: &str, index: usize) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        crate::community::v2::service::move_category(&Self::short_transport(), &v2, Self::id32(category_id, "category_id")?, index).await.map_err(VectorError::Other)
+    }
+
+    /// Move a Channel into a Category (`None` = uncategorized) at `index` among its Channels.
+    pub async fn move_channel(&self, community_id: &str, channel_id: &str, category_id: Option<&str>, index: usize) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let channel = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let category = category_id.map(|c| Self::id32(c, "category_id")).transpose()?;
+        crate::community::v2::service::move_channel(&Self::short_transport(), &v2, &channel, category, index).await.map_err(VectorError::Other)
+    }
+
+    /// Edit a Channel's name, topic and view (`chat`, `forum` or `voice`).
+    pub async fn edit_channel_details(&self, community_id: &str, channel_id: &str, name: &str, topic: Option<&str>, view: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let channel = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let view = crate::community::v2::community::ChannelView::parse(view);
+        crate::community::v2::service::edit_channel_details(&Self::short_transport(), &v2, &channel, name, topic, view).await.map_err(VectorError::Other)
     }
 
     /// Set exactly which Roles a member holds.

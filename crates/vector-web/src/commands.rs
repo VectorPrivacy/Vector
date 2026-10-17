@@ -446,7 +446,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "create_community" => cm::create_community(a.str("name")?, a.opt_str("channelName"), a.de("relays")?).await,
         "create_community_channel" => {
-            cm::create_community_channel(a.str("communityId")?, a.str("name")?, a.bool("private").unwrap_or(false)).await
+            cm::create_community_channel(a.str("communityId")?, a.str("name")?, a.bool("private").unwrap_or(false), a.opt_str("categoryId")).await
         }
         "update_community_metadata" => {
             let id = a.str("communityId")?;

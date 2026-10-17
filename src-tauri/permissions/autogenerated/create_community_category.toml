@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-community-category"
+description = "Enables the create_community_category command without any pre-configured scope."
+commands.allow = ["create_community_category"]
+
+[[permission]]
+identifier = "deny-create-community-category"
+description = "Denies the create_community_category command without any pre-configured scope."
+commands.deny = ["create_community_category"]

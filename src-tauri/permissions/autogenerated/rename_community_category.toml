@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-community-category"
+description = "Enables the rename_community_category command without any pre-configured scope."
+commands.allow = ["rename_community_category"]
+
+[[permission]]
+identifier = "deny-rename-community-category"
+description = "Denies the rename_community_category command without any pre-configured scope."
+commands.deny = ["rename_community_category"]

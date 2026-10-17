@@ -5522,9 +5522,62 @@ pub async fn edit_role_v2<T: Transport + ?Sized>(
 /// moved Role alone, its key minted between its new neighbours.
 pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, role_id: &str, index: usize) -> Result<(), String> {
     crate::db::scoped(async move {
-        let view = fetch_authority(transport, community).await;
+        let mut view = fetch_authority(transport, community).await;
+        move_role_in(transport, community, &mut view, role_id, index).await
+    })
+    .await
+}
+
+/// Reorder the Roles to `ordered` (top first; Roles it leaves out keep their order after
+/// it). The longest run already in order stays put and each other Role moves once, all
+/// judged against one fold carried forward, so a relay slow to serve one move can't skew
+/// the next.
+pub async fn reorder_roles_v2<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ordered: &[String]) -> Result<usize, String> {
+    crate::db::scoped(async move {
+        let mut view = fetch_authority(transport, community).await;
         require_activated(&view)?;
-        let author = role_author(community, &view)?;
+        let mut cur: Vec<String> = ranked(&view).into_iter().map(|r| r.role_id.clone()).collect();
+        let mut target: Vec<String> = ordered.iter().filter(|id| cur.contains(id)).cloned().collect();
+        target.extend(cur.iter().filter(|id| !ordered.contains(id)).cloned());
+        let seq: Vec<usize> = target.iter().map(|id| cur.iter().position(|c| c == id).expect("from cur")).collect();
+        let n = seq.len();
+        let (mut len, mut prev) = (vec![1usize; n], vec![usize::MAX; n]);
+        for i in 0..n {
+            for j in 0..i {
+                if seq[j] < seq[i] && len[j] + 1 > len[i] {
+                    len[i] = len[j] + 1;
+                    prev[i] = j;
+                }
+            }
+        }
+        let mut keep = vec![false; n];
+        let mut at = (0..n).max_by_key(|&i| (len[i], std::cmp::Reverse(i)));
+        while let Some(k) = at {
+            keep[k] = true;
+            at = (prev[k] != usize::MAX).then_some(prev[k]);
+        }
+        // Each moved Role lands just after its predecessor in the target order.
+        let mut moved = 0;
+        for i in (0..n).filter(|&i| !keep[i]) {
+            let id = target[i].clone();
+            let index = match i.checked_sub(1) {
+                None => 0,
+                Some(p) => cur.iter().filter(|c| **c != id).position(|c| *c == target[p]).map_or(0, |at| at + 1),
+            };
+            move_role_in(transport, community, &mut view, &id, index).await?;
+            cur.retain(|c| *c != id);
+            cur.insert(index.min(cur.len()), id);
+            moved += 1;
+        }
+        Ok(moved)
+    })
+    .await
+}
+
+async fn move_role_in<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, view: &mut AuthorityView, role_id: &str, index: usize) -> Result<(), String> {
+    {
+        require_activated(view)?;
+        let author = role_author(community, view)?;
         let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
         require_role_head(&view, role_id)?;
         let others: Vec<&crate::community::roles::Role> = ranked(&view).into_iter().filter(|r| r.role_id != current.role_id).collect();
@@ -5542,7 +5595,7 @@ pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &Comm
         let rank = crate::community::rank::between(above.and_then(|r| r.rank.as_deref()), below.and_then(|r| r.rank.as_deref()))
             .ok_or("no room between those roles; move a neighbour first")?;
         if current.rank.as_deref().is_some_and(|old| old.as_bytes() < rank.as_bytes()) {
-            seal_standing(transport, community, &holders_of(&view, role_id), Seal::Strict).await?;
+            seal_standing(transport, community, &holders_of(view, role_id), Seal::Strict).await?;
         }
         // A Grant is judged on the Role's rank as it stands, so moving the Role up past the
         // Grant's signer would take it from the member: re-sign those Grants as the mover.
@@ -5559,16 +5612,30 @@ pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &Comm
                 return Err(format!("moving \"{}\" there would take it from members you can't give it to", current.name));
             }
         }
+        let resign: Vec<crate::community::roles::MemberGrant> = resign.into_iter().cloned().collect();
         let mut next = current;
-        next.rank = Some(rank);
+        next.rank = Some(rank.clone());
         set_role_v2(transport, community, &next).await?;
-        for g in resign {
+        for g in &resign {
             let member = PublicKey::from_hex(&g.member).map_err(|e| e.to_string())?;
             grant_roles_with_roster(transport, community, &member, g.role_ids.clone(), &view.roles).await?;
         }
+        // Carry the move forward in the view, as the next fold will read it.
+        if let Some(r) = view.roles.roles.iter_mut().find(|r| r.role_id == role_id) {
+            r.rank = Some(rank);
+        }
+        let keys: Vec<String> = view.roles.roles.iter().filter_map(|r| r.rank.clone()).collect();
+        let ranks = crate::community::rank::dense_ranks(keys.iter().map(String::as_str));
+        for r in view.roles.roles.iter_mut() {
+            if let Some(p) = r.rank.as_deref().and_then(|k| ranks.get(k)) {
+                r.position = *p;
+            }
+        }
+        for g in &resign {
+            view.grant_authors.insert(g.member.clone(), author.me_hex.clone());
+        }
         Ok(())
-    })
-    .await
+    }
 }
 
 /// Delete a Roles v2 Role: terminal, it leaves every holder and frees its slot.
@@ -19169,6 +19236,34 @@ mod tests {
         publish_marked(&relay, &community, &x, vsk::TENURE, &eid, 2, prev, &content).await;
         let f = fold_authority(&community, &fetch_control(&relay, &community).await, &Floors::default());
         assert!(f.roles.role(&made).is_some(), "the owner's seal still holds");
+    }
+
+    #[tokio::test]
+    async fn a_reorder_moves_only_what_left_its_run() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Reorder", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut ids = Vec::new();
+        for name in ["A", "B", "C", "D", "E"] {
+            ids.push(create_role_v2(&bed.relay, &held(), name, 0, 0).await.unwrap());
+        }
+        let order = |eds: &[ParsedEdition]| {
+            let f = fold_authority(&held(), eds, &Floors::default());
+            let mut roles: Vec<&crate::community::roles::Role> = f.roles.roles.iter().collect();
+            roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+            roles.into_iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+        };
+        let pick = |names: &str| names.chars().map(|c| ids[(c as u8 - b'A') as usize].clone()).collect::<Vec<_>>();
+        let before = fetch_control(&bed.relay, &held()).await.len();
+        assert_eq!(reorder_roles_v2(&bed.relay, &held(), &pick("EABCD")).await.unwrap(), 1, "one Role left its run");
+        assert_eq!(fetch_control(&bed.relay, &held()).await.len(), before + 1);
+        assert_eq!(order(&fetch_control(&bed.relay, &held()).await), ["E", "A", "B", "C", "D"]);
+        assert_eq!(reorder_roles_v2(&bed.relay, &held(), &pick("DBAEC")).await.unwrap(), 3);
+        assert_eq!(order(&fetch_control(&bed.relay, &held()).await), ["D", "B", "A", "E", "C"]);
+        assert_eq!(reorder_roles_v2(&bed.relay, &held(), &pick("DBAEC")).await.unwrap(), 0, "nothing to do");
     }
 
     #[tokio::test]

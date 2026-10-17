@@ -40,12 +40,16 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
         "description": c.description,
         "is_owner": matches!((me, owner), (Some(m), Some(o)) if m == o),
         "has_icon": c.icon.is_some(),
-        "channels": c.channels.iter().map(|ch| json!({
+        "channels": c.layout().1.into_iter().map(|(ch, cat)| json!({
             "channel_id": bytes_to_hex_32(&ch.id.0),
             "name": ch.name,
             "private": ch.private,
             "readable": !ch.private || ch.key.is_some(),
+            "category_id": cat.map(|k| bytes_to_hex_32(&k.id)),
+            "topic": ch.topic(),
+            "view": ch.view().as_str(),
         })).collect::<Vec<_>>(),
+        "categories": VectorCore::categories_json(c),
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
@@ -292,7 +296,7 @@ pub async fn create_community(name: String, channel_name: Option<String>, relays
     }))
 }
 
-pub async fn create_community_channel(community_id: String, name: String, private: bool) -> Result<Value, String> {
+pub async fn create_community_channel(community_id: String, name: String, private: bool, category_id: Option<String>) -> Result<Value, String> {
     db::scoped_result(async move {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -300,11 +304,8 @@ pub async fn create_community_channel(community_id: String, name: String, privat
         }
         let community = load_v2(&community_id)?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(20));
-        let channel_id = if private {
-            vector_core::community::v2::service::create_private_channel(&transport, &community, &name).await?
-        } else {
-            vector_core::community::v2::service::create_public_channel(&transport, &community, &name).await?
-        };
+        let category = category_id.as_deref().map(id32).transpose()?;
+        let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, &name, private, category).await?;
         if let Ok(c) = load_v2(&community_id) {
             VectorCore.register_v2_chats(&c, &db::current_session()).await;
         }
