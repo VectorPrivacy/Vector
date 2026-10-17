@@ -73,6 +73,7 @@ const TAG_SEVER: &str = "sever";
 /// Names how a 3303 delivers (CORD-03 §5); an access delivery is never a rotation.
 const TAG_DELIVERY: &str = "delivery";
 const DELIVERY_ACCESS: &str = "access";
+const DELIVERY_HISTORY: &str = "history";
 
 /// What a rekey rotates (CORD-06 §1). The 32-byte scope id is stamped into every
 /// blob's plaintext so a blob can't be spliced onto another coordinate.
@@ -830,6 +831,158 @@ pub fn parse_access_delivery(opened: &OpenedStream) -> Result<AccessDelivery, Re
     Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs })
 }
 
+/// A Channel's history scope (CORD-03 §5): what history blobs bind to, so one can never be
+/// spliced in as a current key.
+pub fn history_scope(channel: &ChannelId) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"concord/history-scope");
+    h.update(channel.0);
+    h.finalize().into()
+}
+
+/// A past epoch's read view of a Channel (CORD-03 §5): where its messages are and the key that
+/// opens them, never the secret that signs into it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HistoryView {
+    pub address: [u8; 32],
+    pub conv_key: [u8; 32],
+}
+
+impl std::fmt::Debug for HistoryView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryView").field("address", &crate::simd::hex::bytes_to_hex_32(&self.address)).finish_non_exhaustive()
+    }
+}
+
+impl HistoryView {
+    pub fn of(group: &GroupKey) -> Self {
+        let mut conv_key = [0u8; 32];
+        conv_key.copy_from_slice(group.conv_key().as_bytes());
+        HistoryView { address: group.pk().to_bytes(), conv_key }
+    }
+}
+
+/// `history_scope[32] ‖ epoch_be[8] ‖ address[32] ‖ conv_key[32]`.
+fn history_plaintext_b64(channel: &ChannelId, epoch: Epoch, view: &HistoryView) -> Zeroizing<String> {
+    let mut pt = Zeroizing::new([0u8; 104]);
+    pt[..32].copy_from_slice(&history_scope(channel));
+    pt[32..40].copy_from_slice(&epoch.0.to_be_bytes());
+    pt[40..72].copy_from_slice(&view.address);
+    pt[72..].copy_from_slice(&view.conv_key);
+    Zeroizing::new(crate::simd::base64::STANDARD.encode_to_string(&pt[..]))
+}
+
+fn parse_history_plaintext(pt: &[u8], channel: &ChannelId, epoch: Epoch) -> Result<HistoryView, RekeyError> {
+    if pt.len() != 104 {
+        return Err(RekeyError::BadBlobLength(pt.len()));
+    }
+    if pt[..32] != history_scope(channel) {
+        return Err(RekeyError::ScopeSplice);
+    }
+    if pt[32..40] != epoch.0.to_be_bytes() {
+        return Err(RekeyError::EpochSplice);
+    }
+    let (mut address, mut conv_key) = ([0u8; 32], [0u8; 32]);
+    address.copy_from_slice(&pt[40..72]);
+    conv_key.copy_from_slice(&pt[72..]);
+    Ok(HistoryView { address, conv_key })
+}
+
+/// The public locator of `recipient`'s history blob for `epoch` from `deliverer`.
+pub fn history_locator(deliverer_xonly: &[u8; 32], recipient_xonly: &[u8; 32], channel: &ChannelId, epoch: Epoch) -> String {
+    crate::simd::hex::bytes_to_hex_32(&recipient_locator(deliverer_xonly, recipient_xonly, &history_scope(channel), epoch))
+}
+
+pub async fn build_history_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    deliverer_xonly: &[u8; 32],
+    recipient: &PublicKey,
+    channel: &ChannelId,
+    epoch: Epoch,
+    view: &HistoryView,
+) -> Result<RekeyBlob, RekeyError> {
+    let inner = history_plaintext_b64(channel, epoch, view);
+    let wrapped = signer.nip44_encrypt_async(recipient, inner.as_str()).await.map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    Ok(RekeyBlob { locator: history_locator(deliverer_xonly, &recipient.to_bytes(), channel, epoch), wrapped })
+}
+
+pub async fn open_history_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    deliverer: &PublicKey,
+    channel: &ChannelId,
+    epoch: Epoch,
+    blob: &RekeyBlob,
+) -> Result<HistoryView, RekeyError> {
+    let inner = Zeroizing::new(signer.nip44_decrypt_async(deliverer, &blob.wrapped).await.map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    let pt = Zeroizing::new(crate::simd::base64::STANDARD.decode_to_vec(inner.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    parse_history_plaintext(&pt, channel, epoch)
+}
+
+/// [`build_history_blob`] with local keys.
+pub fn build_history_blob_local(deliverer: &Keys, recipient: &PublicKey, channel: &ChannelId, epoch: Epoch, view: &HistoryView) -> Result<RekeyBlob, RekeyError> {
+    let inner = history_plaintext_b64(channel, epoch, view);
+    let ck = ConversationKey::derive(deliverer.secret_key(), recipient).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, inner.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    Ok(RekeyBlob {
+        locator: history_locator(&deliverer.public_key().to_bytes(), &recipient.to_bytes(), channel, epoch),
+        wrapped: crate::simd::base64::STANDARD.encode_to_string(&payload),
+    })
+}
+
+/// [`open_history_blob`] with local keys.
+pub fn open_history_blob_local(me: &SecretKey, deliverer: &PublicKey, channel: &ChannelId, epoch: Epoch, blob: &RekeyBlob) -> Result<HistoryView, RekeyError> {
+    let ck = ConversationKey::derive(me, deliverer).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let payload = crate::simd::base64::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let inner = Zeroizing::new(decrypt_to_bytes(&ck, &payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    let pt = Zeroizing::new(crate::simd::base64::STANDARD.decode_to_vec(inner.as_slice()).map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    parse_history_plaintext(&pt, channel, epoch)
+}
+
+/// One epoch's history blobs on a Channel's access plane.
+#[derive(Debug, Clone)]
+pub struct HistoryDelivery {
+    pub deliverer: PublicKey,
+    pub epoch: Epoch,
+    pub blobs: Vec<RekeyBlob>,
+}
+
+pub fn build_history_rumor(deliverer: PublicKey, channel: &ChannelId, epoch: Epoch, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
+    if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
+        return Err(RekeyError::TooManyBlobs(blobs.len()));
+    }
+    let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let tags = vec![
+        Tag::custom(TAG_SCOPE, [crate::simd::hex::bytes_to_hex_32(&history_scope(channel))]),
+        Tag::custom(TAG_NEW_EPOCH, [epoch.0.to_string()]),
+        Tag::custom(TAG_DELIVERY, [DELIVERY_HISTORY]),
+    ];
+    Ok(stream::build_rumor_secs(super::kind::REKEY, deliverer, &content, tags, at_secs))
+}
+
+/// Parse an opened access-plane event as `channel`'s history, refusing anything else.
+pub fn parse_history_delivery(opened: &OpenedStream, channel: &ChannelId) -> Result<HistoryDelivery, RekeyError> {
+    if opened.seal_form != SealForm::Encrypted {
+        return Err(RekeyError::Stream(StreamError::BadSealKind(stream::KIND_SEAL_PLAINTEXT)));
+    }
+    let rumor = &opened.rumor;
+    if rumor.kind.as_u16() != super::kind::REKEY {
+        return Err(RekeyError::NotARekey(rumor.kind.as_u16()));
+    }
+    if unique_tag(rumor, TAG_DELIVERY)?.as_deref() != Some(DELIVERY_HISTORY) {
+        return Err(RekeyError::BadTag(TAG_DELIVERY));
+    }
+    if unique_tag(rumor, TAG_SCOPE)?.as_deref() != Some(crate::simd::hex::bytes_to_hex_32(&history_scope(channel)).as_str()) {
+        return Err(RekeyError::BadTag(TAG_SCOPE));
+    }
+    let epoch = Epoch(parse_u64(rumor, TAG_NEW_EPOCH)?);
+    let blobs: Vec<RekeyBlob> = serde_json::from_str(&rumor.content).map_err(|_| RekeyError::BadTag("blobs"))?;
+    if blobs.len() > MAX_REKEY_BLOBS_RECEIVED {
+        return Err(RekeyError::TooManyBlobs(blobs.len()));
+    }
+    Ok(HistoryDelivery { deliverer: opened.author, epoch, blobs })
+}
+
 // ── Continuity + removal + fork resolution (CORD-06 §2/§3) ───────────────────
 
 /// The verdict of the prevcommit continuity check (CORD-06 §2).
@@ -1252,6 +1405,32 @@ mod tests {
         let rotation = build_rekey_rumor(deliverer.public_key(), RekeyScope::Channel(CHAN), Epoch(3), Epoch(2), &commit, &[blob], 1, 1, 100, None, false).unwrap();
         let (wrap, _) = seal_rekey_chunk(&rotation, &group, &deliverer, Timestamp::from_secs(100)).unwrap();
         assert!(parse_access_delivery(&stream::open_wrap(&wrap, &group).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_history_delivery_round_trips_and_binds_its_channel_and_epoch() {
+        let (deliverer, recipient) = (keys(1), keys(8));
+        let group = crate::community::v2::derive::channel_access_group_key(&root(), &CHAN, Epoch(0));
+        let past = crate::community::v2::derive::channel_group_key(&[0x42; 32], &CHAN, Epoch(2));
+        let view = HistoryView::of(&past);
+        let blob = build_history_blob_local(&deliverer, &recipient.public_key(), &CHAN, Epoch(2), &view).unwrap();
+        let rumor = build_history_rumor(deliverer.public_key(), &CHAN, Epoch(2), std::slice::from_ref(&blob), 100).unwrap();
+        let (wrap, _) = seal_rekey_chunk(&rumor, &group, &deliverer, Timestamp::from_secs(100)).unwrap();
+        let opened = stream::open_wrap(&wrap, &group).unwrap();
+        let d = parse_history_delivery(&opened, &CHAN).unwrap();
+        assert_eq!((d.deliverer, d.epoch), (deliverer.public_key(), Epoch(2)));
+        assert_eq!(d.blobs[0].locator, history_locator(&xonly(&deliverer), &xonly(&recipient), &CHAN, Epoch(2)));
+        assert_eq!(open_history_blob_local(recipient.secret_key(), &deliverer.public_key(), &CHAN, Epoch(2), &d.blobs[0]).unwrap(), view, "the address and key of that epoch");
+        assert!(matches!(open_history_blob_local(recipient.secret_key(), &deliverer.public_key(), &CHAN, Epoch(3), &d.blobs[0]), Err(RekeyError::EpochSplice)));
+        let other = ChannelId([0x01; 32]);
+        assert!(matches!(open_history_blob_local(recipient.secret_key(), &deliverer.public_key(), &other, Epoch(2), &d.blobs[0]), Err(RekeyError::ScopeSplice)));
+        assert!(parse_history_delivery(&opened, &other).is_err(), "another channel's history isn't this one's");
+        assert!(parse_access_delivery(&opened).is_err() && parse_rekey_chunk(&opened).is_err(), "nor is it a key or a rotation");
+        // The view really opens that epoch's plane.
+        let msg = stream::build_rumor_secs(9, deliverer.public_key(), "old", vec![], 1);
+        let (old_wrap, _) = stream::wrap_seal(&stream::build_seal(&msg, SealForm::Plaintext, &past, &deliverer).unwrap(), &past, stream::KIND_WRAP, Timestamp::from_secs(1)).unwrap();
+        let read = stream::open_wrap_at(&old_wrap, &PublicKey::from_slice(&view.address).unwrap(), &ConversationKey::new(view.conv_key), false).unwrap();
+        assert_eq!(read.rumor.content, "old");
     }
 
     #[test]

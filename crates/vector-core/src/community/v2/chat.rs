@@ -444,7 +444,18 @@ pub fn open_chat_event(
     channel_id: &ChannelId,
     epoch: Epoch,
 ) -> Result<ChatEvent, ChatError> {
-    let opened = stream::open_wrap(wrap, group)?;
+    open_chat_event_at(wrap, &group.pk(), group.conv_key(), channel_id, epoch)
+}
+
+/// [`open_chat_event`] with a read view only: the epoch's address and conversation key.
+pub fn open_chat_event_at(
+    wrap: &Event,
+    address: &PublicKey,
+    conv_key: &nostr_sdk::prelude::nip44::v2::ConversationKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+) -> Result<ChatEvent, ChatError> {
+    let opened = stream::open_wrap_at(wrap, address, conv_key, false)?;
     if opened.seal_form != SealForm::Encrypted {
         return Err(ChatError::NotEncryptedSealed);
     }

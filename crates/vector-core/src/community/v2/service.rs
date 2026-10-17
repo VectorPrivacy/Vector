@@ -488,6 +488,21 @@ fn heal_own_wrap_key(event: &ChatEvent, group: &GroupKey, relays: &[String]) {
     }
 }
 
+/// One epoch a channel read covers: keyed, or a past epoch held read-only (CORD-03 §5).
+enum ReadPlane {
+    Keyed(GroupKey),
+    View(PublicKey, nostr_sdk::prelude::nip44::v2::ConversationKey),
+}
+
+impl ReadPlane {
+    fn address(&self) -> PublicKey {
+        match self {
+            ReadPlane::Keyed(group) => group.pk(),
+            ReadPlane::View(address, _) => *address,
+        }
+    }
+}
+
 /// How many of the newest held epochs a newest-first catch-up reads. One: a
 /// rotation moves the conversation, so the live epoch is where it is. Rotated-past
 /// epochs are reached by back-paging, when a reader actually scrolls for them.
@@ -568,16 +583,28 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
         if coords.is_empty() {
             return Ok(Vec::new());
         }
+        let mut planes: Vec<(ReadPlane, Epoch)> = coords.into_iter().map(|(secret, epoch)| (ReadPlane::Keyed(channel_group_key(&secret, channel_id, epoch)), epoch)).collect();
+        if ch.private {
+            // Past epochs delivered read-only with Read Message History (CORD-03 §5).
+            let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+            for (epoch, view) in crate::db::community::history_views(&cid_hex, &ch_hex).unwrap_or_default() {
+                if planes.iter().any(|(_, e)| *e == epoch) {
+                    continue;
+                }
+                if let Ok(address) = PublicKey::from_slice(&view.address) {
+                    planes.push((ReadPlane::View(address, nostr_sdk::prelude::nip44::v2::ConversationKey::new(view.conv_key)), epoch));
+                }
+            }
+        }
         // Every epoch is its own address on this plane, so the full set costs one
         // fetch per held epoch per page and grows with the community's whole
         // rotation history. A newest-first catch-up wants the live epoch, which is
         // the only one anyone should be speaking on; reaching back through a
         // rotation is what back-paging (`start_until`) is for — the same division
         // the boot volley already draws.
-        let mut coords = coords;
-        if start_until.is_none() && coords.len() > LIVE_COORD_EPOCHS {
-            coords.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
-            coords.truncate(LIVE_COORD_EPOCHS);
+        if start_until.is_none() && planes.len() > LIVE_COORD_EPOCHS {
+            planes.sort_by_key(|(_, e)| std::cmp::Reverse(e.0));
+            planes.truncate(LIVE_COORD_EPOCHS);
         }
 
         let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
@@ -593,19 +620,23 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
             // freshly-adopted epoch never load. Per-plane authed fetches + union.
             let mut wraps: Vec<Event> = Vec::new();
             let mut wrap_ids: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-            for (secret, epoch) in &coords {
-                let plane = channel_group_key(secret, channel_id, *epoch);
+            for (plane, _) in &planes {
                 let q = Query {
                     kinds: vec![stream::KIND_WRAP],
-                    authors: vec![plane.pk_hex()],
+                    authors: vec![plane.address().to_hex()],
                     since,
                     until,
                     limit: Some(page),
                     evidence,
                     ..Default::default()
                 };
-                if let Ok(evs) = transport.fetch_plane(plane.keys(), &q, &community.relays).await {
-                    for e in evs.events {
+                // A read view holds no key to authenticate as the plane, so it asks plainly.
+                let fetched = match plane {
+                    ReadPlane::Keyed(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| f.events),
+                    ReadPlane::View(..) => transport.fetch(&q, &community.relays).await,
+                };
+                if let Ok(evs) = fetched {
+                    for e in evs {
                         if wrap_ids.insert(e.id) {
                             wraps.push(e);
                         }
@@ -634,15 +665,20 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                     continue;
                 }
                 // Select the epoch whose group key authored this wrap (no trial decrypt).
-                for (secret, epoch) in &coords {
-                    let group = channel_group_key(secret, channel_id, *epoch);
-                    if wrap.pubkey != group.pk() {
+                for (plane, epoch) in &planes {
+                    if wrap.pubkey != plane.address() {
                         continue;
                     }
-                    if let Ok(event) = chat::open_chat_event(wrap, &group, channel_id, *epoch) {
+                    let opened = match plane {
+                        ReadPlane::Keyed(group) => chat::open_chat_event(wrap, group, channel_id, *epoch),
+                        ReadPlane::View(address, conv_key) => chat::open_chat_event_at(wrap, address, conv_key, channel_id, *epoch),
+                    };
+                    if let Ok(event) = opened {
                         let id = event.opened().rumor_id;
                         if seen_rumors.insert(id) {
-                            heal_own_wrap_key(&event, &group, &community.relays);
+                            if let ReadPlane::Keyed(group) = plane {
+                                heal_own_wrap_key(&event, group, &community.relays);
+                            }
                             page_events.push(FetchedEvent { event, epoch: *epoch });
                         }
                     }
@@ -6189,6 +6225,147 @@ async fn deliver_access<T: Transport + ?Sized>(transport: &T, community: &Commun
     Ok(())
 }
 
+/// Deliver every past epoch of `channel` this device can read, read-only, to `recipients`:
+/// one history event per epoch on the access plane (CORD-03 §5). Returns the epochs sent.
+async fn deliver_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, recipients: &[PublicKey]) -> Result<usize, String> {
+    use nostr_sdk::prelude::AsyncGetPublicKey;
+    let ch = community.channel(channel).ok_or("no such channel")?;
+    let (cid_hex, ch_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&channel.0));
+    let mut views: std::collections::BTreeMap<u64, rekey::HistoryView> = crate::db::community::history_views(&cid_hex, &ch_hex)?
+        .into_iter()
+        .filter(|(e, _)| *e < ch.epoch)
+        .map(|(e, v)| (e.0, v))
+        .collect();
+    for (e, secret) in crate::db::community::held_epoch_keys(&cid_hex, &ch_hex)? {
+        if e < ch.epoch && secret != community.community_root {
+            views.insert(e.0, rekey::HistoryView::of(&channel_group_key(&secret, channel, e)));
+        }
+    }
+    if views.is_empty() || recipients.is_empty() {
+        return Ok(0);
+    }
+    let signer = crate::signer::active_signer()?;
+    let me = me_pk()?;
+    if signer.get_public_key_async().await.map_err(|e| e.to_string())? != me {
+        return Err("the active signer isn't this account".to_string());
+    }
+    let group = access_group(community, channel);
+    let at = now_ms() / 1000;
+    for (epoch, view) in &views {
+        let epoch = Epoch(*epoch);
+        let mut blobs = Vec::with_capacity(recipients.len());
+        for r in recipients {
+            blobs.push(rekey::build_history_blob(&signer, &me.to_bytes(), r, channel, epoch, view).await.map_err(|e| e.to_string())?);
+        }
+        for part in blobs.chunks(rekey::MAX_REKEY_BLOBS_PER_EVENT) {
+            let rumor = rekey::build_history_rumor(me, channel, epoch, part, at).map_err(|e| e.to_string())?;
+            let (wrap, _) = stream::seal_and_wrap_signed(&signer, me, &rumor, stream::SealForm::Encrypted, &group, stream::KIND_WRAP, Timestamp::from_secs(at), &[])
+                .await
+                .map_err(|e| e.to_string())?;
+            transport.publish(&wrap, &community.relays).await?;
+        }
+    }
+    Ok(views.len())
+}
+
+/// Every history delivery for `channel` on its access plane.
+async fn fetch_history_deliveries<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId) -> Result<Vec<rekey::HistoryDelivery>, String> {
+    const PAGE: usize = 200;
+    const MAX_PAGES: usize = 6;
+    let group = access_group(community, channel);
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+    let (mut until, mut oldest): (Option<u64>, Option<u64>) = (None, None);
+    for _ in 0..MAX_PAGES {
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], until, limit: Some(PAGE), ..Default::default() };
+        let page = transport.fetch_plane(group.keys(), &query, &community.relays).await?;
+        let complete = page.is_complete();
+        let wraps = page.events;
+        let mut fresh = 0usize;
+        for w in &wraps {
+            if !seen.insert(w.id) {
+                continue;
+            }
+            fresh += 1;
+            oldest = Some(oldest.map_or(w.created_at.as_secs(), |o| o.min(w.created_at.as_secs())));
+            if let Some(d) = stream::open_wrap(w, &group).ok().and_then(|o| rekey::parse_history_delivery(&o, channel).ok()) {
+                out.push(d);
+            }
+        }
+        if fresh == 0 || (wraps.len() < PAGE && complete) {
+            break;
+        }
+        match oldest {
+            Some(o) if o > 0 => until = Some(o),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+struct OpenedHistory;
+struct HistoryCollectClock;
+
+/// How often a member re-reads history deliveries when nothing moved.
+const HISTORY_COLLECT_PERIOD_MS: u64 = 10 * 60 * 1000;
+
+/// Whether to read history deliveries for a community now: when the roster moved or a key was
+/// just adopted, else once per period. Marks it read.
+pub(crate) fn history_collect_due(id: &crate::community::CommunityId, moved: bool) -> bool {
+    let clock = crate::db::current_session().scoped::<HistoryCollectClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>();
+    let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let due = moved || last.get(&id.0).is_none_or(|t| now.saturating_sub(*t) > HISTORY_COLLECT_PERIOD_MS);
+    if due {
+        last.insert(id.0, now);
+    }
+    due
+}
+
+/// Read Message History, member side (CORD-03 §5): for each private channel this member reads
+/// with READ_MESSAGE_HISTORY, archive every past epoch it lacks that a deliverer the channel
+/// lets in sent it read-only. Returns how many epochs were archived.
+pub async fn collect_history<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<usize, String> {
+    use crate::community::roles::Permissions;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    if roster.everyone.is_none() {
+        return Ok(0);
+    }
+    let owner_hex = community.owner()?.to_hex();
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let me = me_pk()?;
+    let signer = crate::signer::active_signer()?;
+    let opened = crate::db::current_session().scoped::<OpenedHistory, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], u64)>>>();
+    let mut archived = 0;
+    for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+        if !roster.channel_permissions(Some(&owner_hex), &me.to_hex(), &chan, true).contains(Permissions::READ_MESSAGE_HISTORY) {
+            continue;
+        }
+        let mut held: std::collections::HashSet<u64> = crate::db::community::held_epoch_keys(&cid_hex, &chan)?.into_iter().map(|(e, _)| e.0).collect();
+        held.extend(crate::db::community::history_views(&cid_hex, &chan)?.into_iter().map(|(e, _)| e.0));
+        held.insert(ch.epoch.0);
+        for d in fetch_history_deliveries(transport, community, &ch.id).await? {
+            let h = d.deliverer.to_hex();
+            let trusted = h == owner_hex || (!banned.contains(&h) && roster.is_entitled(Some(&owner_hex), &h, &chan, &[], &[]));
+            if !trusted || d.epoch >= ch.epoch || held.contains(&d.epoch.0) {
+                continue;
+            }
+            let Some(blob) = d.blobs.iter().find(|b| b.locator == rekey::history_locator(&d.deliverer.to_bytes(), &me.to_bytes(), &ch.id, d.epoch)) else { continue };
+            if !opened.lock().unwrap_or_else(|e| e.into_inner()).insert((ch.id.0, d.deliverer.to_bytes(), me.to_bytes(), d.epoch.0)) {
+                continue;
+            }
+            if let Ok(view) = rekey::open_history_blob(&signer, &d.deliverer, &ch.id, d.epoch, blob).await {
+                crate::db::community::store_history_view(&cid_hex, &chan, d.epoch.0, &view)?;
+                held.insert(d.epoch.0);
+                archived += 1;
+            }
+        }
+    }
+    Ok(archived)
+}
+
 struct AccessDutyClock;
 
 /// How often a holder re-checks its channels' access planes when nothing in the roster moved.
@@ -6332,6 +6509,13 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
             continue;
         }
         deliver_access(transport, community, &ch.id, &unserved).await?;
+        // With Read Message History they also get every past epoch this device can read.
+        let readers: Vec<PublicKey> = unserved
+            .iter()
+            .filter(|pk| roster.channel_permissions(Some(&owner_hex), &pk.to_hex(), &chan, true).contains(crate::community::roles::Permissions::READ_MESSAGE_HISTORY))
+            .copied()
+            .collect();
+        deliver_history(transport, community, &ch.id, &readers).await?;
         let mut held = ledger.lock().unwrap_or_else(|e| e.into_inner());
         held.extend(unserved.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
         done.delivered += unserved.len();
@@ -6351,7 +6535,7 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me = me_pk()?;
     let signer = crate::signer::active_signer()?;
-    let opened = crate::db::current_session().scoped::<OpenedDeliveries, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], u64)>>>();
+    let opened = crate::db::current_session().scoped::<OpenedDeliveries, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32], u64)>>>();
     let mut parked = 0;
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_none()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
@@ -6376,7 +6560,7 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
         for d in deliveries.iter().filter(|d| d.epoch == newest) {
             let mine: Vec<&rekey::RekeyBlob> = rekey::find_my_blobs(&d.blobs, &d.deliverer.to_bytes(), &me.to_bytes(), scope, d.epoch).collect();
             // Opened once a session: parking again would trim other candidates out of the cap.
-            if mine.is_empty() || !opened.lock().unwrap_or_else(|e| e.into_inner()).insert((ch.id.0, d.deliverer.to_bytes(), d.epoch.0)) {
+            if mine.is_empty() || !opened.lock().unwrap_or_else(|e| e.into_inner()).insert((ch.id.0, d.deliverer.to_bytes(), me.to_bytes(), d.epoch.0)) {
                 continue;
             }
             for blob in mine {
@@ -23192,6 +23376,80 @@ mod tests {
         assert!(!rotation_carries(&minted, &any, &m, &ch, now), "without them");
         assert!(rotation_carries(&minted, &any, &kept, &ch, now), "and with whoever it still lets in");
         assert_eq!(access_duty(&bed.relay, &held()).await.unwrap(), AccessDuty::default(), "and then there is nothing left to do");
+    }
+
+    #[tokio::test]
+    async fn read_message_history_hands_a_new_reader_the_past_read_only() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("History").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        send_chat_message(&bed.relay, &held(), &ch, "early", None, &[], vec![]).await.unwrap();
+        let first = held().channel(&ch).unwrap().epoch;
+        rekey_channel_excluding(&bed.relay, &held(), &ch, &crate::db::community::get_community_roles(&cid_hex).unwrap(), &[], &[]).await.unwrap();
+        send_chat_message(&bed.relay, &held(), &ch, "later", None, &[], vec![]).await.unwrap();
+        let now = held().channel(&ch).unwrap().epoch;
+        assert!(now > first);
+        // Two readers join after the rotation; one is denied history in this channel.
+        let readers = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(readers.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let (m, n) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![readers.clone()]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &n.public_key(), vec![readers]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(n.public_key().to_hex()), 0, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 2);
+        let blob_for = |who: PublicKey| {
+            let (relay, c) = (&bed.relay, held());
+            let owner_pk = owner.keys.public_key();
+            async move {
+                fetch_history_deliveries(relay, &c, &ch).await.unwrap().iter().any(|d| d.blobs.iter().any(|b| b.locator == rekey::history_locator(&owner_pk.to_bytes(), &who.to_bytes(), &ch, d.epoch)))
+            }
+        };
+        assert!(blob_for(m.public_key()).await && !blob_for(n.public_key()).await, "history goes only to who may read it");
+        // Someone the channel doesn't let in offers M an epoch nobody else did.
+        let stranger = Keys::generate();
+        let fake = rekey::HistoryView { address: [0x55; 32], conv_key: [0x66; 32] };
+        let blob = rekey::build_history_blob_local(&stranger, &m.public_key(), &ch, Epoch(0), &fake).unwrap();
+        let rumor = rekey::build_history_rumor(stranger.public_key(), &ch, Epoch(0), &[blob], now_ms() / 1000).unwrap();
+        let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &access_group(&held(), &ch), &stranger, Timestamp::now()).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        // And a holder sends N history N may not read.
+        deliver_history(&bed.relay, &held(), &ch, &[n.public_key()]).await.unwrap();
+        // Each reader's own device: the current key only, and no secret of the past epoch.
+        let as_reader = |who: &Keys| {
+            let mut c = held();
+            c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap().key = None;
+            crate::db::community::save_community_v2(&c).unwrap();
+            crate::db::get_write_connection_guard_static().unwrap()
+                .execute("DELETE FROM community_epoch_keys WHERE community_id = ?1 AND scope_id IN (?2, ?3, ?4)", rusqlite::params![cid_hex, chan, format!("hist:{chan}"), format!("hista:{chan}")])
+                .unwrap();
+            act_as(who);
+        };
+        let texts = |c: CommunityV2| {
+            let relay = &bed.relay;
+            async move {
+                let far = now_ms() / 1000 + 100;
+                let got = fetch_channel_history(relay, &c, &ch, 50, 4, None, Some(far), crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+                got.iter().filter_map(|e| match &e.event { chat::ChatEvent::Message { opened, .. } => Some(opened.rumor.content.clone()), _ => None }).collect::<Vec<_>>()
+            }
+        };
+        as_reader(&m);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1);
+        absorb_parked_channel_keys(&held(), &crate::db::current_session());
+        assert_eq!(texts(held()).await, vec!["later".to_string()], "the key alone opens only its own epoch");
+        assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 1, "the earlier epoch, read-only, and not the stranger's");
+        assert_eq!(crate::db::community::history_views(&cid_hex, &chan).unwrap().iter().map(|(e, _)| *e).collect::<Vec<_>>(), vec![first]);
+        assert!(crate::db::community::held_epoch_key(&cid_hex, &chan, first.0).unwrap().is_none(), "never its secret");
+        assert_eq!(texts(held()).await, vec!["early".to_string(), "later".to_string()], "history reads back");
+        assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 0, "once");
+        as_reader(&n);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1);
+        absorb_parked_channel_keys(&held(), &crate::db::current_session());
+        assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 0, "denied history, it takes none even when sent");
+        assert_eq!(texts(held()).await, vec!["later".to_string()], "and history starts where access did");
+        act_as(&owner.keys);
     }
 
     #[tokio::test]

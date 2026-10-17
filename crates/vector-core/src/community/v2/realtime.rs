@@ -1157,6 +1157,15 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 // `control_changed`: adopting a parked vend changes no control state.
                 refresh_subscription(&client).await;
             }
+            // After adopting: a channel keyed just now is one whose history may be waiting.
+            let reread = crate::db::community::load_community_v2(id).ok().flatten();
+            if let Some(now) = reread.filter(|_| super::service::history_collect_due(id, control.authority_changed || !keyed.is_empty())) {
+                match super::service::collect_history(&transport, &now).await {
+                    Ok(0) => {}
+                    Ok(n) => crate::log_info!("[v2:follow {}] {n} past epoch(s) delivered read-only", &community_id[..8.min(community_id.len())]),
+                    Err(e) => crate::log_warn!("[v2:follow {}] history read failed: {e}", &community_id[..8.min(community_id.len())]),
+                }
+            }
             for ch in keyed {
                 let hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
                 // Read what was said while we were locked out. The live subscription

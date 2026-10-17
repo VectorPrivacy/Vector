@@ -393,6 +393,27 @@ pub fn held_epoch_keys(community_id: &str, scope_id: &str) -> Result<Vec<(Epoch,
     Ok(out)
 }
 
+/// Archive a past epoch's read view of a private channel (CORD-03 §5): its conversation key and
+/// address, under scopes of their own so neither is ever taken for a channel key.
+pub fn store_history_view(community_id: &str, channel_id: &str, epoch: u64, view: &crate::community::v2::rekey::HistoryView) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("store history view tx: {e}"))?;
+    store_epoch_key_tx(&tx, community_id, &format!("hist:{channel_id}"), epoch, &view.conv_key)?;
+    store_epoch_key_tx(&tx, community_id, &format!("hista:{channel_id}"), epoch, &view.address)?;
+    tx.commit().map_err(|e| format!("store history view commit: {e}"))
+}
+
+/// Every past epoch of a private channel held read-only, oldest first.
+pub fn history_views(community_id: &str, channel_id: &str) -> Result<Vec<(Epoch, crate::community::v2::rekey::HistoryView)>, String> {
+    let addresses: std::collections::HashMap<u64, [u8; 32]> =
+        held_epoch_keys(community_id, &format!("hista:{channel_id}"))?.into_iter().map(|(e, a)| (e.0, a)).collect();
+    Ok(held_epoch_keys(community_id, &format!("hist:{channel_id}"))?
+        .into_iter()
+        .filter_map(|(e, conv_key)| addresses.get(&e.0).map(|address| (e, crate::community::v2::rekey::HistoryView { address: *address, conv_key })))
+        .collect())
+}
+
 /// The held key for one specific `(scope, epoch)`, or `None` if not held. The open path uses this to
 /// select the decryption key by the inbound event's `epoch` tag.
 pub fn held_epoch_key(community_id: &str, scope_id: &str, epoch: u64) -> Result<Option<[u8; 32]>, String> {
