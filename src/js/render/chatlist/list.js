@@ -642,7 +642,6 @@ function computeCommunityPingCount(chat) { return foldCommunity(chat, countPingM
 function countPingMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;
     const isGroup = chatIsGroup(chat);
-    const admins = chat.metadata?.admins;
     const from = chat.unread_from || '';
     let pings = 0;
     for (let i = chat.messages.length - 1; i >= 0; i--) {
@@ -660,14 +659,13 @@ function countPingMessages(chat) {
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
-        // Authorized @everyone = owner or admin (owner isn't in the admins list — it's its own tier),
-        // and only where the community still lets one through.
+        // An @everyone from someone who may mention everyone, where the community still lets one through.
         const everyoneAuthor = msg.npub || '';
         const mentionedEveryone = isGroup
             && chat.everyone_pings !== false
             && /@everyone\b/.test(msg.content)
-            && (admins?.includes(everyoneAuthor) || chat.metadata?.custom_fields?.owner_npub === everyoneAuthor);
-        if (mentionedMe || mentionedEveryone) pings++;
+            && mayMentionEveryone(chat, everyoneAuthor);
+        if (mentionedMe || mentionedEveryone || (isGroup && rolePingsMe(msg, chat))) pings++;
     }
     return pings;
 }

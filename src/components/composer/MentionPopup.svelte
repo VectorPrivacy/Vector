@@ -25,6 +25,10 @@
                 <span class="mention-item-time"><span class="icon icon-clock"></span></span>
                 <span class="mention-item-name">time</span>
                 <span class="mention-item-hint">A time everyone sees in their own zone</span>
+            {:else if item.role}
+                <span class="mention-item-role" style:--role-color={item.role.color ? '#' + (item.role.color >>> 0).toString(16).padStart(6, '0').slice(-6) : null}>@</span>
+                <span class="mention-item-name">{item.name}</span>
+                <span class="mention-item-hint">Role</span>
             {:else}
                 <img src={item.avatarSrc || 'icons/user-placeholder.svg'} alt="" />
                 <span class="mention-item-name">{item.name}</span>

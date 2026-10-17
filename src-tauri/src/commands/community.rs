@@ -572,8 +572,13 @@ pub async fn send_community_message(
         use vector_core::sending::SendCallback;
         use vector_core::Message;
         let reply = replied_to.filter(|r| !r.is_empty());
+        let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let (content, role_mentions) = vector_core::community::mentions::resolve_in(&community_id, &content);
         let (content, text_spans) = vector_core::text_spans::extract(&content);
-        let span_tags: Vec<nostr_sdk::prelude::Tag> = vector_core::text_spans::to_nostr_tags(&text_spans).collect();
+        let span_tags: Vec<nostr_sdk::prelude::Tag> = vector_core::text_spans::to_nostr_tags(&text_spans)
+            .chain(vector_core::community::mentions::to_tags(&role_mentions))
+            .collect();
         // A `/` picker send names its chosen bot so only that bot executes when two
         // bots share a command name (untagged = broadcast). The tag rides the
         // signed rumor, and the sender's own optimistic row carries the
@@ -592,9 +597,6 @@ pub async fn send_community_message(
         let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
         let my_npub = author_pk.to_bech32().ok();
 
-        // Resolve channel → owning Community.
-        let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
-            .ok_or("Unknown Community channel")?;
         let id_bytes = hex_to_id32(&community_id)?;
 
         // The same pending → sent/failed lifecycle as DMs. The rumor id is a pure function
@@ -657,6 +659,7 @@ pub async fn send_community_message(
             emoji_tags: emoji_tags.clone(),
             addressed_bots: addressed_bots.clone(),
             text_spans: text_spans.clone(),
+            role_mentions,
             expiration: expiry,
             ..Default::default()
         };
@@ -1084,13 +1087,15 @@ async fn dispatch_community_attachment_message(
         use vector_core::Message;
 
         let reply = replied_to.filter(|r| !r.is_empty());
-        let (content, text_spans) = vector_core::text_spans::extract(&content);
         let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
         let my_npub = author_pk.to_bech32().ok();
 
         // Resolve channel → owning Community (same as send_community_message).
         let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
             .ok_or("Unknown Community channel")?;
+        // A caption names a Role in text only.
+        let (content, _) = vector_core::community::mentions::resolve_in(&community_id, &content);
+        let (content, text_spans) = vector_core::text_spans::extract(&content);
         let id_bytes = hex_to_id32(&community_id)?;
         // Resolved before any upload work.
         let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
@@ -3220,6 +3225,12 @@ pub async fn set_channel_sync(community_id: String, channel_id: String, category
         Ok(())
     })
     .await
+}
+
+/// Who may mention everyone, and the community's Roles for mentioning, read locally.
+#[tauri::command]
+pub fn get_community_mentions(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.community_mentions(&community_id).map_err(|e| e.to_string())
 }
 
 /// Of `npubs`, those who can't send in a channel: their posts there collapse.

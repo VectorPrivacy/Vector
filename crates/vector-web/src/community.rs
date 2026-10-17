@@ -140,14 +140,16 @@ pub async fn sync_community_channel(channel_id: &str, before_ms: Option<u64>) ->
 pub async fn send_community_message(channel_id: String, content: String, replied_to: Option<String>, bot: Option<String>) -> Result<(), String> {
     db::scoped(async move {
         let reply = replied_to.filter(|r| !r.is_empty());
+        let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+        let (content, role_mentions) = vector_core::community::mentions::resolve_in(&community_id, &content);
         let (content, text_spans) = vector_core::text_spans::extract(&content);
         let bot_pk = bot.as_deref().filter(|b| !b.is_empty()).and_then(|b| PublicKey::parse(b).ok());
         let mut extra_tags: Vec<Tag> = bot_pk.map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)]).unwrap_or_default();
         extra_tags.extend(vector_core::text_spans::to_nostr_tags(&text_spans));
+        extra_tags.extend(vector_core::community::mentions::to_tags(&role_mentions));
         let addressed_bots: Vec<String> = bot_pk.and_then(|pk| pk.to_bech32().ok()).into_iter().collect();
 
         let author = vector_core::my_public_key().ok_or("Public key not set")?;
-        let community_id = db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
         let community = load_v2(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
         let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
@@ -190,6 +192,7 @@ pub async fn send_community_message(channel_id: String, content: String, replied
             emoji_tags: emoji_tags.clone(),
             addressed_bots,
             text_spans,
+            role_mentions,
             expiration: expiry,
             ..Default::default()
         };

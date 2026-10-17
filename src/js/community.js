@@ -93,6 +93,7 @@ async function loadCommunityRoles(communityId) {
     if (!communityId) return;
     let adminNpubs;
     try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
+    await loadCommunityMentions(communityId);
     applyCommunityAdmins(communityId, adminNpubs);
 }
 
@@ -855,6 +856,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         } catch (_) {}
         // Cache admins onto this community's channel chats so message rendering can chip
         // @everyone from admin senders (owner is handled separately via owner_npub).
+        await loadCommunityMentions(communityId);
         applyCommunityAdmins(communityId, adminNpubs);
         // The banlist (for the unban list), shown to anyone who can BAN.
         if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }

@@ -363,6 +363,7 @@ fn process_text_message(
         emoji_tags,
         addressed_bots,
         text_spans,
+        role_mentions: crate::community::mentions::from_tags(rumor.tags.iter()),
     };
 
     Ok(RumorProcessingResult::TextMessage(msg))
@@ -613,6 +614,7 @@ fn process_file_attachment(
         emoji_tags,
         addressed_bots: crate::bot_interface::addressed_bots(rumor.tags.iter()),
         text_spans: Vec::new(),
+        role_mentions: Vec::new(),
     };
 
     Ok(RumorProcessingResult::FileAttachment(msg))
@@ -1266,6 +1268,17 @@ mod tests {
         match process_rumor(edit, dm_context(&keys), &temp_dir()).unwrap() {
             RumorProcessingResult::Edit { text_spans, .. } => assert_eq!(text_spans.len(), 1),
             _ => panic!("Expected Edit"),
+        }
+    }
+
+    #[test]
+    fn role_tags_reach_the_message() {
+        let keys = test_keypair();
+        let tags = Tags::from_list(vec![Tag::custom("role", ["ab".repeat(32)]), Tag::custom("role", ["not-a-role"])]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, "@Raid Team go", tags);
+        match process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::TextMessage(msg) => assert_eq!(msg.role_mentions, vec!["ab".repeat(32)]),
+            _ => panic!("Expected TextMessage"),
         }
     }
 

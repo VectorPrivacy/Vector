@@ -2250,11 +2250,13 @@ impl VectorCore {
 
     /// Edit one of your own Community messages.
     pub async fn edit_community_message(&self, channel_id: &str, message_id: &str, new_content: &str) -> Result<()> {
-        let (plain, text_spans) = crate::text_spans::extract(new_content);
+        let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
+        // An edit names a Role in text only: it pings nobody anew.
+        let (named, _) = crate::community::mentions::resolve_in(&crate::simd::hex::bytes_to_hex_32(&id.0), new_content);
+        let (plain, text_spans) = crate::text_spans::extract(&named);
         let new_content = plain.as_str();
         let span_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_spans::to_nostr_tags(&text_spans).collect();
         let emoji_tags = emoji_packs::resolve_outbound_emoji_tags(new_content);
-        let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
         let community = crate::db::community::load_community_v2(&id)
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -4199,6 +4201,70 @@ impl VectorCore {
             })
             .cloned()
             .collect())
+    }
+
+    /// What mentions in a community need (CORD-04 §8): who may mention everyone, and so any
+    /// Role (`anyone` when `@everyone` itself may), and its Roles top first, each with
+    /// whether any member may mention it and whether I hold it.
+    pub fn community_mentions(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::roles::Permissions;
+        use nostr_sdk::prelude::PublicKey;
+        let v2 = Self::held_v2(community_id)?;
+        let owner = v2.owner().map_err(VectorError::Other)?.to_hex();
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let banned = crate::db::community::get_community_banlist(community_id).unwrap_or_default();
+        let me = crate::state::my_public_key().map(|pk| pk.to_hex()).unwrap_or_default();
+        let members: std::collections::BTreeSet<&str> = std::iter::once(owner.as_str()).chain(roster.grants.iter().map(|g| g.member.as_str())).collect();
+        let pingers: Vec<String> = members
+            .into_iter()
+            .filter(|m| !banned.iter().any(|b| b == m) && roster.is_authorized(m, Some(&owner), Permissions::MENTION_EVERYONE))
+            .filter_map(|m| PublicKey::from_hex(m).ok()?.to_bech32().ok())
+            .collect();
+        let held: std::collections::HashSet<&str> = roster.roles_of(&me).map(|r| r.role_id.as_str()).collect();
+        let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().filter(|r| crate::community::mentions::is_role_id(&r.role_id)).collect();
+        roles.sort_by_key(|r| r.position);
+        let roles: Vec<serde_json::Value> = roles
+            .into_iter()
+            .map(|r| serde_json::json!({ "id": r.role_id, "name": r.name, "color": r.color, "mentionable": r.mentionable, "held": held.contains(r.role_id.as_str()) }))
+            .collect();
+        Ok(serde_json::json!({
+            "anyone": roster.everyone.is_some_and(|e| e.contains(Permissions::MENTION_EVERYONE)),
+            "pingers": pingers,
+            "roles": roles,
+        }))
+    }
+
+    /// Whether a message's Role mentions ping me (CORD-04 §8). False on any read failure.
+    pub fn role_mentions_ping_me(&self, community_id: &str, author_npub: &str, role_ids: &[String]) -> bool {
+        if role_ids.is_empty() {
+            return false;
+        }
+        let (Some(me), Ok(author), Ok(Some(held))) = (
+            crate::state::my_public_key(),
+            nostr_sdk::prelude::PublicKey::parse(author_npub),
+            Self::load_held(community_id),
+        ) else {
+            return false;
+        };
+        let (Ok(owner), Ok(roster)) = (held.owner(), crate::db::community::get_community_roles(community_id)) else { return false };
+        let author = author.to_hex();
+        if crate::db::community::get_community_banlist(community_id).unwrap_or_default().contains(&author) {
+            return false;
+        }
+        crate::community::mentions::pings(&roster, Some(&owner.to_hex()), &author, &me.to_hex(), role_ids)
+    }
+
+    /// Whether readers collapse `author_npub`'s post at `at_ms` in a channel (CORD-04 §8):
+    /// they can't send there, or it falls inside their Timeout.
+    pub fn post_collapses(&self, community_id: &str, channel_id: &str, author_npub: &str, at_ms: u64) -> bool {
+        if self.channel_send_denied(community_id, channel_id, &[author_npub.to_string()]).is_ok_and(|d| !d.is_empty()) {
+            return true;
+        }
+        let (Ok(v2), Ok(author)) = (Self::held_v2(community_id), nostr_sdk::prelude::PublicKey::parse(author_npub)) else { return false };
+        crate::community::v2::service::community_timeouts(&v2)
+            .ok()
+            .and_then(|t| t.get(&author).copied())
+            .is_some_and(|(from, until)| (from..until).contains(&(at_ms / 1000)))
     }
 
     /// The Timeouts running in a community: npub → { from, until } (unix seconds).

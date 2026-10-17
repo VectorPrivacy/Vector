@@ -171,19 +171,31 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
 /// OS notification for a realtime Community message. The channel's resolved level decides which
 /// classes ring: everything at `All`, only a ping at `Mentions`, nothing at `Nothing` — where a
 /// mute has already clamped that level to at most `Mentions`. A ping is a direct @mention, a reply
-/// to one of our own messages, or an authorized @everyone the community still allows. Above all of
-/// it, a blocked or DM-muted sender is silent whatever the room says. `chat_id` is the channel id.
+/// to one of our own messages, a Role mention that stands, or an @everyone from a holder of Mention
+/// Everyone the community still allows. Above all of it, a blocked or DM-muted sender, or a post
+/// readers collapse, is silent whatever the room says. `chat_id` is the channel id.
 pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
     if msg.mine { return; }
     let sender_npub = msg.npub.as_deref().unwrap_or_default();
     if sender_npub.is_empty() { return; }
 
     let community_id = vector_core::db::community::community_id_for_channel(chat_id).ok().flatten();
+    // A post its readers collapse rings nobody.
+    if community_id.as_deref().is_some_and(|cid| vector_core::VectorCore.post_collapses(cid, chat_id, sender_npub, msg.at)) {
+        return;
+    }
 
     // Resolve @everyone authority only when the text actually contains it (zero-cost on normal sends).
     let everyone_ping = msg.mentions_everyone()
         && vector_core::notify::everyone_allowed(community_id.as_deref())
-        && community_sender_is_admin(chat_id, sender_npub);
+        && community_id.as_deref().is_some_and(|cid| {
+            vector_core::VectorCore
+                .member_has_permission(cid, sender_npub, vector_core::community::roles::Permissions::MENTION_EVERYONE)
+                .unwrap_or(false)
+        });
+    let role_ping = community_id
+        .as_deref()
+        .is_some_and(|cid| vector_core::VectorCore.role_mentions_ping_me(cid, sender_npub, &msg.role_mentions));
 
     // A reply to our own message is an implicit ping (same as a direct @mention). The inbound parse
     // doesn't resolve the reply's author, so check the target event's `mine` flag directly.
@@ -192,7 +204,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let class = if everyone_ping {
         vector_core::notify::MessageClass::Everyone
-    } else if msg.mentions_me() || reply_ping {
+    } else if msg.mentions_me() || reply_ping || role_ping {
         vector_core::notify::MessageClass::Mention
     } else {
         vector_core::notify::MessageClass::Normal
@@ -252,18 +264,6 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
         sender_name, community_name, content, avatar, community_avatar, chat_id.to_string(),
     ).with_message_id(msg.id.clone()).with_sender(sender_npub.to_string()).with_expiry(msg.expiration);
     crate::services::show_notification_generic(notification);
-}
-
-/// Whether `sender_npub` (bech32) is the owner or an admin of the community owning `channel_id`.
-/// Used only for @everyone authority; a lookup failure denies the bypass (fail-closed).
-fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
-    let Ok(sender_hex) = nostr_sdk::prelude::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
-        return false;
-    };
-    let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
-        return false;
-    };
-    vector_core::community::moderation::is_owner_or_admin(&community_id, &sender_hex)
 }
 
 /// Called once after login to begin receiving real-time events.

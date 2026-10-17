@@ -412,6 +412,7 @@ fn message_to_stored_event(message: &Message, chat_id: i64, user_id: Option<i64>
         tags.push(vec!["emoji".to_string(), et.shortcode.clone(), et.url.clone()]);
     }
     tags.extend(message.text_spans.iter().map(|s| s.to_tag_parts()));
+    tags.extend(crate::community::mentions::to_stored(&message.role_mentions));
 
     // Bot routing targets (npubs) — persist so the passive "ran /cmd with
     // Bot" render survives a reload.
@@ -1520,6 +1521,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             emoji_tags,
             addressed_bots,
             text_spans,
+            role_mentions: crate::community::mentions::from_stored(&event.tags),
         });
     }
 
@@ -1879,6 +1881,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                 emoji_tags,
                 addressed_bots,
                 text_spans,
+                role_mentions: crate::community::mentions::from_stored(&stored_tags),
             });
         }
     });
@@ -3518,6 +3521,19 @@ mod tests {
     // The filter keys on the POSITIVE tombstone, never STATE absence — an LRU-evicted (but
     // not deleted) message MUST still persist and ledger, or archive sync could silently
     // drop the exact history it exists to persist.
+    #[tokio::test]
+    async fn role_mentions_survive_a_reload() {
+        let (_tmp, _guard) = init_test_db();
+        let ids = vec!["ab".repeat(32), "cd".repeat(32)];
+        let msg = Message { id: "pings-a-role".into(), content: "@Raid Team go".into(), at: 1_000_000, role_mentions: ids.clone(), ..Default::default() };
+        save_message("npub1roles", &msg).await.unwrap();
+        let (_, back) = get_message_by_id("pings-a-role").await.unwrap().unwrap();
+        assert_eq!(back.role_mentions, ids, "through the message view");
+        let last = get_all_chats_last_messages().await.unwrap();
+        let row = last.values().flatten().find(|m| m.id == "pings-a-role").unwrap();
+        assert_eq!(row.role_mentions, ids, "and the chat list's last messages");
+    }
+
     #[tokio::test]
     async fn a_delete_tombstone_survives_a_restart() {
         // NIP-09 is best-effort: a relay that ignored it re-serves the wrap days

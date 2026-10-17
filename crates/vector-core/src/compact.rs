@@ -1609,6 +1609,7 @@ pub struct MessageExtras {
     /// Bot routing targets as interned npub handles
     pub addressed_bots: TinyVec<u16>,
     spans: TinyVec<HeldSpan>,
+    role_mentions: TinyVec<[u8; 32]>,
     /// The newest edit's text is the message content, held there once
     tail_is_content: bool,
 }
@@ -1620,6 +1621,7 @@ impl MessageExtras {
             && self.emoji_tags.is_empty()
             && self.addressed_bots.is_empty()
             && self.spans.is_empty()
+            && self.role_mentions.is_empty()
     }
 
     fn edit_history(&self, content: &str) -> Vec<EditEntry> {
@@ -1644,6 +1646,7 @@ impl MessageExtras {
             + self.addressed_bots.heap_bytes()
             + self.spans.heap_bytes()
             + self.spans.iter().map(HeldSpan::heap_bytes).sum::<usize>()
+            + self.role_mentions.heap_bytes()
     }
 }
 
@@ -2281,6 +2284,7 @@ impl CompactMessage {
             emoji_tags: intern_emoji_tags(&msg.emoji_tags, interner),
             addressed_bots: msg.addressed_bots.iter().map(|n| interner.intern(n)).collect(),
             spans: hold_spans(msg.text_spans),
+            role_mentions: msg.role_mentions.iter().filter_map(|id| crate::simd::hex::hex_to_bytes_32_checked(id)).collect(),
             tail_is_content,
         };
         Self {
@@ -2333,6 +2337,9 @@ impl CompactMessage {
                 .map(|x| x.addressed_bots.iter().filter_map(|&i| interner.resolve(i).map(|s| s.to_string())).collect())
                 .unwrap_or_default(),
             text_spans: extras.map(|x| x.spans.iter().map(HeldSpan::to_span).collect()).unwrap_or_default(),
+            role_mentions: extras
+                .map(|x| x.role_mentions.iter().map(crate::simd::hex::bytes_to_hex_32).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -2547,6 +2554,7 @@ mod tests {
                     emoji_tags: Vec::new(),
                     addressed_bots: Vec::new(),
                     text_spans: Vec::new(),
+                    role_mentions: Vec::new(),
                 }
             })
             .collect();
@@ -3841,6 +3849,7 @@ mod tests {
             ]),
             emoji_tags: Vec::new(),
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
+            role_mentions: vec!["ab".repeat(32), "cd".repeat(32)],
             text_spans: vec![crate::text_spans::TextSpan::Color(crate::text_color::ColorSpan { from: 0, to: 2, effect: crate::text_color::Effect::Rainbow, colors: Vec::new() })],
         }
     }
@@ -3906,7 +3915,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<CompactReaction>(), 40);
         assert_eq!(std::mem::size_of::<TinyVec<CompactReaction>>(), 8);
         assert_eq!(std::mem::size_of::<CompactAttachment>(), 144);
-        assert_eq!(std::mem::size_of::<MessageExtras>(), 48);
+        assert_eq!(std::mem::size_of::<MessageExtras>(), 56);
         assert_eq!(std::mem::size_of::<CompactEdit>(), 24);
         assert_eq!(std::mem::size_of::<HeldSpan>(), 32);
     }
@@ -3995,6 +4004,7 @@ mod tests {
         assert_eq!(restored.reactions[0].emoji, msg.reactions[0].emoji);
         // Bot routing targets round-trip through the interner.
         assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
+        assert_eq!(restored.role_mentions, msg.role_mentions, "role_mentions mismatch");
     }
 
     // The compact form deliberately keeps only the "replied-to has an attachment"

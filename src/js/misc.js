@@ -1511,7 +1511,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
     // vectorapp.io/profile/<npub> links into tags (that domain only; npubs in any other URL stay put).
     // The vectorapp.io branch is first so the bare branch's `/`-lookbehind can't swallow the npub
     // mid-URL. queueSync: fetch an uncached tagged profile so its name can fill in.
-    const { allowBare = false, queueSync = false } = opts;
+    const { allowBare = false, queueSync = false, roles = [] } = opts;
     const mentionPattern = allowBare
         ? /https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})\b|(?<![\w/])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g
         : /@(npub1[a-z0-9]{58})/g;
@@ -1569,9 +1569,12 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
         }
     }
 
-    // Second pass: render @everyone for admin senders in group chats
-    if (senderIsAdmin) {
-        const everyonePattern = /@everyone\b/g;
+    // Second pass: @everyone from those who may use it, and the Roles a message mentions
+    const chips = new Map(roles.filter(r => r.name).map(r => [r.name, r]));
+    if (senderIsAdmin) chips.set('everyone', null);
+    if (chips.size) {
+        const names = [...chips.keys()].sort((a, b) => b.length - a.length).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const everyonePattern = new RegExp('@(' + names.join('|') + ')(?![\\p{L}\\p{N}_])', 'gu');
         const walker2 = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
             acceptNode(node) {
                 let parent = node.parentElement;
@@ -1599,9 +1602,11 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
                 if (match.index > lastIdx) {
                     frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
                 }
+                const role = chips.get(match[1]);
                 const span = document.createElement('span');
-                span.className = 'mention mention-everyone';
-                span.textContent = '@everyone';
+                span.className = role ? 'mention mention-role' : 'mention mention-everyone';
+                if (role?.color) span.style.setProperty('--role-color', '#' + (role.color >>> 0).toString(16).padStart(6, '0').slice(-6));
+                span.textContent = '@' + match[1];
                 frag.appendChild(span);
                 lastIdx = match.index + match[0].length;
             }

@@ -63,6 +63,9 @@ pub struct Message {
     /// Coloured runs and times in `content` (see `text_spans`), from `["color", …]` and `["time", …]` tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text_spans: Vec<crate::text_spans::TextSpan>,
+    /// Roles a community message mentions, as hex ids (`["role", …]` tags, CORD-03 §3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_mentions: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -692,6 +695,7 @@ mod tests {
             emoji_tags: Vec::new(),
             addressed_bots: Vec::new(),
             text_spans: Vec::new(),
+            role_mentions: Vec::new(),
         };
 
         let json = serde_json::to_string(&msg).expect("serialize should succeed");

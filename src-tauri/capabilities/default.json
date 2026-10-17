@@ -122,6 +122,7 @@
     "allow-get-community-timeouts",
     "allow-timeout-community-member",
     "allow-get-channel-send-denied",
+    "allow-get-community-mentions",
     "allow-create-community-channel",
     "allow-delete-community-channel",
     "allow-set-community-image",

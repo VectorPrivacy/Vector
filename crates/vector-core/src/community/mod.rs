@@ -4,6 +4,7 @@
 pub mod attachments;
 pub mod cache;
 pub mod cipher;
+pub mod mentions;
 pub mod message_delete;
 pub mod policy;
 pub mod moderation;

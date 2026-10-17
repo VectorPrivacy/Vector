@@ -366,8 +366,7 @@ function _dmsgIsPinged(msg, currentChat, isGroupChat) {
     // stamped as `@npub1...` in the content, so a substring match is reliable.
     const mentionedMe = strPubkey && msg.content && msg.content.includes('@' + strPubkey);
     const senderNpub = msg.npub || '';
-    const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
-        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
+    const senderIsAdmin = isGroupChat && mayMentionEveryone(currentChat, senderNpub);
     const mentionedEveryone = senderIsAdmin && msg.content && /@everyone\b/.test(msg.content);
     // A reply to one of my own messages is an implicit ping. Prefer the in-memory
     // target's `mine` flag (DMs don't populate replied_to_npub); fall back to the
@@ -377,7 +376,7 @@ function _dmsgIsPinged(msg, currentChat, isGroupChat) {
         const tgt = currentChat?.messages?.find(m => m.id === msg.replied_to);
         repliedToMe = tgt ? !!tgt.mine : (msg.replied_to_npub === strPubkey);
     }
-    return !!(mentionedMe || mentionedEveryone || repliedToMe);
+    return !!(mentionedMe || mentionedEveryone || repliedToMe || (isGroupChat && rolePingsMe(msg, currentChat)));
 }
 
 /**
@@ -573,11 +572,11 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     if (!isRevealedBlockedMsg) processInlineImages(span);
 
     const senderNpub = msg.mine ? strPubkey : (msg.npub || '');
-    const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
-        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
+    const senderIsAdmin = isGroupChat && mayMentionEveryone(currentChat, senderNpub);
     // Bare and nostr:-prefixed npubs (and vectorapp.io profile links) render
     // as mention pills, same treatment as bios.
-    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true });
+    const roles = isGroupChat ? standingRoleMentions(msg, currentChat) : [];
+    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true, roles });
     renderGoLinks(span);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before

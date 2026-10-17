@@ -20370,6 +20370,19 @@ hr {
   background: var(--icon-color-primary, #59fcb3);
 }
 
+.mention-item-role {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 600;
+  color: var(--role-color, var(--icon-color-primary, #59fcb3));
+  background: color-mix(in srgb, var(--role-color, var(--icon-color-primary, #59fcb3)) 16%, transparent);
+}
+
 /* `.icon` is absolutely placed, so the box it centres in must be positioned. */
 .mention-item-time {
   position: relative;
@@ -20474,6 +20487,12 @@ hr {
 }
 
 /* Inline mention highlight in rendered messages */
+.mention.mention-role {
+  color: var(--role-color, var(--icon-color-primary, #59fcb3));
+  background: color-mix(in srgb, var(--role-color, var(--icon-color-primary, #59fcb3)) 16%, transparent);
+  cursor: default;
+}
+
 .mention {
   background: rgba(255, 255, 255, 0.06);
   color: var(--icon-color-primary, #59fcb3);

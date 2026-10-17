@@ -496,8 +496,12 @@ function getMentionCandidates(includeSelf = false) {
         // @everyone is ignored, so suggesting it would mislead. Roles preload at boot, so this gate is
         // reliable now (the earlier always-show was a stopgap for when admins weren't loaded yet).
         if (isCommunity) {
+            // Roles, between the members and @everyone; send writes each as `@role:<id>`.
+            for (const r of mentionableRoles(chat)) {
+                candidates.push({ npub: 'role:' + r.id, name: r.name, avatarSrc: null, lastActive: -1, role: r });
+            }
             const cf = chat.metadata?.custom_fields || {};
-            const canPingEveryone = cf.is_owner === 'true' || (chat.metadata?.admins || []).includes(strPubkey);
+            const canPingEveryone = cf.is_owner === 'true' || mayMentionEveryone(chat, strPubkey);
             if (canPingEveryone) {
                 candidates.push({ npub: 'everyone', name: 'everyone', avatarSrc: null, lastActive: -1 });
             }
@@ -524,7 +528,7 @@ function mentionLabel(npub, codeLen) {
  */
 function relabelComposerMentions() {
     if (!mentionCtrl) return;
-    const labels = new Map(mentionCtrl.getMentions().map(m => [m.npub, mentionLabel(m.npub, 3)]));
+    const labels = new Map(mentionCtrl.getMentions().filter(m => m.npub.startsWith('npub1')).map(m => [m.npub, mentionLabel(m.npub, 3)]));
     // Two people on one label would send as one.
     const count = {};
     for (const l of labels.values()) count[l] = (count[l] || 0) + 1;

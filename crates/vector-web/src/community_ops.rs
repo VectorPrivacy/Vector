@@ -63,6 +63,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_community_timeouts" => with_id(a, |id| core(VectorCore.community_timeouts(id))),
             "timeout_community_member" => timeout_member(a).await,
             "get_channel_send_denied" => send_denied(a),
+            "get_community_mentions" => mentions(a),
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
@@ -272,6 +273,10 @@ async fn set_overwrite(a: &Args) -> Result<Value, String> {
     let (id, scope, kind, target) = (a.str("communityId")?, a.str("scopeId")?, a.str("kind")?, a.opt_str("targetId"));
     let (allow, deny) = (a.str("allow")?, a.str("deny")?);
     db::scoped(async move { core(VectorCore.set_channel_overwrite(&id, &scope, &kind, target.as_deref(), &allow, &deny).await) }).await
+}
+
+fn mentions(a: &Args) -> Result<Value, String> {
+    core(VectorCore.community_mentions(&a.str("communityId")?))
 }
 
 fn send_denied(a: &Args) -> Result<Value, String> {

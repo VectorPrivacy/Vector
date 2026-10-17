@@ -113,6 +113,45 @@ const channelSendDeniedCache = new Map();
 function channelSendDenied(channelId) {
     return channelSendDeniedCache.get(channelId) || null;
 }
+/** Per community: who may mention everyone, and its Roles for mentioning (CORD-04 §8). */
+const communityMentionsCache = new Map();
+
+async function loadCommunityMentions(communityId) {
+    if (!communityId) return;
+    let m;
+    try { m = await invoke('get_community_mentions', { communityId }); } catch { return; }
+    communityMentionsCache.set(communityId, { anyone: !!m.anyone, pingers: new Set(m.pingers || []), roles: m.roles || [] });
+}
+
+/** Whether `npub` may mention everyone, and so any Role, where `chat` sits. */
+function mayMentionEveryone(chat, npub) {
+    const m = communityMentionsCache.get(communityIdOfChat(chat));
+    if (m) return m.anyone || m.pingers.has(npub);
+    return !!(chat?.metadata?.admins?.includes(npub) || chat?.metadata?.custom_fields?.owner_npub === npub);
+}
+
+/** The Roles `msg` mentions that stand: mentionable, or named by someone who may mention everyone. */
+function standingRoleMentions(msg, chat) {
+    const ids = msg.role_mentions;
+    const m = ids?.length && communityMentionsCache.get(communityIdOfChat(chat));
+    if (!m) return [];
+    const byAnyone = mayMentionEveryone(chat, msg.npub || (msg.mine ? strPubkey : ''));
+    return m.roles.filter(r => ids.includes(r.id) && (r.mentionable || byAnyone));
+}
+
+/** Whether `msg` pings me through a Role I hold. */
+function rolePingsMe(msg, chat) {
+    return !msg.mine && standingRoleMentions(msg, chat).some(r => r.held);
+}
+
+/** The Roles I may mention where `chat` sits: the mentionable ones, or all of them. */
+function mentionableRoles(chat) {
+    const m = communityMentionsCache.get(communityIdOfChat(chat));
+    if (!m) return [];
+    const all = mayMentionEveryone(chat, strPubkey) || chat?.metadata?.custom_fields?.is_owner === 'true';
+    return m.roles.filter(r => all || r.mentionable);
+}
+
 function communityTimeoutsFor(communityId) {
     return communityId ? communityTimeoutsCache.get(communityId) : null;
 }
