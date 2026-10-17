@@ -18,7 +18,7 @@ export function openChannelEditor(communityId, channel, isCategory = false) {
     Object.assign(s, {
         open: true, communityId, channelId: channel.id, name: channel.name || '', topic: channel.topic || '',
         view: channel.view || 'chat', busy: false, error: '', tab: isCategory ? 'permissions' : 'overview',
-        perms: null, target: 'everyone', draft: null, isCategory,
+        perms: null, target: 'everyone', draft: null, isCategory, private: !!channel.private,
     });
 }
 export function closeChannelEditor() { s.open = false; s.busy = false; s.error = ''; }

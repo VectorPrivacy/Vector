@@ -316,8 +316,8 @@ function loadChannelPerms(communityId, channelId) {
     invoke('get_channel_permissions', { communityId, channelId })
         .then((perms) => {
             const names = {};
-            for (const o of perms.overwrites || []) {
-                if (o.kind === 'member') names[o.id] = getName(getProfile(o.npub) || o.npub);
+            for (const o of [...(perms.overwrites || []).filter(o => o.kind === 'member'), ...(perms.members || [])]) {
+                names[o.id] = getName(getProfile(o.npub) || o.npub);
             }
             VectorSvelte.setChannelPerms({ ...perms, member_names: names });
         })

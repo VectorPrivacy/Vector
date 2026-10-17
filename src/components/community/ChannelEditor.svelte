@@ -48,6 +48,12 @@
         }).sort((a, b) => (a.key === 'everyone') - (b.key === 'everyone') || a.rank - b.rank);
     });
     const addable = $derived((st.perms?.roles || []).filter((r) => !targets.some((t) => t.key === `role:${r.role_id}`)));
+    const addableMembers = $derived((st.perms?.members || [])
+        .filter((m) => !targets.some((t) => t.key === `member:${m.id}`))
+        .map((m) => ({ id: m.id, name: st.perms.member_names?.[m.id] || `${m.id.slice(0, 10)}…` }))
+        .sort((a, b) => a.name.localeCompare(b.name)));
+    // A private channel opens only to a role's or a member's allow, whatever @everyone says.
+    const closedToEveryone = (bit) => st.private && st.target === 'everyone' && bit === BIT(13);
     const bitState = (bit) => {
         if (!st.draft) return 'inherit';
         if (BigInt(st.draft.allow) & bit) return 'allow';
@@ -85,7 +91,7 @@
     <div class="modal-overlay" onclick={(e) => { if (e.target === e.currentTarget && !st.busy) closeChannelEditor(); }}>
         <div class="modal-box cmt-modal ce-modal" class:cmt-busy={st.busy}>
             <div class="cmt-header">
-                <div class="cmt-header-icon"><span class="icon {st.isCategory ? 'icon-folder' : 'icon-channel-hash'}"></span></div>
+                <div class="cmt-header-icon"><span class="icon {st.isCategory ? 'icon-folder' : st.private ? 'icon-locked' : 'icon-channel-hash'}"></span></div>
                 <div class="cmt-header-text">
                     <h3 class="cmt-title">{st.isCategory ? `${st.name} Permissions` : 'Edit Channel'}</h3>
                     <p class="cmt-subtitle">{st.isCategory ? 'Channels synced to this category follow these rules.' : 'How it shows and how it opens.'}</p>
@@ -128,21 +134,30 @@
                                     {#each addable as r (r.role_id)}<option value={r.role_id}>{r.name}</option>{/each}
                                 </select>
                             {/if}
+                            {#if addableMembers.length}
+                                <select class="cs-input cs-select ce-add" value="" disabled={st.busy}
+                                        onchange={(e) => { if (e.currentTarget.value) selectOverwrite(`member:${e.currentTarget.value}`); e.currentTarget.value = ''; }}>
+                                    <option value="">Add a member…</option>
+                                    {#each addableMembers as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
+                                </select>
+                            {/if}
                         </div>
                         <div class="ce-bits">
                             {#each PERM_GROUPS as g (g.title)}
                                 <p class="cs-perm-group">{g.title}</p>
                                 {#each g.perms as p (p.name)}
                                     {@const state = bitState(p.bit)}
-                                    <div class="ce-bit" class:disabled={!canTouch(p.bit)}>
+                                    {@const closed = closedToEveryone(p.bit)}
+                                    <div class="ce-bit" class:disabled={!canTouch(p.bit) || closed}>
                                         <span class="cs-perm-text">
                                             <span class="cs-perm-name">{p.name}</span>
-                                            {#if p.desc}<span class="cs-perm-desc">{p.desc}</span>{/if}
+                                            {#if closed}<span class="cs-perm-desc">A private channel opens only to the roles and members you allow.</span>
+                                            {:else if p.desc}<span class="cs-perm-desc">{p.desc}</span>{/if}
                                         </span>
                                         <div class="ce-tri">
-                                            <button class="ce-tri-deny" class:on={state === 'deny'} title="Deny" disabled={!canTouch(p.bit) || st.busy} onclick={() => setOverwriteBit(p.bit, 'deny')}><span class="icon icon-x"></span></button>
-                                            <button class="ce-tri-inherit" class:on={state === 'inherit'} title="Inherit" disabled={!canTouch(p.bit) || st.busy} onclick={() => setOverwriteBit(p.bit, 'inherit')}>/</button>
-                                            <button class="ce-tri-allow" class:on={state === 'allow'} title="Allow" disabled={!canTouch(p.bit) || st.busy} onclick={() => setOverwriteBit(p.bit, 'allow')}><span class="icon icon-check"></span></button>
+                                            <button class="ce-tri-deny" class:on={state === 'deny'} title="Deny" disabled={!canTouch(p.bit) || closed || st.busy} onclick={() => setOverwriteBit(p.bit, 'deny')}><span class="icon icon-x"></span></button>
+                                            <button class="ce-tri-inherit" class:on={state === 'inherit'} title="Inherit" disabled={!canTouch(p.bit) || closed || st.busy} onclick={() => setOverwriteBit(p.bit, 'inherit')}>/</button>
+                                            <button class="ce-tri-allow" class:on={state === 'allow'} title="Allow" disabled={!canTouch(p.bit) || closed || st.busy} onclick={() => setOverwriteBit(p.bit, 'allow')}><span class="icon icon-check"></span></button>
                                         </div>
                                     </div>
                                 {/each}

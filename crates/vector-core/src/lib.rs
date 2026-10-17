@@ -4145,6 +4145,13 @@ impl VectorCore {
             "grantable": if is_owner { u64::MAX.to_string() } else { roster.effective_permissions(&me).0.to_string() },
             "roles": roles.iter().map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position })).collect::<Vec<_>>(),
             "overwrites": overwrites,
+            // Who a member overwrite can name: everyone this device knows, but the owner.
+            "members": crate::community::v2::service::stored_memberlist(&v2)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|pk| pk.to_hex() != owner_hex)
+                .map(|pk| serde_json::json!({ "id": pk.to_hex(), "npub": ToBech32::to_bech32(&pk).ok() }))
+                .collect::<Vec<_>>(),
         }))
     }
 
