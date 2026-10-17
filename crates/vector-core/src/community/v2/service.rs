@@ -5666,7 +5666,7 @@ pub async fn move_role_v2<T: Transport + ?Sized>(transport: &T, community: &Comm
         let mut view = fetch_authority(transport, community).await;
         let before = view.roles.clone();
         move_role_in(transport, community, &mut view, role_id, index).await?;
-        let after = roster_after_moves(transport, community, &view, &[role_id.to_string()]).await;
+        let after = roster_after_moves(transport, community, &view, &before, &[role_id.to_string()]).await;
         settle_access(transport, community, &before, &after).await
     })
     .await
@@ -5715,7 +5715,7 @@ pub async fn reorder_roles_v2<T: Transport + ?Sized>(transport: &T, community: &
             moved.push(id);
         }
         if !moved.is_empty() {
-            let after = roster_after_moves(transport, community, &view, &moved).await;
+            let after = roster_after_moves(transport, community, &view, &before, &moved).await;
             settle_access(transport, community, &before, &after).await?;
         }
         Ok(moved.len())
@@ -5726,14 +5726,49 @@ pub async fn reorder_roles_v2<T: Transport + ?Sized>(transport: &T, community: &
 /// The Roster to settle Role moves against. Readers re-judge every overwrite against the
 /// new ranks, so their fold when a fresh read is whole and serves every move; else `local`,
 /// carried forward from a whole read, which a failed read can't empty.
-async fn roster_after_moves<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, local: &AuthorityView, moved: &[String]) -> crate::community::roles::CommunityRoles {
+/// A local settle can't see which overwrites readers now drop, so the cut is owed against
+/// `before` until a whole read lands.
+async fn roster_after_moves<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, local: &AuthorityView, before: &crate::community::roles::CommunityRoles, moved: &[String]) -> crate::community::roles::CommunityRoles {
     let fresh = fetch_authority(transport, community).await;
     let serves = |id: &String| fresh.roles.role(id).is_some_and(|r| local.roles.role(id).is_some_and(|l| l.rank == r.rank));
     if fresh.everyone_served && !fresh.gapped && moved.iter().all(serves) {
         return fresh.roles;
     }
     crate::log_warn!("[Concord] role move settled against the local fold: the fresh read was partial");
+    owe_settle(&crate::simd::hex::bytes_to_hex_32(&community.id().0), before);
     local.roles.clone()
+}
+
+/// Remember the Roster a change started from, when who lost access couldn't be read; kept
+/// the earliest, so the owed settle covers every change since.
+fn owe_settle(cid_hex: &str, before: &crate::community::roles::CommunityRoles) {
+    if owed_settle(cid_hex).is_some() {
+        return;
+    }
+    if let Ok(v) = serde_json::to_string(before) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_settle:{cid_hex}"), v);
+    }
+}
+
+fn owed_settle(cid_hex: &str) -> Option<crate::community::roles::CommunityRoles> {
+    crate::db::settings::get_sql_setting(format!("v2_settle:{cid_hex}")).ok().flatten().and_then(|v| serde_json::from_str(&v).ok())
+}
+
+pub(crate) fn has_owed_settle(cid_hex: &str) -> bool {
+    owed_settle(cid_hex).is_some()
+}
+
+/// Settle an owed change against a whole read: cut who lost access since, invite who gained.
+async fn run_owed_settle<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<bool, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let Some(before) = owed_settle(&cid_hex) else { return Ok(false) };
+    let fresh = fetch_authority(transport, community).await;
+    if !fresh.everyone_served || fresh.gapped {
+        return Err("the roster couldn't be read whole; the settle stays owed".to_string());
+    }
+    settle_access(transport, community, &before, &fresh.roles).await?;
+    let _ = crate::db::settings::set_sql_setting(format!("v2_settle:{cid_hex}"), String::new());
+    Ok(true)
 }
 
 async fn move_role_in<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, view: &mut AuthorityView, role_id: &str, index: usize) -> Result<(), String> {
@@ -8179,15 +8214,19 @@ async fn run_read_cuts<T: Transport + ?Sized>(transport: &T, community: &Communi
     }
 }
 
-/// Retry the ban rotations this device still owes a community. Runs outside the follow
-/// lock, which every rotation takes.
-pub(crate) async fn retry_read_cuts(id: &crate::community::CommunityId) {
+/// Retry the rotations this device still owes a community: a ban's cuts and a Role move's
+/// settle. Runs outside the follow lock, which every rotation takes.
+pub(crate) async fn retry_owed_rotations(id: &crate::community::CommunityId) {
     let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
     match run_read_cuts(&transport, &community).await {
         Ok(0) => {}
         Ok(n) => crate::log_info!("[Ban] rotated {n} private channel(s) a ban still owed"),
         Err(e) => crate::log_warn!("[Ban] owed private-channel rotation still pending: {e}"),
+    }
+    let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
+    if let Err(e) = run_owed_settle(&transport, &community).await {
+        crate::log_warn!("[Roles] owed access settle still pending: {e}");
     }
 }
 
@@ -22922,6 +22961,37 @@ mod tests {
             assert!(stored.is_entitled(Some(&owner.keys.public_key().to_hex()), &m.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.0), &[], &[]), "nor drops them from the roster");
             assert!(stored.role(&other).is_some(), "nor its Roles");
         }
+    }
+
+    #[tokio::test]
+    async fn a_role_move_whose_reread_fails_owes_the_cut() {
+        let (bed, owner, a, community) = v2_bed_with_admin("OwedCut").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let r = create_role_v2(&bed.relay, &held(), "Readers", 0, 0).await.unwrap();
+        let m = Keys::generate().public_key();
+        set_member_roles(&bed.relay, &held(), &m, vec![r.clone()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&a);
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(r.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        act_as(&owner.keys);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let epoch = held().channel(&ch).unwrap().epoch;
+        // Readers above A: A's allow falls, but the reread fails, so the cut is owed.
+        let flaky = BreaksAfterPublish { inner: &bed.relay, broken: false.into() };
+        move_role_v2(&flaky, &held(), &r, 0).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        assert!(has_owed_settle(&cid_hex));
+        assert_eq!(held().channel(&ch).unwrap().epoch, epoch, "nothing cut on a failed read");
+        let blind = BreaksAfterPublish { inner: &bed.relay, broken: true.into() };
+        assert!(run_owed_settle(&blind, &held()).await.is_err(), "a partial read pays nothing");
+        assert!(has_owed_settle(&cid_hex) && held().channel(&ch).unwrap().epoch == epoch, "and evicts no one");
+        assert!(run_owed_settle(&bed.relay, &held()).await.unwrap());
+        assert!(held().channel(&ch).unwrap().epoch > epoch, "the whole read cuts M");
+        let owner_hex = owner.keys.public_key().to_hex();
+        assert!(!crate::db::community::get_community_roles(&cid_hex).unwrap().is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]));
+        assert!(!has_owed_settle(&cid_hex), "and the settle is paid");
     }
 
     #[tokio::test]
