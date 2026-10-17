@@ -283,8 +283,15 @@ async function csSaveRoles(communityId) {
             const name = e.name.trim();
             if (!name) throw new Error('A role needs a name');
             const args = { communityId, name, color: e.color, permissions: e.permissions, channelId: e.channel_id };
-            if (e.id === null) reopen = await invoke('create_community_role', args);
-            else await invoke('edit_community_role', { ...args, roleId: e.id, display: e.display, mentionable: e.mentionable });
+            if (e.id === null) {
+                reopen = await invoke('create_community_role', args);
+                // Creation takes no flags: a role made shown or mentionable gets them right after.
+                if (e.display || e.mentionable) {
+                    await invoke('edit_community_role', { ...args, roleId: reopen, display: !!e.display, mentionable: !!e.mentionable });
+                }
+            } else {
+                await invoke('edit_community_role', { ...args, roleId: e.id, display: e.display, mentionable: e.mentionable });
+            }
         }
     }
     await csLoadRoles(communityId);

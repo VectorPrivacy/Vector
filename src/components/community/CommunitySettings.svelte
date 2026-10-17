@@ -29,6 +29,9 @@
     // The Roles section's anchors follow what it shows: the list, or one role open.
     const roleAnchors = $derived(!st.roles.edit
         ? [{ id: 'role-list', label: 'Role List', icon: 'shield-filled', keys: 'roles role list order rank create permissions' }]
+        : st.roles.edit.everyone
+        // @everyone is permissions alone: everyone holds it, and it has no name to show.
+        ? [{ id: 'role-permissions', label: 'Permissions', icon: 'shield-filled', keys: 'everyone role permissions ban kick manage' }]
         : [
             { id: 'role-display', label: 'Display', icon: 'palette', keys: 'role name colour color access channel scope' },
             { id: 'role-permissions', label: 'Permissions', icon: 'shield-filled', keys: 'role permissions ban kick manage' },
