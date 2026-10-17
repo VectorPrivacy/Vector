@@ -52,6 +52,7 @@
     // svelte-ignore state_referenced_locally
     const isPivx = $derived(!!current.pivx_payment);
     const isBlocked = $derived(!!ctx.blocked);
+    const isTimedOut = $derived(!!ctx.timedOut);
 
     // Mount-time constants. Authorship never changes for a row; a changed message
     // keeps its author.
@@ -193,7 +194,7 @@
     </div>
     {#if isPivx}
         <div class="dmsg-body"><PivxBubble msg={current} h={h.pivx} /></div>
-    {:else if isBlocked}
+    {:else if isBlocked || isTimedOut}
         <div class="dmsg-body">
             <div class="dmsg-header">
                 <span class="dmsg-author btn" data-npub={authorFullId || undefined} use:name={displayName}></span>
@@ -209,7 +210,7 @@
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <span style="color: rgba(255,255,255,0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;"
                       onclick={(e) => { e.stopPropagation(); h.revealBlocked(msg); }}>
-                    <span class="icon icon-cancel" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>Blocked message</span>
+                    <span class="icon {isTimedOut ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{isTimedOut ? 'Sent while timed out' : 'Blocked message'}</span>
             </div>
         </div>
     {:else}

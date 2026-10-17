@@ -71,7 +71,9 @@ const _dmsgListHelpers = {
         if (ctx && ctx.currentChat?.id === strOpenChat) {
             const revealed = revealedBlockedMessages.has(msg.id);
             const isBlocked = _dmsgAuthorBlocked(msg, ctx.currentChat, ctx.isGroupChat);
-            if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)) return ctx;
+            const timedOut = _dmsgPostedTimedOut(msg, ctx.currentChat);
+            if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)
+                && ctx.timedOut === (timedOut && !revealed)) return ctx;
         }
         const fresh = _dmsgRowCtx(msg);
         _dmsgRowCtxCache.set(msg, fresh);
@@ -86,18 +88,28 @@ function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
     const p = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
     return !!p?.is_blocked;
 }
+/** Whether a community post was made while its author was timed out there (CORD-04 §8). */
+function _dmsgPostedTimedOut(msg, currentChat) {
+    if (msg.mine || !msg.npub) return false;
+    const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
+    const at = (msg.at || 0) / 1000;
+    return !!t && at >= t.from && at < t.until;
+}
 function _dmsgRowCtx(msg) {
     {
         const currentChat = arrChats.find(c => c.id === strOpenChat);
         const isGroupChat = chatIsGroup(currentChat);
         const blocked = _dmsgAuthorBlocked(msg, currentChat, isGroupChat);
+        const revealed = revealedBlockedMessages.has(msg.id);
         return {
             myNpub: strPubkey,
             isGroupChat,
             currentChat,
             pinged: _dmsgIsPinged(msg, currentChat, isGroupChat),
-            blocked: blocked && !revealedBlockedMessages.has(msg.id),
-            revealedBlocked: blocked && revealedBlockedMessages.has(msg.id),
+            blocked: blocked && !revealed,
+            revealedBlocked: blocked && revealed,
+            // A reader collapses, never drops, what a timed-out member posted.
+            timedOut: !blocked && _dmsgPostedTimedOut(msg, currentChat) && !revealed,
         };
     }
 }

@@ -106,12 +106,24 @@ function setCommunityChannels(communityId, channels, categories) {
     leaveHiddenChannel(communityId);
 }
 
-/** Lock the composer while the local user is timed out in the open chat's community. */
+/** communityId → the Timeouts running there, npub → { from, until }, as last read. */
+const communityTimeoutsCache = new Map();
+function communityTimeoutsFor(communityId) {
+    return communityId ? communityTimeoutsCache.get(communityId) : null;
+}
+
+/**
+ * Read the open chat's community's Timeouts: the rows of what a timed-out member posted
+ * collapse, and the composer locks while the local user is the one timed out.
+ */
 async function refreshTimeoutLock(chat) {
     const communityId = communityIdOfChat(chat);
     if (!communityId) return;
     let running = null;
     try { running = await invoke('get_community_timeouts', { communityId }); } catch { return; }
+    const had = JSON.stringify(communityTimeoutsCache.get(communityId) || {});
+    communityTimeoutsCache.set(communityId, running || {});
+    if (had !== JSON.stringify(running || {}) && strOpenChat === chat.id) openChat(strOpenChat);
     const mine = running?.[strPubkey];
     if (!mine || strOpenChat !== chat.id) return;
     const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
