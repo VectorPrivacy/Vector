@@ -291,6 +291,74 @@ mod perm_decimal_string_opt {
     }
 }
 
+/// One sealed standing in a Tenure (CORD-04 §9): the listed editions are judged as if their
+/// author held `permissions` through a Role at `rank`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenureEntry {
+    pub rank: String,
+    #[serde(with = "perm_decimal_string")]
+    pub permissions: u64,
+    #[serde(default)]
+    pub heads: Vec<String>,
+}
+
+/// A member's Tenure (vsk 16 at `tenure_locator(community_id, member)`), replaced entire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenureContent {
+    pub member: String,
+    #[serde(default)]
+    pub sealed: Vec<TenureEntry>,
+}
+
+/// The most entries a Tenure carries, and heads an entry lists: bounded by a member's own
+/// standing heads in practice, capped so a hostile writer can't bloat every fold.
+pub const MAX_TENURE_ENTRIES: usize = 16;
+pub const MAX_TENURE_HEADS: usize = 512;
+
+/// Parse a Tenure; entries with a malformed rank key are dropped, and oversize lists cut.
+pub fn parse_tenure_content(content: &str) -> Option<TenureContent> {
+    let mut t: TenureContent = serde_json::from_str(content).ok()?;
+    t.sealed.retain(|e| crate::community::rank::is_rank_key(&e.rank));
+    t.sealed.truncate(MAX_TENURE_ENTRIES);
+    for e in &mut t.sealed {
+        e.heads.retain(|h| crate::simd::hex::hex_to_bytes_32_checked(h).is_some());
+        e.heads.truncate(MAX_TENURE_HEADS);
+    }
+    Some(t)
+}
+
+/// The most heads a writer puts in one Tenure, across its entries: about 35 KB of hashes,
+/// inside what relays take once the edition is sealed and wrapped.
+pub const TENURE_HEAD_BUDGET: usize = 512;
+
+/// A Tenure's entries once `entry` is added, or `None` when it adds nothing. Older entries
+/// keep only the heads that are still the member's (`current`), since a superseded edition
+/// no longer decides anything; the oldest go first when the budget runs out.
+pub fn tenure_with(prior: Vec<TenureEntry>, entry: TenureEntry, current: &[[u8; 32]]) -> Option<Vec<TenureEntry>> {
+    let current: std::collections::HashSet<String> = current.iter().map(crate::simd::hex::bytes_to_hex_32).collect();
+    let mut sealed: Vec<TenureEntry> = prior
+        .into_iter()
+        .map(|mut e| {
+            e.heads.retain(|h| current.contains(h));
+            e
+        })
+        .filter(|e| !e.heads.is_empty())
+        .collect();
+    if sealed.iter().any(|e| e.rank == entry.rank && e.permissions & entry.permissions == entry.permissions && entry.heads.iter().all(|h| e.heads.contains(h))) {
+        return None;
+    }
+    sealed.push(entry);
+    let mut total: usize = sealed.iter().map(|e| e.heads.len()).sum();
+    while sealed.len() > MAX_TENURE_ENTRIES || (total > TENURE_HEAD_BUDGET && sealed.len() > 1) {
+        total -= sealed.remove(0).heads.len();
+    }
+    Some(sealed)
+}
+
+pub fn tenure_content_json(t: &TenureContent) -> Result<String, String> {
+    serde_json::to_string(t).map_err(|e| e.to_string())
+}
+
 /// CORD-04 §3 permissions: a decimal string on the wire, accepting either a string or
 /// a legacy bare number on read, and always writing the string. Digit-only (a leading
 /// `+`/`-` or whitespace is rejected, matching the strict `ms`/`ev` discipline).
@@ -322,6 +390,34 @@ mod perm_decimal_string {
 
 #[cfg(test)]
 mod tests {
+
+    fn te(rank: &str, bits: u64, heads: &[u8]) -> TenureEntry {
+        TenureEntry { rank: rank.into(), permissions: bits, heads: heads.iter().map(|b| crate::simd::hex::bytes_to_hex_32(&[*b; 32])).collect() }
+    }
+
+    #[test]
+    fn a_tenure_keeps_live_heads_and_skips_what_it_already_seals() {
+        let live: Vec<[u8; 32]> = [1u8, 2, 3].iter().map(|b| [*b; 32]).collect();
+        // A superseded head (9) leaves the older entry; an emptied entry goes.
+        let got = tenure_with(vec![te("C", 7, &[1, 9]), te("D", 1, &[9])], te("F", 3, &[2, 3]), &live).unwrap();
+        assert_eq!(got, vec![te("C", 7, &[1]), te("F", 3, &[2, 3])]);
+        // Already sealed at that rank with those bits: nothing to publish.
+        assert_eq!(tenure_with(got.clone(), te("F", 1, &[2]), &live), None);
+        assert!(tenure_with(got, te("F", 8, &[2]), &live).is_some(), "a bit not yet sealed is new");
+    }
+
+    #[test]
+    fn a_tenure_drops_its_oldest_entries_past_the_caps() {
+        let live: Vec<[u8; 32]> = (0..=255u8).map(|b| [b; 32]).collect();
+        let prior: Vec<TenureEntry> = (0..MAX_TENURE_ENTRIES as u8).map(|i| te("C", 1 << i, &[i])).collect();
+        let got = tenure_with(prior, te("F", 1, &[200]), &live).unwrap();
+        assert_eq!(got.len(), MAX_TENURE_ENTRIES);
+        assert_eq!((got[0].permissions, got.last().unwrap().rank.as_str()), (2, "F"), "the oldest went");
+        let wide = TenureEntry { rank: "C".into(), permissions: 1, heads: (0..TENURE_HEAD_BUDGET).map(|i| format!("{i:064x}")).collect() };
+        let got = tenure_with(vec![te("B", 1, &[1])], wide, &[[1; 32]]).unwrap();
+        assert_eq!(got.len(), 1, "an entry past the head budget pushes the older one out");
+    }
+
 
     #[test]
     fn a_role_republished_here_keeps_what_another_client_wrote() {
