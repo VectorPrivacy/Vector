@@ -399,6 +399,29 @@ pub fn overwrite_content_json(o: &Overwrite) -> String {
         .expect("plain struct")
 }
 
+/// A Channel's sync (vsk 17 at `sync_locator(community_id, channel_id)`): the Category
+/// whose overwrites it takes, or none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncContent {
+    pub channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `(channel, category)` hex, lowercase; a malformed category reads as none.
+pub fn parse_sync_content(content: &str) -> Option<(String, Option<String>)> {
+    let c: SyncContent = serde_json::from_str(content).ok()?;
+    let channel = crate::simd::hex::hex_to_bytes_32_checked(&c.channel)?;
+    let category = c.sync.as_deref().and_then(crate::simd::hex::hex_to_bytes_32_checked);
+    Some((crate::simd::hex::bytes_to_hex_32(&channel), category.map(|k| crate::simd::hex::bytes_to_hex_32(&k))))
+}
+
+pub fn sync_content_json(channel: &str, category: Option<&str>) -> String {
+    serde_json::to_string(&SyncContent { channel: channel.to_string(), sync: category.map(String::from), extra: Default::default() }).expect("plain struct")
+}
+
 pub fn tenure_content_json(t: &TenureContent) -> Result<String, String> {
     serde_json::to_string(t).map_err(|e| e.to_string())
 }

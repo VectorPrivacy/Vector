@@ -45,6 +45,7 @@ const LABEL_INVITE_LINKS: &str = "concord/invite-links";
 const LABEL_EVERYONE: &str = "concord/everyone";
 const LABEL_TENURE: &str = "concord/tenure";
 const LABEL_ACL: &str = "concord/acl";
+const LABEL_SYNC: &str = "concord/sync";
 const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -313,6 +314,11 @@ pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32], write
 pub fn acl_locator(community_id: &CommunityId, scope: &[u8; 32], target: &[u8; 32]) -> [u8; 32] {
     let pair: [u8; 32] = Sha256::new().chain_update(scope).chain_update(target).finalize().into();
     hkdf32(&community_id.0, &build_info(LABEL_ACL, &pair, None))
+}
+
+/// A Channel's sync coordinate (CORD-04 §8).
+pub fn sync_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_SYNC, &channel_id.0, None))
 }
 
 /// A Channel's Pin List coordinate (CORD-04 §7).

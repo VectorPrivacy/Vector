@@ -210,6 +210,9 @@ pub struct CommunityRoles {
     /// Channel permission overwrites (CORD-04 §8), on Roles v2.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overwrites: Vec<Overwrite>,
+    /// Channels that take their Category's overwrites instead of their own: channel → category.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub syncs: std::collections::BTreeMap<String, String>,
 }
 
 /// The bits an overwrite may touch (CORD-04 §8): the channel permissions and
@@ -275,7 +278,9 @@ impl CommunityRoles {
         }
         let roles: Vec<&Role> = role_ids.iter().filter_map(|id| self.role(id)).collect();
         let mut p = roles.iter().fold(self.everyone.unwrap_or_default(), |acc, r| acc.union(r.permissions)).0;
-        let scope = channel_hex.to_ascii_lowercase();
+        let channel = channel_hex.to_ascii_lowercase();
+        // A synced Channel resolves against its Category's overwrites, ignoring its own.
+        let scope = self.syncs.get(&channel).cloned().unwrap_or(channel);
         let here = || self.overwrites.iter().filter(|o| o.scope == scope);
         if let Some(o) = here().find(|o| o.target == OverwriteTarget::Everyone) {
             p = (p & !o.deny.0) | o.allow.0;
@@ -541,6 +546,7 @@ mod tests {
             grants: vec![MemberGrant { member: m.clone(), role_ids: vec![r1.clone(), r2.clone()] }],
             everyone: Some(Permissions(view | send)),
             overwrites: vec![ow(OverwriteTarget::Everyone, 0, view | send), ow(OverwriteTarget::Role(r1.clone()), view, 0), ow(OverwriteTarget::Role(r2.clone()), 0, view)],
+            syncs: Default::default(),
         };
         let at = |r: &CommunityRoles, who: &str| r.channel_permissions(Some("o"), who, &ch).0;
         assert_eq!(at(&r, &m), view, "one role's allow beats another's deny; @everyone's deny of Send stands");
@@ -552,6 +558,11 @@ mod tests {
         r.overwrites.pop();
         assert!(r.is_entitled(Some("o"), &m, &ch, &[], &[]));
         assert!(!r.is_entitled(Some("o"), &m, &ch, &[], std::slice::from_ref(&r1)), "losing the allowing role loses the key");
+        let cat = "d".repeat(64);
+        r.overwrites.push(Overwrite { scope: cat.clone(), target: OverwriteTarget::Role(r2.clone()), allow: Permissions(0), deny: Permissions(send) });
+        r.syncs.insert(ch.clone(), cat);
+        assert_eq!(at(&r, &n), view | send, "a synced channel takes its Category's overwrites, not its own");
+        assert_eq!(at(&r, &m), view, "including the Category's denies");
     }
 
     fn admin_roster(member: &str) -> CommunityRoles {
@@ -563,7 +574,7 @@ mod tests {
             }],
             roles: vec![role],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         }
     }
 
@@ -605,7 +616,7 @@ mod tests {
             grants: vec![MemberGrant { member: alice.clone(), role_ids: vec![role.role_id.clone()] }],
             roles: vec![role],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         };
         assert!(!r.is_admin(&alice), "a social-only role holder is not an admin");
         assert!(r.is_privileged(&alice), "though they do hold a role");
@@ -636,7 +647,7 @@ mod tests {
             ],
             roles: vec![admin_role, mod_role],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         };
         let owner_ref = Some(owner.as_str());
 
@@ -683,7 +694,7 @@ mod tests {
             ],
             roles: vec![admin_role, kick_role],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         };
         let o = Some(owner.as_str());
         use Permissions as P;
@@ -741,7 +752,7 @@ mod tests {
             }],
             roles: vec![admin, mod_role],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         };
         // Union of both roles' bits, and the *highest* (lowest index) position wins.
         assert!(r.has_permission(&alice, Permissions::BAN)); // from Admin
@@ -771,7 +782,7 @@ mod tests {
         // A member with no role (Bob) is not — and neither is Alice once demoted (no grant).
         let bob = "bb".repeat(32);
         assert!(!r.is_authorized(&bob, Some(&owner), Permissions::BAN));
-        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None, overwrites: Vec::new() };
+        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None, overwrites: Vec::new(), syncs: Default::default() };
         assert!(!demoted.is_authorized(&alice, Some(&owner), Permissions::BAN));
         // ...but the owner stays authorized even with an empty grant set.
         assert!(demoted.is_authorized(&owner, Some(&owner), Permissions::BAN));
@@ -806,7 +817,7 @@ mod tests {
             ],
             roles: vec![scoped, server],
             everyone: None,
-            overwrites: Vec::new(),
+            overwrites: Vec::new(), syncs: Default::default(),
         }
     }
 

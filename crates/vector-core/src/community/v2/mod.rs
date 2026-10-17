@@ -105,4 +105,6 @@ pub mod vsk {
     pub const CATEGORY: &str = "15";
     /// A member's Tenure (CORD-04 §9).
     pub const TENURE: &str = "16";
+    /// A Channel's sync to its Category's overwrites (CORD-04 §8).
+    pub const CHANNEL_SYNC: &str = "17";
 }
