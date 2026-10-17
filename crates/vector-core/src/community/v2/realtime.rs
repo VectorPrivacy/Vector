@@ -1101,7 +1101,8 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         }
         // Keys delivered on an access plane park for the vend judge just below.
-        if let Ok(Some(current)) = crate::db::community::load_community_v2(id) {
+        let collect = super::service::access_collect_due(id, control.authority_changed);
+        if let Some(current) = crate::db::community::load_community_v2(id).ok().flatten().filter(|_| collect) {
             match super::service::collect_access(&transport, &current).await {
                 Ok(0) => {}
                 Ok(n) => crate::log_info!("[v2:follow {}] {n} key(s) waiting on access planes", &community_id[..8.min(community_id.len())]),
@@ -1133,6 +1134,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             crate::db::spawn_bound(async move {
                 crate::rt::time::sleep(std::time::Duration::from_secs(20)).await;
                 if crate::db::current_session().is_live() {
+                    super::service::access_collect_now(&again);
                     enqueue_follow(&again);
                 }
             });

@@ -6208,6 +6208,33 @@ pub(crate) fn access_duty_due(id: &crate::community::CommunityId, roster_moved: 
 }
 
 struct AccessLedger;
+struct OpenedDeliveries;
+struct AccessCollectClock;
+
+/// How often a keyless member re-reads its access planes when nothing in the roster moved.
+const ACCESS_COLLECT_PERIOD_MS: u64 = 60 * 1000;
+
+fn access_collect_clock() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>> {
+    crate::db::current_session().scoped::<AccessCollectClock, std::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>>()
+}
+
+/// Let the next follow read a community's access planes whatever the period says.
+pub(crate) fn access_collect_now(id: &crate::community::CommunityId) {
+    access_collect_clock().lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+}
+
+/// Whether to read the access planes for a community now: whenever the roster moved, else once
+/// per period. Marks it read.
+pub(crate) fn access_collect_due(id: &crate::community::CommunityId, roster_moved: bool) -> bool {
+    let clock = access_collect_clock();
+    let mut last = clock.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let due = roster_moved || last.get(&id.0).is_none_or(|t| now.saturating_sub(*t) > ACCESS_COLLECT_PERIOD_MS);
+    if due {
+        last.insert(id.0, now);
+    }
+    due
+}
 
 /// The holder's duty (CORD-03 §5): for every private Channel this device holds and may read,
 /// deliver the key to each entitled member nobody has served at its epoch: not a reader-trusted
@@ -6292,6 +6319,7 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let me = me_pk()?;
     let signer = crate::signer::active_signer()?;
+    let opened = crate::db::current_session().scoped::<OpenedDeliveries, std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], u64)>>>();
     let mut parked = 0;
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_none()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
@@ -6314,7 +6342,12 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
             .collect();
         let Some(newest) = deliveries.iter().map(|d| d.epoch).max() else { continue };
         for d in deliveries.iter().filter(|d| d.epoch == newest) {
-            for blob in rekey::find_my_blobs(&d.blobs, &d.deliverer.to_bytes(), &me.to_bytes(), scope, d.epoch) {
+            let mine: Vec<&rekey::RekeyBlob> = rekey::find_my_blobs(&d.blobs, &d.deliverer.to_bytes(), &me.to_bytes(), scope, d.epoch).collect();
+            // Opened once a session: parking again would trim other candidates out of the cap.
+            if mine.is_empty() || !opened.lock().unwrap_or_else(|e| e.into_inner()).insert((ch.id.0, d.deliverer.to_bytes(), d.epoch.0)) {
+                continue;
+            }
+            for blob in mine {
                 if let Ok(key) = rekey::open_blob(&signer, &d.deliverer, scope, d.epoch, blob).await {
                     crate::db::community::park_channel_key(&cid_hex, &chan, d.epoch.0, &key, &d.deliverer.to_hex())?;
                     parked += 1;
@@ -23068,6 +23101,7 @@ mod tests {
         with_channel(None, epoch);
         act_as(&m);
         assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1, "only the honest delivery: not the banned member's, nor one far ahead");
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 0, "and once a session: re-parking would crowd out other candidates");
         crate::db::community::set_community_banlist(&cid_hex, &[], 2).unwrap();
         assert_eq!(absorb_parked_channel_keys(&held(), &crate::db::current_session()).len(), 1);
         assert_eq!(held().channel(&ch).unwrap().key, Some(key), "the delivered key is the channel's");
