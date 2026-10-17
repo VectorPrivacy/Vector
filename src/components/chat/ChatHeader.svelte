@@ -41,11 +41,12 @@
             avatarSrc = H.getProfileAvatarSrc(profile) || null;
             if (profile) click = () => H.openProfile(profile);
         }
-        let subtext = '', tags = [];
+        let subtext = '', tags = [], topic = false;
         if (notes) subtext = 'Encrypted Notes to Self';
-        else if (group) subtext = H.memberSubtext(communityId);
+        // A channel's topic says more than the member count, so it takes the line when set.
+        else if (group) { const t = H.channelTopic(chat); topic = !!t; subtext = t || H.memberSubtext(communityId); }
         else if (!H.streamHidden(profile || id)) { subtext = profile?.status?.title || ''; tags = profile?.status?.emoji_tags || []; }
-        return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, menu: !!chat && H.menuCount(chat) > 0 };
+        return { id, notes, group, name, twemoji, avatarSrc, click, subtext, tags, topic, menu: !!chat && H.menuCount(chat) > 0 };
     });
 
     function nameInto(node, [text, twemoji]) {
@@ -128,7 +129,7 @@
             <h3 id="chat-contact" class="cutoff" class:btn={!!vm?.click} class:chat-contact={status.hidden} class:chat-contact-with-status={!status.hidden}
                 use:nameInto={[vm ? vm.name : '', !!vm?.twemoji]} onclick={() => vm?.click?.()}></h3>
         </div>
-        <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden}
+        <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden} class:is-topic={!!vm?.topic}
               use:statusInto={[status.text, status.tags]}></span>
     </div>
     <!-- The right-hand actions sit in one row, so a hidden pin toggle leaves no gap. -->

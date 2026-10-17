@@ -1184,6 +1184,30 @@ body.ws.ws-community-pane #chat > .chat-header #chat-contact-status {
   display: none;
 }
 
+/* A channel's topic is the one second line worth the room: inline after the name,
+   past a hairline, as quiet as the hash. */
+body.ws.ws-community-pane #chat > .chat-header .profile-header-info:has(#chat-contact-status.is-topic:not(.status-hidden)) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+body.ws.ws-community-pane #chat > .chat-header #chat-contact-status.is-topic:not(.status-hidden) {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  /* The name row sits 5px down its box; centre on the name, not the box. */
+  margin: 5px 0 0;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13.5px;
+  line-height: 18px;
+  text-align: left;
+  align-self: center;
+  cursor: default;
+}
+
 /* The hash is drawn here rather than inserted, so no render path has to know
    about it and nothing can rebuild the header without it. */
 body.ws.ws-community-pane #chat > .chat-header #chat-contact {

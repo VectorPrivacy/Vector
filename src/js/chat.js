@@ -1622,6 +1622,7 @@ VectorSvelte.setChatHeaderHandlers({
         communityChatTitle: (chat) => communityChatTitle(chat),
         typers: (chat) => visibleTypers(chat),
         memberSubtext: (cid) => communityMemberSubtext(cid),
+        channelTopic: (chat) => communityChannelTopic(chat),
         menuCount: (chat) => buildChatMenuItems(chat).length,
         openProfile: (profile) => { previousChatBeforeProfile = strOpenChat; openProfile(profile); },
         openCommunity: (chat) => openCommunityDetails(chat),

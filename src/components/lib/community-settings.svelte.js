@@ -60,7 +60,8 @@ export function csRoleEditDirty() {
     const e = s.roles.edit;
     if (!e) return false;
     if (e.id === null) return true;
-    return e.name !== e.base.name || e.color !== e.base.color || e.permissions !== e.base.permissions;
+    return e.name !== e.base.name || e.color !== e.base.color || e.permissions !== e.base.permissions
+        || e.display !== e.base.display || e.mentionable !== e.base.mentionable;
 }
 
 /** Anything unsaved, anywhere: what the save bar and the close refusal answer to. */
@@ -73,11 +74,17 @@ export function csSetRoleMembers(npubs) { s.roles.members = npubs || []; }
 export function csSetRolesBusy(on) { s.roles.busy = !!on; }
 export function csSetRoleOrder(ids) { s.roles.order = ids; }
 
-/** Open a role in the editor: an existing one by its view entry, or a fresh draft. */
+/**
+ * Open a role in the editor: an existing one by its view entry, or a fresh draft.
+ * `@everyone` opens as `{ everyone: true, permissions }`: permissions alone, never a Role.
+ */
 export function csEditRole(role) {
     if (!role) { s.roles.edit = null; return; }
-    const base = { name: role.name || '', color: role.color || 0, permissions: role.permissions || '0' };
-    s.roles.edit = { id: role.role_id ?? null, channel_id: role.channel_id ?? null, ...base, base };
+    const base = {
+        name: role.name || '', color: role.color || 0, permissions: role.permissions || '0',
+        display: !!role.display, mentionable: !!role.mentionable,
+    };
+    s.roles.edit = { id: role.everyone ? 'everyone' : role.role_id ?? null, everyone: !!role.everyone, channel_id: role.channel_id ?? null, ...base, base };
 }
 export function csPatchRoleEdit(patch) { if (s.roles.edit) Object.assign(s.roles.edit, patch); }
 
@@ -142,7 +149,7 @@ export function csReset() {
     const e = s.roles.edit;
     // A role never created has nothing to fall back to: resetting discards it.
     if (e && e.id === null) s.roles.edit = null;
-    else if (e) Object.assign(e, { name: e.base.name, color: e.base.color, permissions: e.base.permissions });
+    else if (e) Object.assign(e, { name: e.base.name, color: e.base.color, permissions: e.base.permissions, display: e.base.display, mentionable: e.base.mentionable });
 }
 
 /** What a save committed, folded into `saved` so the bar only lingers for what failed. */

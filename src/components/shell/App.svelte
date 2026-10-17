@@ -29,6 +29,7 @@
     import ContextMenu from '../ui/ContextMenu.svelte';
     import RekeyProgress from '../community/RekeyProgress.svelte';
     import InviteModal from '../community/InviteModal.svelte';
+    import ChannelEditor from '../community/ChannelEditor.svelte';
     import Tooltip from './Tooltip.svelte';
     import ComposerPopups from '../composer/ComposerPopups.svelte';
 import CallOverlay from '../calls/CallOverlay.svelte';
@@ -157,6 +158,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 {#if screens.qrScanner}<QrScanner h={screens.qrScanner.h} />{/if}
 {#if screens.statusDialog}<StatusDialog h={screens.statusDialog.h} />{/if}
 {#if screens.keysModal}<KeysModal h={screens.keysModal.h} />{/if}
+{#if screens.channelEditor}<ChannelEditor h={screens.channelEditor.h} />{/if}
 {#if screens.secretGuard}<SecretGuard h={screens.secretGuard.h} />{/if}
 {#if screens.transferModal}<TransferModal h={screens.transferModal.h} />{/if}
 {#if screens.call}<CallOverlay h={screens.call.h} />{/if}

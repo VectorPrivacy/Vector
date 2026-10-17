@@ -3870,6 +3870,39 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
+/* Organising: the role list's insertion line, on a channel row or a Category heading. */
+.chatlist-channel,
+.chatlist-channel-section-head { position: relative; }
+.chatlist-channel.is-dragging,
+.chatlist-channel-section.is-dragging { opacity: 0.3; }
+.chatlist-channel.drop-above::after,
+.chatlist-channel.drop-below::after,
+.chatlist-channel-section-head.drop-above::after,
+.chatlist-channel-section-head.drop-below::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 8px var(--icon-color-primary);
+  pointer-events: none;
+  z-index: 2;
+}
+.chatlist-channel.drop-above::after,
+.chatlist-channel-section-head.drop-above::after { top: -1px; }
+.chatlist-channel.drop-below::after,
+.chatlist-channel-section-head.drop-below::after { bottom: -1px; }
+.chatlist-drag-ghost {
+  opacity: 0.92;
+  background-color: #161616;
+  border-radius: 7px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
+  transition: none;
+}
+.chatlist-channels-pane.is-organising .chatlist-channel-section-loose { min-height: 30px; }
+
 .chatlist-channel:hover {
   background-color: rgba(255, 255, 255, 0.045);
   color: rgba(255, 255, 255, 0.9);
@@ -25932,6 +25965,64 @@ body.profile-switcher-editing .profile-switcher-add {
   flex-shrink: 0;
 }
 .cs-role-open .icon { background-color: #555; }
+/* Channel editor: how the channel opens, one card per view. */
+.ce-views { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ce-view {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #262626;
+  border-radius: 10px;
+  background-color: #0c0c0c;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+.ce-view:hover { background-color: #131313; }
+.ce-view.on {
+  border-color: var(--icon-color-primary);
+  background-color: color-mix(in srgb, var(--icon-color-primary) 8%, #0c0c0c);
+}
+.ce-view:disabled { opacity: 0.6; cursor: default; }
+.ce-modal .cmt-footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.ce-modal .cmt-status { flex: 1; min-width: 0; }
+@media (max-width: 520px) { .ce-views { grid-template-columns: 1fr; } }
+
+/* @everyone: the list's fixed foot, beneath every role. */
+.cs-role-everyone .cs-role-dot { background-color: #99aab5; }
+.cs-role-everyone .cs-role-name { color: #cfcfcf; }
+/* Roles v2 offer, for an owner on the legacy roster. */
+.cs-role-upgrade {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--icon-color-primary) 35%, transparent);
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--icon-color-primary) 6%, #0c0c0c);
+}
+.cs-role-upgrade-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.cs-role-upgrade .cs-btn-save { flex-shrink: 0; }
+.cs-btn-danger {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 45%, transparent);
+  border-radius: 8px;
+  background-color: var(--danger-color-hover);
+  color: var(--danger-color);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.12s ease;
+}
+.cs-btn-danger:hover { filter: brightness(1.15); }
+.cs-btn-danger:disabled { opacity: 0.45; cursor: default; filter: none; }
 
 .cs-back {
   display: inline-flex;

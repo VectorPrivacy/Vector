@@ -3923,6 +3923,8 @@ impl VectorCore {
             "everyone": roster.everyone.map(|p| p.0.to_string()),
             "everyone_editable": activated && (is_owner || roster.permissions_above(&me, u32::MAX).contains(Permissions::MANAGE_ROLES)),
             "everyone_default": crate::community::v2::roles::EVERYONE_DEFAULT.to_string(),
+            // Private channels' access roles move with channel permissions, which come first.
+            "activation_blocked": roster.roles.iter().any(|r| matches!(r.scope, RoleScope::Channel(_))),
             "roles": roles,
             "channels": channels,
             "max_roles": crate::community::v2::roles::MAX_ROLES_PER_COMMUNITY,

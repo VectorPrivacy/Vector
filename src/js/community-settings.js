@@ -11,6 +11,8 @@ VectorSvelte.setScreen('communitySettings', {
         reset: () => VectorSvelte.csReset(),
         unban: () => csUnbanSelected(),
         setRoleHolders: (roleId, add, remove) => csSetRoleHolders(roleId, add, remove),
+        deleteRole: (role) => csDeleteRole(role),
+        activateRoles: () => csActivateRoles(),
         copyIdItems: (what, id) => copyIdItems(what, id),
         showContextMenu: (menu) => showContextMenu(menu),
         // Empty when they have no name of their own, so the row shows the key once.
@@ -275,16 +277,64 @@ async function csSaveRoles(communityId) {
     let reopen = roles.edit?.id ?? null;
     if (VectorSvelte.csRoleEditDirty()) {
         const e = roles.edit;
-        const name = e.name.trim();
-        if (!name) throw new Error('A role needs a name');
-        const args = { communityId, name, color: e.color, permissions: e.permissions, channelId: e.channel_id };
-        if (e.id === null) reopen = await invoke('create_community_role', args);
-        else await invoke('edit_community_role', { ...args, roleId: e.id });
+        if (e.everyone) {
+            await invoke('set_community_everyone', { communityId, permissions: e.permissions });
+        } else {
+            const name = e.name.trim();
+            if (!name) throw new Error('A role needs a name');
+            const args = { communityId, name, color: e.color, permissions: e.permissions, channelId: e.channel_id };
+            if (e.id === null) reopen = await invoke('create_community_role', args);
+            else await invoke('edit_community_role', { ...args, roleId: e.id, display: e.display, mentionable: e.mentionable });
+        }
     }
     await csLoadRoles(communityId);
     VectorSvelte.csSetRoleOrder(null);
-    const fresh = VectorSvelte.csState().roles.view?.roles.find(r => r.role_id === reopen);
+    const view = VectorSvelte.csState().roles.view;
+    const fresh = reopen === 'everyone'
+        ? { everyone: true, permissions: view?.everyone || '0' }
+        : view?.roles.find(r => r.role_id === reopen);
     if (VectorSvelte.csState().roles.edit) VectorSvelte.csEditRole(fresh || null);
+}
+
+/** Delete a role (new roles only): it leaves everyone who holds it, for good. */
+async function csDeleteRole(role) {
+    const communityId = VectorSvelte.csState().communityId;
+    if (!communityId || !role?.role_id) return;
+    const held = role.holders?.length || 0;
+    const ok = await popupConfirm('Delete role',
+        `Delete <b>${escapeHtml(role.name || 'this role')}</b>?${held ? ` ${held === 1 ? 'The member who holds it loses' : `The ${held} members who hold it lose`} its permissions.` : ''} This can't be undone.`,
+        false, '', 'vector_warning.svg');
+    if (!ok) return;
+    VectorSvelte.csSetRolesBusy(true);
+    try {
+        await invoke('delete_community_role', { communityId, roleId: role.role_id });
+        VectorSvelte.csEditRole(null);
+        await csLoadRoles(communityId);
+    } catch (e) {
+        showToast(String(e));
+    } finally {
+        VectorSvelte.csSetRolesBusy(false);
+    }
+}
+
+/** Owner only: move the community to the new roles, carrying every role over. */
+async function csActivateRoles() {
+    const st = VectorSvelte.csState();
+    const communityId = st.communityId;
+    if (!communityId) return;
+    const ok = await popupConfirm('Switch to the new roles',
+        'Adds @everyone, channel permissions and role deletion. Every role carries over. Members on an older Vector keep the roles from before the switch and won\'t see later changes until they update.',
+        false, '', 'vector_warning.svg', '', 'Switch');
+    if (!ok) return;
+    VectorSvelte.csSetRolesBusy(true);
+    try {
+        await invoke('activate_community_roles_v2', { communityId, everyone: st.roles.view?.everyone_default || '0' });
+        await csLoadRoles(communityId);
+    } catch (e) {
+        showToast(String(e));
+    } finally {
+        VectorSvelte.csSetRolesBusy(false);
+    }
 }
 
 /** The roles view, and the members the editor can hand a role to. */

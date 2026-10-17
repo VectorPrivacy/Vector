@@ -2,14 +2,15 @@
     // Community Settings → Roles. The list in CORD-04 display order (position, then the
     // lower role_id), dragged to reorder; and the editor for one role: its look, its
     // permissions and its members. Order and edits are drafts under the save bar;
-    // membership acts at once. A role is never deleted: CORD-04 has no role tombstone,
-    // so there is nothing honest to offer until it does.
+    // membership and deletion act at once. On Roles v2 the list ends at @everyone, whose
+    // permissions every member holds before any role.
     import { csState, csSetRoleOrder, csEditRole, csPatchRoleEdit } from '../lib/community-settings.svelte.js';
     import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import MemberRow from '../people/MemberRow.svelte';
 
-    // h: setRoleHolders(roleId, add, remove), name(npub), veiled(npub), searchName(npub), profile(npub), avatarSrc(npub), ui
+    // h: setRoleHolders(roleId, add, remove), deleteRole(role), activateRoles(), name(npub), veiled(npub),
+    //    searchName(npub), profile(npub), avatarSrc(npub), ui
     let { h } = $props();
 
     const st = csState();
@@ -23,7 +24,37 @@
         MANAGE_ROLES: 1n << 0n, MANAGE_CHANNELS: 1n << 1n, MANAGE_METADATA: 1n << 2n, KICK: 1n << 3n,
         BAN: 1n << 4n, MANAGE_MESSAGES: 1n << 5n, CREATE_INVITE: 1n << 6n, VIEW_AUDIT_LOG: 1n << 8n,
         MENTION_EVERYONE: 1n << 9n, PIN_MESSAGES: 1n << 11n,
+        VIEW_CHANNEL: 1n << 13n, SEND_MESSAGES: 1n << 14n, SEND_IN_THREADS: 1n << 15n, ATTACH_FILES: 1n << 16n,
+        ADD_REACTIONS: 1n << 17n, READ_MESSAGE_HISTORY: 1n << 18n, CONNECT: 1n << 19n, SPEAK: 1n << 20n,
+        VIDEO: 1n << 21n, PRIORITY_SPEAKER: 1n << 22n, MUTE_MEMBERS: 1n << 23n, DEAFEN_MEMBERS: 1n << 24n,
+        MOVE_MEMBERS: 1n << 25n, MODERATE_MEMBERS: 1n << 26n,
     };
+    // Channel and voice bits exist on Roles v2 only; a legacy roster has no use for them.
+    const V2_GROUPS = [
+        {
+            title: 'Channels',
+            perms: [
+                { bit: BIT.VIEW_CHANNEL, name: 'View Channels', desc: 'See channels and read what is posted in them.' },
+                { bit: BIT.SEND_MESSAGES, name: 'Send Messages', desc: 'Post in channels.' },
+                { bit: BIT.SEND_IN_THREADS, name: 'Send in Threads', desc: 'Reply in threads.' },
+                { bit: BIT.ATTACH_FILES, name: 'Attach Files', desc: 'Share images, videos and files.' },
+                { bit: BIT.ADD_REACTIONS, name: 'Add Reactions', desc: 'React to messages.' },
+                { bit: BIT.READ_MESSAGE_HISTORY, name: 'Read Message History', desc: 'Read what was posted before they could see a channel.' },
+            ],
+        },
+        {
+            title: 'Voice',
+            perms: [
+                { bit: BIT.CONNECT, name: 'Connect', desc: 'Join calls.' },
+                { bit: BIT.SPEAK, name: 'Speak', desc: 'Talk in calls.' },
+                { bit: BIT.VIDEO, name: 'Video', desc: 'Share their camera or screen in calls.' },
+                { bit: BIT.PRIORITY_SPEAKER, name: 'Priority Speaker', desc: 'Be heard over others while they talk.' },
+                { bit: BIT.MUTE_MEMBERS, name: 'Mute Members', desc: 'Mute members beneath them in calls.' },
+                { bit: BIT.DEAFEN_MEMBERS, name: 'Deafen Members', desc: 'Deafen members beneath them in calls.' },
+                { bit: BIT.MOVE_MEMBERS, name: 'Move Members', desc: 'Move members beneath them between calls.' },
+            ],
+        },
+    ];
     const GROUPS = [
         {
             title: 'Community',
@@ -42,6 +73,7 @@
                 { bit: BIT.BAN, name: 'Ban Members', desc: 'Ban members beneath them, silencing them and cutting them off for good.' },
                 { bit: BIT.MANAGE_MESSAGES, name: 'Manage Messages', desc: 'Hide messages from members beneath them.' },
                 { bit: BIT.PIN_MESSAGES, name: 'Pin Messages', desc: 'Pin messages to a channel for everyone to see.' },
+                { bit: BIT.MODERATE_MEMBERS, name: 'Timeout Members', desc: 'Silence members beneath them for a while.', v2: true },
             ],
         },
         {
@@ -63,6 +95,14 @@
 
     // ── the list ──
     const channelName = (id) => view?.channels.find((c) => c.channel_id === id)?.name || 'a private channel';
+    const v2 = $derived(!!view?.activated);
+    const groups = $derived.by(() => {
+        const base = GROUPS.map((g) => ({ ...g, perms: g.perms.filter((p) => v2 || !p.v2) }));
+        return v2 ? [...base.slice(0, 2), ...V2_GROUPS, ...base.slice(2)] : base;
+    });
+    function openEveryone() {
+        csEditRole({ everyone: true, permissions: view.everyone || '0' });
+    }
     const byId = $derived(new Map((view?.roles || []).map((r) => [r.role_id, r])));
     // The list as the draft orders it, or as published.
     const rows = $derived.by(() => {
@@ -119,7 +159,7 @@
     // ── the editor ──
     const current = $derived(edit?.id ? byId.get(edit.id) : null);
     // A role you can't manage opens read-only: you may look, not touch.
-    const editable = $derived(!edit ? false : edit.id === null ? !!view?.can_manage : !!current?.manageable);
+    const editable = $derived(!edit ? false : edit.everyone ? !!view?.everyone_editable : edit.id === null ? !!view?.can_manage : !!current?.manageable);
     const perms = $derived(edit ? BigInt(edit.permissions) : 0n);
     const basePerms = $derived(edit ? BigInt(edit.base.permissions) : 0n);
     const grantable = $derived(view ? BigInt(view.grantable) : 0n);
@@ -187,6 +227,21 @@
             {/if}
         </div>
         <p class="cs-lede">Members get the permissions of every role they hold. A role can manage only the roles beneath it, so the order matters: drag to arrange.</p>
+        {#if !v2 && view.is_owner}
+            <div class="cs-role-upgrade">
+                <div class="cs-role-upgrade-text">
+                    <span class="cs-perm-name">New roles are available</span>
+                    {#if view.activation_blocked}
+                        <span class="cs-perm-desc">Not yet for a community with private channels: their access moves to channel permissions first.</span>
+                    {:else}
+                        <span class="cs-perm-desc">@everyone, channel and voice permissions, and roles you can delete. Every role carries over.</span>
+                    {/if}
+                </div>
+                {#if !view.activation_blocked}
+                    <button class="cs-btn-save" disabled={st.roles.busy} onclick={() => h.activateRoles()}>Switch</button>
+                {/if}
+            </div>
+        {/if}
         <div class="cs-roles">
             <!-- The owner as the list's fixed top: not a Role (none may claim position 0),
                  so it is drawn here, costs no slot, and nothing can pick, move or grant it. -->
@@ -212,14 +267,31 @@
                     <span class="cs-role-open"><span class="icon icon-chevron-right"></span></span>
                 </div>
             {:else}
-                <p class="cmt-empty" style="text-align:center;">No roles yet. Create one to start giving members permissions.</p>
+                {#if !v2}<p class="cmt-empty" style="text-align:center;">No roles yet. Create one to start giving members permissions.</p>{/if}
             {/each}
+            {#if v2}
+                <!-- Beneath every Role and never moved: what each member holds before any role. -->
+                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                <div class="cs-role cs-role-everyone" class:locked={!view.everyone_editable} onclick={openEveryone}>
+                    <span class="cs-role-grip"><span class="icon icon-locked"></span></span>
+                    <span class="cs-role-dot"></span>
+                    <span class="cs-role-name cutoff">@everyone</span>
+                    <span class="cs-role-count">all members</span>
+                    <span class="cs-role-open"><span class="icon icon-chevron-right"></span></span>
+                </div>
+            {/if}
         </div>
         <p class="cs-hint">{view.roles.length} of {view.max_roles} roles</p>
     </section>
 {:else}
     <button class="cs-back" onclick={() => csEditRole(null)}><span class="icon icon-chevron-left"></span>All Roles</button>
 
+    {#if edit.everyone}
+    <section class="cs-block" data-anchor="role-display">
+        <h3 class="cs-heading">@everyone</h3>
+        <p class="cs-lede">What every member holds before any role. A role can add to it, never take from it.</p>
+    </section>
+    {:else}
     <section class="cs-block" data-anchor="role-display">
         <h3 class="cs-heading">{edit.id === null ? 'New Role' : 'Display'}</h3>
         {#if !editable}<p class="cs-lede">This role sits at or above your own, so you can view it but not change it.</p>{/if}
@@ -256,6 +328,24 @@
                 <span style:color={edit.color ? hex(edit.color) : null}>{edit.name.trim() || 'new role'}</span>
             </div>
         </div>
+        {#if v2}
+            <label class="toggle-container cs-perm cs-field-gap" class:disabled={!editable}>
+                <span class="cs-perm-text">
+                    <span class="cs-perm-name">Show members separately</span>
+                    <span class="cs-perm-desc">List its members under the role's name in the member list.</span>
+                </span>
+                <input type="checkbox" checked={edit.display} disabled={!editable} onchange={(e) => csPatchRoleEdit({ display: e.currentTarget.checked })}>
+                <span class="neon-toggle"></span>
+            </label>
+            <label class="toggle-container cs-perm" class:disabled={!editable}>
+                <span class="cs-perm-text">
+                    <span class="cs-perm-name">Allow anyone to mention this role</span>
+                    <span class="cs-perm-desc">Otherwise only members who can mention @everyone notify it.</span>
+                </span>
+                <input type="checkbox" checked={edit.mentionable} disabled={!editable} onchange={(e) => csPatchRoleEdit({ mentionable: e.currentTarget.checked })}>
+                <span class="neon-toggle"></span>
+            </label>
+        {:else}
         <div class="cs-field cs-field-gap">
             <span class="cs-label">Access</span>
             {#if edit.id === null}
@@ -270,12 +360,14 @@
                 <p class="cs-hint cs-hint-tight">{edit.channel_id ? `#${channelName(edit.channel_id)} only. Holding this role is what lets someone read that channel.` : 'Every channel.'}</p>
             {/if}
         </div>
+        {/if}
     </section>
+    {/if}
 
     <section class="cs-block" data-anchor="role-permissions">
         <h3 class="cs-heading">Permissions</h3>
         <p class="cs-lede">You can only turn on permissions you hold yourself.</p>
-        {#each GROUPS as group (group.title)}
+        {#each groups as group (group.title)}
             <p class="cs-perm-group">{group.title}</p>
             {#each group.perms as p (p.name)}
                 <label class="toggle-container cs-perm" class:disabled={!canToggle(p.bit)}>
@@ -290,7 +382,7 @@
         {/each}
     </section>
 
-    {#if edit.id !== null}
+    {#if edit.id !== null && !edit.everyone}
         <section class="cs-block" data-anchor="role-members">
             <div class="cs-heading-row">
                 <h3 class="cs-heading">Members</h3>
@@ -340,6 +432,11 @@
                     {/each}
                 {/if}
             </div>
+        </section>
+    {/if}
+    {#if v2 && editable && edit.id !== null && !edit.everyone}
+        <section class="cs-block" data-anchor="role-delete">
+            <button class="cs-btn-danger" disabled={st.roles.busy} onclick={() => h.deleteRole(current)}>Delete Role</button>
         </section>
     {/if}
 {/if}

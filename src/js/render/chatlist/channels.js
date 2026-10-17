@@ -20,7 +20,10 @@
 function visibleChannels(channels) {
     return (channels || [])
         .filter(c => !(c.private && c.readable === false))
-        .map(c => ({ id: c.channel_id, name: c.name, private: !!c.private, readable: true }));
+        .map(c => ({
+            id: c.channel_id, name: c.name, private: !!c.private, readable: true,
+            category: c.category_id || null, topic: c.topic || '', view: c.view || 'chat',
+        }));
 }
 
 function lockedChannels(channels) {
@@ -44,8 +47,10 @@ function leaveHiddenChannel(communityId) {
     if (target) openChat(target);
 }
 
-/** communityId → [{ id, name }], as last read from the community documents. */
+/** communityId → [{ id, name, private, category, topic, view }] in sidebar order, as last read. */
 const communityChannelsCache = new Map();
+/** communityId → [{ id, name }]: its Categories in sidebar order. */
+const communityCategoriesCache = new Map();
 /** Per community, the private channels it lists that we hold no key for: named, never opened. */
 const communityLockedChannels = new Map();
 /** communityIds whose channel list is expanded in the chat list. */
@@ -66,6 +71,7 @@ function loadCommunityChannels() {
             for (const community of list || []) {
                 communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
                 communityLockedChannels.set(community.community_id, lockedChannels(community.channels));
+                communityCategoriesCache.set(community.community_id, categoriesOf(community.categories));
             }
             for (const community of list || []) {
                 communityChanged(community.community_id);
@@ -76,13 +82,140 @@ function loadCommunityChannels() {
         .finally(() => { communityChannelsLoading = false; });
 }
 
+function categoriesOf(categories) {
+    return (categories || []).map(k => ({ id: k.category_id, name: k.name }));
+}
+
 /** Adopt a channel set straight off a `get_community` summary the caller already fetched. */
-function setCommunityChannels(communityId, channels) {
+function setCommunityChannels(communityId, channels, categories) {
     if (!communityId || !Array.isArray(channels)) return;
     communityChannelsCache.set(communityId, visibleChannels(channels));
     communityLockedChannels.set(communityId, lockedChannels(channels));
+    if (Array.isArray(categories)) communityCategoriesCache.set(communityId, categoriesOf(categories));
+    communityChanged(communityId);
     leaveHiddenChannel(communityId);
 }
+
+/** The open channel's topic, '' when it has none. */
+function communityChannelTopic(chat) {
+    const communityId = communityIdOfChat(chat);
+    return (communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id)?.topic) || '';
+}
+
+/** A community's Categories in sidebar order ([] before the first load lands). */
+function getCommunityCategories(communityId) {
+    return communityCategoriesCache.get(communityId) || [];
+}
+
+/**
+ * Move a channel into `categoryId` (null = uncategorized) at `index` among that group's
+ * channels. Shown at once; the list re-reads what the backend kept when the publish lands.
+ */
+async function moveCommunityChannel(communityId, channelId, categoryId, index) {
+    const channels = communityChannelsCache.get(communityId);
+    const moved = channels?.find(c => c.id === channelId);
+    if (!moved) return;
+    const rest = channels.filter(c => c.id !== channelId);
+    const group = rest.filter(c => (c.category || null) === (categoryId || null));
+    const anchor = group[index - 1];
+    const next = { ...moved, category: categoryId || null };
+    let at = anchor ? rest.indexOf(anchor) + 1 : (group[0] ? rest.indexOf(group[0]) : rest.length);
+    if (!anchor && !group[0] && categoryId) {
+        // An empty Category: after the last channel of every Category above it.
+        const order = getCommunityCategories(communityId).map(k => k.id);
+        const before = new Set(order.slice(0, order.indexOf(categoryId)));
+        const last = rest.reduce((i, c, j) => (!c.category || before.has(c.category) ? j : i), -1);
+        at = last + 1;
+    }
+    rest.splice(at, 0, next);
+    communityChannelsCache.set(communityId, rest);
+    communityChanged(communityId);
+    try {
+        await invoke('move_community_channel', { communityId, channelId, categoryId: categoryId || null, index });
+    } catch (e) {
+        showToast(String(e));
+    }
+    refreshCommunityChannels();
+}
+
+/** Move a Category to `index` among the Categories. */
+async function moveCommunityCategory(communityId, categoryId, index) {
+    const cats = getCommunityCategories(communityId);
+    const moved = cats.find(k => k.id === categoryId);
+    if (!moved) return;
+    const rest = cats.filter(k => k.id !== categoryId);
+    rest.splice(Math.min(index, rest.length), 0, moved);
+    communityCategoriesCache.set(communityId, rest);
+    communityChanged(communityId);
+    try {
+        await invoke('move_community_category', { communityId, categoryId, index });
+    } catch (e) {
+        showToast(String(e));
+    }
+    refreshCommunityChannels();
+}
+
+async function promptCreateCategory(communityId) {
+    const name = await popupConfirm('New category', 'A heading to group channels under.', false, 'category name');
+    if (!name || !String(name).trim()) return;
+    try {
+        await invoke('create_community_category', { communityId, name: String(name).trim() });
+        refreshCommunityChannels();
+    } catch (e) {
+        await popupConfirm("Couldn't add the category", escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    }
+}
+
+async function promptRenameCategory(communityId, category) {
+    const name = await popupConfirm('Rename category', escapeHtml(category.name), false, 'category name');
+    if (!name || !String(name).trim()) return;
+    try {
+        await invoke('rename_community_category', { communityId, categoryId: category.id, name: String(name).trim() });
+        refreshCommunityChannels();
+    } catch (e) {
+        showToast(String(e));
+    }
+}
+
+async function promptDeleteCategory(communityId, category) {
+    const ok = await popupConfirm('Delete category',
+        `Delete <b>${escapeHtml(category.name)}</b>? Its channels stay, uncategorized.`,
+        false, '', 'vector_warning.svg');
+    if (!ok) return;
+    try {
+        await invoke('delete_community_category', { communityId, categoryId: category.id });
+        refreshCommunityChannels();
+    } catch (e) {
+        showToast(String(e));
+    }
+}
+
+/** A Category header's menu: what a manager can do with it. */
+function openCategoryMenu(communityId, category, x, y) {
+    if (!communityCanAddChannels(communityId)) return;
+    showContextMenu({ x, y, items: [
+        { label: 'Create Channel', icon: 'plus', onClick: () => promptCreateChannel(communityId, false, category.id) },
+        { label: 'Create Private Channel', icon: 'locked', onClick: () => promptCreateChannel(communityId, true, category.id) },
+        { divider: true },
+        { label: 'Rename Category', icon: 'edit', onClick: () => promptRenameCategory(communityId, category) },
+        { label: 'Delete Category', icon: 'x', danger: true, onClick: () => promptDeleteCategory(communityId, category) },
+    ] });
+}
+
+VectorSvelte.setScreen('channelEditor', {
+    h: {
+        save: async ({ communityId, channelId, name, topic, view }) => {
+            VectorSvelte.setChannelEditorBusy(true);
+            try {
+                await invoke('edit_community_channel', { communityId, channelId, name, topic, view });
+                VectorSvelte.closeChannelEditor();
+                refreshCommunityChannels();
+            } catch (e) {
+                VectorSvelte.setChannelEditorBusy(false, String(e));
+            }
+        },
+    },
+});
 
 /** Channels for a community, or null before the first load lands. */
 function getCommunityChannels(communityId) {
@@ -301,6 +434,13 @@ async function openCommunityMenu(chat, ev, at) {
         icon: 'add-user',
         onClick: () => openCommunityInvitePanel(chat),
     });
+    if (caps?.manage_channels) {
+        items.push({
+            label: 'Create Category',
+            icon: 'plus',
+            onClick: () => promptCreateCategory(cf.community_id),
+        });
+    }
     if (communitySettingsWritable(caps)) {
         items.push({
             label: 'Community Settings',
@@ -381,6 +521,10 @@ async function openChannelMenu(communityId, channel, x, y) {
         items.push({ divider: true });
     }
     items.push(...await notifyMenuItems(channel.id, communityId));
+    if (communityCanAddChannels(communityId)) {
+        items.push({ divider: true });
+        items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => VectorSvelte.openChannelEditor(communityId, channel) });
+    }
     items.push(...copyLinkItems('Channel', { community: communityId, channel: channel.id }));
     items.push(...copyIdItems('Channel', channel.id));
     // The primary channel anchors the community's row and history; the backend refuses to tombstone it.
@@ -397,7 +541,7 @@ async function openChannelMenu(communityId, channel, x, y) {
     showContextMenu({ x, y, items });
 }
 
-async function promptCreateChannel(communityId, isPrivate = false) {
+async function promptCreateChannel(communityId, isPrivate = false, categoryId = null) {
     const name = await popupConfirm(isPrivate ? 'New private channel' : 'New channel',
         isPrivate
             ? 'Only members you grant access to can read it.'
@@ -405,7 +549,7 @@ async function promptCreateChannel(communityId, isPrivate = false) {
         false, 'channel name');
     if (!name || !String(name).trim()) return;
     try {
-        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate });
+        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate, categoryId });
         refreshCommunityChannels();
         expandedCommunities.add(communityId);
         openCommunityChannel(communityId, { id: channelId, name });

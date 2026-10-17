@@ -1,13 +1,16 @@
 <script>
     // A community's channels: nested under its chat-list row as a flat disclosure, or as
-    // the widescreen pane in Public / Private sections. Each row derives its own weight
-    // (muted, unread, pings) from its chat's signal, so a message repaints one row.
+    // the widescreen pane in its Categories (Public / Private sections where it has none).
+    // A manager drags channels between and within them, and Categories among themselves.
+    // Each row derives its own weight (muted, unread, pings) from its chat's signal, so a
+    // message repaints one row.
     import { communityVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
+    import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
-    // h: getChannels, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
+    // h: getChannels, getCategories, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
     //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelMenu,
-    //    attachLongPressContextMenu, createChannel, deleteChannel
+    //    openCategoryMenu, attachLongPressContextMenu, createChannel, deleteChannel, moveChannel, moveCategory
 
     const state = $derived.by(() => {
         communityVersion(communityId);
@@ -23,19 +26,102 @@
     // The pane's owner dims its bottom fadeout when nothing rendered.
     $effect(() => { onShown(!!state); });
 
-    // A section is { id, label, channels, canAdd }: the day the backend grows user-defined
-    // sections only this grouping changes. Today the protocol knows public vs private.
+    const categories = $derived.by(() => { communityVersion(communityId); return h.getCategories(communityId); });
+
+    // A section is { id, label, channels, canAdd, category }: a Category, the channels filed
+    // under none (first, without a heading), or, in a community without Categories, the
+    // Public and Private halves of its one list.
     const sections = $derived.by(() => {
         if (!state) return [];
         const { channels, canManage } = state;
         const out = [];
-        const open = channels.filter(c => !c.private);
-        const shut = channels.filter(c => c.private);
-        if (open.length) out.push({ id: 'public', label: 'Public', channels: open, canAdd: canManage });
-        if (shut.length) out.push({ id: 'private', label: 'Private', channels: shut, canAdd: canManage });
-        if (!out.length && canManage) out.push({ id: 'public', label: 'Public', channels: [], canAdd: true });
+        if (!categories.length) {
+            const open = channels.filter(c => !c.private);
+            const shut = channels.filter(c => c.private);
+            if (open.length) out.push({ id: 'public', label: 'Public', channels: open, canAdd: canManage, category: null });
+            if (shut.length) out.push({ id: 'private', label: 'Private', channels: shut, canAdd: canManage, category: null });
+            if (!out.length && canManage) out.push({ id: 'public', label: 'Public', channels: [], canAdd: true, category: null });
+            return out;
+        }
+        const loose = channels.filter(c => !c.category);
+        if (loose.length || (canManage && dragging?.kind === 'channel')) {
+            out.push({ id: 'none', label: '', channels: loose, canAdd: false, category: null, headless: true });
+        }
+        for (const k of categories) {
+            const inside = channels.filter(c => c.category === k.id);
+            // A Category shows while it holds a channel the viewer can see, or to a manager.
+            if (!inside.length && !canManage) continue;
+            out.push({ id: k.id, label: k.name, channels: inside, canAdd: canManage, category: k });
+        }
         return out;
     });
+
+    // ── organising ── (the role list's gesture and look)
+    const rowEls = new Map();
+    const headEls = new Map();
+    function tracked(map) {
+        return (node, id) => { map.set(id, node); return { destroy() { if (map.get(id) === node) map.delete(id); } }; };
+    }
+    const rowEl = tracked(rowEls);
+    const headEl = tracked(headEls);
+    let dragging = $state(null);   // { kind: 'channel' | 'category', id }
+    let drop = $state(null);       // { key, before }, key 'ch:<id>' or 'cat:<id>'
+    let ghost = null;
+
+    function targets() {
+        if (!dragging) return [];
+        const heads = categories.filter((k) => k.id !== dragging.id).map((k) => ({ key: `cat:${k.id}`, el: headEls.get(k.id) }));
+        if (dragging.kind === 'category') return heads.filter((t) => t.el);
+        const rows = (state?.channels || []).filter((c) => c.id !== dragging.id).map((c) => ({ key: `ch:${c.id}`, el: rowEls.get(c.id) }));
+        return [...rows, ...heads].filter((t) => t.el);
+    }
+    const resolve = (y) => nearestByCentre(targets(), 0, y, 'y');
+
+    function land(t) {
+        if (!t || !dragging) return;
+        const [kind, key] = [t.key.slice(0, t.key.indexOf(':')), t.key.slice(t.key.indexOf(':') + 1)];
+        if (dragging.kind === 'category') {
+            const order = categories.map((k) => k.id).filter((id) => id !== dragging.id);
+            const at = order.indexOf(key) + (t.before ? 0 : 1);
+            if (categories.map((k) => k.id).join() !== [...order.slice(0, at), dragging.id, ...order.slice(at)].join()) {
+                h.moveCategory(communityId, dragging.id, at);
+            }
+            return;
+        }
+        const channels = state.channels;
+        const moved = channels.find((c) => c.id === dragging.id);
+        // On a heading: the top of that Category.
+        const category = kind === 'cat' ? key : (channels.find((c) => c.id === key)?.category || null);
+        const group = channels.filter((c) => c.id !== dragging.id && (c.category || null) === category);
+        const index = kind === 'cat' ? 0 : group.findIndex((c) => c.id === key) + (t.before ? 0 : 1);
+        const was = channels.filter((c) => (c.category || null) === category);
+        if ((moved.category || null) === category && was.indexOf(moved) === index) return;
+        h.moveChannel(communityId, dragging.id, category, index);
+    }
+
+    function gestures(kind, id, onMenu) {
+        return {
+            onMenu,
+            onDragStart: (ev, node) => { dragging = { kind, id }; ghost = dragGhost(node, 'chatlist-drag-ghost'); },
+            onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(mv.clientY); },
+            onDragEnd: (up) => {
+                const t = resolve(up.clientY);
+                ghost?.remove(); ghost = null;
+                land(t);
+                dragging = null; drop = null;
+            },
+            ignore: () => !state?.canManage,
+        };
+    }
+    // A manager's rows reorder; everyone else's keep the plain long-press menu.
+    function channelGesture(node, channel) {
+        const menu = (x, y) => h.openChannelMenu(communityId, channel, x, y);
+        if (pane && state?.canManage) return reorderable(node, gestures('channel', channel.id, menu));
+        return h.attachLongPressContextMenu(node, menu);
+    }
+    function categoryGesture(node, category) {
+        return reorderable(node, gestures('category', category.id, (x, y) => h.openCategoryMenu(communityId, category, x, y)));
+    }
 
     // Collapsed sections: seeded from the persisted set, flipped here so the fold is
     // immediate; the app persists the change.
@@ -65,7 +151,6 @@
 {#snippet row(channel, canManage)}
     {@const r = rowState(channel.id)}
     <!-- The menu is the only way in: the row itself stays navigation. -->
-    {@const menu = (node) => h.attachLongPressContextMenu(node, (x, y) => h.openChannelMenu(communityId, channel, x, y))}
     <!-- Three tiers, loudest first: something to read, nothing to read, and a room you asked
          to be quiet. Muted wins outright: a standing instruction, not a state unread overrides. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -74,9 +159,15 @@
          class:is-muted={r.muted}
          class:has-unread={r.unread}
          class:is-read={!r.unread}
-         use:menu
+         class:is-dragging={dragging?.id === channel.id}
+         class:drop-above={drop?.key === `ch:${channel.id}` && drop.before}
+         class:drop-below={drop?.key === `ch:${channel.id}` && !drop.before}
+         title={channel.topic || null}
+         use:rowEl={channel.id}
+         use:channelGesture={channel}
          onclick={() => h.openChannel(communityId, channel)}>
-        <span class="chatlist-channel-hash"><span class="icon icon-channel-hash"></span></span>
+        <!-- Grouped by Category, a private channel says so with its own glyph. -->
+        <span class="chatlist-channel-hash"><span class="icon {categories.length && channel.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
         <span class="chatlist-channel-name cutoff">{channel.name}</span>
         <!-- A number only for someone calling your name; ordinary unread is the row's own weight. -->
         {#if r.pings}
@@ -107,10 +198,22 @@
             {/if}
         </div>
     {:else}
-        <div class="chatlist-channels chatlist-channels-pane">
+        {#key state.canManage}
+        <div class="chatlist-channels chatlist-channels-pane" class:is-organising={!!dragging}>
             {#each sections as section (section.id)}
-                <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)}>
-                    <div class="chatlist-channel-section-head">
+                {#if section.headless}
+                    <div class="chatlist-channel-section chatlist-channel-section-loose">
+                        <div class="chatlist-channel-section-body">
+                            {#each section.channels as channel (channel.id)}
+                                {@render row(channel, state.canManage)}
+                            {/each}
+                        </div>
+                    </div>
+                {:else}
+                <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)} class:is-dragging={dragging?.id === section.id}>
+                    <!-- A Category's heading is its handle: dragged among the others, or the top
+                         of the Category a dragged channel lands in. -->
+                    {#snippet head()}
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                         <div class="chatlist-channel-section-toggle btn" onclick={() => toggle(section.id)}>
                             <span class="chatlist-channel-section-label">{section.label}</span>
@@ -118,19 +221,31 @@
                         </div>
                         {#if section.canAdd}
                             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                            <div class="chatlist-channel-section-add btn" title="Add a {section.label.toLowerCase()} channel"
-                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, section.id === 'private'); }}>
+                            <div class="chatlist-channel-section-add btn" title={section.category ? `Add a channel to ${section.label}` : `Add a ${section.label.toLowerCase()} channel`}
+                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, section.id === 'private', section.category?.id || null); }}>
                                 <span class="icon icon-plus"></span>
                             </div>
                         {/if}
-                    </div>
+                    {/snippet}
+                    {#if section.category && state.canManage}
+                        <div class="chatlist-channel-section-head"
+                             class:drop-above={drop?.key === `cat:${section.id}` && drop.before}
+                             class:drop-below={drop?.key === `cat:${section.id}` && !drop.before}
+                             use:headEl={section.id} use:categoryGesture={section.category}>
+                            {@render head()}
+                        </div>
+                    {:else}
+                        <div class="chatlist-channel-section-head">{@render head()}</div>
+                    {/if}
                     <div class="chatlist-channel-section-body">
                         {#each section.channels as channel (channel.id)}
                             {@render row(channel, section.canAdd)}
                         {/each}
                     </div>
                 </div>
+                {/if}
             {/each}
         </div>
+        {/key}
     {/if}
 {/if}

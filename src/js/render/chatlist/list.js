@@ -120,7 +120,11 @@ function chatlistSnapshot() {
  * @property {(chatId: string) => void} openChannel
  * @property {(communityId: string, channel: object, x: number, y: number) => void} openChannelMenu
  * @property {(vm: object) => void} rowClick
- * @property {(communityId: string, isPrivate: boolean) => void} createChannel
+ * @property {(communityId: string, isPrivate: boolean, categoryId?: string|null) => void} createChannel
+ * @property {(communityId: string) => object[]} getCategories   [{ id, name }] in sidebar order
+ * @property {(communityId: string, channelId: string, categoryId: string|null, index: number) => void} moveChannel
+ * @property {(communityId: string, categoryId: string, index: number) => void} moveCategory
+ * @property {(communityId: string, category: object, x: number, y: number) => void} openCategoryMenu
  * @property {(chatId: string) => void} deleteChannel
  * @property {(image: string) => Promise<string|null>} cacheInviteLogo
  * @property {(invite: object) => void} acceptInvite
@@ -181,6 +185,10 @@ function chatlistHelpers() {
         },
         createChannel: promptCreateChannel,
         deleteChannel: promptDeleteChannel,
+        getCategories: getCommunityCategories,
+        moveChannel: moveCommunityChannel,
+        moveCategory: moveCommunityCategory,
+        openCategoryMenu,
         // invite rows
         cacheInviteLogo: (image) => invoke('cache_invite_logo', { image }).then(path => path ? convertFileSrc(path) : null),
         acceptInvite: acceptCommunityInvite,

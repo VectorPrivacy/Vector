@@ -5710,10 +5710,6 @@ pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: 
     .await
 }
 
-/// Seal what `member` decided before reducing their authority (CORD-04 §9): every standing
-/// Control head they authored is listed in their Tenure at the standing they hold now, so a
-/// strip, a deletion, a demotion or a ban leaves their decisions standing. Refuses when the
-/// writer couldn't grant that standing, since a head it can't seal would fall away.
 /// How a reduction treats a member whose standing its writer can't seal whole.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Seal {
