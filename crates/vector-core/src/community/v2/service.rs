@@ -12897,6 +12897,54 @@ mod tests {
         assert_eq!(members.len(), 2);
     }
 
+    #[tokio::test]
+    async fn a_member_asleep_through_activation_catches_up_on_waking() {
+        // A device that stopped before Roles v2 (as code from before it would) misses the
+        // switch, a Role only v2 knows, and a ban that Role's holder refounds. On waking with
+        // this code it folds the new Roster and follows the rotation it would have refused.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Sleeper", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        follow_control(&bed.relay, &joined).await.unwrap();
+
+        bed.swap_to(&owner);
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        activate_roles_v2(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::BAN | Permissions::KICK).await.unwrap();
+        let x = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![mods]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&x);
+        set_members_banned(&bed.relay, held().id(), &[Keys::generate().public_key()], true).await.unwrap();
+        act_as(&owner.keys);
+        let epoch = held().root_epoch;
+        assert_ne!(epoch, community.root_epoch, "the Mods holder refounded");
+        send_message(&bed.relay, &held(), &general, "after the ban").await.unwrap();
+
+        // Waking: floors written before families existed record none.
+        bed.swap_to(&member);
+        crate::db::get_write_connection_guard_static().unwrap().execute("UPDATE community_edition_heads SET family = NULL", []).unwrap();
+        let mine = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let session = crate::db::current_session();
+        let _ = follow_rekeys(&bed.relay, &mine(), &session).await;
+        assert_eq!(mine().root_epoch, community.root_epoch, "on its old Roster the rotator has no standing");
+        follow_control(&bed.relay, &mine()).await.unwrap();
+        follow_rekeys(&bed.relay, &mine(), &session).await.unwrap();
+        follow_control(&bed.relay, &mine()).await.unwrap();
+        assert_eq!(mine().root_epoch, epoch, "it followed the rotation");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(roster.everyone.is_some(), "on the new Roster");
+        assert!(roster.is_authorized(&x.public_key().to_hex(), Some(&owner.keys.public_key().to_hex()), Permissions::BAN), "with the Role only it knows");
+        assert!(texts_in(&bed.relay, &mine(), &general).await.contains(&"after the ban".to_string()), "and reads what was said since");
+    }
+
     /// Join-time ban gate: an honest client whose npub is on the authorized banlist
     /// refuses to join — no Guestbook Join publish, no local write — through the shared
     /// accept path every door (direct invite, parked, public link, migration) funnels into.
