@@ -9867,7 +9867,8 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                     && (sealed || citation_ok_in_fold(community.id(), &authority.heads, owner_hex.as_deref(), &e.author, e.authority.as_ref()))
             })
             .collect();
-        let rank = |author_hex: &str| fork_rank(&authority.roles, owner_hex.as_deref(), author_hex);
+        // A Writers ledger settles a tie on what never changes: a later change of rank can't move it.
+        let rank = |author_hex: &str| if writers_channel.is_some() { 0 } else { fork_rank(&authority.roles, owner_hex.as_deref(), author_hex) };
         let ledger_ok = writers_channel
             .map(|ch| {
                 // What this reader already holds anchors what builds on it.
@@ -10020,8 +10021,29 @@ fn ledger_chain_ok(
         None => own(e) && e.version == 1 && parsed.get(&e.self_hash).is_some_and(|l| l.is_first()),
         Some(p) => !by_hash.contains_key(&p) && !anchored(e) && own(e),
     };
-    // The roots an authorized edition builds on, each with the highest version one reaches.
-    let mut endorsed: HashMap<[u8; 32], u64> = HashMap::new();
+    // Down each chain from what is judged so far; one is at most as long as the group.
+    let grow = |mut ok: HashMap<[u8; 32], bool>| {
+        for _ in 0..group.len() {
+            let mut moved = false;
+            for e in group {
+                if ok.contains_key(&e.self_hash) {
+                    continue;
+                }
+                let Some(p) = e.prev_hash else { continue };
+                if let Some(&before) = ok.get(&p) {
+                    let extends = parsed.get(&e.self_hash).zip(parsed.get(&p)).is_some_and(|(l, b)| l.extends(b));
+                    ok.insert(e.self_hash, before && own(e) && extends);
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        ok
+    };
+    // The roots an authorized edition builds on.
+    let mut endorsed: Vec<&ParsedEdition> = Vec::new();
     for (e, _) in group.iter().zip(authorized).filter(|(_, &a)| a) {
         let mut at = *e;
         for _ in 0..group.len() {
@@ -10030,17 +10052,21 @@ fn ledger_chain_ok(
                 None => break,
             }
         }
-        if root(at) {
-            let tip = endorsed.entry(at.self_hash).or_default();
-            *tip = (*tip).max(e.version);
+        if root(at) && !endorsed.iter().any(|r| r.self_hash == at.self_hash) {
+            endorsed.push(at);
         }
     }
-    // The longest history wins, as for every Control entity; the fork key settles a tie.
+    // The longest history wins, as for every Control entity: the highest version an authorized
+    // edition that stands reaches from each root. The fork key settles a tie.
     let chosen = endorsed
         .iter()
-        .filter_map(|(h, tip)| by_hash.get(h).map(|e| (*tip, e)))
-        .min_by_key(|(tip, e)| (std::cmp::Reverse(*tip), key(e)))
-        .map(|(_, e)| e.self_hash);
+        .map(|r| {
+            let ok = grow(HashMap::from([(r.self_hash, true)]));
+            let tip = group.iter().zip(authorized).filter(|(e, &a)| a && ok.get(&e.self_hash) == Some(&true)).map(|(e, _)| e.version).max().unwrap_or(0);
+            (tip, *r)
+        })
+        .min_by_key(|(tip, r)| (std::cmp::Reverse(*tip), key(r)))
+        .map(|(_, r)| r.self_hash);
     let mut ok: HashMap<[u8; 32], bool> = HashMap::new();
     if let Some((h, _)) = anchor.filter(|(h, _)| by_hash.contains_key(h)) {
         ok.insert(*h, true);
@@ -10055,25 +10081,7 @@ fn ledger_chain_ok(
             ok.insert(e.self_hash, Some(e.self_hash) == chosen);
         }
     }
-    // Then down each chain; one is at most as long as the group.
-    for _ in 0..group.len() {
-        let mut moved = false;
-        for e in group {
-            if ok.contains_key(&e.self_hash) {
-                continue;
-            }
-            let Some(p) = e.prev_hash else { continue };
-            if let Some(&before) = ok.get(&p) {
-                let extends = parsed.get(&e.self_hash).zip(parsed.get(&p)).is_some_and(|(l, b)| l.extends(b));
-                ok.insert(e.self_hash, before && own(e) && extends);
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
-        }
-    }
-    ok
+    grow(ok)
 }
 
 /// Fold one entity's editions against its persisted floor into a head index (into the
@@ -24757,17 +24765,18 @@ mod tests {
         publish_marked(&bed.relay, &held(), &x, vsk::WRITERS, &eid, 2, head(), &early.to_string()).await;
         follow_control(&bed.relay, &held()).await.unwrap();
         assert_eq!(held().channel(&general).unwrap().writers, Some(first.clone()), "dated before the entry it follows");
-        // Nor one naming a predecessor nobody serves while older editions are served: a second
-        // root stands for nothing, and while its signer stands neither does the first.
+        // A manager's root beside the chain, with the longer history: a reader that holds the
+        // chain keeps it, a fresh one takes the longer, and with its signer's standing gone, the first.
         let y = Keys::generate();
         let mods = create_role_v2(&bed.relay, &held(), "Mod", 0, Permissions::MANAGE_CHANNELS | crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
         set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        publish_marked(&bed.relay, &held(), &y, vsk::WRITERS, &eid, 2, Some([0x3c; 32]), &mint(&first, at(2), 8, &y).to_json()).await;
+        let beside = mint(&first, at(2), 8, &y);
+        publish_marked(&bed.relay, &held(), &y, vsk::WRITERS, &eid, 2, Some([0x3c; 32]), &beside.to_json()).await;
         follow_control(&bed.relay, &held()).await.unwrap();
         assert_eq!(held().channel(&general).unwrap().writers, Some(first.clone()), "a dangling predecessor");
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == first.to_json()), "a fresh fold takes the first edition, not the dangling one");
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == beside.to_json()), "a fresh fold takes the longer history");
         publish_grant(&bed.relay, &held(), &owner.keys, &y.public_key(), vec![], 2).await;
         follow_control(&bed.relay, &held()).await.unwrap();
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
@@ -25237,10 +25246,20 @@ mod tests {
         let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner.keys, Timestamp::from_secs(at / 1000)).unwrap();
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         assert_ne!(x_first, owners);
+        // The lower inner id wins, whoever signed it: what never changes settles the tie.
+        let ids: Vec<([u8; 32], String)> = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.vsk == vsk::WRITERS).map(|e| (e.inner_id, e.content)).collect();
+        let winner = ids.iter().min_by_key(|(id, _)| *id).map(|(_, c)| c.clone()).unwrap();
+        let winner = Ledger::parse(&winner).unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(held().channel(&general).unwrap().writers, Some(owners.clone()), "the device that held x's converges on the owner's");
+        assert_eq!(held().channel(&general).unwrap().writers, Some(winner.clone()), "the device that held one converges on the winner");
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == owners.to_json()), "and a fresh reader takes the same");
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == winner.to_json()), "and a fresh reader takes the same");
+        // A change of rank moves nothing.
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers, Some(winner.clone()));
+        let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == winner.to_json()));
         // The ledger moves on from there.
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
         let reopened = held().channel(&general).unwrap().writers.clone().unwrap();

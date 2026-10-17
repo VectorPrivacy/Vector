@@ -12,6 +12,9 @@ const BACKSTOP_DAMP_MS: u64 = 6 * 3600 * 1000;
 /// How long a manager waits before moving a Channel's ledger in line with its permissions again.
 const BACKSTOP_MOVE_MS: u64 = 3600 * 1000;
 
+/// How long a backstop that read the Control Plane short waits before reading it again.
+const BACKSTOP_RETRY_MS: u64 = 10 * 60 * 1000;
+
 /// How long a manager who may post goes unserved before it mints a key it can use.
 const STARVED_MS: u64 = 10 * 60 * 1000;
 
@@ -181,6 +184,8 @@ async fn reopen<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, c
     publish_ledger(transport, community, ch, &ledger, Spell::Open).await
 }
 
+/// How every refusal that is one Channel's ledger's own begins.
+const LEDGER_OWN: &str = "this channel's writer ledger";
 const LEDGER_MOVED: &str = "this channel's writer ledger moved; nothing published over it";
 
 /// Whether an edition appending to `base` would chain from the head this device holds: the
@@ -255,11 +260,16 @@ async fn settle_writers_moved<T: Transport + ?Sized>(transport: &T, community: &
             candidates.push(pk);
         }
     }
-    // One Channel's failure never stops the rest; the first is reported.
+    // A Channel whose ledger won't take this never stops the rest; anything else, a relay that
+    // isn't answering, stops them all rather than waiting it out once per Channel.
     let mut failed: Option<String> = None;
     for ch in &held.channels {
         if let Err(e) = settle_one(transport, &held, ch, before, after, (&was, &now), &candidates, may_manage).await {
+            let theirs = e.starts_with(LEDGER_OWN);
             failed.get_or_insert(e);
+            if !theirs {
+                break;
+            }
         }
     }
     failed.map_or(Ok(()), Err)
@@ -335,6 +345,8 @@ enum Lane {
     Relayed,
     Starved,
     Move,
+    /// After a read that came back short: try again in a while, not every pass.
+    Retry,
 }
 
 impl Lane {
@@ -344,6 +356,7 @@ impl Lane {
             Lane::Starved => ([0; 32], BACKSTOP_DAMP_MS),
             Lane::Move => ([1; 32], BACKSTOP_MOVE_MS),
             Lane::Relayed => ([2; 32], BACKSTOP_DAMP_MS),
+            Lane::Retry => ([3; 32], BACKSTOP_RETRY_MS),
         }
     }
 }
@@ -521,9 +534,14 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
 /// [`backstop`], then damping `lanes` unless it found the ledger moved: a failure counts as an
 /// attempt, or every pass would mint and deliver again.
 async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey], lanes: &[Lane]) -> Result<bool, String> {
+    if !due(&ch.id, Lane::Retry) {
+        return Ok(false);
+    }
     let result = backstop(transport, held, ch, posters, cut).await;
-    if !matches!(result, Ok(Backstop::Moved)) {
-        acted(&ch.id, lanes);
+    match result {
+        Ok(Backstop::Moved) => {}
+        Ok(Backstop::Short) => acted(&ch.id, &[Lane::Retry]),
+        _ => acted(&ch.id, lanes),
     }
     result.map(|b| b == Backstop::Acted)
 }
@@ -532,8 +550,10 @@ async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Backstop {
     Acted,
-    /// The ledger moved, or the read came back short: nothing to damp.
+    /// The ledger moved: nothing to damp.
     Moved,
+    /// A read came back short.
+    Short,
     /// A fresh read of the roster disagrees with the pass's.
     StoodDown,
 }
@@ -556,7 +576,7 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     // The roster the pass read may predate the change that moved the ledger.
     let now = fetch_authority(transport, &fresh).await;
     if !now.everyone_served || now.gapped {
-        return Ok(Backstop::Moved);
+        return Ok(Backstop::Short);
     }
     if restricts(&now.roles, &ch) != restricts(posters.roster, &ch) {
         return Ok(Backstop::StoodDown);
