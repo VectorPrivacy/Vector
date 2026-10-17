@@ -23696,6 +23696,9 @@ mod tests {
         assert_eq!(collect_writers(&bed.relay, &held(&community)).await.unwrap(), 0, "the channel no longer lets them post");
         crate::db::community::store_epoch_key(&cid_hex, &crate::community::v2::writers::secret_scope(&general), live.0, &[0x42; 32]).unwrap();
         assert!(!can_post(&held(&community), &general), "a held secret that doesn't derive to the ledger's address writes nothing");
+        crate::db::community::store_epoch_key(&cid_hex, &crate::community::v2::writers::secret_scope(&general), live.0, &live_secret).unwrap();
+        assert!(!can_post(&held(&community), &general), "and the right key is no licence once the channel stops letting them post");
+        assert!(send_message(&bed.relay, &held(&community), &general, "kept the key").await.is_err());
         assert!(!can_post(&held(&community), &general) && send_message(&bed.relay, &held(&community), &general, "denied").await.is_err());
         assert!(channel_texts(&bed.relay, &held(&community), &general).await.contains(&"second".to_string()), "still a reader");
 
@@ -23782,6 +23785,10 @@ mod tests {
         assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.delivered, 0);
         publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), 0, 0).await;
         follow_control(&bed.relay, &held(&community)).await.unwrap();
+        // A writer's blob at a non-writer's locator can't make the ledger churn.
+        let (live, live_secret, _) = writing::live_writer(&held(&community), held(&community).channel(&general).unwrap()).unwrap();
+        deliver_on_plane(&bed.relay, &held(&community), &general, scope, live, Some(crate::community::v2::writers::writer_address(&live_secret, &general, live)), &live_secret, &[m]).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 0, "a cut waits out its damping");
         bed.swap_to(&member);
         follow_control(&bed.relay, &held(&community)).await.unwrap();
         assert!(!can_post(&held(&community), &general));

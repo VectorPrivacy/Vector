@@ -3547,6 +3547,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_writer_posts_provenance_survives_a_reload() {
+        let (_tmp, _guard) = init_test_db();
+        let msg = Message { id: "from-a-writer".into(), content: "announced".into(), at: 1_000_000, writer: true, ..Default::default() };
+        save_message("npub1writers", &msg).await.unwrap();
+        let (_, back) = get_message_by_id("from-a-writer").await.unwrap().unwrap();
+        assert!(back.writer, "through the message view");
+        let last = get_all_chats_last_messages().await.unwrap();
+        assert!(last.values().flatten().find(|m| m.id == "from-a-writer").unwrap().writer, "and the chat list's last messages");
+        let plain = Message { id: "from-the-open".into(), content: "said".into(), at: 1_000_001, ..Default::default() };
+        save_message("npub1writers", &plain).await.unwrap();
+        assert!(!get_message_by_id("from-the-open").await.unwrap().unwrap().1.writer);
+    }
+
+    #[tokio::test]
     async fn a_delete_tombstone_survives_a_restart() {
         // NIP-09 is best-effort: a relay that ignored it re-serves the wrap days
         // later. The events row is gone by then and the in-session tombstone set
