@@ -197,7 +197,7 @@
                 isAdmin,
                 rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
                 rankLabel: heldBy.get(m.npub)?.name || null,
-                canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban),
+                canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban || caps.moderate_members),
                 canRole: mayRole(m.npub),
                 tier: tierOf(m.npub),
             });
@@ -322,8 +322,29 @@
 
     // Roles and moderation live on the row menu (right-click / long-press), with a "⋯"
     // handle on hover so it is discoverable without welding destructive buttons onto every row.
+    // A Timeout silences a member for a while, everywhere in the community.
+    const TIMEOUTS = [['60 seconds', 60], ['5 minutes', 300], ['10 minutes', 600], ['1 hour', 3600], ['1 day', 86400], ['1 week', 604800]];
+    async function timeout(vm, seconds) {
+        try {
+            await h.invoke('timeout_community_member', { communityId, npub: vm.npub, seconds });
+            h.showToast(seconds ? `${vm.display} is timed out` : `${vm.display}'s timeout is lifted`);
+        } catch (err) {
+            h.showToast(String(err));
+        }
+    }
     function menuItems(vm) {
         const items = [];
+        if (caps.moderate_members) {
+            items.push({
+                label: 'Timeout',
+                icon: 'clock',
+                submenu: () => [
+                    ...TIMEOUTS.map(([label, secs]) => ({ label, onClick: () => timeout(vm, secs) })),
+                    { divider: true },
+                    { label: 'Lift timeout', onClick: () => timeout(vm, 0) },
+                ],
+            });
+        }
         if (caps.kick) items.push({ label: 'Kick', hint: 'can rejoin with an invite', icon: 'x', onClick: () => remove(vm, false) });
         if (caps.ban) items.push({ label: 'Ban', hint: 'cannot rejoin', icon: 'x-user', danger: true, onClick: () => remove(vm, true) });
         return items;

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-timeout-community-member"
+description = "Enables the timeout_community_member command without any pre-configured scope."
+commands.allow = ["timeout_community_member"]
+
+[[permission]]
+identifier = "deny-timeout-community-member"
+description = "Denies the timeout_community_member command without any pre-configured scope."
+commands.deny = ["timeout_community_member"]

@@ -106,6 +106,19 @@ function setCommunityChannels(communityId, channels, categories) {
     leaveHiddenChannel(communityId);
 }
 
+/** Lock the composer while the local user is timed out in the open chat's community. */
+async function refreshTimeoutLock(chat) {
+    const communityId = communityIdOfChat(chat);
+    if (!communityId) return;
+    let running = null;
+    try { running = await invoke('get_community_timeouts', { communityId }); } catch { return; }
+    const mine = running?.[strPubkey];
+    if (!mine || strOpenChat !== chat.id) return;
+    const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    VectorSvelte.setLock('timeout', `You're timed out until ${until}`);
+    VectorSvelte.flushSync();
+}
+
 /** The open channel's topic, '' when it has none. */
 function communityChannelTopic(chat) {
     const communityId = communityIdOfChat(chat);

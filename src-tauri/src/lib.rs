@@ -1138,6 +1138,8 @@ pub fn run() {
             commands::community::get_channel_permissions,
             commands::community::set_channel_overwrite,
             commands::community::set_channel_sync,
+            commands::community::get_community_timeouts,
+            commands::community::timeout_community_member,
             commands::community::create_community_channel,
             commands::community::delete_community_channel,
             commands::community::set_community_image,

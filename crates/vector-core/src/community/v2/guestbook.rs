@@ -40,6 +40,10 @@ pub const SNAPSHOT_CHUNK: usize = 400;
 const TAG_INVITE: &str = "invite";
 const TAG_TARGET: &str = "p";
 const TAG_SNAP: &str = "snap";
+const TAG_UNTIL: &str = "until";
+
+/// The longest a Timeout runs past its own `created_at` (CORD-04 §8).
+pub const MAX_TIMEOUT_SECS: u64 = 28 * 24 * 3600;
 
 const VERB_JOIN: &str = "join";
 const VERB_LEAVE: &str = "leave";
@@ -133,6 +137,15 @@ pub fn build_kick_rumor(
 /// one-id-one-time invariant is what lets readers reject torn chunk sets.
 /// No survivors still yields one empty chunk, so the Refounding's guestbook
 /// step is observable either way.
+/// A Timeout of `target` until `until_secs` (unix seconds); one already past lifts it.
+pub fn build_timeout_rumor(actor: PublicKey, target: PublicKey, until_secs: u64, citation: Option<&AuthorityCitation>, at_ms: u64) -> UnsignedEvent {
+    let mut tags = vec![Tag::public_key(target), Tag::custom(TAG_UNTIL, [until_secs.to_string()])];
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
+    stream::build_rumor_ms(kind::TIMEOUT, actor, "", tags, at_ms)
+}
+
 pub fn build_snapshot_rumors(
     refounder: PublicKey,
     members: &[PublicKey],
@@ -246,6 +259,14 @@ pub enum GuestbookEntry {
         chunk: (u32, u32),
         at_ms: u64,
     },
+    /// A Timeout (CORD-04 §8): `target` silenced until `until_secs`.
+    Timeout {
+        actor: PublicKey,
+        target: PublicKey,
+        until_secs: u64,
+        citation: Option<AuthorityCitation>,
+        at_ms: u64,
+    },
 }
 
 impl GuestbookEntry {
@@ -255,7 +276,8 @@ impl GuestbookEntry {
             GuestbookEntry::Join { at_ms, .. }
             | GuestbookEntry::Leave { at_ms, .. }
             | GuestbookEntry::Kick { at_ms, .. }
-            | GuestbookEntry::Snapshot { at_ms, .. } => *at_ms,
+            | GuestbookEntry::Snapshot { at_ms, .. }
+            | GuestbookEntry::Timeout { at_ms, .. } => *at_ms,
         }
     }
 }
@@ -300,6 +322,33 @@ pub fn parse_guestbook_event(opened: &OpenedStream) -> Result<GuestbookEvent, Gu
             GuestbookEntry::Kick {
                 actor: opened.author,
                 target,
+                citation: AuthorityCitation::from_tags(&rumor.tags),
+                at_ms,
+            }
+        }
+        kind::TIMEOUT => {
+            let (mut target, mut until): (Option<PublicKey>, Option<u64>) = (None, None);
+            for t in rumor.tags.iter() {
+                let s = t.as_slice();
+                if s.len() >= 2 && s[0] == TAG_TARGET {
+                    if target.is_some() {
+                        return Err(GuestbookError::DuplicateTag(TAG_TARGET));
+                    }
+                    target = Some(PublicKey::from_hex(&s[1]).map_err(|_| GuestbookError::BadTag(TAG_TARGET))?);
+                } else if s.len() >= 2 && s[0] == TAG_UNTIL {
+                    if until.is_some() {
+                        return Err(GuestbookError::DuplicateTag(TAG_UNTIL));
+                    }
+                    if s[1].is_empty() || !s[1].bytes().all(|b| b.is_ascii_digit()) {
+                        return Err(GuestbookError::BadTag(TAG_UNTIL));
+                    }
+                    until = Some(s[1].parse().map_err(|_| GuestbookError::BadTag(TAG_UNTIL))?);
+                }
+            }
+            GuestbookEntry::Timeout {
+                actor: opened.author,
+                target: target.ok_or(GuestbookError::MissingTag(TAG_TARGET))?,
+                until_secs: until.ok_or(GuestbookError::MissingTag(TAG_UNTIL))?,
                 citation: AuthorityCitation::from_tags(&rumor.tags),
                 at_ms,
             }
@@ -507,11 +556,34 @@ pub fn coalesce(
                     );
                 }
             }
+            // Timeouts silence, they don't change who is a member.
+            GuestbookEntry::Timeout { .. } => {}
         }
     }
 
     supersede_by_refounding(&mut fold, events, horizon, snapshot_authority);
     fold
+}
+
+/// The Timeouts running at `now_secs` (CORD-04 §8): per target, the newest Timeout whose
+/// signer `may_time_out` that target; one already past lifts it. `until` is capped at 28
+/// days past the Timeout's own time, judged against the rumor so every reader agrees.
+/// Returns target → (from, until) in unix seconds.
+pub fn active_timeouts(events: &[GuestbookEvent], now_secs: u64, may_time_out: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool) -> BTreeMap<PublicKey, (u64, u64)> {
+    let mut newest: BTreeMap<PublicKey, (u64, [u8; 32], u64)> = BTreeMap::new();
+    for ev in events {
+        let GuestbookEntry::Timeout { actor, target, until_secs, citation, at_ms } = &ev.entry else { continue };
+        if !may_time_out(actor, target, citation.as_ref()) {
+            continue;
+        }
+        let from = at_ms / 1000;
+        let until = (*until_secs).min(from.saturating_add(MAX_TIMEOUT_SECS));
+        let key = (*at_ms, ev.rumor_id);
+        if newest.get(target).is_none_or(|(at, id, _)| (*at, *id) < key) {
+            newest.insert(*target, (*at_ms, ev.rumor_id, until));
+        }
+    }
+    newest.into_iter().filter(|(_, (_, _, until))| *until > now_secs).map(|(t, (at, _, until))| (t, (at / 1000, until))).collect()
 }
 
 /// A Refounding's guestbook replaces the old one. A local store appends across
@@ -645,6 +717,26 @@ pub fn complete_memberlist(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_newest_authorized_timeout_stands_capped_at_28_days() {
+        let (mod_, rogue, target) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        let ev = |actor, until_secs, at_secs: u64, id: u8| GuestbookEvent {
+            rumor_id: [id; 32],
+            entry: GuestbookEntry::Timeout { actor, target, until_secs, citation: None, at_ms: at_secs * 1000 },
+            epoch: None,
+            observed_at: None,
+        };
+        let may = |a: &PublicKey, _: &PublicKey, _: Option<&AuthorityCitation>| *a == mod_;
+        let far = 1_000 + 10 * MAX_TIMEOUT_SECS;
+        let got = active_timeouts(&[ev(mod_, far, 1_000, 1)], 2_000, &may);
+        assert_eq!(got[&target], (1_000, 1_000 + MAX_TIMEOUT_SECS), "capped against the Timeout's own time");
+        let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(rogue, 0, 1_500, 2)], 2_000, &may);
+        assert!(got.contains_key(&target), "an unauthorized lift lifts nothing");
+        let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(mod_, 1_200, 1_100, 3)], 2_000, &may);
+        assert!(got.is_empty(), "the newest authorized Timeout stands, here one already over");
+    }
+
     use super::super::super::{CommunityId, Epoch};
     use super::super::derive::guestbook_group_key;
     use super::*;
@@ -766,6 +858,17 @@ mod tests {
         // Uncited kick: the owner acting supreme — citation is simply None.
         let bare = through(&build_kick_rumor(admin.public_key(), target, None, 1_000), &admin);
         assert!(matches!(bare.entry, GuestbookEntry::Kick { citation: None, .. }));
+    }
+
+    #[test]
+    fn timeout_round_trips_and_refuses_a_malformed_until() {
+        let (admin, target) = (Keys::generate(), pk());
+        let ev = through(&build_timeout_rumor(admin.public_key(), target, 1_722_420_000, None, 1_722_410_000_301), &admin);
+        assert_eq!(ev.entry, GuestbookEntry::Timeout { actor: admin.public_key(), target, until_secs: 1_722_420_000, citation: None, at_ms: 1_722_410_000_301 });
+        let bad = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target), Tag::custom(TAG_UNTIL, ["-5"])], 1_000);
+        assert!(matches!(through_err(&bad, &admin), GuestbookError::BadTag(TAG_UNTIL)));
+        let missing = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target)], 1_000);
+        assert!(matches!(through_err(&missing, &admin), GuestbookError::MissingTag(TAG_UNTIL)));
     }
 
     #[test]

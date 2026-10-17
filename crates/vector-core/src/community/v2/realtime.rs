@@ -1189,7 +1189,7 @@ fn surface_presence(
         let (member, joined, at_ms, invited_by) = match &ev.entry {
             GuestbookEntry::Join { member, at_ms, invited_by } => (member, true, *at_ms, invited_by.clone()),
             GuestbookEntry::Leave { member, at_ms } => (member, false, *at_ms, None),
-            GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } => continue,
+            GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } | GuestbookEntry::Timeout { .. } => continue,
         };
         if banned.contains(&member.to_bytes()) {
             continue;

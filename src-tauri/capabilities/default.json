@@ -119,6 +119,8 @@
     "allow-get-channel-permissions",
     "allow-set-channel-overwrite",
     "allow-set-channel-sync",
+    "allow-get-community-timeouts",
+    "allow-timeout-community-member",
     "allow-create-community-channel",
     "allow-delete-community-channel",
     "allow-set-community-image",

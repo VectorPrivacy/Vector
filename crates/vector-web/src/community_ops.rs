@@ -60,6 +60,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_channel_permissions" => with_id(a, |id| a.str("channelId").and_then(|ch| core(VectorCore.channel_permissions_view(id, &ch)))),
             "set_channel_overwrite" => set_overwrite(a).await,
             "set_channel_sync" => set_sync(a).await,
+            "get_community_timeouts" => with_id(a, |id| core(VectorCore.community_timeouts(id))),
+            "timeout_community_member" => timeout_member(a).await,
 
             // --- Images & pins ---
             "set_community_image" => set_community_image(a).await,
@@ -269,6 +271,11 @@ async fn set_overwrite(a: &Args) -> Result<Value, String> {
     let (id, scope, kind, target) = (a.str("communityId")?, a.str("scopeId")?, a.str("kind")?, a.opt_str("targetId"));
     let (allow, deny) = (a.str("allow")?, a.str("deny")?);
     db::scoped(async move { core(VectorCore.set_channel_overwrite(&id, &scope, &kind, target.as_deref(), &allow, &deny).await) }).await
+}
+
+async fn timeout_member(a: &Args) -> Result<Value, String> {
+    let (id, npub, seconds) = (a.str("communityId")?, a.str("npub")?, a.de::<u64>("seconds")?);
+    db::scoped(async move { core(VectorCore.timeout_member(&id, &npub, seconds).await) }).await
 }
 
 async fn set_sync(a: &Args) -> Result<Value, String> {

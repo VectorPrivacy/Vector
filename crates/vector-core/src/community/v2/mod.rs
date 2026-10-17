@@ -59,6 +59,8 @@ pub mod kind {
     pub const WEBXDC: u16 = 3310;
     /// Guestbook snapshot (refounder-signed, chunked 400/event).
     pub const SNAPSHOT: u16 = 3312;
+    /// A Timeout (CORD-04 §8): `["p", target]`, `["until", "<unix seconds>"]`, the signer's `vac`.
+    pub const TIMEOUT: u16 = 3314;
     /// Direct invite rumor — rides a STANDARD NIP-59 giftwrap to a person,
     /// never a stream wrap (CORD-05 §6).
     pub const DIRECT_INVITE: u16 = 3313;

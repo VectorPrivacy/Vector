@@ -1369,6 +1369,7 @@ async function openChat(contact, { reread = true } = {}) {
     } else {
         VectorSvelte.setLock(null);
         VectorSvelte.flushSync();
+        refreshTimeoutLock(chat);
         // Restore this chat's draft (runtime-only). Skip when the input still
         // holds live text — a same-chat re-open must not clobber typing.
         if (domChatMessageInput.value === '') {

@@ -3222,6 +3222,21 @@ pub async fn set_channel_sync(community_id: String, channel_id: String, category
     .await
 }
 
+/// The Timeouts running in a community: npub → { from, until }.
+#[tauri::command]
+pub fn get_community_timeouts(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.community_timeouts(&community_id).map_err(|e| e.to_string())
+}
+
+/// Time a member out for `seconds` (at most 28 days); 0 lifts it.
+#[tauri::command]
+pub async fn timeout_community_member(community_id: String, npub: String, seconds: u64) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.timeout_member(&community_id, &npub, seconds).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Everything the role editor needs, read locally.
 #[tauri::command]
 pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {

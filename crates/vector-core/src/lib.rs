@@ -3701,7 +3701,7 @@ impl VectorCore {
             return Ok(serde_json::json!({
                 "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
                 "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
-                "pin_messages": false, "control_write": false,
+                "pin_messages": false, "control_write": false, "moderate_members": false,
             }));
         }
         // Actions that land as Control editions additionally need the plane's
@@ -3720,6 +3720,8 @@ impl VectorCore {
             "manage_admin_role": me == owner_hex && control_write,
             "pin_messages": has_ctl(Permissions::PIN_MESSAGES),
             "control_write": control_write,
+            // A Timeout rides the Guestbook, so it needs no Control write key.
+            "moderate_members": has(Permissions::MODERATE_MEMBERS),
         }))
     }
 
@@ -4175,6 +4177,24 @@ impl VectorCore {
         crate::community::v2::service::set_channel_sync(&transport, &v2, &channel, category).await.map_err(VectorError::Other)?;
         Self::converge_v2_authority(&transport, community_id).await;
         Ok(())
+    }
+
+    /// The Timeouts running in a community: npub → { from, until } (unix seconds).
+    pub fn community_timeouts(&self, community_id: &str) -> Result<serde_json::Value> {
+        let v2 = Self::held_v2(community_id)?;
+        let running = crate::community::v2::service::community_timeouts(&v2).map_err(VectorError::Other)?;
+        Ok(running
+            .into_iter()
+            .filter_map(|(pk, (from, until))| Some((pk.to_bech32().ok()?, serde_json::json!({ "from": from, "until": until }))))
+            .collect::<serde_json::Map<_, _>>()
+            .into())
+    }
+
+    /// Time a member out for `seconds` (at most 28 days); 0 lifts a running Timeout.
+    pub async fn timeout_member(&self, community_id: &str, npub: &str, seconds: u64) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        crate::community::v2::service::timeout_member(&Self::short_transport(), &v2, &member, seconds).await.map_err(VectorError::Other)
     }
 
     /// Delete a Role (Roles v2 only): terminal, it leaves every holder.

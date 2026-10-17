@@ -182,6 +182,10 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     at_ms: u64,
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    // A member timed out doesn't post until it ends (CORD-04 §8).
+    if let Some((_, until)) = community_timeouts(community)?.get(&author_pk) {
+        return Err(format!("you're timed out here until {until}"));
+    }
     // An honest client posts only where it holds Send Messages (CORD-04 §8).
     let roster = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap_or_default();
     let owner = community.owner().ok().map(|o| o.to_hex());
@@ -2092,6 +2096,59 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
         let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await
             .map_err(|e| e.to_string())?;
         transport.publish(&wrap, &community.relays).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// The Timeouts running now (CORD-04 §8), by target: judged against the Roster as it
+/// stands, like every authority action. Returns target → (from, until), unix seconds.
+pub fn community_timeouts(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, (u64, u64)>, String> {
+    use crate::community::roles::Permissions;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let (events, _) = crate::db::community::get_guestbook(&cid_hex)?;
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let owner = community.owner()?.to_hex();
+    let may = |actor: &PublicKey, target: &PublicKey, _vac: Option<&crate::community::edition::AuthorityCitation>| {
+        let (a, t) = (actor.to_hex(), target.to_hex());
+        t != owner && !banned.contains(&a) && roster.can_act_on_member(&a, Some(&owner), &t, Permissions::MODERATE_MEMBERS)
+    };
+    Ok(guestbook::active_timeouts(&events, now_ms() / 1000, &may))
+}
+
+/// Silence `target` for `seconds` (at most 28 days; 0 lifts a running Timeout). Every
+/// reader honours it iff the signer holds MODERATE_MEMBERS and strictly outranks them.
+pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, target: &PublicKey, seconds: u64) -> Result<(), String> {
+    crate::db::scoped(async move {
+        assert_current_root(community)?;
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let authority = fetch_authority(transport, community).await;
+        let owner_hex = community.owner()?.to_hex();
+        if !authority.roles.can_act_on_member(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::MODERATE_MEMBERS) {
+            return Err("you can only time out members beneath you, with Timeout Members".to_string());
+        }
+        let at_ms = now_ms();
+        let until = (at_ms / 1000).saturating_add(seconds.min(guestbook::MAX_TIMEOUT_SECS));
+        let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let citation = required_authority_citation(community, &my_pk)?;
+        let rumor = guestbook::build_timeout_rumor(my_pk, *target, until, citation.as_ref(), at_ms);
+        let rumor_id = rumor.id.map(|id| id.to_bytes()).unwrap_or_default();
+        let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await.map_err(|e| e.to_string())?;
+        transport.publish(&wrap, &community.relays).await?;
+        // Held at once, so this device honours its own Timeout before the follow reads it back.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+        if !events.iter().any(|e| e.rumor_id == rumor_id) {
+            events.push(guestbook::GuestbookEvent {
+                rumor_id,
+                entry: guestbook::GuestbookEntry::Timeout { actor: my_pk, target: *target, until_secs: until, citation, at_ms },
+                epoch: Some(community.root_epoch.0),
+                observed_at: Some(at_ms / 1000),
+            });
+            crate::db::community::set_guestbook(&cid_hex, &events, cursor)?;
+        }
         Ok(())
     })
     .await
@@ -22169,6 +22226,62 @@ mod tests {
         let served: Vec<ParsedEdition> = fetch_control(&bed.relay, &held()).await.into_iter().filter(|e| e.vsk != vsk::CHANNEL_ACL).collect();
         let f = fold_authority(&held(), &served, &floors);
         assert!(f.roles.is_entitled(Some(&owner.keys.public_key().to_hex()), &m.to_hex(), &crate::simd::hex::bytes_to_hex_32(&ch.0), &[], &[]), "withholding doesn't revoke");
+    }
+
+    #[tokio::test]
+    async fn overwrites_and_syncs_cross_a_refounding_and_readers_agree() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("AclCarry2").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let owner_hex = owner.keys.public_key().to_hex();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let staff = create_role_v2(&bed.relay, &held(), "Staff", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Role(staff.clone()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        let m = Keys::generate().public_key();
+        set_member_roles(&bed.relay, &held(), &m, vec![staff]).await.unwrap();
+        let cat = create_category(&bed.relay, &held(), "Lobby").await.unwrap();
+        set_overwrite(&bed.relay, &held(), cat, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let news = create_channel_in(&bed.relay, &held(), "news", false, Some(cat)).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        set_members_banned(&bed.relay, held().id(), &[Keys::generate().public_key()], true).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let now = held();
+        assert_ne!(now.root_epoch, community.root_epoch, "the ban re-founded");
+        let eds = fetch_control(&bed.relay, &now).await;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex).unwrap().into_iter().filter(|(_, f)| f.0 == now.root_epoch.0).map(|(e, f)| (e, (f.1, f.2, f.3, f.4))).collect();
+        let (chan, news_hex) = (crate::simd::hex::bytes_to_hex_32(&ch.0), crate::simd::hex::bytes_to_hex_32(&news.0));
+        let probe = Keys::generate().public_key().to_hex();
+        for (who, f) in [("cold", fold_authority(&now, &eds, &Floors::default())), ("floored", fold_authority(&now, &eds, &floors))] {
+            assert!(f.roles.is_entitled(Some(&owner_hex), &m.to_hex(), &chan, &[], &[]), "{who}: the role's allow crossed");
+            assert!(!f.roles.is_entitled(Some(&owner_hex), &probe, &chan, &[], &[]), "{who}: and nobody else got in");
+            assert!(!f.roles.channel_permissions(Some(&owner_hex), &probe, &news_hex, false).contains(Permissions::SEND_MESSAGES), "{who}: the sync crossed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_silences_until_it_ends_or_is_lifted() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Timeout", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, peer) = (Keys::generate(), Keys::generate());
+        let ch = community.channels[0].id;
+        timeout_member(&relay, &held(), &m.public_key(), 600).await.unwrap();
+        let t = community_timeouts(&held()).unwrap();
+        let (from, until) = t[&m.public_key()];
+        assert!(until >= from + 600 && until <= from + 601);
+        act_as(&m);
+        let err = send_chat_message(&relay, &held(), &ch, "hi", None, &[], vec![]).await.unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        // A peer with no standing can't lift it, nor time anyone out.
+        act_as(&peer);
+        assert!(timeout_member(&relay, &held(), &m.public_key(), 0).await.is_err());
+        act_as(&owner);
+        timeout_member(&relay, &held(), &m.public_key(), 0).await.unwrap();
+        assert!(community_timeouts(&held()).unwrap().is_empty(), "a Timeout in the past lifts it");
+        act_as(&m);
+        assert!(send_chat_message(&relay, &held(), &ch, "back", None, &[], vec![]).await.is_ok());
+        act_as(&owner);
     }
 
     #[tokio::test]
