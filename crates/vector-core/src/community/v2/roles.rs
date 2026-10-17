@@ -485,7 +485,8 @@ mod tests {
         assert_eq!(got, vec![te("C", 7, &[1]), te("F", 3, &[2, 3])]);
         // Already sealed at that rank with those bits: nothing to publish.
         assert_eq!(tenure_with(got.clone(), te("F", 1, &[2]), &live), None);
-        assert!(tenure_with(got, te("F", 8, &[2]), &live).is_some(), "a bit not yet sealed is new");
+        assert!(tenure_with(got.clone(), te("F", 8, &[2]), &live).is_some(), "a bit not yet sealed is new");
+        assert!(tenure_with(got, te("F", 3, &[1]), &live).is_some(), "so is a head not yet sealed there");
     }
 
     #[test]

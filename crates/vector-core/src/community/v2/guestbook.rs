@@ -865,7 +865,7 @@ mod tests {
         let (admin, target) = (Keys::generate(), pk());
         let ev = through(&build_timeout_rumor(admin.public_key(), target, 1_722_420_000, None, 1_722_410_000_301), &admin);
         assert_eq!(ev.entry, GuestbookEntry::Timeout { actor: admin.public_key(), target, until_secs: 1_722_420_000, citation: None, at_ms: 1_722_410_000_301 });
-        let bad = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target), Tag::custom(TAG_UNTIL, ["-5"])], 1_000);
+        let bad = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target), Tag::custom(TAG_UNTIL, ["+5"])], 1_000);
         assert!(matches!(through_err(&bad, &admin), GuestbookError::BadTag(TAG_UNTIL)));
         let missing = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target)], 1_000);
         assert!(matches!(through_err(&missing, &admin), GuestbookError::MissingTag(TAG_UNTIL)));
