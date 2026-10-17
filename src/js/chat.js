@@ -1355,6 +1355,8 @@ async function openChat(contact, { reread = true } = {}) {
     // Dissolved community: the backend seals it (no new events accepted), so disable the
     // composer the same way a blocked DM does and mark the timeline's end.
     const isDissolvedChat = chatIsDissolved(chat);
+    const communityId = communityIdOfChat(chat);
+    document.body.classList.toggle('ws-channel-private', !!(communityId && communityChannelsCache.get(communityId)?.find(c => c.id === chat.id)?.private));
     VectorSvelte.setNotice('blocked', false);
     VectorSvelte.setNotice('dissolved', '');
     if (isBlockedChat) {

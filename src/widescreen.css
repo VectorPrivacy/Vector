@@ -1234,6 +1234,10 @@ body.ws.ws-community-pane #chat > .chat-header #chat-contact::before {
   mask-position: center;
 }
 
+body.ws.ws-community-pane.ws-channel-private #chat > .chat-header #chat-contact::before {
+  mask-image: url("./icons/locked.svg");
+}
+
 body.ws #group-overview > .chat-header .profile-header-info {
   display: none;
 }
