@@ -3599,6 +3599,7 @@ impl VectorCore {
     ) -> usize {
         crate::db::scoped(async move {
             use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
+            let page = crate::community::v2::service::rejudge_page(channel_id, page);
             let mut new = 0usize;
             // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
             let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());

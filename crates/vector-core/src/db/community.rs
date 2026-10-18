@@ -4516,7 +4516,7 @@ pub const MAX_HELD_COMMUNITY_BYTES: usize = 16 * 1024 * 1024;
 
 /// How far past this device's clock a post may be dated and still be held (CORD-02 §5's horizon):
 /// a later one is left on the relay for a later read.
-const HELD_HORIZON_MS: u64 = 60 * 60 * 1000;
+pub const HELD_HORIZON_MS: u64 = 60 * 60 * 1000;
 
 /// Hold `wrap`, a post by `author` (hex) `channel_id`'s rules didn't stand behind on arrival,
 /// dated `at_ms`. Whether it is held: a post dated past the horizon isn't, nor one the caps
@@ -4524,41 +4524,62 @@ const HELD_HORIZON_MS: u64 = 60 * 60 * 1000;
 pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str, author: &str, at_ms: u64) -> Result<bool, String> {
     let now = now_secs().max(0) as u64 * 1000;
     if at_ms > now.saturating_add(HELD_HORIZON_MS) {
-        deferred().lock().unwrap_or_else(|e| e.into_inner()).insert(wrap_id.to_string(), at_ms);
+        let held = deferred();
+        let mut map = held.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(wrap_id.to_string(), at_ms);
+        // Bounded: one dropped costs only a decrypt on the next read.
+        if map.len() > MAX_DEFERRED {
+            if let Some(furthest) = map.iter().max_by_key(|(_, at)| **at).map(|(id, _)| id.clone()) {
+                map.remove(&furthest);
+            }
+        }
         return Ok(false);
     }
     let _seal = crate::crypto::gate::sealing();
     let enc = enc_txt(wrap)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
-        "INSERT OR IGNORE INTO community_held_wraps (wrap_id, community_id, channel_id, wrap, at_ms, author) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![wrap_id, community_id, channel_id, enc, at_ms as i64, author],
+        "INSERT OR IGNORE INTO community_held_wraps (wrap_id, community_id, channel_id, wrap, at_ms, author, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![wrap_id, community_id, channel_id, enc, at_ms as i64, author, enc.len() as i64],
     )
     .map_err(|e| format!("hold wrap: {e}"))?;
     // Nearest now first, across the Community; each row counts against its Channel and author.
     let ranked: Vec<(String, String, String, usize)> = {
         let mut stmt = conn
-            .prepare("SELECT wrap_id, channel_id, author, LENGTH(wrap) FROM community_held_wraps WHERE community_id = ?1 ORDER BY ABS(at_ms - ?2), wrap_id")
+            .prepare("SELECT wrap_id, channel_id, author, bytes FROM community_held_wraps WHERE community_id = ?1 ORDER BY ABS(at_ms - ?2), wrap_id")
             .map_err(|e| format!("rank held wraps: {e}"))?;
         let rows = stmt
             .query_map(params![community_id, now as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?.max(0) as usize)))
             .map_err(|e| format!("rank held wraps: {e}"))?;
         rows.flatten().collect()
     };
-    let (mut total, mut channels, mut authors) = (0usize, std::collections::HashMap::<&str, (usize, usize)>::new(), std::collections::HashMap::<(&str, &str), usize>::new());
+    let (mut channels, mut authors) = (std::collections::HashMap::<&str, (usize, usize)>::new(), std::collections::HashMap::<(&str, &str), usize>::new());
     let mut evicted: Vec<&String> = Vec::new();
+    let mut kept: Vec<(&String, &str, usize)> = Vec::new();
     for (id, ch, who, len) in &ranked {
         let c = channels.entry(ch.as_str()).or_default();
         let a = authors.entry((ch.as_str(), who.as_str())).or_default();
-        let over = c.0 >= MAX_HELD_WRAPS || c.1 + len > MAX_HELD_BYTES || total + len > MAX_HELD_COMMUNITY_BYTES || (!who.is_empty() && *a >= MAX_HELD_PER_AUTHOR);
-        if over {
+        if c.0 >= MAX_HELD_WRAPS || c.1 + len > MAX_HELD_BYTES || (!who.is_empty() && *a >= MAX_HELD_PER_AUTHOR) {
             evicted.push(id);
             continue;
         }
         c.0 += 1;
         c.1 += len;
         *a += 1;
-        total += len;
+        kept.push((id, ch.as_str(), *len));
+    }
+    // Past the Community's bytes, the Channel holding the most gives up its furthest-dated first,
+    // so one Channel's flood never empties another.
+    let mut total: usize = kept.iter().map(|k| k.2).sum();
+    while total > MAX_HELD_COMMUNITY_BYTES {
+        let most = channels.values().map(|c| c.1).max().unwrap_or(0);
+        let Some(i) = kept.iter().rposition(|k| channels.get(k.1).is_some_and(|c| c.1 == most)) else { break };
+        let (id, ch, len) = kept.remove(i);
+        if let Some(c) = channels.get_mut(ch) {
+            c.1 -= len;
+        }
+        total -= len;
+        evicted.push(id);
     }
     for id in &evicted {
         conn.execute("DELETE FROM community_held_wraps WHERE wrap_id = ?1", params![id]).map_err(|e| format!("trim held wraps: {e}"))?;
@@ -4612,6 +4633,8 @@ pub fn holds_wraps(community_id: &str) -> bool {
 }
 
 struct DeferredWraps;
+
+pub const MAX_DEFERRED: usize = 4096;
 
 /// Wraps refused for a date past the horizon, by id: a read skips each until its date nears.
 fn deferred() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>> {

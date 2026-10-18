@@ -240,7 +240,7 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 
 /// A Writers ledger that moved can admit posts a stale one dropped live: read each such channel
 /// again from the earliest entry that changed (CORD-03 §1).
-async fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId, handler: &dyn InboundEventHandler) {
+async fn reread_moved_ledgers<T: crate::community::transport::Transport + ?Sized>(before: &CommunityV2, id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
     let Ok(Some(after)) = crate::db::community::load_community_v2(id) else { return };
     for ch in &after.channels {
         let was = before.channel(&ch.id).and_then(|c| c.writers.clone());
@@ -252,8 +252,7 @@ async fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::Commu
         let added: Vec<super::writers::Entry> = new.iter().filter(|e| !old.contains(e)).cloned().collect();
         let Some(from_ms) = added.iter().map(|e| e.at).min() else { continue };
         // What a stop or a restrict takes back leaves the history; the read below holds it again.
-        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        super::service::retract_after(&transport, &after, ch, &added, handler).await;
+        super::service::retract_after(transport, &after, ch, &added, handler).await;
         let (after, channel) = (after.clone(), ch.id);
         crate::db::spawn_bound(async move {
             let Some(me) = crate::state::my_public_key() else { return };
@@ -1128,7 +1127,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         };
         let control_changed = control.updated.is_some();
         if control_changed {
-            reread_moved_ledgers(&current, id, handler).await;
+            reread_moved_ledgers(&current, id, &transport, handler).await;
         }
         // The authority half is what the rekey walk gates on, and the walk ran BEFORE
         // this fold. Re-walk once, in-process, on the freshly-written state — a queue
@@ -1281,6 +1280,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 surface_presence(&current, &fresh, handler);
                 handler.on_community_refreshed(&community_id);
             }
+        }
+        // A walk longer than one pass goes on soon, not on whatever next moves the community.
+        if super::service::guestbook_walk_pending(&current) {
+            enqueue_follow(id);
         }
         // What waited on a Roster, ledger or memberlist this pass may have moved is judged again.
         if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
@@ -1622,15 +1625,22 @@ mod tests {
                 self.0.lock().unwrap().push((target.to_string(), msg.unauthorized));
             }
         }
+        // A writer at that certifier-less epoch posts after a stop this device hasn't read.
         let writer = Keys::generate();
-        let posted = Message { id: "ab".repeat(32), content: "after the stop".into(), at: now_ms() + 5_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&writer.public_key()).unwrap()), writer: true, ..Default::default() };
-        crate::db::events::save_message(&chan, &posted).await.unwrap();
+        let wgroup = derive::channel_writer_group_key(&[0x11; 32], &general, crate::community::Epoch(1));
+        let split = derive::GroupKey::from_parts(wgroup.keys().clone(), group.conv_key().clone());
+        let rumor = super::super::chat::with_writer_epoch(super::super::chat::build_message_rumor(writer.public_key(), &general, community.root_epoch, "after the stop", None, &[], vec![], now_ms() + 5_000), crate::community::Epoch(1));
+        let (posted, _) = super::super::chat::seal_chat_rumor(&rumor, &split, &writer, nostr_sdk::prelude::Timestamp::from_secs(now_ms() / 1000 + 5), false).unwrap();
+        crate::community::transport::Transport::publish(&relay, &posted, &community.relays).await.unwrap();
+        clear().await;
+        dispatch_event(posted.clone(), rec.clone()).await;
         let before = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let stopped = ledger.appended(now_ms(), Spell::Stop { writer: writer.public_key().to_bytes() }).unwrap();
         crate::db::community::set_community_writers(&cid, &chan, &stopped.to_json(), 2, true).unwrap();
         let removed = Removed::default();
-        reread_moved_ledgers(&before, community.id(), &removed).await;
-        assert_eq!(removed.0.lock().unwrap().clone(), vec![("ab".repeat(32), true)], "the owner's device keeps it, marked");
+        reread_moved_ledgers(&before, community.id(), &relay, &removed).await;
+        let id = super::super::chat::open_writer_chat_event(&posted, &posted.pubkey, crate::community::Epoch(1), group.conv_key(), &general, community.root_epoch).unwrap().opened().rumor_id.to_hex();
+        assert_eq!(removed.0.lock().unwrap().clone(), vec![(id, true)], "the owner's device keeps it, marked");
     }
 
     #[tokio::test]

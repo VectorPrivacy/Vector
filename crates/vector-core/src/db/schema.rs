@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 109;
+pub const HIGHEST_MIGRATION_ID: u32 = 110;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1521,6 +1521,16 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 109, "Held wrap authors", |tx| {
         tx.execute("ALTER TABLE community_held_wraps ADD COLUMN author TEXT NOT NULL DEFAULT ''", [])
             .map_err(|e| format!("migration 109: {e}"))?;
+        Ok(())
+    })?;
+
+    // Each held wrap's size, so the caps never read the wraps back to weigh them.
+    run_atomic_migration(conn, 110, "Held wrap sizes", |tx| {
+        tx.execute_batch(
+            "ALTER TABLE community_held_wraps ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
+             UPDATE community_held_wraps SET bytes = length(wrap);",
+        )
+        .map_err(|e| format!("migration 110: {e}"))?;
         Ok(())
     })?;
 

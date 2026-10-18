@@ -502,7 +502,7 @@ pub fn open_writer_chat_event(
 const TAG_WEPOCH: &str = "wepoch";
 
 /// The writer epoch a rumor commits, if any.
-fn writer_epoch_of(rumor: &UnsignedEvent) -> Result<Option<Epoch>, ChatError> {
+pub(crate) fn writer_epoch_of(rumor: &UnsignedEvent) -> Result<Option<Epoch>, ChatError> {
     let mut found = None;
     for t in rumor.tags.iter() {
         let s = t.as_slice();

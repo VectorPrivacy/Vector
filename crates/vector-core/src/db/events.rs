@@ -798,6 +798,11 @@ pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections
     settled
 }
 
+/// The millisecond remainder a row carries past its `created_at` second.
+fn ms_tag(tags: &[Vec<String>]) -> u64 {
+    tags.iter().find(|t| t.len() == 2 && t[0] == "ms").and_then(|t| t[1].parse::<u64>().ok()).unwrap_or(0)
+}
+
 /// A post stored in a chat dated at or after `since_ms`, as the writers' rules judge it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPost {
@@ -829,8 +834,7 @@ pub fn posts_since(chat_identifier: &str, since_ms: u64) -> Result<Vec<StoredPos
         .flatten()
         .filter_map(|(id, npub, secs, tags, wrap_id, kind, reference)| {
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags).unwrap_or_default();
-            let ms = tags.iter().find(|t| t.len() == 2 && t[0] == "ms").and_then(|t| t[1].parse::<u64>().ok()).unwrap_or(0);
-            let at_ms = (secs.max(0) as u64) * 1000 + ms;
+            let at_ms = (secs.max(0) as u64) * 1000 + ms_tag(&tags);
             let edit_of = (kind == event_kind::MESSAGE_EDIT as i32).then_some(reference).flatten();
             (at_ms >= since_ms).then(|| StoredPost { id, npub, at_ms, writer: carried_by_writer(&tags), unauthorized: held_unauthorized(&tags), wrap_id: wrap_id.filter(|w| !w.is_empty()), edit_of })
         })
@@ -1517,7 +1521,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
                             .unwrap_or_else(|_| event.content.clone());
                         let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
                         let edit_spans = crate::text_spans::from_stored(&event.tags, &decrypted);
-                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji, edit_spans));
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000 + ms_tag(&event.tags), decrypted, edit_emoji, edit_spans));
                     }
                     _ => {}
                 }
@@ -1877,7 +1881,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
                             .unwrap_or_else(|_| event.content.clone());
                         let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
                         let edit_spans = crate::text_spans::from_stored(&event.tags, &decrypted);
-                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji, edit_spans));
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000 + ms_tag(&event.tags), decrypted, edit_emoji, edit_spans));
                     }
                     _ => {}
                 }
@@ -3461,6 +3465,25 @@ mod tests {
         }
         assert!(held_wraps_in(&cid4, "chan_held_c5").unwrap().is_empty(), "the community's bytes run out on the furthest from now");
         assert!(!held_wraps_in(&cid4, "chan_held_c0").unwrap().is_empty());
+        // A flood in one Channel gives up its own before another Channel loses anything.
+        let cid5 = "9".repeat(64);
+        let tenth = "z".repeat(MAX_HELD_COMMUNITY_BYTES / 10);
+        hold_wrap(&cid5, "chan_held_quiet", &id(3_000), &tenth, "q", now - 50 * 60_000).unwrap();
+        for i in 0..4 {
+            for c in 0..5 {
+                hold_wrap(&cid5, &format!("chan_held_flood{c}"), &id(3_100 + c * 10 + i), &tenth, &format!("f{i}"), now - i as u64).unwrap();
+            }
+        }
+        assert_eq!(held_wraps_in(&cid5, "chan_held_quiet").unwrap().len(), 1, "the quiet channel keeps its one");
+        let flood: usize = (0..5).map(|c| held_wraps_in(&cid5, &format!("chan_held_flood{c}")).unwrap().len()).sum();
+        assert_eq!(flood, 9, "the floods give up one between them once the community's bytes run out");
+        // What waits for its date is bounded, the furthest-dated dropped first.
+        use crate::db::community::MAX_DEFERRED;
+        for i in 0..=MAX_DEFERRED {
+            hold_wrap(&cid, &ch, &id(10_000 + i), "w", "", now + 2 * 3_600_000 + i as u64).unwrap();
+        }
+        assert!(!community_wraps_settled(&[id(10_000 + MAX_DEFERRED)]).contains(&id(10_000 + MAX_DEFERRED)), "dropped, it is only read again");
+        assert!(community_wraps_settled(&[id(10_000)]).contains(&id(10_000)));
         // A manager's flagged copy goes with its wrap.
         let msg = Message { id: "held_copy".into(), content: "spam".into(), at: now - 10 * 60_000, npub: Some(ban_pair().1), unauthorized: true, wrapper_event_id: Some(id(950)), ..Default::default() };
         save_message(&ch, &msg).await.unwrap();
