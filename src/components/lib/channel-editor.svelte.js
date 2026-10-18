@@ -1,11 +1,21 @@
-// The channel editor: a channel's name, topic and view, drafted until Save, and on the
-// new roles its permission overwrites, one target at a time.
+// Channel Settings: a channel's name, topic and view, and on the new roles its permission
+// overwrites one target at a time, drafted against what it holds (`saved`) until Save, in the
+// Community Settings layout and lifecycle.
+import { popOverlay } from './dialog-lifecycle.svelte.js';
+
+export const ceOverlay = popOverlay({});
 
 const s = $state({
-    open: false, communityId: null, channelId: null, name: '', topic: '', view: 'chat', busy: false, error: '',
-    tab: 'overview',
+    communityId: null, channelId: null, name: '', topic: '', view: 'chat', busy: false, error: '',
+    saved: { name: '', topic: '', view: 'chat' },
+    section: 'overview',
+    query: '',
+    // Bumped when a close or a switch of target is refused over unsaved changes, and which.
+    nudge: 0,
+    nudged: 'close',
     // A Category opens on its permissions alone: it has no topic or view.
     isCategory: false,
+    private: false,
     // perms: the channel's overwrites as read ({ activated, can_manage, roles, overwrites, grantable });
     // target: the overwrite open ('everyone', 'role:<id>', 'member:<hex>'); draft its { allow, deny } as decimal strings.
     perms: null, target: 'everyone', draft: null,
@@ -13,17 +23,36 @@ const s = $state({
 
 export function channelEditorState() { return s; }
 
-/** Open on `channel` ({ id, name, topic, view }) of `communityId`, or on a Category's permissions. */
+/** Open on `channel` ({ id, name, topic, view, private }) of `communityId`, or on a Category's permissions. */
 export function openChannelEditor(communityId, channel, isCategory = false) {
+    const saved = { name: channel.name || '', topic: channel.topic || '', view: channel.view || 'chat' };
     Object.assign(s, {
-        open: true, communityId, channelId: channel.id, name: channel.name || '', topic: channel.topic || '',
-        view: channel.view || 'chat', busy: false, error: '', tab: isCategory ? 'permissions' : 'overview',
+        communityId, channelId: channel.id, ...saved, saved, busy: false, error: '',
+        section: isCategory ? 'permissions' : 'overview', query: '',
         perms: null, target: 'everyone', draft: null, isCategory, private: !!channel.private,
     });
+    ceOverlay.open({});
 }
-export function closeChannelEditor() { s.open = false; s.busy = false; s.error = ''; }
+export function closeChannelEditor() { ceOverlay.close(); s.busy = false; s.error = ''; }
 export function setChannelEditorBusy(on, error = '') { s.busy = !!on; s.error = error; }
-export function setChannelEditorTab(tab) { s.tab = tab; }
+export function setChannelEditorSection(id) { s.section = id; }
+export function setChannelEditorQuery(q) { s.query = q; }
+export function channelEditorNudge() { s.nudged = 'close'; s.nudge++; }
+
+/** What Save made the channel's name, topic and view. */
+export function channelEditorSaved(saved) { s.saved = { ...saved }; }
+
+/** Back to what the channel holds, for the open target too. */
+export function resetChannelEditor() {
+    Object.assign(s, { name: s.saved.name, topic: s.saved.topic, view: s.saved.view, error: '' });
+    s.draft = storedOverwrite(s.target);
+}
+
+/** Whether the name, topic or view differ from what the channel holds. */
+export function channelOverviewDirty() {
+    return !s.isCategory && (s.name !== s.saved.name || s.topic !== s.saved.topic || s.view !== s.saved.view);
+}
+export function channelEditorDirty() { return channelOverviewDirty() || overwriteDirty(); }
 
 /** The overwrite stored for `key`, as { allow, deny } decimal strings. */
 export function storedOverwrite(key) {
@@ -36,7 +65,9 @@ export function setChannelPerms(perms) {
     s.perms = perms;
     s.draft = storedOverwrite(s.target);
 }
+/** Open another target's overwrite; one with unsaved bits stays open, and the bar says why. */
 export function selectOverwrite(key) {
+    if (key !== s.target && overwriteDirty()) { s.nudged = 'switch'; s.nudge++; return; }
     s.target = key;
     s.draft = storedOverwrite(key);
 }

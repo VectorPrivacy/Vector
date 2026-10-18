@@ -315,15 +315,18 @@ function openCategoryMenu(communityId, category, x, y) {
     ] });
 }
 
-/** The channel editor, with its permissions read alongside on the new roles. */
+/** Channel Settings, with its permissions read alongside on the new roles. */
 function openChannelEditorFor(communityId, channel, isCategory = false) {
     VectorSvelte.openChannelEditor(communityId, channel, isCategory);
+    pushBack('channel-editor', closeChannelEditorGuarded);
     loadChannelPerms(communityId, channel.id);
 }
 
 function loadChannelPerms(communityId, channelId) {
     invoke('get_channel_permissions', { communityId, channelId })
         .then((perms) => {
+            const st = VectorSvelte.channelEditorState();
+            if (st.communityId !== communityId || st.channelId !== channelId) return;
             const names = {};
             for (const o of [...(perms.overwrites || []).filter(o => o.kind === 'member'), ...(perms.members || [])]) {
                 names[o.id] = getName(getProfile(o.npub) || o.npub);
@@ -333,34 +336,59 @@ function loadChannelPerms(communityId, channelId) {
         .catch(() => {});
 }
 
+/**
+ * Close, unless there are unsaved changes: then the save bar says so and Channel Settings
+ * stays, as Community Settings does.
+ */
+function closeChannelEditorGuarded() {
+    if (VectorSvelte.ceOverlay.closing()) return;
+    const st = VectorSvelte.channelEditorState();
+    if (st.busy || VectorSvelte.channelEditorDirty()) {
+        VectorSvelte.channelEditorNudge();
+        // The back stack pops its entry before calling this; a refused close keeps it.
+        pushBack('channel-editor', closeChannelEditorGuarded);
+        return;
+    }
+    popBack('channel-editor');
+    VectorSvelte.closeChannelEditor();
+}
+
+/** Save what changed: the name, topic and view, then the open target's rules. */
+async function saveChannelEditor() {
+    const st = VectorSvelte.channelEditorState();
+    const { communityId, channelId } = st;
+    VectorSvelte.setChannelEditorBusy(true);
+    try {
+        if (VectorSvelte.channelOverviewDirty()) {
+            const saved = { name: st.name.trim(), topic: st.topic.trim(), view: st.view };
+            await invoke('edit_community_channel', { communityId, channelId, name: saved.name, topic: saved.topic || null, view: saved.view });
+            st.name = saved.name;
+            st.topic = saved.topic;
+            VectorSvelte.channelEditorSaved(saved);
+            refreshCommunityChannels();
+        }
+        if (VectorSvelte.overwriteDirty()) {
+            const [kind, targetId] = st.target === 'everyone' ? ['everyone', null] : st.target.split(':');
+            await invoke('set_channel_overwrite', { communityId, scopeId: channelId, kind, targetId, allow: st.draft.allow, deny: st.draft.deny });
+            loadChannelPerms(communityId, channelId);
+        }
+        VectorSvelte.setChannelEditorBusy(false);
+    } catch (e) {
+        VectorSvelte.setChannelEditorBusy(false, String(e));
+    }
+}
+
 VectorSvelte.setScreen('channelEditor', {
     h: {
+        close: () => closeChannelEditorGuarded(),
+        save: () => saveChannelEditor(),
+        reset: () => VectorSvelte.resetChannelEditor(),
         setSync: async ({ communityId, channelId, categoryId }) => {
             VectorSvelte.setChannelEditorBusy(true);
             try {
                 await invoke('set_channel_sync', { communityId, channelId, categoryId });
                 VectorSvelte.setChannelEditorBusy(false);
                 loadChannelPerms(communityId, channelId);
-            } catch (e) {
-                VectorSvelte.setChannelEditorBusy(false, String(e));
-            }
-        },
-        saveOverwrite: async ({ communityId, channelId, kind, id, allow, deny }) => {
-            VectorSvelte.setChannelEditorBusy(true);
-            try {
-                await invoke('set_channel_overwrite', { communityId, scopeId: channelId, kind, targetId: id, allow, deny });
-                VectorSvelte.setChannelEditorBusy(false);
-                loadChannelPerms(communityId, channelId);
-            } catch (e) {
-                VectorSvelte.setChannelEditorBusy(false, String(e));
-            }
-        },
-        save: async ({ communityId, channelId, name, topic, view }) => {
-            VectorSvelte.setChannelEditorBusy(true);
-            try {
-                await invoke('edit_community_channel', { communityId, channelId, name, topic, view });
-                VectorSvelte.closeChannelEditor();
-                refreshCommunityChannels();
             } catch (e) {
                 VectorSvelte.setChannelEditorBusy(false, String(e));
             }
