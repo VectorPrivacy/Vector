@@ -26017,8 +26017,6 @@ body.profile-switcher-editing .profile-switcher-add {
 .ce-target-row.on .cs-role-name { color: #fff; font-weight: 500; }
 .ce-target-row .cs-role-open .icon { background-color: var(--icon-color-primary); }
 .ce-target-row .cs-role-grip { cursor: pointer; color: #6f6f6f; }
-.ce-adds { display: flex; gap: 8px; flex-wrap: wrap; }
-.ce-adds .cs-select { flex: 1 1 180px; min-width: 0; margin: 0; }
 .ce-for { margin-left: 0.3em; color: #8a8a8a; font-weight: 400; }
 .ce-target-row .cs-role-count, .ce-target-row .cs-role-open { margin-left: auto; }
 .ce-target-row .cs-role-count + .cs-role-open { margin-left: 0; }

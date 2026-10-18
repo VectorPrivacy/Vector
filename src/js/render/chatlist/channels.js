@@ -378,6 +378,19 @@ async function saveChannelEditor() {
     }
 }
 
+/**
+ * @typedef {Object} ChannelEditorHelpers
+ * @property {() => void} close   refused, with the save bar saying why, while edits are unsaved
+ * @property {() => void} save
+ * @property {() => void} reset
+ * @property {(sync: { communityId: string, channelId: string, categoryId: string|null }) => void} setSync
+ * @property {(npub: string) => string} name   empty when they have no name of their own
+ * @property {(npub: string) => boolean} veiled   Streamer Mode hides the name and key
+ * @property {(npub: string) => string} searchName
+ * @property {(npub: string) => string|null} avatarSrc
+ * @property {(npub: string) => object|null} profile
+ * @property {object} ui   MemberRow's { twemojify, showTooltip, hideTooltip }
+ */
 VectorSvelte.setScreen('channelEditor', {
     h: {
         close: () => closeChannelEditorGuarded(),
@@ -392,6 +405,16 @@ VectorSvelte.setScreen('channelEditor', {
             } catch (e) {
                 VectorSvelte.setChannelEditorBusy(false, String(e));
             }
+        },
+        name: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
+        veiled: (npub) => streamHidden(npub),
+        searchName: (npub) => searchName(npub),
+        avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
+        profile: (npub) => getProfile(npub) || null,
+        ui: {
+            twemojify: (el) => twemojify(el),
+            showTooltip: (text, el) => showGlobalTooltip(text, el),
+            hideTooltip: () => hideGlobalTooltip(),
         },
     },
 });

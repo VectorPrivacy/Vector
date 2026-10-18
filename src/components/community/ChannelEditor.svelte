@@ -12,8 +12,10 @@
     import { popIn } from '../lib/popin.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
+    import MemberRow from '../people/MemberRow.svelte';
+    import { profileVersion } from '../lib/signals.svelte.js';
 
-    // h: close(), save(), reset(), setSync({ communityId, channelId, categoryId })
+    /** @type {{ h: ChannelEditorHelpers }} */
     let { h } = $props();
     const ov = ceOverlay.state();
     const st = channelEditorState();
@@ -125,6 +127,32 @@
         .map((m) => ({ id: m.id, name: st.perms.member_names?.[m.id] || `${m.id.slice(0, 10)}…` }))
         .sort((a, b) => a.name.localeCompare(b.name)));
     const open = $derived(targets.find((t) => t.key === st.target));
+
+    // Adding a target: one search over the roles and members without rules here yet.
+    const PICK_MAX = 100;
+    let adding = $state(false);
+    let query = $state('');
+    const shortNpub = (npub) => `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+    const q = $derived(query.trim().toLowerCase());
+    const pickRoles = $derived(addable.filter((r) => !q || r.name.toLowerCase().includes(q)));
+    const pickMembers = $derived.by(() => {
+        const rows = [];
+        for (const m of st.perms?.members || []) {
+            if (!m.npub || targets.some((t) => t.key === `member:${m.id}`)) continue;
+            profileVersion(m.npub);
+            const name = h.name(m.npub);
+            const veiled = h.veiled(m.npub);
+            if (q && !`${veiled ? h.searchName(m.npub) : name} ${m.npub}`.toLowerCase().includes(q)) continue;
+            rows.push({ id: m.id, npub: m.npub, name, veiled, profile: h.profile(m.npub), src: h.avatarSrc(m.npub) });
+        }
+        return rows.sort((a, b) => (a.name || a.npub).localeCompare(b.name || b.npub));
+    });
+    function pickTarget(key) {
+        adding = false;
+        query = '';
+        selectOverwrite(key);
+    }
+    $effect(() => { ov.tick; st.channelId; adding = false; query = ''; });
     // A private channel opens only to a role's or a member's allow, whatever @everyone says.
     const closedToEveryone = (bit) => st.private && st.target === 'everyone' && bit === BIT(13);
     const bitState = (bit) => {
@@ -235,36 +263,57 @@
                         {/if}
                         {#if !st.perms.synced}
                             <section class="cs-block" data-anchor="ch-targets">
-                                <h3 class="cs-heading">Roles & Members</h3>
-                                <p class="cs-lede">{st.isCategory ? 'Channels synced to this category follow these rules.' : 'Pick who to set rules for. Anything left alone follows what they hold across the community.'}</p>
-                                <div class="cs-roles">
-                                    {#each targets as t (t.key)}
-                                        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                                        <div class="cs-role ce-target-row" class:on={st.target === t.key} onclick={() => !st.busy && selectOverwrite(t.key)}>
-                                            {#if t.member}<span class="cs-role-grip"><span class="icon icon-user"></span></span>
-                                            {:else}<span class="cs-role-dot" style:background-color={hex(t.color)}></span>{/if}
-                                            <span class="cs-role-name cutoff">{t.label}</span>
-                                            {#if !t.set}<span class="cs-role-count">no rules yet</span>{/if}
-                                            <span class="cs-role-open">{#if st.target === t.key}<span class="icon icon-check"></span>{/if}</span>
-                                        </div>
-                                    {/each}
+                                <div class="cs-heading-row">
+                                    <h3 class="cs-heading">Roles & Members</h3>
+                                    {#if !adding && (addable.length || addableMembers.length)}
+                                        <button class="cs-btn-save cs-role-create" disabled={st.busy} onclick={() => { adding = true; }}>Add</button>
+                                    {/if}
                                 </div>
-                                {#if addable.length || addableMembers.length}
-                                    <div class="ce-adds">
-                                        {#if addable.length}
-                                            <select class="cs-input cs-select" value="" disabled={st.busy}
-                                                    onchange={(e) => { if (e.currentTarget.value) selectOverwrite(`role:${e.currentTarget.value}`); e.currentTarget.value = ''; }}>
-                                                <option value="">Add a role…</option>
-                                                {#each addable as r (r.role_id)}<option value={r.role_id}>{r.name}</option>{/each}
-                                            </select>
+                                <p class="cs-lede">{st.isCategory ? 'Channels synced to this category follow these rules.' : 'Pick who to set rules for. Anything left alone follows what they hold across the community.'}</p>
+                                {#if adding}
+                                    <div class="emoji-search-container cs-bans-search">
+                                        <span class="emoji-search-icon icon icon-search"></span>
+                                        <input type="text" placeholder="Search roles and members" autocomplete="off" spellcheck="false" bind:value={query}>
+                                    </div>
+                                    {#if pickRoles.length}
+                                        <div class="cs-roles">
+                                            {#each pickRoles as r (r.role_id)}
+                                                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                                                <div class="cs-role ce-target-row" onclick={() => pickTarget(`role:${r.role_id}`)}>
+                                                    <span class="cs-role-dot" style:background-color={hex(r.color)}></span>
+                                                    <span class="cs-role-name cutoff">{r.name}</span>
+                                                </div>
+                                            {/each}
+                                        </div>
+                                    {/if}
+                                    <div class="cs-bans">
+                                        {#each pickMembers.slice(0, PICK_MAX) as row (row.npub)}
+                                            <MemberRow npub={row.npub} profile={row.profile} src={row.src}
+                                                       display={row.name || shortNpub(row.npub)} hasName={!row.veiled && !!row.name}
+                                                       keyHint={row.name && !row.veiled ? shortNpub(row.npub) : ''}
+                                                       onactivate={() => pickTarget(`member:${row.id}`)} ui={h.ui} />
+                                        {/each}
+                                        {#if pickMembers.length > PICK_MAX}
+                                            <p class="cmt-empty" style="text-align:center;">Search to find the other {pickMembers.length - PICK_MAX}.</p>
+                                        {:else if !pickRoles.length && !pickMembers.length}
+                                            <p class="cmt-empty" style="text-align:center;">No matches.</p>
                                         {/if}
-                                        {#if addableMembers.length}
-                                            <select class="cs-input cs-select" value="" disabled={st.busy}
-                                                    onchange={(e) => { if (e.currentTarget.value) selectOverwrite(`member:${e.currentTarget.value}`); e.currentTarget.value = ''; }}>
-                                                <option value="">Add a member…</option>
-                                                {#each addableMembers as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
-                                            </select>
-                                        {/if}
+                                    </div>
+                                    <div class="cs-role-add-bar">
+                                        <button class="cs-btn-text" onclick={() => { adding = false; query = ''; }}>Cancel</button>
+                                    </div>
+                                {:else}
+                                    <div class="cs-roles">
+                                        {#each targets as t (t.key)}
+                                            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                                            <div class="cs-role ce-target-row" class:on={st.target === t.key} onclick={() => !st.busy && selectOverwrite(t.key)}>
+                                                {#if t.member}<span class="cs-role-grip"><span class="icon icon-user"></span></span>
+                                                {:else}<span class="cs-role-dot" style:background-color={hex(t.color)}></span>{/if}
+                                                <span class="cs-role-name cutoff">{t.label}</span>
+                                                {#if !t.set}<span class="cs-role-count">no rules yet</span>{/if}
+                                                <span class="cs-role-open">{#if st.target === t.key}<span class="icon icon-check"></span>{/if}</span>
+                                            </div>
+                                        {/each}
                                     </div>
                                 {/if}
                             </section>
