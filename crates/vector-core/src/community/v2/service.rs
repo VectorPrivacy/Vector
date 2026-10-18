@@ -13136,12 +13136,16 @@ pub async fn pin_message<T: Transport + ?Sized>(
         }
         coords.dedup();
 
+        // A restricted Channel's posts sit at their writer epoch's address, under a read epoch's key.
+        let writer = ch.writers.as_ref().and_then(|l| l.writers().find(|(_, pk, _)| *pk == wrap.pubkey.to_bytes()).map(|(e, ..)| e));
         let mut found: Option<(super::stream::OpenedStream, [u8; 32])> = None;
         for (epoch, ikm) in coords {
             let group = channel_group_key(&ikm, &ch.id, Epoch(epoch));
-            if let Ok(super::chat::ChatEvent::Message { opened, .. }) =
-                super::chat::open_chat_event(wrap, &group, channel_id, Epoch(epoch))
-            {
+            let event = match writer {
+                Some(wepoch) => super::chat::open_writer_chat_event(wrap, &wrap.pubkey, wepoch, group.conv_key(), channel_id, Epoch(epoch)),
+                None => super::chat::open_chat_event(wrap, &group, channel_id, Epoch(epoch)),
+            };
+            if let Ok(super::chat::ChatEvent::Message { opened, .. }) = event {
                 if opened.rumor_id.to_hex() == rumor_id_hex {
                     let conv: [u8; 32] = group
                         .conv_key()
@@ -24339,6 +24343,25 @@ mod tests {
         assert_eq!(sorted(shown.take().into_iter().map(|(t, rang)| { assert!(!rang, "a late arrival never rings"); t }).collect()), vec!["after the reopen".to_string(), "at the old writer address".to_string()]);
         assert!(crate::db::community::held_wraps(&cid_hex).unwrap().is_empty(), "let go once they stand");
         assert_eq!(writing::rejudge_held(&held(), &shown).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_post_at_a_writer_address_can_be_pinned() {
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let rumor = send_chat_message(&bed.relay, &held(), &general, "pin me", None, &[], vec![]).await.unwrap();
+        let far = now_ms() / 1000 + 100;
+        let got = fetch_channel_history(&bed.relay, &held(), &general, 50, 4, None, Some(far), crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let wrap = got.iter().find(|e| e.event.opened().rumor_id.to_hex() == rumor).and_then(|e| e.wrap.clone()).expect("the post reads back");
+        let read = channel_group_key(&held().community_root, &general, held().root_epoch);
+        assert_ne!(wrap.pubkey, read.pk(), "posted at its writer's address, not the read one");
+        let chan = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let wrap_of = crate::db::events::get_event_wrap_context(&rumor).unwrap().and_then(|(w, _)| w);
+        assert_eq!(wrap_of, Some(wrap.id.to_hex()), "the send recorded the wrap it went out in");
+        pin_message(&bed.relay, &held(), &general, &rumor).await.unwrap();
+        let pinned = writable_pin_entries(&held(), &general).unwrap();
+        assert!(pinned.iter().filter_map(|e| super::super::pins::verify_pin_entry(e, &chan)).any(|v| v.rumor_id == rumor), "and its pin verifies");
     }
 
     #[tokio::test]
