@@ -10273,6 +10273,11 @@ fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64
             if let Some(id) = crate::community::id32_from_hex(cid_hex) {
                 access_collect_now(&crate::community::CommunityId(id));
             }
+            // The live subscription is addressed by the live writer: a move this device made itself
+            // folds no change a follow would notice.
+            if let Some(client) = crate::state::nostr_client() {
+                crate::db::spawn_bound(async move { super::realtime::refresh_subscription(&client).await });
+            }
         }
         Ok(_) => {}
         Err(e) => crate::log_warn!("[writers] fold persist failed: {e}"),
