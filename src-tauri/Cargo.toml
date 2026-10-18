@@ -247,9 +247,9 @@ url = "2.5.7"
 
 # Realtime peer channels (Iroh P2P). No portmapper: an idle node must not open UPnP/NAT-PMP to
 # the gateway outside the account's network.
-iroh = { version = "1.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
-noq-proto = "1.1"
+noq-proto = "1.3"
 rand = "0.8"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
@@ -351,13 +351,6 @@ whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev 
 nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
 nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.4" }
-# noq's published BBR3 (through 1.1.1) is a partial merge with an unchecked subtraction
-# that underflows whenever loss exceeds the loss threshold — panic in dev builds, garbage
-# inflight estimate in release (n0-computer/noq#768). Pinned to the quinn-sync commit that
-# replaces it wholesale; drop the pin once a noq release ships it (task #398).
-noq = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
-noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
-noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
 # saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
 # (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
 # and its saturating ops evaluate those limits eagerly — so tor-netdoc's first
