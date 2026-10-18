@@ -87,10 +87,12 @@ async function setupRustListeners() {
             const summary = await invoke('get_community', { communityId });
             // A folded control edition can add, rename or tombstone channels.
             setCommunityChannels(communityId, summary.channels, summary.categories);
+            const channelNames = new Map((summary.channels || []).map(ch => [ch.channel_id, ch.name || '']));
             for (const c of arrChats) {
                 if (c.metadata?.custom_fields?.community_id !== communityId) continue;
                 const f = c.metadata.custom_fields;
                 f.name = summary.name;
+                if (channelNames.has(c.id)) f.channel_name = channelNames.get(c.id);
                 f.description = summary.description || '';
                 f.is_owner = summary.is_owner ? 'true' : 'false';
                 f.dissolved = summary.dissolved ? 'true' : 'false';
