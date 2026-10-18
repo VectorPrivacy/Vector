@@ -980,6 +980,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_held_wraps WHERE community_id = ?1"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
+        Some("DELETE FROM settings WHERE key LIKE 'writer_retract:' || ?1 || ':%'"),
     ]
     .into_iter()
     .flatten()
@@ -4480,6 +4481,11 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
     let _seal = crate::crypto::gate::sealing();
     let enc = enc_txt(content)?;
     let conn = super::get_write_connection_guard_static()?;
+    let old: Option<String> = conn
+        .query_row("SELECT content FROM community_writers WHERE community_id = ?1 AND channel_id = ?2", params![community_id, channel_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("get writers: {e}"))?
+        .map(|c: String| dec_txt(&c));
     let changed = conn
         .execute(
             "INSERT INTO community_writers (community_id, channel_id, content, version) VALUES (?1, ?2, ?3, ?4)
@@ -4489,7 +4495,67 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
             params![community_id, channel_id, enc, version, replace],
         )
         .map_err(|e| format!("set writers: {e}"))?;
+    // Whichever fold stored it, what a new writer or stop entry undoes is owed a retraction.
+    if changed > 0 {
+        if let Some(since) = retraction_since(old.as_deref(), content) {
+            owe_retraction(&conn, community_id, channel_id, since)?;
+        }
+    }
     Ok(changed > 0)
+}
+
+/// The earliest writer or stop entry `new` holds that `old` doesn't: an `open` takes nothing back.
+fn retraction_since(old: Option<&str>, new: &str) -> Option<u64> {
+    use crate::community::v2::writers::{Ledger, Spell};
+    let new = Ledger::parse(new)?;
+    let old = old.and_then(Ledger::parse);
+    new.entries
+        .iter()
+        .filter(|e| matches!(e.spell, Spell::Writer { .. } | Spell::Stop { .. }))
+        .filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)))
+        .map(|e| e.at)
+        .min()
+}
+
+fn retraction_key(community_id: &str, channel_id: &str) -> String {
+    format!("writer_retract:{community_id}:{channel_id}")
+}
+
+/// Stored as `since:stamp`; the stamp tells a drain whether more was owed while it ran.
+fn parse_owed(value: &str) -> Option<(u64, u64)> {
+    let (since, stamp) = value.split_once(':')?;
+    Some((since.parse().ok()?, stamp.parse().ok()?))
+}
+
+fn owe_retraction(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, since: u64) -> Result<(), String> {
+    let key = retraction_key(community_id, channel_id);
+    let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
+    let (since, stamp) = held.as_deref().and_then(parse_owed).map_or((since, 1), |(s, n)| (s.min(since), n + 1));
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, format!("{since}:{stamp}")]).map_err(|e| format!("owe retraction: {e}"))?;
+    Ok(())
+}
+
+/// Owe `channel_id` a retraction of what it shows dated from `since_ms`.
+pub fn owe_writer_retraction(community_id: &str, channel_id: &str, since_ms: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    owe_retraction(&conn, community_id, channel_id, since_ms)
+}
+
+/// The Channels of `community_id` owed a retraction: `(channel, since_ms, stamp)`.
+pub fn owed_retractions(community_id: &str) -> Result<Vec<(String, u64, u64)>, String> {
+    let prefix = retraction_key(community_id, "");
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1").map_err(|e| format!("owed retractions: {e}"))?;
+    let rows = stmt.query_map(params![prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("owed retractions: {e}"))?;
+    Ok(rows.flatten().filter_map(|(k, v)| parse_owed(&v).map(|(since, stamp)| (k[prefix.len()..].to_string(), since, stamp))).collect())
+}
+
+/// Clear `channel_id`'s owed retraction, unless more was owed since `stamp` was read.
+pub fn settle_retraction(community_id: &str, channel_id: &str, stamp: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM settings WHERE key = ?1 AND substr(value, instr(value, ':') + 1) = ?2", params![retraction_key(community_id, channel_id), stamp.to_string()])
+        .map_err(|e| format!("settle retraction: {e}"))?;
+    Ok(())
 }
 
 /// A channel's stored Writers ledger head: `(raw content, version)`.

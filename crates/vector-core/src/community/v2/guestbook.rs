@@ -621,16 +621,28 @@ pub(super) fn live_refound(
 ) -> Option<Refound> {
     let authority = snapshot_authority?;
     let live = events.iter().filter_map(|e| e.epoch).max()?;
+    // Per snapshot: the chunks held, the most any claims, and what they carry.
+    let mut snapshots: BTreeMap<[u8; 32], (BTreeSet<u32>, u32, Vec<&GuestbookEvent>)> = BTreeMap::new();
+    for ev in events {
+        if let GuestbookEntry::Snapshot { refounder, snapshot_id, chunk: (i, n), at_ms, .. } = &ev.entry {
+            if ev.epoch == Some(live) && refounder == authority && *at_ms <= horizon {
+                let s = snapshots.entry(*snapshot_id).or_default();
+                s.0.insert(*i);
+                s.1 = s.1.max(*n);
+                s.2.push(ev);
+            }
+        }
+    }
+    // Leaving someone out of a chunk this device lacks is an absence, not a departure.
+    let whole = snapshots.into_values().filter(|(held, n, _)| *n > 0 && (1..=*n).all(|i| held.contains(&i)));
     let mut base: BTreeSet<PublicKey> = BTreeSet::new();
     let mut cut: Option<u64> = None;
     let mut rumor_id: Option<[u8; 32]> = None;
-    for ev in events {
-        if let GuestbookEntry::Snapshot { refounder, members, at_ms, .. } = &ev.entry {
-            if ev.epoch == Some(live) && refounder == authority && *at_ms <= horizon {
-                base.extend(members.iter().copied());
-                cut = Some(cut.map_or(*at_ms, |c| c.min(*at_ms)));
-                rumor_id = Some(rumor_id.map_or(ev.rumor_id, |r| r.min(ev.rumor_id)));
-            }
+    for ev in whole.flat_map(|(_, _, evs)| evs) {
+        if let GuestbookEntry::Snapshot { members, at_ms, .. } = &ev.entry {
+            base.extend(members.iter().copied());
+            cut = Some(cut.map_or(*at_ms, |c| c.min(*at_ms)));
+            rumor_id = Some(rumor_id.map_or(ev.rumor_id, |r| r.min(ev.rumor_id)));
         }
     }
     Some(Refound { cut: cut?, base, rumor_id: rumor_id? })
@@ -1130,6 +1142,21 @@ mod tests {
         assert_eq!(fold.get(&b).unwrap().verdict, Verdict::Joined, "the addendum adds, it never evicts");
         assert_eq!(fold.get(&c).unwrap().verdict, Verdict::Refounded);
         assert_eq!(fold.get(&c).unwrap().at_ms, 5_000, "the cut is the refound, not the addendum");
+    }
+
+    #[test]
+    fn a_snapshot_missing_a_chunk_departs_nobody() {
+        let refounder = pk();
+        let (a, b, c) = (pk(), pk(), pk());
+        let torn = vec![join_ev(a, 1_000, 1), join_ev(b, 1_000, 2), join_ev(c, 1_000, 3), at_epoch(snap_ev(refounder, vec![a], 0x01, (1, 2), 5_000, 4), 7)];
+        let fold = coalesce(&torn, NOW, Some(&refounder), &always);
+        for m in [&a, &b, &c] {
+            assert_eq!(fold.get(m).unwrap().verdict, Verdict::Joined, "leaving someone out of a chunk not in is an absence");
+        }
+        let whole = [torn, vec![at_epoch(snap_ev(refounder, vec![b], 0x01, (2, 2), 5_000, 5), 7)]].concat();
+        let fold = coalesce(&whole, NOW, Some(&refounder), &always);
+        assert_eq!(fold.get(&b).unwrap().verdict, Verdict::Joined);
+        assert_eq!(fold.get(&c).unwrap().verdict, Verdict::Refounded, "once whole, it departs whom it omits");
     }
 
     #[test]

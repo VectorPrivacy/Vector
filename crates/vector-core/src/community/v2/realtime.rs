@@ -238,30 +238,26 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
     out
 }
 
-/// A Writers ledger that moved can admit posts a stale one dropped live: read each such channel
-/// again from the earliest entry that changed (CORD-03 §1).
-async fn reread_moved_ledgers<T: crate::community::transport::Transport + ?Sized>(before: &CommunityV2, id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
-    let Ok(Some(after)) = crate::db::community::load_community_v2(id) else { return };
-    for ch in &after.channels {
-        let was = before.channel(&ch.id).and_then(|c| c.writers.clone());
-        if was == ch.writers {
-            continue;
+/// Take back what a Writers ledger folded anywhere on this device no longer stands behind, then
+/// read those Channels again from there: a stale ledger may have dropped what the new one admits
+/// (CORD-03 §1).
+async fn settle_owed_retractions<T: crate::community::transport::Transport + ?Sized>(id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
+    let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
+    let cid = crate::simd::hex::bytes_to_hex_32(&id.0);
+    for (chan, since, stamp) in crate::db::community::owed_retractions(&cid).unwrap_or_default() {
+        if let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) {
+            super::service::retract_since(transport, &community, ch, since, handler).await;
+            let (after, channel) = (community.clone(), ch.id);
+            crate::db::spawn_bound(async move {
+                let Some(me) = crate::state::my_public_key() else { return };
+                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                let since = since.saturating_sub(60_000) / 1000;
+                if let Ok(page) = super::service::fetch_channel_history(&transport, &after, &channel, 200, 3, Some(since), None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await {
+                    crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
+                }
+            });
         }
-        let (old, new) = (was.map(|l| l.entries).unwrap_or_default(), ch.writers.as_ref().map(|l| l.entries.clone()).unwrap_or_default());
-        // Only what the ledger added can move a verdict: a cap drop moves no window.
-        let added: Vec<super::writers::Entry> = new.iter().filter(|e| !old.contains(e)).cloned().collect();
-        let Some(from_ms) = added.iter().map(|e| e.at).min() else { continue };
-        // What a stop or a restrict takes back leaves the history; the read below holds it again.
-        super::service::retract_after(transport, &after, ch, &added, handler).await;
-        let (after, channel) = (after.clone(), ch.id);
-        crate::db::spawn_bound(async move {
-            let Some(me) = crate::state::my_public_key() else { return };
-            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            let since = from_ms.saturating_sub(60_000) / 1000;
-            if let Ok(page) = super::service::fetch_channel_history(&transport, &after, &channel, 200, 3, Some(since), None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await {
-                crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
-            }
-        });
+        let _ = crate::db::community::settle_retraction(&cid, &chan, stamp);
     }
 }
 
@@ -1126,9 +1122,6 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
         };
         let control_changed = control.updated.is_some();
-        if control_changed {
-            reread_moved_ledgers(&current, id, &transport, handler).await;
-        }
         // The authority half is what the rekey walk gates on, and the walk ran BEFORE
         // this fold. Re-walk once, in-process, on the freshly-written state — a queue
         // re-enqueue would be both slower and, on a coalesced queue, droppable.
@@ -1280,11 +1273,18 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 surface_presence(&current, &fresh, handler);
                 handler.on_community_refreshed(&community_id);
             }
+            // A walk longer than one pass goes on soon, not on whatever next moves the community;
+            // one that failed waits for the next trigger.
+            if super::service::guestbook_walk_pending(&current) {
+                let id = *id;
+                crate::db::spawn_bound(async move {
+                    crate::rt::time::sleep(std::time::Duration::from_secs(10)).await;
+                    enqueue_follow(&id);
+                });
+            }
         }
-        // A walk longer than one pass goes on soon, not on whatever next moves the community.
-        if super::service::guestbook_walk_pending(&current) {
-            enqueue_follow(id);
-        }
+        // Whichever fold stored a new writer or stop entry, what it undoes is taken back.
+        settle_owed_retractions(id, &transport, handler).await;
         // What waited on a Roster, ledger or memberlist this pass may have moved is judged again.
         if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
             let released = super::service::rejudge_held(&folded, handler).await;
@@ -1634,11 +1634,11 @@ mod tests {
         crate::community::transport::Transport::publish(&relay, &posted, &community.relays).await.unwrap();
         clear().await;
         dispatch_event(posted.clone(), rec.clone()).await;
-        let before = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let stopped = ledger.appended(now_ms(), Spell::Stop { writer: writer.public_key().to_bytes() }).unwrap();
         crate::db::community::set_community_writers(&cid, &chan, &stopped.to_json(), 2, true).unwrap();
         let removed = Removed::default();
-        reread_moved_ledgers(&before, community.id(), &relay, &removed).await;
+        settle_owed_retractions(community.id(), &relay, &removed).await;
+        assert!(crate::db::community::owed_retractions(&cid).unwrap().is_empty(), "settled once taken back");
         let id = super::super::chat::open_writer_chat_event(&posted, &posted.pubkey, crate::community::Epoch(1), group.conv_key(), &general, community.root_epoch).unwrap().opened().rumor_id.to_hex();
         assert_eq!(removed.0.lock().unwrap().clone(), vec![(id, true)], "the owner's device keeps it, marked");
     }

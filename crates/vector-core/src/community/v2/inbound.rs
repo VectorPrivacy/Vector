@@ -246,6 +246,8 @@ fn apply_chat_to_state_in(
                         .chain(text_spans.iter().map(|s| s.to_tag_parts()))
                         // To the millisecond: what a later stop or restrict judges it by.
                         .chain((edited_at % 1000 > 0).then(|| vec!["ms".to_string(), (edited_at % 1000).to_string()]))
+                        // A writer-address edit is no sign of presence, as its post isn't.
+                        .chain(super::chat::carries_writer_epoch(&opened.rumor).then(|| vec!["writer".to_string()]))
                         .collect(),
                 )
                 .reference_id(Some(target_id.clone()))

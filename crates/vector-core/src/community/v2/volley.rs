@@ -392,7 +392,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 let j = &jobs[job_idx];
                 if let Some(event) = j.open(&wrap) {
                     stats.batch_events += 1;
-                    pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
+                    pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch, wrap: Some(wrap.clone()) });
                 }
             }
             for (job_idx, mut page) in pages {
@@ -503,7 +503,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                 }
                 if let Some(event) = j.open(&wrap) {
                     stats.fallback_events += 1;
-                    fb_pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch });
+                    fb_pages.entry(job_idx).or_default().push(FetchedEvent { event, epoch: j.epoch, wrap: Some(wrap.clone()) });
                 }
             }
         }

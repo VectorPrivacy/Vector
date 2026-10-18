@@ -197,6 +197,16 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
     if !chains_from_head(community, ch, &ledger)? {
         return Err(LEDGER_MOVED.to_string());
     }
+    // Who a mint leaves out is final, so it reads the memberlist whole first.
+    let mut passes = 0;
+    while !guestbook_walked_this_session(community) {
+        passes += 1;
+        if passes > 3 || sync_guestbook(transport, community).await.is_err() {
+            return Err(NOT_WALKED.to_string());
+        }
+    }
+    let read = Posters::of(community, posters.roster, posters.banned)?;
+    let posters = &read;
     // Managers hold the key and its certifier too, so any of them can let a writer in.
     let candidates = writer_candidates(community, posters.roster)?;
     let recipients: Vec<PublicKey> = candidates.iter().filter(|p| posters.manages(p) || (!cut.contains(p) && posters.writes(p, ch))).copied().collect();
@@ -237,11 +247,12 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
     Ok(())
 }
 
-/// Whether the relays now carry an edition of `ch`'s ledger past the head this device holds.
-/// Read without folding, so it never waits on a follow the caller may be inside.
+/// Whether the relays now carry an edition of `ch`'s ledger a reader would fold over the head this
+/// device holds: one chaining from it, or a sibling that wins the tie against it. Read without
+/// folding, so it never waits on a follow the caller may be inside.
 async fn ledger_moved_since<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2) -> Result<bool, String> {
     let eid = super::super::derive::writers_locator(community.id(), &ch.id);
-    let held = crate::db::community::get_edition_head(&hex(&community.id().0), &hex(&eid))?.map_or(0, |(v, _)| v);
+    let held = crate::db::community::get_edition_head(&hex(&community.id().0), &hex(&eid))?;
     let control = control::ControlPlane::of(community);
     let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![control.pk_hex()], limit: Some(FOLLOW_PAGE), ..Default::default() };
     let wraps = transport.fetch(&q, &community.relays).await?;
@@ -249,14 +260,26 @@ async fn ledger_moved_since<T: Transport + ?Sized>(transport: &T, community: &Co
     let roster = crate::db::community::get_community_roles(&hex(&community.id().0)).unwrap_or_default();
     let owner_hex = community.owner()?.to_hex();
     let horizon = now_ms().saturating_add(writers::HORIZON_MS) / 1000;
-    Ok(wraps.iter().filter_map(|w| control.open(w).ok()).any(|(ed, _)| {
-        let author = ed.author.to_hex();
-        ed.vsk == vsk::WRITERS
-            && ed.entity_id == eid
-            && ed.version > held
-            && ed.created_at <= horizon
-            && (author == owner_hex || roster.is_authorized(&author, Some(&owner_hex), Permissions::MANAGE_CHANNELS))
-    }))
+    let mut eds: Vec<_> = wraps
+        .iter()
+        .filter_map(|w| control.open(w).ok().map(|(ed, _)| ed))
+        .filter(|ed| {
+            let author = ed.author.to_hex();
+            ed.vsk == vsk::WRITERS && ed.entity_id == eid && ed.created_at <= horizon && (author == owner_hex || roster.is_authorized(&author, Some(&owner_hex), Permissions::MANAGE_CHANNELS))
+        })
+        .collect();
+    let Some((_, head)) = held else { return Ok(!eds.is_empty()) };
+    eds.sort_by_key(|e| e.version);
+    let mut reach = std::collections::HashSet::from([head]);
+    let mut moved = false;
+    for ed in &eds {
+        if ed.prev_hash.is_some_and(|p| reach.contains(&p)) {
+            reach.insert(ed.self_hash);
+            moved = true;
+        }
+    }
+    let beaten = eds.iter().find(|e| e.self_hash == head).is_some_and(|h| eds.iter().any(|e| e.version == h.version && e.self_hash != h.self_hash && e.prev_hash == h.prev_hash && e.inner_id < h.inner_id));
+    Ok(moved || beaten)
 }
 
 /// Who holds `ch`'s certifier at writer `epoch`: its minter, and whom a delivery at the
@@ -357,6 +380,7 @@ pub(super) fn stop_fits(ch: &ChannelV2, writer: &PublicKey) -> bool {
 /// How every refusal that is one Channel's ledger's own begins.
 const LEDGER_OWN: &str = "this channel's writer ledger";
 const LEDGER_MOVED: &str = "this channel's writer ledger moved; nothing published over it";
+const NOT_WALKED: &str = "this community's memberlist isn't read whole yet; nothing minted";
 
 /// Whether an edition appending to `base` would chain from the head this device holds: the
 /// stored ledger is `base` at the head's version, or there is neither.
@@ -499,16 +523,27 @@ async fn settle_one<T: Transport + ?Sized>(
     }
     let live = live_writer(held, ch);
     let certifying = live.as_ref().and_then(|(e, ..)| certifier_held(held, ch, *e));
-    // A writer stopped at this epoch needs a fresh one: its certificate here vouches for nothing.
-    let restarted = ch.writers.as_ref().and_then(|l| l.current_writer().map(|(e, _)| (l, e))).is_some_and(|(l, e)| gained.iter().any(|p| l.stopped(e, &p.to_bytes(), u64::MAX)));
+    // A writer stopped at this epoch, or left out of its whole mint, needs a fresh one: nobody
+    // serves them this one.
+    let back: std::collections::BTreeSet<PublicKey> = match ch.writers.as_ref().and_then(|l| l.current_writer().map(|(e, _)| (l, e))) {
+        Some((ledger, epoch)) => {
+            let deliveries = named_deliveries(transport, held, ch, ledger).await?;
+            let trusted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) || now.manages(d);
+            let left = left_out(&held.id().0, ledger, &deliveries, writers::writer_rekey_scope(&ch.id), &trusted);
+            gained.iter().filter(|p| ledger.stopped(epoch, &p.to_bytes(), u64::MAX) || left.contains(p)).copied().collect()
+        }
+        None => Default::default(),
+    };
+    let served: Vec<PublicKey> = gained.iter().filter(|p| !back.contains(p)).copied().collect();
     match (live, certifying) {
-        _ if restarted && may_manage => match ledger_still(transport, held, &ch.id, &ch.writers).await? {
+        _ if !back.is_empty() && may_manage => match ledger_still(transport, held, &ch.id, &ch.writers).await? {
             Some((fresh, ch)) => mint(transport, &fresh, &ch, now, &[]).await,
             None => Ok(()),
         },
+        _ if served.is_empty() => Ok(()),
         (Some((epoch, secret, writer)), Some(certifying)) => {
-            let certs = certify(held, ch, epoch, &certifying, &gained);
-            deliver_certified(transport, held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained, &certs).await
+            let certs = certify(held, ch, epoch, &certifying, &served);
+            deliver_certified(transport, held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &served, &certs).await
         }
         // Only an epoch's minter can certify a writer: a manager mints one that includes them.
         _ if may_manage => match ledger_still(transport, held, &ch.id, &ch.writers).await? {
@@ -517,6 +552,31 @@ async fn settle_one<T: Transport + ?Sized>(
         },
         _ => Ok(()),
     }
+}
+
+/// Who epoch `e` vouches for: its minter, and each writer a `trusted` delivery certified.
+fn vouched_at(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery], trusted: &dyn Fn(&PublicKey, Epoch) -> bool, e: Epoch) -> std::collections::BTreeSet<PublicKey> {
+    ledger
+        .minter(e)
+        .and_then(|m| PublicKey::from_slice(&m).ok())
+        .into_iter()
+        .chain(deliveries.iter().filter(|d| d.epoch == e && trusted(&d.deliverer, e)).flat_map(|d| d.certs.iter().filter(|(w, c)| ledger.certifies(cid, e, w, c)).filter_map(|(w, _)| PublicKey::from_slice(w).ok())))
+        .collect()
+}
+
+/// Whom the live epoch's minting delivery left out after the epoch before vouched for them,
+/// judged only once every part of it is in: nobody serves them this epoch, whatever a lagging
+/// Roster says. A minter's later top-ups are untagged and serve a few: they are never the mint.
+fn left_out(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery], scope: rekey::RekeyScope, trusted: &dyn Fn(&PublicKey, Epoch) -> bool) -> std::collections::BTreeSet<PublicKey> {
+    let Some((epoch, _)) = ledger.current_writer() else { return Default::default() };
+    let minter = ledger.minter(epoch).and_then(|m| PublicKey::from_slice(&m).ok());
+    let minting: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch && d.mint.is_some()).collect();
+    let parts = minting.iter().filter_map(|d| d.mint.map(|m| m.1)).max().unwrap_or(0);
+    if parts == 0 || !(1..=parts).all(|i| minting.iter().any(|d| d.mint.map(|m| m.0) == Some(i))) {
+        return Default::default();
+    }
+    let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
+    ledger.previous_writer().map(|e| vouched_at(cid, ledger, deliveries, trusted, e)).unwrap_or_default().into_iter().filter(|p| !minted_to(p)).collect()
 }
 
 /// What one run of the writer duty did.
@@ -636,15 +696,16 @@ pub(super) async fn writer_duty<T: Transport + ?Sized>(transport: &T, community:
     let posters = Posters::of(&held, roster, banned)?;
     let candidates = writer_candidates(&held, roster)?;
     let mut done = WriterDuty::default();
+    let gone = departed(&held);
     for ch in &held.channels {
-        if let Err(e) = duty_for(transport, &held, ch, &posters, &candidates, &mut done).await {
+        if let Err(e) = duty_for(transport, &held, ch, &posters, &candidates, &gone, &mut done).await {
             crate::log_warn!("[v2:writers] duty for channel {} failed: {e}", &hex(&ch.id.0)[..8]);
         }
     }
     Ok(done)
 }
 
-async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, candidates: &[PublicKey], done: &mut WriterDuty) -> Result<(), String> {
+async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, candidates: &[PublicKey], gone: &std::collections::HashSet<PublicKey>, done: &mut WriterDuty) -> Result<(), String> {
     let roster = posters.roster;
     let owner_hex = posters.owner_hex.as_str();
     let me = me_pk()?;
@@ -664,7 +725,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         }
         return Ok(());
     }
-    let (Some(ledger), Some((root_ok, minter, began))) = (ch.writers.as_ref(), live.map(|(r, by, at)| (r >= held.root_epoch, by, at))) else { return Ok(()) };
+    let (Some(ledger), Some((root_ok, began))) = (ch.writers.as_ref(), live.map(|(r, _, at)| (r >= held.root_epoch, at))) else { return Ok(()) };
     let Some((epoch, pk)) = ledger.current_writer() else { return Ok(()) };
     if !restrict || !root_ok {
         return Ok(());
@@ -672,23 +733,15 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let cid = held.id().0;
     let scope = writers::writer_rekey_scope(&ch.id);
     let deliveries = named_deliveries(transport, held, ch, ledger).await?;
-    let minter = PublicKey::from_slice(&minter).ok();
     // Only an epoch's minter and the managers serve someone: a writer's blob can't vouch that
-    // they were served.
+    // they were served. One who left still vouched for whom they certified, so it still counts.
     let trusted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) || manager(&d.to_hex());
     // At a certified epoch, served means handed a certificate too.
     let certified = |p: &PublicKey, e: Epoch| {
         ledger.certifier(e).is_none() || deliveries.iter().any(|d| d.epoch == e && trusted(&d.deliverer, e) && d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&cid, e, w, c)))
     };
     let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e)) && certified(p, e);
-    let minter_of = |e: Epoch| ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
-    // Who an epoch vouches for: its minter, and each writer a trusted delivery certified.
-    let vouched = |e: Epoch| -> std::collections::BTreeSet<PublicKey> {
-        minter_of(e)
-            .into_iter()
-            .chain(deliveries.iter().filter(|d| d.epoch == e && trusted(&d.deliverer, e)).flat_map(|d| d.certs.iter().filter(|(w, c)| ledger.certifies(&cid, e, w, c)).filter_map(|(w, _)| PublicKey::from_slice(w).ok())))
-            .collect()
-    };
+    let vouched = |e: Epoch| vouched_at(&cid, ledger, &deliveries, &trusted, e);
     let certifying = certifier_held(held, ch, epoch);
     if may_manage {
         let now = now_ms();
@@ -700,7 +753,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         let holding = certifier_holders(transport, held, ch, epoch, &pool, &|d| manager(&d.to_hex())).await?;
         let holds_certifier = |p: &PublicKey| holding.contains(p);
         // Who left is an absence: judged only on a memberlist this session has read whole.
-        let walked = guestbook_walked_this_session(held.id());
+        let walked = guestbook_walked_this_session(held);
         if walked && holding.iter().any(|p| *p != me && !posters.manages(p)) && due(&ch.id, Lane::Certifier) {
             if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Certifier]).await? {
                 done.moved += 1;
@@ -709,11 +762,10 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         }
         // A manager may hold the key by design; a writer the Channel no longer lets post is stopped,
         // on evidence rather than an absence.
-        let gone = departed(held);
         let out: Vec<PublicKey> = vouched(epoch)
             .into_iter()
-            .filter(|p| walked && *p != me && !manager(&p.to_hex()) && !ledger.stopped(epoch, &p.to_bytes(), now))
-            .filter(|p| lost_evidence(roster, owner_hex, posters.banned, &gone, p, ch))
+            .filter(|p| walked && *p != me && !posters.manages(p) && !ledger.stopped(epoch, &p.to_bytes(), now))
+            .filter(|p| lost_evidence(roster, owner_hex, posters.banned, gone, p, ch))
             .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
             .filter(|p| due(&ch.id, Lane::Cut(*p)))
             .collect();
@@ -752,15 +804,8 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     if certifying.is_none() && !may_manage {
         return Ok(());
     }
-    // The epoch's mint is the minter's own delivery: whoever the epoch before vouched for and it
-    // left out was cut, whatever a lagging Roster says, but only once every part of it is in.
-    // A minter's later top-ups are untagged and serve a few: they are never the mint.
-    let minting: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch && d.mint.is_some()).collect();
-    let parts = minting.iter().filter_map(|d| d.mint.map(|m| m.1)).max().unwrap_or(0);
-    let whole = parts > 0 && (1..=parts).all(|i| minting.iter().any(|d| d.mint.map(|m| m.0) == Some(i)));
-    let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
-    let before = ledger.previous_writer().map(vouched);
-    let cut = |p: &PublicKey| whole && !minting.is_empty() && !minted_to(p) && before.as_ref().is_some_and(|b| b.contains(p));
+    let left = left_out(&cid, ledger, &deliveries, scope, &trusted);
+    let cut = |p: &PublicKey| left.contains(p);
     let sent = crate::db::current_session().scoped::<WriterSent, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
     let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let now = now_ms();
@@ -769,7 +814,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let unserved: Vec<PublicKey> = candidates.iter().filter(|p| **p != me && owed(p)).copied().collect();
     // One this epoch stopped who may post again is owed a fresh epoch, not this one's certificate:
     // judged on a memberlist read whole, and never for a manager, whose posts stand regardless.
-    let walked = guestbook_walked_this_session(held.id());
+    let walked = guestbook_walked_this_session(held);
     // So is one a whole mint left out who, on that memberlist, may post again.
     let back = walked.then(|| candidates.iter().find(|p| posters.writes(p, ch) && !posters.manages(p) && (stopped(p) || cut(p)))).flatten();
     if let Some(back) = back {
@@ -882,19 +927,25 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         }
         act => act,
     };
-    match (restricts(posters.roster, &ch), ch.restricted()) {
-        (false, true) => reopen(transport, &fresh, &ch).await?,
+    let done = match (restricts(posters.roster, &ch), ch.restricted()) {
+        (false, true) => reopen(transport, &fresh, &ch).await,
         (false, false) => return Ok(Backstop::Moved),
         (true, true) => match act {
-            Act::Stop(writer) if stop_fits(&ch, &writer) => stop(transport, &fresh, &ch, &writer).await?,
-            Act::Stop(writer) => mint(transport, &fresh, &ch, posters, &[writer]).await?,
-            Act::Mint(_) if !kept_out.is_empty() => mint(transport, &fresh, &ch, posters, &kept_out).await?,
-            Act::Mint(cut) => mint(transport, &fresh, &ch, posters, cut).await?,
-            Act::Restart(_) => mint(transport, &fresh, &ch, posters, &[]).await?,
+            Act::Stop(writer) if stop_fits(&ch, &writer) => stop(transport, &fresh, &ch, &writer).await,
+            Act::Stop(writer) => mint(transport, &fresh, &ch, posters, &[writer]).await,
+            Act::Mint(_) if !kept_out.is_empty() => mint(transport, &fresh, &ch, posters, &kept_out).await,
+            Act::Mint(cut) => mint(transport, &fresh, &ch, posters, cut).await,
+            Act::Restart(_) => mint(transport, &fresh, &ch, posters, &[]).await,
         },
-        (true, false) => mint(transport, &fresh, &ch, posters, &[]).await?,
+        (true, false) => mint(transport, &fresh, &ch, posters, &[]).await,
+    };
+    // Someone else moved the ledger first: nothing was tried, so nothing is damped.
+    match done {
+        Err(e) if e == LEDGER_MOVED => Ok(Backstop::Moved),
+        Err(e) if e == NOT_WALKED => Ok(Backstop::Short),
+        Err(e) => Err(e),
+        Ok(()) => Ok(Backstop::Acted),
     }
-    Ok(Backstop::Acted)
 }
 
 #[cfg(test)]
@@ -1066,22 +1117,48 @@ pub(crate) fn judge_arrival(judge: Option<&Judge>, community: &[u8; 32], channel
 /// lands: what the Channel's rules no longer stand behind meanwhile isn't kept (a manager's
 /// copy marked), and a later read finds its wrap unsettled.
 pub(crate) fn rejudge_page(channel_hex: &str, page: Vec<FetchedEvent>) -> Vec<FetchedEvent> {
-    let judge = crate::community::id32_from_hex(channel_hex).and_then(|ch| {
+    let judged = crate::community::id32_from_hex(channel_hex).and_then(|ch| {
         let cid = crate::db::community::community_id_for_channel(channel_hex).ok().flatten()?;
         let community = crate::db::community::load_community_v2(&crate::community::CommunityId(crate::community::id32_from_hex(&cid)?)).ok().flatten()?;
         let channel = community.channel(&ChannelId(ch))?.clone();
-        Judge::of(&community, &channel)
+        Some((community.id().0, channel.id, Judge::of(&community, &channel)?))
     });
-    let Some(judge) = judge else { return page };
+    let Some((community, channel, judge)) = judged else { return page };
     page.into_iter()
         .filter_map(|f| {
+            let (author, at_ms) = (f.event.opened().author, f.event.opened().at_ms);
             let wepoch = chat::writer_epoch_of(&f.event.opened().rumor).ok().flatten();
             match judge.sort(f.event, wepoch) {
-                Arrival::Stands(event) | Arrival::Held(Some(event)) => Some(FetchedEvent { event, epoch: f.epoch }),
-                Arrival::Held(None) | Arrival::Dropped => None,
+                Arrival::Stands(event) => Some(FetchedEvent { event, ..f }),
+                // Held to be judged again; a manager's marked copy only with its wrap held.
+                Arrival::Held(marked) => {
+                    let held = f.wrap.as_ref().is_some_and(|w| hold(&community, &channel, w, &author, at_ms));
+                    marked.filter(|_| held).map(|event| FetchedEvent { event, ..f })
+                }
+                Arrival::Dropped => None,
             }
         })
         .collect()
+}
+
+/// The stored Writers ledger of `channel_hex`, as a page is judged on it.
+pub(crate) fn writers_head(channel_hex: &str) -> Option<String> {
+    let cid = crate::db::community::community_id_for_channel(channel_hex).ok().flatten()?;
+    crate::db::community::get_community_writers(&cid, channel_hex).ok().flatten().map(|(c, _)| c)
+}
+
+/// A page judged on `judged_on` and stored after the ledger moved owes what it brought from
+/// `since` a retraction: the one the move set off may have read the history before it landed.
+pub(crate) fn owe_if_moved(channel_hex: &str, judged_on: Option<String>, since: u64) {
+    if writers_head(channel_hex) == judged_on {
+        return;
+    }
+    let Some(cid) = crate::db::community::community_id_for_channel(channel_hex).ok().flatten() else { return };
+    if crate::db::community::owe_writer_retraction(&cid, channel_hex, since).is_ok() {
+        if let Some(id) = crate::community::id32_from_hex(&cid) {
+            crate::community::v2::realtime::enqueue_follow(&crate::community::CommunityId(id));
+        }
+    }
 }
 
 /// Keep `wrap` for a later judgment of `channel`. Whether it is kept.
@@ -1211,36 +1288,43 @@ async fn admit(event: &chat::ChatEvent, channel_hex: &str, community: &Community
     }
 }
 
-/// Take back what `ch` shows that the ledger entries this device just folded no longer stand
-/// behind (CORD-03 §1): of the posts and edits dated from the earliest of them, each is fetched
-/// again and judged as it would be on arrival, except that today's Roster vouches for a writer
-/// in flight whatever the Channel is now. One that doesn't stand is held for a later judgment
-/// (or, dated past the hour, left on the relays), and only then does a manager mark it, anyone
-/// else let it go, or an edit come undone. Returns how many it took back.
-pub async fn retract_after<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
-    crate::db::scoped(retract_after_bound(transport, community, ch, added, handler)).await
+/// Take back what `ch` shows that the ledger entries this device folded, dated from `since`, no
+/// longer stand behind (CORD-03 §1): each post and edit is fetched again and judged as it would be
+/// on arrival, except that today's Roster vouches for a writer in flight whatever the Channel is
+/// now. One that doesn't stand is held for a later judgment (or, dated past the hour, left on the
+/// relays), and only then does a manager mark it, anyone else let it go, or an edit come undone.
+/// Returns how many it took back.
+pub async fn retract_since<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, since: u64, handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+    crate::db::scoped(retract_since_bound(transport, community, ch, since, handler)).await
 }
 
-async fn retract_after_bound<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+/// [`retract_since`] from the earliest of `added`.
+#[cfg(test)]
+pub(super) async fn retract_after<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+    match added.iter().map(|e| e.at).min() {
+        Some(since) => retract_since(transport, community, ch, since, handler).await,
+        None => 0,
+    }
+}
+
+async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, since: u64, handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
     let Some(judge) = Judge::of(community, ch) else { return 0 };
-    let Some(since) = added.iter().map(|e| e.at).min() else { return 0 };
     let chan = hex(&ch.id.0);
     let me = me_pk().ok().and_then(|p| nostr_sdk::prelude::ToBech32::to_bech32(&p).ok());
     let Ok(posts) = crate::db::events::posts_since(&chan, since) else { return 0 };
     let posts: Vec<crate::db::events::StoredPost> = posts.into_iter().filter(|p| !p.unauthorized && p.wrap_id.is_some() && p.npub != me).collect();
-    if posts.is_empty() {
-        return 0;
-    }
     // Asked as the reader and, for what a gated relay serves only to its plane, as each read plane.
     let planes = read_planes(community, ch);
-    let mut wraps: std::collections::HashMap<String, nostr_sdk::prelude::Event> = Default::default();
-    let ids: Vec<String> = posts.iter().filter_map(|p| p.wrap_id.clone()).collect();
-    for chunk in ids.chunks(100) {
-        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: chunk.to_vec(), ..Default::default() };
+    let mut taken = 0;
+    // A chunk at a time, so a long history never sits in memory at once.
+    for chunk in posts.chunks(100) {
+        let ids: Vec<String> = chunk.iter().filter_map(|p| p.wrap_id.clone()).collect();
+        let mut wraps: std::collections::HashMap<String, nostr_sdk::prelude::Event> = Default::default();
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: ids.clone(), ..Default::default() };
         if let Ok(found) = transport.fetch(&q, &community.relays).await {
             wraps.extend(found.into_iter().map(|w| (w.id.to_hex(), w)));
         }
-        let missing: Vec<String> = chunk.iter().filter(|id| !wraps.contains_key(*id)).cloned().collect();
+        let missing: Vec<String> = ids.iter().filter(|id| !wraps.contains_key(*id)).cloned().collect();
         for (plane, _) in planes.iter().filter(|_| !missing.is_empty()) {
             if let ReadPlane::Keyed(group) = plane {
                 let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: missing.clone(), ..Default::default() };
@@ -1249,48 +1333,57 @@ async fn retract_after_bound<T: Transport + ?Sized>(transport: &T, community: &C
                 }
             }
         }
-    }
-    let mut taken = 0;
-    for post in &posts {
-        let Some(wrap) = post.wrap_id.as_ref().and_then(|w| wraps.get(w)) else { continue };
-        let Some((event, wepoch)) = open_on_planes(ch, &planes, wrap) else { continue };
-        let o = event.opened();
-        if o.rumor_id.to_hex() != post.id || judge.banned.contains(&o.author.to_hex()) {
-            continue;
-        }
-        if judge.stands_by_ledger(&event, wepoch) || judge.vouches(&o.author.to_hex(), o.at_ms, wepoch, false) {
-            continue;
-        }
-        // Nothing goes that a later judgment couldn't reach: it is held here, or, dated past the
-        // hour, left on the relays until its date nears.
-        let deferred = o.at_ms > now_ms().saturating_add(crate::db::community::HELD_HORIZON_MS);
-        if !crate::db::current_session().is_live() || !(hold(&community.id().0, &ch.id, wrap, &o.author, o.at_ms) || deferred) {
-            continue;
-        }
-        taken += 1;
-        match &post.edit_of {
-            Some(target) => {
-                let _ = crate::db::events::delete_event(&post.id).await;
-                if let Ok(Some((chat, message))) = crate::db::events::get_message_by_id(target).await {
-                    let shown = crate::state::STATE.lock().await.update_message_with(target, |m, i| *m = crate::compact::CompactMessage::from_message(&message, i));
-                    handler.on_community_update(&chat, target, &shown.map_or(message, |(_, m)| m));
+        for post in chunk {
+            let Some(wrap) = post.wrap_id.as_ref().and_then(|w| wraps.get(w)) else { continue };
+            // A wrap the folded ledger names no address for stands nowhere on it.
+            let (author, at_ms) = match open_on_planes(ch, &planes, wrap) {
+                Some((event, wepoch)) => {
+                    let o = event.opened();
+                    if o.rumor_id.to_hex() != post.id || judge.banned.contains(&o.author.to_hex()) {
+                        continue;
+                    }
+                    if judge.stands_by_ledger(&event, wepoch) || judge.vouches(&o.author.to_hex(), o.at_ms, wepoch, false) {
+                        continue;
+                    }
+                    (o.author, o.at_ms)
                 }
+                None => match post.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) {
+                    Some(author) => (author, post.at_ms),
+                    None => continue,
+                },
+            };
+            // Nothing goes that a later judgment couldn't reach: it is held here, or, dated past the
+            // hour, left on the relays until its date nears.
+            let deferred = at_ms > now_ms().saturating_add(crate::db::community::HELD_HORIZON_MS);
+            if !crate::db::current_session().is_live() || !(hold(&community.id().0, &ch.id, wrap, &author, at_ms) || deferred) {
+                continue;
             }
-            None if judge.me_manages => {
-                let _ = crate::db::events::set_event_unauthorized(&post.id, true);
-                let resident = crate::state::STATE.lock().await.update_message(&post.id, |m| m.flags.set_unauthorized(true));
-                let shown = match resident {
-                    Some(shown) => Some(shown),
-                    None => crate::db::events::get_message_by_id(&post.id).await.ok().flatten(),
-                };
-                if let Some((chat, message)) = shown {
-                    handler.on_community_update(&chat, &post.id, &message);
+            taken += 1;
+            match &post.edit_of {
+                Some(target) => {
+                    let _ = crate::db::events::delete_event(&post.id).await;
+                    if let Ok(Some((chat, message))) = crate::db::events::get_message_by_id(target).await {
+                        let shown = crate::state::STATE.lock().await.update_message_with(target, |m, i| *m = crate::compact::CompactMessage::from_message(&message, i));
+                        handler.on_community_update(&chat, target, &shown.map_or(message, |(_, m)| m));
+                    }
                 }
-            }
-            None => {
-                let _ = crate::state::STATE.lock().await.remove_message(&post.id);
-                let _ = crate::db::events::delete_event(&post.id).await;
-                handler.on_community_removed(&chan, &post.id);
+                // A manager's flag needs a held wrap: one left on the relays is read again later.
+                None if judge.me_manages && !deferred => {
+                    let _ = crate::db::events::set_event_unauthorized(&post.id, true);
+                    let resident = crate::state::STATE.lock().await.update_message(&post.id, |m| m.flags.set_unauthorized(true));
+                    let shown = match resident {
+                        Some(shown) => Some(shown),
+                        None => crate::db::events::get_message_by_id(&post.id).await.ok().flatten(),
+                    };
+                    if let Some((chat, message)) = shown {
+                        handler.on_community_update(&chat, &post.id, &message);
+                    }
+                }
+                None => {
+                    let _ = crate::state::STATE.lock().await.remove_message(&post.id);
+                    let _ = crate::db::events::delete_event(&post.id).await;
+                    handler.on_community_removed(&chan, &post.id);
+                }
             }
         }
     }

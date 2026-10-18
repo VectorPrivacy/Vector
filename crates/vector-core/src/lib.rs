@@ -3599,7 +3599,9 @@ impl VectorCore {
     ) -> usize {
         crate::db::scoped(async move {
             use crate::community::v2::inbound::{apply_chat_to_state, ChatPersist};
+            let judged_on = crate::community::v2::service::writers_head(channel_id);
             let page = crate::community::v2::service::rejudge_page(channel_id, page);
+            let since = page.iter().map(|f| f.event.opened().at_ms).min();
             let mut new = 0usize;
             // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
             let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());
@@ -3649,6 +3651,9 @@ impl VectorCore {
                 }
             }
             crate::community::v2::inbound::persist_chat_page(channel_id, &outcomes, &session).await;
+            if let Some(since) = since {
+                crate::community::v2::service::owe_if_moved(channel_id, judged_on, since);
+            }
             // Resolve each reply's quote before the emit: the renderer has no other source
             // for a parent outside its window and never retries. Placed AFTER the persists
             // so a parent carried by this same page resolves too. One query per page.
