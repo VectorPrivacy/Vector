@@ -2089,13 +2089,14 @@ impl VectorCore {
             None => None,
         };
         let reply_ref = reply.as_ref().map(|(id, author)| (id.as_str(), author.as_str()));
+        let (named, role_mentions) = crate::community::mentions::resolve_in(&crate::simd::hex::bytes_to_hex_32(&id.0), content);
         // NIP-30: resolve `:shortcode:` against subscribed packs so the rumor
         // carries `["emoji", ...]` pairs.
-        let (plain, text_spans) = crate::text_spans::extract(content);
+        let (plain, text_spans) = crate::text_spans::extract(&named);
         let content = plain.as_str();
         let emoji_owned = crate::emoji_packs::resolve_outbound_emoji_tags(content);
         let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-        let mut extra_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_spans::to_nostr_tags(&text_spans).collect();
+        let mut extra_tags: Vec<nostr_sdk::prelude::Tag> = crate::text_spans::to_nostr_tags(&text_spans).chain(crate::community::mentions::to_tags(&role_mentions)).collect();
         if let Some(secs) = expires_in_secs.filter(|s| *s > 0) {
             let at = web_time::SystemTime::now()
                 .duration_since(web_time::UNIX_EPOCH)
