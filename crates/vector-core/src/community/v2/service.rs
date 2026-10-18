@@ -12513,21 +12513,16 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                         advanced = true;
                         changed = true;
                     }
+                    // A complete rotation without me: cut, or still keyless. Either way the
+                    // channel stays known at that epoch, so the walk goes on to the CURRENT one,
+                    // where a later rotation that names me again (a re-grant) lets me back in.
                     Advance::Removed => {
-                        match held_key {
-                            // A complete rotation dropped my blob — cut from the channel.
-                            Some(_) => {
-                                cur.channels.retain(|c| c.id.0 != cid.0);
-                            }
-                            // Keyless scan: this epoch's rotation completed without me.
-                            // Advance the cursor so the walk converges on the channel's
-                            // CURRENT epoch — my entry point is its next rotation (whose
-                            // recipients are the members at that time) or a fresh bundle.
-                            None => {
-                                if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
-                                    ch.epoch = next;
-                                }
-                            }
+                        if held_key.is_some() {
+                            crate::log_debug!("[v2:follow {}] ch {} cut at e{}", &cid_hex[..8], &ch_hex[..8], next.0);
+                        }
+                        if let Some(ch) = cur.channels.iter_mut().find(|c| c.id.0 == cid.0) {
+                            ch.key = None;
+                            ch.epoch = next;
                         }
                         advanced = true;
                         changed = true;
@@ -28073,6 +28068,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_member_cut_then_let_back_in_walks_through_the_cut_to_the_rotation_that_names_them() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("Back").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let m = Keys::generate();
+        let member = crate::community::roles::OverwriteTarget::Member(m.public_key().to_hex());
+        set_overwrite(&bed.relay, &held(), ch.0, member.clone(), Permissions::VIEW_CHANNEL, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
+        let joined = held().channel(&ch).unwrap().epoch;
+        let key = crate::db::community::held_epoch_key(&cid_hex, &chan, joined.0).unwrap().unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, member.clone(), 0, Permissions::VIEW_CHANNEL).await.unwrap();
+        set_overwrite(&bed.relay, &held(), ch.0, member, Permissions::VIEW_CHANNEL, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
+        let back = held().channel(&ch).unwrap().epoch;
+        assert!(back.0 >= joined.0 + 2, "a cut, then the rotation that lets them back in");
+        // Their device, holding the epoch they joined at.
+        let mut c = held();
+        let x = c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap();
+        (x.key, x.epoch) = (Some(key), joined);
+        crate::db::community::save_community_v2(&c).unwrap();
+        act_as(&m);
+        for _ in 0..4 {
+            if let Some(next) = follow_rekeys(&bed.relay, &held(), &crate::db::current_session()).await.unwrap().updated {
+                crate::db::community::save_community_v2(&next).unwrap();
+            }
+        }
+        let now = held().channel(&ch).cloned().expect("a cut keeps the channel known");
+        assert_eq!((now.epoch, now.key.is_some()), (back, true), "and the walk reaches the epoch that names them");
+        act_as(&owner.keys);
+    }
+
+    #[tokio::test]
     async fn a_view_grant_without_history_lets_them_in_at_a_fresh_epoch() {
         let (bed, owner, _x, community) = v2_bed_with_admin("Fresh").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -29711,7 +29738,8 @@ mod tests {
         }
         let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
         let updated = follow.updated.expect("the owner's removal folds");
-        assert!(updated.channel(&priv_id).is_none(), "the owner's exclusion cuts my channel record");
+        let cut = updated.channel(&priv_id).expect("the channel stays known, so a later rotation can name me again");
+        assert!(cut.key.is_none() && cut.epoch == Epoch(2), "the owner's exclusion cuts my key at its epoch");
     }
 
     #[tokio::test]
