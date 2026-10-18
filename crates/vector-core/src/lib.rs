@@ -1410,7 +1410,7 @@ impl VectorCore {
         }
         let session = crate::db::current_session();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let community = v2::create_community(&transport, name, relays, None)
+        let community = v2::create_community_on_roles_v2(&transport, name, relays, None)
             .await
             .map_err(VectorError::Other)?;
         self.register_v2_chats(&community, &session).await;

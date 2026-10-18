@@ -505,7 +505,7 @@ pub async fn create_community(
     let session = vector_core::db::current_session();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let mut community =
-        vector_core::community::v2::service::create_community(&transport, &name, relays, None).await?;
+        vector_core::community::v2::service::create_community_on_roles_v2(&transport, &name, relays, None).await?;
 
     // Genesis mints the first channel as "general"; honor a custom name.
     if channel_name != "general" {

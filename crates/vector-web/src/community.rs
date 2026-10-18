@@ -280,7 +280,7 @@ pub async fn create_community(name: String, channel_name: Option<String>, relays
     let channel_name = channel_name.unwrap_or_else(|| "general".into());
     let session = db::current_session();
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let mut community = vector_core::community::v2::service::create_community(&transport, &name, relays, None).await?;
+    let mut community = vector_core::community::v2::service::create_community_on_roles_v2(&transport, &name, relays, None).await?;
     if channel_name != "general" {
         if let Some(ch) = community.channels.first().cloned() {
             let mut meta = ch.metadata();

@@ -71,6 +71,30 @@ fn next_send_ms() -> u64 {
 /// (self-certifying id + the two owner editions), persist, publish the genesis
 /// control editions, and announce the owner's Guestbook Join. Returns the saved
 /// community.
+/// A new Community on Roles v2 from the start (CORD-04 §2): `@everyone` holds the defaults and the
+/// genesis Channel is all the switch lists. A switch that can't land leaves it on the legacy Roster,
+/// which the owner can still move from.
+pub async fn create_community_on_roles_v2<T: Transport + ?Sized>(
+    transport: &T,
+    name: &str,
+    relays: Vec<String>,
+    description: Option<String>,
+) -> Result<CommunityV2, String> {
+    let community = create_community(transport, name, relays, description).await?;
+    let mut last = String::new();
+    for _ in 0..2 {
+        match activate_roles_v2(transport, &community, super::roles::EVERYONE_DEFAULT).await {
+            Ok(_) => {
+                let _ = follow_control(transport, &community).await;
+                return Ok(crate::db::community::load_community_v2(community.id())?.unwrap_or(community));
+            }
+            Err(e) => last = e,
+        }
+    }
+    crate::log_warn!("[v2:create] the new community stays on the legacy roles: {last}");
+    Ok(community)
+}
+
 pub async fn create_community<T: Transport + ?Sized>(
     transport: &T,
     name: &str,
@@ -23947,6 +23971,25 @@ mod tests {
         set_member_roles(&bed.relay, &held, &x.public_key(), vec![admin]).await.unwrap();
         follow_control(&bed.relay, &held).await.unwrap();
         (bed, owner, x, crate::db::community::load_community_v2(community.id()).unwrap().unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_new_community_starts_on_roles_v2_and_a_joiner_reads_it_so() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community_on_roles_v2(&bed.relay, "Born", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let general = crate::simd::hex::bytes_to_hex_32(&community.channels[0].id.0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert_eq!(roster.everyone, Some(Permissions(crate::community::v2::roles::EVERYONE_DEFAULT)), "@everyone holds the defaults");
+        assert!(roster.legacy_channels.as_ref().is_some_and(|l| l.contains(&general)), "the genesis Channel is what the switch lists");
+        assert!(roles_v2_held(&community));
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+        bed.swap_to(&member);
+        let joined = accept_direct_invite(&bed.relay, &fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await).await.unwrap();
+        follow_control(&bed.relay, &joined).await.unwrap();
+        let theirs = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(theirs.everyone.is_some() && theirs.channel_permissions(Some(&owner.keys.public_key().to_hex()), &member.keys.public_key().to_hex(), &general, false).contains(Permissions::SEND_MESSAGES), "a joiner folds it as Roles v2 and may post in general");
     }
 
     #[tokio::test]
