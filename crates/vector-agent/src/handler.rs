@@ -46,6 +46,13 @@ impl InboundEventHandler for XdcSignalSink {
 }
 
 impl InboundEventHandler for AgentEventHandler {
+    fn on_community_self_removed(&self, community_id: &str) {
+        // A Kick is cooperative: the agent leaves as the desktop does, keeping only the keys a
+        // self-delete of its own past messages needs.
+        eprintln!("[vector-agent] kicked from {}: leaving", &community_id[..8.min(community_id.len())]);
+        let _ = vector_core::db::community::delete_community_retain_keys(community_id);
+    }
+
     fn on_webxdc_signal(&self, contact: &str, npub: &str, topic: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
         XdcSignalSink.on_webxdc_signal(contact, npub, topic, node_addr, event_id, created_at);
     }

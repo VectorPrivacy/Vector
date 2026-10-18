@@ -1291,6 +1291,13 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             return;
         };
         if let Ok(fresh) = super::service::sync_guestbook(&transport, &current).await {
+            // A Kick read on catch-up evicts as one heard live does: offline when kicked is still kicked.
+            let kicked_me = crate::state::my_public_key().is_some_and(|me| super::service::stored_kick_verdict(&current, &me));
+            if kicked_me {
+                crate::log_warn!("[v2:teardown {}] KICK read on catch-up: the authorized guestbook fold rules us kicked", &community_id[..8.min(community_id.len())]);
+                handler.on_community_self_removed(&community_id);
+                return;
+            }
             if !fresh.is_empty() {
                 surface_presence(&current, &fresh, handler);
                 handler.on_community_refreshed(&community_id);
