@@ -4054,6 +4054,9 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                 }
             }
         }
+        for (id, ..) in &channel_updates {
+            reseal_rotated(transport, &updated, id).await;
+        }
         // A restricted Channel's writer key may be held by those this Refounding removed.
         writing::retire_after_refounding(transport, &updated, &away).await;
         Ok(updated)
@@ -9118,43 +9121,37 @@ async fn rekey_channel_at<T: Transport + ?Sized>(
         crate::db::community::advance_channel_epoch(&cid_hex, &chan_hex, new_epoch.0, &new_key)?;
         crate::db::community::store_epoch_key(&cid_hex, &chan_hex, new_epoch.0, &new_key)?;
 
-        // §7 Rotator duty: reseal the Pin List under the NEW key. Without this,
-        // members who join at this epoch hold no old key and the channel's pins
-        // read as sealed-dark for them forever. The rotator is uniquely placed:
-        // it provably reads the old seal (it held the old key) and mints the new
-        // one. Best-effort — a failed reseal never fails the rotation, and any
-        // curator's next edit heals the same way.
-        {
-            let mut rotated = community.clone();
-            if let Some(c) = rotated.channels.iter_mut().find(|c| c.id == *channel_id) {
-                c.key = Some(new_key);
-                c.epoch = new_epoch;
-            }
-            match read_channel_pins(&rotated, channel_id) {
-                Ok(read) if !read.sealed && !read.pins.is_empty() => {
-                    let entries: Vec<super::pins::PinEntry> =
-                        read.pins.iter().map(|p| p.entry.clone()).collect();
-                    if let Some(ch2) = rotated.channel(channel_id).cloned() {
-                        if let Err(e) = publish_pin_list(transport, &rotated, &ch2, &entries).await {
-                            crate::log_warn!("[pins] rotation reseal failed (a curator's next edit heals): {e}");
-                        } else {
-                            crate::log_info!("[pins] resealed {} pin(s) under epoch {}", entries.len(), new_epoch.0);
-                        }
-                    }
-                }
-                Ok(read) if read.sealed => {
-                    crate::log_warn!("[pins] rotating a channel whose pin list we cannot read; reseal skipped");
-                }
-                _ => {}
-            }
-            // CORD-03 §2: the channel's metadata too. Best-effort; a manager's duty backs it up.
-            if let Err(e) = reseal_channel(transport, &rotated, channel_id).await {
-                crate::log_warn!("v2: rotation reseal of channel metadata failed (the access duty retries): {e}");
-            }
+        let mut rotated = community.clone();
+        if let Some(c) = rotated.channels.iter_mut().find(|c| c.id == *channel_id) {
+            c.key = Some(new_key);
+            c.epoch = new_epoch;
         }
+        reseal_rotated(transport, &rotated, channel_id).await;
         Ok(true)
     })
     .await
+}
+
+/// The rotator's duty after minting a Private Channel's epoch (CORD-03 §2, CORD-04 §7): seal its
+/// Pin List and metadata again under the new key, which members who join at it hold alone.
+/// Best-effort: a failure never fails the rotation, and a manager's duty backs it up.
+async fn reseal_rotated<T: Transport + ?Sized>(transport: &T, rotated: &CommunityV2, channel_id: &ChannelId) {
+    match read_channel_pins(rotated, channel_id) {
+        Ok(read) if !read.sealed && !read.pins.is_empty() => {
+            let entries: Vec<super::pins::PinEntry> = read.pins.iter().map(|p| p.entry.clone()).collect();
+            if let Some(ch) = rotated.channel(channel_id).cloned() {
+                match publish_pin_list(transport, rotated, &ch, &entries).await {
+                    Err(e) => crate::log_warn!("[pins] rotation reseal failed (a curator's next edit heals): {e}"),
+                    Ok(_) => crate::log_info!("[pins] resealed {} pin(s) under epoch {}", entries.len(), ch.epoch.0),
+                }
+            }
+        }
+        Ok(read) if read.sealed => crate::log_warn!("[pins] rotating a channel whose pin list we cannot read; reseal skipped"),
+        _ => {}
+    }
+    if let Err(e) = reseal_channel(transport, rotated, channel_id).await {
+        crate::log_warn!("v2: rotation reseal of channel metadata failed (the access duty retries): {e}");
+    }
 }
 
 /// Rotate every private channel a just-banned member could read (CORD-06 §1 applied
@@ -23950,6 +23947,19 @@ mod tests {
         set_member_roles(&bed.relay, &held, &x.public_key(), vec![admin]).await.unwrap();
         follow_control(&bed.relay, &held).await.unwrap();
         (bed, owner, x, crate::db::community::load_community_v2(community.id()).unwrap().unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_refounding_seals_each_private_channel_again_under_its_new_epoch() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("Refound").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let before = held().channel(&ch).unwrap().epoch;
+        refound_community(&bed.relay, &held(), &[Keys::generate().public_key()]).await.unwrap();
+        let after = held().channel(&ch).cloned().unwrap();
+        assert!(after.epoch > before, "the Refounding mints the channel a fresh epoch");
+        assert_eq!(after.sealed.as_ref().map(|s| (s.epoch, s.open)), Some((after.epoch.0, true)), "and seals its metadata under it, for whoever joins at it");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().resealed, 0, "leaving the duty nothing");
     }
 
     #[tokio::test]
