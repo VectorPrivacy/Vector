@@ -33,12 +33,14 @@ pub enum Spell {
     /// From here on the live epoch's certificate for `writer` vouches for nothing: a writer the
     /// Channel no longer lets post. Moves no window.
     Stop { writer: [u8; 32] },
+    /// An entry of a kind this build doesn't know, carried verbatim: it moves nothing.
+    Other,
 }
 
 impl Spell {
     /// Whether this entry moves where posts land.
     fn moves(&self) -> bool {
-        !matches!(self, Spell::Stop { .. })
+        matches!(self, Spell::Writer { .. } | Spell::Open)
     }
 }
 
@@ -122,6 +124,7 @@ impl Ledger {
             let stop = e.remove("stop");
             let spell = match (e.remove("open"), e.remove("epoch"), e.remove("writer"), e.remove("root"), e.remove("by")) {
                 (None, None, None, None, None) if stop.is_some() => Spell::Stop { writer: writer_pk(stop.as_ref()?)? },
+                (None, None, None, None, None) => Spell::Other,
                 (Some(serde_json::Value::Bool(true)), None, None, None, None) if stop.is_none() => Spell::Open,
                 (None, Some(epoch), Some(writer), Some(root), Some(by)) if stop.is_none() => {
                     let certifier = match e.remove("certifier") {
@@ -172,6 +175,7 @@ impl Ledger {
                     Spell::Stop { writer } => {
                         o.insert("stop".into(), crate::simd::hex::bytes_to_hex_32(&writer).into());
                     }
+                    Spell::Other => {}
                 }
                 serde_json::Value::Object(o)
             })
@@ -221,10 +225,15 @@ impl Ledger {
     }
 
     /// Whether `writer` was stopped at writer `epoch` by `at_ms`: a stop entry for them inside
-    /// that epoch's window, dated no later. A stop the cap dropped stops nothing.
+    /// that epoch's window, dated no later. A stop outlives its window's entry retiring; only the
+    /// cap dropping the stop itself undoes it.
     pub fn stopped(&self, epoch: Epoch, writer: &[u8; 32], at_ms: u64) -> bool {
-        let Some(start) = self.entries.iter().position(|e| matches!(e.spell, Spell::Writer { epoch: w, .. } if w == epoch)) else { return false };
-        self.entries[start + 1..].iter().take_while(|e| !e.spell.moves()).any(|e| e.at <= at_ms && matches!(e.spell, Spell::Stop { writer: w } if w == *writer))
+        let names = |e: &Entry| e.at <= at_ms && matches!(e.spell, Spell::Stop { writer: w } if w == *writer);
+        if let Some(start) = self.entries.iter().position(|e| matches!(e.spell, Spell::Writer { epoch: w, .. } if w == epoch)) {
+            return self.entries[start + 1..].iter().take_while(|e| !e.spell.moves()).any(names);
+        }
+        // Retired: the stops left at the front, before the first entry that moves, inside its window.
+        self.retired.iter().find(|r| r.epoch == epoch).is_some_and(|r| self.entries.iter().take_while(|e| !e.spell.moves()).any(|e| (r.from..r.to).contains(&e.at) && names(e)))
     }
 
     /// Who minted writer `epoch`, while the ledger still holds its entry.
@@ -525,6 +534,11 @@ mod tests {
         let mut both: serde_json::Value = serde_json::from_str(&live.to_json()).unwrap();
         both["ledger"][1]["open"] = true.into();
         assert!(Ledger::parse(&both.to_string()).is_none(), "an entry is one thing");
+        let mut unknown: serde_json::Value = serde_json::from_str(&live.to_json()).unwrap();
+        unknown["ledger"].as_array_mut().unwrap().push(serde_json::json!({ "at": 300, "future": "kind" }));
+        let carried = Ledger::parse(&unknown.to_string()).expect("a kind this build doesn't know is carried");
+        assert_eq!(carried.current_writer(), live.current_writer(), "and moves nothing");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&carried.to_json()).unwrap()["ledger"][2], serde_json::json!({ "at": 300, "future": "kind" }), "verbatim");
     }
 
     #[test]
@@ -537,7 +551,13 @@ mod tests {
         assert!(l.appended(5_000, Spell::Stop { writer: pk(9) }).is_none(), "at the cap a stop would retire the live entry");
         let next = l.appended(5_000, w(2, 2)).unwrap();
         assert_eq!(next.retired, vec![Retired { epoch: Epoch(1), pk: pk(1), from: 1_000, to: 5_000, certifier: None }], "its window ends where the next epoch begins");
-        assert!(!next.stopped(Epoch(1), &pk(21), 4_000), "a stop the cap dropped stops nothing");
+        assert!(next.stopped(Epoch(1), &pk(21), 4_000), "a stop outlives its window's entry retiring");
+        assert!(!next.stopped(Epoch(1), &pk(21), 1_000), "and still only from its date");
+        let mut later = next.clone();
+        for i in 0..MAX_LEDGER as u64 {
+            later = later.appended(6_000 + i, Spell::Open).and_then(|l| l.appended(6_000 + i, w(3 + i, 3))).unwrap_or(later);
+        }
+        assert!(!later.stopped(Epoch(1), &pk(21), 4_000), "a stop the cap dropped stops nothing");
     }
 
     fn ledger(entries: &[(u64, Spell)]) -> Ledger {

@@ -67,8 +67,29 @@ pub fn set_app_data_dir(path: PathBuf) {
 pub(crate) fn shared_test_data_dir() -> &'static std::path::Path {
     static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     // Never dropped: process-lifetime by construction, so no test can pull it out
-    // from under another. The OS reclaims it after the run.
-    DIR.get_or_init(|| tempfile::tempdir().expect("test data dir")).path()
+    // from under another. Named by process, so the next run can clear what it left.
+    DIR.get_or_init(|| {
+        sweep_dead_test_dirs();
+        tempfile::Builder::new().prefix(&format!("vector-test-{}-", std::process::id())).tempdir().expect("test data dir")
+    })
+    .path()
+}
+
+/// Earlier runs' roots: every test process leaves one, and the OS is slow to reclaim them.
+#[cfg(test)]
+fn sweep_dead_test_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.strip_prefix("vector-test-").and_then(|r| r.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else { continue };
+        #[cfg(unix)]
+        let gone = unsafe { libc::kill(pid, 0) } != 0;
+        #[cfg(not(unix))]
+        let gone = { let _ = pid; false };
+        if gone {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 pub fn get_app_data_dir() -> Result<&'static PathBuf, String> {

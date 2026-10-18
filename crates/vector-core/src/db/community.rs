@@ -1014,6 +1014,16 @@ pub fn community_member_activity(community_id: &str) -> Result<Vec<(String, u64)
 /// strand the dropped members (absent from the snapshot → absent from `memberlist()` → excluded
 /// from every future rotation). Every other caller keeps the cap.
 pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Result<Vec<(String, u64)>, String> {
+    member_activity(community_id, capped, now_secs() as u64)
+}
+
+/// [`community_member_activity`] for rules where leaving counts: a Grant holder is present only at
+/// time 0, so any Leave or Kick of theirs outranks a Role that lingers. Uncapped.
+pub fn community_member_activity_strict(community_id: &str) -> Result<Vec<(String, u64)>, String> {
+    member_activity(community_id, false, 0)
+}
+
+fn member_activity(community_id: &str, capped: bool, grant_stamp: u64) -> Result<Vec<(String, u64)>, String> {
     /// Cap on rendered members — bounds a presence-flood (fresh-identity 3306 spam) from
     /// growing the list / profile-fetch fan-out without limit.
     const COMMUNITY_MEMBER_CAP: usize = 500;
@@ -1147,7 +1157,7 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
         let mut present: std::collections::HashSet<String> = out.iter().map(|(n, _)| n.clone()).collect();
         let mut reassert = |npub: String| {
             if !banned.contains(&npub) && present.insert(npub.clone()) {
-                out.push((npub, now_secs() as u64));
+                out.push((npub, grant_stamp));
             }
         };
         if let Ok(roles) = get_community_roles(community_id) {
@@ -4497,11 +4507,23 @@ pub fn get_community_writers(community_id: &str, channel_id: &str) -> Result<Opt
     Ok(row.map(|(content, version)| (dec_txt(&content), version)))
 }
 
-/// How many held wraps one Channel keeps: past it the oldest-dated go first.
+/// How many held wraps one Channel keeps, and how many bytes: past either, those dated furthest
+/// from now go first, so a flood dated years ahead or behind evicts only itself.
 pub const MAX_HELD_WRAPS: usize = 500;
+pub const MAX_HELD_BYTES: usize = 4 * 1024 * 1024;
+
+/// How far past this device's clock a post may be dated and still be held (CORD-02 §5's horizon):
+/// a later one is left on the relay for a later read.
+const HELD_HORIZON_MS: u64 = 60 * 60 * 1000;
 
 /// Hold `wrap`, a post `channel_id`'s rules didn't stand behind on arrival, dated `at_ms`.
-pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str, at_ms: u64) -> Result<(), String> {
+/// Whether it is held: a post dated past the horizon isn't, nor one the caps evict at once. A
+/// marked copy kept beside an evicted wrap goes with it.
+pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str, at_ms: u64) -> Result<bool, String> {
+    let now = now_secs().max(0) as u64 * 1000;
+    if at_ms > now.saturating_add(HELD_HORIZON_MS) {
+        return Ok(false);
+    }
     let _seal = crate::crypto::gate::sealing();
     let enc = enc_txt(wrap)?;
     let conn = super::get_write_connection_guard_static()?;
@@ -4510,13 +4532,46 @@ pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str
         params![wrap_id, community_id, channel_id, enc, at_ms as i64],
     )
     .map_err(|e| format!("hold wrap: {e}"))?;
-    conn.execute(
-        "DELETE FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 AND wrap_id NOT IN (
-            SELECT wrap_id FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 ORDER BY at_ms DESC LIMIT ?3)",
-        params![community_id, channel_id, MAX_HELD_WRAPS as i64],
-    )
-    .map_err(|e| format!("trim held wraps: {e}"))?;
-    Ok(())
+    let ranked: Vec<(String, usize)> = {
+        let mut stmt = conn
+            .prepare("SELECT wrap_id, LENGTH(wrap) FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 ORDER BY ABS(at_ms - ?3), wrap_id")
+            .map_err(|e| format!("rank held wraps: {e}"))?;
+        let rows = stmt.query_map(params![community_id, channel_id, now as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as usize))).map_err(|e| format!("rank held wraps: {e}"))?;
+        rows.flatten().collect()
+    };
+    let mut bytes = 0usize;
+    let evicted: Vec<&String> = ranked
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, len))| {
+            bytes += len;
+            *i >= MAX_HELD_WRAPS || bytes > MAX_HELD_BYTES
+        })
+        .map(|(_, (id, _))| id)
+        .collect();
+    for id in &evicted {
+        conn.execute("DELETE FROM community_held_wraps WHERE wrap_id = ?1", params![id]).map_err(|e| format!("trim held wraps: {e}"))?;
+        conn.execute("DELETE FROM events WHERE wrapper_event_id = ?1 AND instr(tags, '[\"unauthorized\"]') > 0", params![id]).map_err(|e| format!("trim held copy: {e}"))?;
+    }
+    Ok(!evicted.iter().any(|id| *id == wrap_id))
+}
+
+/// The Channels of `community_id` holding wraps.
+pub fn held_wrap_channels(community_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT DISTINCT channel_id FROM community_held_wraps WHERE community_id = ?1").map_err(|e| format!("held channels: {e}"))?;
+    let rows = stmt.query_map(params![community_id], |r| r.get(0)).map_err(|e| format!("held channels: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
+/// The wraps held for one Channel, as `(wrap_id, wrap)`, oldest-dated first.
+pub fn held_wraps_in(community_id: &str, channel_id: &str) -> Result<Vec<(String, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT wrap_id, wrap FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 ORDER BY at_ms")
+        .map_err(|e| format!("held wraps: {e}"))?;
+    let rows = stmt.query_map(params![community_id, channel_id], |r| Ok((r.get(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("held wraps: {e}"))?;
+    Ok(rows.flatten().map(|(id, wrap)| (id, dec_txt(&wrap))).collect())
 }
 
 /// Every wrap held for `community_id`, as `(wrap_id, channel_id, wrap)`, oldest-dated first.

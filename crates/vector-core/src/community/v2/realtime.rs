@@ -240,7 +240,7 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 
 /// A Writers ledger that moved can admit posts a stale one dropped live: read each such channel
 /// again from the earliest entry that changed (CORD-03 §1).
-fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId) {
+async fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId, handler: &dyn InboundEventHandler) {
     let Ok(Some(after)) = crate::db::community::load_community_v2(id) else { return };
     for ch in &after.channels {
         let was = before.channel(&ch.id).and_then(|c| c.writers.clone());
@@ -248,8 +248,11 @@ fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::CommunityId
             continue;
         }
         let (old, new) = (was.map(|l| l.entries).unwrap_or_default(), ch.writers.as_ref().map(|l| l.entries.clone()).unwrap_or_default());
-        // Only what the ledger added can admit something new: a cap drop moves no window.
-        let Some(from_ms) = new.iter().filter(|e| !old.contains(e)).map(|e| e.at).min() else { continue };
+        // Only what the ledger added can move a verdict: a cap drop moves no window.
+        let added: Vec<super::writers::Entry> = new.iter().filter(|e| !old.contains(e)).cloned().collect();
+        let Some(from_ms) = added.iter().map(|e| e.at).min() else { continue };
+        // What a stop or a restrict takes back leaves the history; the read below holds it again.
+        super::service::retract_after(&after, ch, &added, handler).await;
         let (after, channel) = (after.clone(), ch.id);
         crate::db::spawn_bound(async move {
             let Some(me) = crate::state::my_public_key() else { return };
@@ -805,8 +808,10 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     return;
                 }
                 inbound::DispatchedV2::Held { channel_id, at_ms, marked } => {
-                    if let Some(ch) = crate::community::id32_from_hex(&channel_id) {
-                        super::service::writing_hold(&c.id().0, &crate::community::ChannelId(ch), &event, at_ms);
+                    // Not held, it stays on the relay for a later read.
+                    let held = crate::community::id32_from_hex(&channel_id).is_some_and(|ch| super::service::writing_hold(&c.id().0, &crate::community::ChannelId(ch), &event, at_ms));
+                    if !held {
+                        return;
                     }
                     remember();
                     // A manager sees what was held, marked, and is never rung for it.
@@ -1122,7 +1127,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         };
         let control_changed = control.updated.is_some();
         if control_changed {
-            reread_moved_ledgers(&current, id);
+            reread_moved_ledgers(&current, id, handler).await;
         }
         // The authority half is what the rekey walk gates on, and the walk ran BEFORE
         // this fold. Re-walk once, in-process, on the freshly-written state — a queue
@@ -1600,6 +1605,31 @@ mod tests {
         let held = crate::db::community::held_wraps(&cid).unwrap();
         assert_eq!(held.iter().map(|(id, ..)| id.clone()).collect::<Vec<_>>(), vec![wrap.id.to_hex()], "its wrap waits for a later judgment");
         assert!(crate::db::wrappers::processed_wrapper_exists(&wrap.id.to_bytes()), "never opened again off a relay");
+        let now_ms = || web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        // One that can't be held, dated past the horizon, stays on the relay for a later read.
+        let ahead = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "from next week", None, &[], vec![], now_ms() + 7 * 86_400_000);
+        let (later, _) = super::super::chat::seal_chat_rumor(&ahead, &group, &member, nostr_sdk::prelude::Timestamp::from_secs(6), false).unwrap();
+        dispatch_event(later.clone(), rec.clone()).await;
+        assert_eq!(rec.got.lock().unwrap().len(), 1, "no copy of what isn't held");
+        assert!(!crate::db::wrappers::processed_wrapper_exists(&later.id.to_bytes()));
+
+        // A ledger that moves takes back what its new stop undoes, before the read that follows.
+        #[derive(Default)]
+        struct Removed(StdMutex<Vec<(String, bool)>>);
+        impl InboundEventHandler for Removed {
+            fn on_community_update(&self, _chat_id: &str, target: &str, msg: &Message) {
+                self.0.lock().unwrap().push((target.to_string(), msg.unauthorized));
+            }
+        }
+        let writer = Keys::generate();
+        let posted = Message { id: "ab".repeat(32), content: "after the stop".into(), at: now_ms() + 5_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&writer.public_key()).unwrap()), writer: true, ..Default::default() };
+        crate::db::events::save_message(&chan, &posted).await.unwrap();
+        let before = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let stopped = ledger.appended(now_ms(), Spell::Stop { writer: writer.public_key().to_bytes() }).unwrap();
+        crate::db::community::set_community_writers(&cid, &chan, &stopped.to_json(), 2, true).unwrap();
+        let removed = Removed::default();
+        reread_moved_ledgers(&before, community.id(), &removed).await;
+        assert_eq!(removed.0.lock().unwrap().clone(), vec![("ab".repeat(32), true)], "the owner's device keeps it, marked");
     }
 
     #[tokio::test]

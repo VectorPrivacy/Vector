@@ -798,6 +798,41 @@ pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections
     settled
 }
 
+/// A post stored in a chat dated at or after `since_ms`, as the writers' rules judge it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPost {
+    pub id: String,
+    pub npub: Option<String>,
+    pub at_ms: u64,
+    /// Read at a restricted Channel's writer address.
+    pub writer: bool,
+    pub unauthorized: bool,
+}
+
+/// The messages `chat_identifier` holds dated at or after `since_ms`.
+pub fn posts_since(chat_identifier: &str, since_ms: u64) -> Result<Vec<StoredPost>, String> {
+    let Ok(chat_id) = super::id_cache::get_chat_id_by_identifier(chat_identifier) else { return Ok(Vec::new()) };
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT id, npub, created_at, tags FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?5) AND created_at >= ?4")
+        .map_err(|e| format!("posts since: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, (since_ms / 1000) as i64, event_kind::PRIVATE_DIRECT_MESSAGE as i32],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)),
+        )
+        .map_err(|e| format!("posts since: {e}"))?;
+    Ok(rows
+        .flatten()
+        .filter_map(|(id, npub, secs, tags)| {
+            let tags: Vec<Vec<String>> = serde_json::from_str(&tags).unwrap_or_default();
+            let ms = tags.iter().find(|t| t.len() == 2 && t[0] == "ms").and_then(|t| t[1].parse::<u64>().ok()).unwrap_or(0);
+            let at_ms = (secs.max(0) as u64) * 1000 + ms;
+            (at_ms >= since_ms).then(|| StoredPost { id, npub, at_ms, writer: carried_by_writer(&tags), unauthorized: held_unauthorized(&tags) })
+        })
+        .collect())
+}
+
 /// Mark a stored message as one its Channel's rules don't stand behind, or clear the mark.
 /// Returns whether the message is stored.
 pub fn set_event_unauthorized(event_id: &str, held: bool) -> Result<bool, String> {
@@ -3378,6 +3413,38 @@ mod tests {
         assert!(set_event_unauthorized("held_post", true).unwrap());
         assert!(get_message_by_id("held_post").await.unwrap().unwrap().1.unauthorized);
         assert!(!set_event_unauthorized("missing", true).unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_held_store_keeps_what_is_dated_near_now_within_its_caps() {
+        use crate::db::community::{hold_wrap, held_wraps_in, MAX_HELD_BYTES, MAX_HELD_WRAPS};
+        let (_tmp, _guard) = init_test_db();
+        let (cid, ch) = ("c".repeat(64), "chan_held_caps".to_string());
+        link_channel_to_community(&ch, &cid);
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let id = |i: usize| format!("{i:064x}");
+        assert!(!hold_wrap(&cid, &ch, &id(1), "w", now + 2 * 3_600_000).unwrap(), "dated past the horizon, it waits on the relay");
+        assert!(held_wraps_in(&cid, &ch).unwrap().is_empty());
+        // A legitimate post half an hour old outlives a flood dated just inside the horizon.
+        assert!(hold_wrap(&cid, &ch, &id(2), "legit", now - 30 * 60_000).unwrap());
+        for i in 0..MAX_HELD_WRAPS {
+            hold_wrap(&cid, &ch, &id(10 + i), "spam", now + 55 * 60_000).unwrap();
+        }
+        assert!(held_wraps_in(&cid, &ch).unwrap().iter().any(|(w, _)| *w == id(2)), "dated nearer now, it stays");
+        // Bytes cap too: a few huge wraps can't crowd out the rest beyond the budget.
+        let (cid2, ch2) = ("d".repeat(64), "chan_held_bytes".to_string());
+        let big = "x".repeat(MAX_HELD_BYTES / 3);
+        for i in 0..4 {
+            hold_wrap(&cid2, &ch2, &id(900 + i), &big, now - (i as u64 + 1) * 1_000).unwrap();
+        }
+        let kept: Vec<String> = held_wraps_in(&cid2, &ch2).unwrap().into_iter().map(|(w, _)| w).collect();
+        assert!(kept.len() < 4 && !kept.contains(&id(903)), "the furthest from now goes once the bytes run out: {kept:?}");
+        // A manager's flagged copy goes with its wrap.
+        let msg = Message { id: "held_copy".into(), content: "spam".into(), at: now - 10 * 60_000, npub: Some(ban_pair().1), unauthorized: true, wrapper_event_id: Some(id(950)), ..Default::default() };
+        save_message(&ch, &msg).await.unwrap();
+        assert!(get_message_by_id("held_copy").await.unwrap().is_some());
+        hold_wrap(&cid, &ch, &id(950), "spam", now + 58 * 60_000).unwrap();
+        assert!(get_message_by_id("held_copy").await.unwrap().is_none(), "evicted at once, and its copy with it");
     }
 
     /// Join/leave lines have their OWN query — the chat page never sees them — so
