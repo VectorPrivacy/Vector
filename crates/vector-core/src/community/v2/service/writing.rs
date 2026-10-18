@@ -882,6 +882,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let walked = guestbook_walked_this_session(held);
     // So is one a whole mint left out who, on that memberlist, may post again.
     let back = walked.then(|| candidates.iter().find(|p| posters.writes(p, ch) && !posters.manages(p) && (stopped(p) || cut(p) || was_away(p)))).flatten();
+    crate::log_debug!("[v2:writers {}] epoch {} walked={walked} back={:?} unserved={}", &hex(&ch.id.0)[..8], epoch.0, back.map(|p| p.to_hex()[..8].to_string()), unserved.len());
     if let Some(back) = back {
         if may_manage && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Restart(*back), &[Lane::Unserved]).await? {
             done.moved += 1;
@@ -912,6 +913,7 @@ async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV
         return Ok(false);
     }
     let result = backstop(transport, held, ch, posters, act).await;
+    crate::log_debug!("[v2:writers {}] backstop: {:?}", &hex(&ch.id.0)[..8], result);
     match result {
         Ok(Backstop::Moved) => {}
         Ok(Backstop::Short) => acted(&ch.id, &[Lane::Retry]),
