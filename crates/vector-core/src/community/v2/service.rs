@@ -6934,9 +6934,9 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
                     .into_iter()
                     .collect();
                 if !out.is_empty() {
-                    let held_now = crate::db::community::load_community_v2(community.id())?.ok_or("community gone during the access duty")?;
-                    rekey_channel_excluding(transport, &held_now, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &out).await?;
-                    done.cut += out.len();
+                    if rekey_channel_at(transport, community, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &out, Some(epoch)).await? {
+                        done.cut += out.len();
+                    }
                     // Whoever is owed this channel is owed its next epoch now; the next run serves them.
                     continue;
                 }
@@ -6960,9 +6960,7 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
                 ledger.lock().unwrap_or_else(|e| e.into_inner()).extend(readers.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
                 done.delivered += readers.len();
             }
-            if !fresh.is_empty() && may_rotate {
-                let held_now = crate::db::community::load_community_v2(community.id())?.ok_or("community gone during the access duty")?;
-                rekey_channel_excluding(transport, &held_now, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &[]).await?;
+            if !fresh.is_empty() && may_rotate && rekey_channel_at(transport, community, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &[], Some(epoch)).await? {
                 done.delivered += fresh.len();
             }
         }
@@ -9015,10 +9013,30 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
     access_ids: &[String],
     removed: &[PublicKey],
 ) -> Result<(), String> {
+    rekey_channel_at(transport, community, channel_id, roster, access_ids, removed, None).await.map(|_| ())
+}
+
+/// [`rekey_channel_excluding`] from the channel as held once the follow lock is ours. With `judged`,
+/// only while it still stands at that epoch: false when it moved meanwhile, so the caller re-judges.
+async fn rekey_channel_at<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    roster: &crate::community::roles::CommunityRoles,
+    access_ids: &[String],
+    removed: &[PublicKey],
+    judged: Option<Epoch>,
+) -> Result<bool, String> {
     crate::db::scoped(async move {
         // Whole-row save below — serialize with the follow worker (see create_*_channel).
         let lock = super::realtime::follow_lock(community.id());
         let _guard = lock.lock().await;
+        // A rotation from a copy read before the wait would mint an epoch someone already has.
+        let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
+        let community = &held;
+        if judged.is_some_and(|e| community.channel(channel_id).map(|c| c.epoch) != Some(e)) {
+            return Ok(false);
+        }
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -9123,7 +9141,7 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
                 crate::log_warn!("v2: rotation reseal of channel metadata failed (the access duty retries): {e}");
             }
         }
-        Ok(())
+        Ok(true)
     })
     .await
 }
@@ -28065,8 +28083,11 @@ mod tests {
         let member = |pk: &PublicKey| crate::community::roles::OverwriteTarget::Member(pk.to_hex());
         set_overwrite(&bed.relay, &held(), ch.0, member(&m), Permissions::VIEW_CHANNEL, 0).await.unwrap();
         assert_eq!(held().channel(&ch).unwrap().epoch, before, "with history, the epoch they're handed is kept");
+        let stale = held();
         set_overwrite(&bed.relay, &held(), ch.0, member(&n), Permissions::VIEW_CHANNEL, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
         let after = held().channel(&ch).unwrap().epoch;
+        access_duty(&bed.relay, &stale).await.unwrap();
+        assert_eq!(held().channel(&ch).unwrap().epoch, after, "a duty that judged the epoch before the grant's rotation mints nothing over it");
         assert!(after > before, "without it, the grant mints the epoch they come in at");
         let any = |_: &PublicKey| true;
         assert!(rotation_carries(&minting_rotations(&bed.relay, &held(), &ch, after).await.unwrap(), &any, &n, &ch, after));
@@ -28086,6 +28107,17 @@ mod tests {
         access_duty(&bed.relay, &held()).await.unwrap();
         assert!(!handed(n, before).await, "nor does the duty");
         assert_eq!(held().channel(&ch).unwrap().epoch, after, "and it has nothing left to mint for them");
+        let key_at = |e: Epoch| crate::db::community::held_epoch_key(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0), e.0).unwrap();
+        let kept = key_at(after);
+        rekey_channel_excluding(&bed.relay, &stale, &ch, &roster, &[], &[]).await.unwrap();
+        assert_eq!(key_at(after), kept, "a rotation from an old copy never re-mints an epoch already held");
+        assert_eq!(held().channel(&ch).unwrap().epoch, Epoch(after.0 + 1));
+        let stale = held();
+        set_overwrite(&bed.relay, &held(), ch.0, member(&m), 0, Permissions::VIEW_CHANNEL).await.unwrap();
+        let cut = held().channel(&ch).unwrap().epoch;
+        assert!(cut > stale.channel(&ch).unwrap().epoch, "the revoke rotated them out");
+        access_duty(&bed.relay, &stale).await.unwrap();
+        assert_eq!(held().channel(&ch).unwrap().epoch, cut, "nor does a duty that judged the epoch before that cut");
     }
 
     #[tokio::test]
