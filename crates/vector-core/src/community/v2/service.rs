@@ -42,7 +42,7 @@ fn me_pk() -> Result<PublicKey, String> {
     crate::state::my_public_key().ok_or_else(|| "no active identity".to_string())
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -3032,11 +3032,14 @@ pub(crate) fn owe_new_departures(community: &CommunityV2) {
 /// only "what is the latest authorized entry for this npub", so a fresh Join
 /// supersedes an old Kick and an empty store yields no verdict at all.
 pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool {
+    stored_kick_at(community, member).is_some()
+}
+
+/// When the authorized Guestbook fold last ruled `member` kicked, if it does now.
+pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else {
-        return false;
-    };
-    let Ok(owner) = community.owner() else { return false };
+    let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).ok()?;
+    let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
@@ -3046,10 +3049,16 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
-    matches!(
-        guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick).get(member),
-        Some(st) if st.verdict == guestbook::Verdict::Kicked
-    )
+    guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick)
+        .get(member)
+        .filter(|st| st.verdict == guestbook::Verdict::Kicked)
+        .map(|st| st.at_ms)
+}
+
+/// Record an eviction this device obeyed in the synced List, at the evicting act's time: siblings and
+/// the next boot then don't re-adopt it, and an invite sent after the act still lands.
+pub fn record_eviction(community: &CommunityV2, removed_at: u64) {
+    tombstone_community_list_durable(*community.id(), community.relays.clone(), removed_at);
 }
 
 /// Catch the persisted Guestbook up from its stored cursor (a fresh hold seeds
@@ -30696,6 +30705,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_obeyed_kick_is_recorded_at_its_own_time() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Evict", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        record_eviction(&community, 9_000_000);
+        assert!(load_pending().tombstones.iter().any(|t| t.community_id == cid_hex && t.removed_at == 9_000_000), "the List is told, so no boot re-adopts it");
+        assert!(tombstone_suppresses(&cid_hex, 8_999), "an invite older than the Kick stays answered");
+        assert!(!tombstone_suppresses(&cid_hex, 9_001), "a re-invite after the Kick lands");
+    }
+
+    #[tokio::test]
     async fn a_rejoin_survives_a_stale_kick_and_an_uncaught_up_store() {
         // The self-eviction race: on a REJOIN the guestbook store starts empty while the
         // control fold has already re-derived the member's old ban mark, so the MEMBERLIST
@@ -30718,6 +30739,7 @@ mod tests {
         // An authorized kick after their join stands.
         crate::db::community::set_guestbook(&cid_hex, &[join(1_000, 1), kick(2_000, 2)], 2).unwrap();
         assert!(stored_kick_verdict(&community, &m), "an authorized kick after the join is honored");
+        assert_eq!(stored_kick_at(&community, &m), Some(2_000), "the eviction carries the Kick's own time");
 
         // A rejoin supersedes it — latest entry wins (CORD-02 §5).
         crate::db::community::set_guestbook(&cid_hex, &[join(1_000, 1), kick(2_000, 2), join(3_000, 3)], 3).unwrap();

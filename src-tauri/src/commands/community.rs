@@ -402,7 +402,7 @@ fn community_relays_of(community_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A removal this device decided (leave, delete, kick, rekey exclusion): torn down and recorded
+/// A removal this device decided (leave, delete): torn down and recorded
 /// in the local tombstone mirror at now.
 pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[String]) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
@@ -466,7 +466,8 @@ async fn prune_orphaned_community_relays(left_relays: &[String]) {
 pub(crate) async fn self_remove_from_community(community_id: &str) {
     println!("[teardown] self_remove_from_community {}", &community_id[..8.min(community_id.len())]);
     let channel_ids = community_channel_ids(community_id);
-    teardown_community_local(community_id, &channel_ids).await;
+    // Core recorded the removal at the evicting act's time.
+    teardown_community_records(community_id, &channel_ids).await;
     vector_core::emit_event(
         "community_kicked",
         &serde_json::json!({ "community_id": community_id }),

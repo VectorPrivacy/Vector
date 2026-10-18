@@ -50,9 +50,6 @@ impl InboundEventHandler for AgentEventHandler {
         // A Kick is cooperative: the agent leaves as the desktop does, keeping only the keys a
         // self-delete of its own past messages needs.
         eprintln!("[vector-agent] kicked from {}: leaving", &community_id[..8.min(community_id.len())]);
-        // Recorded, so the synced Community list doesn't bring it straight back.
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        vector_core::community::v2::service::note_local_removal(community_id, now);
         let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     }
 

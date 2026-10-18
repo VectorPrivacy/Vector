@@ -876,8 +876,8 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // an authorized eviction. Coalescing asks only what our latest authorized
                     // entry is, so a fresh Join beats the old Kick and an empty store decides
                     // nothing.
-                    let evicted = my_pk == target && super::service::stored_kick_verdict(c, &my_pk);
-                    if evicted {
+                    let kicked_at = (my_pk == target).then(|| super::service::stored_kick_at(c, &my_pk)).flatten();
+                    if let Some(at) = kicked_at {
                         // WARN, not info: `log_info!` is compiled out in release, and a
                         // self-eviction is exactly the destructive, hard-to-diagnose event
                         // that must leave a trace on a shipped build.
@@ -885,6 +885,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                             "[v2:teardown {}] KICK: the authorized guestbook fold rules us kicked",
                             &community_id[..8.min(community_id.len())]
                         );
+                        super::service::record_eviction(c, at);
                         handler.on_community_self_removed(&community_id);
                     } else {
                         crate::log_debug!(
@@ -1103,6 +1104,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 // Retain the epoch keys: they open no future epoch, and dropping them
                 // destroys the ability to self-delete our own past messages. Every other
                 // self-removal trigger already retains; this one silently did not.
+                super::service::record_eviction(&current, super::service::now_ms());
                 let _ = crate::db::community::delete_community_retain_keys(&community_id);
                 refresh_subscription(&client).await;
                 handler.on_community_self_removed(&community_id);
@@ -1277,6 +1279,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         if let Some(me) = crate::my_public_key() {
             if crate::db::community::is_author_banned(&community_id, &me) {
                 crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);
+                super::service::record_eviction(&current, super::service::now_ms());
                 handler.on_community_self_removed(&community_id);
                 return;
             }
@@ -1292,9 +1295,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         };
         if let Ok(fresh) = super::service::sync_guestbook(&transport, &current).await {
             // A Kick read on catch-up evicts as one heard live does: offline when kicked is still kicked.
-            let kicked_me = crate::state::my_public_key().is_some_and(|me| super::service::stored_kick_verdict(&current, &me));
-            if kicked_me {
+            if let Some(at) = crate::state::my_public_key().and_then(|me| super::service::stored_kick_at(&current, &me)) {
                 crate::log_warn!("[v2:teardown {}] KICK read on catch-up: the authorized guestbook fold rules us kicked", &community_id[..8.min(community_id.len())]);
+                super::service::record_eviction(&current, at);
                 handler.on_community_self_removed(&community_id);
                 return;
             }
