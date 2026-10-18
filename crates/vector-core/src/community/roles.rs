@@ -505,20 +505,29 @@ impl CommunityRoles {
         if owner_hex == Some(member_hex) {
             return true;
         }
-        let mut held: std::collections::HashSet<&str> =
-            self.roles_of(member_hex).map(|r| r.role_id.as_str()).collect();
-        for id in with {
-            held.insert(id.as_str());
-        }
-        for id in without {
-            held.remove(id.as_str());
-        }
+        let held = self.held_with(member_hex, with, without);
         // On Roles v2 the key follows View Channel as the Channel resolves it (CORD-03 §5).
         if self.everyone.is_some() {
-            let held: Vec<String> = held.into_iter().map(String::from).collect();
             return self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &held, true).contains(Permissions::VIEW_CHANNEL);
         }
-        self.channel_role_ids(channel_hex).iter().any(|id| held.contains(id.as_str()))
+        self.channel_role_ids(channel_hex).iter().any(|id| held.contains(id))
+    }
+
+    /// Whether `member_hex` may read `channel_hex`'s history from before their access began,
+    /// under the same overlay as [`Self::is_entitled`]. Legacy rosters have no such bit.
+    pub fn reads_history(&self, owner_hex: Option<&str>, member_hex: &str, channel_hex: &str, with: &[String], without: &[String]) -> bool {
+        self.everyone.is_none()
+            || self.channel_permissions_holding(owner_hex, member_hex, channel_hex, &self.held_with(member_hex, with, without), true).contains(Permissions::READ_MESSAGE_HISTORY)
+    }
+
+    fn held_with(&self, member_hex: &str, with: &[String], without: &[String]) -> Vec<String> {
+        let mut held: Vec<String> = self.roles_of(member_hex).map(|r| r.role_id.clone()).filter(|id| !without.contains(id)).collect();
+        for id in with.iter().filter(|id| !without.contains(id)) {
+            if !held.contains(id) {
+                held.push(id.clone());
+            }
+        }
+        held
     }
 
     /// Effective permissions for an action TARGETING one channel: server-scope

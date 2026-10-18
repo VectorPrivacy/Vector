@@ -373,15 +373,13 @@ impl CommunityV2 {
                 if c.key.is_none() {
                     return false;
                 }
+                // Without Read Message History, a key comes only with a fresh epoch (CORD-03 §5).
                 match audience {
                     None => false,
-                    Some(m) => roster.is_entitled(
-                        owner_hex,
-                        m,
-                        &crate::simd::hex::bytes_to_hex_32(&c.id.0),
-                        with,
-                        without,
-                    ),
+                    Some(m) => {
+                        let chan = crate::simd::hex::bytes_to_hex_32(&c.id.0);
+                        roster.is_entitled(owner_hex, m, &chan, with, without) && roster.reads_history(owner_hex, m, &chan, with, without)
+                    }
                 }
             })
             .collect()

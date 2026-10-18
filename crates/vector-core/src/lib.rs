@@ -1868,19 +1868,49 @@ impl VectorCore {
         let roster = crate::db::community::get_community_roles(&cid_hex).map_err(VectorError::Other)?;
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         let chan_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
-        let access_ids = roster.channel_role_ids(&chan_hex);
-        let roles: Vec<serde_json::Value> = roster
-            .channel_roles(&chan_hex)
-            .into_iter()
-            .map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name }))
-            .collect();
-        let members: Vec<String> = roster
-            .grants
-            .iter()
-            .filter(|g| !banned.contains(&g.member))
-            .filter(|g| g.role_ids.iter().any(|rid| access_ids.contains(rid)))
-            .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
-            .collect();
+        let owner_hex = community.owner().ok().map(|o| o.to_hex());
+        let (roles, members): (Vec<serde_json::Value>, Vec<String>) = if roster.everyone.is_some() {
+            // Roles v2: whoever the Channel resolves View for, through Roles or their own overwrite.
+            use crate::community::roles::{OverwriteTarget, Permissions};
+            let scope = roster.syncs.get(&chan_hex).cloned().unwrap_or_else(|| chan_hex.clone());
+            let roles = roster
+                .overwrites
+                .iter()
+                .filter(|o| o.scope == scope && o.allow.contains(Permissions::VIEW_CHANNEL))
+                .filter_map(|o| match &o.target {
+                    OverwriteTarget::Role(id) => roster.role(id).map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name })),
+                    _ => None,
+                })
+                .collect();
+            let mut named: Vec<String> = roster.grants.iter().map(|g| g.member.clone()).collect();
+            named.extend(roster.overwrites.iter().filter_map(|o| match &o.target {
+                OverwriteTarget::Member(m) => Some(m.clone()),
+                _ => None,
+            }));
+            named.sort();
+            named.dedup();
+            let members = named
+                .into_iter()
+                .filter(|m| !banned.contains(m) && Some(m) != owner_hex.as_ref() && roster.is_entitled(owner_hex.as_deref(), m, &chan_hex, &[], &[]))
+                .filter_map(|m| PublicKey::from_hex(&m).ok().and_then(|pk| pk.to_bech32().ok()))
+                .collect();
+            (roles, members)
+        } else {
+            let access_ids = roster.channel_role_ids(&chan_hex);
+            let roles = roster
+                .channel_roles(&chan_hex)
+                .into_iter()
+                .map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name }))
+                .collect();
+            let members = roster
+                .grants
+                .iter()
+                .filter(|g| !banned.contains(&g.member))
+                .filter(|g| g.role_ids.iter().any(|rid| access_ids.contains(rid)))
+                .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
+                .collect();
+            (roles, members)
+        };
         Ok(serde_json::json!({
             "channel_id": chan_hex,
             "private": ch.private,

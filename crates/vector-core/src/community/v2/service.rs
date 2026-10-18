@@ -6448,7 +6448,7 @@ async fn settle_access<T: Transport + ?Sized>(
     let mut gained: std::collections::BTreeMap<PublicKey, ()> = Default::default();
     for ch in community.channels.iter().filter(|c| c.private && c.key.is_some()) {
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-        let mut lost = Vec::new();
+        let (mut lost, mut fresh) = (Vec::new(), 0usize);
         for pk in &candidates {
             let hex = pk.to_hex();
             if *pk == me || hex == owner_hex {
@@ -6456,7 +6456,12 @@ async fn settle_access<T: Transport + ?Sized>(
             }
             let (was, now) = (before.is_entitled(Some(&owner_hex), &hex, &chan, &[], &[]), after.is_entitled(Some(&owner_hex), &hex, &chan, &[], &[]));
             if now && !was {
-                gained.insert(*pk, ());
+                // Without history they come in at a fresh epoch, which the rotation below mints.
+                if after.reads_history(Some(&owner_hex), &hex, &chan, &[], &[]) {
+                    gained.insert(*pk, ());
+                } else {
+                    fresh += 1;
+                }
             } else if was && !now {
                 lost.push(*pk);
             }
@@ -6464,9 +6469,9 @@ async fn settle_access<T: Transport + ?Sized>(
         // Readers take a Channel rotation only from its managers (CORD-06): without the
         // standing, the cut waits for one of them rather than forking this device.
         let may_rotate = me.to_hex() == owner_hex || after.is_authorized(&me.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
-        if !lost.is_empty() && !may_rotate {
-            crate::log_warn!("[v2:access] {} lost a channel's View; a channel manager's rotation will cut them", lost.len());
-        } else if !lost.is_empty() {
+        if (!lost.is_empty() || fresh > 0) && !may_rotate {
+            crate::log_warn!("[v2:access] {} lost and {fresh} gained a channel's View; a channel manager's rotation will settle them", lost.len());
+        } else if !lost.is_empty() || fresh > 0 {
             let held = crate::db::community::load_community_v2(community.id())?.ok_or("v2 community not found")?;
             rekey_channel_excluding(transport, &held, &ch.id, after, &[], &lost).await?;
         }
@@ -6946,20 +6951,20 @@ pub async fn access_duty<T: Transport + ?Sized>(transport: &T, community: &Commu
                     !carried && !cut && !served_on_plane(&deliveries, pk, &ch.id, epoch, &entitled_here)
                 })
                 .collect();
-            if unserved.is_empty() {
-                continue;
+            // With Read Message History they take this epoch and every past one this device can
+            // read; without it, only a fresh epoch, so history starts where access did.
+            let (readers, fresh): (Vec<PublicKey>, Vec<PublicKey>) = unserved.into_iter().partition(|pk| roster.reads_history(Some(&owner_hex), &pk.to_hex(), &chan, &[], &[]));
+            if !readers.is_empty() {
+                deliver_access(transport, community, &ch.id, &readers).await?;
+                deliver_history(transport, community, &ch.id, &readers).await?;
+                ledger.lock().unwrap_or_else(|e| e.into_inner()).extend(readers.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
+                done.delivered += readers.len();
             }
-            deliver_access(transport, community, &ch.id, &unserved).await?;
-            // With Read Message History they also get every past epoch this device can read.
-            let readers: Vec<PublicKey> = unserved
-                .iter()
-                .filter(|pk| roster.channel_permissions(Some(&owner_hex), &pk.to_hex(), &chan, true).contains(crate::community::roles::Permissions::READ_MESSAGE_HISTORY))
-                .copied()
-                .collect();
-            deliver_history(transport, community, &ch.id, &readers).await?;
-            let mut held = ledger.lock().unwrap_or_else(|e| e.into_inner());
-            held.extend(unserved.iter().map(|pk| (ch.id.0, epoch.0, pk.to_bytes())));
-            done.delivered += unserved.len();
+            if !fresh.is_empty() && may_rotate {
+                let held_now = crate::db::community::load_community_v2(community.id())?.ok_or("community gone during the access duty")?;
+                rekey_channel_excluding(transport, &held_now, &ch.id, &rotation_roster(roster.clone(), &cid_hex), &[], &[]).await?;
+                done.delivered += fresh.len();
+            }
         }
         Ok(())
     }
@@ -28050,6 +28055,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_view_grant_without_history_lets_them_in_at_a_fresh_epoch() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("Fresh").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        send_chat_message(&bed.relay, &held(), &ch, "before them", None, &[], vec![]).await.unwrap();
+        let before = held().channel(&ch).unwrap().epoch;
+        let (m, n) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let member = |pk: &PublicKey| crate::community::roles::OverwriteTarget::Member(pk.to_hex());
+        set_overwrite(&bed.relay, &held(), ch.0, member(&m), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        assert_eq!(held().channel(&ch).unwrap().epoch, before, "with history, the epoch they're handed is kept");
+        set_overwrite(&bed.relay, &held(), ch.0, member(&n), Permissions::VIEW_CHANNEL, Permissions::READ_MESSAGE_HISTORY).await.unwrap();
+        let after = held().channel(&ch).unwrap().epoch;
+        assert!(after > before, "without it, the grant mints the epoch they come in at");
+        let any = |_: &PublicKey| true;
+        assert!(rotation_carries(&minting_rotations(&bed.relay, &held(), &ch, after).await.unwrap(), &any, &n, &ch, after));
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let owner_hex = owner.keys.public_key().to_hex();
+        let vends = |pk: &PublicKey| held().vendable_channels(&roster, Some(&owner_hex), Some(&pk.to_hex()), &[], &[]).iter().any(|c| c.id.0 == ch.0);
+        assert!(vends(&m) && !vends(&n), "no bundle hands them an epoch");
+        let access = crate::VectorCore.channel_access(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0)).unwrap();
+        let npub = |pk: &PublicKey| serde_json::json!(nostr_sdk::prelude::ToBech32::to_bech32(pk).unwrap());
+        assert_eq!(access["members"].as_array().unwrap().len(), 2, "both overwrites let them in");
+        assert!(access["members"].as_array().unwrap().contains(&npub(&n)));
+        let handed = |pk: PublicKey, e: Epoch| {
+            let (relay, c, o) = (&bed.relay, held(), owner.keys.public_key());
+            async move { fetch_access_deliveries(relay, &c, &ch).await.unwrap().iter().any(|d| d.epoch == e && rekey::find_my_blob(&d.blobs, &o.to_bytes(), &pk.to_bytes(), rekey::RekeyScope::Channel(ch), e).is_some()) }
+        };
+        access_duty(&bed.relay, &held()).await.unwrap();
+        assert!(!handed(n, before).await, "nor does the duty");
+        assert_eq!(held().channel(&ch).unwrap().epoch, after, "and it has nothing left to mint for them");
+    }
+
+    #[tokio::test]
     async fn read_message_history_hands_a_new_reader_the_past_read_only() {
         let (bed, owner, _x, community) = v2_bed_with_admin("History").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -28088,10 +28127,14 @@ mod tests {
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         // And a holder sends N history N may not read.
         deliver_history(&bed.relay, &held(), &ch, &[n.public_key()]).await.unwrap();
-        // Each reader's own device: the current key only, and no secret of the past epoch.
+        // A reader denied history is let in by a fresh epoch, which the duty mints.
+        let rotated = held().channel(&ch).unwrap().epoch;
+        assert!(rotated > now);
+        // Each reader's own device: keyless where its fold left it, and no secret of the past epoch.
         let as_reader = |who: &Keys| {
             let mut c = held();
-            c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap().key = None;
+            let x = c.channels.iter_mut().find(|x| x.id.0 == ch.0).unwrap();
+            (x.key, x.epoch) = (None, now);
             crate::db::community::save_community_v2(&c).unwrap();
             crate::db::get_write_connection_guard_static().unwrap()
                 .execute("DELETE FROM community_epoch_keys WHERE community_id = ?1 AND scope_id IN (?2, ?3, ?4)", rusqlite::params![cid_hex, chan, format!("hist:{chan}"), format!("hista:{chan}")])
@@ -28116,10 +28159,14 @@ mod tests {
         assert_eq!(texts(held()).await, vec!["early".to_string(), "later".to_string()], "history reads back");
         assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 0, "once");
         as_reader(&n);
-        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1);
-        absorb_parked_channel_keys(&held(), &crate::db::current_session());
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 0, "never this epoch's key, which opens what came before them");
+        let adopted = follow_rekeys(&bed.relay, &held(), &crate::db::current_session()).await.unwrap().updated.expect("the rotation names them");
+        crate::db::community::save_community_v2(&adopted).unwrap();
+        assert_eq!(held().channel(&ch).unwrap().epoch, rotated);
         assert_eq!(collect_history(&bed.relay, &held()).await.unwrap(), 0, "denied history, it takes none even when sent");
-        assert_eq!(texts(held()).await, vec!["later".to_string()], "and history starts where access did");
+        assert!(texts(held()).await.is_empty(), "nothing from before their access");
+        send_chat_message(&bed.relay, &held(), &ch, "after", None, &[], vec![]).await.unwrap();
+        assert_eq!(texts(held()).await, vec!["after".to_string()], "history starts where access did");
         act_as(&owner.keys);
     }
 
