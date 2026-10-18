@@ -163,4 +163,54 @@ async function acceptCall(asked = false) {
     }
 }
 
+// ── Voice channels ──
+
+/** Join a voice channel's call; off Clearnet the account agrees first. */
+async function joinVoiceChannel(communityId, channel, asked = false) {
+    if (VectorSvelte.voiceSession()?.channelId === channel.id) return;
+    try {
+        voiceOnState(await invoke('voice_join', { communityId, channelId: channel.id }));
+    } catch (e) {
+        if (!asked && String(e) === 'realtime_consent_required') {
+            if (await askRealtimeConsent()) return joinVoiceChannel(communityId, channel, true);
+            return;
+        }
+        VectorSvelte.showToast(String(e));
+    }
+}
+
+let _voiceChannel = null;
+/** The backend's voice state: the bar mirrors it, and the channel we joined or left re-reads who is in it. */
+function voiceOnState(s) {
+    VectorSvelte.setVoiceSession(s);
+    const now = s?.channel_id || null;
+    if (_voiceChannel && _voiceChannel !== now) refreshVoicePresent(_voiceChannel);
+    if (now) refreshVoicePresent(now);
+    _voiceChannel = now;
+}
+
+function refreshVoicePresent(channelId) {
+    if (!channelId) return;
+    invoke('voice_present', { channelId }).then((npubs) => VectorSvelte.setVoicePresent(channelId, npubs)).catch(() => {});
+}
+
+const voiceChannelOf = (communityId, channelId) => (getCommunityChannels(communityId) || []).find((c) => c.id === channelId) || null;
+
+function registerVoiceScreen() {
+    VectorSvelte.setScreen('voice', {
+        h: {
+            setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
+            setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
+            leave: () => invoke('voice_leave').catch(() => {}),
+            channelName: (communityId, channelId) => voiceChannelOf(communityId, channelId)?.name || 'Voice',
+            openChannel: (communityId, channelId) => {
+                const ch = voiceChannelOf(communityId, channelId);
+                if (ch) openCommunityChannel(communityId, ch);
+            },
+        },
+    });
+    invoke('voice_state').then((s) => voiceOnState(s)).catch(() => {});
+}
+
 document.addEventListener('DOMContentLoaded', registerCallScreen, { once: true });
+document.addEventListener('DOMContentLoaded', registerVoiceScreen, { once: true });

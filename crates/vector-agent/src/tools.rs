@@ -941,6 +941,26 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Join a voice channel's call (a channel whose view is voice). Announces presence every 30 s and connects to everyone else in the call over iroh, relayed unless Direct is on. The agent has no audio: it is in the call, heard by no one and hearing nothing.")]
+    async fn voice_join(&self, Parameters(req): Parameters<ChannelRequest>) -> Result<CallToolResult, McpError> {
+        match vector_core::calls::voice::join(&req.community_id, &req.channel_id).await {
+            Ok(s) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&s).unwrap_or_default())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(description = "Leave the voice call this identity is in.")]
+    async fn voice_leave(&self) -> Result<CallToolResult, McpError> {
+        vector_core::calls::voice::leave().await;
+        Ok(CallToolResult::success(vec![Content::text("left")]))
+    }
+
+    #[tool(description = "The voice call this identity is in: who else is present, and which of them are connected and over which path.")]
+    async fn voice_state(&self) -> Result<CallToolResult, McpError> {
+        let s = vector_core::calls::voice::snapshot();
+        Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&s).unwrap_or_default())]))
+    }
+
     #[tool(description = "Leave a Mini App session and tell the chat.")]
     async fn xdc_leave(&self, Parameters(req): Parameters<XdcTopicRequest>) -> Result<CallToolResult, McpError> {
         let leave = self.xdc.lock().await.get_mut(&req.topic).and_then(|s| s.leave.take());

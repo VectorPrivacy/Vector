@@ -6,6 +6,8 @@
     // message repaints one row.
     import { communityVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
     import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
+    import { voicePresent } from '../lib/voice.svelte.js';
+    import Avatar from '../ui/Avatar.svelte';
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, getCategories, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
@@ -167,7 +169,7 @@
          use:channelGesture={channel}
          onclick={() => h.openChannel(communityId, channel)}>
         <!-- Grouped by Category, a private channel says so with its own glyph. -->
-        <span class="chatlist-channel-hash"><span class="icon {categories.length && channel.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
+        <span class="chatlist-channel-hash"><span class="icon {channel.view === 'voice' ? 'icon-volume-max' : categories.length && channel.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
         <span class="chatlist-channel-name cutoff">{channel.name}</span>
         <!-- A number only for someone calling your name; ordinary unread is the row's own weight. -->
         {#if r.pings}
@@ -181,6 +183,15 @@
             </div>
         {/if}
     </div>
+    <!-- Who is in a voice channel's call, whether or not we are. -->
+    {#if channel.view === 'voice'}
+        {#each voicePresent(channel.id) as npub (npub)}
+            <div class="chatlist-voice-member">
+                <Avatar src={h.getProfileAvatarSrc(h.getProfile(npub))} size={18} />
+                <span class="cutoff">{h.getName(npub)}</span>
+            </div>
+        {/each}
+    {/if}
 {/snippet}
 
 {#if state}

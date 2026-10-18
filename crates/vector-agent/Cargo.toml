@@ -7,7 +7,7 @@ readme = "README.md"
 
 [dependencies]
 # `xdc`: join the Mini App sessions shared in chats (the xdc_* tools).
-vector-core = { path = "../vector-core", features = ["xdc"] }
+vector-core = { path = "../vector-core", features = ["xdc", "calls"] }
 rmcp = { version = "1.5", features = ["server", "transport-io"] }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

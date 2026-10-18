@@ -33,6 +33,7 @@
     import Tooltip from './Tooltip.svelte';
     import ComposerPopups from '../composer/ComposerPopups.svelte';
 import CallOverlay from '../calls/CallOverlay.svelte';
+import VoiceBar from '../calls/VoiceBar.svelte';
     import MediaPopout from '../chat/MediaPopout.svelte';
     import FilePreview from '../composer/FilePreview.svelte';
     import MiniProfile from '../people/MiniProfile.svelte';
@@ -162,6 +163,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 {#if screens.secretGuard}<SecretGuard h={screens.secretGuard.h} />{/if}
 {#if screens.transferModal}<TransferModal h={screens.transferModal.h} />{/if}
 {#if screens.call}<CallOverlay h={screens.call.h} />{/if}
+{#if screens.voice}<VoiceBar h={screens.voice.h} />{/if}
 {#if screens.mediaPopout}<MediaPopout h={screens.mediaPopout.h} />{/if}
 {#if screens.downgradeBlock}<DowngradeBlock h={screens.downgradeBlock.h} />{/if}
 {#if screens.modConsole}<ModConsole h={screens.modConsole.h} />{/if}

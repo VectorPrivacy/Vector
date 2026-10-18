@@ -49,7 +49,7 @@ const screens = $state({ profile: null, settings: null, invites: null, chatNew: 
     // Body-level singletons whose helpers live in the vanilla side; App renders each once registered.
     composerPopups: null, filePreview: null, miniProfile: null, reactionPopups: null, editHistory: null,
     qrOverlay: null, qrScanner: null, statusDialog: null, keysModal: null, secretGuard: null, transferModal: null, downgradeBlock: null,
-    modConsole: null, communitySettings: null, policyDesigner: null, pivx: null, network: null, call: null, mediaPopout: null, channelEditor: null });
+    modConsole: null, communitySettings: null, policyDesigner: null, pivx: null, network: null, call: null, voice: null, mediaPopout: null, channelEditor: null });
 export function shellScreens() { return screens; }
 export function setScreen(name, props) {
     if (!(name in screens)) throw new Error(`setScreen: unknown screen '${name}'`);

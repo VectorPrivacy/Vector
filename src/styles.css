@@ -3943,6 +3943,28 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   text-align: left;
 }
 
+/* Who is in a voice channel's call: a quiet line each, indented under its row. */
+.chatlist-voice-member {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 34px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* The voice bar sits in the pill's place; the 1:1 call never runs beside it. */
+.voice-bar .call-pill-text {
+  cursor: pointer;
+}
+.voice-bar .call-pill-name .icon {
+  width: 12px;
+  height: 12px;
+  margin: 0 2px 0 0;
+  vertical-align: -1px;
+  background-color: currentColor;
+}
+
 .chatlist-channel-badge {
   flex-shrink: 0;
   min-width: 18px;
