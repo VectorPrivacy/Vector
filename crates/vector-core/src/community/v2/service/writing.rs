@@ -1036,7 +1036,7 @@ impl Judge {
     fn departed(&self, author: &PublicKey, at_ms: u64) -> bool {
         let within = |spans: &Vec<(u64, Option<u64>)>| spans.iter().any(|(from, until)| at_ms >= *from && until.is_none_or(|u| at_ms < u));
         self.departures
-            .get_or_init(|| stored_departure_windows(&self.community).into_iter().map(|(p, w)| (p.to_bytes(), w)).collect())
+            .get_or_init(|| stored_departure_windows(&self.community).iter().map(|(p, w)| (p.to_bytes(), w.clone())).collect())
             .get(&author.to_bytes())
             .is_some_and(within)
             || self.ban_spans.get_or_init(|| crate::db::community::ban_windows(&hex(&self.community.id().0)).unwrap_or_default()).get(&author.to_hex()).is_some_and(within)

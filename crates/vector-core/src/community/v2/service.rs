@@ -2946,9 +2946,30 @@ pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collection
     guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, st)| (pk, st.at_ms)).collect()
 }
 
-/// Each member's spans away from `community`, per its stored Guestbook (CORD-03 §1).
-pub(crate) fn stored_departure_windows(community: &CommunityV2) -> std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>> {
+type DepartureSpans = std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>;
+
+struct DepartureCache;
+
+/// Each member's spans away from `community`, per its stored Guestbook (CORD-03 §1). Folded once
+/// per change to what the fold reads, not once per post judged.
+pub(crate) fn stored_departure_windows(community: &CommunityV2) -> std::sync::Arc<DepartureSpans> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let generation = crate::db::community::membership_generation();
+    let cache = crate::db::current_session().scoped::<DepartureCache, std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<DepartureSpans>)>>>();
+    if let Some((g, spans)) = cache.lock().ok().and_then(|c| c.get(&cid_hex).cloned()) {
+        if g == generation {
+            return spans;
+        }
+    }
+    let spans = std::sync::Arc::new(fold_departure_windows(community, &cid_hex));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(cid_hex, (generation, spans.clone()));
+    }
+    spans
+}
+
+fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> DepartureSpans {
+    let cid_hex = cid_hex.to_string();
     let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else { return Default::default() };
     let Ok(owner) = community.owner() else { return Default::default() };
     let owner_hex = owner.to_hex();
@@ -2973,7 +2994,7 @@ pub(crate) fn owe_new_departures(community: &CommunityV2) {
     }
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let Ok(seen) = crate::db::community::departures_seen(&cid_hex) else { return };
-    let now: std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>> = stored_departure_windows(community).into_iter().map(|(p, w)| (p.to_hex(), w)).collect();
+    let now: std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>> = stored_departure_windows(community).iter().map(|(p, w)| (p.to_hex(), w.clone())).collect();
     let mut owed = false;
     for (author, windows) in &now {
         let Some(from) = windows.iter().filter(|w| !seen.get(author).is_some_and(|s| s.iter().any(|v| v.0 == w.0))).map(|w| w.0).min() else { continue };
@@ -3434,7 +3455,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         // Read before the rotation replaces the Guestbook that records them.
-        let away = stored_departure_windows(community);
+        let away = (*stored_departure_windows(community)).clone();
         // Serialize with the follow worker for the whole rotation: the commit tail
         // whole-row-saves, and an unserialized concurrent follow could otherwise be
         // rolled back (or adopt a half-published sibling of this very rotation).
@@ -9848,6 +9869,8 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // The pins/upgrade tail awaited network I/O — re-validate before the vault save.
         // An adopted staff key rides whatever gets saved (the fold's update, or the
         // otherwise-unchanged community) — the vault write that makes it durable.
+        // Kicks and snapshots are judged on the Roster, citations and minter this fold may have moved.
+        crate::db::community::bump_membership_generation();
         let mut updated = fold.updated;
         if let Some(cr) = adopted_control_root {
             let mut u = updated.take().unwrap_or_else(|| community.clone());
@@ -26030,6 +26053,18 @@ mod tests {
         assert!(!texts.contains(&"while banned".to_string()), "an un-ban ends the span, it doesn't erase it");
         assert!(!texts.contains(&"in flight while banned".to_string()), "nobody vouches for what was posted while away");
         assert!(texts.contains(&"after the unban".to_string()), "and they post again on the live epoch");
+    }
+
+    #[tokio::test]
+    async fn departure_spans_are_folded_once_per_change() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let first = stored_departure_windows(&held());
+        assert!(std::sync::Arc::ptr_eq(&first, &stored_departure_windows(&held())), "judging a post folds nothing again");
+        let w = Keys::generate();
+        let leave = guestbook::GuestbookEvent { rumor_id: [7; 32], entry: guestbook::GuestbookEntry::Leave { member: w.public_key(), at_ms: now_ms() }, epoch: Some(held().root_epoch.0), observed_at: None };
+        ingest_guestbook_event(&held(), leave, now_ms() / 1000).unwrap();
+        assert!(stored_departure_windows(&held()).contains_key(&w.public_key()), "a Guestbook write refolds");
     }
 
     fn clear_owed(cid_hex: &str) {

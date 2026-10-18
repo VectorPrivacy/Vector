@@ -1685,6 +1685,7 @@ pub fn set_community_roles(
 ) -> Result<(), String> {
     let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
+    bump_membership_generation();
     let json = enc_txt(&serde_json::to_string(roles).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
@@ -2735,6 +2736,17 @@ pub fn get_guestbook_timeouts(community_id: &str) -> Result<std::sync::Arc<Vec<c
 
 /// Persist a community's Guestbook events + cursor (encrypted at rest, like the
 /// community row itself). The caller owns dedup/merge — this is a plain replace.
+struct MembershipGeneration;
+
+/// Moves whenever what a Guestbook fold reads may have: a store write here, or a Control fold.
+pub fn membership_generation() -> u64 {
+    super::current_session().scoped::<MembershipGeneration, std::sync::atomic::AtomicU64>().load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub fn bump_membership_generation() {
+    super::current_session().scoped::<MembershipGeneration, std::sync::atomic::AtomicU64>().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 pub fn set_guestbook(
     community_id: &str,
     events: &[crate::community::v2::guestbook::GuestbookEvent],
@@ -2742,6 +2754,7 @@ pub fn set_guestbook(
 ) -> Result<(), String> {
     let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
+    bump_membership_generation();
     let conn = super::get_write_connection_guard_static()?;
     let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
     let enc = enc_txt(&json)?;
