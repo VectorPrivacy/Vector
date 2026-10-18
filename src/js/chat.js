@@ -173,6 +173,12 @@ function buildChatMenuItems(chat) {
             },
         });
     }
+    // From inside the channel too, so a phone reaches it without a long-press.
+    const communityId = communityIdOfChat(chat);
+    const channel = communityId && communityCanAddChannels(communityId) ? (getCommunityChannels(communityId) || []).find(c => c.id === chat.id) : null;
+    if (channel) {
+        items.push({ label: 'Edit Channel', icon: 'edit', onClick: () => openChannelEditorFor(communityId, channel) });
+    }
     if (chat?.chat_type === 'DirectMessage') {
         items.push({
             label: 'Change Wallpaper',
