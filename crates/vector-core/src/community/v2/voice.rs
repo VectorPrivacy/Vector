@@ -22,6 +22,8 @@ pub struct Present {
     pub transport: Option<String>,
     /// Their iroh endpoint, when they named one and no one else claims it too.
     pub endpoint: Option<[u8; 32]>,
+    /// The relay that endpoint is reached through.
+    pub relay: Option<String>,
 }
 
 #[derive(Clone)]
@@ -30,6 +32,7 @@ struct Entry {
     joined: bool,
     transport: Option<String>,
     endpoint: Option<[u8; 32]>,
+    relay: Option<String>,
 }
 
 struct Calls;
@@ -40,7 +43,8 @@ fn calls() -> Arc<Mutex<HashMap<String, HashMap<PublicKey, Entry>>>> {
 
 /// Fold one presence for `channel` (hex); the latest per author wins. Returns whether it changed
 /// who is in the call.
-pub fn note(channel: &str, author: PublicKey, at_ms: u64, joined: bool, transport: Option<String>, endpoint: Option<[u8; 32]>, now_ms: u64) -> bool {
+#[allow(clippy::too_many_arguments)]
+pub fn note(channel: &str, author: PublicKey, at_ms: u64, joined: bool, transport: Option<String>, endpoint: Option<[u8; 32]>, relay: Option<String>, now_ms: u64) -> bool {
     if at_ms > now_ms.saturating_add(AHEAD_MS) {
         return false;
     }
@@ -51,7 +55,7 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, joined: bool, transpor
         return false;
     }
     let was = room.get(&author).map(|e| (e.joined, e.endpoint, now_ms.saturating_sub(e.at_ms) < FRESH_MS));
-    room.insert(author, Entry { at_ms, joined, transport, endpoint });
+    room.insert(author, Entry { at_ms, joined, transport, endpoint, relay });
     was != Some((joined, endpoint, true))
 }
 
@@ -65,7 +69,10 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
     let claims = |ep: &[u8; 32]| live.iter().filter(|(_, e)| e.endpoint.as_ref() == Some(ep)).count();
     let mut out: Vec<Present> = live
         .iter()
-        .map(|(a, e)| Present { author: **a, at_ms: e.at_ms, transport: e.transport.clone(), endpoint: e.endpoint.filter(|ep| claims(ep) == 1) })
+        .map(|(a, e)| {
+            let endpoint = e.endpoint.filter(|ep| claims(ep) == 1);
+            Present { author: **a, at_ms: e.at_ms, transport: e.transport.clone(), endpoint, relay: endpoint.and(e.relay.clone()) }
+        })
         .collect();
     out.sort_by_key(|p| p.at_ms);
     out
@@ -92,23 +99,23 @@ mod tests {
     fn the_latest_presence_per_author_stands_while_fresh() {
         let (ch, a) = ("aa".repeat(32), Keys::generate().public_key());
         let ep = [1u8; 32];
-        assert!(note(&ch, a, 10_000, true, Some("iroh".into()), Some(ep), 10_000));
+        assert!(note(&ch, a, 10_000, true, Some("iroh".into()), Some(ep), None, 10_000));
         assert_eq!(present(&ch, 10_000).len(), 1);
-        assert!(!note(&ch, a, 9_000, false, None, None, 10_000), "an older left changes nothing");
+        assert!(!note(&ch, a, 9_000, false, None, None, None, 10_000), "an older left changes nothing");
         assert_eq!(present(&ch, 10_000 + FRESH_MS - 1).len(), 1, "fresh until three heartbeats go missing");
         assert!(present(&ch, 10_000 + FRESH_MS).is_empty(), "then absent");
-        assert!(note(&ch, a, 20_000, false, None, None, 20_000));
+        assert!(note(&ch, a, 20_000, false, None, None, None, 20_000));
         assert!(present(&ch, 20_000).is_empty(), "a newer left ends it");
-        assert!(!note(&ch, a, 20_000 + AHEAD_MS + 1_000, true, None, None, 20_000), "nor can a joined dated far ahead stick");
+        assert!(!note(&ch, a, 20_000 + AHEAD_MS + 1_000, true, None, None, None, 20_000), "nor can a joined dated far ahead stick");
     }
 
     #[test]
     fn an_endpoint_two_authors_claim_is_given_to_neither() {
         let ch = "bb".repeat(32);
         let (a, b, c) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
-        note(&ch, a, 1_000, true, Some("iroh".into()), Some([7u8; 32]), 1_000);
-        note(&ch, b, 1_001, true, Some("iroh".into()), Some([7u8; 32]), 1_001);
-        note(&ch, c, 1_002, true, Some("iroh".into()), Some([8u8; 32]), 1_002);
+        note(&ch, a, 1_000, true, Some("iroh".into()), Some([7u8; 32]), None, 1_000);
+        note(&ch, b, 1_001, true, Some("iroh".into()), Some([7u8; 32]), None, 1_001);
+        note(&ch, c, 1_002, true, Some("iroh".into()), Some([8u8; 32]), None, 1_002);
         let now = present(&ch, 1_002);
         assert_eq!(now.len(), 3, "all three are in the call");
         assert!(now.iter().filter(|p| p.author == a || p.author == b).all(|p| p.endpoint.is_none()), "the contested endpoint dials no one");

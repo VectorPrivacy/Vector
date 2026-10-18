@@ -70,6 +70,8 @@ pub struct CategoryV2 {
 
 /// The most Categories a Community folds.
 pub const MAX_CATEGORIES: usize = 100;
+/// How many voice relays a Community may list.
+pub const MAX_VOICE_RELAYS: usize = 8;
 
 /// How a client opens a Channel (CORD-03 §2). It changes nothing on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +367,16 @@ impl CommunityV2 {
     ///
     /// A LINK has no recipient, so its audience holds no Role by construction
     /// and is entitled to no Private channel at all.
+    /// The iroh relays its voice Channels use (CORD-07 §8), as the Community lists them; none
+    /// means iroh's defaults. Only https URLs, at most eight.
+    pub fn voice_relays(&self) -> Vec<String> {
+        self.meta_extra
+            .get("voice_relays")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|u| u.as_str()).filter(|u| u.starts_with("https://") && u.len() <= 256).map(str::to_string).take(MAX_VOICE_RELAYS).collect())
+            .unwrap_or_default()
+    }
+
     pub fn vendable_channels<'a>(
         &'a self,
         roster: &crate::community::roles::CommunityRoles,

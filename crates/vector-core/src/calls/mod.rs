@@ -12,3 +12,5 @@ pub mod session;
 pub mod settings;
 #[cfg(feature = "calls")]
 pub mod video;
+#[cfg(feature = "calls")]
+pub mod voice;

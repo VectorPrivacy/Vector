@@ -381,15 +381,16 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     channel_id: &ChannelId,
-    endpoint: Option<[u8; 32]>,
+    endpoint: Option<([u8; 32], Option<String>)>,
 ) -> Result<(), String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref(), at_ms);
+    let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref().map(|(e, r)| (e, r.as_deref())), at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
     let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
-    let transport_name = endpoint.map(|_| chat::TRANSPORT_IROH.to_string());
-    super::voice::note(&channel, author_pk, at_ms, endpoint.is_some(), transport_name, endpoint, at_ms);
+    let transport_name = endpoint.as_ref().map(|_| chat::TRANSPORT_IROH.to_string());
+    let (ep, relay) = endpoint.map_or((None, None), |(e, r)| (Some(e), r));
+    super::voice::note(&channel, author_pk, at_ms, ep.is_some(), transport_name, ep, relay, at_ms);
     Ok(())
 }
 
@@ -24008,6 +24009,32 @@ mod tests {
         follow_control(&bed.relay, &joined).await.unwrap();
         let theirs = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(theirs.everyone.is_some() && theirs.channel_permissions(Some(&owner.keys.public_key().to_hex()), &member.keys.public_key().to_hex(), &general, false).contains(Permissions::SEND_MESSAGES), "a joiner folds it as Roles v2 and may post in general");
+    }
+
+    #[cfg(feature = "calls")]
+    #[tokio::test]
+    async fn who_may_join_a_voice_channel_and_who_is_heard_follow_the_roster() {
+        use crate::calls::voice::{allowed_relay, may_connect, may_speak};
+        use crate::community::roles::OverwriteTarget;
+        let (bed, _owner, x, community) = v2_bed_with_admin("Voice").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = held().channels[0].id;
+        let (m, n) = (Keys::generate().public_key(), Keys::generate().public_key());
+        assert!(may_connect(&held(), &ch, &m) && may_speak(&held(), &ch, &m), "@everyone connects and speaks by default");
+        set_overwrite(&bed.relay, &held(), ch.0, OverwriteTarget::Member(m.to_hex()), 0, Permissions::SPEAK).await.unwrap();
+        assert!(may_connect(&held(), &ch, &m) && !may_speak(&held(), &ch, &m), "denied Speak: in the call, not heard");
+        set_overwrite(&bed.relay, &held(), ch.0, OverwriteTarget::Member(n.to_hex()), 0, Permissions::CONNECT).await.unwrap();
+        assert!(!may_connect(&held(), &ch, &n), "denied Connect: never dialled or accepted");
+        timeout_member(&bed.relay, &held(), &x.public_key(), 600).await.unwrap();
+        assert!(may_connect(&held(), &ch, &x.public_key()) && !may_speak(&held(), &ch, &x.public_key()), "timed out: silent while it runs");
+        set_members_banned(&bed.relay, community.id(), &[m], true).await.unwrap();
+        assert!(!may_connect(&held(), &ch, &m), "banned: in no call");
+        let n0: iroh::RelayUrl = iroh::defaults::prod::default_relay_map().urls::<Vec<iroh::RelayUrl>>()[0].clone();
+        let own: iroh::RelayUrl = "https://voice.example.org/".parse().unwrap();
+        assert!(allowed_relay(&n0, &held()) && !allowed_relay(&own, &held()), "iroh's defaults only, until the Community lists its own");
+        let mut listed = held();
+        listed.meta_extra.insert("voice_relays".into(), serde_json::json!(["https://voice.example.org/", "http://plain.example.org/"]));
+        assert!(allowed_relay(&own, &listed) && !allowed_relay(&"http://plain.example.org/".parse().unwrap(), &listed), "and only over https");
     }
 
     #[tokio::test]

@@ -63,6 +63,10 @@ pub trait CallPlatform: Send + Sync + 'static {
     fn decode_addr(&self, addr: &str) -> Option<EndpointAddr>;
     /// Microphone and speaker for a connected call.
     async fn start_audio(&self, conn: Connection, start: AudioStart) -> Result<Box<dyn CallAudio>, String>;
+    /// The media engine for a voice Channel's call; without one, the call runs presence-only.
+    async fn start_voice(&self) -> Result<Box<dyn super::voice::VoiceMedia>, String> {
+        Err("Voice isn't available on this platform yet".into())
+    }
     /// Where new video links go: the call's video track while one runs, else nowhere.
     fn set_video_taker(&self, taker: Option<mpsc::Sender<LinkConn>>);
     /// A hold on the machine for as long as the returned value lives.
