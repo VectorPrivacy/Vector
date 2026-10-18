@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-set-muted"
+description = "Enables the voice_set_muted command without any pre-configured scope."
+commands.allow = ["voice_set_muted"]
+
+[[permission]]
+identifier = "deny-voice-set-muted"
+description = "Denies the voice_set_muted command without any pre-configured scope."
+commands.deny = ["voice_set_muted"]

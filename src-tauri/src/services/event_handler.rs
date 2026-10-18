@@ -289,6 +289,10 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         });
     }
 
+    fn on_voice_presence(&self, channel_id: &str) {
+        vector_core::emit_event("voice_presence", &serde_json::json!({ "channel_id": channel_id }));
+    }
+
     fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
         let (chat_id, npub) = (chat_id.to_string(), npub.to_string());
         vector_core::db::spawn_bound(async move {

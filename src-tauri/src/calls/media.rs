@@ -27,22 +27,56 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Milliseconds on a clock that starts with the process: what the jitter buffer times by.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Datagram flag: the sender is muted, the payload is empty, play silence.
-const FLAG_MUTED: u16 = 1;
+pub(crate) const FLAG_MUTED: u16 = 1;
 /// Datagram flag: a frame of the shared screen's sound, stereo, its own sequence.
-const FLAG_SHARE: u16 = 2;
+pub(crate) const FLAG_SHARE: u16 = 2;
 
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
-const PLAY_AHEAD_MS: u32 = 30;
+pub(crate) const PLAY_AHEAD_MS: u32 = 30;
+
+/// Where captured frames go: one call's peer, or everyone in a voice Channel's call.
+#[derive(Clone)]
+pub(crate) enum Outbound {
+    One(Connection),
+    Many(Arc<Mutex<Vec<Connection>>>),
+}
+
+impl Outbound {
+    fn send(&self, datagram: bytes::Bytes, stats: &MediaStats) {
+        let sent = |c: &Connection, d: bytes::Bytes| match c.send_datagram(d) {
+            Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
+            Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
+        };
+        match self {
+            Outbound::One(c) => {
+                sent(c, datagram);
+            }
+            Outbound::Many(peers) => {
+                for c in peers.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                    sent(c, datagram.clone());
+                }
+            }
+        }
+    }
+
+    /// The one connection a 1:1 call tunes its rate and link simulation to.
+    fn one(&self) -> Option<&Connection> {
+        match self {
+            Outbound::One(c) => Some(c),
+            Outbound::Many(_) => None,
+        }
+    }
+}
 
 /// A frame's loudness on a 0 to 1 scale: -60 dBFS is silence, 0 dBFS full.
-fn level_of(frame: &[i16]) -> f32 {
+pub(crate) fn level_of(frame: &[i16]) -> f32 {
     let sum: f64 = frame.iter().map(|s| (*s as f64).powi(2)).sum();
     let rms = (sum / frame.len().max(1) as f64).sqrt() / 32768.0;
     if rms <= 0.0 {
@@ -108,10 +142,10 @@ impl MediaEngine {
             let mic = Arc::clone(&mic);
             let stats = Arc::clone(&stats);
             let link = Arc::clone(&link);
-            let conn = conn.clone();
+            let out = conn.clone().map(Outbound::One);
             std::thread::Builder::new()
                 .name("calls-capture".into())
-                .spawn(move || capture_thread(conn, link, out_rate, stop, muted, mic, stats, ready_tx, mic_wanted, abandoned))
+                .spawn(move || capture_thread(out, link, out_rate, stop, muted, mic, stats, ready_tx, mic_wanted, abandoned))
                 .map(|t| (t, ready_rx))
                 .map_err(|e| e.to_string())
         };
@@ -303,8 +337,8 @@ impl NetSim {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_thread(
-    conn: Option<Connection>,
+pub(crate) fn capture_thread(
+    out: Option<Outbound>,
     link: Arc<LiveLink>,
     out_rate: u32,
     stop: Arc<AtomicBool>,
@@ -368,7 +402,7 @@ fn capture_thread(
         Ok((stream, ring, rate)) => (Some(stream), ring, rate),
         // A call goes on without a microphone: muted, but still hearing the peer and still
         // sending the muted frames that tell them we are here.
-        Err(e) if conn.is_some() => {
+        Err(e) if out.is_some() => {
             vector_core::log_warn!("[Calls] no microphone, the call goes on muted: {e}");
             mic.store(false, Ordering::Relaxed);
             (None, Arc::new(SpscRing::new(ENGINE_RATE as usize)), ENGINE_RATE)
@@ -413,7 +447,7 @@ fn capture_thread(
     let mut seq: u16 = stats.next_seq.load(Ordering::Relaxed) as u16;
     let mut netsim = NetSim::from_env();
     let mut rate = RateControl::new();
-    if let Some(conn) = conn.as_ref() {
+    if let Some(conn) = out.as_ref().and_then(Outbound::one) {
         let net = conn.stats();
         rate.prime(net.udp_tx.datagrams, net.lost_packets);
     }
@@ -470,7 +504,7 @@ fn capture_thread(
             }
             stats.mic_level.store(level_of(&clean).to_bits(), Ordering::Relaxed);
 
-            let Some(conn) = conn.as_ref() else {
+            let Some(out) = out.as_ref() else {
                 seq = seq.wrapping_add(1);
                 stats.next_seq.store(seq as u32, Ordering::Relaxed);
                 continue;
@@ -484,22 +518,17 @@ fn capture_thread(
                     Err(_) => pack(seq, ts, FLAG_MUTED, &[]),
                 }
             };
-            match netsim.as_mut() {
-                Some(sim) => sim.offer(datagram),
-                None => {
-                    match conn.send_datagram(datagram) {
-                        Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
-                        Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
-                    };
-                }
+            match (netsim.as_mut(), out.one()) {
+                (Some(sim), Some(_)) => sim.offer(datagram),
+                _ => out.send(datagram, &stats),
             }
             seq = seq.wrapping_add(1);
             stats.next_seq.store(seq as u32, Ordering::Relaxed);
         }
-        if let (Some(sim), Some(conn)) = (netsim.as_mut(), conn.as_ref()) {
+        if let (Some(sim), Some(conn)) = (netsim.as_mut(), out.as_ref().and_then(Outbound::one)) {
             sim.pump(conn, &stats);
         }
-        if let Some(conn) = conn.as_ref() {
+        if let Some(conn) = out.as_ref().and_then(Outbound::one) {
             if rate_tick.elapsed() >= Duration::from_secs(1) {
                 rate_tick = Instant::now();
                 // Every QUIC packet goes out as one UDP datagram, so this is packets sent.

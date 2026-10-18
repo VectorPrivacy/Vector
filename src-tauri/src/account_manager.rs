@@ -662,6 +662,7 @@ pub async fn reset_session() {
     // A call and the Mini App sessions share the account's node, which the
     // sessions' end retires; both end while the client exists to say so.
     crate::calls::session::end_all("account_changed");
+    vector_core::calls::voice::leave().await;
     if let Some(handle) = crate::TAURI_APP.get() {
         crate::miniapps::commands::end_for_account_swap(handle).await;
     }

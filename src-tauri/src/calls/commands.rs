@@ -127,3 +127,40 @@ pub async fn call_mic_test_stop() {
 pub async fn call_status() -> Option<CallState> {
     session::snapshot()
 }
+
+/// Join a voice Channel's call, leaving any other.
+#[tauri::command]
+pub async fn voice_join(community_id: String, channel_id: String) -> Result<vector_core::calls::voice::VoiceState, String> {
+    vector_core::db::scoped(vector_core::calls::voice::join(&community_id, &channel_id)).await
+}
+
+#[tauri::command]
+pub async fn voice_leave() {
+    vector_core::db::scoped(vector_core::calls::voice::leave()).await
+}
+
+#[tauri::command]
+pub async fn voice_state() -> Option<vector_core::calls::voice::VoiceState> {
+    vector_core::db::scoped(async { vector_core::calls::voice::snapshot() }).await
+}
+
+#[tauri::command]
+pub async fn voice_set_muted(on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::calls::voice::set_muted(on) }).await
+}
+
+#[tauri::command]
+pub async fn voice_set_deafened(on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::calls::voice::set_deafened(on) }).await
+}
+
+/// Who is in a voice Channel's call now, whether or not we are: npubs, earliest first.
+#[tauri::command]
+pub async fn voice_present(channel_id: String) -> Vec<String> {
+    use nostr_sdk::prelude::ToBech32;
+    vector_core::db::scoped(async move {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        vector_core::community::v2::voice::present(&channel_id, now).into_iter().filter_map(|p| p.author.to_bech32().ok()).collect()
+    })
+    .await
+}

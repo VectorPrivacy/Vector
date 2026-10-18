@@ -39,6 +39,11 @@ impl CallPlatform for Desktop {
         Ok(Box::new(engine))
     }
 
+    async fn start_voice(&self) -> Result<Box<dyn vector_core::calls::voice::VoiceMedia>, String> {
+        let engine = tokio::task::spawn_blocking(super::voice::VoiceEngine::start).await.map_err(|e| e.to_string())??;
+        Ok(Box::new(engine))
+    }
+
     fn set_video_taker(&self, taker: Option<mpsc::Sender<LinkConn>>) {
         super::link::set_taker(taker);
     }
