@@ -928,7 +928,7 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     // Someone else moved the ledger first: nothing was tried, so nothing is damped.
     match done {
         Err(e) if e == LEDGER_MOVED => Ok(Backstop::Moved),
-        Err(e) if e == NOT_WALKED => Ok(Backstop::Short),
+        Err(e) if e == NOT_WALKED || e == super::CONTROL_SHORT => Ok(Backstop::Short),
         Err(e) => Err(e),
         Ok(()) => Ok(Backstop::Acted),
     }
@@ -1306,8 +1306,8 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
     for chunk in posts.chunks(100) {
         let ids: Vec<String> = chunk.iter().filter_map(|p| p.wrap_id.clone()).collect();
         let mut wraps: std::collections::HashMap<String, nostr_sdk::prelude::Event> = Default::default();
-        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: ids.clone(), ..Default::default() };
-        // Answered without it is an answer; a read that failed everywhere leaves the rest owed.
+        // Absence is a verdict: every relay asked must answer, or the rest stays owed.
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: ids.clone(), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
         let mut answered = match transport.fetch(&q, &community.relays).await {
             Ok(found) => {
                 wraps.extend(found.into_iter().map(|w| (w.id.to_hex(), w)));
@@ -1318,9 +1318,9 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
         let missing: Vec<String> = ids.iter().filter(|id| !wraps.contains_key(*id)).cloned().collect();
         for (plane, _) in planes.iter().filter(|_| !missing.is_empty()) {
             if let ReadPlane::Keyed(group) = plane {
-                let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: missing.clone(), ..Default::default() };
+                let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: missing.clone(), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
                 if let Ok(found) = transport.fetch_plane(group.keys(), &q, &community.relays).await {
-                    answered |= found.answered > 0;
+                    answered |= found.is_complete();
                     wraps.extend(found.events.into_iter().map(|w| (w.id.to_hex(), w)));
                 }
             }
@@ -1346,7 +1346,7 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
                 }
                 // A writer-address post whose address the held ledger no longer names stands nowhere;
                 // one this device simply holds no key for stays.
-                None if post.writer => match post.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) {
+                None if post.writer && !ch.writers.as_ref().is_some_and(|l| l.writers().any(|(_, pk, _)| pk == wrap.pubkey.to_bytes())) => match post.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) {
                     Some(author) => (author, post.at_ms),
                     None => continue,
                 },

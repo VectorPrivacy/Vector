@@ -2345,6 +2345,8 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
         let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await.map_err(|e| e.to_string())?;
         transport.publish(&wrap, &community.relays).await?;
         // Held at once, so this device honours its own Timeout before the follow reads it back.
+        let gate = guestbook_write_gate();
+        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
         let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
         if !events.iter().any(|e| e.rumor_id == rumor_id) {
             events.push(guestbook::GuestbookEvent {
@@ -2481,91 +2483,40 @@ pub struct AuthorityView {
 /// the roster off the newest window. A fetch failure degrades fail-safe:
 /// owner-only authority plus the PERSISTED banlist — nobody gains standing from
 /// an outage, and a ban never lifts on withheld data.
-/// Page the Control Plane as the Roster fold reads it: the editions read, the authority floors,
-/// the authority they settle, and whether the first read failed.
-async fn read_authority<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> (Vec<ParsedEdition>, Floors, AuthoritySet, bool) {
-    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
-        .collect();
-    let floors = floors_of_family(&floors, &cid_hex, crate::db::community::FLOOR_AUTHORITY);
-    let control = control::ControlPlane::of(community);
-
-    let mut editions: Vec<ParsedEdition> = Vec::new();
-    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-    let mut oldest: Option<u64> = None;
-    let mut until: Option<u64> = None;
-    // Seed from an EMPTY fold, not owner_only(): a fold over zero editions yields
-    // owner-only roles AND retains the PERSISTED banlist. So a first-page transport
-    // error returns the stored bans (fail-safe), never an empty banlist that would
-    // silently un-ban on withheld data.
-    let mut a = fold_authority(community, &[], &floors);
-    let mut failed = false;
-    for _ in 0..FOLLOW_MAX_PAGES {
-        // Quorum, DECLARED (the until→Full transport floor is gone): these
-        // control reads tolerate a partial union — their fold semantics are
-        // fail-safe on gaps (seeded banlists, withheld roster cache).
-        let query = Query {
-            kinds: vec![stream::KIND_WRAP],
-            authors: vec![control.pk_hex()],
-            until,
-            limit: Some(FOLLOW_PAGE),
-            evidence: crate::community::transport::Evidence::Quorum,
-            ..Default::default()
-        };
-        let Ok(wraps) = transport.fetch(&query, &community.relays).await else {
-            failed |= editions.is_empty();
-            break;
-        };
-        let mut fresh = 0usize;
-        for w in &wraps {
-            if !seen_wraps.insert(w.id) {
-                continue;
-            }
-            fresh += 1;
-            let at = w.created_at.as_secs();
-            if oldest.is_none_or(|o| at < o) {
-                oldest = Some(at);
-            }
-            if let Ok((ed, _)) = control.open(w) {
-                if seen.insert(ed.inner_id) {
-                    editions.push(ed);
-                }
-            }
-        }
-        a = fold_authority(community, &editions, &floors);
-        if !a.gapped || fresh == 0 {
-            break;
-        }
-        until = oldest;
-    }
-    (editions, floors, a, failed)
-}
+/// Why a Control Plane read is no verdict: it stopped short of what this device tracks.
+pub(super) const CONTROL_SHORT: &str = "the Control Plane couldn't be read whole";
 
 /// The head a reader folds for the Writers ledger at `eid` from what the relays serve now, read
-/// without persisting anything: `(self_hash, version)`. An error when nothing could be read.
+/// as deep as a follow and without persisting anything: `(self_hash, version)`. A read short of
+/// what this device tracks is no verdict either way.
 pub(super) async fn writers_head_on_relays<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, eid: &[u8; 32]) -> Result<Option<([u8; 32], u64)>, String> {
-    let (editions, _, authority, failed) = read_authority(transport, community).await;
-    if failed {
-        return Err("couldn't read the Control Plane".to_string());
-    }
-    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
-        .into_iter()
-        .filter(|(_, f)| f.0 == community.root_epoch.0)
-        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
-        .collect();
-    let fold = apply_control_fold(community, &editions, &floors, &authority);
+    let read = read_control(transport, community).await?;
     let eid_hex = crate::simd::hex::bytes_to_hex_32(eid);
-    Ok(fold.heads.iter().find(|h| h.entity_hex == eid_hex).map(|h| (h.self_hash, h.version)))
+    let head = read.fold.heads.iter().find(|h| h.entity_hex == eid_hex).map(|h| (h.self_hash, h.version));
+    // A gap above the head is an edition nobody can link: it moves no reader past it.
+    if read.truncated || read.authority.gapped || (head.is_none() && read.floors.contains_key(&eid_hex)) {
+        return Err(CONTROL_SHORT.to_string());
+    }
+    Ok(head)
 }
 
 pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> AuthorityView {
-    let (_, floors, a, _) = read_authority(transport, community).await;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    // As deep as a follow reads; a failed read keeps the persisted banlist (an empty fold retains it).
+    let (floors, a, short) = match read_control(transport, community).await {
+        Ok(read) => (read.floors, read.authority, read.truncated),
+        Err(_) => {
+            let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, f)| f.0 == community.root_epoch.0)
+                .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+                .collect();
+            let a = fold_authority(community, &[], &floors);
+            (floors, a, true)
+        }
+    };
+    let floors = floors_of_family(&floors, &cid_hex, crate::db::community::FLOOR_AUTHORITY);
     let head_entities = a.settled().into_iter().map(String::from).collect();
     let grant_authors = a
         .roles
@@ -2583,7 +2534,7 @@ pub async fn fetch_authority<T: Transport + ?Sized>(transport: &T, community: &C
     AuthorityView {
         roles: a.roles,
         banned: a.banned,
-        gapped: a.gapped,
+        gapped: a.gapped || short,
         floored: floors.keys().cloned().collect(),
         head_entities,
         banned_at: a.banned_at,
@@ -3133,23 +3084,33 @@ fn guestbook_walk_progress(community: &CommunityV2) -> Option<(u64, u64)> {
     guestbook_walk_map().lock().ok()?.get(&guestbook_plane(community)).copied()
 }
 
+/// A walk only ever goes further: a slower one finishing late never sends the next back over
+/// what another read, nor reopens a plane already read whole.
 fn set_guestbook_walk_progress(community: &CommunityV2, progress: Option<(u64, u64)>) {
+    if guestbook_walked_this_session(community) {
+        return;
+    }
     if let Ok(mut m) = guestbook_walk_map().lock() {
-        match progress {
-            Some(p) => m.insert(guestbook_plane(community), p),
-            None => m.remove(&guestbook_plane(community)),
+        let plane = guestbook_plane(community);
+        match (progress, m.get(&plane).copied()) {
+            (Some((until, newest)), Some((held, seen))) => m.insert(plane, (until.min(held), newest.max(seen))),
+            (Some(p), None) => m.insert(plane, p),
+            (None, _) => m.remove(&plane),
         };
     }
 }
 
 /// Whether a walk of `community`'s Guestbook stopped short this session and has more to read.
 pub(crate) fn guestbook_walk_pending(community: &CommunityV2) -> bool {
-    guestbook_walk_progress(community).is_some()
+    !guestbook_walked_this_session(community) && guestbook_walk_progress(community).is_some()
 }
 
 fn mark_guestbook_walked(community: &CommunityV2) {
     if let Ok(mut s) = guestbook_walked_set().lock() {
         s.insert(guestbook_plane(community));
+    }
+    if let Ok(mut m) = guestbook_walk_map().lock() {
+        m.remove(&guestbook_plane(community));
     }
 }
 
@@ -9367,168 +9328,190 @@ impl ControlFollow {
     }
 }
 
+/// What a follow of the Control Plane reads and folds before it persists anything.
+struct ControlRead {
+    floors: Floors,
+    editions: Vec<ParsedEdition>,
+    authority: AuthoritySet,
+    fold: ControlFold,
+    /// The read stopped with editions this device tracks still unread.
+    truncated: bool,
+    pages_read: usize,
+}
+
+/// Read the Control Plane as deep as a follow does, escalating to Full while anything this
+/// device tracks is unaccounted for, and fold it without persisting.
+async fn read_control<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<ControlRead, String> {
+    let control = control::ControlPlane::of(community);
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(community.id()));
+    // Per-entity refuse-downgrade floors for the CURRENT epoch only. A head recorded
+    // under a prior epoch is excluded, so that entity auto-bootstraps after a
+    // Refounding (Armada accepts a compacted head across a dangling prev — matched).
+    // A read error FAILS CLOSED: an empty map would silently re-open the rollback
+    // window the floor exists to shut.
+    let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
+        .into_iter()
+        .filter(|(_, f)| f.0 == community.root_epoch.0)
+        .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
+        .collect();
+
+    // Newest window first; page OLDER only while a tracking entity is gapped (its
+    // floor link evicted from the window — H1/M8 refetch), bounded like the join
+    // verifier. A withholding relay still converges to fail-closed after the cap.
+    let mut editions: Vec<ParsedEdition> = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new() };
+    let mut authority = AuthoritySet::owner_only();
+    // Whether this round gave up with editions still unread. The follow is
+    // procedural by design — process what arrives, converge with everyone else —
+    // so a short read never blocks reading, writing or epoch adoption. It only
+    // withholds the ROSTER cache below: caching a partial authority as this
+    // device's baseline is the one step that outlives the round.
+    let mut truncated = true;
+    let mut pages_read = 0usize;
+    // Quorum answers as soon as a majority does, so a fast subset that happens not
+    // to hold an older edition is indistinguishable from that edition not existing —
+    // and the same subset answers every boot, so the retain never lifts and the
+    // roster cache freezes with no way back. This fold draws an ABSENCE verdict
+    // (`stored_complete`, `truncated`), and CORD-04 §5 makes a gap fail closed FOR
+    // THAT ENTITY and refetch. So escalate: read at Quorum, and if anything we
+    // already hold is still unaccounted for, read again at Full before concluding.
+    // Healthy folds never pay for the second tier.
+    for tier in [
+        crate::community::transport::Evidence::Quorum,
+        crate::community::transport::Evidence::Full,
+    ] {
+        let mut until: Option<u64> = None;
+        let mut oldest: Option<u64> = None;
+        truncated = true;
+        for _ in 0..FOLLOW_MAX_PAGES {
+            pages_read += 1;
+            let query = Query {
+                kinds: vec![stream::KIND_WRAP],
+                authors: vec![control.pk_hex()],
+                until,
+                limit: Some(FOLLOW_PAGE),
+                evidence: tier,
+                ..Default::default()
+            };
+            let wraps = transport.fetch(&query, &community.relays).await?;
+            // The `until` cursor is INCLUSIVE (a `-1` step can skip same-second siblings
+            // at a page boundary); the wrap-id dedup makes re-served boundary events
+            // free, and a page with nothing new means the relay is exhausted.
+            let mut fresh = 0usize;
+            for w in &wraps {
+                if !seen_wraps.insert(w.id) {
+                    continue;
+                }
+                fresh += 1;
+                let at = w.created_at.as_secs();
+                if oldest.is_none_or(|o| at < o) {
+                    oldest = Some(at);
+                }
+                // Open + seal-verify every edition; authority is resolved by the roster
+                // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
+                if let Ok((ed, _)) = control.open(w) {
+                    if seen.insert(ed.inner_id) {
+                        editions.push(ed);
+                    }
+                }
+            }
+            // Roster first (roles/grants/banlist → authorized set), then the authority-
+            // gated metadata/channel fold over the same edition set.
+            authority = fold_authority(community, &editions, &floors);
+            fold = apply_control_fold(community, &editions, &floors, &authority);
+            // "Nothing is gapped" is NOT "I have read enough".
+            //
+            // An entity we track whose editions are entirely absent from the window
+            // folds away silently — absence dangles no link, so it raises no gap. The
+            // loop therefore declared the very first page coherent and stopped, and a
+            // community whose grants sit older than one page could never re-derive its
+            // own roster: every fold offered zero grants, and only the completeness
+            // guard retaining the cache kept the admin list alive at all. That made the
+            // cache the sole surviving copy of the roster rather than a cache.
+            //
+            // So keep paging while anything we already know about is still unaccounted
+            // for. This only ever reads MORE; it cannot lose data, and it terminates on
+            // the page cap or an exhausted plane exactly as before.
+            let heads_now = authority.settled();
+            // A FAILED read must not read as "I track nothing" — that makes
+            // "everything is accounted for" trivially true and stops the walk at the
+            // first page, which is the exact failure this loop exists to prevent.
+            // Fail toward reading MORE.
+            let all_accounted = match crate::db::community::get_community_roles(&cid_hex) {
+                Ok(known) => {
+                    // A roster we have not built yet accounts for nothing, so
+                    // "everything I track is present" is vacuously TRUE and stops a
+                    // COLD device at the first page — caching whatever the newest
+                    // window happened to hold as its whole baseline, and losing every
+                    // grant older than one page. The early break is an optimisation
+                    // for a client that already knows what it is looking for.
+                    (!known.roles.is_empty() || !known.grants.is_empty())
+                        && (!floors.contains_key(&everyone_hex) || heads_now.contains(everyone_hex.as_str()))
+                        && known.roles.iter().all(|r| heads_now.contains(r.role_id.as_str()))
+                        && known.grants.iter().all(|g| {
+                            crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
+                                let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                                heads_now.contains(eid.as_str())
+                            })
+                        })
+                }
+                Err(e) => {
+                    crate::log_warn!("[v2:control {}] roster read failed mid-page ({e}) — paging on rather than assuming nothing is tracked", &cid_hex[..8.min(cid_hex.len())]);
+                    false
+                }
+            };
+            if !(fold.gapped || authority.gapped) && all_accounted {
+                truncated = false; // coherent AND complete for everything we track
+                break;
+            }
+            if fresh == 0 {
+                // A FULL page with nothing new is a same-second wall no `until` steps
+                // past, so older editions stay unreachable; a short page is the end
+                // of the plane, and a gap in THAT is the relay withholding, not us
+                // giving up early.
+                truncated = wraps.len() >= FOLLOW_PAGE;
+                break;
+            }
+            until = oldest;
+        }
+
+        if tier == crate::community::transport::Evidence::Full {
+            break;
+        }
+        let stored_so_far = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let heads_so_far = authority.settled();
+        let accounted = stored_so_far.roles.iter().all(|r| !floors.contains_key(&r.role_id) || heads_so_far.contains(r.role_id.as_str()))
+            && stored_so_far.grants.iter().all(|g| {
+                crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
+                    let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                    !floors.contains_key(&eid) || heads_so_far.contains(eid.as_str())
+                })
+            });
+        if accounted {
+            break;
+        }
+        crate::log_debug!(
+            "[v2:control {}] {} stored entit(ies) unaccounted after a Quorum read — re-reading at Full before drawing an absence verdict",
+            &cid_hex[..8.min(cid_hex.len())],
+            stored_so_far.roles.len() + stored_so_far.grants.len()
+        );
+    }
+
+    Ok(ControlRead { floors, editions, authority, fold, truncated, pages_read })
+}
+
 pub async fn follow_control<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
 ) -> Result<ControlFollow, String> {
     crate::db::scoped(async move {
         community.owner()?; // fail fast if the community is somehow unproven.
-        let control = control::ControlPlane::of(community);
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
 
-        // Per-entity refuse-downgrade floors for the CURRENT epoch only. A head recorded
-        // under a prior epoch is excluded, so that entity auto-bootstraps after a
-        // Refounding (Armada accepts a compacted head across a dangling prev — matched).
-        // A read error FAILS CLOSED: an empty map would silently re-open the rollback
-        // window the floor exists to shut.
-        let floors: Floors = crate::db::community::get_all_edition_heads_full(&cid_hex)?
-            .into_iter()
-            .filter(|(_, f)| f.0 == community.root_epoch.0)
-            .map(|(entity, f)| (entity, (f.1, f.2, f.3, f.4)))
-            .collect();
-
-        // Newest window first; page OLDER only while a tracking entity is gapped (its
-        // floor link evicted from the window — H1/M8 refetch), bounded like the join
-        // verifier. A withholding relay still converges to fail-closed after the cap.
-        let mut editions: Vec<ParsedEdition> = Vec::new();
-        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-        let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-        let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new() };
-        let mut authority = AuthoritySet::owner_only();
-        // Whether this round gave up with editions still unread. The follow is
-        // procedural by design — process what arrives, converge with everyone else —
-        // so a short read never blocks reading, writing or epoch adoption. It only
-        // withholds the ROSTER cache below: caching a partial authority as this
-        // device's baseline is the one step that outlives the round.
-        let mut truncated = true;
-        let mut pages_read = 0usize;
-        // Quorum answers as soon as a majority does, so a fast subset that happens not
-        // to hold an older edition is indistinguishable from that edition not existing —
-        // and the same subset answers every boot, so the retain never lifts and the
-        // roster cache freezes with no way back. This fold draws an ABSENCE verdict
-        // (`stored_complete`, `truncated`), and CORD-04 §5 makes a gap fail closed FOR
-        // THAT ENTITY and refetch. So escalate: read at Quorum, and if anything we
-        // already hold is still unaccounted for, read again at Full before concluding.
-        // Healthy folds never pay for the second tier.
-        for tier in [
-            crate::community::transport::Evidence::Quorum,
-            crate::community::transport::Evidence::Full,
-        ] {
-            let mut until: Option<u64> = None;
-            let mut oldest: Option<u64> = None;
-            truncated = true;
-            for _ in 0..FOLLOW_MAX_PAGES {
-                pages_read += 1;
-                let query = Query {
-                    kinds: vec![stream::KIND_WRAP],
-                    authors: vec![control.pk_hex()],
-                    until,
-                    limit: Some(FOLLOW_PAGE),
-                    evidence: tier,
-                    ..Default::default()
-                };
-                let wraps = transport.fetch(&query, &community.relays).await?;
-                // The `until` cursor is INCLUSIVE (a `-1` step can skip same-second siblings
-                // at a page boundary); the wrap-id dedup makes re-served boundary events
-                // free, and a page with nothing new means the relay is exhausted.
-                let mut fresh = 0usize;
-                for w in &wraps {
-                    if !seen_wraps.insert(w.id) {
-                        continue;
-                    }
-                    fresh += 1;
-                    let at = w.created_at.as_secs();
-                    if oldest.is_none_or(|o| at < o) {
-                        oldest = Some(at);
-                    }
-                    // Open + seal-verify every edition; authority is resolved by the roster
-                    // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
-                    if let Ok((ed, _)) = control.open(w) {
-                        if seen.insert(ed.inner_id) {
-                            editions.push(ed);
-                        }
-                    }
-                }
-                // Roster first (roles/grants/banlist → authorized set), then the authority-
-                // gated metadata/channel fold over the same edition set.
-                authority = fold_authority(community, &editions, &floors);
-                fold = apply_control_fold(community, &editions, &floors, &authority);
-                // "Nothing is gapped" is NOT "I have read enough".
-                //
-                // An entity we track whose editions are entirely absent from the window
-                // folds away silently — absence dangles no link, so it raises no gap. The
-                // loop therefore declared the very first page coherent and stopped, and a
-                // community whose grants sit older than one page could never re-derive its
-                // own roster: every fold offered zero grants, and only the completeness
-                // guard retaining the cache kept the admin list alive at all. That made the
-                // cache the sole surviving copy of the roster rather than a cache.
-                //
-                // So keep paging while anything we already know about is still unaccounted
-                // for. This only ever reads MORE; it cannot lose data, and it terminates on
-                // the page cap or an exhausted plane exactly as before.
-                let heads_now = authority.settled();
-                // A FAILED read must not read as "I track nothing" — that makes
-                // "everything is accounted for" trivially true and stops the walk at the
-                // first page, which is the exact failure this loop exists to prevent.
-                // Fail toward reading MORE.
-                let all_accounted = match crate::db::community::get_community_roles(&cid_hex) {
-                    Ok(known) => {
-                        // A roster we have not built yet accounts for nothing, so
-                        // "everything I track is present" is vacuously TRUE and stops a
-                        // COLD device at the first page — caching whatever the newest
-                        // window happened to hold as its whole baseline, and losing every
-                        // grant older than one page. The early break is an optimisation
-                        // for a client that already knows what it is looking for.
-                        (!known.roles.is_empty() || !known.grants.is_empty())
-                            && known.roles.iter().all(|r| heads_now.contains(r.role_id.as_str()))
-                            && known.grants.iter().all(|g| {
-                                crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
-                                    let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
-                                    heads_now.contains(eid.as_str())
-                                })
-                            })
-                    }
-                    Err(e) => {
-                        crate::log_warn!("[v2:control {}] roster read failed mid-page ({e}) — paging on rather than assuming nothing is tracked", &cid_hex[..8.min(cid_hex.len())]);
-                        false
-                    }
-                };
-                if !(fold.gapped || authority.gapped) && all_accounted {
-                    truncated = false; // coherent AND complete for everything we track
-                    break;
-                }
-                if fresh == 0 {
-                    // A FULL page with nothing new is a same-second wall no `until` steps
-                    // past, so older editions stay unreachable; a short page is the end
-                    // of the plane, and a gap in THAT is the relay withholding, not us
-                    // giving up early.
-                    truncated = wraps.len() >= FOLLOW_PAGE;
-                    break;
-                }
-                until = oldest;
-            }
-
-            if tier == crate::community::transport::Evidence::Full {
-                break;
-            }
-            let stored_so_far = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-            let heads_so_far = authority.settled();
-            let accounted = stored_so_far.roles.iter().all(|r| !floors.contains_key(&r.role_id) || heads_so_far.contains(r.role_id.as_str()))
-                && stored_so_far.grants.iter().all(|g| {
-                    crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
-                        let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
-                        !floors.contains_key(&eid) || heads_so_far.contains(eid.as_str())
-                    })
-                });
-            if accounted {
-                break;
-            }
-            crate::log_debug!(
-                "[v2:control {}] {} stored entit(ies) unaccounted after a Quorum read — re-reading at Full before drawing an absence verdict",
-                &cid_hex[..8.min(cid_hex.len())],
-                stored_so_far.roles.len() + stored_so_far.grants.len()
-            );
-        }
+        let ControlRead { floors, editions, authority, fold, truncated, pages_read } = read_control(transport, community).await?;
 
         // The fetches straddled awaits; a swap since the guard was captured must not
         // write account A's control state into B.
@@ -25365,26 +25348,26 @@ mod tests {
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
         bed.swap_to(&member);
         follow_control(&bed.relay, &held()).await.unwrap();
-        crate::db::community::take_owed_retractions(&cid_hex).unwrap();
+        clear_owed(&cid_hex);
         bed.swap_to(&owner);
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), 0, 0).await.unwrap();
         let stop_at = held().channel(&general).unwrap().writers.as_ref().unwrap().entries.last().unwrap().at;
         // A backstop's read of the Control Plane, not the live follow, is what folds it here.
         bed.swap_to(&member);
         follow_fresh(&bed.relay, community.id()).await.unwrap();
-        assert_eq!(crate::db::community::take_owed_retractions(&cid_hex).unwrap(), vec![(chan_hex.clone(), stop_at)]);
-        assert!(crate::db::community::owed_retractions(&cid_hex).unwrap().is_empty(), "taken whole");
-        // What is owed while a drain runs stands on its own range.
+        let owed = crate::db::community::owed_retractions(&cid_hex).unwrap();
+        assert_eq!(owed.iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex.clone(), stop_at)]);
+        // What is owed while a drain runs survives its clear.
         crate::db::community::owe_writer_retraction(&cid_hex, &chan_hex, stop_at + 1).unwrap();
-        crate::db::community::owe_writer_retraction(&cid_hex, &chan_hex, stop_at + 5).unwrap();
-        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap(), vec![(chan_hex, stop_at + 1)]);
+        crate::db::community::settle_retraction(&cid_hex, &chan_hex, owed[0].1, owed[0].2).unwrap();
+        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap().iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex, stop_at)]);
     }
 
     #[tokio::test]
     async fn a_page_stored_after_its_ledger_moved_owes_a_retraction() {
         let (_bed, _owner, _member, community, general) = restricted_bed(false).await;
         let (cid_hex, chan_hex) = (crate::simd::hex::bytes_to_hex_32(&community.id().0), crate::simd::hex::bytes_to_hex_32(&general.0));
-        crate::db::community::take_owed_retractions(&cid_hex).unwrap();
+        clear_owed(&cid_hex);
         let judged_on = writing::writers_head(&chan_hex).unwrap();
         writing::owe_if_moved(&chan_hex, Some(judged_on.clone()), 5_000);
         assert!(crate::db::community::owed_retractions(&cid_hex).unwrap().is_empty(), "judged on the ledger it landed under");
@@ -25398,9 +25381,9 @@ mod tests {
         let stop_at = now_ms() + 1;
         let stopped = ledger.appended(stop_at, crate::community::v2::writers::Spell::Stop { writer: Keys::generate().public_key().to_bytes() }).unwrap();
         crate::db::community::set_community_writers(&cid_hex, &chan_hex, &stopped.to_json(), 100, true).unwrap();
-        crate::db::community::take_owed_retractions(&cid_hex).unwrap();
+        clear_owed(&cid_hex);
         writing::owe_if_moved(&chan_hex, Some(judged_on), 5_000);
-        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap(), vec![(chan_hex, stop_at)]);
+        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap().iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex, stop_at)]);
     }
 
     #[tokio::test]
@@ -25713,6 +25696,70 @@ mod tests {
         let (events, _) = crate::db::community::get_guestbook(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
         let joined = |k: &Keys| events.iter().any(|e| matches!(e.entry, guestbook::GuestbookEntry::Join { member, .. } if member == k.public_key()));
         assert!(joined(&a) && joined(&b), "neither write drops what the other stored");
+    }
+
+    #[tokio::test]
+    async fn a_manager_whose_grant_sits_past_a_page_still_moves_the_ledger() {
+        use crate::community::roles::OverwriteTarget;
+        use crate::community::v2::writers::Spell;
+        let (bed, owner, x, community) = v2_bed_with_admin("Buried").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        // A page's worth of editions nobody folds, newer than the admin's Grant.
+        let group = control::ControlPlane::of(&held()).write_group().unwrap();
+        let binding = Some(crate::community::v2::derive::edition_binding(community.id()));
+        for i in 0..600u32 {
+            let mut eid = [0u8; 32];
+            eid[..4].copy_from_slice(&i.to_be_bytes());
+            let rumor = control::build_edition_rumor_bound(owner.keys.public_key(), "99", &eid, 1, None, "{}", now_ms() / 1000, None, binding);
+            let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner.keys, Timestamp::from_secs(now_ms() / 1000)).unwrap();
+            bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        }
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
+        let (v, head) = crate::db::community::get_edition_head(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&eid)).unwrap().unwrap();
+        let theirs = held().channel(&general).unwrap().writers.clone().unwrap().appended(now_ms(), Spell::Open).unwrap();
+        let cite = cite_on_relay(&bed.relay, &held(), &x).await;
+        let rumor = control::build_edition_rumor_bound(x.public_key(), vsk::WRITERS, &eid, v + 1, Some(&head), &theirs.to_json(), now_ms() / 1000, cite.as_ref(), binding);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &x, Timestamp::from_secs(now_ms() / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        act_as(&owner.keys);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert_eq!(writing::mint_for_test(&bed.relay, &held(), &general, &roster).await, Err(writing::LEDGER_MOVED_FOR_TEST.to_string()), "read as deep as a follow, the admin's edition is seen");
+    }
+
+    #[tokio::test]
+    async fn a_walk_read_whole_is_never_reopened_by_a_slower_one() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Straggler", bed.relays.clone(), None).await.unwrap();
+        set_guestbook_walk_progress(&community, Some((1_000, 2_000)));
+        set_guestbook_walk_progress(&community, Some((5_000, 1_500)));
+        assert_eq!(guestbook_walk_progress(&community), Some((1_000, 2_000)), "a walk only goes further");
+        mark_guestbook_walked(&community);
+        set_guestbook_walk_progress(&community, Some((900, 2_000)));
+        assert!(!guestbook_walk_pending(&community), "a straggler finishing late reopens nothing");
+    }
+
+    #[test]
+    fn a_fork_switch_owes_from_what_it_dropped() {
+        use crate::community::v2::writers::{Ledger, Spell};
+        let ch = ChannelId([4; 32]);
+        let w = Keys::generate().public_key().to_bytes();
+        let writer = Spell::Writer { epoch: Epoch(1), pk: crate::community::v2::writers::writer_address(&[1; 32], &ch, Epoch(1)), root: Epoch(0), by: w, certifier: None };
+        let base = Ledger::new(&ch).appended(1_000, writer).unwrap();
+        let losing = base.appended(2_000, Spell::Open).unwrap();
+        let winning = base.appended(2_500, Spell::Stop { writer: w }).unwrap();
+        assert_eq!(crate::db::community::retraction_since(Some(&losing.to_json()), &winning.to_json()), Some(2_000), "the open the switch dropped admitted posts from 2_000");
+        assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &winning.to_json()), Some(2_500));
+        assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &losing.to_json()), None, "an open added takes nothing back");
+    }
+
+    fn clear_owed(cid_hex: &str) {
+        for (chan, since, generation) in crate::db::community::owed_retractions(cid_hex).unwrap() {
+            crate::db::community::settle_retraction(cid_hex, &chan, since, generation).unwrap();
+        }
     }
 
     /// Answers no fetch by id, as a relay that serves a plane only to its own key.

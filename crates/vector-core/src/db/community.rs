@@ -4504,30 +4504,35 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
     Ok(changed > 0)
 }
 
-/// The earliest writer or stop entry `new` holds that `old` doesn't: an `open` takes nothing back.
+/// From when a move from `old` to `new` can change a verdict: the earliest writer or stop entry
+/// it added, or entry a fork switch dropped. An `open` added takes nothing back, and an entry the
+/// cap trimmed from the front moves no window.
 pub(crate) fn retraction_since(old: Option<&str>, new: &str) -> Option<u64> {
     use crate::community::v2::writers::{Ledger, Spell};
     let new = Ledger::parse(new)?;
     let old = old.and_then(Ledger::parse);
-    new.entries
-        .iter()
-        .filter(|e| matches!(e.spell, Spell::Writer { .. } | Spell::Stop { .. }))
-        .filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)))
-        .map(|e| e.at)
-        .min()
+    let added = new.entries.iter().filter(|e| matches!(e.spell, Spell::Writer { .. } | Spell::Stop { .. })).filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)));
+    let front = new.entries.first().map_or(u64::MAX, |e| e.at);
+    let dropped = old.iter().flat_map(|o| o.entries.iter()).filter(|e| !matches!(e.spell, Spell::Other) && e.at >= front && !new.entries.contains(e));
+    added.chain(dropped).map(|e| e.at).min()
 }
 
 fn retraction_key(community_id: &str, channel_id: &str) -> String {
     format!("writer_retract:{community_id}:{channel_id}")
 }
 
+/// Stored as `since:generation`: a drain clears only the value it read, so what is owed while it
+/// runs survives it.
+fn parse_owed(value: &str) -> Option<(u64, u64)> {
+    let mut parts = value.split(':');
+    Some((parts.next()?.parse().ok()?, parts.next().and_then(|g| g.parse().ok()).unwrap_or(0)))
+}
+
 fn owe_retraction(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, since: u64) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = MIN(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
-        params![retraction_key(community_id, channel_id), since.to_string()],
-    )
-    .map_err(|e| format!("owe retraction: {e}"))?;
+    let key = retraction_key(community_id, channel_id);
+    let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
+    let (since, generation) = held.as_deref().and_then(parse_owed).map_or((since, 1), |(s, g)| (s.min(since), g + 1));
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, format!("{since}:{generation}")]).map_err(|e| format!("owe retraction: {e}"))?;
     Ok(())
 }
 
@@ -4537,25 +4542,21 @@ pub fn owe_writer_retraction(community_id: &str, channel_id: &str, since_ms: u64
     owe_retraction(&conn, community_id, channel_id, since_ms)
 }
 
-/// The Channels of `community_id` owed a retraction, and from when.
-pub fn owed_retractions(community_id: &str) -> Result<Vec<(String, u64)>, String> {
+/// The Channels of `community_id` owed a retraction: `(channel, since_ms, generation)`.
+pub fn owed_retractions(community_id: &str) -> Result<Vec<(String, u64, u64)>, String> {
     let prefix = retraction_key(community_id, "");
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1").map_err(|e| format!("owed retractions: {e}"))?;
     let rows = stmt.query_map(params![prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("owed retractions: {e}"))?;
-    Ok(rows.flatten().filter_map(|(k, v)| Some((k[prefix.len()..].to_string(), v.split(':').next()?.parse().ok()?))).collect())
+    Ok(rows.flatten().filter_map(|(k, v)| parse_owed(&v).map(|(since, generation)| (k[prefix.len()..].to_string(), since, generation))).collect())
 }
 
-/// Take what `community_id` is owed, leaving nothing behind: a drain owes again what it couldn't
-/// do, and what is owed meanwhile stands on its own range.
-pub fn take_owed_retractions(community_id: &str) -> Result<Vec<(String, u64)>, String> {
-    let owed = owed_retractions(community_id)?;
+/// Clear `channel_id`'s owed retraction once done, unless more was owed since it was read.
+pub fn settle_retraction(community_id: &str, channel_id: &str, since: u64, generation: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    for (channel, since) in &owed {
-        conn.execute("DELETE FROM settings WHERE key = ?1 AND CAST(value AS INTEGER) = ?2", params![retraction_key(community_id, channel), *since as i64])
-            .map_err(|e| format!("take retraction: {e}"))?;
-    }
-    Ok(owed)
+    conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![retraction_key(community_id, channel_id), format!("{since}:{generation}")])
+        .map_err(|e| format!("settle retraction: {e}"))?;
+    Ok(())
 }
 
 pub fn get_community_writers(community_id: &str, channel_id: &str) -> Result<Option<(String, i64)>, String> {

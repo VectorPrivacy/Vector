@@ -244,16 +244,17 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Transport + ?Sized>(id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
     let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
     let cid = crate::simd::hex::bytes_to_hex_32(&id.0);
-    let owed = crate::db::community::take_owed_retractions(&cid).unwrap_or_default();
-    let mut failed = false;
-    for (chan, since) in owed {
-        let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) else { continue };
-        // One failed read means the network is down: the rest waits for the next pass.
-        if failed || super::service::retract_since(transport, &community, ch, since, handler).await.is_err() {
-            failed = true;
-            let _ = crate::db::community::owe_writer_retraction(&cid, &chan, since);
+    // Cleared only once done: a drain cut short leaves it owed.
+    for (chan, since, generation) in crate::db::community::owed_retractions(&cid).unwrap_or_default() {
+        let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) else {
+            let _ = crate::db::community::settle_retraction(&cid, &chan, since, generation);
             continue;
+        };
+        // One failed read means the network is down: the rest waits for the next pass.
+        if super::service::retract_since(transport, &community, ch, since, handler).await.is_err() {
+            break;
         }
+        let _ = crate::db::community::settle_retraction(&cid, &chan, since, generation);
         let (after, channel) = (community.clone(), ch.id);
         crate::db::spawn_bound(async move {
             let Some(me) = crate::state::my_public_key() else { return };
@@ -1670,7 +1671,26 @@ mod tests {
         crate::db::events::save_message(&chan, &stored).await.unwrap();
         crate::db::community::owe_writer_retraction(&cid, &chan, stored.at - 1).unwrap();
         settle_owed_retractions(community.id(), &Down, &removed).await;
-        assert_eq!(crate::db::community::owed_retractions(&cid).unwrap(), vec![(chan.clone(), stored.at - 1)], "still owed");
+        assert_eq!(crate::db::community::owed_retractions(&cid).unwrap().iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan.clone(), stored.at - 1)], "still owed");
+        // Nor does a drain cut short: it clears only once done.
+        struct Hangs;
+        #[async_trait::async_trait]
+        impl crate::community::transport::Transport for Hangs {
+            async fn fetch_plane(&self, _p: &Keys, _q: &crate::community::transport::Query, _r: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+                std::future::pending().await
+            }
+            async fn publish(&self, _e: &nostr_sdk::prelude::Event, _r: &[String]) -> Result<(), String> {
+                std::future::pending().await
+            }
+            async fn publish_durable(&self, _e: &nostr_sdk::prelude::Event, _r: &[String]) -> Result<(), String> {
+                std::future::pending().await
+            }
+            async fn fetch(&self, _q: &crate::community::transport::Query, _r: &[String]) -> Result<Vec<nostr_sdk::prelude::Event>, String> {
+                std::future::pending().await
+            }
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), settle_owed_retractions(community.id(), &Hangs, &removed)).await;
+        assert_eq!(crate::db::community::owed_retractions(&cid).unwrap().len(), 1, "a drain that never finished leaves it owed");
         let id = super::super::chat::open_writer_chat_event(&posted, &posted.pubkey, crate::community::Epoch(1), group.conv_key(), &general, community.root_epoch).unwrap().opened().rumor_id.to_hex();
         assert_eq!(removed.0.lock().unwrap().clone(), vec![(id, true)], "the owner's device keeps it, marked");
     }
