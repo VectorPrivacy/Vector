@@ -242,7 +242,7 @@
                                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                                         <div class="cs-role ce-target-row" class:on={st.target === t.key} onclick={() => !st.busy && selectOverwrite(t.key)}>
                                             {#if t.member}<span class="cs-role-grip"><span class="icon icon-user"></span></span>
-                                            {:else}<span class="cs-role-dot" style:background-color={t.key === 'everyone' ? null : hex(t.color)}></span>{/if}
+                                            {:else}<span class="cs-role-dot" style:background-color={hex(t.color)}></span>{/if}
                                             <span class="cs-role-name cutoff">{t.label}</span>
                                             {#if !t.set}<span class="cs-role-count">no rules yet</span>{/if}
                                             <span class="cs-role-open">{#if st.target === t.key}<span class="icon icon-check"></span>{/if}</span>
