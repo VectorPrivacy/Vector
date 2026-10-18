@@ -67,17 +67,11 @@ impl<'a> Posters<'a> {
     }
 }
 
-/// Who has gone from `community` by an event the Guestbook records (a Leave, an authorized Kick
-/// or a Refounding) with no newer Join: a departure is never inferred from an absence, and no
-/// post or reaction since undoes it.
-fn departed(community: &CommunityV2) -> std::collections::HashSet<PublicKey> {
-    stored_departures(community).into_iter().collect()
-}
 
-/// Whether there is evidence `p` may no longer post in `ch`: the roster takes Send, a ban, or a
-/// recorded departure.
-fn lost_evidence(roster: &CommunityRoles, owner_hex: &str, banned: &std::collections::BTreeSet<String>, gone: &std::collections::HashSet<PublicKey>, p: &PublicKey, ch: &ChannelV2) -> bool {
-    !may_write(roster, owner_hex, &p.to_hex(), ch) || banned.contains(&p.to_hex()) || gone.contains(p)
+/// Whether the Roster no longer lets `p` post in `ch`. One who left the Community, or was banned,
+/// needs no stop: the Guestbook and the banlist already stand behind nothing they post.
+fn lost_send(roster: &CommunityRoles, owner_hex: &str, p: &PublicKey, ch: &ChannelV2) -> bool {
+    !may_write(roster, owner_hex, &p.to_hex(), ch)
 }
 
 /// The writer secret this device holds for `ch`'s live writer epoch, given or minted here,
@@ -680,16 +674,15 @@ pub(super) async fn writer_duty<T: Transport + ?Sized>(transport: &T, community:
     let posters = Posters::of(&held, roster, banned)?;
     let candidates = writer_candidates(&held, roster)?;
     let mut done = WriterDuty::default();
-    let gone = departed(&held);
     for ch in &held.channels {
-        if let Err(e) = duty_for(transport, &held, ch, &posters, &candidates, &gone, &mut done).await {
+        if let Err(e) = duty_for(transport, &held, ch, &posters, &candidates, &mut done).await {
             crate::log_warn!("[v2:writers] duty for channel {} failed: {e}", &hex(&ch.id.0)[..8]);
         }
     }
     Ok(done)
 }
 
-async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, candidates: &[PublicKey], gone: &std::collections::HashSet<PublicKey>, done: &mut WriterDuty) -> Result<(), String> {
+async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, candidates: &[PublicKey], done: &mut WriterDuty) -> Result<(), String> {
     let roster = posters.roster;
     let owner_hex = posters.owner_hex.as_str();
     let me = me_pk()?;
@@ -751,7 +744,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         let out: Vec<PublicKey> = vouched(epoch)
             .into_iter()
             .filter(|p| walked && *p != me && !posters.manages(p) && !ledger.stopped(epoch, &p.to_bytes(), now))
-            .filter(|p| lost_evidence(roster, owner_hex, posters.banned, gone, p, ch))
+            .filter(|p| lost_send(roster, owner_hex, p, ch))
             .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
             .filter(|p| due(&ch.id, Lane::Cut(*p)))
             .collect();
@@ -895,8 +888,7 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             if sync_guestbook(transport, &fresh).await.is_err() {
                 return Ok(Backstop::Short);
             }
-            let gone = departed(&fresh);
-            let lost = |p: &PublicKey| lost_evidence(&now.roles, &posters.owner_hex, posters.banned, &gone, p, &ch);
+            let lost = |p: &PublicKey| lost_send(&now.roles, &posters.owner_hex, p, &ch);
             match act {
                 Act::Stop(p) if !lost(&p) => return Ok(Backstop::StoodDown),
                 Act::Restart(p) if lost(&p) => return Ok(Backstop::StoodDown),
@@ -975,6 +967,7 @@ pub(crate) struct Judge {
     owner_hex: String,
     banned: Vec<String>,
     members: std::sync::OnceLock<std::collections::HashSet<String>>,
+    departures: std::sync::OnceLock<std::collections::HashMap<[u8; 32], u64>>,
     me_manages: bool,
 }
 
@@ -1003,7 +996,15 @@ impl Judge {
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         let me = me_pk().map(|p| p.to_hex()).unwrap_or_default();
         let me_manages = !me.is_empty() && (me == owner_hex || (!banned.contains(&me) && roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_CHANNELS)));
-        Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, banned, members: Default::default(), me_manages })
+        Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, banned, members: Default::default(), departures: Default::default(), me_manages })
+    }
+
+    /// Whether the Guestbook records `author` gone from the Community by `at_ms`.
+    fn departed(&self, author: &PublicKey, at_ms: u64) -> bool {
+        self.departures
+            .get_or_init(|| stored_departure_times(&self.community).into_iter().map(|(p, at)| (p.to_bytes(), at)).collect())
+            .get(&author.to_bytes())
+            .is_some_and(|gone| at_ms >= *gone)
     }
 
     fn member(&self, author: &str) -> bool {
@@ -1055,7 +1056,7 @@ impl Judge {
                     Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community.id().0, e, &o.author.to_bytes(), &c)),
                     None => true,
                 };
-                open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms))
+                open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms) && !self.departed(&o.author, o.at_ms))
             }
         }
     }
