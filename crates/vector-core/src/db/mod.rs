@@ -82,8 +82,9 @@ fn sweep_dead_test_dirs() {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(pid) = name.strip_prefix("vector-test-").and_then(|r| r.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else { continue };
+        // SAFETY: signal 0 delivers nothing; it only asks whether the process exists.
         #[cfg(unix)]
-        let gone = unsafe { libc::kill(pid, 0) } != 0;
+        let gone = unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
         #[cfg(not(unix))]
         let gone = { let _ = pid; false };
         if gone {

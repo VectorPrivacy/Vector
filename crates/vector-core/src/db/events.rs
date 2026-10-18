@@ -807,6 +807,9 @@ pub struct StoredPost {
     /// Read at a restricted Channel's writer address.
     pub writer: bool,
     pub unauthorized: bool,
+    pub wrap_id: Option<String>,
+    /// For an edit, the message it edits.
+    pub edit_of: Option<String>,
 }
 
 /// The messages `chat_identifier` holds dated at or after `since_ms`.
@@ -814,21 +817,22 @@ pub fn posts_since(chat_identifier: &str, since_ms: u64) -> Result<Vec<StoredPos
     let Ok(chat_id) = super::id_cache::get_chat_id_by_identifier(chat_identifier) else { return Ok(Vec::new()) };
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
-        .prepare("SELECT id, npub, created_at, tags FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?5) AND created_at >= ?4")
+        .prepare("SELECT id, npub, created_at, tags, wrapper_event_id, kind, reference_id FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?5, ?6) AND created_at >= ?4")
         .map_err(|e| format!("posts since: {e}"))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, (since_ms / 1000) as i64, event_kind::PRIVATE_DIRECT_MESSAGE as i32],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)),
+            rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, (since_ms / 1000) as i64, event_kind::PRIVATE_DIRECT_MESSAGE as i32, event_kind::MESSAGE_EDIT as i32],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, i32>(5)?, r.get::<_, Option<String>>(6)?)),
         )
         .map_err(|e| format!("posts since: {e}"))?;
     Ok(rows
         .flatten()
-        .filter_map(|(id, npub, secs, tags)| {
+        .filter_map(|(id, npub, secs, tags, wrap_id, kind, reference)| {
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags).unwrap_or_default();
             let ms = tags.iter().find(|t| t.len() == 2 && t[0] == "ms").and_then(|t| t[1].parse::<u64>().ok()).unwrap_or(0);
             let at_ms = (secs.max(0) as u64) * 1000 + ms;
-            (at_ms >= since_ms).then(|| StoredPost { id, npub, at_ms, writer: carried_by_writer(&tags), unauthorized: held_unauthorized(&tags) })
+            let edit_of = (kind == event_kind::MESSAGE_EDIT as i32).then_some(reference).flatten();
+            (at_ms >= since_ms).then(|| StoredPost { id, npub, at_ms, writer: carried_by_writer(&tags), unauthorized: held_unauthorized(&tags), wrap_id: wrap_id.filter(|w| !w.is_empty()), edit_of })
         })
         .collect())
 }
@@ -3423,27 +3427,45 @@ mod tests {
         link_channel_to_community(&ch, &cid);
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let id = |i: usize| format!("{i:064x}");
-        assert!(!hold_wrap(&cid, &ch, &id(1), "w", now + 2 * 3_600_000).unwrap(), "dated past the horizon, it waits on the relay");
+        assert!(!hold_wrap(&cid, &ch, &id(1), "w", "", now + 2 * 3_600_000).unwrap(), "dated past the horizon, it waits on the relay");
         assert!(held_wraps_in(&cid, &ch).unwrap().is_empty());
+        assert!(community_wraps_settled(&[id(1)]).contains(&id(1)), "and a read leaves it there until its date nears");
         // A legitimate post half an hour old outlives a flood dated just inside the horizon.
-        assert!(hold_wrap(&cid, &ch, &id(2), "legit", now - 30 * 60_000).unwrap());
+        assert!(hold_wrap(&cid, &ch, &id(2), "legit", "", now - 30 * 60_000).unwrap());
         for i in 0..MAX_HELD_WRAPS {
-            hold_wrap(&cid, &ch, &id(10 + i), "spam", now + 55 * 60_000).unwrap();
+            hold_wrap(&cid, &ch, &id(10 + i), "spam", "", now + 55 * 60_000).unwrap();
         }
         assert!(held_wraps_in(&cid, &ch).unwrap().iter().any(|(w, _)| *w == id(2)), "dated nearer now, it stays");
         // Bytes cap too: a few huge wraps can't crowd out the rest beyond the budget.
         let (cid2, ch2) = ("d".repeat(64), "chan_held_bytes".to_string());
         let big = "x".repeat(MAX_HELD_BYTES / 3);
         for i in 0..4 {
-            hold_wrap(&cid2, &ch2, &id(900 + i), &big, now - (i as u64 + 1) * 1_000).unwrap();
+            hold_wrap(&cid2, &ch2, &id(900 + i), &big, "", now - (i as u64 + 1) * 1_000).unwrap();
         }
         let kept: Vec<String> = held_wraps_in(&cid2, &ch2).unwrap().into_iter().map(|(w, _)| w).collect();
         assert!(kept.len() < 4 && !kept.contains(&id(903)), "the furthest from now goes once the bytes run out: {kept:?}");
+        // One author can't hold more than a share of a channel, nor a community more than its bytes.
+        use crate::db::community::{MAX_HELD_COMMUNITY_BYTES, MAX_HELD_PER_AUTHOR};
+        let (cid3, ch3) = ("e".repeat(64), "chan_held_share".to_string());
+        assert!(hold_wrap(&cid3, &ch3, &id(1_000), "older, someone else", "bb", now - 20 * 60_000).unwrap());
+        for i in 0..MAX_HELD_PER_AUTHOR + 5 {
+            hold_wrap(&cid3, &ch3, &id(1_001 + i), "flood", "aa", now - i as u64).unwrap();
+        }
+        let kept = held_wraps_in(&cid3, &ch3).unwrap();
+        assert_eq!(kept.len(), MAX_HELD_PER_AUTHOR + 1, "the flood keeps its share and no more");
+        assert!(kept.iter().any(|(w, _)| *w == id(1_000)));
+        let cid4 = "f".repeat(64);
+        let fifth = "y".repeat(MAX_HELD_COMMUNITY_BYTES / 5);
+        for i in 0..6 {
+            hold_wrap(&cid4, &format!("chan_held_c{i}"), &id(2_000 + i), &fifth, "", now - (i as u64 + 1) * 60_000).unwrap();
+        }
+        assert!(held_wraps_in(&cid4, "chan_held_c5").unwrap().is_empty(), "the community's bytes run out on the furthest from now");
+        assert!(!held_wraps_in(&cid4, "chan_held_c0").unwrap().is_empty());
         // A manager's flagged copy goes with its wrap.
         let msg = Message { id: "held_copy".into(), content: "spam".into(), at: now - 10 * 60_000, npub: Some(ban_pair().1), unauthorized: true, wrapper_event_id: Some(id(950)), ..Default::default() };
         save_message(&ch, &msg).await.unwrap();
         assert!(get_message_by_id("held_copy").await.unwrap().is_some());
-        hold_wrap(&cid, &ch, &id(950), "spam", now + 58 * 60_000).unwrap();
+        hold_wrap(&cid, &ch, &id(950), "spam", "", now + 58 * 60_000).unwrap();
         assert!(get_message_by_id("held_copy").await.unwrap().is_none(), "evicted at once, and its copy with it");
     }
 

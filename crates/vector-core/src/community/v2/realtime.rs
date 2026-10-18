@@ -252,7 +252,8 @@ async fn reread_moved_ledgers(before: &CommunityV2, id: &crate::community::Commu
         let added: Vec<super::writers::Entry> = new.iter().filter(|e| !old.contains(e)).cloned().collect();
         let Some(from_ms) = added.iter().map(|e| e.at).min() else { continue };
         // What a stop or a restrict takes back leaves the history; the read below holds it again.
-        super::service::retract_after(&after, ch, &added, handler).await;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        super::service::retract_after(&transport, &after, ch, &added, handler).await;
         let (after, channel) = (after.clone(), ch.id);
         crate::db::spawn_bound(async move {
             let Some(me) = crate::state::my_public_key() else { return };
@@ -807,9 +808,9 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
-                inbound::DispatchedV2::Held { channel_id, at_ms, marked } => {
+                inbound::DispatchedV2::Held { channel_id, author, at_ms, marked } => {
                     // Not held, it stays on the relay for a later read.
-                    let held = crate::community::id32_from_hex(&channel_id).is_some_and(|ch| super::service::writing_hold(&c.id().0, &crate::community::ChannelId(ch), &event, at_ms));
+                    let held = crate::community::id32_from_hex(&channel_id).is_some_and(|ch| super::service::writing_hold(&c.id().0, &crate::community::ChannelId(ch), &event, &author, at_ms));
                     if !held {
                         return;
                     }

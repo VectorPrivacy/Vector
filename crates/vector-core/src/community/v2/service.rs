@@ -2578,13 +2578,24 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
     community: &CommunityV2,
     since_secs: u64,
 ) -> Result<(Vec<guestbook::GuestbookEvent>, u64, bool), String> {
+    fetch_guestbook_from(transport, community, since_secs, None).await.map(|(events, newest, end, _)| (events, newest, end))
+}
+
+/// [`fetch_guestbook_events`] from `start_until` down, with where it stopped when the page cap
+/// came first, so a long walk goes on from there.
+async fn fetch_guestbook_from<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    since_secs: u64,
+    start_until: Option<u64>,
+) -> Result<(Vec<guestbook::GuestbookEvent>, u64, bool, Option<u64>), String> {
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     const GB_PAGE: usize = 500;
     const GB_MAX_PAGES: usize = 12;
     let mut events = Vec::new();
     let mut newest: u64 = since_secs;
     let mut seen: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-    let mut until: Option<u64> = None;
+    let mut until: Option<u64> = start_until;
     let mut oldest: Option<u64> = None;
     // Did the walk run out of PLANE, or out of PAGES? Only the former means the
     // caller holds everything down to `since_secs` — advancing a cursor on the
@@ -2631,7 +2642,7 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
             }
         }
     }
-    Ok((events, newest, reached_end))
+    Ok((events, newest, reached_end, until))
 }
 
 /// The shared membership fold: coalesce Guestbook events under the community's
@@ -2928,6 +2939,22 @@ pub async fn wire_guestbook_members<T: Transport + ?Sized>(
 /// old ban mark — is absent from it while being perfectly joined. Coalescing asks
 /// only "what is the latest authorized entry for this npub", so a fresh Join
 /// supersedes an old Kick and an empty store yields no verdict at all.
+/// Who the stored Guestbook folds as gone, by a Leave, an authorized Kick or a Refounding.
+pub(crate) fn stored_departures(community: &CommunityV2) -> Vec<PublicKey> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else { return Vec::new() };
+    let Ok(owner) = community.owner() else { return Vec::new() };
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
+        let actor_hex = actor.to_hex();
+        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
+    guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, _)| pk).collect()
+}
+
 pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else {
@@ -2971,7 +2998,14 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         // Overlap one second so a same-second boundary event can't slip the cursor;
         // the rumor-id merge below dedups the re-fetched edge.
         let since = if full { 0 } else { cursor.saturating_sub(1) };
-        let (fresh, newest, reached_end) = fetch_guestbook_events(transport, community, since).await?;
+        // A walk longer than one pass's pages goes on where the last pass stopped, carrying the
+        // newest it saw, so a large Guestbook is still read whole.
+        let resumed = if full { guestbook_walk_progress(community.id()) } else { None };
+        let (fresh, newest, reached_end, stopped_at) = fetch_guestbook_from(transport, community, since, resumed.map(|r| r.0)).await?;
+        let newest = newest.max(resumed.map_or(0, |r| r.1));
+        if full {
+            set_guestbook_walk_progress(community.id(), (!reached_end).then_some(stopped_at).flatten().map(|u| (u, newest)));
+        }
         // Every event off this fetch came from the plane we hold the key to. The stamp is
         // what lets the fold tell a Join carried over from a buried epoch apart from a
         // live one; a row stored before stamping existed earns its stamp on re-read.
@@ -3033,6 +3067,26 @@ fn guestbook_walked_set() -> std::sync::Arc<std::sync::Mutex<std::collections::H
 
 fn guestbook_walked_this_session(community: &crate::community::CommunityId) -> bool {
     guestbook_walked_set().lock().is_ok_and(|s| s.contains(&community.0))
+}
+
+struct GuestbookWalkProgress;
+
+fn guestbook_walk_map() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], (u64, u64)>>> {
+    crate::db::current_session().scoped::<GuestbookWalkProgress, _>()
+}
+
+/// Where this session's walk of a Guestbook stopped short, and the newest it had seen.
+fn guestbook_walk_progress(community: &crate::community::CommunityId) -> Option<(u64, u64)> {
+    guestbook_walk_map().lock().ok()?.get(&community.0).copied()
+}
+
+fn set_guestbook_walk_progress(community: &crate::community::CommunityId, progress: Option<(u64, u64)>) {
+    if let Ok(mut m) = guestbook_walk_map().lock() {
+        match progress {
+            Some(p) => m.insert(community.0, p),
+            None => m.remove(&community.0),
+        };
+    }
 }
 
 fn mark_guestbook_walked(community: &crate::community::CommunityId) {
@@ -6421,6 +6475,26 @@ async fn deliver_certified<T: Transport + ?Sized>(
     recipients: &[PublicKey],
     certs: &std::collections::HashMap<PublicKey, [u8; 64]>,
 ) -> Result<(), String> {
+    for wrap in build_deliveries(community, channel, scope, epoch, writer, key, recipients, certs, false).await? {
+        transport.publish(&wrap, &community.relays).await?;
+    }
+    Ok(())
+}
+
+/// The sealed events of a delivery, built whole before any is sent: every blob is a signer
+/// round trip. `mint` marks each as a part of a writer epoch's minting delivery.
+#[allow(clippy::too_many_arguments)]
+async fn build_deliveries(
+    community: &CommunityV2,
+    channel: &ChannelId,
+    scope: rekey::RekeyScope,
+    epoch: Epoch,
+    writer: Option<[u8; 32]>,
+    key: &[u8; 32],
+    recipients: &[PublicKey],
+    certs: &std::collections::HashMap<PublicKey, [u8; 64]>,
+    mint: bool,
+) -> Result<Vec<Event>, String> {
     use nostr_sdk::prelude::AsyncGetPublicKey;
     let signer = crate::signer::active_signer()?;
     let me = me_pk()?;
@@ -6435,15 +6509,18 @@ async fn deliver_certified<T: Transport + ?Sized>(
     }
     let at = now_ms() / 1000;
     let per_event = if certs.is_empty() { rekey::MAX_REKEY_BLOBS_PER_EVENT } else { rekey::MAX_CERTIFIED_BLOBS_PER_EVENT };
-    for (part, who) in blobs.chunks(per_event).zip(recipients.chunks(per_event)) {
+    let parts = blobs.len().div_ceil(per_event).max(1);
+    let mut out = Vec::with_capacity(parts);
+    for (i, (part, who)) in blobs.chunks(per_event).zip(recipients.chunks(per_event)).enumerate() {
         let carried: Vec<([u8; 32], [u8; 64])> = who.iter().filter_map(|r| certs.get(r).map(|c| (r.to_bytes(), *c))).collect();
         let rumor = rekey::build_access_rumor_certified(me, scope, epoch, writer, part, &carried, at).map_err(|e| e.to_string())?;
+        let rumor = if mint { rekey::as_mint_part(rumor, i + 1, parts) } else { rumor };
         let (wrap, _) = stream::seal_and_wrap_signed(&signer, me, &rumor, stream::SealForm::Encrypted, &group, stream::KIND_WRAP, Timestamp::from_secs(at), &[])
             .await
             .map_err(|e| e.to_string())?;
-        transport.publish(&wrap, &community.relays).await?;
+        out.push(wrap);
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Deliver every past epoch of `channel` this device can read, read-only, to `recipients`:
@@ -24177,7 +24254,7 @@ mod tests {
         for scope in [crate::community::v2::writers::secret_scope(&general), crate::community::v2::writers::minted_scope(&general), crate::community::v2::writers::certifier_scope(&general), chan_hex.clone()] {
             crate::db::community::store_epoch_key(&cid_hex, &scope, 1, &[0x5e; 32]).unwrap();
         }
-        crate::db::community::hold_wrap(&cid_hex, &chan_hex, &"ab".repeat(32), "{}", 1).unwrap();
+        crate::db::community::hold_wrap(&cid_hex, &chan_hex, &"ab".repeat(32), "{}", "", 1).unwrap();
         crate::db::community::delete_community_retain_keys(&cid_hex).unwrap();
         assert!(crate::db::community::held_epoch_key(&cid_hex, &chan_hex, 1).unwrap().is_some(), "a self-scrub signs with the read keys");
         for scope in [crate::community::v2::writers::secret_scope(&general), crate::community::v2::writers::minted_scope(&general), crate::community::v2::writers::certifier_scope(&general)] {
@@ -24208,6 +24285,172 @@ mod tests {
         sync_guestbook(&bed.relay, &held()).await.unwrap();
         crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
         assert!(!channel_texts(&bed.relay, &held(), &general).await.contains(&"after leaving".to_string()), "a Role they still hold is no membership once they left");
+    }
+
+    #[tokio::test]
+    async fn a_lone_writer_who_leaves_is_stopped_whatever_role_lingers() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let (live, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let cert = cert_for(&held(), &general, live, &w.public_key());
+        let gb = crate::community::v2::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch);
+        let leave = guestbook::build_leave_rumor(w.public_key(), now_ms());
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&leave, &gb, &w, Timestamp::from_secs(now_ms() / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        // They post at the writer address after leaving: that is no sign they came back.
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "still here", now_ms()).await;
+        let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        for f in page.iter().filter(|f| f.event.opened().rumor.content == "still here") {
+            crate::community::v2::inbound::persist_routed_chat_event(&f.event, &chan_hex, &community.id().0, &owner.keys.public_key()).await.expect("stored");
+        }
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 0, "a departure is judged on a memberlist read whole");
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1);
+        let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(ledger.current_writer().unwrap().0, live, "a stop, not a fresh epoch");
+        assert!(ledger.stopped(live, &w.public_key().to_bytes(), u64::MAX));
+        // Their key and certificate still sign; what they post after the stop stands nowhere.
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "after the stop", now_ms() + 2_000).await;
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(!channel_texts(&bed.relay, &held(), &general).await.contains(&"after the stop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_guestbook_longer_than_one_pass_is_still_read_whole() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Big", bed.relays.clone(), None).await.unwrap();
+        let gb = crate::community::v2::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let base = now_ms() / 1000 - 100_000;
+        let joiners: Vec<Keys> = (0..6_100).map(|_| Keys::generate()).collect();
+        for (i, k) in joiners.iter().enumerate() {
+            let at = base + i as u64;
+            let join = guestbook::build_join_rumor(k.public_key(), None, at * 1000);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, k, Timestamp::from_secs(at)).unwrap();
+            bed.relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        sync_guestbook(&bed.relay, &community).await.unwrap();
+        assert!(!guestbook_walked_this_session(community.id()), "one pass's pages fall short");
+        sync_guestbook(&bed.relay, &community).await.unwrap();
+        assert!(guestbook_walked_this_session(community.id()), "the next goes on from where it stopped");
+        let members = stored_memberlist_strict(&crate::db::community::load_community_v2(community.id()).unwrap().unwrap()).unwrap();
+        assert!(members.contains(&joiners[0].public_key()) && members.contains(&joiners[6_099].public_key()), "oldest and newest both");
+    }
+
+    #[tokio::test]
+    async fn a_writer_nobody_saw_leave_is_never_stopped_for_an_absence() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        // The role that made them a member goes; no Leave, no Kick, no ban says they left.
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![]).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 0, "an absence is no departure");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_writer_who_now_manages_costs_no_fresh_epoch() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![plain.clone()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), 0, 0).await.unwrap();
+        assert!(held().channel(&general).unwrap().writers.as_ref().unwrap().stopped(Epoch(1), &w.public_key().to_bytes(), u64::MAX));
+        // Let back as a manager without a settle: their posts stand by the Roster whatever the key.
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![plain, mods]).await.unwrap();
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 0);
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(1));
+    }
+
+    #[tokio::test]
+    async fn a_manager_without_the_certifier_lets_a_fresh_epoch_land_before_minting_over_it() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &member.keys.public_key(), vec![plain.clone(), mods]).await.unwrap();
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![plain]).await.unwrap();
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await;
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(writing::certifier_held(&held(), held().channel(&general).unwrap(), Epoch(1)).is_none());
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 0, "a fresh epoch's own deliveries get their while");
+    }
+
+    #[tokio::test]
+    async fn taking_back_never_reads_a_reopened_channel_stricter_than_judging() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        bed.swap_to(&owner);
+        let z = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &z.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(z.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        // Restricted again and reopened while this member wasn't looking; z posted at the read
+        // address in between, in flight across the restrict.
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let start = held().channel(&general).unwrap().writers.as_ref().unwrap().entries.last().unwrap().at;
+        post_raw(&bed.relay, &held(), &z, &general, &read, community.root_epoch, None, "in flight", start + 300).await;
+        crate::rt::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
+        bed.swap_to(&member);
+        let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        for f in page.iter().filter(|f| f.event.opened().rumor.content == "in flight") {
+            crate::community::v2::inbound::persist_routed_chat_event(&f.event, &chan_hex, &community.id().0, &member.keys.public_key()).await.expect("it stood on the open ledger");
+        }
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
+        let added: Vec<_> = ledger.entries[ledger.entries.len() - 2..].to_vec();
+        let shown = Shown::default();
+        assert_eq!(writing::retract_after(&bed.relay, &held(), held().channel(&general).unwrap(), &added, &shown).await, 0, "a writer in flight keeps the post");
+    }
+
+    #[tokio::test]
+    async fn a_held_post_whose_author_is_banned_since_is_let_go() {
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        bed.swap_to(&owner);
+        let p = Keys::generate();
+        post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "spam", now_ms()).await;
+        assert!(marked_texts(&bed.relay, &held(), &general).await.contains(&"spam".to_string()));
+        assert_eq!(crate::db::community::held_wraps(&cid_hex).unwrap().len(), 1);
+        crate::db::community::set_community_banlist(&cid_hex, &[p.public_key().to_hex()], 1).unwrap();
+        let shown = Shown::default();
+        writing::rejudge_held(&held(), &shown).await;
+        assert!(crate::db::community::held_wraps(&cid_hex).unwrap().is_empty(), "nothing to wait for");
     }
 
     #[tokio::test]
@@ -24444,13 +24687,53 @@ mod tests {
         let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
         let added = vec![ledger.entries.last().unwrap().clone()];
         let shown = Shown::default();
-        assert_eq!(writing::retract_after(&held(), held().channel(&general).unwrap(), &added, &shown).await, 1);
+        assert_eq!(writing::retract_after(&bed.relay, &held(), held().channel(&general).unwrap(), &added, &shown).await, 1);
         assert_eq!(shown.take(), vec![(format!("-{}", ids["after"]), false)], "only what the stop undoes");
         assert!(crate::db::events::get_message_by_id(&ids["after"]).await.unwrap().is_none());
         assert!(crate::db::events::get_message_by_id(&ids["before"]).await.unwrap().is_some(), "a writer's past posts stay theirs");
         // The read after the move holds it again, for a later judgment.
         assert!(!channel_texts(&bed.relay, &held(), &general).await.contains(&"after".to_string()));
         assert_eq!(crate::db::community::held_wraps(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_edit_a_stopped_writer_made_after_the_stop_is_undone() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let (live, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        let cert = cert_for(&held(), &general, live, &w.public_key());
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "original", now_ms() - 5_000).await;
+        let original = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap()
+            .into_iter().find(|f| f.event.opened().rumor.content == "original").unwrap().event.opened().rumor_id.to_hex();
+        let edit = chat::with_writer(chat::build_edit_rumor(w.public_key(), &general, community.root_epoch, &original, "rewritten", &[], None, now_ms() + 3_000), live, Some(&cert));
+        let (wrap, _) = chat::seal_chat_rumor(&edit, &signed, &w, Timestamp::from_secs(now_ms() / 1000 + 3), false).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        for f in &page {
+            crate::community::v2::inbound::persist_routed_chat_event(&f.event, &chan_hex, &community.id().0, &member.keys.public_key()).await;
+        }
+        assert_eq!(crate::db::events::get_message_by_id(&original).await.unwrap().unwrap().1.content, "rewritten");
+        bed.swap_to(&owner);
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), 0, 0).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
+        let added = vec![ledger.entries.last().unwrap().clone()];
+        let shown = Shown::default();
+        assert_eq!(writing::retract_after(&bed.relay, &held(), held().channel(&general).unwrap(), &added, &shown).await, 1);
+        assert_eq!(crate::db::events::get_message_by_id(&original).await.unwrap().unwrap().1.content, "original", "the edit is undone");
+        assert_eq!(shown.take(), vec![("~original".to_string(), false)]);
+        assert_eq!(crate::db::community::held_wraps(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().len(), 1, "and its wrap waits");
     }
 
     #[tokio::test]
@@ -24480,7 +24763,7 @@ mod tests {
         let added = vec![ledger.entries.last().unwrap().clone()];
         assert!(matches!(added[0].spell, crate::community::v2::writers::Spell::Writer { .. }));
         let shown = Shown::default();
-        assert_eq!(writing::retract_after(&held(), held().channel(&general).unwrap(), &added, &shown).await, 1);
+        assert_eq!(writing::retract_after(&bed.relay, &held(), held().channel(&general).unwrap(), &added, &shown).await, 1);
         assert_eq!(shown.take(), vec![(format!("-{}", ids["after the restrict"]), false)]);
         assert!(crate::db::events::get_message_by_id(&ids["while open"]).await.unwrap().is_some(), "what was said while open stays");
     }
@@ -24581,6 +24864,66 @@ mod tests {
         sync_guestbook(&bed.relay, &held()).await.unwrap();
         assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 0, "read whole, they're back");
         assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(1));
+    }
+
+    /// Loses the `nth` event sent to one plane, as a relay that drops a burst would.
+    struct LosesOne<'a> {
+        inner: &'a MemoryRelay,
+        plane: String,
+        nth: usize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Transport for LosesOne<'_> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.inner.fetch_plane(plane, query, relays).await
+        }
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            if e.pubkey.to_hex() == self.plane && self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == self.nth {
+                return Err("dropped".into());
+            }
+            self.inner.publish(e, r).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.publish(e, r).await
+        }
+        async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
+            self.inner.fetch(q, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mint_whose_delivery_lost_a_part_leaves_nobody_out() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let role = create_role_v2(&bed.relay, &held(), "Writers", 0, 0).await.unwrap();
+        let writers: Vec<Keys> = (0..rekey::MAX_CERTIFIED_BLOBS_PER_EVENT + 2).map(|_| Keys::generate()).collect();
+        for w in &writers {
+            set_member_roles(&bed.relay, &held(), &w.public_key(), vec![role.clone()]).await.unwrap();
+        }
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Role(role.clone()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        // Two lose Send at once: a fresh epoch, whose second part a relay drops.
+        let lossy = LosesOne { inner: &bed.relay, plane: access_group(&held(), &general).pk_hex(), nth: 2, seen: 0.into() };
+        for w in &writers[..2] {
+            publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), 0, Permissions::SEND_MESSAGES).await;
+        }
+        let before = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let after = crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap();
+        let _ = writing::settle_for_test(&lossy, &held(), &before, &after).await;
+        let live = held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0;
+        assert_eq!(live, Epoch(2));
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
+        let plane = fetch_plane_deliveries(&bed.relay, &held(), &general, scope).await.unwrap();
+        let stranded: Vec<&Keys> = writers[2..].iter().filter(|w| !served_at(&plane, &w.public_key(), scope, live, &|_| true)).collect();
+        assert!(!stranded.is_empty(), "the part a relay dropped served nobody");
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        access_duty(&bed.relay, &held()).await.unwrap();
+        let plane = fetch_plane_deliveries(&bed.relay, &held(), &general, scope).await.unwrap();
+        assert!(writers[2..].iter().all(|w| served_at(&plane, &w.public_key(), scope, live, &|_| true)), "the next pass serves those the lost part left out");
+        assert!(writers[..2].iter().all(|w| !served_at(&plane, &w.public_key(), scope, live, &|_| true)), "and never those the change took out");
     }
 
     #[tokio::test]
@@ -24823,6 +25166,8 @@ mod tests {
         follow_control(&bed.relay, &held(&community)).await.unwrap();
         assert!(!can_post(&held(&community), &general), "a writer this epoch stopped posts nothing here, key or not");
         bed.swap_to(&owner);
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.moved, 0, "letting someone back is judged on a memberlist read whole");
+        sync_guestbook(&bed.relay, &held(&community)).await.unwrap();
         assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.moved, 1);
         assert_eq!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
         bed.swap_to(&member);

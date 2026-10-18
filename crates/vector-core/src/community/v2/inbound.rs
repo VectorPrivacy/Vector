@@ -244,9 +244,12 @@ fn apply_chat_to_state_in(
                 .tags(
                     emoji.iter().map(|(s, u)| vec!["emoji".to_string(), s.clone(), u.clone()])
                         .chain(text_spans.iter().map(|s| s.to_tag_parts()))
+                        // To the millisecond: what a later stop or restrict judges it by.
+                        .chain((edited_at % 1000 > 0).then(|| vec!["ms".to_string(), (edited_at % 1000).to_string()]))
                         .collect(),
                 )
                 .reference_id(Some(target_id.clone()))
+                .wrapper_event_id(Some(opened.wrapper_id.to_hex()))
                 .created_at(edited_at / 1000)
                 .mine(opened.author == *my_pubkey)
                 .npub(opened.author.to_bech32().ok())
@@ -512,7 +515,7 @@ pub enum DispatchedV2 {
     /// A post `channel_id`'s writers' rules don't stand behind on arrival: the realtime layer
     /// holds the wrap for a later judgment, and keeps `marked`, the copy a reader who manages the
     /// Channel sees, without ringing anything.
-    Held { channel_id: String, at_ms: u64, marked: Option<Box<ChatEvent>> },
+    Held { channel_id: String, author: PublicKey, at_ms: u64, marked: Option<Box<ChatEvent>> },
     /// The wrap opened on a v2 plane but carries nothing the handler renders
     /// (e.g. a WebXDC signal, or a kick we don't surface in the first cut).
     Ignored,
@@ -605,10 +608,10 @@ pub fn dispatch_wrap(
 /// Judge `event` by its Channel's writers' rules, then dispatch what stands.
 fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::community::ChannelV2, wepoch: Option<crate::community::Epoch>, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-    let at_ms = event.opened().at_ms;
+    let (at_ms, author) = (event.opened().at_ms, event.opened().author);
     match super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, wepoch) {
         super::service::Arrival::Stands(event) => dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler),
-        super::service::Arrival::Held(marked) => DispatchedV2::Held { channel_id, at_ms, marked: marked.map(Box::new) },
+        super::service::Arrival::Held(marked) => DispatchedV2::Held { channel_id, author, at_ms, marked: marked.map(Box::new) },
         super::service::Arrival::Dropped => DispatchedV2::Ignored,
     }
 }

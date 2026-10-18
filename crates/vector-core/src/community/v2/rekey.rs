@@ -801,6 +801,21 @@ pub struct AccessDelivery {
     pub writer: Option<[u8; 32]>,
     /// Writer certificates it hands its recipients, by recipient (CORD-03 §1).
     pub certs: Vec<([u8; 32], [u8; 64])>,
+    /// For one part of a writer epoch's minting delivery, which part of how many.
+    pub mint: Option<(u32, u32)>,
+}
+
+/// Marks one event of a writer epoch's minting delivery: `["mint", <part>, <parts>]`, from 1.
+const TAG_MINT: &str = "mint";
+
+/// `rumor` as part `part` of `parts` of a minting delivery, its id recomputed.
+pub fn as_mint_part(rumor: UnsignedEvent, part: usize, parts: usize) -> UnsignedEvent {
+    use crate::event_ext::FinalizeUnsignedWithId as _;
+    let mut tags: Vec<Tag> = rumor.tags.iter().cloned().collect();
+    tags.push(Tag::custom(TAG_MINT, [part.to_string(), parts.to_string()]));
+    let mut out = nostr_sdk::prelude::EventBuilder::new(rumor.kind, rumor.content).tags(tags).custom_created_at(rumor.created_at).finalize_unsigned_with_id(rumor.pubkey);
+    out.ensure_id();
+    out
 }
 
 /// A writer-scope delivery's claimed address.
@@ -876,7 +891,14 @@ pub fn parse_access_delivery(opened: &OpenedStream) -> Result<AccessDelivery, Re
         })
         .take(MAX_REKEY_BLOBS_RECEIVED)
         .collect();
-    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs, writer, certs })
+    let mint = rumor
+        .tags
+        .iter()
+        .map(|t| t.as_slice())
+        .find(|t| t.first().map(String::as_str) == Some(TAG_MINT))
+        .and_then(|t| Some((t.get(1)?.parse::<u32>().ok()?, t.get(2)?.parse::<u32>().ok()?)))
+        .filter(|(part, parts)| *part >= 1 && part <= parts);
+    Ok(AccessDelivery { deliverer: opened.author, scope, epoch, blobs, writer, certs, mint })
 }
 
 /// A Channel's history scope (CORD-03 §5): what history blobs bind to, so one can never be

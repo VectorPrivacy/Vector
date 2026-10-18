@@ -62,6 +62,19 @@ impl<'a> Posters<'a> {
     }
 }
 
+/// Who has gone from `community` by an event the Guestbook records (a Leave, an authorized Kick
+/// or a Refounding) and not come back: a departure is never inferred from an absence.
+fn departed(community: &CommunityV2) -> std::collections::HashSet<PublicKey> {
+    let present: std::collections::HashSet<PublicKey> = stored_memberlist_strict(community).unwrap_or_default().into_iter().collect();
+    stored_departures(community).into_iter().filter(|p| !present.contains(p)).collect()
+}
+
+/// Whether there is evidence `p` may no longer post in `ch`: the roster takes Send, a ban, or a
+/// recorded departure.
+fn lost_evidence(roster: &CommunityRoles, owner_hex: &str, banned: &std::collections::BTreeSet<String>, gone: &std::collections::HashSet<PublicKey>, p: &PublicKey, ch: &ChannelV2) -> bool {
+    !may_write(roster, owner_hex, &p.to_hex(), ch) || banned.contains(&p.to_hex()) || gone.contains(p)
+}
+
 /// The writer secret this device holds for `ch`'s live writer epoch, given or minted here,
 /// checked against the ledger.
 pub(crate) fn live_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8; 32], GroupKey)> {
@@ -195,15 +208,19 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
             store_my_cert(community, ch, epoch, mine);
         }
     }
+    // Every delivery is built first, the signer's slow part. Then the ledger goes, so a manager
+    // that sees it moved stands down and a mint that lost its race sends nothing, then the
+    // deliveries at once; a part that fails after is the duty's, and leaves nobody out.
+    let mut sends = build_deliveries(community, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(pk), &secret, &recipients, &certs, true).await?;
+    if !managers.is_empty() {
+        sends.extend(build_deliveries(community, &ch.id, writers::certifier_rekey_scope(&ch.id), epoch, Some(certifier), &certifying, &managers, &Default::default(), false).await?);
+    }
     if !crate::db::current_session().is_live() {
         return Err("account changed while minting a writer key".to_string());
     }
-    // The ledger goes first: a manager that sees it moved stands down instead of minting too,
-    // and a mint that lost its race sends nothing. A delivery that fails after is the duty's.
     publish_ledger(transport, community, ch, &ledger, spell).await?;
-    deliver_certified(transport, community, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(pk), &secret, &recipients, &certs).await?;
-    if !managers.is_empty() {
-        deliver_on_plane(transport, community, &ch.id, writers::certifier_rekey_scope(&ch.id), epoch, Some(certifier), &certifying, &managers).await?;
+    for wrap in &sends {
+        transport.publish(wrap, &community.relays).await?;
     }
     Ok(())
 }
@@ -406,9 +423,9 @@ async fn settle_one<T: Transport + ?Sized>(
     may_manage: bool,
 ) -> Result<(), String> {
     let moved = restricts(before, ch) != restricts(after, ch);
-    // A manager keeps the key by design, so losing Send stops nothing.
     let live = ch.writers.as_ref().and_then(|l| l.current_writer().map(|(e, _)| (l, e)));
-    // One the ledger already stopped is nothing to act on.
+    // A manager keeps the key by design, so losing Send stops nothing; one the ledger already
+    // stopped is nothing to act on.
     let lost: Vec<PublicKey> = candidates
         .iter()
         .filter(|p| was.writes(p, ch) && !now.writes(p, ch) && !now.manages(p))
@@ -656,10 +673,13 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             }
             return Ok(());
         }
-        // A manager may hold the key by design; a writer the Channel no longer lets post is stopped.
+        // A manager may hold the key by design; a writer the Channel no longer lets post is stopped,
+        // on evidence rather than an absence.
+        let gone = departed(held);
         let out: Vec<PublicKey> = vouched(epoch)
             .into_iter()
-            .filter(|p| walked && *p != me && !posters.writes(p, ch) && !manager(&p.to_hex()) && !ledger.stopped(epoch, &p.to_bytes(), now))
+            .filter(|p| walked && *p != me && !manager(&p.to_hex()) && !ledger.stopped(epoch, &p.to_bytes(), now))
+            .filter(|p| lost_evidence(roster, owner_hex, posters.banned, &gone, p, ch))
             .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
             .filter(|p| due(&ch.id, Lane::Cut(*p)))
             .collect();
@@ -699,19 +719,30 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         return Ok(());
     }
     // The epoch's mint is the minter's own delivery: whoever the epoch before vouched for and it
-    // left out was cut, whatever a lagging Roster says.
-    let minting: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch).collect();
+    // left out was cut, whatever a lagging Roster says, but only once every part of it is in.
+    let by_minter: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch).collect();
+    let marked: Vec<&rekey::AccessDelivery> = by_minter.iter().copied().filter(|d| d.mint.is_some()).collect();
+    let (minting, whole) = if marked.is_empty() {
+        (by_minter, true)
+    } else {
+        let parts = marked.iter().filter_map(|d| d.mint.map(|m| m.1)).max().unwrap_or(0);
+        let whole = (1..=parts).all(|i| marked.iter().any(|d| d.mint.map(|m| m.0) == Some(i)));
+        (marked, whole)
+    };
     let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
     let before = ledger.previous_writer().map(vouched);
-    let cut = |p: &PublicKey| !minting.is_empty() && !minted_to(p) && before.as_ref().is_some_and(|b| b.contains(p));
+    let cut = |p: &PublicKey| whole && !minting.is_empty() && !minted_to(p) && before.as_ref().is_some_and(|b| b.contains(p));
     let sent = crate::db::current_session().scoped::<WriterSent, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
     let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let now = now_ms();
     let stopped = |p: &PublicKey| ledger.stopped(epoch, &p.to_bytes(), now);
     let owed = |p: &PublicKey| (posters.writes(p, ch) || posters.manages(p)) && !stopped(p) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes())) && !served(p, epoch) && !cut(p);
     let unserved: Vec<PublicKey> = candidates.iter().filter(|p| **p != me && owed(p)).copied().collect();
-    // One this epoch stopped who may post again is owed a fresh epoch, not this one's certificate.
-    if let Some(back) = candidates.iter().find(|p| posters.writes(p, ch) && stopped(p)) {
+    // One this epoch stopped who may post again is owed a fresh epoch, not this one's certificate:
+    // judged on a memberlist read whole, and never for a manager, whose posts stand regardless.
+    let walked = guestbook_walked_this_session(held.id());
+    let back = walked.then(|| candidates.iter().find(|p| posters.writes(p, ch) && !posters.manages(p) && stopped(p))).flatten();
+    if let Some(back) = back {
         if may_manage && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Restart(*back), &[Lane::Unserved]).await? {
             done.moved += 1;
             return Ok(());
@@ -727,7 +758,8 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             sent.lock().unwrap_or_else(|e| e.into_inner()).extend(unserved.iter().map(|p| (ch.id.0, epoch.0, p.to_bytes())));
             done.delivered += unserved.len();
         }
-        _ if may_manage && unserved.iter().any(|p| posters.writes(p, ch)) && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Unserved]).await? => done.moved += 1,
+        // A fresh epoch's own deliveries get a while to land before anyone mints over it.
+        _ if may_manage && now.saturating_sub(began) > STARVED_MS && unserved.iter().any(|p| posters.writes(p, ch)) && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Unserved]).await? => done.moved += 1,
         _ => {}
     }
     Ok(())
@@ -794,12 +826,15 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     if restricts(&now.roles, &ch) != restricts(posters.roster, &ch) {
         return Ok(Backstop::StoodDown);
     }
-    // What justified acting on one writer must hold on the roster just read too.
-    let writes_now = |p: &PublicKey| may_write(&now.roles, &posters.owner_hex, &p.to_hex(), &ch);
-    match act {
-        Act::Stop(p) if writes_now(&p) => return Ok(Backstop::StoodDown),
-        Act::Restart(p) if !writes_now(&p) => return Ok(Backstop::StoodDown),
-        _ => {}
+    // What justified acting on one writer must hold on what was just read too: the roster, and
+    // the Guestbook caught up.
+    if let Act::Stop(p) | Act::Restart(p) = act {
+        let _ = sync_guestbook(transport, &fresh).await;
+        let gone = departed(&fresh);
+        let lost = lost_evidence(&now.roles, &posters.owner_hex, posters.banned, &gone, &p, &ch);
+        if matches!(act, Act::Stop(_)) != lost {
+            return Ok(Backstop::StoodDown);
+        }
     }
     match (restricts(posters.roster, &ch), ch.restricted()) {
         (false, true) => reopen(transport, &fresh, &ch).await?,
@@ -813,6 +848,11 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         (true, false) => mint(transport, &fresh, &ch, posters, &[]).await?,
     }
     Ok(Backstop::Acted)
+}
+
+#[cfg(test)]
+pub(super) async fn settle_for_test<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, before: &CommunityRoles, after: &CommunityRoles) -> Result<(), String> {
+    settle_writers_moved(transport, community, before, after).await
 }
 
 #[cfg(test)]
@@ -880,13 +920,18 @@ impl Judge {
     /// A post by a member who manages the Channel stands. So does one by a member who may post
     /// there now, sent across a move of the ledger it hadn't read yet: dated within
     /// [`writers::ENTRY_SKEW_MS`] past the entry that moved its address.
-    pub(super) fn vouched_by_roster(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>) -> bool {
+    fn vouched_by_roster(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>) -> bool {
+        self.vouches(author, at_ms, wepoch, true)
+    }
+
+    /// [`Self::vouched_by_roster`]; `gated` reads today's Roster for writers only while the
+    /// Channel is restricted, since once open it lets everyone.
+    fn vouches(&self, author: &str, at_ms: u64, wepoch: Option<Epoch>, gated: bool) -> bool {
         if author == self.owner_hex {
             return true;
         }
         let manages = self.roster.is_authorized(author, Some(&self.owner_hex), Permissions::MANAGE_CHANNELS);
-        // Today's Roster says who writes only while the Channel is restricted: once open, it lets everyone.
-        let writes = || self.channel.restricted() && self.crossed_a_move(at_ms, wepoch) && may_write(&self.roster, &self.owner_hex, author, &self.channel);
+        let writes = || (!gated || self.channel.restricted()) && self.crossed_a_move(at_ms, wepoch) && may_write(&self.roster, &self.owner_hex, author, &self.channel);
         // The memberlist leaves out the banned.
         (manages || writes()) && self.member(author)
     }
@@ -950,18 +995,18 @@ pub(crate) fn sort_arrival(judge: Option<&Judge>, event: chat::ChatEvent, wepoch
 /// [`sort_arrival`] for `wrap` as it arrives: what stands, or a manager's marked copy of what
 /// doesn't, whose wrap waits for a later judgment.
 pub(crate) fn judge_arrival(judge: Option<&Judge>, community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::prelude::Event, event: chat::ChatEvent, wepoch: Option<Epoch>) -> Option<chat::ChatEvent> {
-    let at_ms = event.opened().at_ms;
+    let (at_ms, author) = (event.opened().at_ms, event.opened().author);
     match sort_arrival(judge, event, wepoch) {
         Arrival::Stands(event) => Some(event),
         // One that couldn't be held is left on the relay for a later read.
-        Arrival::Held(marked) => hold(community, channel, wrap, at_ms).then_some(marked).flatten(),
+        Arrival::Held(marked) => hold(community, channel, wrap, &author, at_ms).then_some(marked).flatten(),
         Arrival::Dropped => None,
     }
 }
 
 /// Keep `wrap` for a later judgment of `channel`. Whether it is kept.
-pub(crate) fn hold(community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::prelude::Event, at_ms: u64) -> bool {
-    match crate::db::community::hold_wrap(&hex(community), &hex(&channel.0), &wrap.id.to_hex(), &wrap.as_json(), at_ms) {
+pub(crate) fn hold(community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::prelude::Event, author: &PublicKey, at_ms: u64) -> bool {
+    match crate::db::community::hold_wrap(&hex(community), &hex(&channel.0), &wrap.id.to_hex(), &wrap.as_json(), &author.to_hex(), at_ms) {
         Ok(held) => held,
         Err(e) => {
             crate::log_warn!("[v2:writers] couldn't hold a post for later: {e}");
@@ -972,12 +1017,12 @@ pub(crate) fn hold(community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::
 
 struct Rejudged;
 
-/// What a Channel's held posts were last judged on: once none of it moves, judging again changes nothing.
-fn judged_on(ledger: &Option<Ledger>, roles_at: i64, members: &std::collections::HashSet<String>, banned: &[String], me_manages: bool, planes: usize) -> u64 {
+/// What a held post is judged on: once none of it moves, judging it again changes nothing.
+fn judged_on(ledger: &Option<Ledger>, roster: &str, members: &std::collections::HashSet<String>, banned: &[String], me_manages: bool, planes: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ledger.as_ref().map(|l| l.to_json()).hash(&mut h);
-    roles_at.hash(&mut h);
+    roster.hash(&mut h);
     let mut m: Vec<&String> = members.iter().collect();
     m.sort();
     m.hash(&mut h);
@@ -1002,8 +1047,9 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
     let (Ok(channels), Ok(me)) = (crate::db::community::held_wrap_channels(&cid_hex), me_pk()) else { return 0 };
     let session = crate::db::current_session();
     let members: std::collections::HashSet<String> = stored_memberlist_strict(community).unwrap_or_default().iter().map(|p| p.to_hex()).collect();
-    let roles_at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
-    let last = session.scoped::<Rejudged, std::sync::Mutex<std::collections::HashMap<([u8; 32], String), u64>>>();
+    let roster = crate::db::community::get_community_roles(&cid_hex).ok().and_then(|r| serde_json::to_string(&r).ok()).unwrap_or_default();
+    // By wrap: one held after the last pass, on whatever state its arrival read, is judged again.
+    let last = session.scoped::<Rejudged, std::sync::Mutex<std::collections::HashMap<String, u64>>>();
     let mut released = 0;
     for channel_hex in channels {
         let Some(ch) = crate::community::id32_from_hex(&channel_hex).and_then(|id| community.channel(&ChannelId(id))) else { continue };
@@ -1012,8 +1058,9 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
         if let Some(j) = &judge {
             let _ = j.members.set(members.clone());
         }
-        let print = judged_on(&ch.writers, roles_at, &members, judge.as_ref().map_or(&[][..], |j| &j.banned[..]), judge.as_ref().is_some_and(|j| j.me_manages), planes.len());
-        if last.lock().unwrap_or_else(|e| e.into_inner()).insert((community.id().0, channel_hex.clone()), print) == Some(print) {
+        let print = judged_on(&ch.writers, &roster, &members, judge.as_ref().map_or(&[][..], |j| &j.banned[..]), judge.as_ref().is_some_and(|j| j.me_manages), planes.len());
+        let judged = |id: &str| last.lock().unwrap_or_else(|e| e.into_inner()).get(id) == Some(&print);
+        if crate::db::community::held_wrap_ids_in(&cid_hex, &channel_hex).unwrap_or_default().iter().all(|id| judged(id)) {
             continue;
         }
         let Ok(wraps) = crate::db::community::held_wraps_in(&cid_hex, &channel_hex) else { continue };
@@ -1021,6 +1068,10 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
             if !session.is_live() {
                 return released;
             }
+            if judged(&wrap_id) {
+                continue;
+            }
+            last.lock().unwrap_or_else(|e| e.into_inner()).insert(wrap_id.clone(), print);
             let Ok(wrap) = nostr_sdk::prelude::Event::from_json(&json) else {
                 let _ = crate::db::community::release_held_wrap(&wrap_id);
                 continue;
@@ -1049,7 +1100,16 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
                     let _ = crate::db::events::delete_event(&id).await;
                     handler.on_community_removed(&channel_hex, &id);
                 }
-                Arrival::Held(_) | Arrival::Dropped => {}
+                // Its author is banned since: nothing to wait for.
+                Arrival::Dropped => {
+                    let _ = crate::db::community::release_held_wrap(&wrap_id);
+                    if marked {
+                        let _ = crate::state::STATE.lock().await.remove_message(&id);
+                        let _ = crate::db::events::delete_event(&id).await;
+                        handler.on_community_removed(&channel_hex, &id);
+                    }
+                }
+                Arrival::Held(_) => {}
             }
         }
     }
@@ -1068,50 +1128,92 @@ async fn admit(event: &chat::ChatEvent, channel_hex: &str, community: &Community
 }
 
 /// Take back what `ch` shows that the ledger entries this device just folded no longer stand
-/// behind (CORD-03 §1): a stopped writer's writer-address posts dated from the stop inside its
-/// window, and after a writer entry, read-address posts dated inside it by authors the rules
-/// don't vouch for. A manager keeps them marked; any other reader lets them go, and the read
-/// that follows a moved ledger holds their wraps again. Returns how many it took back.
-pub async fn retract_after(community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+/// behind (CORD-03 §1): posts and edits dated from the earliest of them that neither the ledger
+/// nor the Roster would take now, a stopped writer's or, inside a new writer window, one at the
+/// read address by someone not vouched for. Each one's wrap is held again first, for a later
+/// judgment; then a manager keeps the post marked and anyone else lets it go, and an edit is
+/// undone. Returns how many it took back.
+pub async fn retract_after<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
+    crate::db::scoped(retract_after_bound(transport, community, ch, added, handler)).await
+}
+
+async fn retract_after_bound<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, added: &[writers::Entry], handler: &dyn crate::event_handler::InboundEventHandler) -> usize {
     let (Some(ledger), Some(judge)) = (ch.writers.as_ref(), Judge::of(community, ch)) else { return 0 };
     let Some(since) = added.iter().map(|e| e.at).min() else { return 0 };
     let chan = hex(&ch.id.0);
     let Ok(posts) = crate::db::events::posts_since(&chan, since) else { return 0 };
     let me = me_pk().ok().map(|p| p.to_hex());
     let windows: Vec<(Epoch, u64, Option<u64>)> = ledger.writers().filter_map(|(e, _, end)| ledger.writer_start(e).map(|start| (e, start, end))).collect();
-    let mut taken = 0;
-    for post in posts.iter().filter(|p| !p.unauthorized) {
-        let Some(author) = post.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) else { continue };
-        if Some(author.to_hex()) == me {
-            continue;
-        }
-        let window = windows.iter().find(|(_, start, end)| *start <= post.at_ms && end.is_none_or(|end| post.at_ms < end));
-        let undone = added.iter().any(|e| match e.spell {
-            Spell::Stop { writer } => post.writer && writer == author.to_bytes() && window.is_some_and(|(epoch, ..)| ledger.stopped(*epoch, &writer, post.at_ms)),
-            Spell::Writer { .. } => !post.writer && post.at_ms >= e.at && !ledger.read_address_takes(post.at_ms) && !judge.vouched_by_roster(&author.to_hex(), post.at_ms, None),
-            _ => false,
-        });
-        if !undone {
-            continue;
-        }
-        taken += 1;
-        if judge.me_manages {
-            let _ = crate::db::events::set_event_unauthorized(&post.id, true);
-            let resident = crate::state::STATE.lock().await.update_message(&post.id, |m| m.flags.set_unauthorized(true));
-            let shown = match resident {
-                Some(shown) => Some(shown),
-                None => crate::db::events::get_message_by_id(&post.id).await.ok().flatten(),
-            };
-            if let Some((chat, message)) = shown {
-                handler.on_community_update(&chat, &post.id, &message);
+    let undone: Vec<&crate::db::events::StoredPost> = posts
+        .iter()
+        .filter(|p| !p.unauthorized)
+        .filter(|post| {
+            let Some(author) = post.npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) else { return false };
+            if Some(author.to_hex()) == me {
+                return false;
             }
-        } else {
-            let _ = crate::state::STATE.lock().await.remove_message(&post.id);
-            let _ = crate::db::events::delete_event(&post.id).await;
-            handler.on_community_removed(&chan, &post.id);
+            let window = windows.iter().find(|(_, start, end)| *start <= post.at_ms && end.is_none_or(|end| post.at_ms < end)).map(|w| w.0);
+            // An edit inside a writer window rode the writer's address: no other stood there.
+            let at_writer = post.writer || (post.edit_of.is_some() && window.is_some());
+            let stands = ledger.read_address_takes(post.at_ms)
+                || (at_writer && window.is_some_and(|e| ledger.writer_address_takes(e, post.at_ms) && !ledger.stopped(e, &author.to_bytes(), post.at_ms)));
+            // Taking back is never stricter than judging: today's Roster vouches here whatever
+            // the Channel is now.
+            !stands && !judge.vouches(&author.to_hex(), post.at_ms, if at_writer { window } else { None }, false)
+        })
+        .collect();
+    if undone.is_empty() {
+        return 0;
+    }
+    // Held first, so nothing taken back is lost if a later judgment stands behind it.
+    let ids: Vec<String> = undone.iter().filter_map(|p| p.wrap_id.clone()).collect();
+    if !ids.is_empty() {
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids, ..Default::default() };
+        if let Ok(wraps) = transport.fetch(&q, &community.relays).await {
+            for wrap in &wraps {
+                let post = undone.iter().find(|p| p.wrap_id.as_deref() == Some(wrap.id.to_hex().as_str()));
+                if let Some((post, author)) = post.and_then(|p| Some((p, PublicKey::parse(p.npub.as_deref()?).ok()?))) {
+                    hold(&community.id().0, &ch.id, wrap, &author, post.at_ms);
+                }
+            }
         }
     }
-    taken
+    if !crate::db::current_session().is_live() {
+        return 0;
+    }
+    for post in &undone {
+        match &post.edit_of {
+            Some(target) => {
+                let _ = crate::db::events::delete_event(&post.id).await;
+                if let Ok(Some((chat, message))) = crate::db::events::get_message_by_id(target).await {
+                    {
+                        let mut state = crate::state::STATE.lock().await;
+                        if state.remove_message(target).is_some() {
+                            state.add_message_to_chat(&chat, &message);
+                        }
+                    }
+                    handler.on_community_update(&chat, target, &message);
+                }
+            }
+            None if judge.me_manages => {
+                let _ = crate::db::events::set_event_unauthorized(&post.id, true);
+                let resident = crate::state::STATE.lock().await.update_message(&post.id, |m| m.flags.set_unauthorized(true));
+                let shown = match resident {
+                    Some(shown) => Some(shown),
+                    None => crate::db::events::get_message_by_id(&post.id).await.ok().flatten(),
+                };
+                if let Some((chat, message)) = shown {
+                    handler.on_community_update(&chat, &post.id, &message);
+                }
+            }
+            None => {
+                let _ = crate::state::STATE.lock().await.remove_message(&post.id);
+                let _ = crate::db::events::delete_event(&post.id).await;
+                handler.on_community_removed(&chan, &post.id);
+            }
+        }
+    }
+    undone.len()
 }
 
 struct OpenedWriterBlobs;
