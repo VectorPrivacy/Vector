@@ -42,6 +42,8 @@ pub struct Mesh {
     closing: Arc<std::sync::Mutex<HashMap<TopicId, watch::Receiver<bool>>>>,
     /// Joins holding the mesh before they have subscribed (see [`lease`]).
     leases: AtomicUsize,
+    /// Bound with IP transports, so peers may reach it, and learn its address, directly.
+    direct: bool,
 }
 
 /// The mesh, held by a join from the moment it is handed out until its topic is
@@ -106,6 +108,12 @@ async fn acquire(lease: bool) -> Result<Arc<Mesh>, String> {
     let session = crate::db::current_session();
     let mut slot = MESH.lock().await;
     match claim(&mut slot, session.id(), session.is_live()) {
+        // A node bound under the other privacy choice is replaced once nothing uses it.
+        Claim::Reuse(m) if m.direct != crate::transport::realtime::direct() && m.idle().await => {
+            if let Some((_, old)) = slot.take() {
+                old.close_detached();
+            }
+        }
         Claim::Reuse(m) => {
             if lease {
                 m.leases.fetch_add(1, Ordering::SeqCst);
@@ -133,9 +141,7 @@ async fn acquire(lease: bool) -> Result<Arc<Mesh>, String> {
 pub async fn retire_if_idle(expected: &Arc<Mesh>) -> bool {
     let mut slot = MESH.lock().await;
     let idle = match slot.as_ref() {
-        Some((_, m)) if Arc::ptr_eq(m, expected) => {
-            m.leases.load(Ordering::SeqCst) == 0 && m.topics.read().await.is_empty() && !call_active()
-        }
+        Some((_, m)) if Arc::ptr_eq(m, expected) => m.idle().await,
         _ => false,
     };
     if !idle {
@@ -193,6 +199,13 @@ pub fn retire(owner: u64) {
 
 #[cfg(test)]
 pub(crate) async fn install_for_test(owner: u64, mesh: Mesh) -> Arc<Mesh> {
+    install_bound_as(owner, mesh, crate::transport::realtime::direct()).await
+}
+
+/// [`install_for_test`] as though bound under the given privacy choice.
+#[cfg(test)]
+pub(crate) async fn install_bound_as(owner: u64, mut mesh: Mesh, direct: bool) -> Arc<Mesh> {
+    mesh.direct = direct;
     let mesh = Arc::new(mesh);
     *MESH.lock().await = Some((owner, mesh.clone()));
     mesh
@@ -234,7 +247,7 @@ fn take_owned<T>(slot: &mut Option<(u64, T)>, owner: u64) -> Option<T> {
 
 impl Mesh {
     async fn bind() -> anyhow_lite::Result<Self> {
-        let mesh = Self::build(wire::relay_mode()).await?;
+        let mesh = Self::build(wire::relay_mode(), crate::transport::realtime::direct()).await?;
         // An advertisement without our relay is undiallable.
         let _ = crate::rt::time::timeout(std::time::Duration::from_secs(8), mesh.endpoint.online()).await;
         for _ in 0..20 {
@@ -250,10 +263,12 @@ impl Mesh {
     /// A mesh with no relay, for tests: binds offline and at once.
     #[cfg(test)]
     pub(crate) async fn offline() -> Self {
-        Self::build(RelayMode::Disabled).await.expect("bind")
+        Self::build(RelayMode::Disabled, true).await.expect("bind")
     }
 
-    async fn build(relay_mode: RelayMode) -> anyhow_lite::Result<Self> {
+    /// Not `direct`: no IP transport, so no UDP socket, no address to hand a peer and nothing to
+    /// holepunch from. Every path then runs through the relay.
+    async fn build(relay_mode: RelayMode, direct: bool) -> anyhow_lite::Result<Self> {
         let mut seed = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
         let secret_key = SecretKey::from(seed);
@@ -285,12 +300,10 @@ impl Mesh {
             }
         }
 
-        let endpoint = Endpoint::builder(RelayOnly(relay_mode))
-            .secret_key(secret_key)
-            .alpns(alpns())
-            .transport_config(transport)
-            .bind()
-            .await?;
+        let builder = Endpoint::builder(RelayOnly(relay_mode)).secret_key(secret_key).alpns(alpns()).transport_config(transport);
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = if direct { builder } else { builder.clear_ip_transports() };
+        let endpoint = builder.bind().await?;
 
         let gossip = Gossip::builder().max_message_size(wire::MAX_GOSSIP_MESSAGE).spawn(endpoint.clone());
 
@@ -325,6 +338,7 @@ impl Mesh {
             topics: tokio::sync::RwLock::new(HashMap::new()),
             closing: Arc::new(std::sync::Mutex::new(HashMap::new())),
             leases: AtomicUsize::new(0),
+            direct,
         })
     }
 
@@ -344,6 +358,11 @@ impl Mesh {
     }
 
     /// The endpoint itself, for protocols that share the node (calls dial on it).
+    /// No topic, no join on its way to one, no call.
+    async fn idle(&self) -> bool {
+        self.leases.load(Ordering::SeqCst) == 0 && self.topics.read().await.is_empty() && !call_active()
+    }
+
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
@@ -591,6 +610,16 @@ mod anyhow_lite {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_private_node_has_no_socket_and_so_no_address_to_give_away() {
+        let unreachable: iroh::RelayUrl = "https://127.0.0.1:1".parse().unwrap();
+        let private = Mesh::build(RelayMode::Custom(iroh::RelayMap::from(unreachable)), false).await.unwrap();
+        assert!(private.endpoint.bound_sockets().is_empty(), "no IP transport bound");
+        assert!(!private.endpoint.addr().addrs.iter().any(|a| matches!(a, TransportAddr::Ip(_))), "nothing direct to advertise or trade");
+        let direct = Mesh::build(RelayMode::Disabled, true).await.unwrap();
+        assert!(!direct.endpoint.bound_sockets().is_empty(), "a direct node binds its sockets");
+    }
+
     #[test]
     fn an_account_never_gets_another_accounts_mesh() {
         let mut slot = Some((1u64, "a"));
@@ -688,6 +717,24 @@ mod tests {
             assert!(!retire_if_idle(&mesh).await, "a stale close must not take its successor");
             assert_eq!(slot_owner().await, Some(owner));
             assert!(retire_if_idle(&successor).await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_node_in_use_keeps_serving_after_the_privacy_choice_changes() {
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = SLOT_TESTS.lock().await;
+        crate::db::with_session(crate::db::current_session(), async {
+            let owner = crate::db::current_session().id();
+            let mesh = install_bound_as(owner, Mesh::offline().await, !crate::transport::realtime::direct()).await;
+            let (tx, _rx) = mpsc::channel(4);
+            mesh.subscribe([7u8; 32], Vec::new(), tx).await.unwrap();
+            let lease = lease().await.expect("the mesh in use");
+            assert!(Arc::ptr_eq(lease.mesh(), &mesh), "a session in progress is never cut over to a new node");
+            drop(lease);
+            mesh.unsubscribe(&[7u8; 32]).await;
+            assert!(retire_if_idle(&mesh).await);
         })
         .await;
     }

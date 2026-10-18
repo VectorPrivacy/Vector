@@ -6,7 +6,7 @@
     import VoiceMeter from '../calls/VoiceMeter.svelte';
     import Select from '../ui/Select.svelte';
     import InfoIcon from './InfoIcon.svelte';
-    let { h } = $props();   // h: setAudio(patch), explain(kind), micTestStart(), micTestStop(), loadDevices(), setDevice(kind, name)
+    let { h } = $props();   // h: setAudio(patch), explain(kind), micTestStart(), micTestStop(), loadDevices(), setDevice(kind, name), setDirect(on)
     const a = callAudio();
     const c = callState();
     const inCall = $derived(!!c.id && c.phase !== 'ended');
@@ -109,5 +109,14 @@
         </label>
     </div>
 {/each}
+
+<p class="st-group">Connection</p>
+<div class="form-group">
+    <label class="toggle-container">
+        <span><InfoIcon onclick={() => h.explain('direct')} />Direct Connection</span>
+        <input type="checkbox" checked={a.direct} onchange={(e) => h.setDirect(e.currentTarget.checked)}>
+        <span class="neon-toggle"></span>
+    </label>
+</div>
 
 <!-- No <style>: the .calls-* rules live in styles.css. -->

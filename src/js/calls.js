@@ -88,6 +88,7 @@ const CALL_EXPLAINERS = {
     autoGain: ['Automatic Gain', 'Lifts a quiet microphone so nobody has to shout, and eases off a loud one.'],
     echoCancel: ['Echo Cancellation', 'Keeps your speakers out of your microphone, so the other side never hears themselves back.'],
     noiseSuppress: ['Noise Suppression', 'Takes down fans, keyboards and hum while you talk.'],
+    direct: ['Direct Connection', 'Off, calls and Mini Apps reach people through a relay, so they never learn your IP address. On, you connect straight to them for lower latency, and they can see your IP address.'],
 };
 
 SETTINGS_HELPERS.calls = {
@@ -97,6 +98,7 @@ SETTINGS_HELPERS.calls = {
     micTestStop: () => micTestStop(),
     loadDevices: () => loadAudioDevices(),
     setDevice: (kind, name) => setAudioDevice(kind, name),
+    setDirect: (on) => invoke('realtime_direct_set', { on }).then(() => VectorSvelte.setCallDirect(on)).catch((e) => VectorSvelte.showToast(String(e))),
 };
 
 function registerCallScreen() {
@@ -126,6 +128,7 @@ function registerCallScreen() {
     // A reloaded webview finds the call the backend still holds, and the switches it saved.
     invoke('call_status').then((s) => { if (s) { VectorSvelte.setCallState(s); callVideoOnState(s); } }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
+    invoke('realtime_direct_get').then((on) => VectorSvelte.setCallDirect(on)).catch(() => {});
 }
 
 /** A held quality rung or frame rate for one of our pictures; null lets the ladder decide. */

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-realtime-direct-set"
+description = "Enables the realtime_direct_set command without any pre-configured scope."
+commands.allow = ["realtime_direct_set"]
+
+[[permission]]
+identifier = "deny-realtime-direct-set"
+description = "Denies the realtime_direct_set command without any pre-configured scope."
+commands.deny = ["realtime_direct_set"]

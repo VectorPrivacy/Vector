@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-realtime-direct-get"
+description = "Enables the realtime_direct_get command without any pre-configured scope."
+commands.allow = ["realtime_direct_get"]
+
+[[permission]]
+identifier = "deny-realtime-direct-get"
+description = "Denies the realtime_direct_get command without any pre-configured scope."
+commands.deny = ["realtime_direct_get"]

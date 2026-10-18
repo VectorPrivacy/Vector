@@ -88,6 +88,18 @@ pub async fn call_audio_settings_get() -> AudioSettings {
     settings::load()
 }
 
+/// Whether calls and Mini Apps may connect directly (each peer then learns this device's IP).
+#[tauri::command]
+pub async fn realtime_direct_get() -> bool {
+    vector_core::db::scoped(async { vector_core::transport::realtime::direct() }).await
+}
+
+/// Takes effect once nothing uses the live node: a call in progress keeps the one it started on.
+#[tauri::command]
+pub async fn realtime_direct_set(on: bool) -> Result<(), String> {
+    vector_core::db::scoped(vector_core::transport::realtime::set_direct(on)).await
+}
+
 /// Applies mid-call and saves.
 #[tauri::command]
 pub async fn call_audio_settings_set(settings: AudioSettings) -> Result<(), String> {

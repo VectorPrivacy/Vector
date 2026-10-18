@@ -28,6 +28,8 @@ const video = $state({ encode: [], decode: [], link: false,
     shareAudio: { available: false, on: false } });
 // The voice processing switches, the call volumes and the microphone test, shared by the pill and Settings.
 const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, micVolume: 1, speakerVolume: 1, loaded: false,
+    // Direct paths to call and Mini App peers, who then learn this device's IP address.
+    direct: false,
     micTest: false, micLevel: 0,
     // Every microphone and speaker on the machine, the defaults, and the preference (null = default).
     devices: { inputs: [], outputs: [], defaultInput: '', defaultOutput: '', input: null, output: null } });
@@ -70,6 +72,8 @@ export function setCallAudio(s) {
     audio.micVolume = s.mic_volume ?? 1; audio.speakerVolume = s.speaker_volume ?? 1;
     audio.loaded = true;
 }
+
+export function setCallDirect(on) { audio.direct = !!on; }
 
 /** The backend's device list and preference. */
 export function setAudioDevices(l) {

@@ -415,6 +415,9 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 (Err(e), _) | (_, Err(e)) => Err(e),
             },
             "call_share_audio" => Err("Not available in the browser".into()),
+            // A browser has no IP transport: every path already runs through a relay.
+            "realtime_direct_get" => Ok(Value::Bool(false)),
+            "realtime_direct_set" => Ok(Value::Null),
             "call_audio_settings_get" => vector_core::db::scoped_result(async { Ok(settings::load()) }).await.and_then(to_value),
             "call_audio_settings_set" => match a.de::<AudioSettings>("settings") {
                 Ok(s) => vector_core::db::scoped_result(async move { settings::set(s) }).await.map(|_| {

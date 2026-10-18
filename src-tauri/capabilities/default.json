@@ -435,6 +435,8 @@
     "allow-call-set-share-volume",
     "allow-call-set-volume",
     "allow-call-audio-settings-get",
+    "allow-realtime-direct-get",
+    "allow-realtime-direct-set",
     "allow-call-audio-settings-set",
     "allow-call-mic-test-start",
     "allow-call-mic-test-stop",

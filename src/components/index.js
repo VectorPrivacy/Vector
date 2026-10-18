@@ -113,7 +113,7 @@ export { openNostrEmbedModal, pushNostrEmbedModal, popNostrEmbedModal, closeNost
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
 export { setChatPaneHandlers, setChatHeaderHandlers } from './lib/chatpane.svelte.js';
-export { callAudio, setCallState, setCallStats, setCallLevels, setCallAudio, setMicTest, setAudioDevices, setVideoCaps, setVideoLink, setVideoPeerSize, setVideoStats, setVideoPrefs, setShareAudio, shareAudioNative, shareAudioOn } from './lib/calls.svelte.js';
+export { callAudio, setCallState, setCallStats, setCallLevels, setCallAudio, setCallDirect, setMicTest, setAudioDevices, setVideoCaps, setVideoLink, setVideoPeerSize, setVideoStats, setVideoPrefs, setShareAudio, shareAudioNative, shareAudioOn } from './lib/calls.svelte.js';
 export { wallpaperState, setWallpaperLayer, setWallpaperSliders, setWallpaperBusy, setWallpaperLabel, setWallpaperPreviewing } from './lib/wallpaper.svelte.js';
 export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetBusy, modSetProgress, modSetTab };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };

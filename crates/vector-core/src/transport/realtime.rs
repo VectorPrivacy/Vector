@@ -41,6 +41,22 @@ pub fn grant() {
     }
 }
 
+const DIRECT_KEY: &str = "realtime_direct";
+
+/// Whether calls and Mini Apps may connect directly: lower latency, but each peer learns this
+/// device's IP address. Off by default, so every path runs through a relay.
+pub fn direct() -> bool {
+    crate::db::get_sql_setting(DIRECT_KEY.to_string()).ok().flatten().is_some_and(|v| v == "1")
+}
+
+/// Remember the choice; a node bound under the other one is replaced once nothing uses it.
+pub async fn set_direct(on: bool) -> Result<(), String> {
+    crate::db::set_sql_setting(DIRECT_KEY.to_string(), if on { "1" } else { "0" }.to_string())?;
+    #[cfg(feature = "xdc")]
+    crate::xdc::mesh::retire_live_if_idle().await;
+    Ok(())
+}
+
 /// Process-wide opt-in, for SDK bots that accept realtime outside the network.
 pub fn allow_always(on: bool) {
     ALLOW_ALWAYS.store(on, Ordering::Release);
