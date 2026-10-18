@@ -240,24 +240,34 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 
 /// Take back what a Writers ledger folded anywhere on this device no longer stands behind, then
 /// read those Channels again from there: a stale ledger may have dropped what the new one admits
-/// (CORD-03 §1).
-async fn settle_owed_retractions<T: crate::community::transport::Transport + ?Sized>(id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
+/// (CORD-03 §1). What a failed read leaves undone stays owed.
+pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Transport + ?Sized>(id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
     let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
     let cid = crate::simd::hex::bytes_to_hex_32(&id.0);
-    for (chan, since, stamp) in crate::db::community::owed_retractions(&cid).unwrap_or_default() {
-        if let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) {
-            super::service::retract_since(transport, &community, ch, since, handler).await;
-            let (after, channel) = (community.clone(), ch.id);
-            crate::db::spawn_bound(async move {
-                let Some(me) = crate::state::my_public_key() else { return };
-                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-                let since = since.saturating_sub(60_000) / 1000;
-                if let Ok(page) = super::service::fetch_channel_history(&transport, &after, &channel, 200, 3, Some(since), None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await {
-                    crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
-                }
-            });
+    let owed = crate::db::community::take_owed_retractions(&cid).unwrap_or_default();
+    let mut failed = false;
+    for (chan, since) in owed {
+        let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) else { continue };
+        // One failed read means the network is down: the rest waits for the next pass.
+        if failed || super::service::retract_since(transport, &community, ch, since, handler).await.is_err() {
+            failed = true;
+            let _ = crate::db::community::owe_writer_retraction(&cid, &chan, since);
+            continue;
         }
-        let _ = crate::db::community::settle_retraction(&cid, &chan, stamp);
+        let (after, channel) = (community.clone(), ch.id);
+        crate::db::spawn_bound(async move {
+            let Some(me) = crate::state::my_public_key() else { return };
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            let since = since.saturating_sub(60_000) / 1000;
+            let settled = |wraps: &[nostr_sdk::prelude::EventId]| {
+                let hex: Vec<String> = wraps.iter().map(|w| w.to_hex()).collect();
+                let settled = crate::db::events::community_wraps_settled(&hex);
+                wraps.iter().zip(&hex).filter(|(_, h)| settled.contains(*h)).map(|(w, _)| *w).collect()
+            };
+            if let Ok(page) = super::service::fetch_channel_history(&transport, &after, &channel, 200, 3, Some(since), None, crate::community::transport::Evidence::Quorum, |_, _| true, settled).await {
+                crate::VectorCore::v2_ingest_chat_page(&crate::simd::hex::bytes_to_hex_32(&channel.0), me, crate::db::current_session(), page).await;
+            }
+        });
     }
 }
 
@@ -1638,7 +1648,29 @@ mod tests {
         crate::db::community::set_community_writers(&cid, &chan, &stopped.to_json(), 2, true).unwrap();
         let removed = Removed::default();
         settle_owed_retractions(community.id(), &relay, &removed).await;
-        assert!(crate::db::community::owed_retractions(&cid).unwrap().is_empty(), "settled once taken back");
+        assert!(crate::db::community::owed_retractions(&cid).unwrap().is_empty(), "nothing owed once taken back");
+        // A read that fails leaves it owed for the next pass.
+        struct Down;
+        #[async_trait::async_trait]
+        impl crate::community::transport::Transport for Down {
+            async fn fetch_plane(&self, _p: &Keys, _q: &crate::community::transport::Query, _r: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+                Err("down".into())
+            }
+            async fn publish(&self, _e: &nostr_sdk::prelude::Event, _r: &[String]) -> Result<(), String> {
+                Err("down".into())
+            }
+            async fn publish_durable(&self, _e: &nostr_sdk::prelude::Event, _r: &[String]) -> Result<(), String> {
+                Err("down".into())
+            }
+            async fn fetch(&self, _q: &crate::community::transport::Query, _r: &[String]) -> Result<Vec<nostr_sdk::prelude::Event>, String> {
+                Err("down".into())
+            }
+        }
+        let stored = Message { id: "c".repeat(64), content: "shown".into(), at: now_ms(), npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&Keys::generate().public_key()).unwrap()), wrapper_event_id: Some("b".repeat(64)), ..Default::default() };
+        crate::db::events::save_message(&chan, &stored).await.unwrap();
+        crate::db::community::owe_writer_retraction(&cid, &chan, stored.at - 1).unwrap();
+        settle_owed_retractions(community.id(), &Down, &removed).await;
+        assert_eq!(crate::db::community::owed_retractions(&cid).unwrap(), vec![(chan.clone(), stored.at - 1)], "still owed");
         let id = super::super::chat::open_writer_chat_event(&posted, &posted.pubkey, crate::community::Epoch(1), group.conv_key(), &general, community.root_epoch).unwrap().opened().rumor_id.to_hex();
         assert_eq!(removed.0.lock().unwrap().clone(), vec![(id, true)], "the owner's device keeps it, marked");
     }

@@ -3470,7 +3470,14 @@ impl VectorCore {
             if let Some(me) = crate::my_public_key() {
                 if crate::db::community::is_author_banned(&cid_hex, &me) {
                     let _ = crate::db::community::delete_community_retain_keys(&cid_hex);
+                    return warnings;
                 }
+            }
+            // As the live follow does: what a fold here undid is taken back, and what waited is judged again.
+            let quiet = crate::event_handler::NoOpEventHandler;
+            crate::community::v2::realtime::settle_owed_retractions(id, &transport, &quiet).await;
+            if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+                crate::community::v2::service::rejudge_held(&folded, &quiet).await;
             }
             warnings
         })

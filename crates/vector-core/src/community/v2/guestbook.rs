@@ -633,12 +633,15 @@ pub(super) fn live_refound(
             }
         }
     }
-    // Leaving someone out of a chunk this device lacks is an absence, not a departure.
-    let whole = snapshots.into_values().filter(|(held, n, _)| *n > 0 && (1..=*n).all(|i| held.contains(&i)));
+    // Leaving someone out of a chunk this device lacks is an absence, not a departure: one torn
+    // snapshot and no list of this Refounding is whole, an addendum's least of all.
+    if snapshots.values().any(|(held, n, _)| *n == 0 || !(1..=*n).all(|i| held.contains(&i))) {
+        return None;
+    }
     let mut base: BTreeSet<PublicKey> = BTreeSet::new();
     let mut cut: Option<u64> = None;
     let mut rumor_id: Option<[u8; 32]> = None;
-    for ev in whole.flat_map(|(_, _, evs)| evs) {
+    for ev in snapshots.into_values().flat_map(|(_, _, evs)| evs) {
         if let GuestbookEntry::Snapshot { members, at_ms, .. } = &ev.entry {
             base.extend(members.iter().copied());
             cut = Some(cut.map_or(*at_ms, |c| c.min(*at_ms)));
@@ -1157,6 +1160,23 @@ mod tests {
         let fold = coalesce(&whole, NOW, Some(&refounder), &always);
         assert_eq!(fold.get(&b).unwrap().verdict, Verdict::Joined);
         assert_eq!(fold.get(&c).unwrap().verdict, Verdict::Refounded, "once whole, it departs whom it omits");
+    }
+
+    #[test]
+    fn a_whole_addendum_never_stands_in_for_a_torn_base() {
+        let refounder = pk();
+        let (a, b, c) = (pk(), pk(), pk());
+        let events = [
+            join_ev(a, 1_000, 1),
+            join_ev(b, 1_000, 2),
+            join_ev(c, 1_000, 3),
+            at_epoch(snap_ev(refounder, vec![a], 0x01, (1, 2), 5_000, 4), 7),
+            at_epoch(snap_ev(refounder, vec![b], 0x02, (1, 1), 8_000, 5), 7),
+        ];
+        let fold = coalesce(&events, NOW, Some(&refounder), &always);
+        for m in [&a, &b, &c] {
+            assert_eq!(fold.get(m).unwrap().verdict, Verdict::Joined, "the Refounding's own list isn't whole");
+        }
     }
 
     #[test]
