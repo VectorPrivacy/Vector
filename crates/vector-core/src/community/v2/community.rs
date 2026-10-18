@@ -109,6 +109,15 @@ impl ChannelV2 {
         self.meta_extra.get("category").and_then(|v| v.as_str()).and_then(crate::simd::hex::hex_to_bytes_32_checked)
     }
 
+    /// Who made this Private Channel, as its sealed metadata says: only a key holder can write that.
+    pub fn creator(&self) -> Option<&str> {
+        let sealed = self.private && self.sealed.as_ref().is_some_and(|s| s.open && !s.junk);
+        self.meta_extra
+            .get("creator")
+            .and_then(|v| v.as_str())
+            .filter(|c| sealed && c.len() == 64 && c.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    }
+
     pub fn topic(&self) -> Option<&str> {
         self.meta_extra.get("topic").and_then(|v| v.as_str()).filter(|t| !t.is_empty() && t.len() <= super::control::MAX_TOPIC_BYTES)
     }

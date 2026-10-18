@@ -217,6 +217,9 @@ pub struct CommunityRoles {
     /// listed them: the only ones an unmarked Channel edition may still describe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_channels: Option<std::collections::BTreeSet<String>>,
+    /// Private Channels' creators, as each Channel's sealed metadata names them: channel → member.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub creators: std::collections::BTreeMap<String, String>,
 }
 
 /// The bits an overwrite may touch (CORD-04 §8): the channel permissions and
@@ -285,6 +288,9 @@ impl CommunityRoles {
         let roles: Vec<&Role> = role_ids.iter().filter_map(|id| self.role(id)).collect();
         let mut p = roles.iter().fold(self.everyone.unwrap_or_default(), |acc, r| acc.union(r.permissions)).0;
         let channel = channel_hex.to_ascii_lowercase();
+        // A Private Channel's creator is let in while they manage channels: nobody's own overwrite
+        // can admit them, since none outranks itself (CORD-04 §8).
+        let created = p & Permissions::MANAGE_CHANNELS != 0 && self.creators.get(&channel).is_some_and(|c| c == member_hex);
         // A synced Channel resolves against its Category's overwrites, ignoring its own.
         let scope = self.syncs.get(&channel).cloned().unwrap_or(channel);
         let here = || self.overwrites.iter().filter(|o| o.scope == scope);
@@ -304,6 +310,9 @@ impl CommunityRoles {
             }
         }
         p = (p & !deny) | allow;
+        if created {
+            p |= Permissions::VIEW_CHANNEL;
+        }
         if let Some(o) = here().find(|o| matches!(&o.target, OverwriteTarget::Member(m) if m == member_hex)) {
             p = (p & !o.deny.0) | o.allow.0;
         }
@@ -575,7 +584,7 @@ mod tests {
             grants: vec![MemberGrant { member: m.clone(), role_ids: vec![r1.clone(), r2.clone()] }],
             everyone: Some(Permissions(view | send)),
             overwrites: vec![ow(OverwriteTarget::Everyone, 0, view | send), ow(OverwriteTarget::Role(r1.clone()), view, 0), ow(OverwriteTarget::Role(r2.clone()), 0, view)],
-            syncs: Default::default(), legacy_channels: None,
+            syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         let at = |r: &CommunityRoles, who: &str| r.channel_permissions(Some("o"), who, &ch, false).0;
         assert_eq!(at(&r, &m), view, "one role's allow beats another's deny; @everyone's deny of Send stands");
@@ -603,7 +612,7 @@ mod tests {
             }],
             roles: vec![role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         }
     }
 
@@ -645,7 +654,7 @@ mod tests {
             grants: vec![MemberGrant { member: alice.clone(), role_ids: vec![role.role_id.clone()] }],
             roles: vec![role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         assert!(!r.is_admin(&alice), "a social-only role holder is not an admin");
         assert!(r.is_privileged(&alice), "though they do hold a role");
@@ -676,7 +685,7 @@ mod tests {
             ],
             roles: vec![admin_role, mod_role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         let owner_ref = Some(owner.as_str());
 
@@ -723,7 +732,7 @@ mod tests {
             ],
             roles: vec![admin_role, kick_role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         let o = Some(owner.as_str());
         use Permissions as P;
@@ -781,7 +790,7 @@ mod tests {
             }],
             roles: vec![admin, mod_role],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         // Union of both roles' bits, and the *highest* (lowest index) position wins.
         assert!(r.has_permission(&alice, Permissions::BAN)); // from Admin
@@ -811,7 +820,7 @@ mod tests {
         // A member with no role (Bob) is not — and neither is Alice once demoted (no grant).
         let bob = "bb".repeat(32);
         assert!(!r.is_authorized(&bob, Some(&owner), Permissions::BAN));
-        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None, overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None };
+        let demoted = CommunityRoles { roles: r.roles.clone(), grants: vec![], everyone: None, overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default() };
         assert!(!demoted.is_authorized(&alice, Some(&owner), Permissions::BAN));
         // ...but the owner stays authorized even with an empty grant set.
         assert!(demoted.is_authorized(&owner, Some(&owner), Permissions::BAN));
@@ -846,7 +855,7 @@ mod tests {
             ],
             roles: vec![scoped, server],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         }
     }
 

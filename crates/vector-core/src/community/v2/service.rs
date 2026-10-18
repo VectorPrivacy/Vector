@@ -7004,8 +7004,11 @@ pub async fn collect_access<T: Transport + ?Sized>(transport: &T, community: &Co
             .into_iter()
             .filter(|d| window.contains(&d.epoch.0))
             .filter(|d| {
+                // A manager counts: the creator rule that may let them in is sealed from a keyless reader.
                 let h = d.deliverer.to_hex();
-                h == owner_hex || (!banned.contains(&h) && roster.is_entitled(Some(&owner_hex), &h, &chan, &[], &[]))
+                h == owner_hex
+                    || (!banned.contains(&h)
+                        && (roster.is_entitled(Some(&owner_hex), &h, &chan, &[], &[]) || roster.is_authorized(&h, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS)))
             })
             .collect();
         let Some(newest) = deliveries.iter().map(|d| d.epoch).max() else { continue };
@@ -8427,13 +8430,14 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         ensure_channel_manager(community, &my_pk)?;
-        // Nobody beneath the owner can let themselves into a channel they make: their own
-        // standing sits above nothing of theirs (CORD-04 §8).
-        if roles_v2_held(community) && my_pk != community.owner()? {
-            return Err("on the new roles only the owner can make a private channel for now".to_string());
-        }
         assert_channel_id_free(&channel_id, community.id())?;
-        let meta = control::ChannelMetadata { name: name.to_string(), private: true, voice: None, deleted: None, custom: None, extra: Default::default() };
+        let v2 = roles_v2_held(community);
+        // On Roles v2 the sealed metadata names its creator, who is let in on that (CORD-04 §8).
+        let mut extra = serde_json::Map::new();
+        if v2 {
+            extra.insert("creator".into(), my_pk.to_hex().into());
+        }
+        let meta = control::ChannelMetadata { name: name.to_string(), private: true, voice: None, deleted: None, custom: None, extra };
         let channel_key = super::super::random_32();
         let epoch = Epoch(1);
         let content = channel_edition_content(community, &channel_id, &meta, Some((channel_key, epoch)), None)?;
@@ -8470,18 +8474,23 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
             transport.publish_durable(c, &community.relays).await?;
         }
         publish_control_edition(transport, community, vsk::CHANNEL_METADATA, &channel_id.0, &content).await?;
-        if roles_v2_held(community) {
-            // On Roles v2 a Private Channel is closed to everyone but the owner until they let
-            // a Role or a member in, so it opens nothing before its rules exist.
+        if v2 {
+            // On Roles v2 a Private Channel is closed to everyone but the owner and its creator
+            // until they let a Role or a member in, so it opens nothing before its rules exist.
             let chan = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
             let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
             if !crate::db::community::community_held(community.id())? {
                 return Err("community removed during channel create".to_string());
             }
             let mut updated = community.clone();
-            updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: Default::default(), writers: None, sealed: sealed.clone() });
+            updated.channels.push(ChannelV2 { id: channel_id, name: name.to_string(), private: true, key: Some(channel_key), epoch, voice: None, meta_custom: None, meta_extra: meta.extra.clone(), writers: None, sealed: sealed.clone() });
             crate::db::community::save_community_v2(&updated)?;
             crate::db::community::store_epoch_key(&cid_hex, &chan, epoch.0, &channel_key)?;
+            // The fold reads the creator back later; until then the stored Roster must let them in.
+            let mut roster = crate::db::community::get_community_roles(&cid_hex)?;
+            roster.creators.insert(chan.clone(), my_pk.to_hex());
+            let at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
+            crate::db::community::set_community_roles(&cid_hex, &roster, at)?;
             let _ = refresh_public_links(transport, &updated).await;
             return Ok(());
         }
@@ -8600,8 +8609,10 @@ pub fn judge_channel_key_vend(
     }
 
     // (4) The vendor must be entitled too — they hold the real key, so a wrong
-    // key from them costs isolation, never confidentiality.
-    if sender_hex != owner_hex && !roster.is_entitled(Some(&owner_hex), sender_hex, &chan_hex, &[], &[]) {
+    // key from them costs isolation, never confidentiality. A channel manager may be
+    // let in by a creator rule only a holder can read, so they count as one.
+    let manages = roster.is_authorized(sender_hex, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
+    if sender_hex != owner_hex && !manages && !roster.is_entitled(Some(&owner_hex), sender_hex, &chan_hex, &[], &[]) {
         return VendVerdict::Park("vendor's entitlement has not folded yet");
     }
 
@@ -10842,6 +10853,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     if activated {
         authorized.overwrites = fold_overwrites(community, editions, floors, &authorized, &banned, &sealed, &mut heads, &mut gapped);
         authorized.syncs = fold_syncs(community, editions, floors, &authorized, &banned, &sealed, &mut heads, &mut gapped);
+        authorized.creators = community.channels.iter().filter_map(|c| Some((crate::simd::hex::bytes_to_hex_32(&c.id.0), c.creator()?.to_string()))).collect();
     }
 
     AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, complete, refused, carried, admitted, activated, sealed, converged }
@@ -15151,7 +15163,7 @@ mod tests {
                 MemberGrant { member: revoked.to_hex(), role_ids: Vec::new() },
             ],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roles, 1).unwrap();
 
@@ -16151,7 +16163,7 @@ mod tests {
             roles: vec![role("mod", 3, Permissions::MANAGE_ROLES | Permissions::KICK), role("low", 8, Permissions::BAN)],
             grants: vec![MemberGrant { member: "m".into(), role_ids: vec!["mod".into(), "low".into()] }],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         let moderator = RoleAuthor { me_hex: "m".into(), owner_hex: "o".into(), is_owner: false, rank: 3, roles };
         assert!(moderator.supports(4, Permissions::KICK), "a bit they hold, beneath them");
@@ -23941,14 +23953,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_channel_manager_makes_a_private_channel_and_is_let_in_as_its_creator() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Made").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (owner_hex, x_hex) = (owner.keys.public_key().to_hex(), x.public_key().to_hex());
+        act_as(&x);
+        let ch = create_private_channel(&bed.relay, &held(), "mods").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        assert!(crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().is_entitled(Some(&owner_hex), &x_hex, &chan, &[], &[]), "in from the start");
+        send_chat_message(&bed.relay, &held(), &ch, "made by a mod", None, &[], vec![]).await.unwrap();
+        // The owner's device reads the creator from the sealed metadata, and its duty keeps them.
+        act_as(&owner.keys);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let fold = || async { fold_authority(&held(), &fetch_control(&bed.relay, &held()).await, &Floors::default()).roles };
+        let roster = fold().await;
+        assert!(roster.is_entitled(Some(&owner_hex), &x_hex, &chan, &[], &[]), "the creator, on a fold of the plane");
+        assert!(!roster.is_entitled(Some(&owner_hex), &Keys::generate().public_key().to_hex(), &chan, &[], &[]), "and no one else");
+        let epoch = held().channel(&ch).unwrap().epoch;
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().cut, 0);
+        assert_eq!(held().channel(&ch).unwrap().epoch, epoch, "no rotation cuts them");
+        // An outranking member's deny still shuts them out, and so does losing Manage Channels.
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(x_hex.clone()), 0, Permissions::VIEW_CHANNEL).await.unwrap();
+        assert!(!fold().await.is_entitled(Some(&owner_hex), &x_hex, &chan, &[], &[]), "an explicit deny wins");
+        assert!(held().channel(&ch).unwrap().epoch > epoch, "and rotates them out");
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(x_hex.clone()), 0, 0).await.unwrap();
+        assert!(fold().await.is_entitled(Some(&owner_hex), &x_hex, &chan, &[], &[]), "the creator rule stands once the deny goes");
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(!fold().await.is_entitled(Some(&owner_hex), &x_hex, &chan, &[], &[]), "only while they manage channels");
+    }
+
+    #[tokio::test]
+    async fn a_reader_takes_the_key_its_creator_delivers_though_it_cant_see_the_creator_rule() {
+        let (bed, _owner, x, community) = v2_bed_with_admin("Keyless").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        act_as(&x);
+        let ch = create_private_channel(&bed.relay, &held(), "mods").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let m = Keys::generate();
+        set_overwrite(&bed.relay, &held(), ch.0, crate::community::roles::OverwriteTarget::Member(m.public_key().to_hex()), Permissions::VIEW_CHANNEL, 0).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().delivered, 1, "the creator delivers");
+        // M's device: keyless, and its fold can't open the seal that names the creator.
+        let mut c = held();
+        let e = c.channels.iter_mut().find(|e| e.id.0 == ch.0).unwrap();
+        (e.key, e.sealed) = (None, None);
+        e.meta_extra.clear();
+        crate::db::community::save_community_v2(&c).unwrap();
+        let mut roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        roster.creators.clear();
+        crate::db::community::set_community_roles(&cid_hex, &roster, crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0)).unwrap();
+        assert!(!roster.is_entitled(None, &x.public_key().to_hex(), &chan, &[], &[]), "to M, the creator isn't entitled");
+        act_as(&m);
+        assert_eq!(collect_access(&bed.relay, &held()).await.unwrap(), 1, "but manages channels, so its delivery counts");
+        absorb_parked_channel_keys(&held(), &crate::db::current_session());
+        assert!(held().channel(&ch).unwrap().key.is_some(), "and the key is taken");
+        act_as(&x);
+    }
+
+    #[tokio::test]
+    async fn a_creator_named_outside_the_seal_lets_nobody_in() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Plain").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = create_private_channel(&bed.relay, &held(), "inner").await.unwrap();
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let mut c = held();
+        let x_hex = x.public_key().to_hex();
+        let entry = c.channels.iter_mut().find(|e| e.id.0 == ch.0).unwrap();
+        entry.meta_extra.insert("creator".into(), x_hex.clone().into());
+        assert_eq!(entry.creator(), Some(x_hex.as_str()), "read from the opened seal");
+        entry.sealed = None;
+        assert_eq!(entry.creator(), None, "a plain edition names no creator: anyone with Manage Channels could write one");
+        let roster = fold_authority(&c, &fetch_control(&bed.relay, &c).await, &Floors::default()).roles;
+        assert!(!roster.is_entitled(Some(&owner.keys.public_key().to_hex()), &x_hex, &chan, &[], &[]));
+    }
+
+    #[tokio::test]
     async fn a_private_channel_stays_closed_whatever_everyone_is_allowed() {
         // Privacy doesn't hang on an @everyone deny a manager could clear: a private
         // Channel opens only to a Role's or a member's allow.
         let (bed, owner, x, community) = v2_bed_with_admin("Closed").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
-        act_as(&x);
-        assert!(create_private_channel(&bed.relay, &held(), "admins").await.is_err(), "a creator beneath the owner couldn't let themselves in");
-        act_as(&owner.keys);
         let ch = create_private_channel(&bed.relay, &held(), "admins").await.unwrap();
         let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
         let owner_hex = owner.keys.public_key().to_hex();
@@ -28934,7 +29020,7 @@ mod tests {
             grants: vec![crate::community::roles::MemberGrant { member: me.clone(), role_ids: vec![access.role_id.clone()] }],
             roles: vec![access],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &folded, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -28992,7 +29078,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -29072,7 +29158,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         crate::db::community::park_channel_key(&cid_hex, &chan_hex, 0, &vended, &owner_hex).unwrap();
@@ -29134,7 +29220,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -29284,7 +29370,7 @@ mod tests {
             }],
             roles: vec![access],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1).unwrap();
 
@@ -29676,7 +29762,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -29734,7 +29820,7 @@ mod tests {
                 MemberGrant { member: member.keys.public_key().to_hex(), role_ids: vec![role.role_id.clone()] },
             ],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         crate::db::community::set_community_roles(&cid_hex, &roster, 1_000).unwrap();
 
@@ -30027,7 +30113,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: vec![MemberGrant { member: admin.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }],
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
@@ -30080,7 +30166,7 @@ mod tests {
             roles: vec![role.clone()],
             grants: [&a, &b].iter().map(|k| MemberGrant { member: k.public_key().to_hex(), role_ids: vec![role.role_id.clone()] }).collect(),
             everyone: None,
-            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None,
+            overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
         seed_roster_with_heads(&community, &roster, 1_000);
 
