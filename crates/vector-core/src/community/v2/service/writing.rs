@@ -84,8 +84,9 @@ fn usable_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8;
         return None;
     }
     let live = live_writer(community, ch)?;
-    let certified = ch.writers.as_ref()?.certifier(live.0).is_none() || my_cert(community, ch, live.0).is_some();
-    certified.then_some(live)
+    let ledger = ch.writers.as_ref()?;
+    let certified = ledger.certifier(live.0).is_none() || my_cert(community, ch, live.0).is_some();
+    (certified && !ledger.stopped(live.0, &me_pk().ok()?.to_bytes(), u64::MAX)).then_some(live)
 }
 
 /// Where a send of `kind` lands in `ch`: the read group, or the live writer key signing with the
@@ -214,7 +215,7 @@ fn certify(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch, certifying: &[
 
 /// The certifier secret this device holds for `ch`'s writer `epoch`, minted or handed to it,
 /// when it is the one the ledger names.
-fn certifier_held(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> Option<[u8; 32]> {
+pub(super) fn certifier_held(community: &CommunityV2, ch: &ChannelV2, epoch: Epoch) -> Option<[u8; 32]> {
     let held = crate::db::community::held_epoch_key(&hex(&community.id().0), &writers::certifier_scope(&ch.id), epoch.0).ok()??;
     let named = ch.writers.as_ref()?.certifier(epoch)?;
     (writers::certifier_of(&held) == Some(named)).then_some(held)
@@ -265,6 +266,24 @@ async fn reopen<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, c
     }
     let ledger = ch.writers.clone().unwrap_or_else(|| Ledger::new(&ch.id));
     publish_ledger(transport, community, ch, &ledger, Spell::Open).await
+}
+
+/// Append a stop for `writer` to `ch`'s ledger: their certificate at the live epoch vouches for
+/// nothing they post from now on.
+async fn stop<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, writer: &PublicKey) -> Result<(), String> {
+    if ledger_unread(community, ch) {
+        return Err("this channel's writer ledger can't be read; nothing appended to it".to_string());
+    }
+    let ledger = ch.writers.clone().ok_or("this channel keeps no writer ledger")?;
+    publish_ledger(transport, community, ch, &ledger, Spell::Stop { writer: writer.to_bytes() }).await
+}
+
+/// Whether a stop for `writer` fits `ch`'s ledger (a ledger refuses one that would retire its
+/// live writer entry), and isn't one already standing.
+pub(super) fn stop_fits(ch: &ChannelV2, writer: &PublicKey) -> bool {
+    let Some(ledger) = ch.writers.as_ref() else { return false };
+    let Some((epoch, _)) = ledger.current_writer() else { return false };
+    !ledger.stopped(epoch, &writer.to_bytes(), u64::MAX) && ledger.appended(now_ms(), Spell::Stop { writer: writer.to_bytes() }).is_some()
 }
 
 /// How every refusal that is one Channel's ledger's own begins.
@@ -370,19 +389,24 @@ async fn settle_one<T: Transport + ?Sized>(
     may_manage: bool,
 ) -> Result<(), String> {
     let moved = restricts(before, ch) != restricts(after, ch);
-    // A manager keeps the key by design, so losing Send cuts nothing.
+    // A manager keeps the key by design, so losing Send stops nothing.
     let lost: Vec<PublicKey> = candidates.iter().filter(|p| was.writes(p, ch) && !now.writes(p, ch) && !now.manages(p)).copied().collect();
+    // A manager who lost the bit, or left, still holds the certifier: only a fresh epoch takes it back.
+    let demoted = candidates.iter().any(|p| (p.to_hex() == was.owner_hex || before.is_authorized(&p.to_hex(), Some(&was.owner_hex), Permissions::MANAGE_CHANNELS)) && !now.manages(p));
     let acts = match (restricts(after, ch), ch.restricted()) {
         (true, false) => may_manage && moved,
         (false, true) => may_manage && moved,
-        (true, true) => may_manage && !lost.is_empty(),
+        (true, true) => may_manage && (!lost.is_empty() || demoted),
         (false, false) => false,
     };
     if acts {
         let Some((fresh, ch)) = ledger_still(transport, held, &ch.id, &ch.writers).await? else { return Ok(()) };
         return match ch.restricted() {
             false => mint(transport, &fresh, &ch, now, &lost).await,
-            true if restricts(after, &ch) => mint(transport, &fresh, &ch, now, &lost).await,
+            true if restricts(after, &ch) => match (demoted, lost.as_slice()) {
+                (false, [one]) if stop_fits(&ch, one) => stop(transport, &fresh, &ch, one).await,
+                _ => mint(transport, &fresh, &ch, now, &lost).await,
+            },
             true => reopen(transport, &fresh, &ch).await,
         };
     }
@@ -395,7 +419,13 @@ async fn settle_one<T: Transport + ?Sized>(
     }
     let live = live_writer(held, ch);
     let certifying = live.as_ref().and_then(|(e, ..)| certifier_held(held, ch, *e));
+    // A writer stopped at this epoch needs a fresh one: its certificate here vouches for nothing.
+    let restarted = ch.writers.as_ref().and_then(|l| l.current_writer().map(|(e, _)| (l, e))).is_some_and(|(l, e)| gained.iter().any(|p| l.stopped(e, &p.to_bytes(), u64::MAX)));
     match (live, certifying) {
+        _ if restarted && may_manage => match ledger_still(transport, held, &ch.id, &ch.writers).await? {
+            Some((fresh, ch)) => mint(transport, &fresh, &ch, now, &[]).await,
+            None => Ok(()),
+        },
         (Some((epoch, secret, writer)), Some(certifying)) => {
             let certs = certify(held, ch, epoch, &certifying, &gained);
             deliver_certified(transport, held, &ch.id, writers::writer_rekey_scope(&ch.id), epoch, Some(writer.pk().to_bytes()), &secret, &gained, &certs).await
@@ -422,6 +452,7 @@ pub struct WriterDuty {
 }
 
 struct WriterSent;
+struct CertifierSent;
 struct BackstopClock;
 
 /// A backstop's lane in one Channel: cutting one member, minting for itself, or moving the ledger
@@ -429,15 +460,14 @@ struct BackstopClock;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Lane {
     Cut(PublicKey),
-    /// A cut only a writer's hand-on shows: one Channel-wide lane, so a writer can't force a
-    /// mint per member.
-    Relayed,
     Starved,
     Move,
     /// After a read that came back short: try again in a while, not every pass.
     Retry,
     /// Minting for writers nobody who can certify them has served.
     Unserved,
+    /// Minting to take the certifier back from someone who no longer manages.
+    Certifier,
 }
 
 impl Lane {
@@ -446,7 +476,7 @@ impl Lane {
             Lane::Cut(m) => (m.to_bytes(), BACKSTOP_DAMP_MS),
             Lane::Starved => ([0; 32], BACKSTOP_DAMP_MS),
             Lane::Move => ([1; 32], BACKSTOP_MOVE_MS),
-            Lane::Relayed => ([2; 32], BACKSTOP_DAMP_MS),
+            Lane::Certifier => ([2; 32], BACKSTOP_MOVE_MS),
             Lane::Retry => ([3; 32], BACKSTOP_RETRY_MS),
             Lane::Unserved => ([4; 32], BACKSTOP_MOVE_MS),
         }
@@ -545,10 +575,11 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let keyless = may_manage && restrict && ch.restricted() && posters.writes(&me, ch) && live_writer(held, ch).is_none();
     let since = postable_since(held, ch, keyless);
     let live = ch.writers.as_ref().and_then(|l| l.live());
-    // A Refounding retires the live writer epoch: the members it removed may hold it.
-    let retired = live.is_some_and(|(root, ..)| root < held.root_epoch);
+    // A Refounding retires the live writer epoch: the members it removed may hold it. One whose
+    // entry named no certifier predates certificates, so anyone handed its key could post.
+    let retired = live.is_some_and(|(root, ..)| root < held.root_epoch) || ch.writers.as_ref().and_then(|l| l.current_writer()).is_some_and(|(e, _)| ch.writers.as_ref().is_some_and(|l| l.certifier(e).is_none()));
     if may_manage && ((restrict && retired) || (restrict != ch.restricted() && due(&ch.id, Lane::Move))) {
-        if backstop_damped(transport, held, ch, posters, &[], &[Lane::Move]).await? {
+        if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Move]).await? {
             done.moved += 1;
         }
         return Ok(());
@@ -558,6 +589,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     if !restrict || !root_ok {
         return Ok(());
     }
+    let cid = held.id().0;
     let scope = writers::writer_rekey_scope(&ch.id);
     let deliveries = named_deliveries(transport, held, ch, ledger).await?;
     let minter = PublicKey::from_slice(&minter).ok();
@@ -566,72 +598,101 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let trusted = |d: &PublicKey, e: Epoch| Some(*d) == ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok()) || manager(&d.to_hex());
     // At a certified epoch, served means handed a certificate too.
     let certified = |p: &PublicKey, e: Epoch| {
-        ledger.certifier(e).is_none()
-            || deliveries.iter().any(|d| d.epoch == e && trusted(&d.deliverer, e) && d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&held.id().0, e, w, c)))
+        ledger.certifier(e).is_none() || deliveries.iter().any(|d| d.epoch == e && trusted(&d.deliverer, e) && d.certs.iter().any(|(w, c)| *w == p.to_bytes() && ledger.certifies(&cid, e, w, c)))
     };
     let served = |p: &PublicKey, e: Epoch| served_at(&deliveries, p, scope, e, &|d| trusted(d, e)) && certified(p, e);
-    let banned_pks: Vec<PublicKey> = posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok()).collect();
-    let pool: Vec<PublicKey> = candidates.iter().chain(banned_pks.iter()).copied().collect();
     let minter_of = |e: Epoch| ledger.minter(e).and_then(|m| PublicKey::from_slice(&m).ok());
-    let held_now = holders(&deliveries, &pool, scope, epoch, minter_of(epoch), &trusted);
-    let held_before = ledger.previous_writer().map(|e| holders(&deliveries, &pool, scope, e, minter_of(e), &trusted));
-    if may_manage {
-        // A manager may hold the key by design: it can mint one whenever it likes.
-        let out: Vec<(PublicKey, Lane)> = pool
-            .iter()
-            .filter(|p| **p != me && !posters.writes(p, ch) && !manager(&p.to_hex()))
-            .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
-            .filter_map(|p| held_now.get(p).map(|&relayed| (*p, if relayed { Lane::Relayed } else { Lane::Cut(*p) })))
-            .collect::<std::collections::BTreeMap<_, _>>()
+    // Who an epoch vouches for: its minter, and each writer a trusted delivery certified.
+    let vouched = |e: Epoch| -> std::collections::BTreeSet<PublicKey> {
+        minter_of(e)
             .into_iter()
-            .filter(|(_, lane)| due(&ch.id, *lane))
-            .collect();
-        if !out.is_empty() {
-            let lanes: Vec<Lane> = out.iter().map(|(_, lane)| *lane).collect();
-            let cut: Vec<PublicKey> = out.iter().map(|(p, _)| *p).collect();
-            if backstop_damped(transport, held, ch, posters, &cut, &lanes).await? {
-                done.cut += cut.len();
+            .chain(deliveries.iter().filter(|d| d.epoch == e && trusted(&d.deliverer, e)).flat_map(|d| d.certs.iter().filter(|(w, c)| ledger.certifies(&cid, e, w, c)).filter_map(|(w, _)| PublicKey::from_slice(w).ok())))
+            .collect()
+    };
+    let certifying = certifier_held(held, ch, epoch);
+    if may_manage {
+        let now = now_ms();
+        // Whoever holds the certifier and no longer manages could vouch for anyone: a fresh epoch
+        // takes it back.
+        let cscope = writers::certifier_rekey_scope(&ch.id);
+        let named = ledger.certifier(epoch);
+        let offered: Vec<rekey::AccessDelivery> = fetch_plane_deliveries(transport, held, &ch.id, cscope).await?.into_iter().filter(|d| d.epoch == epoch && d.writer == named && trusted(&d.deliverer, epoch)).collect();
+        let holds_certifier = |p: &PublicKey| Some(*p) == minter || offered.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), cscope, epoch).is_some());
+        let pool: Vec<PublicKey> = candidates.iter().copied().chain(posters.banned.iter().filter_map(|h| PublicKey::from_hex(h).ok())).collect();
+        if pool.iter().any(|p| *p != me && !posters.manages(p) && holds_certifier(p)) && due(&ch.id, Lane::Certifier) {
+            if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Certifier]).await? {
+                done.moved += 1;
             }
             return Ok(());
         }
+        // A manager may hold the key by design; a writer the Channel no longer lets post is stopped.
+        let out: Vec<PublicKey> = vouched(epoch)
+            .into_iter()
+            .filter(|p| *p != me && !posters.writes(p, ch) && !manager(&p.to_hex()) && !ledger.stopped(epoch, &p.to_bytes(), now))
+            .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
+            .filter(|p| due(&ch.id, Lane::Cut(*p)))
+            .collect();
+        if !out.is_empty() {
+            let lanes: Vec<Lane> = out.iter().map(|p| Lane::Cut(*p)).collect();
+            let act = match out.as_slice() {
+                [one] => Act::Stop(*one),
+                many => Act::Mint(many),
+            };
+            if backstop_damped(transport, held, ch, posters, act, &lanes).await? {
+                done.cut += out.len();
+            }
+            return Ok(());
+        }
+        // A manager promoted since the mint is handed the certifier, so it never mints to let a writer in.
+        if let Some(certifying) = certifying {
+            let sent = crate::db::current_session().scoped::<CertifierSent, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
+            let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let owed: Vec<PublicKey> = candidates.iter().filter(|p| **p != me && posters.manages(p) && !holds_certifier(p) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes()))).copied().collect();
+            if !owed.is_empty() {
+                deliver_on_plane(transport, held, &ch.id, cscope, epoch, named, &certifying, &owed).await?;
+                sent.lock().unwrap_or_else(|e| e.into_inner()).extend(owed.iter().map(|p| (ch.id.0, epoch.0, p.to_bytes())));
+            }
+        }
         // A key it can open, not a blob at its locator: anyone can leave a blob.
-        let starved = now_ms().saturating_sub(began.max(since)) > STARVED_MS;
+        let starved = now.saturating_sub(began.max(since)) > STARVED_MS;
         if keyless && starved && due(&ch.id, Lane::Starved) {
-            if backstop_damped(transport, held, ch, posters, &[], &[Lane::Starved]).await? {
+            if backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Starved]).await? {
                 done.moved += 1;
             }
             return Ok(());
         }
     }
-    // Only the epoch's minter can certify a writer; a manager mints the rest one that includes them.
-    let certifying = certifier_held(held, ch, epoch);
+    // Only a holder of the epoch's certifier can let a writer in; a manager mints the rest one that includes them.
     let live = live_writer(held, ch);
     if certifying.is_none() && !may_manage {
         return Ok(());
     }
-    // The epoch's mint is the minter's own delivery: whoever held the epoch before and it left
-    // out was cut, whatever a lagging Roster says.
+    // The epoch's mint is the minter's own delivery: whoever the epoch before vouched for and it
+    // left out was cut, whatever a lagging Roster says.
     let minting: Vec<&rekey::AccessDelivery> = deliveries.iter().filter(|d| Some(d.deliverer) == minter && d.epoch == epoch).collect();
     let minted_to = |p: &PublicKey| minting.iter().any(|d| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some());
-    let cut = |p: &PublicKey| !minting.is_empty() && !minted_to(p) && held_before.as_ref().is_some_and(|h| h.contains_key(p));
+    let before = ledger.previous_writer().map(vouched);
+    let cut = |p: &PublicKey| !minting.is_empty() && !minted_to(p) && before.as_ref().is_some_and(|b| b.contains(p));
     let sent = crate::db::current_session().scoped::<WriterSent, std::sync::Mutex<std::collections::HashSet<([u8; 32], u64, [u8; 32])>>>();
     let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let unserved: Vec<PublicKey> = candidates
-        .iter()
-        .filter(|p| posters.writes(p, ch) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes())) && !served(p, epoch) && !cut(p))
-        .copied()
-        .collect();
-    if unserved.is_empty() {
+    let now = now_ms();
+    let owed = |p: &PublicKey| (posters.writes(p, ch) || posters.manages(p)) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes())) && !served(p, epoch) && !cut(p);
+    let unserved: Vec<PublicKey> = candidates.iter().filter(|p| **p != me && owed(p)).copied().collect();
+    // One this epoch stopped who may post again is owed a fresh epoch, not this one's certificate.
+    let restarted = candidates.iter().any(|p| posters.writes(p, ch) && ledger.stopped(epoch, &p.to_bytes(), now));
+    if unserved.is_empty() && !restarted {
         return Ok(());
     }
     match (live, certifying) {
+        _ if restarted && may_manage && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Unserved]).await? => done.moved += 1,
+        _ if restarted => {}
         (Some((_, secret, _)), Some(certifying)) => {
             let certs = certify(held, ch, epoch, &certifying, &unserved);
             deliver_certified(transport, held, &ch.id, scope, epoch, Some(pk), &secret, &unserved, &certs).await?;
             sent.lock().unwrap_or_else(|e| e.into_inner()).extend(unserved.iter().map(|p| (ch.id.0, epoch.0, p.to_bytes())));
             done.delivered += unserved.len();
         }
-        _ if may_manage && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, &[], &[Lane::Unserved]).await? => done.moved += 1,
+        _ if may_manage && unserved.iter().any(|p| posters.writes(p, ch)) && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Mint(&[]), &[Lane::Unserved]).await? => done.moved += 1,
         _ => {}
     }
     Ok(())
@@ -639,17 +700,26 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
 
 /// [`backstop`], then damping `lanes` unless it found the ledger moved: a failure counts as an
 /// attempt, or every pass would mint and deliver again.
-async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey], lanes: &[Lane]) -> Result<bool, String> {
+async fn backstop_damped<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, act: Act<'_>, lanes: &[Lane]) -> Result<bool, String> {
     if !due(&ch.id, Lane::Retry) {
         return Ok(false);
     }
-    let result = backstop(transport, held, ch, posters, cut).await;
+    let result = backstop(transport, held, ch, posters, act).await;
     match result {
         Ok(Backstop::Moved) => {}
         Ok(Backstop::Short) => acted(&ch.id, &[Lane::Retry]),
         _ => acted(&ch.id, lanes),
     }
     result.map(|b| b == Backstop::Acted)
+}
+
+/// What a backstop does to a restricted Channel's ledger.
+#[derive(Clone, Copy)]
+pub(super) enum Act<'a> {
+    /// Mint a fresh epoch for the writers who remain, leaving these out.
+    Mint(&'a [PublicKey]),
+    /// Stop one writer, or mint without them when a stop doesn't fit.
+    Stop(PublicKey),
 }
 
 /// How a backstop ended.
@@ -667,7 +737,7 @@ pub(super) enum Backstop {
 /// A manager's mint or reopen on another's behalf: wait by rank so the highest acts first, read
 /// the Control Plane again, and act only if the ledger is where this pass saw it and the roster,
 /// read whole again, agrees with the one the pass judged by.
-async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<Backstop, String> {
+async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, act: Act<'_>) -> Result<Backstop, String> {
     let me_hex = me_pk()?.to_hex();
     let steps = if me_hex == posters.owner_hex { 0 } else { posters.roster.highest_position(&me_hex).map_or(10, |p| p.saturating_add(1).min(10)) };
     if steps > 0 {
@@ -690,38 +760,14 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     match (restricts(posters.roster, &ch), ch.restricted()) {
         (false, true) => reopen(transport, &fresh, &ch).await?,
         (false, false) => return Ok(Backstop::Moved),
-        _ => mint(transport, &fresh, &ch, posters, cut).await?,
+        (true, true) => match act {
+            Act::Stop(writer) if stop_fits(&ch, &writer) => stop(transport, &fresh, &ch, &writer).await?,
+            Act::Stop(writer) => mint(transport, &fresh, &ch, posters, &[writer]).await?,
+            Act::Mint(cut) => mint(transport, &fresh, &ch, posters, cut).await?,
+        },
+        (true, false) => mint(transport, &fresh, &ch, posters, &[]).await?,
     }
     Ok(Backstop::Acted)
-}
-
-/// Who of `pool` the deliveries show holding writer epoch `epoch`, each marked when only a
-/// writer's hand-on shows it: the epoch's minter and those `trusted` served, then those a holder
-/// served in turn. Any holder can hand the key on, so a cut reaches them all.
-fn holders(deliveries: &[rekey::AccessDelivery], pool: &[PublicKey], scope: rekey::RekeyScope, epoch: Epoch, minter: Option<PublicKey>, trusted: &dyn Fn(&PublicKey, Epoch) -> bool) -> std::collections::HashMap<PublicKey, bool> {
-    let sent: Vec<(PublicKey, Vec<PublicKey>)> = deliveries
-        .iter()
-        .filter(|d| d.epoch == epoch)
-        .map(|d| (d.deliverer, pool.iter().filter(|p| rekey::find_my_blob(&d.blobs, &d.deliverer.to_bytes(), &p.to_bytes(), scope, epoch).is_some()).copied().collect()))
-        .collect();
-    let mut held: std::collections::HashMap<PublicKey, bool> = minter.into_iter().map(|m| (m, false)).collect();
-    for (_, to) in sent.iter().filter(|(d, _)| trusted(d, epoch)) {
-        for p in to {
-            held.insert(*p, false);
-        }
-    }
-    let mut next: Vec<PublicKey> = held.keys().copied().collect();
-    while let Some(holder) = next.pop() {
-        for (_, to) in sent.iter().filter(|(d, _)| *d == holder) {
-            for p in to {
-                if !held.contains_key(p) {
-                    held.insert(*p, true);
-                    next.push(*p);
-                }
-            }
-        }
-    }
-    held
 }
 
 #[cfg(test)]
@@ -729,7 +775,7 @@ pub(super) async fn backstop_on<T: Transport + ?Sized>(transport: &T, community:
     let banned = Default::default();
     let posters = Posters::of(community, roster, &banned)?;
     let ch = community.channel(channel).cloned().ok_or("no such channel")?;
-    backstop(transport, community, &ch, &posters, &[]).await
+    backstop(transport, community, &ch, &posters, Act::Mint(&[])).await
 }
 
 /// How a restricted Channel's writers' rules judge what reaches a reader (CORD-03 §1).
@@ -814,7 +860,7 @@ impl Judge {
                     Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community.id().0, e, &o.author.to_bytes(), &c)),
                     None => true,
                 };
-                open || (certified && self.ledger.writer_address_takes(e, o.at_ms))
+                open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms))
             }
         }
     }

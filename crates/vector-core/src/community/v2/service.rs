@@ -24251,6 +24251,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writers_lost_together_take_one_fresh_epoch_and_one_alone_a_stop() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, _member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let writers = create_role_v2(&bed.relay, &held(), "Writers", 0, 0).await.unwrap();
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        for k in [&a, &b, &c] {
+            set_member_roles(&bed.relay, &held(), &k.public_key(), vec![plain.clone(), writers.clone()]).await.unwrap();
+        }
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Role(writers.clone()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(1), "gained, not minted");
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![plain.clone()]).await.unwrap();
+        let l = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(l.current_writer().unwrap().0, Epoch(1));
+        assert!(l.stopped(Epoch(1), &a.public_key().to_bytes(), u64::MAX), "one writer lost is a stop");
+        set_member_roles(&bed.relay, &held(), &a.public_key(), vec![plain.clone(), writers.clone()]).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2), "let back in after a stop, a writer takes a fresh epoch");
+        // Everyone the role let post loses it in one change.
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Role(writers), 0, 0).await.unwrap();
+        let l = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(l.current_writer().unwrap().0, Epoch(3), "several lost at once take a fresh epoch");
+        let plane = fetch_plane_deliveries(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general)).await.unwrap();
+        assert!(plane.iter().filter(|d| d.epoch == Epoch(3)).all(|d| d.certs.iter().all(|(w, _)| *w != b.public_key().to_bytes() && *w != c.public_key().to_bytes())), "without them");
+    }
+
+    #[tokio::test]
+    async fn a_demoted_manager_who_writes_takes_a_fresh_epoch_not_a_stop() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, _owner, x, community) = v2_bed_with_admin("Demoted writer").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        // x manages and writes through one role, and loses both in one change.
+        let lead = create_role_v2(&bed.relay, &held(), "Lead", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Role(lead.clone()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![plain.clone(), lead]).await.unwrap();
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(1));
+        set_member_roles(&bed.relay, &held(), &x.public_key(), vec![plain]).await.unwrap();
+        let l = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(l.current_writer().unwrap().0, Epoch(2), "the certifier x held goes with a fresh epoch");
+        assert!(!l.stopped(Epoch(1), &x.public_key().to_bytes(), u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn a_stop_fits_only_while_the_live_entry_stays_and_the_writer_isnt_stopped() {
+        use crate::community::v2::writers::{writer_address, Ledger, Spell};
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Full", bed.relays.clone(), None).await.unwrap();
+        let mut ch = community.channels[0].clone();
+        let mut l = Ledger::new(&ch.id).appended(1_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&[1; 32], &ch.id, Epoch(1)), root: Epoch(0), by: [0x0b; 32], certifier: None }).unwrap();
+        let w = Keys::generate().public_key();
+        for _ in 1..crate::community::v2::writers::MAX_LEDGER - 1 {
+            l = l.appended(2_000, Spell::Stop { writer: Keys::generate().public_key().to_bytes() }).unwrap();
+        }
+        ch.writers = Some(l.clone());
+        assert!(writing::stop_fits(&ch, &w), "one slot left");
+        ch.writers = Some(l.appended(2_000, Spell::Stop { writer: w.to_bytes() }).unwrap());
+        assert!(!writing::stop_fits(&ch, &w), "stopped already");
+        assert!(!writing::stop_fits(&ch, &Keys::generate().public_key()), "full: a stop would retire the live entry");
+    }
+
+    #[tokio::test]
+    async fn an_epoch_from_before_certificates_is_replaced_by_one_with_a_certifier() {
+        use crate::community::roles::OverwriteTarget;
+        use crate::community::v2::writers::{writer_address, Ledger, Spell};
+        let (bed, owner, _x, community) = v2_bed_with_admin("Legacy").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = held().channels[0].id;
+        let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
+        let old = Ledger::new(&general).appended(2_001_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&[0x77; 32], &general, Epoch(1)), root: Epoch(0), by: owner.keys.public_key().to_bytes(), certifier: None }).unwrap();
+        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await;
+        publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 1, None, &old.to_json()).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(held().channel(&general).unwrap().writers.as_ref().is_some_and(|l| l.certifier(Epoch(1)).is_none()), "folded the old ledger");
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 1);
+        let l = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(l.current_writer().unwrap().0, Epoch(2));
+        assert!(l.certifier(Epoch(2)).is_some(), "anyone handed the old key could post");
+    }
+
+    #[tokio::test]
+    async fn a_manager_promoted_since_the_mint_is_handed_the_certifier() {
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &member.keys.public_key(), vec![mods]).await.unwrap();
+        access_duty(&bed.relay, &held()).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        collect_writers(&bed.relay, &held()).await.unwrap();
+        let ch = held().channel(&general).unwrap().clone();
+        let live = ch.writers.as_ref().unwrap().current_writer().unwrap().0;
+        assert!(writing::certifier_held(&held(), &ch, live).is_some(), "a manager can let a writer in without a new epoch");
+        assert!(writing::live_writer(&held(), &ch).is_some(), "and holds the key to hand on");
+        assert_eq!(live, Epoch(1));
+    }
+
+    #[tokio::test]
+    async fn a_manager_who_leaves_takes_the_certifier_with_them_so_a_fresh_epoch_replaces_it() {
+        let (bed, owner, member, community, general) = restricted_bed(true).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&member);
+        collect_writers(&bed.relay, &held()).await.unwrap();
+        let ch = held().channel(&general).unwrap().clone();
+        assert!(writing::certifier_held(&held(), &ch, Epoch(1)).is_some());
+        let gb = crate::community::v2::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch);
+        let leave = guestbook::build_leave_rumor(member.keys.public_key(), now_ms());
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&leave, &gb, &member.keys, Timestamp::from_secs(now_ms() / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        bed.swap_to(&owner);
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.moved, 1);
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers, WriterDuty::default(), "once");
+    }
+
+    #[tokio::test]
     async fn a_managers_marked_copy_loses_its_mark_once_the_post_stands() {
         use crate::community::roles::OverwriteTarget;
         let (bed, owner, member, community, general) = restricted_bed(true).await;
@@ -24346,11 +24468,13 @@ mod tests {
         bed.swap_to(&owner);
         assert!(channel_texts(&bed.relay, &held(&community), &general).await.contains(&"from m".to_string()));
 
-        // Take it back: a fresh writer epoch without them closes the address they hold.
+        // Take it back: a stop voids their certificate from then on, with no new key to hand out.
         set_overwrite(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.public_key().to_hex()), 0, 0).await.unwrap();
         let ledger = held(&community).channel(&general).unwrap().writers.clone().unwrap();
-        assert_eq!(ledger.current_writer().unwrap().0, Epoch(2));
-        let closed_at = ledger.writers().find(|(e, ..)| *e == Epoch(1)).and_then(|(.., end)| end).unwrap();
+        assert_eq!(ledger.current_writer().unwrap().0, Epoch(1), "no fresh epoch");
+        let last = ledger.entries.last().unwrap();
+        assert!(matches!(last.spell, crate::community::v2::writers::Spell::Stop { writer } if writer == m.public_key().to_bytes()));
+        let closed_at = last.at;
         let stale = GroupKey::from_parts(old_writer.keys().clone(), read.conv_key().clone());
         assert_eq!(crate::community::v2::derive::channel_writer_group_key(&old_secret, &general, Epoch(1)).pk(), stale.pk());
         let m_cert = cert_for(&held(&community), &general, Epoch(1), &m.public_key());
@@ -24453,19 +24577,33 @@ mod tests {
         publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), 0, 0).await;
         follow_control(&bed.relay, &held(&community)).await.unwrap();
         assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 1, "a served writer the channel no longer lets post");
-        assert_eq!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
-        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "cut once");
-        // A Roster that lets them back without a settle doesn't undo the cut: the epoch's mint
-        // left them out after they held the one before.
+        let ledger = held(&community).channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!(ledger.current_writer().unwrap().0, Epoch(1), "stopped, with no new key");
+        assert!(ledger.stopped(Epoch(1), &m.to_bytes(), u64::MAX));
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers, WriterDuty::default(), "stopped once");
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(!can_post(&held(&community), &general));
+        bed.swap_to(&owner);
+        // Let back in, a writer this epoch stopped is owed a fresh one.
         publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), Permissions::SEND_MESSAGES, 0).await;
         follow_control(&bed.relay, &held(&community)).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.delivered, 0);
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        assert!(!can_post(&held(&community), &general), "a writer this epoch stopped posts nothing here, key or not");
+        bed.swap_to(&owner);
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.moved, 1);
+        assert_eq!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held(&community)).await.unwrap();
+        collect_writers(&bed.relay, &held(&community)).await.unwrap();
+        assert!(can_post(&held(&community), &general));
+        bed.swap_to(&owner);
         publish_overwrite_raw(&bed.relay, &held(&community), general.0, OverwriteTarget::Member(m.to_hex()), 0, 0).await;
         follow_control(&bed.relay, &held(&community)).await.unwrap();
-        // A writer's blob at a non-writer's locator can't make the ledger churn.
-        let (live, live_secret, _) = writing::live_writer(&held(&community), held(&community).channel(&general).unwrap()).unwrap();
-        deliver_on_plane(&bed.relay, &held(&community), &general, scope, live, Some(crate::community::v2::writers::writer_address(&live_secret, &general, live)), &live_secret, &[m]).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 0, "a cut waits out its damping");
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 1, "stopped at the fresh epoch too");
+        assert!(held(&community).channel(&general).unwrap().writers.as_ref().unwrap().stopped(Epoch(2), &m.to_bytes(), u64::MAX));
+        assert_eq!(access_duty(&bed.relay, &held(&community)).await.unwrap().writers.cut, 0, "once");
         bed.swap_to(&member);
         follow_control(&bed.relay, &held(&community)).await.unwrap();
         assert!(!can_post(&held(&community), &general));
@@ -24689,7 +24827,11 @@ mod tests {
         set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
         publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(y.public_key().to_hex()), 0, 0).await;
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1, "the minter's own blobs still prove who holds its epoch");
+        // The demotion took the certifier back with a fresh epoch at once; y, whom it still
+        // vouches for, is stopped there.
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1);
+        assert!(held().channel(&general).unwrap().writers.as_ref().unwrap().stopped(Epoch(2), &y.public_key().to_bytes(), u64::MAX));
     }
 
     #[tokio::test]
@@ -24700,7 +24842,7 @@ mod tests {
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let general = held().channels[0].id;
         let eid = crate::community::v2::derive::writers_locator(community.id(), &general);
-        let lost = Ledger::new(&general).appended(2_001_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&[0x77; 32], &general, Epoch(1)), root: Epoch(0), by: owner.keys.public_key().to_bytes(), certifier: None }).unwrap();
+        let lost = Ledger::new(&general).appended(2_001_000, Spell::Writer { epoch: Epoch(1), pk: writer_address(&[0x77; 32], &general, Epoch(1)), root: Epoch(0), by: owner.keys.public_key().to_bytes(), certifier: crate::community::v2::writers::certifier_of(&[0x66; 32]) }).unwrap();
         publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await;
         publish_marked(&bed.relay, &held(), &owner.keys, vsk::WRITERS, &eid, 1, None, &lost.to_json()).await;
         follow_control(&bed.relay, &held()).await.unwrap();
@@ -25667,16 +25809,17 @@ mod tests {
         assert_eq!(held().channel(&general).unwrap().writers, Some(winner.clone()), "the device that held one converges on the winner");
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
         assert!(fresh.writers.iter().any(|(_, content, ..)| *content == winner.to_json()), "and a fresh reader takes the same");
-        // A change of rank moves nothing.
+        // Demoting x builds on the settled race: a fresh epoch takes back the certifier x held.
         set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(held().channel(&general).unwrap().writers, Some(winner.clone()));
+        let after = held().channel(&general).unwrap().writers.clone().unwrap();
+        assert_eq!((after.entries[0].clone(), after.current_writer().unwrap().0), (winner.entries[0].clone(), Epoch(2)));
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
-        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == winner.to_json()));
+        assert!(fresh.writers.iter().any(|(_, content, ..)| *content == after.to_json()));
         // The ledger moves on from there.
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
         let reopened = held().channel(&general).unwrap().writers.clone().unwrap();
-        assert!(!reopened.restricted() && reopened.entries.len() == 2);
+        assert!(!reopened.restricted() && reopened.entries.len() == 3);
         let fresh = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
         assert!(fresh.writers.iter().any(|(_, content, ..)| *content == reopened.to_json()));
     }
@@ -25752,50 +25895,40 @@ mod tests {
         let plane = fetch_plane_deliveries(&bed.relay, &held(), &general, scope).await.unwrap();
         assert!(served_at(&plane, &w.public_key(), scope, Epoch(1), &|d| *d == x.public_key()), "the minter served them");
         assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 0, "a manager holding what it minted is nobody to cut");
-        // Demoted, what x decided stands, and the key x minted is cut like anyone's.
+        // Demoted, what x decided stands, and the certifier x held is replaced by a fresh epoch.
         set_member_roles(&bed.relay, &held(), &x.public_key(), vec![]).await.unwrap();
         follow_control(&bed.relay, &held()).await.unwrap();
         assert!(held().channel(&general).unwrap().restricted());
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1);
         assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, Epoch(2));
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers, WriterDuty::default(), "nothing of x's left to take back");
     }
 
     #[tokio::test]
-    async fn a_member_a_writer_served_is_cut_with_the_rest() {
+    async fn a_key_passed_on_lets_nobody_post_and_costs_no_new_epoch() {
         use crate::community::roles::OverwriteTarget;
         let (bed, owner, _x, community) = v2_bed_with_admin("Passed").await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let general = held().channels[0].id;
-        let (w, g) = (Keys::generate(), Keys::generate());
-        let plain = create_role_v2(&bed.relay, &held(), "Member", 0, 0).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![plain.clone()]).await.unwrap();
-        set_member_roles(&bed.relay, &held(), &g.public_key(), vec![plain]).await.unwrap();
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Member", 0, 0).await.unwrap()]).await.unwrap();
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
-        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(g.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await;
-        follow_control(&bed.relay, &held()).await.unwrap();
-        let (live, pk) = held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap();
-        // The writer hands g the key, then g loses Send where nobody settles it.
-        act_as(&w);
-        deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(pk), &[0x99; 32], &[g.public_key()]).await.unwrap();
-        // …who hands it on to h, who never could post.
-        let h = Keys::generate();
-        act_as(&owner.keys);
+        let (live, secret, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        // The writer hands the key to h, who may not post, and h hands it on to k.
+        let (h, k) = (Keys::generate(), Keys::generate());
         set_member_roles(&bed.relay, &held(), &h.public_key(), vec![create_role_v2(&bed.relay, &held(), "Guest", 0, 0).await.unwrap()]).await.unwrap();
-        act_as(&g);
-        deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(pk), &[0x99; 32], &[h.public_key()]).await.unwrap();
-        act_as(&owner.keys);
-        publish_overwrite_raw(&bed.relay, &held(), general.0, OverwriteTarget::Member(g.public_key().to_hex()), 0, 0).await;
-        follow_control(&bed.relay, &held()).await.unwrap();
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 2, "a key passed on is cut like one minted, however far");
-        // A writer handing each new key to someone else forces a mint once in six hours, not once a member.
-        let k = Keys::generate();
-        set_member_roles(&bed.relay, &held(), &k.public_key(), vec![create_role_v2(&bed.relay, &held(), "Visitor", 0, 0).await.unwrap()]).await.unwrap();
-        let (live, pk) = held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap();
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
         act_as(&w);
-        deliver_on_plane(&bed.relay, &held(), &general, crate::community::v2::writers::writer_rekey_scope(&general), live, Some(pk), &[0x99; 32], &[k.public_key()]).await.unwrap();
+        deliver_on_plane(&bed.relay, &held(), &general, scope, live, Some(writer.pk().to_bytes()), &secret, &[h.public_key()]).await.unwrap();
+        act_as(&h);
+        deliver_on_plane(&bed.relay, &held(), &general, scope, live, Some(writer.pk().to_bytes()), &secret, &[k.public_key()]).await.unwrap();
         act_as(&owner.keys);
-        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 0);
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        post_raw(&bed.relay, &held(), &k, &general, &signed, community.root_epoch, Some(live), "through a passed key", now_ms()).await;
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers, WriterDuty::default(), "nobody to stop: a key without a certificate vouches for nothing");
+        assert_eq!(held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0, live, "and no epoch spent on it");
+        assert_eq!(marked_texts(&bed.relay, &held(), &general).await, vec!["through a passed key".to_string()]);
     }
 
     #[tokio::test]
