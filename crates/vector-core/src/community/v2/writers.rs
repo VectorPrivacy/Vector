@@ -53,6 +53,20 @@ pub struct Entry {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The field a stop carries when it records a departure that came before it was written.
+const STOP_FROM: &str = "from";
+
+impl Entry {
+    /// When this entry takes effect: its own date, or for a stop, the departure it records if
+    /// that came first. A reader that predates `from` applies the stop from its own date.
+    pub fn effective(&self) -> u64 {
+        match self.spell {
+            Spell::Stop { .. } => self.extra.get(STOP_FROM).and_then(|v| v.as_u64()).map_or(self.at, |from| from.min(self.at)),
+            _ => self.at,
+        }
+    }
+}
+
 /// A writer entry the cap dropped: its address still reads, its window stays closed, and its
 /// writers' certificates still check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +242,7 @@ impl Ledger {
     /// that epoch's window, dated no later. A stop outlives its window's entry retiring; only the
     /// cap dropping the stop itself undoes it.
     pub fn stopped(&self, epoch: Epoch, writer: &[u8; 32], at_ms: u64) -> bool {
-        let names = |e: &Entry| e.at <= at_ms && matches!(e.spell, Spell::Stop { writer: w } if w == *writer);
+        let names = |e: &Entry| e.effective() <= at_ms && matches!(e.spell, Spell::Stop { writer: w } if w == *writer);
         if let Some(start) = self.entries.iter().position(|e| matches!(e.spell, Spell::Writer { epoch: w, .. } if w == epoch)) {
             return self.entries[start + 1..].iter().take_while(|e| !e.spell.moves()).any(names);
         }
@@ -328,8 +342,17 @@ impl Ledger {
     /// This ledger with `spell` appended at `at`, never before the last entry. `None` when a
     /// writer epoch isn't above the last.
     pub fn appended(&self, at: u64, spell: Spell) -> Option<Self> {
+        self.appended_from(at, spell, None)
+    }
+
+    /// [`Self::appended`]; a stop dated `at` that records a departure from `from`.
+    pub fn appended_from(&self, at: u64, spell: Spell, from: Option<u64>) -> Option<Self> {
         let at = self.entries.last().map_or(at, |last| at.max(last.at));
-        self.with(Entry { at, spell, extra: Default::default() })
+        let mut extra = serde_json::Map::new();
+        if let (Spell::Stop { .. }, Some(from)) = (spell, from.filter(|f| *f < at)) {
+            extra.insert(STOP_FROM.into(), from.into());
+        }
+        self.with(Entry { at, spell, extra })
     }
 
     /// Whether this ledger is `prev` with exactly one entry appended.

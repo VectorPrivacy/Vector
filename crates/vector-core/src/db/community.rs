@@ -981,6 +981,9 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract:' || ?1 || ':%'"),
+        Some("DELETE FROM settings WHERE key LIKE 'writer_retract_by:' || ?1 || ':%'"),
+        Some("DELETE FROM settings WHERE key = 'departures_seen:' || ?1"),
+        Some("DELETE FROM settings WHERE key = 'ban_windows:' || ?1"),
     ]
     .into_iter()
     .flatten()
@@ -4514,7 +4517,7 @@ pub(crate) fn retraction_since(old: Option<&str>, new: &str) -> Option<u64> {
     let added = new.entries.iter().filter(|e| matches!(e.spell, Spell::Writer { .. } | Spell::Stop { .. })).filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)));
     let front = new.entries.first().map_or(u64::MAX, |e| e.at);
     let dropped = old.iter().flat_map(|o| o.entries.iter()).filter(|e| !matches!(e.spell, Spell::Other) && e.at >= front && !new.entries.contains(e));
-    added.chain(dropped).map(|e| e.at).min()
+    added.chain(dropped).map(|e| e.effective()).min()
 }
 
 fn retraction_key(community_id: &str, channel_id: &str) -> String {
@@ -4549,6 +4552,84 @@ pub fn owed_retractions(community_id: &str) -> Result<Vec<(String, u64, u64)>, S
     let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1").map_err(|e| format!("owed retractions: {e}"))?;
     let rows = stmt.query_map(params![prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("owed retractions: {e}"))?;
     Ok(rows.flatten().filter_map(|(k, v)| parse_owed(&v).map(|(since, generation)| (k[prefix.len()..].to_string(), since, generation))).collect())
+}
+
+fn author_retraction_key(community_id: &str, channel_id: &str, author: &str) -> String {
+    format!("writer_retract_by:{community_id}:{channel_id}:{author}")
+}
+
+/// Owe `channel_id` a retraction of what `author` (hex) posted there from `since_ms`.
+pub fn owe_author_retraction(community_id: &str, channel_id: &str, author: &str, since_ms: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let key = author_retraction_key(community_id, channel_id, author);
+    let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
+    let (since, generation) = held.as_deref().and_then(parse_owed).map_or((since_ms, 1), |(s, g)| (s.min(since_ms), g + 1));
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, format!("{since}:{generation}")]).map_err(|e| format!("owe retraction: {e}"))?;
+    Ok(())
+}
+
+/// What `community_id` owes one author's posts: `(channel, author hex, since_ms, generation)`.
+pub fn owed_author_retractions(community_id: &str) -> Result<Vec<(String, String, u64, u64)>, String> {
+    let prefix = author_retraction_key(community_id, "", "");
+    let prefix = &prefix[..prefix.len() - 1];
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1").map_err(|e| format!("owed retractions: {e}"))?;
+    let rows = stmt.query_map(params![prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("owed retractions: {e}"))?;
+    Ok(rows
+        .flatten()
+        .filter_map(|(k, v)| {
+            let (channel, author) = k[prefix.len()..].split_once(':')?;
+            let (since, generation) = parse_owed(&v)?;
+            Some((channel.to_string(), author.to_string(), since, generation))
+        })
+        .collect())
+}
+
+/// Clear one author's owed retraction once done, unless more was owed since it was read.
+pub fn settle_author_retraction(community_id: &str, channel_id: &str, author: &str, since: u64, generation: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![author_retraction_key(community_id, channel_id, author), format!("{since}:{generation}")])
+        .map_err(|e| format!("settle retraction: {e}"))?;
+    Ok(())
+}
+
+/// Each npub's spans on the banlist this device has read, in ms.
+pub fn ban_windows(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>, String> {
+    Ok(super::settings::get_sql_setting(format!("ban_windows:{community_id}"))?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+}
+
+/// Merge spans a fold read: one it saw end replaces the same span held open, and spans its window
+/// no longer reaches are kept.
+pub fn merge_ban_windows(community_id: &str, read: &std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>) -> Result<(), String> {
+    if read.is_empty() {
+        return Ok(());
+    }
+    let mut held = ban_windows(community_id)?;
+    let before = held.clone();
+    for (npub, spans) in read {
+        let slot = held.entry(npub.clone()).or_default();
+        for span in spans {
+            match slot.iter_mut().find(|s| s.0 == span.0) {
+                Some(s) if s.1.is_none() => s.1 = span.1,
+                Some(_) => {}
+                None => slot.push(*span),
+            }
+        }
+        slot.sort_by_key(|s| s.0);
+    }
+    if held == before {
+        return Ok(());
+    }
+    super::settings::set_sql_setting(format!("ban_windows:{community_id}"), serde_json::to_string(&held).map_err(|e| e.to_string())?)
+}
+
+/// The departures this device has already owed take-backs for, by author hex.
+pub fn departures_seen(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>, String> {
+    Ok(super::settings::get_sql_setting(format!("departures_seen:{community_id}"))?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+}
+
+pub fn set_departures_seen(community_id: &str, seen: &std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>) -> Result<(), String> {
+    super::settings::set_sql_setting(format!("departures_seen:{community_id}"), serde_json::to_string(seen).map_err(|e| e.to_string())?)
 }
 
 /// Clear `channel_id`'s owed retraction once done, unless more was owed since it was read.

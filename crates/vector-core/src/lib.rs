@@ -3475,6 +3475,9 @@ impl VectorCore {
             }
             // As the live follow does: what a fold here undid is taken back, and what waited is judged again.
             let quiet = crate::event_handler::NoOpEventHandler;
+            if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+                crate::community::v2::service::owe_new_departures(&folded);
+            }
             crate::community::v2::realtime::settle_owed_retractions(id, &transport, &quiet).await;
             if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
                 crate::community::v2::service::rejudge_held(&folded, &quiet).await;
@@ -3609,6 +3612,7 @@ impl VectorCore {
             let judged_on = crate::community::v2::service::writers_head(channel_id);
             let page = crate::community::v2::service::rejudge_page(channel_id, page);
             let since = page.iter().map(|f| f.event.opened().at_ms).min();
+            let posted: Vec<(nostr_sdk::prelude::PublicKey, u64)> = page.iter().filter(|f| matches!(f.event, crate::community::v2::chat::ChatEvent::Message { .. } | crate::community::v2::chat::ChatEvent::Edit { .. })).map(|f| (f.event.opened().author, f.event.opened().at_ms)).collect();
             let mut new = 0usize;
             // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
             let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());
@@ -3661,6 +3665,7 @@ impl VectorCore {
             if let Some(since) = since {
                 crate::community::v2::service::owe_if_moved(channel_id, judged_on, since);
             }
+            crate::community::v2::service::owe_if_departed(channel_id, &posted);
             // Resolve each reply's quote before the emit: the renderer has no other source
             // for a parent outside its window and never retries. Placed AFTER the persists
             // so a parent carried by this same page resolves too. One query per page.

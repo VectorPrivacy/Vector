@@ -819,14 +819,19 @@ pub struct StoredPost {
 
 /// The messages `chat_identifier` holds dated at or after `since_ms`.
 pub fn posts_since(chat_identifier: &str, since_ms: u64) -> Result<Vec<StoredPost>, String> {
+    posts_since_by(chat_identifier, since_ms, None)
+}
+
+/// [`posts_since`], of one author's (npub) posts only when `author` is given.
+pub fn posts_since_by(chat_identifier: &str, since_ms: u64, author: Option<&str>) -> Result<Vec<StoredPost>, String> {
     let Ok(chat_id) = super::id_cache::get_chat_id_by_identifier(chat_identifier) else { return Ok(Vec::new()) };
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
-        .prepare("SELECT id, npub, created_at, tags, wrapper_event_id, kind, reference_id FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?5, ?6) AND created_at >= ?4")
+        .prepare("SELECT id, npub, created_at, tags, wrapper_event_id, kind, reference_id FROM events WHERE chat_id = ?1 AND kind IN (?2, ?3, ?5, ?6) AND created_at >= ?4 AND (?7 IS NULL OR npub = ?7)")
         .map_err(|e| format!("posts since: {e}"))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, (since_ms / 1000) as i64, event_kind::PRIVATE_DIRECT_MESSAGE as i32, event_kind::MESSAGE_EDIT as i32],
+            rusqlite::params![chat_id, event_kind::CHAT_MESSAGE as i32, event_kind::FILE_ATTACHMENT as i32, (since_ms / 1000) as i64, event_kind::PRIVATE_DIRECT_MESSAGE as i32, event_kind::MESSAGE_EDIT as i32, author],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, i32>(5)?, r.get::<_, Option<String>>(6)?)),
         )
         .map_err(|e| format!("posts since: {e}"))?;

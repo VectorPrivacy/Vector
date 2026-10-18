@@ -244,6 +244,17 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Transport + ?Sized>(id: &crate::community::CommunityId, transport: &T, handler: &dyn InboundEventHandler) {
     let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
     let cid = crate::simd::hex::bytes_to_hex_32(&id.0);
+    // A departure is one member's: only their posts are read again, and nothing new is admitted.
+    for (chan, author, since, generation) in crate::db::community::owed_author_retractions(&cid).unwrap_or_default() {
+        let (Some(ch), Ok(pk)) = (community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan), nostr_sdk::prelude::PublicKey::from_hex(&author)) else {
+            let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, generation);
+            continue;
+        };
+        if super::service::retract_by(transport, &community, ch, &pk, since, handler).await.is_err() {
+            return;
+        }
+        let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, generation);
+    }
     // Cleared only once done: a drain cut short leaves it owed.
     for (chan, since, generation) in crate::db::community::owed_retractions(&cid).unwrap_or_default() {
         let Some(ch) = community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan) else {
@@ -1294,7 +1305,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 });
             }
         }
-        // Whichever fold stored a new writer or stop entry, what it undoes is taken back.
+        // Whichever fold stored a new writer or stop entry, or found someone gone, what it undoes is taken back.
+        if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+            super::service::owe_new_departures(&folded);
+        }
         settle_owed_retractions(id, &transport, handler).await;
         // What waited on a Roster, ledger or memberlist this pass may have moved is judged again.
         if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
