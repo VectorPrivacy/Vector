@@ -3462,13 +3462,14 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         }
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
-        // Read before the rotation replaces the Guestbook that records them.
-        let away = (*stored_departure_windows(community)).clone();
         // Serialize with the follow worker for the whole rotation: the commit tail
         // whole-row-saves, and an unserialized concurrent follow could otherwise be
         // rolled back (or adopt a half-published sibling of this very rotation).
         let lock = super::realtime::follow_lock(cid);
         let _guard = lock.lock().await;
+        // Read whole before the rotation replaces the Guestbook that records them.
+        let _ = writing::read_whole(transport, community).await;
+        let away = (*stored_departure_windows(community)).clone();
         // Reload the FRESHEST base state: a stale caller struct would address the rotation
         // under a superseded root (a base fork with no heal). The community_id is
         // self-certifying + stable, so re-loading by it is safe.
@@ -26133,6 +26134,13 @@ mod tests {
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         sync_guestbook(&bed.relay, &held()).await.unwrap();
         assert!(!writing::can_post(&held(), &general), "what they'd post at the epoch they were kicked in stands nowhere: the composer waits");
+        // Made a manager, their posts stand on the Roster: nothing to wait for.
+        bed.swap_to(&owner);
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_CHANNELS).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &member.keys.public_key(), vec![mods]).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(writing::can_post(&held(), &general), "a manager back from a Kick posts at once");
     }
 
     #[tokio::test]

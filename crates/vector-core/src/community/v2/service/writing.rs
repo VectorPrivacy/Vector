@@ -99,8 +99,11 @@ fn usable_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Epoch, [u8;
     let ledger = ch.writers.as_ref()?;
     let certified = ledger.certifier(live.0).is_none() || my_cert(community, ch, live.0).is_some();
     let me = me_pk().ok()?;
-    // Kicked while this epoch held, what this device posts at it stands nowhere: it waits for a fresh one.
-    let kicked = stored_departure_windows(community).get(&me).is_some_and(|spans| kicked_in(spans, ledger.writer_start(live.0).unwrap_or(0), u64::MAX));
+    // Kicked while this epoch held, what this device posts at it stands nowhere: it waits for a fresh
+    // one. A manager's posts stand on the Roster, so it never waits.
+    let banned: std::collections::BTreeSet<String> = crate::db::community::get_community_banlist(&hex(&community.id().0)).unwrap_or_default().into_iter().collect();
+    let manages = Posters::of(community, &roster, &banned).is_ok_and(|p| p.manages(&me));
+    let kicked = !manages && stored_departure_windows(community).get(&me).is_some_and(|spans| kicked_in(spans, ledger.writer_start(live.0).unwrap_or(0), u64::MAX));
     (certified && !kicked && !ledger.stopped(live.0, &me.to_bytes(), u64::MAX)).then_some(live)
 }
 
@@ -174,7 +177,7 @@ async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch:
 }
 
 /// Read `community`'s Guestbook whole this session, as whom a mint leaves out or stops is final.
-async fn read_whole<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
+pub(super) async fn read_whole<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     let mut passes = 0;
     while !guestbook_walked_this_session(community) {
         passes += 1;
