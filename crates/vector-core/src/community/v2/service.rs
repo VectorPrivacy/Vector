@@ -375,6 +375,24 @@ pub async fn send_webxdc_signal<T: Transport + ?Sized>(
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await.map(|_| ())
 }
 
+/// Voice presence (CORD-07 §4): `Some(endpoint)` is a `joined` heartbeat over iroh, None a `left`.
+/// Ephemeral, at the Channel's read address: being in a call is CONNECT, whatever its writers.
+pub async fn send_voice_presence<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    endpoint: Option<[u8; 32]>,
+) -> Result<(), String> {
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    let at_ms = now_ms();
+    let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref(), at_ms);
+    publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
+    let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    let transport_name = endpoint.map(|_| chat::TRANSPORT_IROH.to_string());
+    super::voice::note(&channel, author_pk, at_ms, endpoint.is_some(), transport_name, endpoint, at_ms);
+    Ok(())
+}
+
 /// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
 pub async fn send_typing<T: Transport + ?Sized>(
     transport: &T,

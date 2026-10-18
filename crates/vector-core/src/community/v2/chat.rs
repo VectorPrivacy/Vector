@@ -40,6 +40,10 @@ const TAG_TARGET: &str = "e";
 const TAG_TARGET_AUTHOR: &str = "p";
 const TAG_TARGET_KIND: &str = "k";
 const TAG_EMOJI: &str = "emoji";
+const TAG_TRANSPORT: &str = "transport";
+const TAG_ENDPOINT: &str = "endpoint";
+/// The transport a peer-to-peer call names (CORD-07 §8).
+pub const TRANSPORT_IROH: &str = "iroh";
 
 /// Errors from the chat plane layer (envelope errors ride inside).
 #[derive(Debug)]
@@ -307,6 +311,16 @@ pub fn build_webxdc_rumor(
 
 /// Build a kind-23311 typing rumor — presence of the event is the signal, it
 /// carries nothing. Seal it with `ephemeral: true` so relays never store it.
+/// A voice presence heartbeat (CORD-07 §4): `Some(endpoint)` is `joined` over iroh, None is `left`.
+pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, endpoint: Option<&[u8; 32]>, at_ms: u64) -> UnsignedEvent {
+    let mut tags = stream::channel_binding_tags(channel_id, epoch);
+    if let Some(ep) = endpoint {
+        tags.push(Tag::custom(TAG_TRANSPORT, [TRANSPORT_IROH.to_string()]));
+        tags.push(Tag::custom(TAG_ENDPOINT, [crate::simd::hex::bytes_to_hex_32(ep)]));
+    }
+    stream::build_rumor_ms(kind::VOICE_PRESENCE, author, if endpoint.is_some() { "joined" } else { "left" }, tags, at_ms)
+}
+
 pub fn build_typing_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, at_ms: u64) -> UnsignedEvent {
     let tags = stream::channel_binding_tags(channel_id, epoch);
     stream::build_rumor_ms(kind::TYPING, author, "", tags, at_ms)
@@ -422,6 +436,9 @@ pub enum ChatEvent {
     Webxdc { opened: OpenedStream },
     /// Kind 23311 — the event's presence is the whole signal.
     Typing { opened: OpenedStream },
+    /// Kind 23313 (CORD-07 §4): in a Channel's call, or out of it. A `joined` names how it's
+    /// reached: on iroh, `endpoint`; any other transport leaves it None but still counts.
+    VoicePresence { opened: OpenedStream, joined: bool, transport: Option<String>, endpoint: Option<[u8; 32]> },
 }
 
 impl ChatEvent {
@@ -440,7 +457,8 @@ impl ChatEvent {
             | ChatEvent::Delete { opened, .. }
             | ChatEvent::Edit { opened, .. }
             | ChatEvent::Webxdc { opened }
-            | ChatEvent::Typing { opened } => opened,
+            | ChatEvent::Typing { opened }
+            | ChatEvent::VoicePresence { opened, .. } => opened,
         }
     }
 }
@@ -550,8 +568,9 @@ pub fn with_writer(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<&[u8; 64]>)
 /// Whether a rumor kind moves to a restricted Channel's writer address. Reactions and deletions
 /// stay at the read address: a restricted Channel gates posting, not reacting, and a deletion is
 /// judged by its signer's authority wherever it lands. Typing signals posting, so it moves too.
+/// Voice presence stays: being in a call is CONNECT, not posting.
 pub fn rides_writer_address(kind: u16) -> bool {
-    !matches!(kind, kind::REACTION | kind::DELETE)
+    !matches!(kind, kind::REACTION | kind::DELETE | kind::VOICE_PRESENCE)
 }
 
 /// Open a chat wrap against every `(epoch, secret)` a client holds for one
@@ -584,7 +603,7 @@ pub fn open_chat_event_multi(
 fn is_chat_kind(k: u16) -> bool {
     matches!(
         k,
-        kind::MESSAGE | kind::COMMENT | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING
+        kind::MESSAGE | kind::COMMENT | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING | kind::VOICE_PRESENCE
     )
 }
 
@@ -658,6 +677,19 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
         }
         kind::WEBXDC => Ok(ChatEvent::Webxdc { opened }),
         kind::TYPING => Ok(ChatEvent::Typing { opened }),
+        kind::VOICE_PRESENCE => {
+            let joined = match opened.rumor.content.as_str() {
+                "joined" => true,
+                "left" => false,
+                _ => return Err(ChatError::BadTag("content")),
+            };
+            let transport = unique_tag(&opened.rumor, TAG_TRANSPORT)?.map(|t| value_of(t, TAG_TRANSPORT).map(str::to_string)).transpose()?;
+            let endpoint = match (joined, transport.as_deref()) {
+                (true, Some(TRANSPORT_IROH)) => Some(decode_id32(required_tag(&opened.rumor, TAG_ENDPOINT)?, TAG_ENDPOINT)?),
+                _ => None,
+            };
+            Ok(ChatEvent::VoicePresence { opened, joined, transport, endpoint })
+        }
         k => Err(ChatError::UnknownKind(k)),
     }
 }

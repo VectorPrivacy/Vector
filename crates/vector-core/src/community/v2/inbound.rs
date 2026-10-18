@@ -294,7 +294,7 @@ fn apply_chat_to_state_in(
             let _ = state.remove_message(&target_id);
             Some(ChatPersist::Removed(target_id))
         }
-        ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } => None,
+        ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } | ChatEvent::VoicePresence { .. } => None,
     }
 }
 
@@ -496,6 +496,8 @@ pub enum DispatchedV2 {
     Chat { channel_id: String, event: Box<ChatEvent> },
     /// A typing indicator from `npub` on `channel_id`.
     Typing { channel_id: String, npub: String },
+    /// A voice presence that changed who is in `channel_id`'s call.
+    VoicePresence { channel_id: String },
     /// A Guestbook join/leave for `npub`.
     Presence { npub: String, joined: bool },
     /// A Guestbook Kick naming `target`. Returned unjudged: the store keeps the
@@ -611,6 +613,18 @@ pub fn dispatch_wrap(
 fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::community::ChannelV2, wepoch: Option<crate::community::Epoch>, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
     let (at_ms, author) = (event.opened().at_ms, event.opened().author);
+    // Being in a call is CONNECT, not SEND: a Channel's writers' rules don't judge it.
+    if let ChatEvent::VoicePresence { opened, joined, transport, endpoint } = event {
+        if author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
+            return DispatchedV2::Ignored;
+        }
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        if !super::voice::note(&channel_id, opened.author, at_ms, joined, transport, endpoint, now) {
+            return DispatchedV2::Ignored;
+        }
+        handler.on_voice_presence(&channel_id);
+        return DispatchedV2::VoicePresence { channel_id };
+    }
     match super::service::sort_arrival(super::service::Judge::of(community, ch).as_ref(), event, wepoch) {
         super::service::Arrival::Stands(event) => dispatch_chat_event(event, &channel_id, &community.id().0, my_pubkey, handler),
         super::service::Arrival::Held(marked) => DispatchedV2::Held { channel_id, author, at_ms, marked: marked.map(Box::new) },
@@ -911,6 +925,21 @@ mod tests {
         };
         assert!(matches!(dispatch_wrap(&typing(&read, None), &community, &me.public_key(), &rec), DispatchedV2::Ignored), "nobody shows as typing through the read address");
         assert!(matches!(dispatch_wrap(&typing(&w2, Some(Epoch(2))), &community, &me.public_key(), &rec), DispatchedV2::Typing { .. }), "a writer does");
+        // Being in a call is CONNECT, not posting: presence counts at the read address.
+        let presence = |endpoint: Option<[u8; 32]>, at_ms: u64| {
+            let rumor = chat::build_voice_presence_rumor(member.public_key(), &general, epoch, endpoint.as_ref(), at_ms);
+            chat::seal_chat_rumor(&rumor, &read, &member, Timestamp::from_secs(at_ms / 1000), true).unwrap().0
+        };
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
+        assert!(matches!(dispatch_wrap(&presence(Some([0x44; 32]), now), &community, &me.public_key(), &rec), DispatchedV2::VoicePresence { .. }), "a non-writer is in the call");
+        assert_eq!(super::super::voice::author_of(&ch_hex, &[0x44; 32], now), Some(member.public_key()), "the sealed presence binds its endpoint to them");
+        assert!(matches!(dispatch_wrap(&presence(None, now + 1), &community, &me.public_key(), &rec), DispatchedV2::VoicePresence { .. }));
+        assert!(super::super::voice::present(&ch_hex, now + 1).is_empty(), "and leaves it");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_community_banlist(&cid_hex, &[member.public_key().to_hex()], 1).unwrap();
+        assert!(matches!(dispatch_wrap(&presence(Some([0x45; 32]), now + 2), &community, &me.public_key(), &rec), DispatchedV2::Ignored), "a banned member is in no call");
+        crate::db::community::set_community_banlist(&cid_hex, &[], 2).unwrap();
         // A forged wrap at the writer address fails the signature a reader checks there.
         let mut forged = post(&w2, Some(Epoch(2)), "forged", 30_000);
         forged.sig = post(&w2, Some(Epoch(2)), "other", 30_001).sig;

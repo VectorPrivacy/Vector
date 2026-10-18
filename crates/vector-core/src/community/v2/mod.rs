@@ -24,6 +24,7 @@ pub mod pin_keys;
 pub mod pins;
 pub mod realtime;
 pub mod volley;
+pub mod voice;
 pub mod rekey;
 pub mod roles;
 pub mod service;

@@ -64,6 +64,9 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community typing indicator (ephemeral). `until` is the unix-secs the typer stops being active.
     fn on_community_typing(&self, _chat_id: &str, _npub: &str, _until: u64) {}
 
+    /// Someone joined or left a voice Channel's call, or went stale (`community::v2::voice`).
+    fn on_voice_presence(&self, _channel_id: &str) {}
+
     /// A WebXDC realtime peer signal. `node_addr` = `Some` advertises an Iroh node, `None` = peer-left.
     #[allow(clippy::too_many_arguments)]
     fn on_community_webxdc(
