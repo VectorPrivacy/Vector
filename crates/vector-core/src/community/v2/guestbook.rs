@@ -437,31 +437,30 @@ pub struct MemberState {
     pub rumor_id: [u8; 32],
 }
 
-/// Does `next` beat `prev`? Later ms wins; at a tie a firsthand entry beats a
-/// snapshot seed (a member's own word over the refounder's attestation), then
-/// the lower rumor id. The id tie-break is author-grindable — an accepted
-/// residual: the coalesce is per-npub, so an author only ever grinds ties
-/// against their own entries (CORD-02 §5).
-/// Each member's spans away from the Community, `[from, until)`, `until` open while still away:
-/// the earliest honoured Leave or Kick after a Join opens one, and the next Join or snapshot
-/// seed closes it. Honoured as [`coalesce`] honours them; a Refounding's omission opens none.
+/// A span away from the Community: `[from, until)`, `until` open while still away, and whether an
+/// honoured Kick fell in it.
+pub type Span = (u64, Option<u64>, bool);
+
+/// Each member's spans away from the Community: the earliest honoured Leave or Kick after a Join
+/// opens one, and the next Join or snapshot seed closes it. Honoured as [`coalesce`] honours them;
+/// a Refounding's omission opens none.
 pub fn departure_windows(
     events: &[GuestbookEvent],
     now_ms: u64,
     snapshot_authority: Option<&PublicKey>,
     can_kick: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
-) -> BTreeMap<PublicKey, Vec<(u64, Option<u64>)>> {
+) -> BTreeMap<PublicKey, Vec<Span>> {
     let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
-    // (at, firsthand, rumor id, away): ordered as `supersedes` orders them.
-    let mut by_member: BTreeMap<PublicKey, Vec<(u64, bool, [u8; 32], bool)>> = BTreeMap::new();
+    // (at, firsthand, rumor id, away, kicked): ordered as `supersedes` orders them.
+    let mut by_member: BTreeMap<PublicKey, Vec<(u64, bool, [u8; 32], bool, bool)>> = BTreeMap::new();
     for ev in events.iter().filter(|e| e.entry.at_ms() <= horizon) {
         match &ev.entry {
-            GuestbookEntry::Join { member, at_ms, .. } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, false)),
-            GuestbookEntry::Leave { member, at_ms } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, true)),
-            GuestbookEntry::Kick { actor, target, at_ms, citation } if can_kick(actor, target, citation.as_ref()) => by_member.entry(*target).or_default().push((*at_ms, true, ev.rumor_id, true)),
+            GuestbookEntry::Join { member, at_ms, .. } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, false, false)),
+            GuestbookEntry::Leave { member, at_ms } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, true, false)),
+            GuestbookEntry::Kick { actor, target, at_ms, citation } if can_kick(actor, target, citation.as_ref()) => by_member.entry(*target).or_default().push((*at_ms, true, ev.rumor_id, true, true)),
             GuestbookEntry::Snapshot { refounder, members, at_ms, .. } if snapshot_authority == Some(refounder) => {
                 for m in members {
-                    by_member.entry(*m).or_default().push((*at_ms, false, ev.rumor_id, false));
+                    by_member.entry(*m).or_default().push((*at_ms, false, ev.rumor_id, false, false));
                 }
             }
             _ => {}
@@ -473,19 +472,20 @@ pub fn departure_windows(
             continue;
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2)));
-        let (mut windows, mut open) = (Vec::new(), None);
-        for (at, _, _, away) in entries {
+        let (mut windows, mut open): (Vec<Span>, Option<(u64, bool)>) = (Vec::new(), None);
+        for (at, _, _, away, kicked) in entries {
             match (away, open) {
-                (true, None) => open = Some(at),
-                (false, Some(from)) => {
-                    windows.push((from, Some(at)));
+                (true, None) => open = Some((at, kicked)),
+                (true, Some((from, was))) => open = Some((from, was || kicked)),
+                (false, Some((from, kicked))) => {
+                    windows.push((from, Some(at), kicked));
                     open = None;
                 }
                 _ => {}
             }
         }
-        if let Some(from) = open {
-            windows.push((from, None));
+        if let Some((from, kicked)) = open {
+            windows.push((from, None, kicked));
         }
         if !windows.is_empty() {
             out.insert(member, windows);
@@ -494,6 +494,11 @@ pub fn departure_windows(
     out
 }
 
+/// Does `next` beat `prev`? Later ms wins; at a tie a firsthand entry beats a
+/// snapshot seed (a member's own word over the refounder's attestation), then
+/// the lower rumor id. The id tie-break is author-grindable — an accepted
+/// residual: the coalesce is per-npub, so an author only ever grinds ties
+/// against their own entries (CORD-02 §5).
 fn supersedes(prev: &MemberState, next: &MemberState) -> bool {
     if next.at_ms != prev.at_ms {
         return next.at_ms > prev.at_ms;

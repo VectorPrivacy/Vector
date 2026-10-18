@@ -4516,7 +4516,7 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
             owe_retraction(&conn, community_id, channel_id, since)?;
         }
         for (writer, since) in stop_owes(old.as_deref(), content) {
-            owe_author_retraction_on(&conn, community_id, channel_id, &crate::simd::hex::bytes_to_hex_32(&writer), since)?;
+            owe_author_retraction_on(&conn, community_id, channel_id, &crate::simd::hex::bytes_to_hex_32(&writer), since, None)?;
         }
     }
     Ok(changed > 0)
@@ -4588,22 +4588,44 @@ fn author_retraction_key(community_id: &str, channel_id: &str, author: &str) -> 
     format!("writer_retract_by:{community_id}:{channel_id}:{author}")
 }
 
-/// Owe `channel_id` a retraction of what `author` (hex) posted there from `since_ms`.
-pub fn owe_author_retraction(community_id: &str, channel_id: &str, author: &str, since_ms: u64) -> Result<(), String> {
+/// Owe `channel_id` a retraction of what `author` (hex) posted there from `since_ms`, before
+/// `until_ms` when given.
+pub fn owe_author_retraction(community_id: &str, channel_id: &str, author: &str, since_ms: u64, until_ms: Option<u64>) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    owe_author_retraction_on(&conn, community_id, channel_id, author, since_ms)
+    owe_author_retraction_on(&conn, community_id, channel_id, author, since_ms, until_ms)
 }
 
-fn owe_author_retraction_on(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, author: &str, since_ms: u64) -> Result<(), String> {
+/// Stored as `since:generation:until`, `until` empty when open.
+fn parse_author_owed(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let mut parts = value.split(':');
+    let since = parts.next()?.parse().ok()?;
+    let generation = parts.next().and_then(|g| g.parse().ok()).unwrap_or(0);
+    let until = parts.next().and_then(|u| u.parse().ok());
+    Some((since, generation, until))
+}
+
+fn author_owed_value(since: u64, generation: u64, until: Option<u64>) -> String {
+    format!("{since}:{generation}:{}", until.map_or(String::new(), |u| u.to_string()))
+}
+
+fn owe_author_retraction_on(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, author: &str, since_ms: u64, until_ms: Option<u64>) -> Result<(), String> {
     let key = author_retraction_key(community_id, channel_id, author);
     let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
-    let (since, generation) = held.as_deref().and_then(parse_owed).map_or((since_ms, 1), |(s, g)| (s.min(since_ms), g + 1));
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, format!("{since}:{generation}")]).map_err(|e| format!("owe retraction: {e}"))?;
+    let (since, generation, until) = match held.as_deref().and_then(parse_author_owed) {
+        // The same span closing narrows its own owe; any other range widens it.
+        Some((s, g, u)) => (s.min(since_ms), g + 1, match (u, until_ms) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (None, Some(b)) if s == since_ms => Some(b),
+            _ => None,
+        }),
+        None => (since_ms, 1, until_ms),
+    };
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, author_owed_value(since, generation, until)]).map_err(|e| format!("owe retraction: {e}"))?;
     Ok(())
 }
 
-/// What `community_id` owes one author's posts: `(channel, author hex, since_ms, generation)`.
-pub fn owed_author_retractions(community_id: &str) -> Result<Vec<(String, String, u64, u64)>, String> {
+/// What `community_id` owes one author's posts: `(channel, author hex, since_ms, until_ms, generation)`.
+pub fn owed_author_retractions(community_id: &str) -> Result<Vec<(String, String, u64, Option<u64>, u64)>, String> {
     let prefix = author_retraction_key(community_id, "", "");
     let prefix = &prefix[..prefix.len() - 1];
     let conn = super::get_db_connection_guard_static()?;
@@ -4613,26 +4635,26 @@ pub fn owed_author_retractions(community_id: &str) -> Result<Vec<(String, String
         .flatten()
         .filter_map(|(k, v)| {
             let (channel, author) = k[prefix.len()..].split_once(':')?;
-            let (since, generation) = parse_owed(&v)?;
-            Some((channel.to_string(), author.to_string(), since, generation))
+            let (since, generation, until) = parse_author_owed(&v)?;
+            Some((channel.to_string(), author.to_string(), since, until, generation))
         })
         .collect())
 }
 
 /// Clear one author's owed retraction once done, unless more was owed since it was read.
-pub fn settle_author_retraction(community_id: &str, channel_id: &str, author: &str, since: u64, generation: u64) -> Result<(), String> {
+pub fn settle_author_retraction(community_id: &str, channel_id: &str, author: &str, since: u64, until: Option<u64>, generation: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![author_retraction_key(community_id, channel_id, author), format!("{since}:{generation}")])
+    conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![author_retraction_key(community_id, channel_id, author), author_owed_value(since, generation, until)])
         .map_err(|e| format!("settle retraction: {e}"))?;
     Ok(())
 }
 
 /// The departures this device has already owed take-backs for, by author hex.
-pub fn departures_seen(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>, String> {
+pub fn departures_seen(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<crate::community::v2::guestbook::Span>>, String> {
     Ok(super::settings::get_sql_setting(format!("departures_seen:{community_id}"))?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
 }
 
-pub fn set_departures_seen(community_id: &str, seen: &std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>) -> Result<(), String> {
+pub fn set_departures_seen(community_id: &str, seen: &std::collections::BTreeMap<String, Vec<crate::community::v2::guestbook::Span>>) -> Result<(), String> {
     super::settings::set_sql_setting(format!("departures_seen:{community_id}"), serde_json::to_string(seen).map_err(|e| e.to_string())?)
 }
 
@@ -4783,17 +4805,16 @@ pub fn holds_wraps(community_id: &str) -> bool {
         .is_some()
 }
 
-/// Whether `channel_id` holds a wrap by `author` (hex) waiting for a later judgment.
-pub fn holds_wraps_by(community_id: &str, channel_id: &str, author: &str) -> bool {
-    super::get_db_connection_guard_static()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row("SELECT 1 FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 AND author = ?3 LIMIT 1", params![community_id, channel_id, author], |_| Ok(()))
-                .optional()
-                .ok()
-                .flatten()
-        })
-        .is_some()
+/// Whether `channel_id` holds a wrap by `author` (hex) sent to `address` (a writer address),
+/// waiting for a later judgment.
+pub fn holds_wraps_at(community_id: &str, channel_id: &str, author: &str, address: &[u8; 32]) -> bool {
+    let wraps: Vec<String> = {
+        let Ok(conn) = super::get_db_connection_guard_static() else { return false };
+        let Ok(mut stmt) = conn.prepare("SELECT wrap FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 AND author = ?3") else { return false };
+        let Ok(rows) = stmt.query_map(params![community_id, channel_id, author], |r| r.get::<_, String>(0)) else { return false };
+        rows.flatten().collect()
+    };
+    wraps.iter().any(|w| nostr_sdk::prelude::Event::from_json(dec_txt(w)).is_ok_and(|e| e.pubkey.to_bytes() == *address))
 }
 
 struct DeferredWraps;

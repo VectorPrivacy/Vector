@@ -245,15 +245,15 @@ pub(crate) async fn settle_owed_retractions<T: crate::community::transport::Tran
     let Ok(Some(community)) = crate::db::community::load_community_v2(id) else { return };
     let cid = crate::simd::hex::bytes_to_hex_32(&id.0);
     // A departure is one member's: only their posts are read again, and nothing new is admitted.
-    for (chan, author, since, generation) in crate::db::community::owed_author_retractions(&cid).unwrap_or_default() {
+    for (chan, author, since, until, generation) in crate::db::community::owed_author_retractions(&cid).unwrap_or_default() {
         let (Some(ch), Ok(pk)) = (community.channels.iter().find(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0) == chan), nostr_sdk::prelude::PublicKey::from_hex(&author)) else {
-            let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, generation);
+            let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, until, generation);
             continue;
         };
-        if super::service::retract_by(transport, &community, ch, &pk, since, handler).await.is_err() {
+        if super::service::retract_by(transport, &community, ch, &pk, since, until, handler).await.is_err() {
             return;
         }
-        let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, generation);
+        let _ = crate::db::community::settle_author_retraction(&cid, &chan, &author, since, until, generation);
     }
     // Cleared only once done: a drain cut short leaves it owed.
     for (chan, since, generation) in crate::db::community::owed_retractions(&cid).unwrap_or_default() {
