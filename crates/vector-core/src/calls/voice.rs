@@ -427,7 +427,9 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
 }
 
 fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
-    if let Some(l) = v.links.lock().unwrap_or_else(|e| e.into_inner()).remove(id) {
+    // Out of the lock first: `changed` reads the links again.
+    let removed = v.links.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    if let Some(l) = removed {
         l.conn.close(0u32.into(), why);
         if let Some(m) = &v.media {
             m.remove_peer(id);
@@ -439,6 +441,47 @@ fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_peer_dropped_from_the_call_never_blocks_on_its_own_state() {
+        struct Offline;
+        impl iroh::endpoint::presets::Preset for Offline {
+            fn apply(self, b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+                b.relay_mode(RelayMode::Disabled).crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            }
+        }
+        let bind = || async { Endpoint::builder(Offline).alpns(vec![VOICE_ALPN.to_vec()]).bind().await.unwrap() };
+        let (a, b) = (bind().await, bind().await);
+        let server = b.clone();
+        let accepted = tokio::spawn(async move { server.accept().await.unwrap().await.unwrap() });
+        let conn = a.connect(b.addr(), VOICE_ALPN).await.unwrap();
+        let _held = accepted.await.unwrap();
+        let v = Arc::new(Voice {
+            owner: 0,
+            community: CommunityId([0; 32]),
+            channel: ChannelId([1; 32]),
+            channel_hex: crate::simd::hex::bytes_to_hex_32(&[1; 32]),
+            endpoint: a.clone(),
+            me: nostr_sdk::prelude::Keys::generate().public_key(),
+            links: Mutex::new(HashMap::new()),
+            dialing: Mutex::new(HashSet::new()),
+            media: None,
+            muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
+            nudge: tokio::sync::Notify::new(),
+            tasks: Mutex::new(Vec::new()),
+        });
+        let id = *b.id().as_bytes();
+        link(&v, id, nostr_sdk::prelude::Keys::generate().public_key(), conn);
+        assert_eq!(v.links.lock().unwrap().len(), 1);
+        let (gone, (tx, rx)) = (v.clone(), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            unlink(&gone, &id, b"left");
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok(), "unlinking repaints the state, which reads the links: it must not hold them");
+        assert!(v.links.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn of_a_pair_exactly_one_dials() {
