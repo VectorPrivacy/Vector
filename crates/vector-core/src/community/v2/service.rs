@@ -2983,33 +2983,44 @@ fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> DepartureSp
     guestbook::departure_windows(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick)
 }
 
-/// A departure this device hasn't owed for yet undoes what its member posted from it in every
-/// restricted Channel. Judged against a durable record, so a departure that appears by a Roster
-/// or citation landing later, or a pass cut short, is owed all the same. Only that member's
-/// posts are owed, and only where they posted since.
+/// A departure this device hasn't owed for yet undoes what its member posted at a writer address
+/// from it, in every Channel that keeps a ledger. Judged against a durable record, so a departure
+/// that appears by a Roster or citation landing later, or a pass cut short, is owed all the same.
+/// Only that member's writer posts are owed, never from before the Channel's first writer window.
 pub(crate) fn owe_new_departures(community: &CommunityV2) {
-    let restricted: Vec<String> = community.channels.iter().filter(|c| c.restricted()).map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
-    if restricted.is_empty() {
-        return;
-    }
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let Ok(seen) = crate::db::community::departures_seen(&cid_hex) else { return };
     let now: std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>> = stored_departure_windows(community).iter().map(|(p, w)| (p.to_hex(), w.clone())).collect();
+    if now == seen {
+        return;
+    }
+    let floors: Vec<(String, u64)> = community
+        .channels
+        .iter()
+        .filter_map(|c| {
+            let l = c.writers.as_ref()?;
+            let first = l.entries.first().map(|e| e.at).into_iter().chain(l.retired.iter().map(|r| r.from)).min()?;
+            Some((crate::simd::hex::bytes_to_hex_32(&c.id.0), first))
+        })
+        .collect();
     let mut owed = false;
     for (author, windows) in &now {
         let Some(from) = windows.iter().filter(|w| !seen.get(author).is_some_and(|s| s.iter().any(|v| v.0 == w.0))).map(|w| w.0).min() else { continue };
         let Ok(pk) = PublicKey::from_hex(author) else { continue };
         let Ok(npub) = nostr_sdk::prelude::ToBech32::to_bech32(&pk);
-        for chan in &restricted {
-            if crate::db::events::posts_since_by(chan, from, Some(&npub)).is_ok_and(|p| !p.is_empty()) {
-                if crate::db::community::owe_author_retraction(&cid_hex, chan, author, from).is_err() {
+        for (chan, first) in &floors {
+            let since = from.max(*first);
+            // A read that fails leaves the record unwritten, so the next pass owes it again.
+            let Ok(posts) = crate::db::events::posts_since_by(chan, since, Some(&npub)) else { return };
+            if posts.iter().any(|p| p.writer) {
+                if crate::db::community::owe_author_retraction(&cid_hex, chan, author, since).is_err() {
                     return;
                 }
                 owed = true;
             }
         }
     }
-    if now != seen && crate::db::community::set_departures_seen(&cid_hex, &now).is_ok() && owed {
+    if crate::db::community::set_departures_seen(&cid_hex, &now).is_ok() && owed {
         super::realtime::enqueue_follow(community.id());
     }
 }
@@ -9638,7 +9649,6 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // so a later un-ban can't resurrect a pre-ban Join. Persisted even when the banlist
         // itself was retained — the history is what the suppression reads.
         let _ = crate::db::community::merge_community_ban_marks(&cid_hex, &authority.banned_at);
-        let _ = crate::db::community::merge_ban_windows(&cid_hex, &authority.ban_windows);
         if let Some((banned, version)) = &authority.banlist_persist {
             let mut before = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
             crate::db::community::set_community_banlist(&cid_hex, banned, *version as i64)?;
@@ -10408,8 +10418,6 @@ struct AuthoritySet {
     /// named them, across every edition in the window rather than just the head. Outlives
     /// the ban itself so an un-ban can't resurrect a phantom (see [`fold_members`]).
     banned_at: std::collections::BTreeMap<String, u64>,
-    /// Each npub's spans on the banlist the window shows, in ms: `[from, until)`.
-    ban_windows: std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>,
     /// Every floored role and grant served its held head this fold: data enough that a
     /// held head the Roster refuses is refused on the evidence, not on a withholding.
     complete: bool,
@@ -10446,7 +10454,6 @@ impl AuthoritySet {
             gapped: false,
             banlist_persist: None,
             banned_at: Default::default(),
-            ban_windows: Default::default(),
             complete: false,
             refused: Default::default(),
             carried: Default::default(),
@@ -10724,30 +10731,6 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
             *slot = (*slot).max(p.created_at);
         }
     }
-    // Each npub's spans on the banlist, read across every candidate: an un-ban ends one, so what
-    // they posted while banned stays lost to them.
-    let mut ban_windows: std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>> = std::collections::BTreeMap::new();
-    {
-        let mut lists: Vec<(u64, std::collections::BTreeSet<String>)> = banlist_authored.iter().map(|p| (p.created_at.saturating_mul(1000), super::roles::parse_banlist_content(&p.content).unwrap_or_default().into_iter().collect())).collect();
-        lists.sort_by_key(|l| l.0);
-        for npub in banned_at.keys() {
-            let (mut spans, mut open) = (Vec::new(), None);
-            for (at, list) in &lists {
-                match (list.contains(npub), open) {
-                    (true, None) => open = Some(*at),
-                    (false, Some(from)) => {
-                        spans.push((from, Some(*at)));
-                        open = None;
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(from) = open {
-                spans.push((from, None));
-            }
-            ban_windows.insert(npub.clone(), spans);
-        }
-    }
     let mut banlist_persist: Option<(Vec<String>, u64)> = None;
     let mut banlist_head: Option<FoldedHead> = None;
     let banned: std::collections::BTreeSet<String> = if banlist_authored.is_empty() {
@@ -10826,7 +10809,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         authorized.syncs = fold_syncs(community, editions, floors, &authorized, &banned, &sealed, &mut heads, &mut gapped);
     }
 
-    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, ban_windows, complete, refused, carried, admitted, activated, sealed, converged }
+    AuthoritySet { roles: authorized, banned, heads, gapped, banlist_persist, banned_at, complete, refused, carried, admitted, activated, sealed, converged }
 }
 
 /// Whether `author_hex` could write every overwrite in `scopes` as it stands: what a sync
@@ -25487,12 +25470,14 @@ mod tests {
         // A backstop's read of the Control Plane, not the live follow, is what folds it here.
         bed.swap_to(&member);
         follow_fresh(&bed.relay, community.id()).await.unwrap();
-        let owed = crate::db::community::owed_retractions(&cid_hex).unwrap();
-        assert_eq!(owed.iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex.clone(), stop_at)]);
+        let owed = crate::db::community::owed_author_retractions(&cid_hex).unwrap();
+        assert_eq!(owed.iter().map(|(c, a, s, _)| (c.clone(), a.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex.clone(), w.public_key().to_hex(), stop_at)], "a stop owes its writer's posts alone");
+        assert!(crate::db::community::owed_retractions(&cid_hex).unwrap().is_empty());
         // What is owed while a drain runs survives its clear.
-        crate::db::community::owe_writer_retraction(&cid_hex, &chan_hex, stop_at + 1).unwrap();
-        crate::db::community::settle_retraction(&cid_hex, &chan_hex, owed[0].1, owed[0].2).unwrap();
-        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap().iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex, stop_at)]);
+        let author = w.public_key().to_hex();
+        crate::db::community::owe_author_retraction(&cid_hex, &chan_hex, &author, stop_at + 1).unwrap();
+        crate::db::community::settle_author_retraction(&cid_hex, &chan_hex, &author, owed[0].2, owed[0].3).unwrap();
+        assert_eq!(crate::db::community::owed_author_retractions(&cid_hex).unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -25511,11 +25496,12 @@ mod tests {
         assert!(crate::db::community::owed_retractions(&cid_hex).unwrap().is_empty(), "an open owes nothing");
         // A stop owes from its own entry, never from a post's earlier date.
         let stop_at = now_ms() + 1;
-        let stopped = ledger.appended(stop_at, crate::community::v2::writers::Spell::Stop { writer: Keys::generate().public_key().to_bytes() }).unwrap();
+        let stopped_writer = Keys::generate().public_key();
+        let stopped = ledger.appended(stop_at, crate::community::v2::writers::Spell::Stop { writer: stopped_writer.to_bytes() }).unwrap();
         crate::db::community::set_community_writers(&cid_hex, &chan_hex, &stopped.to_json(), 100, true).unwrap();
         clear_owed(&cid_hex);
         writing::owe_if_moved(&chan_hex, Some(judged_on), 5_000);
-        assert_eq!(crate::db::community::owed_retractions(&cid_hex).unwrap().iter().map(|(c, s, _)| (c.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex, stop_at)]);
+        assert_eq!(crate::db::community::owed_author_retractions(&cid_hex).unwrap().iter().map(|(c, a, s, _)| (c.clone(), a.clone(), *s)).collect::<Vec<_>>(), vec![(chan_hex, stopped_writer.to_hex(), stop_at)]);
     }
 
     #[tokio::test]
@@ -25891,10 +25877,11 @@ mod tests {
         let losing = base.appended(2_000, Spell::Open).unwrap();
         let winning = base.appended(2_500, Spell::Stop { writer: w }).unwrap();
         assert_eq!(crate::db::community::retraction_since(Some(&losing.to_json()), &winning.to_json()), Some(2_000), "the open the switch dropped admitted posts from 2_000");
-        assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &winning.to_json()), Some(2_500));
+        assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &winning.to_json()), None, "a stop is its writer's alone");
+        assert_eq!(crate::db::community::stop_owes(Some(&base.to_json()), &winning.to_json()), vec![(w, 2_500)]);
         assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &losing.to_json()), None, "an open added takes nothing back");
         let dated = base.appended_from(3_000, Spell::Stop { writer: w }, Some(1_500)).unwrap();
-        assert_eq!(crate::db::community::retraction_since(Some(&base.to_json()), &dated.to_json()), Some(1_500), "a stop that records a departure owes from it");
+        assert_eq!(crate::db::community::stop_owes(Some(&base.to_json()), &dated.to_json()), vec![(w, 1_500)], "a stop that records a departure owes from it");
     }
 
     #[tokio::test]
@@ -25906,7 +25893,7 @@ mod tests {
         let at = now_ms();
         let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
         ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Join { member: w.public_key(), invited_by: None, at_ms: at - 5_000 }), at / 1000 - 5).unwrap();
-        let shown = crate::types::Message { id: "a".repeat(64), content: "since".into(), at: at + 1_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&w.public_key()).unwrap()), wrapper_event_id: Some("b".repeat(64)), ..Default::default() };
+        let shown = crate::types::Message { id: "a".repeat(64), content: "since".into(), at: at + 1_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&w.public_key()).unwrap()), wrapper_event_id: Some("b".repeat(64)), writer: true, ..Default::default() };
         crate::db::events::save_message(&chan_hex, &shown).await.unwrap();
         clear_owed(&cid_hex);
         // A Leave from a key that never posted, dated as early as it likes, owes nothing.
@@ -25949,7 +25936,7 @@ mod tests {
         let at = now_ms();
         let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
         ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Join { member: w.public_key(), invited_by: None, at_ms: at - 60_000 }), at / 1000 - 60).unwrap();
-        let shown = crate::types::Message { id: "a".repeat(64), content: "since".into(), at: at + 1_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&w.public_key()).unwrap()), wrapper_event_id: Some("b".repeat(64)), ..Default::default() };
+        let shown = crate::types::Message { id: "a".repeat(64), content: "since".into(), at: at + 1_000, npub: Some(nostr_sdk::prelude::ToBech32::to_bech32(&w.public_key()).unwrap()), wrapper_event_id: Some("b".repeat(64)), writer: true, ..Default::default() };
         crate::db::events::save_message(&chan_hex, &shown).await.unwrap();
         // A Kick from one who may kick only once a Role edit this device hasn't read lands.
         let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, 0).await.unwrap();
@@ -25979,29 +25966,20 @@ mod tests {
         let (wrap, _) = guestbook::seal_guestbook_rumor(&leave, &gb, &w, Timestamp::from_secs(left_at / 1000)).unwrap();
         bed.relay.publish(&wrap, &held().relays).await.unwrap();
         sync_guestbook(&bed.relay, &held()).await.unwrap();
+        // They post on after leaving; this device holds what it can't stand behind.
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let (_, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let cert = cert_for(&held(), &general, live, &w.public_key());
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "after leaving", left_at + 500).await;
+        channel_texts(&bed.relay, &held(), &general).await;
+        assert!(crate::db::community::holds_wraps_by(&crate::simd::hex::bytes_to_hex_32(&community.id().0), &crate::simd::hex::bytes_to_hex_32(&general.0), &w.public_key().to_hex()));
         crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
         refound_community(&bed.relay, &held(), &[]).await.unwrap();
         let ledger = held().channel(&general).unwrap().writers.clone().unwrap();
         assert!(ledger.current_writer().unwrap().0 > live, "the Refounding re-minted");
         assert!(ledger.stopped(live, &w.public_key().to_bytes(), left_at), "a reader who never reads the old Guestbook still sees them stopped from when they left");
         assert!(!ledger.stopped(live, &w.public_key().to_bytes(), left_at - 1));
-    }
-
-    #[tokio::test]
-    async fn an_unban_ends_a_span_on_the_banlist_without_erasing_it() {
-        let (bed, owner, _member, community, _general) = restricted_bed(false).await;
-        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        bed.swap_to(&owner);
-        let w = Keys::generate().public_key().to_hex();
-        set_banlist(&bed.relay, &held(), std::slice::from_ref(&w)).await.unwrap();
-        follow_control(&bed.relay, &held()).await.unwrap();
-        crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        set_banlist(&bed.relay, &held(), &[]).await.unwrap();
-        follow_control(&bed.relay, &held()).await.unwrap();
-        let spans = crate::db::community::ban_windows(&cid_hex).unwrap();
-        let span = spans.get(&w).and_then(|s| s.first()).copied().expect("the ban is remembered");
-        assert!(span.1.is_some_and(|until| until > span.0), "the un-ban closed it: {span:?}");
     }
 
     #[tokio::test]
@@ -26022,40 +26000,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn what_a_writer_posted_while_banned_stays_lost_after_the_unban() {
-        use crate::community::roles::OverwriteTarget;
-        let (bed, owner, member, community, general) = restricted_bed(false).await;
-        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
-        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        bed.swap_to(&owner);
-        let w = Keys::generate();
-        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
-        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
-        let (live, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
-        let cert = cert_for(&held(), &general, live, &w.public_key());
-        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
-        crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        set_banlist(&bed.relay, &held(), &[w.public_key().to_hex()]).await.unwrap();
-        crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        set_banlist(&bed.relay, &held(), &[]).await.unwrap();
-        bed.swap_to(&member);
-        follow_control(&bed.relay, &held()).await.unwrap();
-        let span = crate::db::community::ban_windows(&cid_hex).unwrap().get(&w.public_key().to_hex()).and_then(|s| s.first()).copied().unwrap();
-        let until = span.1.unwrap();
-        bed.swap_to(&owner);
-        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "while banned", span.0 + 10).await;
-        // Nor does one sent across the restrict as if in flight.
-        post_raw(&bed.relay, &held(), &w, &general, &read, community.root_epoch, None, "in flight while banned", span.0 + 20).await;
-        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "after the unban", until + 10).await;
-        bed.swap_to(&member);
-        let texts = channel_texts(&bed.relay, &held(), &general).await;
-        assert!(!texts.contains(&"while banned".to_string()), "an un-ban ends the span, it doesn't erase it");
-        assert!(!texts.contains(&"in flight while banned".to_string()), "nobody vouches for what was posted while away");
-        assert!(texts.contains(&"after the unban".to_string()), "and they post again on the live epoch");
-    }
-
-    #[tokio::test]
     async fn departure_spans_are_folded_once_per_change() {
         let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
         let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -26065,6 +26009,81 @@ mod tests {
         let leave = guestbook::GuestbookEvent { rumor_id: [7; 32], entry: guestbook::GuestbookEntry::Leave { member: w.public_key(), at_ms: now_ms() }, epoch: Some(held().root_epoch.0), observed_at: None };
         ingest_guestbook_event(&held(), leave, now_ms() / 1000).unwrap();
         assert!(stored_departure_windows(&held()).contains_key(&w.public_key()), "a Guestbook write refolds");
+    }
+
+    #[tokio::test]
+    async fn a_ban_stops_a_writer_and_an_unban_takes_them_back_on_a_fresh_epoch() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let (live, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let cert = cert_for(&held(), &general, live, &w.public_key());
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        set_banlist(&bed.relay, &held(), &[w.public_key().to_hex()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        assert_eq!(access_duty(&bed.relay, &held()).await.unwrap().writers.cut, 1, "a ban is a stop on the ledger");
+        assert!(held().channel(&general).unwrap().writers.as_ref().unwrap().stopped(live, &w.public_key().to_bytes(), u64::MAX));
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "while banned", now_ms() + 1_000).await;
+        set_banlist(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(!channel_texts(&bed.relay, &held(), &general).await.contains(&"while banned".to_string()), "an un-ban brings nothing back");
+        // Un-banned, they rejoin.
+        bed.swap_to(&owner);
+        crate::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        let gb = crate::community::v2::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch);
+        let join = guestbook::build_join_rumor(w.public_key(), None, now_ms());
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &w, Timestamp::from_secs(now_ms() / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        access_duty(&bed.relay, &held()).await.unwrap();
+        let fresh = held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0;
+        let scope = crate::community::v2::writers::writer_rekey_scope(&general);
+        let plane = fetch_plane_deliveries(&bed.relay, &held(), &general, scope).await.unwrap();
+        assert!(fresh > live && served_at(&plane, &w.public_key(), scope, fresh, &|_| true), "the un-banned writer posts again on a fresh epoch");
+    }
+
+    #[tokio::test]
+    async fn one_back_from_a_kick_posts_nothing_more_at_that_epoch_whatever_their_join_says() {
+        use crate::community::roles::OverwriteTarget;
+        let (bed, owner, member, community, general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let read = channel_group_key(&community.community_root, &general, community.root_epoch);
+        bed.swap_to(&owner);
+        let w = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &w.public_key(), vec![create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap()]).await.unwrap();
+        set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Member(w.public_key().to_hex()), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let (live, _, writer) = writing::live_writer(&held(), held().channel(&general).unwrap()).unwrap();
+        let cert = cert_for(&held(), &general, live, &w.public_key());
+        let signed = GroupKey::from_parts(writer.keys().clone(), read.conv_key().clone());
+        let gb = crate::community::v2::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch);
+        let kicked_at = now_ms();
+        let kick = guestbook::build_kick_rumor(owner.keys.public_key(), w.public_key(), None, kicked_at);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&kick, &gb, &owner.keys, Timestamp::from_secs(kicked_at / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "while kicked", kicked_at + 500).await;
+        // They come back with a Join dated a moment after the Kick.
+        let join = guestbook::build_join_rumor(w.public_key(), None, kicked_at + 1);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &w, Timestamp::from_secs(kicked_at / 1000)).unwrap();
+        bed.relay.publish(&wrap, &held().relays).await.unwrap();
+        post_certified(&bed.relay, &held(), &w, &general, &signed, community.root_epoch, Some((live, Some(cert))), "after the join", kicked_at + 2_000).await;
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        let texts = channel_texts(&bed.relay, &held(), &general).await;
+        assert!(!texts.contains(&"while kicked".to_string()) && !texts.contains(&"after the join".to_string()), "back, they post on a fresh epoch, never this one");
+        bed.swap_to(&owner);
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        access_duty(&bed.relay, &held()).await.unwrap();
+        let fresh = held().channel(&general).unwrap().writers.as_ref().unwrap().current_writer().unwrap().0;
+        assert!(fresh > live, "the duty restarts them");
     }
 
     fn clear_owed(cid_hex: &str) {

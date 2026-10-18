@@ -247,7 +247,8 @@ impl Ledger {
             return self.entries[start + 1..].iter().take_while(|e| !e.spell.moves()).any(names);
         }
         // Retired: the stops left at the front, before the first entry that moves, inside its window.
-        self.retired.iter().find(|r| r.epoch == epoch).is_some_and(|r| self.entries.iter().take_while(|e| !e.spell.moves()).any(|e| (r.from..r.to).contains(&e.at) && names(e)))
+        // A stop dated with the entry that retired its window was still written inside it.
+        self.retired.iter().find(|r| r.epoch == epoch).is_some_and(|r| self.entries.iter().take_while(|e| !e.spell.moves()).any(|e| (r.from..=r.to).contains(&e.at) && names(e)))
     }
 
     /// Who minted writer `epoch`, while the ledger still holds its entry.

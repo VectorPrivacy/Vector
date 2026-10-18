@@ -68,10 +68,10 @@ impl<'a> Posters<'a> {
 }
 
 
-/// Whether the Roster no longer lets `p` post in `ch`. One who left the Community, or was banned,
-/// needs no stop: the Guestbook and the banlist already stand behind nothing they post.
-fn lost_send(roster: &CommunityRoles, owner_hex: &str, p: &PublicKey, ch: &ChannelV2) -> bool {
-    !may_write(roster, owner_hex, &p.to_hex(), ch)
+/// Whether `p` may no longer post in `ch`: the Roster takes Send, or a ban. One who left the
+/// Community needs no stop line: the Guestbook every reader holds already stops them.
+fn lost_send(roster: &CommunityRoles, owner_hex: &str, banned: &std::collections::BTreeSet<String>, p: &PublicKey, ch: &ChannelV2) -> bool {
+    !may_write(roster, owner_hex, &p.to_hex(), ch) || banned.contains(&p.to_hex())
 }
 
 /// The writer secret this device holds for `ch`'s live writer epoch, given or minted here,
@@ -165,6 +165,54 @@ fn ledger_unread(community: &CommunityV2, ch: &ChannelV2) -> bool {
 /// post there but `cut`, and append it to the ledger. A retry after a failed publish reuses the
 /// secret it already minted, so the blobs it left still serve.
 async fn mint<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<(), String> {
+    let away = stored_departure_windows(community);
+    mint_carrying(transport, community, ch, posters, cut, &away).await
+}
+
+/// [`mint`], first stopping in the epoch it closes each member `away` says left while it held:
+/// a reader who never reads the Guestbook that says so, as one who joins after a Refounding,
+/// learns it from the ledger. A stop that fails leaves the mint for the duty's retry.
+async fn mint_carrying<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey], away: &std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>) -> Result<(), String> {
+    if carry_departures(transport, community, &ch.id, away).await? {
+        let fresh = crate::db::community::load_community_v2(community.id())?.ok_or("this community is gone")?;
+        let ch = fresh.channel(&ch.id).cloned().ok_or("no such channel")?;
+        return mint_over(transport, &fresh, &ch, posters, cut).await;
+    }
+    mint_over(transport, community, ch, posters, cut).await
+}
+
+/// Stop in `channel`'s live epoch, from when they left, each member away while it held whose
+/// posts there this device has seen: anyone else has nothing a later reader could show.
+async fn carry_departures<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, away: &std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>) -> Result<bool, String> {
+    let (cid, chan) = (hex(&community.id().0), hex(&channel.0));
+    let mut carried = false;
+    let mut fresh = community.clone();
+    for (writer, spans) in away {
+        let Some(ch) = fresh.channel(channel) else { return Ok(carried) };
+        let Some(ledger) = ch.writers.as_ref() else { return Ok(carried) };
+        let Some((epoch, _)) = ledger.current_writer() else { return Ok(carried) };
+        let start = ledger.writer_start(epoch).unwrap_or(0);
+        let Some(from) = spans.iter().filter(|(_, until)| until.is_none_or(|u| u > start)).map(|(from, _)| (*from).max(start)).min() else { continue };
+        if ledger.stopped(epoch, &writer.to_bytes(), from) {
+            continue;
+        }
+        let Ok(npub) = nostr_sdk::prelude::ToBech32::to_bech32(writer);
+        let posted = crate::db::events::posts_since_by(&chan, from, Some(&npub))?.iter().any(|p| p.writer) || crate::db::community::holds_wraps_by(&cid, &chan, &writer.to_hex());
+        if !posted {
+            continue;
+        }
+        // At the cap a stop would retire the live entry: the epoch's window is what holds then.
+        if ledger.appended_from(now_ms(), Spell::Stop { writer: writer.to_bytes() }, Some(from)).is_none() {
+            return Ok(carried);
+        }
+        stop_from(transport, &fresh, ch, writer, from).await?;
+        carried = true;
+        fresh = crate::db::community::load_community_v2(community.id())?.ok_or("this community is gone")?;
+    }
+    Ok(carried)
+}
+
+async fn mint_over<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, ch: &ChannelV2, posters: &Posters<'_>, cut: &[PublicKey]) -> Result<(), String> {
     if ledger_unread(community, ch) {
         return Err("this channel's writer ledger can't be read; nothing minted over it".to_string());
     }
@@ -539,30 +587,6 @@ async fn settle_one<T: Transport + ?Sized>(
     }
 }
 
-/// Before a Refounding retires `channel`'s live epoch, stop each member the Roster still lets post
-/// there who is away from the Community, from when they left: a reader who joins after reads only
-/// the new Guestbook, and the ledger the Refounding carries is what tells it. One who lost Send
-/// is already stopped.
-async fn stop_departed_writers<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, channel: &ChannelId, posters: &Posters<'_>, away: &std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>) {
-    let Some(ch) = community.channel(channel) else { return };
-    let gone: Vec<(PublicKey, u64)> = away
-        .iter()
-        .filter_map(|(p, w)| w.last().filter(|w| w.1.is_none()).map(|w| (*p, w.0)))
-        .filter(|(p, _)| may_write(posters.roster, &posters.owner_hex, &p.to_hex(), ch))
-        .collect();
-    for (writer, from) in gone {
-        let Ok(Some(fresh)) = crate::db::community::load_community_v2(community.id()) else { return };
-        let Some(ch) = fresh.channel(channel) else { return };
-        if !stop_fits(ch, &writer) {
-            continue;
-        }
-        if let Err(e) = stop_from(transport, &fresh, ch, &writer, from).await {
-            crate::log_warn!("[v2:writers] couldn't stop a departed writer before the Refounding's re-mint: {e}");
-            return;
-        }
-    }
-}
-
 /// Who epoch `e` vouches for: its minter, and each writer a `trusted` delivery certified.
 fn vouched_at(cid: &[u8; 32], ledger: &Ledger, deliveries: &[rekey::AccessDelivery], trusted: &dyn Fn(&PublicKey, Epoch) -> bool, e: Epoch) -> std::collections::BTreeSet<PublicKey> {
     ledger
@@ -775,7 +799,7 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
         let out: Vec<PublicKey> = vouched(epoch)
             .into_iter()
             .filter(|p| walked && *p != me && !posters.manages(p) && !ledger.stopped(epoch, &p.to_bytes(), now))
-            .filter(|p| lost_send(roster, owner_hex, p, ch))
+            .filter(|p| lost_send(roster, owner_hex, posters.banned, p, ch))
             .filter(|p| me_hex == owner_hex || roster.can_act_on_member(&me_hex, Some(owner_hex), &p.to_hex(), Permissions::MANAGE_CHANNELS))
             .filter(|p| due(&ch.id, Lane::Cut(*p)))
             .collect();
@@ -820,13 +844,17 @@ async fn duty_for<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
     let already = sent.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let now = now_ms();
     let stopped = |p: &PublicKey| ledger.stopped(epoch, &p.to_bytes(), now);
-    let owed = |p: &PublicKey| (posters.writes(p, ch) || posters.manages(p)) && !stopped(p) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes())) && !served(p, epoch) && !cut(p);
+    // Away from the Community while this epoch held: back, they need a fresh one, as if stopped.
+    let away = stored_departure_windows(held);
+    let start = ledger.writer_start(epoch).unwrap_or(0);
+    let was_away = |p: &PublicKey| away.get(p).is_some_and(|spans| spans.iter().any(|(from, until)| *from <= now && until.is_none_or(|u| u > start)));
+    let owed = |p: &PublicKey| (posters.writes(p, ch) || posters.manages(p)) && !stopped(p) && !was_away(p) && !already.contains(&(ch.id.0, epoch.0, p.to_bytes())) && !served(p, epoch) && !cut(p);
     let unserved: Vec<PublicKey> = candidates.iter().filter(|p| **p != me && owed(p)).copied().collect();
     // One this epoch stopped who may post again is owed a fresh epoch, not this one's certificate:
     // judged on a memberlist read whole, and never for a manager, whose posts stand regardless.
     let walked = guestbook_walked_this_session(held);
     // So is one a whole mint left out who, on that memberlist, may post again.
-    let back = walked.then(|| candidates.iter().find(|p| posters.writes(p, ch) && !posters.manages(p) && (stopped(p) || cut(p)))).flatten();
+    let back = walked.then(|| candidates.iter().find(|p| posters.writes(p, ch) && !posters.manages(p) && (stopped(p) || cut(p) || was_away(p)))).flatten();
     if let Some(back) = back {
         if may_manage && due(&ch.id, Lane::Unserved) && backstop_damped(transport, held, ch, posters, Act::Restart(*back), &[Lane::Unserved]).await? {
             done.moved += 1;
@@ -919,7 +947,7 @@ async fn backstop<T: Transport + ?Sized>(transport: &T, held: &CommunityV2, ch: 
             if sync_guestbook(transport, &fresh).await.is_err() {
                 return Ok(Backstop::Short);
             }
-            let lost = |p: &PublicKey| lost_send(&now.roles, &posters.owner_hex, p, &ch);
+            let lost = |p: &PublicKey| lost_send(&now.roles, &posters.owner_hex, posters.banned, p, &ch);
             match act {
                 Act::Stop(p) if !lost(&p) => return Ok(Backstop::StoodDown),
                 Act::Restart(p) if lost(&p) => return Ok(Backstop::StoodDown),
@@ -998,8 +1026,7 @@ pub(crate) struct Judge {
     owner_hex: String,
     banned: Vec<String>,
     members: std::sync::OnceLock<std::collections::HashSet<String>>,
-    departures: std::sync::OnceLock<std::collections::HashMap<[u8; 32], Vec<(u64, Option<u64>)>>>,
-    ban_spans: std::sync::OnceLock<std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>>,
+    departures: std::sync::OnceLock<std::sync::Arc<std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>>>,
     me_manages: bool,
 }
 
@@ -1028,18 +1055,24 @@ impl Judge {
         let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         let me = me_pk().map(|p| p.to_hex()).unwrap_or_default();
         let me_manages = !me.is_empty() && (me == owner_hex || (!banned.contains(&me) && roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_CHANNELS)));
-        Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, banned, members: Default::default(), departures: Default::default(), ban_spans: Default::default(), me_manages })
+        Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, banned, members: Default::default(), departures: Default::default(), me_manages })
     }
 
-    /// Whether `author` was away at `at_ms`: gone from the Community by the Guestbook, or on the
-    /// banlist. A Join or an un-ban ends a span away, it never erases it.
+    fn spans(&self, author: &PublicKey) -> Option<&Vec<(u64, Option<u64>)>> {
+        self.departures.get_or_init(|| stored_departure_windows(&self.community)).get(author)
+    }
+
+    /// Whether the Guestbook records `author` away from the Community at `at_ms`.
     fn departed(&self, author: &PublicKey, at_ms: u64) -> bool {
-        let within = |spans: &Vec<(u64, Option<u64>)>| spans.iter().any(|(from, until)| at_ms >= *from && until.is_none_or(|u| at_ms < u));
-        self.departures
-            .get_or_init(|| stored_departure_windows(&self.community).iter().map(|(p, w)| (p.to_bytes(), w.clone())).collect())
-            .get(&author.to_bytes())
-            .is_some_and(within)
-            || self.ban_spans.get_or_init(|| crate::db::community::ban_windows(&hex(&self.community.id().0)).unwrap_or_default()).get(&author.to_hex()).is_some_and(within)
+        self.spans(author).is_some_and(|spans| spans.iter().any(|(from, until)| at_ms >= *from && until.is_none_or(|u| at_ms < u)))
+    }
+
+    /// Whether `author` went away while writer epoch `e` held, at or before `at_ms`: from then that
+    /// epoch's certificate vouches for nothing they post, whatever Join follows. Coming back takes
+    /// a fresh epoch, as a stop does.
+    fn away_in(&self, e: Epoch, author: &PublicKey, at_ms: u64) -> bool {
+        let start = self.ledger.writer_start(e).unwrap_or(0);
+        self.spans(author).is_some_and(|spans| spans.iter().any(|(from, until)| *from <= at_ms && until.is_none_or(|u| u > start)))
     }
 
     fn member(&self, author: &str) -> bool {
@@ -1092,7 +1125,7 @@ impl Judge {
                     Some(_) => chat::writer_cert_of(&o.rumor).is_some_and(|c| self.ledger.certifies(&self.community.id().0, e, &o.author.to_bytes(), &c)),
                     None => true,
                 };
-                open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms) && !self.departed(&o.author, o.at_ms))
+                open || (certified && self.ledger.writer_address_takes(e, o.at_ms) && !self.ledger.stopped(e, &o.author.to_bytes(), o.at_ms) && !self.away_in(e, &o.author, o.at_ms))
             }
         }
     }
@@ -1178,9 +1211,13 @@ pub(crate) fn writers_head(channel_hex: &str) -> Option<String> {
 /// have read the history before it landed. A move that only reopens owes nothing.
 pub(crate) fn owe_if_moved(channel_hex: &str, judged_on: Option<String>, since: u64) {
     let Some(head) = writers_head(channel_hex) else { return };
-    let Some(from) = crate::db::community::retraction_since(judged_on.as_deref(), &head) else { return };
     let Some(cid) = crate::db::community::community_id_for_channel(channel_hex).ok().flatten() else { return };
-    if crate::db::community::owe_writer_retraction(&cid, channel_hex, since.max(from)).is_ok() {
+    let mut owed = false;
+    for (writer, from) in crate::db::community::stop_owes(judged_on.as_deref(), &head) {
+        owed |= crate::db::community::owe_author_retraction(&cid, channel_hex, &hex(&writer), since.max(from)).is_ok();
+    }
+    let everyone = crate::db::community::retraction_since(judged_on.as_deref(), &head);
+    if everyone.is_some_and(|from| crate::db::community::owe_writer_retraction(&cid, channel_hex, since.max(from)).is_ok()) || owed {
         if let Some(id) = crate::community::id32_from_hex(&cid) {
             crate::community::v2::realtime::enqueue_follow(&crate::community::CommunityId(id));
         }
@@ -1222,11 +1259,12 @@ pub(crate) fn hold(community: &[u8; 32], channel: &ChannelId, wrap: &nostr_sdk::
 struct Rejudged;
 
 /// What a held post is judged on: once none of it moves, judging it again changes nothing.
-fn judged_on(ledger: &Option<Ledger>, roster: &str, members: &std::collections::HashSet<String>, banned: &[String], me_manages: bool, planes: usize) -> u64 {
+fn judged_on(ledger: &Option<Ledger>, roster: &str, members: &std::collections::HashSet<String>, away: &std::collections::BTreeMap<PublicKey, Vec<(u64, Option<u64>)>>, banned: &[String], me_manages: bool, planes: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ledger.as_ref().map(|l| l.to_json()).hash(&mut h);
     roster.hash(&mut h);
+    away.iter().map(|(p, spans)| (p.to_bytes(), spans)).collect::<Vec<_>>().hash(&mut h);
     let mut m: Vec<&String> = members.iter().collect();
     m.sort();
     m.hash(&mut h);
@@ -1252,6 +1290,7 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
     let session = crate::db::current_session();
     let members: std::collections::HashSet<String> = stored_memberlist_strict(community).unwrap_or_default().iter().map(|p| p.to_hex()).collect();
     let roster = crate::db::community::get_community_roles(&cid_hex).ok().and_then(|r| serde_json::to_string(&r).ok()).unwrap_or_default();
+    let away = stored_departure_windows(community);
     // By wrap: one held after the last pass, on whatever state its arrival read, is judged again.
     let last = session.scoped::<Rejudged, std::sync::Mutex<std::collections::HashMap<([u8; 32], String), u64>>>();
     let cid = community.id().0;
@@ -1263,7 +1302,7 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
         if let Some(j) = &judge {
             let _ = j.members.set(members.clone());
         }
-        let print = judged_on(&ch.writers, &roster, &members, judge.as_ref().map_or(&[][..], |j| &j.banned[..]), judge.as_ref().is_some_and(|j| j.me_manages), planes.len());
+        let print = judged_on(&ch.writers, &roster, &members, &away, judge.as_ref().map_or(&[][..], |j| &j.banned[..]), judge.as_ref().is_some_and(|j| j.me_manages), planes.len());
         let judged = |id: &str| last.lock().unwrap_or_else(|e| e.into_inner()).get(&(cid, id.to_string())) == Some(&print);
         if crate::db::community::held_wrap_ids_in(&cid_hex, &channel_hex).unwrap_or_default().iter().all(|id| judged(id)) {
             continue;
@@ -1561,10 +1600,7 @@ pub(super) async fn retire_after_refounding<T: Transport + ?Sized>(transport: &T
     for id in held.channels.iter().filter(|c| c.restricted() && restricts(&roster, c)).map(|c| c.id).collect::<Vec<_>>() {
         let Some(ch) = held.channel(&id) else { continue };
         if ch.writers.as_ref().and_then(|l| l.live()).is_some_and(|(root, ..)| root < held.root_epoch) {
-            stop_departed_writers(transport, &held, &id, &posters, away).await;
-            let Ok(Some(held)) = crate::db::community::load_community_v2(community.id()) else { return };
-            let Some(ch) = held.channel(&id) else { continue };
-            if let Err(e) = mint(transport, &held, ch, &posters, &[]).await {
+            if let Err(e) = mint_carrying(transport, &held, ch, &posters, &[], away).await {
                 crate::log_warn!("[v2:writers] re-mint after the Refounding failed (the duty retries): {e}");
             }
         }

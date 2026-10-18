@@ -983,7 +983,6 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract_by:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key = 'departures_seen:' || ?1"),
-        Some("DELETE FROM settings WHERE key = 'ban_windows:' || ?1"),
     ]
     .into_iter()
     .flatten()
@@ -1685,7 +1684,6 @@ pub fn set_community_roles(
 ) -> Result<(), String> {
     let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
-    bump_membership_generation();
     let json = enc_txt(&serde_json::to_string(roles).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
@@ -1693,6 +1691,7 @@ pub fn set_community_roles(
         params![json, at, community_id],
     )
     .map_err(|e| format!("set roles: {e}"))?;
+    bump_membership_generation();
     Ok(())
 }
 
@@ -2754,7 +2753,6 @@ pub fn set_guestbook(
 ) -> Result<(), String> {
     let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
-    bump_membership_generation();
     let conn = super::get_write_connection_guard_static()?;
     let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
     let enc = enc_txt(&json)?;
@@ -2769,6 +2767,7 @@ pub fn set_guestbook(
     let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
     let entry = cache.entry(community_id.to_string()).or_insert((0, None));
     *entry = (entry.0 + 1, None);
+    bump_membership_generation();
     Ok(())
 }
 
@@ -4516,21 +4515,39 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
         if let Some(since) = retraction_since(old.as_deref(), content) {
             owe_retraction(&conn, community_id, channel_id, since)?;
         }
+        for (writer, since) in stop_owes(old.as_deref(), content) {
+            owe_author_retraction_on(&conn, community_id, channel_id, &crate::simd::hex::bytes_to_hex_32(&writer), since)?;
+        }
     }
     Ok(changed > 0)
 }
 
-/// From when a move from `old` to `new` can change a verdict: the earliest writer or stop entry
-/// it added, or entry a fork switch dropped. An `open` added takes nothing back, and an entry the
-/// cap trimmed from the front moves no window.
+/// From when a move from `old` to `new` can change everyone's verdicts: the earliest writer entry
+/// it added, or entry a fork switch dropped. An `open` added takes nothing back, an entry the cap
+/// trimmed from the front moves no window, and a stop is its writer's alone ([`stop_owes`]).
 pub(crate) fn retraction_since(old: Option<&str>, new: &str) -> Option<u64> {
     use crate::community::v2::writers::{Ledger, Spell};
     let new = Ledger::parse(new)?;
     let old = old.and_then(Ledger::parse);
-    let added = new.entries.iter().filter(|e| matches!(e.spell, Spell::Writer { .. } | Spell::Stop { .. })).filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)));
+    let added = new.entries.iter().filter(|e| matches!(e.spell, Spell::Writer { .. })).filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)));
     let front = new.entries.first().map_or(u64::MAX, |e| e.at);
     let dropped = old.iter().flat_map(|o| o.entries.iter()).filter(|e| !matches!(e.spell, Spell::Other) && e.at >= front && !new.entries.contains(e));
     added.chain(dropped).map(|e| e.effective()).min()
+}
+
+/// The stops a move from `old` to `new` added: whose posts each undoes, and from when.
+pub(crate) fn stop_owes(old: Option<&str>, new: &str) -> Vec<([u8; 32], u64)> {
+    use crate::community::v2::writers::{Ledger, Spell};
+    let Some(new) = Ledger::parse(new) else { return Vec::new() };
+    let old = old.and_then(Ledger::parse);
+    new.entries
+        .iter()
+        .filter(|e| !old.as_ref().is_some_and(|o| o.entries.contains(e)))
+        .filter_map(|e| match e.spell {
+            Spell::Stop { writer } => Some((writer, e.effective())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn retraction_key(community_id: &str, channel_id: &str) -> String {
@@ -4574,6 +4591,10 @@ fn author_retraction_key(community_id: &str, channel_id: &str, author: &str) -> 
 /// Owe `channel_id` a retraction of what `author` (hex) posted there from `since_ms`.
 pub fn owe_author_retraction(community_id: &str, channel_id: &str, author: &str, since_ms: u64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
+    owe_author_retraction_on(&conn, community_id, channel_id, author, since_ms)
+}
+
+fn owe_author_retraction_on(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, author: &str, since_ms: u64) -> Result<(), String> {
     let key = author_retraction_key(community_id, channel_id, author);
     let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
     let (since, generation) = held.as_deref().and_then(parse_owed).map_or((since_ms, 1), |(s, g)| (s.min(since_ms), g + 1));
@@ -4604,36 +4625,6 @@ pub fn settle_author_retraction(community_id: &str, channel_id: &str, author: &s
     conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![author_retraction_key(community_id, channel_id, author), format!("{since}:{generation}")])
         .map_err(|e| format!("settle retraction: {e}"))?;
     Ok(())
-}
-
-/// Each npub's spans on the banlist this device has read, in ms.
-pub fn ban_windows(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>, String> {
-    Ok(super::settings::get_sql_setting(format!("ban_windows:{community_id}"))?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
-}
-
-/// Merge spans a fold read: one it saw end replaces the same span held open, and spans its window
-/// no longer reaches are kept.
-pub fn merge_ban_windows(community_id: &str, read: &std::collections::BTreeMap<String, Vec<(u64, Option<u64>)>>) -> Result<(), String> {
-    if read.is_empty() {
-        return Ok(());
-    }
-    let mut held = ban_windows(community_id)?;
-    let before = held.clone();
-    for (npub, spans) in read {
-        let slot = held.entry(npub.clone()).or_default();
-        for span in spans {
-            match slot.iter_mut().find(|s| s.0 == span.0) {
-                Some(s) if s.1.is_none() => s.1 = span.1,
-                Some(_) => {}
-                None => slot.push(*span),
-            }
-        }
-        slot.sort_by_key(|s| s.0);
-    }
-    if held == before {
-        return Ok(());
-    }
-    super::settings::set_sql_setting(format!("ban_windows:{community_id}"), serde_json::to_string(&held).map_err(|e| e.to_string())?)
 }
 
 /// The departures this device has already owed take-backs for, by author hex.
@@ -4789,6 +4780,19 @@ pub fn holds_wraps(community_id: &str) -> bool {
     super::get_db_connection_guard_static()
         .ok()
         .and_then(|conn| conn.query_row("SELECT 1 FROM community_held_wraps WHERE community_id = ?1 LIMIT 1", params![community_id], |_| Ok(())).optional().ok().flatten())
+        .is_some()
+}
+
+/// Whether `channel_id` holds a wrap by `author` (hex) waiting for a later judgment.
+pub fn holds_wraps_by(community_id: &str, channel_id: &str, author: &str) -> bool {
+    super::get_db_connection_guard_static()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT 1 FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2 AND author = ?3 LIMIT 1", params![community_id, channel_id, author], |_| Ok(()))
+                .optional()
+                .ok()
+                .flatten()
+        })
         .is_some()
 }
 
