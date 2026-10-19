@@ -54,6 +54,8 @@ pub trait VoiceMedia: Send + Sync {
     fn set_volume(&self, _endpoint: &[u8; 32], _gain: f32) {}
     /// A peer with Priority Speaker: while they talk, everyone else plays quieter.
     fn set_priority(&self, _endpoint: &[u8; 32], _on: bool) {}
+    /// Let go of the devices now, though other holders of the engine may outlive this call.
+    fn stop(&self) {}
     /// False when the call went ahead without a microphone: muted, whatever the switch says.
     fn has_mic(&self) -> bool {
         true
@@ -188,18 +190,19 @@ pub fn may_connect(community: &CommunityV2, channel: &ChannelId, member: &Public
 }
 
 /// Whether `member` is heard: Speak, not under a Timeout, and not muted or deafened by a moderator.
+/// The original roles carry no voice bits, but a Timeout and a moderator's mute hold there too.
 pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKey) -> bool {
     let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let chan = crate::simd::hex::bytes_to_hex_32(&channel.0);
     let hex = member.to_hex();
-    let owner = community.owner().ok().map(|o| o.to_hex());
-    let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
-    if roster.everyone.is_none() {
-        return true;
-    }
     let timed_out = crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member));
     let (server_muted, server_deafened) = presence::server_state(&chan, member);
-    !timed_out && !server_muted && !server_deafened && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
+    if timed_out || server_muted || server_deafened {
+        return false;
+    }
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
+    roster.everyone.is_none() || roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
 }
 
 /// Whether `member` holds `bit` in this Channel; on the original roles, nobody holds the voice bits.
@@ -211,17 +214,16 @@ fn has_bit(community: &CommunityV2, channel: &ChannelId, member: &PublicKey, bit
     roster.everyone.is_some() && roster.channel_permissions(owner.as_deref(), &member.to_hex(), &chan, community.channel(channel).is_some_and(|c| c.private)).contains(bit)
 }
 
-/// Whether `member`'s screen is shown: Video, and not under a Timeout (CORD-07 §7).
+/// Whether `member`'s camera or screen is shown: Video, and not under a Timeout (CORD-07 §7).
 pub fn may_video(community: &CommunityV2, channel: &ChannelId, member: &PublicKey) -> bool {
+    if crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member)) {
+        return false;
+    }
     let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let chan = crate::simd::hex::bytes_to_hex_32(&channel.0);
     let owner = community.owner().ok().map(|o| o.to_hex());
     let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
-    if roster.everyone.is_none() {
-        return true;
-    }
-    let timed_out = crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member));
-    !timed_out && roster.channel_permissions(owner.as_deref(), &member.to_hex(), &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::VIDEO)
+    roster.everyone.is_none() || roster.channel_permissions(owner.as_deref(), &member.to_hex(), &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::VIDEO)
 }
 
 fn voice_relays(community: &CommunityV2) -> Vec<RelayUrl> {
@@ -338,7 +340,11 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         }
         crate::rt::time::sleep(Duration::from_millis(1500)).await;
     }
-    *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
+    // A join that raced this one installed its call meanwhile: that call goes, not just its slot.
+    let raced = VOICE.lock().unwrap_or_else(|e| e.into_inner()).replace(v.clone());
+    if let Some(old) = raced {
+        crate::db::spawn_bound(shutdown(old));
+    }
     if let Some(m) = v.engine() {
         apply_to(&v, &*m);
         m.chime(Chime::Joined);
@@ -358,6 +364,12 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
 /// Leave the call, if in one: a `left` is best-effort, staleness heals a missed one.
 pub async fn leave() {
     let Some(v) = VOICE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    shutdown(v).await;
+    crate::emit_event("voice_state", &serde_json::Value::Null);
+}
+
+/// Take a call down: its tasks, its links, its devices, a `left`, its endpoint.
+async fn shutdown(v: Arc<Voice>) {
     if let Some(m) = v.engine() {
         m.chime(Chime::Left);
     }
@@ -373,10 +385,11 @@ pub async fn leave() {
     }
     // The microphone closes now, not when the last task holding the session lets go.
     let engine = v.media.lock().unwrap_or_else(|e| e.into_inner()).take();
-    drop(engine);
+    if let Some(engine) = engine {
+        engine.stop();
+    }
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
-    crate::emit_event("voice_state", &serde_json::Value::Null);
 }
 
 /// Start or stop sending our camera or screen to whoever watches (CORD-07 §6). Video is judged
@@ -619,6 +632,10 @@ pub fn set_peer_volume(member: &PublicKey, gain: f32) -> Result<(), String> {
 fn reannounce(v: &Arc<Voice>) {
     let v = v.clone();
     crate::db::spawn_bound(async move {
+        // A call left meanwhile must not announce itself joined after its `left`.
+        if !live().is_some_and(|now| Arc::ptr_eq(&now, &v)) {
+            return;
+        }
         if let Err(e) = announce(&v, true).await {
             crate::log_warn!("[voice] presence update failed: {e}");
         }
@@ -692,8 +709,12 @@ fn apply_to(v: &Voice, m: &dyn VoiceMedia) {
     m.set_deafened(deafened);
 }
 
+/// Repaint, if this is still the live call: one taken down meanwhile paints nothing.
 fn changed(v: &Voice) {
-    crate::emit_event("voice_state", &state(v));
+    let state = state(v);
+    if live().is_some_and(|now| std::ptr::eq(Arc::as_ptr(&now), v)) {
+        crate::emit_event("voice_state", &state);
+    }
 }
 
 /// Who is speaking, five times a second while there is audio to show it.
@@ -711,9 +732,12 @@ async fn levels(v: Arc<Voice>) {
 pub async fn restart_audio() {
     let Some(v) = live() else { return };
     let Ok(platform) = super::platform::get() else { return };
-    // The old engine lets go of the devices before the new one opens them.
+    // The old engine lets go of the devices before the new one opens them, though a task may
+    // still hold it for a moment.
     let old = v.media.lock().unwrap_or_else(|e| e.into_inner()).take();
-    drop(old);
+    if let Some(old) = old {
+        old.stop();
+    }
     let fresh: Arc<dyn VoiceMedia> = match platform.start_voice().await {
         Ok(m) => Arc::from(m),
         Err(e) => {
@@ -723,6 +747,8 @@ pub async fn restart_audio() {
         }
     };
     apply_to(&v, &*fresh);
+    // Installed before the peers are added: a link landing meanwhile adds itself to it too.
+    *v.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&fresh));
     let community = held(&v.community).ok();
     let links: Vec<([u8; 32], PublicKey, Connection)> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, l)| (*id, l.author, l.conn.clone())).collect();
     for (id, author, conn) in links {
@@ -730,9 +756,9 @@ pub async fn restart_audio() {
         fresh.set_volume(&id, peer_volume(&author));
         if let Some(c) = &community {
             fresh.set_audible(&id, may_speak(c, &v.channel, &author));
+            fresh.set_priority(&id, has_bit(c, &v.channel, &author, Permissions::PRIORITY_SPEAKER));
         }
     }
-    *v.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
     changed(&v);
 }
 
@@ -768,7 +794,16 @@ async fn heartbeat(v: Arc<Voice>) {
 async fn dialer(v: Arc<Voice>) {
     let my_id = *v.endpoint.id().as_bytes();
     loop {
-        let Ok(community) = held(&v.community) else { return };
+        // Gone ends the upkeep; a failed read only skips this pass.
+        let community = match crate::db::community::load_community_v2(&v.community) {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                crate::log_warn!("[voice] mesh upkeep skipped a pass: {e}");
+                crate::rt::time::sleep(DIAL_EVERY).await;
+                continue;
+            }
+        };
         let present = presence::present(&v.channel_hex, now_ms());
         let gone: Vec<[u8; 32]> = {
             let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -789,6 +824,15 @@ async fn dialer(v: Arc<Voice>) {
             }
         }
         video::revalidate(&v, |author| may_video(&community, &v.channel, author));
+        // Video lost while sending: stop, as every receiver already has.
+        let sending = v.video.sending();
+        if sending.any() && !may_video(&community, &v.channel, &v.me) {
+            for kind in [crate::calls::wire::VideoKind::Camera, crate::calls::wire::VideoKind::Screen] {
+                let _ = video::set_sending(&v, kind, false);
+            }
+            reannounce(&v);
+            changed(&v);
+        }
         for p in present.iter().filter(|p| p.author != v.me) {
             let (Some(ep), Some(relay)) = (p.endpoint, p.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok())) else { continue };
             let busy = v.links.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&ep) || v.dialing.lock().unwrap_or_else(|e| e.into_inner()).contains(&ep);

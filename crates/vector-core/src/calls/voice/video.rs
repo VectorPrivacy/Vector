@@ -2,14 +2,19 @@
 //! encodes each picture once; each frame goes to every member who asked for that picture, one QUIC
 //! stream per frame, as in a 1:1 call. A member only receives what it shows, so a call of several
 //! costs a sender one upload per viewer, not per member.
+//!
+//! One viewer never holds the rest back: a frame is never queued behind a viewer's stream credit,
+//! a viewer that keeps falling behind stops steering the shared rate and the keyframe cadence, and
+//! catches up from the next keyframe.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use iroh::endpoint::{Connection, VarInt};
+use futures_util::FutureExt;
+use iroh::endpoint::{Connection, RecvStream, VarInt};
 use nostr_sdk::prelude::PublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -19,7 +24,7 @@ use super::Voice;
 use crate::calls::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_PEER_FRAME};
 use crate::calls::platform::LinkConn;
 use crate::calls::rate::{Rung, CAMERA_LADDER, SCREEN_LADDER, SCREEN_RELAY_CAP};
-use crate::calls::wire::{Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME};
+use crate::calls::wire::{Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
 use crate::rt::time::timeout;
 
 /// A unidirectional stream's first byte: what it carries.
@@ -36,8 +41,16 @@ const ACK_SLACK_MS: u64 = 60;
 const STALE_MIN: Duration = Duration::from_millis(400);
 const STALE_KEY_MIN: Duration = Duration::from_secs(2);
 const INBOUND_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
-/// Keyframes are forced, and asked of a sender, this often at most.
+/// How long a frame waits for a busy webview before that picture restarts from a keyframe.
+const TO_WEB_WAIT: Duration = Duration::from_millis(250);
+/// Keyframes are forced, and asked of a sender, this often at most; one viewer's own requests are
+/// honoured less often, and a viewer still waiting gets one at least this often regardless.
 const KEY_GAP: Duration = Duration::from_secs(1);
+const VIEWER_KEY_GAP: Duration = Duration::from_secs(3);
+/// Seconds in a row with losses before a viewer counts as behind.
+const BEHIND_AFTER_SECS: u32 = 3;
+/// A watched picture its sender says is on, with no frame this long, is asked for again.
+const REWATCH_AFTER: Duration = Duration::from_secs(4);
 /// Where each picture starts, and how far it may climb through relays and when every viewer is
 /// reached directly.
 const SCREEN_START: usize = 2;
@@ -69,11 +82,25 @@ pub(super) struct Out {
     want: Mutex<Tracks>,
     in_flight: AtomicUsize,
     need_key: [AtomicBool; 2],
+    /// Losses this second, and seconds in a row that had some.
+    stale: AtomicU32,
+    bad_secs: AtomicU32,
+    /// Too far behind to steer the rate or force keyframes; it catches up on the next keyframe.
+    behind: AtomicBool,
+    last_key_request: Mutex<Option<Instant>>,
 }
 
 impl Out {
-    fn new(want: Tracks) -> Self {
-        Self { want: Mutex::new(want), in_flight: AtomicUsize::new(0), need_key: [AtomicBool::new(true), AtomicBool::new(true)] }
+    fn new() -> Self {
+        Self {
+            want: Mutex::new(Tracks::default()),
+            in_flight: AtomicUsize::new(0),
+            need_key: [AtomicBool::new(true), AtomicBool::new(true)],
+            stale: AtomicU32::new(0),
+            bad_secs: AtomicU32::new(0),
+            behind: AtomicBool::new(false),
+            last_key_request: Mutex::new(None),
+        }
     }
 
     fn wants(&self, kind: VideoKind) -> bool {
@@ -88,14 +115,23 @@ pub(super) struct Video {
     sending: Mutex<Tracks>,
     /// Who asked for which of our pictures.
     watchers: Mutex<HashMap<[u8; 32], Arc<Out>>>,
+    /// Each link's controls, sent in order on it.
+    controls: Mutex<HashMap<[u8; 32], mpsc::UnboundedSender<Ctl>>>,
     /// Which pictures we asked for, by member: one who reconnects is asked again.
     watching: Mutex<HashMap<PublicKey, Tracks>>,
-    /// Pictures whose next frame we take must be a keyframe.
+    watch_since: Mutex<HashMap<PublicKey, Instant>>,
+    /// Pictures whose next frame we take must be a keyframe, and when each last showed a frame.
     resync: Mutex<HashSet<(PublicKey, usize)>>,
+    last_frame: Mutex<HashMap<(PublicKey, usize), Instant>>,
+    last_rewatch: Mutex<HashMap<PublicKey, Instant>>,
     codec: Mutex<Option<VideoCodec>>,
     rung: [AtomicUsize; 2],
-    stale: AtomicU64,
+    /// A rate or codec the webview hasn't taken yet: its queue was full.
+    rate_unsent: [AtomicBool; 2],
+    codec_unsent: AtomicBool,
     clean_secs: AtomicU32,
+    /// The viewer count moved: the next tick repaints, however often a peer flips it.
+    state_dirty: AtomicBool,
     last_key_forced: [Mutex<Option<Instant>>; 2],
     last_key_asked: Mutex<HashMap<(PublicKey, usize), Instant>>,
 }
@@ -104,6 +140,27 @@ fn ladder(kind: VideoKind) -> &'static [Rung] {
     match kind {
         VideoKind::Camera => &CAMERA_LADDER,
         VideoKind::Screen => &SCREEN_LADDER,
+    }
+}
+
+/// What a second's losses do to a picture's rung: `stale` of the `active` viewers (those not
+/// behind) lost frames. Down when a third of them did; up after a run of clean seconds.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    Down,
+    Up,
+    Hold,
+}
+
+fn step(stale: usize, active: usize, clean_secs: u32) -> Step {
+    if active == 0 {
+        Step::Hold
+    } else if stale > 0 && stale >= active.div_ceil(3) {
+        Step::Down
+    } else if stale == 0 && clean_secs >= CLIMB_AFTER_SECS {
+        Step::Up
+    } else {
+        Step::Hold
     }
 }
 
@@ -117,13 +174,18 @@ impl Video {
         if !self.sending().screen {
             return 0;
         }
-        let outs: Vec<Arc<Out>> = self.watchers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-        outs.iter().filter(|o| o.wants(VideoKind::Screen)).count() as u32
+        self.outs().iter().filter(|o| o.wants(VideoKind::Screen)).count() as u32
+    }
+
+    fn outs(&self) -> Vec<Arc<Out>> {
+        self.watchers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
     }
 
     #[cfg(test)]
     pub(super) fn add_watcher(&self, id: [u8; 32]) {
-        self.watchers.lock().unwrap().insert(id, Arc::new(Out::new(Tracks { camera: true, screen: true })));
+        let out = Out::new();
+        *out.want.lock().unwrap() = Tracks { camera: true, screen: true };
+        self.watchers.lock().unwrap().insert(id, Arc::new(out));
     }
 
     #[cfg(test)]
@@ -131,11 +193,10 @@ impl Video {
         *self.sending.lock().unwrap() = tracks;
     }
 
-    fn tell(&self, msg: &ToLink) {
+    /// Whether the webview took it; a full queue drops it.
+    fn tell(&self, msg: &ToLink) -> bool {
         let tx = self.to_web.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(tx) = tx {
-            let _ = tx.try_send(Bytes::from(control(msg)));
-        }
+        tx.is_some_and(|tx| tx.try_send(Bytes::from(control(msg))).is_ok())
     }
 
     fn rung(&self, kind: VideoKind) -> Rung {
@@ -145,7 +206,15 @@ impl Video {
 
     fn tell_rung(&self, kind: VideoKind) {
         let r = self.rung(kind);
-        self.tell(&ToLink::Rate { kind, kbps: r.kbps, width: r.width, height: r.height, fps: r.fps });
+        let told = self.tell(&ToLink::Rate { kind, kbps: r.kbps, width: r.width, height: r.height, fps: r.fps });
+        self.rate_unsent[kind.index()].store(!told, Ordering::SeqCst);
+    }
+
+    fn tell_codec(&self) {
+        let codec = *self.codec.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(codec) = codec {
+            self.codec_unsent.store(!self.tell(&ToLink::Codec { codec }), Ordering::SeqCst);
+        }
     }
 
     /// One keyframe of that picture for every viewer, a second apart at most.
@@ -165,6 +234,16 @@ impl Video {
         let s = self.sending();
         KINDS.iter().filter(|k| s.has(**k)).map(|k| self.rung(*k).fps as u64).sum::<u64>().max(1)
     }
+
+    /// A viewer lost a frame of that picture: it waits for a keyframe, which only a viewer not
+    /// already behind may force.
+    fn lost(&self, out: &Out, kind: VideoKind) {
+        out.need_key[kind.index()].store(true, Ordering::SeqCst);
+        out.stale.fetch_add(1, Ordering::SeqCst);
+        if !out.behind.load(Ordering::SeqCst) {
+            self.force_key(kind);
+        }
+    }
 }
 
 /// Take the webview's video link for this call and keep the pictures' rates; the tasks end with it.
@@ -182,27 +261,30 @@ pub(super) fn stop(v: &Voice) {
     }
     v.video.to_web.lock().unwrap_or_else(|e| e.into_inner()).take();
     *v.video.sending.lock().unwrap_or_else(|e| e.into_inner()) = Tracks::default();
+    v.video.controls.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-/// A peer joined the mesh: read what they send us on streams, and if we watch them, ask this
-/// connection for it.
+/// A peer joined the mesh: its controls go out in order on this connection, we read what it sends
+/// on streams, and if we watch it, this connection is asked for it.
 pub(super) fn on_link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
+    let (tx, rx) = mpsc::unbounded_channel::<Ctl>();
+    v.video.controls.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+    crate::db::spawn_bound(send_controls(conn.clone(), rx));
     let want = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(&author).copied();
     if let Some(want) = want.filter(|w| w.any()) {
-        {
-            let mut resync = v.video.resync.lock().unwrap_or_else(|e| e.into_inner());
-            for kind in KINDS.into_iter().filter(|k| want.has(*k)) {
-                resync.insert((author, kind.index()));
-            }
-        }
-        send_ctl(conn.clone(), Ctl::Watch { camera: want.camera, screen: want.screen });
+        mark_resync(v, &author, want);
+        send_ctl(v, &id, Ctl::Watch { camera: want.camera, screen: want.screen });
     }
     crate::db::spawn_bound(inbound(v.clone(), id, author, conn));
 }
 
 /// A peer's connection went: nothing goes to it now.
 pub(super) fn on_unlink(v: &Voice, id: &[u8; 32]) {
-    v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    let gone = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    v.video.controls.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    if gone.is_some_and(|o| o.wants(VideoKind::Screen)) {
+        v.video.state_dirty.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Start or stop sending a picture. Presence says so, so every member can see it.
@@ -228,8 +310,7 @@ pub(super) fn set_sending(v: &Arc<Voice>, kind: VideoKind, on: bool) -> Result<(
         *v.video.last_key_forced[kind.index()].lock().unwrap_or_else(|e| e.into_inner()) = None;
         v.video.force_key(kind);
     }
-    let outs: Vec<Arc<Out>> = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-    for out in outs {
+    for out in v.video.outs() {
         out.need_key[kind.index()].store(true, Ordering::SeqCst);
     }
     Ok(())
@@ -252,14 +333,10 @@ pub(super) fn watch(v: &Arc<Voice>, author: &PublicKey, want: Tracks) -> Result<
     if before == want {
         return Ok(());
     }
-    {
-        let mut resync = v.video.resync.lock().unwrap_or_else(|e| e.into_inner());
-        for kind in KINDS.into_iter().filter(|k| want.has(*k) && !before.has(*k)) {
-            resync.insert((*author, kind.index()));
-        }
-    }
-    if let Some(conn) = conn_of(v, author) {
-        send_ctl(conn, Ctl::Watch { camera: want.camera, screen: want.screen });
+    v.video.watch_since.lock().unwrap_or_else(|e| e.into_inner()).insert(*author, Instant::now());
+    mark_resync(v, author, Tracks { camera: want.camera && !before.camera, screen: want.screen && !before.screen });
+    if let Some(id) = endpoint_of(v, author) {
+        send_ctl(v, &id, Ctl::Watch { camera: want.camera, screen: want.screen });
     }
     Ok(())
 }
@@ -269,13 +346,28 @@ pub(super) fn revalidate(v: &Voice, may_video: impl Fn(&PublicKey) -> bool) {
     v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).retain(|author, _| may_video(author));
 }
 
-fn conn_of(v: &Voice, author: &PublicKey) -> Option<Connection> {
-    v.links.lock().unwrap_or_else(|e| e.into_inner()).values().find(|l| l.author == *author).map(|l| l.conn.clone())
+fn endpoint_of(v: &Voice, author: &PublicKey) -> Option<[u8; 32]> {
+    v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(_, l)| l.author == *author).map(|(id, _)| *id)
 }
 
-fn send_ctl(conn: Connection, ctl: Ctl) {
-    let Ok(body) = serde_json::to_vec(&ctl) else { return };
-    crate::db::spawn_bound(async move {
+fn mark_resync(v: &Voice, author: &PublicKey, kinds: Tracks) {
+    let mut resync = v.video.resync.lock().unwrap_or_else(|e| e.into_inner());
+    for kind in KINDS.into_iter().filter(|k| kinds.has(*k)) {
+        resync.insert((*author, kind.index()));
+    }
+}
+
+fn send_ctl(v: &Voice, id: &[u8; 32], ctl: Ctl) {
+    if let Some(tx) = v.video.controls.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+        let _ = tx.send(ctl);
+    }
+}
+
+/// One link's controls, one stream each, in the order they were asked: a quick unwatch and watch
+/// must not land the other way round.
+async fn send_controls(conn: Connection, mut rx: mpsc::UnboundedReceiver<Ctl>) {
+    while let Some(ctl) = rx.recv().await {
+        let Ok(body) = serde_json::to_vec(&ctl) else { continue };
         let sent = async {
             let mut s = conn.open_uni().await.map_err(|e| e.to_string())?;
             let mut msg = Vec::with_capacity(1 + body.len());
@@ -284,10 +376,17 @@ fn send_ctl(conn: Connection, ctl: Ctl) {
             s.write_all(&msg).await.map_err(|e| e.to_string())?;
             s.finish().map_err(|e| e.to_string())
         };
-        if let Err(e) = timeout(Duration::from_secs(5), sent).await.unwrap_or_else(|_| Err("timed out".into())) {
-            crate::log_debug!("[voice] video control not sent: {e}");
+        match timeout(Duration::from_secs(5), sent).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                crate::log_debug!("[voice] video control not sent: {e}");
+                if conn.close_reason().is_some() {
+                    return;
+                }
+            }
+            Err(_) => crate::log_debug!("[voice] video control timed out"),
         }
-    });
+    }
 }
 
 /// Ask a sender for a keyframe of one picture, a second apart at most.
@@ -300,16 +399,8 @@ fn ask_key(v: &Voice, author: &PublicKey, kind: VideoKind) {
         }
         asked.insert(key, Instant::now());
     }
-    if let Some(conn) = conn_of(v, author) {
-        send_ctl(conn, Ctl::Key { kind });
-    }
-}
-
-/// Every picture we watch starts again from a keyframe.
-fn resync_all(v: &Voice, author: &PublicKey, want: Tracks) {
-    for kind in KINDS.into_iter().filter(|k| want.has(*k)) {
-        v.video.resync.lock().unwrap_or_else(|e| e.into_inner()).insert((*author, kind.index()));
-        ask_key(v, author, kind);
+    if let Some(id) = endpoint_of(v, author) {
+        send_ctl(v, &id, Ctl::Key { kind });
     }
 }
 
@@ -320,12 +411,12 @@ async fn link_loop(v: Arc<Voice>, mut taker: mpsc::Receiver<LinkConn>) {
         // Fresh decoders on the other side start from keyframes.
         let watching: Vec<(PublicKey, Tracks)> = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(a, t)| (*a, *t)).collect();
         for (author, want) in watching {
-            resync_all(&v, &author, want);
+            mark_resync(&v, &author, want);
+            for kind in KINDS.into_iter().filter(|k| want.has(*k)) {
+                ask_key(&v, &author, kind);
+            }
         }
-        let codec = *v.video.codec.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(codec) = codec {
-            v.video.tell(&ToLink::Codec { codec });
-        }
+        v.video.tell_codec();
         let sending = v.video.sending();
         for kind in KINDS.into_iter().filter(|k| sending.has(*k)) {
             v.video.tell_rung(kind);
@@ -335,15 +426,13 @@ async fn link_loop(v: Arc<Voice>, mut taker: mpsc::Receiver<LinkConn>) {
                 Some(LinkMsg::Frame { header, .. }) => {
                     let kind = VideoKind::from_flags(header.flags);
                     if v.video.sending().has(kind) {
-                        fan_out(&v, kind, msg.slice(1..), header).await;
+                        fan_out(&v, kind, msg.slice(1..), header);
                     }
                 }
                 Some(LinkMsg::Control(FromLink::Caps { encode, .. })) => {
                     let codec = if encode.iter().any(|c| c == "h264") { Some(VideoCodec::H264) } else if encode.iter().any(|c| c == "vp8") { Some(VideoCodec::Vp8) } else { None };
                     *v.video.codec.lock().unwrap_or_else(|e| e.into_inner()) = codec;
-                    if let Some(codec) = codec {
-                        v.video.tell(&ToLink::Codec { codec });
-                    }
+                    v.video.tell_codec();
                 }
                 Some(LinkMsg::Control(FromLink::LostFrom { peer, kind })) => {
                     let Ok(author) = PublicKey::from_hex(&peer) else { continue };
@@ -365,9 +454,13 @@ async fn link_loop(v: Arc<Voice>, mut taker: mpsc::Receiver<LinkConn>) {
 
 /// One encoded frame to everyone watching that picture. Streams to a viewer open in frame order, so
 /// their reader sees a gap only where a frame really went missing.
-async fn fan_out(v: &Arc<Voice>, kind: VideoKind, frame: Bytes, header: VideoHeader) {
+fn fan_out(v: &Arc<Voice>, kind: VideoKind, frame: Bytes, header: VideoHeader) {
+    let mut msg = BytesMut::with_capacity(1 + frame.len());
+    msg.extend_from_slice(&[STREAM_FRAME]);
+    msg.extend_from_slice(&frame);
+    let msg = msg.freeze();
     for (conn, out) in targets(v, kind) {
-        ship(v, conn, out, kind, frame.clone(), header).await;
+        ship(v, conn, out, kind, msg.clone(), header);
     }
 }
 
@@ -380,12 +473,16 @@ pub(super) fn targets(v: &Voice, kind: VideoKind) -> Vec<(Connection, Arc<Out>)>
     watchers.into_iter().filter_map(|(id, out)| links.get(&id).map(|l| (l.conn.clone(), out))).collect()
 }
 
-async fn ship(v: &Arc<Voice>, conn: Connection, out: Arc<Out>, kind: VideoKind, frame: Bytes, header: VideoHeader) {
+/// One frame to one viewer, never waiting on them: a viewer out of stream credit or this far behind
+/// skips to the next keyframe.
+fn ship(v: &Arc<Voice>, conn: Connection, out: Arc<Out>, kind: VideoKind, msg: Bytes, header: VideoHeader) {
     let key = header.is_key();
     let i = kind.index();
     if out.need_key[i].load(Ordering::SeqCst) {
         if !key {
-            v.video.force_key(kind);
+            if !out.behind.load(Ordering::SeqCst) {
+                v.video.force_key(kind);
+            }
             return;
         }
         out.need_key[i].store(false, Ordering::SeqCst);
@@ -394,37 +491,22 @@ async fn ship(v: &Arc<Voice>, conn: Connection, out: Arc<Out>, kind: VideoKind, 
         let paths = conn.paths();
         paths.iter().find(|p| p.is_selected()).map_or(Duration::ZERO, |p| p.rtt())
     };
-    // A viewer this far behind skips to the next keyframe rather than queue more.
     let cap = (((rtt.as_millis() as u64 + ACK_SLACK_MS) * v.video.sending_fps() / 1000) as usize + IN_FLIGHT_SLACK).max(IN_FLIGHT_MIN);
     if out.in_flight.load(Ordering::SeqCst) >= cap {
-        out.need_key[i].store(true, Ordering::SeqCst);
-        v.video.stale.fetch_add(1, Ordering::SeqCst);
-        v.video.force_key(kind);
+        v.video.lost(&out, kind);
         return;
     }
+    let Some(Ok(mut s)) = conn.open_uni().now_or_never() else {
+        v.video.lost(&out, kind);
+        return;
+    };
     let stale = if key { STALE_KEY_MIN.max(rtt * 4) } else { STALE_MIN.max(rtt * 3) };
     out.in_flight.fetch_add(1, Ordering::SeqCst);
-    let lost = move |v: &Voice, out: &Out| {
-        out.need_key[i].store(true, Ordering::SeqCst);
-        v.video.stale.fetch_add(1, Ordering::SeqCst);
-        v.video.force_key(kind);
-    };
-    let mut s = match timeout(stale, conn.open_uni()).await {
-        Ok(Ok(s)) => s,
-        _ => {
-            out.in_flight.fetch_sub(1, Ordering::SeqCst);
-            lost(v, &out);
-            return;
-        }
-    };
     let _ = s.set_priority(if key { 1 } else { 0 });
     let v = v.clone();
     crate::db::spawn_bound(async move {
         let sent = async {
-            let mut msg = BytesMut::with_capacity(1 + frame.len());
-            msg.extend_from_slice(&[STREAM_FRAME]);
-            msg.extend_from_slice(&frame);
-            if timeout(stale, s.write_chunk(msg.freeze())).await.is_err() {
+            if timeout(stale, s.write_chunk(msg)).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return false;
             }
@@ -440,68 +522,152 @@ async fn ship(v: &Arc<Voice>, conn: Connection, out: Arc<Out>, kind: VideoKind, 
         .await;
         out.in_flight.fetch_sub(1, Ordering::SeqCst);
         if !sent {
-            lost(&v, &out);
+            v.video.lost(&out, kind);
         }
     });
+}
+
+/// What one stream from a peer carried.
+enum Inbound {
+    Frame(VideoKind, Vec<u8>),
+    /// A frame of a picture we don't watch: the stream is stopped unread.
+    Unwanted,
+    Control(Vec<u8>),
+    Other,
+}
+
+/// Read one stream, header first, so a frame we don't want is never read in full and a broken one
+/// still names its picture. The error says which picture lost a frame, when that much arrived.
+async fn read_stream(v: &Voice, author: &PublicKey, s: &mut RecvStream) -> Result<Inbound, Option<VideoKind>> {
+    let mut first = [0u8; 1];
+    s.read_exact(&mut first).await.map_err(|_| None)?;
+    match first[0] {
+        STREAM_FRAME => {
+            let mut head = [0u8; VIDEO_HEADER_LEN];
+            s.read_exact(&mut head).await.map_err(|_| None)?;
+            let header = VideoHeader::parse(&head).ok_or(None)?;
+            let kind = VideoKind::from_flags(header.flags);
+            let wanted = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(author).is_some_and(|w| w.has(kind));
+            if !wanted {
+                let _ = s.stop(VarInt::from_u32(0));
+                return Ok(Inbound::Unwanted);
+            }
+            let body = s.read_to_end(MAX_VIDEO_FRAME).await.map_err(|_| Some(kind))?;
+            let mut frame = Vec::with_capacity(VIDEO_HEADER_LEN + body.len());
+            frame.extend_from_slice(&head);
+            frame.extend_from_slice(&body);
+            Ok(Inbound::Frame(kind, frame))
+        }
+        STREAM_CONTROL => s.read_to_end(MAX_CONTROL).await.map(Inbound::Control).map_err(|_| None),
+        _ => {
+            let _ = s.stop(VarInt::from_u32(0));
+            Ok(Inbound::Other)
+        }
+    }
 }
 
 /// What one peer sends us on streams: their pictures' frames, and what they ask of ours.
 async fn inbound(v: Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
     let tag = author.to_bytes();
+    let conn_id = conn.stable_id();
     while let Ok(mut s) = conn.accept_uni().await {
-        let data = match timeout(INBOUND_FRAME_TIMEOUT, s.read_to_end(1 + MAX_VIDEO_FRAME)).await {
-            Ok(Ok(data)) => data,
-            _ => {
-                let want = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(&author).copied().unwrap_or_default();
-                resync_all(&v, &author, want);
-                continue;
-            }
-        };
-        match data.first() {
-            Some(&STREAM_FRAME) => deliver(&v, &author, &tag, &data[1..]),
-            Some(&STREAM_CONTROL) if data.len() <= 1 + MAX_CONTROL => match serde_json::from_slice::<Ctl>(&data[1..]) {
-                Ok(Ctl::Watch { camera, screen }) => {
-                    let want = Tracks { camera, screen };
-                    let out = {
-                        let mut watchers = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner());
-                        if want.any() {
-                            Some(watchers.entry(id).or_insert_with(|| Arc::new(Out::new(Tracks::default()))).clone())
-                        } else {
-                            watchers.remove(&id);
-                            None
-                        }
-                    };
-                    if let Some(out) = out {
-                        let before = std::mem::replace(&mut *out.want.lock().unwrap_or_else(|e| e.into_inner()), want);
-                        for kind in KINDS.into_iter().filter(|k| want.has(*k) && !before.has(*k)) {
-                            out.need_key[kind.index()].store(true, Ordering::SeqCst);
-                            v.video.force_key(kind);
-                        }
-                    }
-                    super::changed(&v);
-                }
-                Ok(Ctl::Key { kind }) => {
-                    let out = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
-                    if let Some(out) = out {
-                        out.need_key[kind.index()].store(true, Ordering::SeqCst);
-                    }
-                    v.video.force_key(kind);
-                }
+        match timeout(INBOUND_FRAME_TIMEOUT, read_stream(&v, &author, &mut s)).await {
+            Ok(Ok(Inbound::Frame(kind, frame))) => deliver(&v, &author, &tag, kind, frame).await,
+            Ok(Ok(Inbound::Unwanted)) => rewatch(&v, &author),
+            Ok(Ok(Inbound::Control(data))) => match serde_json::from_slice::<Ctl>(&data) {
+                Ok(Ctl::Watch { camera, screen }) => on_watch(&v, id, conn_id, Tracks { camera, screen }),
+                Ok(Ctl::Key { kind }) => on_key(&v, id, kind),
                 _ => {}
             },
-            _ => {}
+            Ok(Ok(Inbound::Other)) => {}
+            Ok(Err(kind)) => {
+                let want = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(&author).copied().unwrap_or_default();
+                let lost = kind.map_or(want, |k| Tracks::default().with(k, want.has(k)));
+                mark_resync(&v, &author, lost);
+                for kind in KINDS.into_iter().filter(|k| lost.has(*k)) {
+                    ask_key(&v, &author, kind);
+                }
+            }
+            Err(_) => {
+                let _ = s.stop(VarInt::from_u32(0));
+                let want = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(&author).copied().unwrap_or_default();
+                mark_resync(&v, &author, want);
+                for kind in KINDS.into_iter().filter(|k| want.has(*k)) {
+                    ask_key(&v, &author, kind);
+                }
+            }
         }
     }
 }
 
-/// A sender's frame to the webview, tagged with whose it is, if we're watching that picture.
-fn deliver(v: &Voice, author: &PublicKey, tag: &[u8; 32], frame: &[u8]) {
-    let Some(header) = VideoHeader::parse(frame) else { return };
-    let kind = VideoKind::from_flags(header.flags);
-    let wanted = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(author).is_some_and(|w| w.has(kind));
-    if !wanted {
+/// A viewer asked for pictures of ours. The same ask again changes nothing.
+fn on_watch(v: &Arc<Voice>, id: [u8; 32], conn_id: usize, want: Tracks) {
+    let (out, before) = {
+        let mut watchers = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner());
+        if !want.any() {
+            let gone = watchers.remove(&id);
+            drop(watchers);
+            if gone.is_some_and(|o| o.wants(VideoKind::Screen)) {
+                v.video.state_dirty.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
+        let out = watchers.entry(id).or_insert_with(|| Arc::new(Out::new())).clone();
+        drop(watchers);
+        let before = std::mem::replace(&mut *out.want.lock().unwrap_or_else(|e| e.into_inner()), want);
+        (out, before)
+    };
+    if before == want {
         return;
     }
+    for kind in KINDS.into_iter().filter(|k| want.has(*k) && !before.has(*k)) {
+        out.need_key[kind.index()].store(true, Ordering::SeqCst);
+        v.video.force_key(kind);
+    }
+    if before.screen != want.screen {
+        v.video.state_dirty.store(true, Ordering::SeqCst);
+    }
+    // The connection it asked on may have closed while this was read.
+    let live = v.links.lock().unwrap_or_else(|e| e.into_inner()).get(&id).is_some_and(|l| l.conn.stable_id() == conn_id);
+    if !live {
+        v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+}
+
+/// A viewer's decoder lost a picture: honoured every few seconds at most for each viewer, and only
+/// for a picture they watch; between, it just waits for the next keyframe.
+fn on_key(v: &Voice, id: [u8; 32], kind: VideoKind) {
+    let out = v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+    let Some(out) = out.filter(|o| o.wants(kind)) else { return };
+    out.need_key[kind.index()].store(true, Ordering::SeqCst);
+    let mut last = out.last_key_request.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < VIEWER_KEY_GAP) {
+        return;
+    }
+    *last = Some(Instant::now());
+    drop(last);
+    v.video.force_key(kind);
+}
+
+/// A sender is sending us what we don't watch, or not what we do: tell them again what we want,
+/// every few seconds at most.
+fn rewatch(v: &Voice, author: &PublicKey) {
+    {
+        let mut last = v.video.last_rewatch.lock().unwrap_or_else(|e| e.into_inner());
+        if last.get(author).is_some_and(|t| t.elapsed() < REWATCH_AFTER) {
+            return;
+        }
+        last.insert(*author, Instant::now());
+    }
+    let want = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).get(author).copied().unwrap_or_default();
+    if let Some(id) = endpoint_of(v, author) {
+        send_ctl(v, &id, Ctl::Watch { camera: want.camera, screen: want.screen });
+    }
+}
+
+/// A sender's frame to the webview, tagged with whose it is.
+async fn deliver(v: &Voice, author: &PublicKey, tag: &[u8; 32], kind: VideoKind, frame: Vec<u8>) {
+    let Some(header) = VideoHeader::parse(&frame) else { return };
     let key = (*author, kind.index());
     {
         let mut resync = v.video.resync.lock().unwrap_or_else(|e| e.into_inner());
@@ -514,26 +680,52 @@ fn deliver(v: &Voice, author: &PublicKey, tag: &[u8; 32], frame: &[u8]) {
             resync.remove(&key);
         }
     }
+    v.video.last_frame.lock().unwrap_or_else(|e| e.into_inner()).insert(key, Instant::now());
     let Some(tx) = v.video.to_web.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
     let mut msg = BytesMut::with_capacity(1 + 32 + frame.len());
     msg.extend_from_slice(&[KIND_PEER_FRAME]);
     msg.extend_from_slice(tag);
-    msg.extend_from_slice(frame);
+    msg.extend_from_slice(&frame);
     // A webview this far behind starts that picture again from a keyframe rather than lag.
-    if tx.try_send(msg.freeze()).is_err() {
+    if !matches!(timeout(TO_WEB_WAIT, tx.send(msg.freeze())).await, Ok(Ok(()))) {
         v.video.resync.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
         ask_key(v, author, kind);
     }
 }
 
-/// Once a second while sending: a viewer falling behind steps our pictures down; clean seconds step
-/// them back up, as far as the slowest kind of path allows.
+/// Once a second: each viewer's health, the pictures' rungs, what the webview missed, and watches
+/// that went unanswered.
 async fn rate_loop(v: Arc<Voice>) {
+    let mut tick: u64 = 0;
     loop {
         crate::rt::time::sleep(Duration::from_secs(1)).await;
+        tick += 1;
+        if v.video.state_dirty.swap(false, Ordering::SeqCst) {
+            super::changed(&v);
+        }
+        if v.video.codec_unsent.load(Ordering::SeqCst) {
+            v.video.tell_codec();
+        }
+        heal_watches(&v);
+        // Each viewer's losses this second, and whether they have fallen behind.
+        let health: Vec<(Arc<Out>, bool)> = v
+            .video
+            .outs()
+            .into_iter()
+            .map(|out| {
+                let lossy = out.stale.swap(0, Ordering::SeqCst) > 0;
+                let bad = if lossy {
+                    out.bad_secs.fetch_add(1, Ordering::SeqCst) + 1
+                } else {
+                    out.bad_secs.store(0, Ordering::SeqCst);
+                    0
+                };
+                out.behind.store(bad >= BEHIND_AFTER_SECS, Ordering::SeqCst);
+                (out, lossy)
+            })
+            .collect();
         let sending = v.video.sending();
         if !sending.any() {
-            v.video.stale.store(0, Ordering::SeqCst);
             continue;
         }
         let relayed = {
@@ -541,12 +733,13 @@ async fn rate_loop(v: Arc<Voice>) {
             let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
             ids.iter().filter_map(|id| links.get(id)).any(|l| !l.conn.paths().iter().any(|p| p.is_selected() && p.is_ip()))
         };
-        let stale = v.video.stale.swap(0, Ordering::SeqCst) > 0;
-        let climb = !stale && v.video.clean_secs.fetch_add(1, Ordering::SeqCst) + 1 >= CLIMB_AFTER_SECS;
-        if stale || climb {
-            v.video.clean_secs.store(0, Ordering::SeqCst);
-        }
+        let active: Vec<&(Arc<Out>, bool)> = health.iter().filter(|(o, _)| !o.behind.load(Ordering::SeqCst)).collect();
+        let lossy_any = active.iter().any(|(_, lossy)| *lossy);
+        let clean = if lossy_any { 0 } else { v.video.clean_secs.fetch_add(1, Ordering::SeqCst) + 1 };
+        let mut moved = false;
         for kind in KINDS.into_iter().filter(|k| sending.has(*k)) {
+            let watched = active.iter().filter(|(o, _)| o.wants(kind)).count();
+            let lossy = active.iter().filter(|(o, lossy)| *lossy && o.wants(kind)).count();
             let cap = match (kind, relayed) {
                 (VideoKind::Screen, true) => SCREEN_RELAY_CAP,
                 (VideoKind::Screen, false) => SCREEN_DIRECT_CAP,
@@ -554,11 +747,47 @@ async fn rate_loop(v: Arc<Voice>) {
                 (VideoKind::Camera, false) => CAMERA_DIRECT_CAP,
             };
             let rung = v.video.rung[kind.index()].load(Ordering::SeqCst);
-            let next = if stale { rung.saturating_sub(1) } else if climb { (rung + 1).min(cap) } else { rung.min(cap) };
+            let next = match step(lossy, watched, clean) {
+                Step::Down => rung.saturating_sub(1),
+                Step::Up => (rung + 1).min(cap),
+                Step::Hold => rung.min(cap),
+            };
             if next != rung {
                 v.video.rung[kind.index()].store(next, Ordering::SeqCst);
                 v.video.tell_rung(kind);
+                moved = true;
+            } else if v.video.rate_unsent[kind.index()].load(Ordering::SeqCst) {
+                v.video.tell_rung(kind);
             }
+            // A viewer still waiting on a keyframe gets one this often, behind or not.
+            if tick.is_multiple_of(VIEWER_KEY_GAP.as_secs()) && health.iter().any(|(o, _)| o.wants(kind) && o.need_key[kind.index()].load(Ordering::SeqCst)) {
+                v.video.force_key(kind);
+            }
+        }
+        if moved || lossy_any {
+            v.video.clean_secs.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A watched picture its sender says is on that hasn't shown a frame for a while: our watch may
+/// have been lost on the way, so it is sent again.
+fn heal_watches(v: &Voice) {
+    let watching: Vec<(PublicKey, Tracks)> = v.video.watching.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(a, t)| (*a, *t)).collect();
+    if watching.is_empty() {
+        return;
+    }
+    let present = crate::community::v2::voice::present(&v.channel_hex, super::now_ms());
+    for (author, want) in watching {
+        let Some(p) = present.iter().find(|p| p.author == author) else { continue };
+        let since = v.video.watch_since.lock().unwrap_or_else(|e| e.into_inner()).get(&author).copied();
+        let quiet = |kind: VideoKind| {
+            let last = v.video.last_frame.lock().unwrap_or_else(|e| e.into_inner()).get(&(author, kind.index())).copied();
+            last.or(since).is_none_or(|t| t.elapsed() >= REWATCH_AFTER)
+        };
+        let missing = (want.screen && p.screen && quiet(VideoKind::Screen)) || (want.camera && p.camera && quiet(VideoKind::Camera));
+        if missing {
+            rewatch(v, &author);
         }
     }
 }
@@ -575,5 +804,15 @@ mod tests {
         assert_eq!(serde_json::from_str::<Ctl>(r#"{"t":"key","kind":"screen"}"#).unwrap(), Ctl::Key { kind: VideoKind::Screen });
         assert_eq!(serde_json::from_str::<Ctl>(r#"{"t":"hologram","on":true}"#).unwrap(), Ctl::Unknown, "a newer peer's control is skipped");
         assert_eq!(serde_json::to_string(&Ctl::Watch { camera: false, screen: true }).unwrap(), r#"{"t":"watch","camera":false,"screen":true}"#);
+    }
+
+    #[test]
+    fn one_struggling_viewer_of_many_does_not_drag_the_picture_down() {
+        assert_eq!(step(1, 1, 0), Step::Down, "the only viewer losing frames steps it down");
+        assert_eq!(step(1, 6, 0), Step::Hold, "one of six does not");
+        assert_eq!(step(2, 6, 0), Step::Down, "a third of them does");
+        assert_eq!(step(0, 6, CLIMB_AFTER_SECS), Step::Up, "clean seconds climb");
+        assert_eq!(step(0, 6, CLIMB_AFTER_SECS - 1), Step::Hold);
+        assert_eq!(step(0, 0, CLIMB_AFTER_SECS), Step::Hold, "nobody watching: no climb");
     }
 }

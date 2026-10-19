@@ -101,6 +101,11 @@ async function callVideoOnState(s) {
 /** Every voice_state: the link opens for a voice call's screens, and closes when it ends. */
 async function voiceVideoOnState(s) {
     const channel = s?.channel_id || null;
+    // The call stopped a picture of ours (a permission lost, say): the capture stops with it.
+    if (channel && voiceLinkChannel === channel) {
+        if (selfTracks.camera && !s.camera) stopVideo('camera', false);
+        if (selfTracks.screen && !s.sharing) stopVideo('screen', false);
+    }
     if (voiceLinkChannel === channel) return;
     if (voiceLinkChannel) {
         stopAllVideo(false);

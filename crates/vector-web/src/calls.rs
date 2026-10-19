@@ -335,6 +335,7 @@ const PRIORITY_TALKING: f32 = 0.35;
 const DUCK_GAIN: f32 = 0.3;
 const DUCK_ATTACK: f32 = 0.5;
 const DUCK_RELEASE: f32 = 0.1;
+const DUCK_HOLD: Duration = Duration::from_millis(300);
 /// What a voice call's microphone sends, as desktop's.
 const VOICE_KBPS: u32 = 32;
 
@@ -362,6 +363,7 @@ struct VoiceEngine {
     seq: AtomicU32,
     started: Instant,
     duck: Mutex<f32>,
+    priority_heard: Mutex<Option<Instant>>,
 }
 
 static VOICE: Mutex<Option<Arc<VoiceEngine>>> = Mutex::new(None);
@@ -403,6 +405,7 @@ impl WebVoice {
             seq: AtomicU32::new(0),
             started: Instant::now(),
             duck: Mutex::new(1.0),
+            priority_heard: Mutex::new(None),
         });
         let (tx, rx) = oneshot::channel();
         *READY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
@@ -506,6 +509,14 @@ impl VoiceMedia for WebVoice {
         out
     }
 
+    fn stop(&self) {
+        let peers: Vec<Arc<VoicePeer>> = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, p)| p).collect();
+        for p in peers {
+            drop_peer(&p);
+        }
+        release_voice(&self.0);
+    }
+
     fn chime(&self, cue: Chime) {
         let cue = match cue {
             Chime::Joined => "joined",
@@ -528,11 +539,7 @@ fn drop_peer(p: &VoicePeer) {
 
 impl Drop for WebVoice {
     fn drop(&mut self) {
-        let peers: Vec<Arc<VoicePeer>> = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, p)| p).collect();
-        for p in peers {
-            drop_peer(&p);
-        }
-        release_voice(&self.0);
+        VoiceMedia::stop(self);
     }
 }
 
@@ -554,23 +561,38 @@ pub fn voice_audio_level(slot: u32, level: f32) {
 
 /// The speaker wants its next 20 ms of a voice call: every peer's next frame and the gain to mix
 /// it at. `{ e: [{ s, k, d, run, g }], quiet }`, with `k` as in `call_audio_pull`; `quiet` is a
-/// frame of silence while deafened. No entries and not quiet: nothing yet.
+/// frame of silence (deafened, or nobody audible). No entries and not quiet: nothing yet.
 #[wasm_bindgen]
 pub fn voice_audio_pull(_ahead_ms: u32) -> JsValue {
     let Some(v) = voice() else { return JsValue::NULL };
     let peers: Vec<Arc<VoicePeer>> = v.peers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-    let talking = peers.iter().any(|p| p.audible.load(Ordering::Relaxed) && p.priority.load(Ordering::Relaxed) && f32::from_bits(p.level.load(Ordering::Relaxed)) > PRIORITY_TALKING);
+    // Every peer's next frame first: whether a priority speaker is talking is judged only on one
+    // heard now, so one whose packets stopped can't hold the room down.
+    let popped: Vec<(Arc<VoicePeer>, Pop, u32)> = peers
+        .into_iter()
+        .map(|p| {
+            let run = p.plc_run.load(Ordering::Relaxed);
+            let next = p.jitter.lock().unwrap_or_else(|e| e.into_inner()).pop(run, now_ms(), &p.stats);
+            (p, next, run)
+        })
+        .collect();
+    let talking = popped.iter().any(|(p, next, _)| {
+        matches!(next, Pop::Frame(_)) && p.audible.load(Ordering::Relaxed) && p.priority.load(Ordering::Relaxed) && f32::from_bits(p.level.load(Ordering::Relaxed)) > PRIORITY_TALKING
+    });
     let duck = {
         let mut duck = v.duck.lock().unwrap_or_else(|e| e.into_inner());
-        let target = if talking { DUCK_GAIN } else { 1.0 };
+        let mut heard = v.priority_heard.lock().unwrap_or_else(|e| e.into_inner());
+        if talking {
+            *heard = Some(Instant::now());
+        }
+        let target = if heard.is_some_and(|t| t.elapsed() < DUCK_HOLD) { DUCK_GAIN } else { 1.0 };
         *duck += (target - *duck) * if target < *duck { DUCK_ATTACK } else { DUCK_RELEASE };
         *duck
     };
     let deafened = v.deafened.load(Ordering::Relaxed);
+    let mut any = false;
     let entries = js_sys::Array::new();
-    for p in peers {
-        let run = p.plc_run.load(Ordering::Relaxed);
-        let next = p.jitter.lock().unwrap_or_else(|e| e.into_inner()).pop(run, now_ms(), &p.stats);
+    for (p, next, run) in popped {
         let entry = js_sys::Object::new();
         let set = |k: &str, val: &JsValue| {
             let _ = js_sys::Reflect::set(&entry, &JsValue::from_str(k), val);
@@ -584,15 +606,23 @@ pub fn voice_audio_pull(_ahead_ms: u32) -> JsValue {
             Pop::Muted => {
                 p.plc_run.store(0, Ordering::Relaxed);
                 p.level.store(0f32.to_bits(), Ordering::Relaxed);
+                any = true;
                 continue;
             }
             Pop::Fec(_) | Pop::Conceal => {
                 p.plc_run.store((run + 1).min(MAX_PLC_RUN), Ordering::Relaxed);
+                if run + 1 > 1 {
+                    p.level.store(0f32.to_bits(), Ordering::Relaxed);
+                }
                 set("run", &JsValue::from(run + 1));
                 3
             }
-            Pop::Wait => continue,
+            Pop::Wait => {
+                p.level.store(0f32.to_bits(), Ordering::Relaxed);
+                continue;
+            }
         };
+        any = true;
         // Deafened, or a peer who may not speak: drained, never played.
         if deafened || !p.audible.load(Ordering::Relaxed) {
             continue;
@@ -604,8 +634,11 @@ pub fn voice_audio_pull(_ahead_ms: u32) -> JsValue {
         entries.push(&entry);
     }
     let out = js_sys::Object::new();
+    // A frame taken but nothing to play (everyone muted, or deafened) is silence, not "nothing yet":
+    // the speaker would otherwise run dry and widen its margin.
+    let quiet = deafened || (any && entries.length() == 0);
     let _ = js_sys::Reflect::set(&out, &JsValue::from_str("e"), &entries);
-    let _ = js_sys::Reflect::set(&out, &JsValue::from_str("quiet"), &JsValue::from(deafened));
+    let _ = js_sys::Reflect::set(&out, &JsValue::from_str("quiet"), &JsValue::from(quiet));
     out.into()
 }
 

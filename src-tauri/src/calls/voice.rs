@@ -37,7 +37,7 @@ pub struct VoiceEngine {
     conns: Arc<Mutex<Vec<([u8; 32], Connection)>>>,
     sends: Arc<Mutex<Vec<Connection>>>,
     peers: Arc<Mutex<HashMap<[u8; 32], Peer>>>,
-    threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl VoiceEngine {
@@ -93,7 +93,7 @@ impl VoiceEngine {
                 .spawn(move || playout_thread(link, out_rate, peers, stop, deafened))
                 .map_err(|e| e.to_string())?
         };
-        Ok(Self { stop, muted, deafened, mic, stats, conns: Arc::new(Mutex::new(Vec::new())), sends, peers, threads: vec![capture, playout] })
+        Ok(Self { stop, muted, deafened, mic, stats, conns: Arc::new(Mutex::new(Vec::new())), sends, peers, threads: Mutex::new(vec![capture, playout]) })
     }
 }
 
@@ -115,8 +115,16 @@ impl VoiceMedia for VoiceEngine {
                 }
             })
         };
-        self.sends.lock().unwrap_or_else(|e| e.into_inner()).push(conn.clone());
-        self.conns.lock().unwrap_or_else(|e| e.into_inner()).push((endpoint, conn));
+        // Once per endpoint: a reconnect replaces the connection, never adds a second send.
+        {
+            let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+            let gone: Vec<usize> = conns.iter().filter(|(ep, _)| *ep == endpoint).map(|(_, c)| c.stable_id()).collect();
+            conns.retain(|(ep, _)| *ep != endpoint);
+            conns.push((endpoint, conn.clone()));
+            let mut sends = self.sends.lock().unwrap_or_else(|e| e.into_inner());
+            sends.retain(|c| !gone.contains(&c.stable_id()));
+            sends.push(conn);
+        }
         let peer = Peer { jitter, stats, audible: Arc::new(AtomicBool::new(true)), priority: Arc::new(AtomicBool::new(false)), gain: Arc::new(AtomicU32::new(1f32.to_bits())), level: Arc::new(AtomicU32::new(0)), rx };
         if let Some(old) = self.peers.lock().unwrap_or_else(|e| e.into_inner()).insert(endpoint, peer) {
             old.rx.abort();
@@ -143,6 +151,23 @@ impl VoiceMedia for VoiceEngine {
 
     fn has_mic(&self) -> bool {
         self.mic.load(Ordering::Relaxed)
+    }
+
+    /// The devices go now, whoever still holds the engine.
+    fn stop(&self) {
+        if self.stop.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        for (_, p) in self.peers.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+            p.rx.abort();
+        }
+        let threads: Vec<_> = self.threads.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        for t in threads {
+            let _ = t.join();
+        }
+        if let Ok(mixer) = AudioEngine::get() {
+            mixer.detach_live();
+        }
     }
 
     fn chime(&self, cue: Chime) {
@@ -180,16 +205,7 @@ impl VoiceMedia for VoiceEngine {
 
 impl Drop for VoiceEngine {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        for (_, p) in self.peers.lock().unwrap_or_else(|e| e.into_inner()).drain() {
-            p.rx.abort();
-        }
-        for t in self.threads.drain(..) {
-            let _ = t.join();
-        }
-        if let Ok(mixer) = AudioEngine::get() {
-            mixer.detach_live();
-        }
+        VoiceMedia::stop(self);
     }
 }
 
@@ -199,6 +215,7 @@ const PRIORITY_TALKING: f32 = 0.35;
 const DUCK_GAIN: f32 = 0.3;
 const DUCK_ATTACK: f32 = 0.5;
 const DUCK_RELEASE: f32 = 0.1;
+const DUCK_HOLD: Duration = Duration::from_millis(300);
 
 /// Each peer's decoder state, kept beside the engine's map so a peer gone mid-frame is simply skipped.
 struct Voicing {
@@ -217,6 +234,7 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
     // This frame's decoded peers, mixed once we know whether a priority speaker is talking.
     let mut heard: Vec<(f32, bool, [i16; FRAME])> = Vec::new();
     let mut duck = 1.0f32;
+    let mut priority_heard: Option<std::time::Instant> = None;
 
     while !stop.load(Ordering::Relaxed) {
         if link.play.len() >= ahead {
@@ -276,18 +294,23 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
                 }
             }
         }
-        // Everyone but the priority speaker dips while they talk: in fast, out slowly.
-        let target = if priority_talking { DUCK_GAIN } else { 1.0 };
+        if !any {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        // Everyone but the priority speaker dips while they talk, and stays down through the gaps
+        // between their words: in fast, out slowly.
+        if priority_talking {
+            priority_heard = Some(std::time::Instant::now());
+        }
+        let ducked = priority_heard.is_some_and(|t| t.elapsed() < DUCK_HOLD);
+        let target = if ducked { DUCK_GAIN } else { 1.0 };
         duck += (target - duck) * if target < duck { DUCK_ATTACK } else { DUCK_RELEASE };
         for (gain, priority, pcm) in heard.iter() {
             let gain = if *priority { *gain } else { *gain * duck };
             for (m, s) in mix.iter_mut().zip(pcm.iter()) {
                 *m += (*s as f32 * gain) as i32;
             }
-        }
-        if !any {
-            std::thread::sleep(Duration::from_millis(5));
-            continue;
         }
         let silent = deafened.load(Ordering::Relaxed);
         for (dst, m) in mix_f32.iter_mut().zip(mix.iter()) {
