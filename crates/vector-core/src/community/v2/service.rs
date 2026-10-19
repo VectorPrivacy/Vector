@@ -3181,6 +3181,12 @@ pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64
         .map(|st| st.at_ms)
 }
 
+/// The latest a local hold can date from. Rows keep whole seconds, so a join is never ruled older
+/// than a removal it may have followed within the same second.
+fn hold_bound_ms(c: &CommunityV2) -> u64 {
+    c.created_at_ms.saturating_add(999)
+}
+
 /// Record an eviction this device obeyed in the synced List, at the evicting act's time: siblings and
 /// the next boot then don't re-adopt it, and an invite sent after the act still lands.
 pub fn record_eviction(community: &CommunityV2, removed_at: u64) {
@@ -4763,6 +4769,7 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
         };
         let just_joined_hex = just_joined.map(|c| crate::simd::hex::bytes_to_hex_32(&c.0));
         let now = now_ms();
+        let pending = pending_tombstones();
         let mut local = super::list::CommunityList::default();
         for id in crate::db::community::list_community_ids()? {
             if !matches!(crate::db::community::community_held(&id), Ok(true)) {
@@ -4788,7 +4795,7 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
                 .find(|t| t.community_id == cid_hex)
                 .map(|t| t.removed_at)
                 .unwrap_or(0);
-            let held_since = c.created_at_ms;
+            let held_since = hold_bound_ms(&c);
             if !is_join && !remote.is_live(&cid_hex) && tombstoned_at > 0 && held_since <= tombstoned_at {
                 crate::log_warn!(
                     "[CommunityList] holding {} but NOT recording it: a tombstone at {} post-dates our hold ({}) — treated as a leave from another device",
@@ -4803,7 +4810,10 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
             let added_at = if remote.is_live(&cid_hex) && !is_join {
                 remote.entries.iter().find(|e| e.community_id == cid_hex).map(|e| e.added_at).unwrap_or(now)
             } else if is_join {
-                joined.map_or(now, |(_, at)| at)
+                // A join outranks every removal already known: one stamped later than the join
+                // was noticed late or on a skewed clock, never made after it.
+                let known = pending.tombstones.iter().filter(|t| t.community_id == cid_hex).map(|t| t.removed_at).fold(tombstoned_at, u64::max);
+                joined.map_or(now, |(_, at)| at).max(known.saturating_add(1))
             } else {
                 // Recorded at its own hold time: `now` would out-date a removal this read missed.
                 held_since
@@ -4814,7 +4824,7 @@ async fn republish_community_list_at<T: Transport + ?Sized>(
             let seed = rebuild_snapshot(jm, theirs.map(|e| &e.seed));
             local.entries.push(super::list::CommunityListEntry { community_id: cid_hex, seed, current, added_at, extra: Default::default() });
         }
-        let merged = remote.merge(&local).merge(&pending_tombstones());
+        let merged = remote.merge(&local).merge(&pending);
         // No whole-list cap: fragmentation is what keeps each event publishable,
         // and the count limit is gone (CORD-02 §8).
         match publish_fragments(transport, &merged, &prev_created, &read_frags, &on_relays, &targets).await {
@@ -5331,7 +5341,7 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             // this would then delete the community on every sync. So let the LOCAL hold break the
             // tie too — a hold created after the removal IS the rejoin, whether or not its entry
             // ever reached the list.
-            if held.created_at_ms > t.removed_at {
+            if hold_bound_ms(&held) > t.removed_at {
                 crate::log_warn!(
                     "[CommunityList] {} is tombstoned at {} but our hold ({}) post-dates it — treating as a rejoin, not tearing down",
                     &t.community_id[..8], t.removed_at, held.created_at_ms
@@ -30177,6 +30187,36 @@ mod tests {
         republish_community_list(&relay, Some(x.id())).await.unwrap();
         sync_community_list(&relay, &x.relays).await.unwrap();
         assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_some(), "a re-joined community is not torn down by a stale tombstone");
+    }
+
+    #[tokio::test]
+    async fn a_join_outranks_a_removal_stamped_after_it() {
+        // A removal noticed late (or on a skewed clock) can carry a time after a fresh join;
+        // the join must still stand, here and at the next sync.
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let x = create_community(&relay, "Late", vec!["wss://r".into()], None).await.unwrap();
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        publish_remote_tombstone(&relay, &me, &x.relays, &x_hex, now_ms() + 60_000).await;
+        assert!(republish_community_list(&relay, Some(x.id())).await.unwrap(), "the join landed");
+        sync_community_list(&relay, &x.relays).await.unwrap();
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_some(), "a join is not undone by a removal it already knew of");
+    }
+
+    #[tokio::test]
+    async fn a_hold_is_never_ruled_older_than_a_removal_in_its_own_second() {
+        // Rows keep whole seconds: a removal later in the join's second must not read as after it.
+        let (_tmp, _guard, me) = init_test_db();
+        let relay = MemoryRelay::new();
+        let x = create_community(&relay, "Same second", vec!["wss://r".into()], None).await.unwrap();
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        let held = crate::db::community::load_community_v2(x.id()).unwrap().unwrap();
+        assert_eq!(held.created_at_ms % 1000, 0, "the row keeps whole seconds");
+        // Relays that only ever saw a sibling's removal, half a second into the join's second.
+        let elsewhere = MemoryRelay::new();
+        publish_remote_tombstone(&elsewhere, &me, &x.relays, &x_hex, held.created_at_ms + 500).await;
+        sync_community_list(&elsewhere, &x.relays).await.unwrap();
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_some(), "the hold is not torn down by a removal inside its own second");
     }
 
     #[tokio::test]
