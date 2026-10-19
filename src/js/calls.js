@@ -197,6 +197,16 @@ function refreshVoicePresent(channelId) {
 const voiceChannelOf = (communityId, channelId) => (getCommunityChannels(communityId) || []).find((c) => c.id === channelId) || null;
 
 function registerVoiceScreen() {
+    VectorSvelte.setVoiceCallHandlers({
+        join: (communityId, channelId) => joinVoiceChannel(communityId, { id: channelId }),
+        leave: () => invoke('voice_leave').catch(() => {}),
+        setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
+        setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
+        micAccess: () => promptMicAccess(),
+        getName: (npub) => getName(npub),
+        avatarSrc: (npub) => getProfileAvatarSrc(getProfile(npub)),
+        myNpub: () => strPubkey,
+    });
     VectorSvelte.setScreen('voice', {
         h: {
             setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),

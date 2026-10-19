@@ -33,6 +33,10 @@ pub trait VoiceMedia: Send + Sync {
     fn set_deafened(&self, on: bool);
     /// Whether a peer's audio plays: a member without SPEAK, or timed out, isn't heard.
     fn set_audible(&self, _endpoint: &[u8; 32], _on: bool) {}
+    /// False when the call went ahead without a microphone: muted, whatever the switch says.
+    fn has_mic(&self) -> bool {
+        true
+    }
     /// How loud each peer is now, 0 to 1, and our own microphone under `None`.
     fn levels(&self) -> Vec<(Option<[u8; 32]>, f32)> {
         Vec::new()
@@ -47,6 +51,8 @@ pub struct VoicePeer {
     pub direct: bool,
     /// How loud they are now, 0 to 1.
     pub level: f32,
+    pub muted: bool,
+    pub deafened: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -60,6 +66,8 @@ pub struct VoiceState {
     pub audio: bool,
     /// How loud our microphone is now, 0 to 1.
     pub mic_level: f32,
+    /// False when there's no microphone to hear: refused access, or none there.
+    pub mic: bool,
 }
 
 struct Link {
@@ -185,7 +193,8 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
     let community = held(&v.community)?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let endpoint = joined.then(|| (*v.endpoint.id().as_bytes(), relay_of(&v.endpoint)));
-    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint).await
+    let muted = v.muted.load(Ordering::SeqCst) || v.media.as_ref().is_none_or(|m| !m.has_mic());
+    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, muted, v.deafened.load(Ordering::SeqCst)).await
 }
 
 /// Join a voice Channel's call, leaving any other first.
@@ -285,6 +294,7 @@ pub fn set_muted(on: bool) -> Result<(), String> {
     if let Some(m) = &v.media {
         m.set_muted(on);
     }
+    reannounce(&v);
     changed(&v);
     Ok(())
 }
@@ -295,8 +305,19 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
     if let Some(m) = &v.media {
         m.set_deafened(on);
     }
+    reannounce(&v);
     changed(&v);
     Ok(())
+}
+
+/// Everyone sees a mute or deafen now, not at the next heartbeat.
+fn reannounce(v: &Arc<Voice>) {
+    let v = v.clone();
+    crate::db::spawn_bound(async move {
+        if let Err(e) = announce(&v, true).await {
+            crate::log_warn!("[voice] presence update failed: {e}");
+        }
+    });
 }
 
 fn state(v: &Voice) -> VoiceState {
@@ -313,6 +334,8 @@ fn state(v: &Voice) -> VoiceState {
                 connected: link.is_some(),
                 direct: link.is_some_and(|l| l.conn.paths().iter().any(|path| path.is_selected() && path.is_ip())),
                 level: if link.is_some() { level_of(p.endpoint) } else { 0.0 },
+                muted: p.muted,
+                deafened: p.deafened,
             }
         })
         .collect();
@@ -325,6 +348,7 @@ fn state(v: &Voice) -> VoiceState {
         deafened: v.deafened.load(Ordering::SeqCst),
         audio: v.media.is_some(),
         mic_level: level_of(None),
+        mic: v.media.as_ref().is_some_and(|m| m.has_mic()),
     }
 }
 

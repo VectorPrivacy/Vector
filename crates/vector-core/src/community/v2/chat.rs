@@ -43,6 +43,8 @@ const TAG_EMOJI: &str = "emoji";
 const TAG_TRANSPORT: &str = "transport";
 const TAG_ENDPOINT: &str = "endpoint";
 const TAG_RELAY: &str = "relay";
+const TAG_MUTED: &str = "muted";
+const TAG_DEAFENED: &str = "deafened";
 /// The transport a peer-to-peer call names (CORD-07 §8).
 pub const TRANSPORT_IROH: &str = "iroh";
 
@@ -313,14 +315,21 @@ pub fn build_webxdc_rumor(
 /// Build a kind-23311 typing rumor — presence of the event is the signal, it
 /// carries nothing. Seal it with `ephemeral: true` so relays never store it.
 /// A voice presence heartbeat (CORD-07 §4): `Some` is `joined` over iroh, naming the endpoint and
-/// the relay it's reached through (a relay names no IP); None is `left`.
-pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, endpoint: Option<(&[u8; 32], Option<&str>)>, at_ms: u64) -> UnsignedEvent {
+/// the relay it's reached through (a relay names no IP), and whether we're muted or deafened;
+/// None is `left`.
+pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, endpoint: Option<(&[u8; 32], Option<&str>)>, muted: bool, deafened: bool, at_ms: u64) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     if let Some((ep, relay)) = endpoint {
         tags.push(Tag::custom(TAG_TRANSPORT, [TRANSPORT_IROH.to_string()]));
         tags.push(Tag::custom(TAG_ENDPOINT, [crate::simd::hex::bytes_to_hex_32(ep)]));
         if let Some(r) = relay {
             tags.push(Tag::custom(TAG_RELAY, [r.to_string()]));
+        }
+        if muted {
+            tags.push(Tag::custom(TAG_MUTED, Vec::<String>::new()));
+        }
+        if deafened {
+            tags.push(Tag::custom(TAG_DEAFENED, Vec::<String>::new()));
         }
     }
     stream::build_rumor_ms(kind::VOICE_PRESENCE, author, if endpoint.is_some() { "joined" } else { "left" }, tags, at_ms)
@@ -443,7 +452,7 @@ pub enum ChatEvent {
     Typing { opened: OpenedStream },
     /// Kind 23313 (CORD-07 §4): in a Channel's call, or out of it. A `joined` names how it's
     /// reached: on iroh, `endpoint`; any other transport leaves it None but still counts.
-    VoicePresence { opened: OpenedStream, joined: bool, transport: Option<String>, endpoint: Option<[u8; 32]>, relay: Option<String> },
+    VoicePresence { opened: OpenedStream, heard: super::voice::Heard },
 }
 
 impl ChatEvent {
@@ -697,7 +706,9 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
                 Some(_) => unique_tag(&opened.rumor, TAG_RELAY)?.map(|t| value_of(t, TAG_RELAY).map(str::to_string)).transpose()?,
                 None => None,
             };
-            Ok(ChatEvent::VoicePresence { opened, joined, transport, endpoint, relay })
+            let flag = |name: &str| opened.rumor.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some(name));
+            let (muted, deafened) = (joined && flag(TAG_MUTED), joined && flag(TAG_DEAFENED));
+            Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened } })
         }
         k => Err(ChatError::UnknownKind(k)),
     }

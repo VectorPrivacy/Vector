@@ -154,13 +154,21 @@ pub async fn voice_set_deafened(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move { vector_core::calls::voice::set_deafened(on) }).await
 }
 
-/// Who is in a voice Channel's call now, whether or not we are: npubs, earliest first.
+/// Who is in a voice Channel's call now, whether or not we are, earliest first.
 #[tauri::command]
-pub async fn voice_present(channel_id: String) -> Vec<String> {
+pub async fn voice_present(channel_id: String) -> Vec<serde_json::Value> {
     use nostr_sdk::prelude::ToBech32;
     vector_core::db::scoped(async move {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        vector_core::community::v2::voice::present(&channel_id, now).into_iter().filter_map(|p| p.author.to_bech32().ok()).collect()
+        vector_core::community::v2::voice::present(&channel_id, now)
+            .into_iter()
+            .filter_map(|p| {
+                let npub = p.author.to_bech32().ok()?;
+                // Another transport's caller is in the call, but out of reach of ours.
+                let elsewhere = p.transport.as_deref().is_some_and(|t| t != vector_core::community::v2::chat::TRANSPORT_IROH) || p.transport.is_none();
+                Some(serde_json::json!({ "npub": npub, "muted": p.muted, "deafened": p.deafened, "elsewhere": elsewhere }))
+            })
+            .collect()
     })
     .await
 }

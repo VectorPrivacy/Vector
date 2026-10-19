@@ -1238,6 +1238,10 @@ body.ws.ws-community-pane.ws-channel-private #chat > .chat-header #chat-contact:
   mask-image: url("./icons/locked.svg");
 }
 
+body.ws.ws-community-pane.ws-channel-voice #chat > .chat-header #chat-contact::before {
+  mask-image: url("./icons/volume-max.svg");
+}
+
 body.ws #group-overview > .chat-header .profile-header-info {
   display: none;
 }

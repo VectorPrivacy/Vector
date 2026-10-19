@@ -3963,11 +3963,150 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   border-radius: 50%;
 }
 
+.chatlist-voice-member .icon {
+  position: static;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin: 0 0 0 auto;
+  background-color: rgba(255, 255, 255, 0.45);
+}
+
+/* A voice channel's stage, above its chat. */
+.voice-stage {
+  position: relative;
+  z-index: 2;
+  margin: 8px 16px 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.voice-stage-live {
+  border-color: rgba(89, 252, 179, 0.25);
+}
+.voice-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #fff;
+}
+.voice-stage-head .icon {
+  position: static;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  background-color: currentColor;
+  opacity: 0.7;
+}
+.voice-stage-title {
+  font-weight: 600;
+}
+.voice-stage-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.voice-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.voice-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
+}
+.voice-tile.is-pending {
+  opacity: 0.55;
+}
+.voice-tile-avatar {
+  position: relative;
+  display: flex;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 2px rgba(89, 252, 179, calc(var(--talk, 0) * 0.95)),
+    0 0 calc(var(--talk, 0) * 14px) rgba(89, 252, 179, calc(var(--talk, 0) * 0.6));
+  transition: box-shadow 0.1s linear;
+}
+.voice-tile-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #1a1a1a;
+  border: 2px solid #0b0b0b;
+}
+.voice-tile-badge .icon {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  background-color: var(--danger-color);
+}
+.voice-tile-name {
+  max-width: 100%;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.voice-tile-note {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.voice-stage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.voice-stage-warn {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--status-fair);
+  cursor: pointer;
+}
+.voice-stage-join,
+.voice-stage-leave {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+}
+.voice-stage-join {
+  background: #59fcb3;
+  color: #04120b;
+}
+.voice-stage-join:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.voice-stage-leave {
+  background: var(--danger-color);
+  color: #fff;
+}
+
 /* The voice bar sits in the pill's place; the 1:1 call never runs beside it. */
 .voice-bar .call-pill-text {
   cursor: pointer;
 }
 .voice-bar .call-pill-name .icon {
+  position: static;
+  display: inline-block;
   width: 12px;
   height: 12px;
   margin: 0 2px 0 0;

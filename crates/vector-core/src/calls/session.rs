@@ -326,6 +326,9 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
         return Err("Not a valid npub".into());
     }
     crate::transport::realtime::check()?;
+    if super::voice::snapshot().is_some() {
+        return Err("Leave the voice channel first".into());
+    }
     let platform = platform::get()?;
     let id = format!("{:032x}", rand::random::<u128>());
 
@@ -730,6 +733,8 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                 match guard.as_ref() {
                     Some(c) if c.id == call_id => return,
                     Some(_) => None,
+                    // In a voice channel's call: busy, as in any other.
+                    None if super::voice::snapshot().is_some() => None,
                     None => {
                         let call = Call {
                             id: call_id.to_string(),

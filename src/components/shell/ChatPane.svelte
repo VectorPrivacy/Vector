@@ -7,6 +7,7 @@
     import { wallpaperState, wallpaperShown } from '../lib/wallpaper.svelte.js';
     import ChatHeader from '../chat/ChatHeader.svelte';
     import PinsDrawer from '../chat/PinsDrawer.svelte';
+    import VoiceStage from '../calls/VoiceStage.svelte';
     import WallpaperLayer from '../chat/WallpaperLayer.svelte';
     import WallpaperPreviewBar from '../chat/WallpaperPreviewBar.svelte';
     import ComposerBox from '../composer/ComposerBox.svelte';
@@ -47,6 +48,7 @@
     <WallpaperLayer />
     <ChatHeader />
     <PinsDrawer />
+    <VoiceStage />
     <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
     <div id="chat-messages" class="chat-messages" use:typingFade></div>
     <WallpaperPreviewBar />

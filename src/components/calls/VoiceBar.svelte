@@ -1,14 +1,17 @@
 <script>
     // The voice Channel call this device is in: where, how many, and its mute, deafen and leave.
-    import { voiceSession } from '../lib/voice.svelte.js';
+    import { voiceSession, voiceStage } from '../lib/voice.svelte.js';
+    import { openChatId } from '../lib/signals.svelte.js';
     let { h } = $props();   // h: setMuted(on), setDeafened(on), leave(), channelName(communityId, channelId), openChannel(communityId, channelId)
     const v = $derived(voiceSession());
+    // The call's own stage on screen carries the same controls.
+    const onStage = $derived(!!v && voiceStage()?.channelId === v.channelId && openChatId() === v.channelId);
     const others = $derived(v ? v.peers.filter((p) => p.connected).length : 0);
     const status = $derived(!v ? '' : !v.audio ? 'In the call, without audio'
         : others ? `${others + 1} in the call` : 'Waiting for others');
 </script>
 
-{#if v}
+{#if v && !onStage}
     <div class="call-pill call-pill-live voice-bar">
         <div class="call-pill-row">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

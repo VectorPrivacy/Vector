@@ -780,6 +780,11 @@ async function promptDeleteChannel(communityId, channel) {
  * the message renderer, so it's seeded from the community's primary row.
  */
 function openCommunityChannel(communityId, channel) {
+    // A voice channel's stage shows above its chat while it's on screen.
+    if (channel.view === 'voice') {
+        VectorSvelte.setVoiceStage({ communityId, channelId: channel.id, name: channel.name });
+        refreshVoicePresent(channel.id);
+    }
     if (chatOnScreen(channel.id)) return;
     let chat = arrChats.find(c => c.id === channel.id);
     if (!chat) {

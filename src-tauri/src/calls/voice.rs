@@ -29,6 +29,8 @@ pub struct VoiceEngine {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
+    /// False once the call went ahead without a microphone.
+    mic: Arc<AtomicBool>,
     stats: Arc<MediaStats>,
     conns: Arc<Mutex<Vec<([u8; 32], Connection)>>>,
     sends: Arc<Mutex<Vec<Connection>>>,
@@ -58,10 +60,11 @@ impl VoiceEngine {
         let peers: Arc<Mutex<HashMap<[u8; 32], Peer>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let mic = Arc::new(AtomicBool::new(true));
         let capture = {
             let (stop, muted, stats, link) = (Arc::clone(&stop), Arc::clone(&muted), Arc::clone(&stats), Arc::clone(&link));
             let out = Some(Outbound::Many(Arc::clone(&sends)));
-            let mic = Arc::new(AtomicBool::new(true));
+            let mic = Arc::clone(&mic);
             std::thread::Builder::new()
                 .name("voice-capture".into())
                 .spawn(move || capture_thread(out, link, out_rate, stop, muted, mic, stats, ready_tx, true, Arc::new(AtomicBool::new(false))))
@@ -88,7 +91,7 @@ impl VoiceEngine {
                 .spawn(move || playout_thread(link, out_rate, peers, stop, deafened))
                 .map_err(|e| e.to_string())?
         };
-        Ok(Self { stop, muted, deafened, stats, conns: Arc::new(Mutex::new(Vec::new())), sends, peers, threads: vec![capture, playout] })
+        Ok(Self { stop, muted, deafened, mic, stats, conns: Arc::new(Mutex::new(Vec::new())), sends, peers, threads: vec![capture, playout] })
     }
 }
 
@@ -134,6 +137,10 @@ impl VoiceMedia for VoiceEngine {
 
     fn set_deafened(&self, on: bool) {
         self.deafened.store(on, Ordering::Relaxed);
+    }
+
+    fn has_mic(&self) -> bool {
+        self.mic.load(Ordering::Relaxed)
     }
 
     fn set_audible(&self, endpoint: &[u8; 32], on: bool) {

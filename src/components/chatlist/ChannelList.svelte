@@ -6,7 +6,7 @@
     // message repaints one row.
     import { communityVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
     import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
-    import { voicePresent, voiceSpeaking } from '../lib/voice.svelte.js';
+    import { voicePresent, voiceLevel, voiceCallHandlers, voiceSession, SPEAKING } from '../lib/voice.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
@@ -185,10 +185,12 @@
     </div>
     <!-- Who is in a voice channel's call, whether or not we are. -->
     {#if channel.view === 'voice'}
-        {#each voicePresent(channel.id) as npub (npub)}
-            <div class="chatlist-voice-member" class:is-speaking={voiceSpeaking(npub)}>
-                <Avatar src={h.getProfileAvatarSrc(h.getProfile(npub))} size={18} />
-                <span class="cutoff">{h.getName(npub)}</span>
+        {@const live = voiceSession()?.channelId === channel.id}
+        {#each voicePresent(channel.id) as p (p.npub)}
+            <div class="chatlist-voice-member" class:is-speaking={live && !p.muted && voiceLevel(p.npub, voiceCallHandlers().myNpub?.()) > SPEAKING}>
+                <Avatar src={h.getProfileAvatarSrc(h.getProfile(p.npub))} size={18} />
+                <span class="cutoff">{h.getName(p.npub)}</span>
+                {#if p.deafened}<span class="icon icon-volume-mute" title="Deafened"></span>{:else if p.muted}<span class="icon icon-mic-off" title="Muted"></span>{/if}
             </div>
         {/each}
     {/if}

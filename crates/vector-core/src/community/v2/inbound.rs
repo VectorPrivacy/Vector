@@ -614,12 +614,12 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
     let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
     let (at_ms, author) = (event.opened().at_ms, event.opened().author);
     // Being in a call is CONNECT, not SEND: a Channel's writers' rules don't judge it.
-    if let ChatEvent::VoicePresence { opened, joined, transport, endpoint, relay } = event {
+    if let ChatEvent::VoicePresence { opened, heard } = event {
         if author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
             return DispatchedV2::Ignored;
         }
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        if !super::voice::note(&channel_id, opened.author, at_ms, joined, transport, endpoint, relay, now) {
+        if !super::voice::note(&channel_id, opened.author, at_ms, heard, now) {
             return DispatchedV2::Ignored;
         }
         #[cfg(feature = "calls")]
@@ -929,7 +929,7 @@ mod tests {
         assert!(matches!(dispatch_wrap(&typing(&w2, Some(Epoch(2))), &community, &me.public_key(), &rec), DispatchedV2::Typing { .. }), "a writer does");
         // Being in a call is CONNECT, not posting: presence counts at the read address.
         let presence = |endpoint: Option<[u8; 32]>, at_ms: u64| {
-            let rumor = chat::build_voice_presence_rumor(member.public_key(), &general, epoch, endpoint.as_ref().map(|e| (e, Some("https://relay.example./"))), at_ms);
+            let rumor = chat::build_voice_presence_rumor(member.public_key(), &general, epoch, endpoint.as_ref().map(|e| (e, Some("https://relay.example./"))), true, false, at_ms);
             chat::seal_chat_rumor(&rumor, &read, &member, Timestamp::from_secs(at_ms / 1000), true).unwrap().0
         };
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -937,6 +937,7 @@ mod tests {
         assert!(matches!(dispatch_wrap(&presence(Some([0x44; 32]), now), &community, &me.public_key(), &rec), DispatchedV2::VoicePresence { .. }), "a non-writer is in the call");
         assert_eq!(super::super::voice::author_of(&ch_hex, &[0x44; 32], now), Some(member.public_key()), "the sealed presence binds its endpoint to them");
         assert_eq!(super::super::voice::present(&ch_hex, now)[0].relay.as_deref(), Some("https://relay.example./"), "and names the relay it's reached through");
+        assert!(super::super::voice::present(&ch_hex, now)[0].muted && !super::super::voice::present(&ch_hex, now)[0].deafened, "and whether they're muted");
         assert!(matches!(dispatch_wrap(&presence(None, now + 1), &community, &me.public_key(), &rec), DispatchedV2::VoicePresence { .. }));
         assert!(super::super::voice::present(&ch_hex, now + 1).is_empty(), "and leaves it");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
