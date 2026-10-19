@@ -5,8 +5,8 @@
     let { h } = $props();   // h: submit() (create what the draft describes), close()
     const st = createChannelModal.state();
     const TYPES = [
-        { kind: 'text', icon: 'channel-hash', name: 'Text', desc: 'Messages, images, files and threads' },
-        { kind: 'voice', icon: 'volume-max', name: 'Voice', desc: 'Talk together, with cameras and screens' },
+        { kind: 'text', icon: 'channel-hash', name: 'Text', desc: 'Messages, images and files' },
+        { kind: 'voice', icon: 'volume-max', name: 'Voice', desc: 'Hang out over voice and video' },
     ];
     // The protocol's name cap, in bytes.
     const MAX = 64;
@@ -67,7 +67,7 @@
             <label class="toggle-container cs-perm ccm-private">
                 <span class="cs-perm-text">
                     <span class="cs-perm-name"><span class="icon icon-locked"></span>Private Channel</span>
-                    <span class="cs-perm-desc">Only members and roles you let in can {st.kind === 'voice' ? 'join its calls and read its chat' : 'see and read it'}.</span>
+                    <span class="cs-perm-desc">Only members and roles you let in can {st.kind === 'voice' ? 'join it' : 'see it'}.</span>
                 </span>
                 <input type="checkbox" checked={st.isPrivate} onchange={(e) => patchCreateChannel({ isPrivate: e.currentTarget.checked })}>
                 <span class="neon-toggle"></span>
