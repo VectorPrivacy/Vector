@@ -863,6 +863,21 @@ mod tests {
     }
 
     #[test]
+    fn a_joined_presence_carries_what_its_author_shows_and_a_left_carries_nothing() {
+        use super::super::voice::Showing;
+        let author = Keys::generate();
+        let ep = [0x5a; 32];
+        let showing = Showing { muted: true, deafened: false, screen: true, camera: true };
+        let joined = build_voice_presence_rumor(author.public_key(), &chan(), Epoch(0), Some((&ep, Some("https://relay.example/"))), showing, AT);
+        let ChatEvent::VoicePresence { heard, .. } = open(&seal(&joined, &author)).unwrap() else { panic!("presence expected") };
+        assert!(heard.joined && heard.muted && !heard.deafened && heard.screen && heard.camera);
+        assert_eq!((heard.endpoint, heard.relay.as_deref()), (Some(ep), Some("https://relay.example/")));
+        let left = build_voice_presence_rumor(author.public_key(), &chan(), Epoch(0), None, showing, AT + 1);
+        let ChatEvent::VoicePresence { heard, .. } = open(&seal(&left, &author)).unwrap() else { panic!("presence expected") };
+        assert!(!heard.joined && !heard.muted && !heard.screen && !heard.camera && heard.endpoint.is_none(), "a left says nothing of what it showed");
+    }
+
+    #[test]
     fn message_round_trip_carries_reply_emoji_and_extra_tags_verbatim() {
         let author = Keys::generate();
         let parent = Keys::generate();
