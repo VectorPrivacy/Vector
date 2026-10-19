@@ -81,7 +81,8 @@ function resolveGoLink(link) {
     if (!room) return { kind: 'channel', state: 'unknown', communityName };
     if (listed && !listed.some(c => c.id === link.channel)) return { kind: 'channel', state: 'deleted', communityName, channelName };
     const kind = link.message ? 'message' : 'channel';
-    return { kind, state: kind === 'message' ? 'pending' : 'ok', communityName, channelName, chatId: room.id };
+    const voice = listed?.find(c => c.id === link.channel)?.view === 'voice';
+    return { kind, state: kind === 'message' ? 'pending' : 'ok', communityName, channelName, chatId: room.id, voice };
 }
 
 /** Where a message is on this device: `{ chat, deleted }`. */
@@ -183,6 +184,8 @@ function _paintGoPill(pill, r, hereCommunity) {
     pill.classList.toggle('is-unknown', dim);
     pill.classList.toggle('is-gone', r.state === 'deleted');
     const sep = () => _goText('›', 'go-link-sep');
+    const roomIcon = () => _goIcon(r.voice ? 'volume-max' : 'channel-hash');
+    const roomRef = r.voice ? r.channelName : `#${r.channelName}`;
     const room = () => {
         if (r.communityName && pill.dataset.community !== hereCommunity) {
             pill.append(_goCommunityIcon(pill.dataset.community), _goText(r.communityName, 'go-link-name go-link-community'), sep());
@@ -206,16 +209,16 @@ function _paintGoPill(pill, r, hereCommunity) {
                 return;
             }
             room();
-            pill.append(_goIcon(r.state === 'locked' ? 'locked' : 'channel-hash'), _goText(r.channelName, 'go-link-name go-link-room'));
+            pill.append(r.state === 'locked' ? _goIcon('locked') : roomIcon(), _goText(r.channelName, 'go-link-name go-link-room'));
             pill.title = r.state === 'locked' ? `Private channel in ${r.communityName}`
                 : r.state === 'deleted' ? `Deleted channel in ${r.communityName}`
-                : `#${r.channelName} in ${r.communityName}`;
+                : `${roomRef} in ${r.communityName}`;
             return;
         case 'message':
             room();
-            pill.append(_goIcon('channel-hash'), _goText(r.channelName, 'go-link-name'), sep(), _goIcon('chat-bubble'));
+            pill.append(roomIcon(), _goText(r.channelName, 'go-link-name'), sep(), _goIcon('chat-bubble'));
             if (r.state === 'deleted') pill.append(_goText('deleted', 'go-link-name'));
-            pill.title = GO_MESSAGE_TITLES[r.state] || `Message in #${r.channelName}, ${r.communityName}`;
+            pill.title = GO_MESSAGE_TITLES[r.state] || `Message in ${roomRef}, ${r.communityName}`;
             return;
         default: {
             if (r.state === 'ok' && r.chatId) {
