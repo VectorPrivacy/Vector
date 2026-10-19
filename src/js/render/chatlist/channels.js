@@ -638,11 +638,11 @@ async function openCommunityMenu(chat, ev, at) {
         onClick: () => openCommunityInvitePanel(chat),
     });
     if (caps?.manage_channels) {
-        items.push({
-            label: 'Create Category',
-            icon: 'plus',
-            onClick: () => promptCreateCategory(cf.community_id),
-        });
+        items.push(
+            { label: 'Create Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(cf.community_id) },
+            { label: 'Create Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(cf.community_id, false, null, true) },
+            { label: 'Create Category', icon: 'plus', onClick: () => promptCreateCategory(cf.community_id) },
+        );
     }
     if (communitySettingsWritable(caps)) {
         items.push({
