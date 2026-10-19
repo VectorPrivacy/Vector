@@ -637,8 +637,8 @@ pub fn active_timeouts(events: &[GuestbookEvent], now_secs: u64, may_time_out: &
         }
         let from = at_ms / 1000;
         let until = (*until_secs).min(from.saturating_add(MAX_TIMEOUT_SECS));
-        let key = (*at_ms, ev.rumor_id);
-        if newest.get(target).is_none_or(|(at, id, _)| (*at, *id) < key) {
+        // Newest by ms; a tie goes to the lower rumor id, as everywhere on the Guestbook.
+        if newest.get(target).is_none_or(|(at, id, _)| *at < *at_ms || (*at == *at_ms && ev.rumor_id < *id)) {
             newest.insert(*target, (*at_ms, ev.rumor_id, until));
         }
     }
@@ -809,6 +809,9 @@ mod tests {
         assert!(got.contains_key(&target), "an unauthorized lift lifts nothing");
         let got = active_timeouts(&[ev(mod_, far, 1_000, 1), ev(mod_, 1_200, 1_100, 3)], 2_000, &may);
         assert!(got.is_empty(), "the newest authorized Timeout stands, here one already over");
+        for order in [[ev(mod_, far, 1_100, 7), ev(mod_, 0, 1_100, 6)], [ev(mod_, 0, 1_100, 6), ev(mod_, far, 1_100, 7)]] {
+            assert!(active_timeouts(&order, 2_000, &may).is_empty(), "a same-ms tie goes to the lower rumor id, in any order");
+        }
         let ahead = 2_000 + MAX_FUTURE_MS / 1000 + 1;
         let got = active_timeouts(&[ev(mod_, ahead + 100, ahead, 4)], 2_000, &may);
         assert!(got.is_empty(), "a Timeout dated past the horizon is ignored");
