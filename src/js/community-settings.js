@@ -138,7 +138,7 @@ async function csPickBanner() {
             src: preview,
             aspect: BANNER_ASPECT,
             title: 'Crop Banner',
-            hint: 'Drag to move, or drag a corner to resize. The shaded top band fades under the channel list.',
+            hint: 'Drag to move, or drag a corner to resize.',
             preview: 'banner',
             context: csBannerPreviewContext(st.communityId),
         });
