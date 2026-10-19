@@ -4817,6 +4817,39 @@ impl VectorCore {
             .map_err(VectorError::Other)
     }
 
+    /// Set the iroh relays a Community's voice channels use (CORD-07 §8): at most eight, https
+    /// only; none means iroh's defaults. Overlaid onto the held document like any metadata edit.
+    pub async fn set_voice_relays(&self, community_id: &str, relays: &[String]) -> Result<Vec<String>> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let mut clean: Vec<String> = Vec::new();
+        for r in relays.iter().map(|r| r.trim().trim_end_matches('/').to_string()).filter(|r| !r.is_empty()) {
+            let parsed = url::Url::parse(&r).map_err(|_| VectorError::Other(format!("{r} isn't a relay address")))?;
+            if parsed.scheme() != "https" || parsed.host_str().is_none() {
+                return Err(VectorError::Other(format!("{r}: a voice relay is an https:// address")));
+            }
+            let normal = format!("{}/", parsed.as_str().trim_end_matches('/'));
+            if !clean.contains(&normal) {
+                clean.push(normal);
+            }
+        }
+        if clean.len() > crate::community::v2::community::MAX_VOICE_RELAYS {
+            return Err(VectorError::Other(format!("at most {} voice relays", crate::community::v2::community::MAX_VOICE_RELAYS)));
+        }
+        let mut meta = community.metadata();
+        if clean.is_empty() {
+            meta.extra.remove("voice_relays");
+        } else {
+            meta.extra.insert("voice_relays".into(), serde_json::json!(clean));
+        }
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)?;
+        Ok(clean)
+    }
+
     /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then
     /// drop the held keys + local channel chats. You need a fresh invite to rejoin.
     pub async fn leave_community(&self, community_id: &str) -> Result<()> {

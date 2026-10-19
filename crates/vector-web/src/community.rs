@@ -57,6 +57,7 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
+        "voice_relays": c.voice_relays(),
         "relays": c.relays,
     })
 }

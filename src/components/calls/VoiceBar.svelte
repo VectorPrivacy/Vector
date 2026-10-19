@@ -1,9 +1,11 @@
 <script>
     // The voice Channel call this device is in: where, how many, and its mute, deafen and leave.
-    import { voiceSession, voiceStage } from '../lib/voice.svelte.js';
+    import { voiceSession, voiceStage, voiceMicOff, toggleVoiceMic } from '../lib/voice.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
-    let { h } = $props();   // h: setMuted(on), setDeafened(on), leave(), channelName(communityId, channelId), openChannel(communityId, channelId)
+    let { h } = $props();   // h: setMuted(on), setDeafened(on), leave(), keyHint(key), channelName(communityId, channelId), openChannel(communityId, channelId)
     const v = $derived(voiceSession());
+    const micOff = $derived(voiceMicOff(v));
+    const toggleMic = () => toggleVoiceMic(v, h);
     // The call's own stage on screen carries the same controls.
     const onStage = $derived(!!v && voiceStage()?.channelId === v.channelId && openChatId() === v.channelId);
     const others = $derived(v ? v.peers.filter((p) => p.connected).length : 0);
@@ -19,11 +21,13 @@
                 <span class="call-pill-name cutoff"><span class="icon icon-volume-max"></span> {h.channelName(v.communityId, v.channelId)}</span>
                 <span class="call-pill-status cutoff">{status}</span>
             </div>
-            <button class="call-btn" class:call-btn-on={v.muted} title={v.muted ? 'Unmute' : 'Mute'} onclick={() => h.setMuted(!v.muted)}>
-                <span class="icon" class:icon-mic-off={v.muted} class:icon-mic-on={!v.muted}></span>
+            <button class="call-btn" class:call-btn-on={micOff} class:call-btn-locked={v.serverMuted}
+                    title={v.serverMuted ? 'Muted by a moderator' : `${micOff ? 'Unmute' : 'Mute'} (${h.keyHint('M')})`} onclick={toggleMic}>
+                <span class="icon" class:icon-mic-off={micOff} class:icon-mic-on={!micOff}></span>
             </button>
-            <button class="call-btn" class:call-btn-on={v.deafened} title={v.deafened ? 'Undeafen' : 'Deafen'} onclick={() => h.setDeafened(!v.deafened)}>
-                <span class="icon" class:icon-volume-mute={v.deafened} class:icon-volume-max={!v.deafened}></span>
+            <button class="call-btn" class:call-btn-on={v.deafened || v.serverDeafened} class:call-btn-locked={v.serverDeafened}
+                    title={v.serverDeafened ? 'Deafened by a moderator' : `${v.deafened ? 'Undeafen' : 'Deafen'} (${h.keyHint('D')})`} onclick={() => h.setDeafened(!(v.deafened || v.serverDeafened))}>
+                <span class="icon" class:icon-volume-mute={v.deafened || v.serverDeafened} class:icon-volume-max={!v.deafened && !v.serverDeafened}></span>
             </button>
             <button class="call-btn call-btn-hangup" title="Leave the call" onclick={() => h.leave()}>
                 <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">

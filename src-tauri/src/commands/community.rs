@@ -38,6 +38,8 @@ pub struct CommunitySummary {
     pub dissolved: bool,
     /// The relays hosting the community, for the settings view.
     pub relays: Vec<String>,
+    /// The iroh relays its voice channels use; empty is iroh's defaults.
+    pub voice_relays: Vec<String>,
     /// The categories in sidebar order; `channels` is in sidebar order too.
     pub categories: serde_json::Value,
 }
@@ -101,6 +103,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
         dissolved: c.dissolved,
         relays: c.relays.clone(),
+        voice_relays: c.voice_relays(),
     }
 }
 
@@ -2488,6 +2491,12 @@ pub async fn update_community_metadata(
         Ok(())
     })
     .await
+}
+
+/// The iroh relays a community's voice channels use; empty means iroh's defaults.
+#[tauri::command]
+pub async fn set_community_voice_relays(community_id: String, relays: Vec<String>) -> Result<Vec<String>, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.set_voice_relays(&community_id, &relays).await.map_err(|e| e.to_string()) }).await
 }
 
 /// Rename a channel (requires manage-channels authority) and republish its ChannelMetadata so members

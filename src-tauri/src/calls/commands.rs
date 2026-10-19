@@ -209,7 +209,7 @@ pub async fn voice_present(channel_id: String) -> Vec<serde_json::Value> {
                 let npub = p.author.to_bech32().ok()?;
                 // Another transport's caller is in the call, but out of reach of ours.
                 let elsewhere = p.transport.as_deref().is_some_and(|t| t != vector_core::community::v2::chat::TRANSPORT_IROH) || p.transport.is_none();
-                Some(serde_json::json!({ "npub": npub, "muted": p.muted || p.server_muted, "deafened": p.deafened || p.server_deafened, "server": p.server_muted || p.server_deafened, "elsewhere": elsewhere }))
+                Some(serde_json::json!({ "npub": npub, "muted": p.muted || p.server_muted, "deafened": p.deafened || p.server_deafened, "server_muted": p.server_muted, "server_deafened": p.server_deafened, "elsewhere": elsewhere }))
             })
             .collect()
     })

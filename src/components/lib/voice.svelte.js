@@ -11,11 +11,28 @@ export function setVoiceSession(s) {
     live.session = s ? {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,
-        mic: s.mic !== false,
+        mic: s.mic !== false, serverMuted: !!s.server_muted, serverDeafened: !!s.server_deafened,
     } : null;
 }
 
-/** Who is in `channelId`'s call, earliest first: [{ npub, muted, deafened, server, elsewhere }]. */
+/** Whether our microphone is off, for any reason: our mute, a moderator's, or a deafen. */
+export function voiceMicOff(s) {
+    return !!s && (s.muted || s.serverMuted || s.deafened || s.serverDeafened);
+}
+
+/** The mic button: deafened, it undeafens and unmutes; under a moderator, it asks (and is told why not). */
+export function toggleVoiceMic(s, h) {
+    if (s.deafened) {
+        h.setDeafened(false);
+        if (s.muted) h.setMuted(false);
+    } else if (s.serverMuted || s.serverDeafened) {
+        h.setMuted(false);
+    } else {
+        h.setMuted(!s.muted);
+    }
+}
+
+/** Who is in `channelId`'s call, earliest first: [{ npub, muted, deafened, server_muted, server_deafened, elsewhere }]. */
 export function voicePresent(channelId) { return rooms[channelId] || []; }
 export function setVoicePresent(channelId, list) { rooms[channelId] = list || []; }
 
@@ -24,7 +41,7 @@ export function voiceStage() { return live.stage; }
 export function setVoiceStage(stage) { live.stage = stage || null; }
 
 /** The stage's and the bar's helpers: join, leave, setMuted, setDeafened, micAccess, getProfile,
- *  getName, avatarSrc, myNpub, memberMenu. */
+ *  getName, avatarSrc, myNpub, memberMenu, keyHint. */
 export function voiceCallHandlers() { return handlers; }
 export function setVoiceCallHandlers(h) { handlers = h || {}; }
 
@@ -32,7 +49,7 @@ export function setVoiceCallHandlers(h) { handlers = h || {}; }
 export function voiceLevel(npub, me) {
     const s = live.session;
     if (!s) return 0;
-    if (npub === me) return s.muted || !s.mic ? 0 : s.micLevel;
+    if (npub === me) return voiceMicOff(s) || !s.mic ? 0 : s.micLevel;
     return s.peers.find((x) => x.npub === npub)?.level || 0;
 }
 

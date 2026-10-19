@@ -8024,7 +8024,16 @@ pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, commu
     ensure_folded_permission(community, &me_pk()?, crate::community::roles::Permissions::MANAGE_METADATA, "editing the community metadata")?;
     control::validate_community_metadata(meta).map_err(|e| e.to_string())?;
     let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
-    publish_control_edition(transport, community, vsk::COMMUNITY_METADATA, &community.id().0, &content).await
+    let lock = super::realtime::follow_lock(community.id());
+    let _guard = lock.lock().await;
+    publish_control_edition(transport, community, vsk::COMMUNITY_METADATA, &community.id().0, &content).await?;
+    // Applied locally too: the fold that would otherwise land it runs on a later control pass.
+    if let Ok(Some(mut held)) = crate::db::community::load_community_v2(community.id()) {
+        if apply_community_metadata(&mut held, meta.clone()) {
+            crate::db::community::save_community_v2(&held)?;
+        }
+    }
+    Ok(())
 }
 
 /// Persist a freshly-published icon/banner onto the held row and return the fresh
@@ -14132,6 +14141,22 @@ mod tests {
             crate::db::community::load_community_v2(preview.id()).unwrap().is_none(),
             "previewing must not persist a membership"
         );
+    }
+
+    #[tokio::test]
+    async fn an_own_metadata_edit_reads_back_before_any_control_pass() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Echo", bed.relays.clone(), None).await.unwrap();
+        let mut meta = community.metadata();
+        meta.name = "Echoed".into();
+        meta.extra.insert("voice_relays".into(), serde_json::json!(["https://voice.example/"]));
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held().name, "Echoed");
+        assert_eq!(held().voice_relays(), vec!["https://voice.example/".to_string()]);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().voice_relays(), vec!["https://voice.example/".to_string()], "the fold lands the same head");
     }
 
     #[tokio::test]

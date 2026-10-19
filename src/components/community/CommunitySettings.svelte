@@ -55,6 +55,7 @@
             icon: 'globe',
             anchors: [
                 { id: 'relay-list', label: 'Hosting Relays', icon: 'globe', keys: 'relays servers hosting network nostr' },
+                { id: 'voice-relays', label: 'Voice Relays', icon: 'volume-max', keys: 'voice relays iroh calls audio' },
             ],
         },
         {
@@ -166,6 +167,29 @@
     }
     function addressOf(url) {
         return url.slice(schemeOf(url).length).replace(/\/$/, '');
+    }
+
+    const VOICE_RELAYS_MAX = 8;
+    let voiceRelayInput = $state('');
+    let voiceRelayError = $state('');
+
+    function addVoiceRelay() {
+        let raw = voiceRelayInput.trim();
+        if (!raw) return;
+        if (!raw.includes('://')) raw = `https://${raw}`;
+        let url;
+        try { url = new URL(raw); } catch { voiceRelayError = 'That isn\'t a relay address.'; return; }
+        if (url.protocol !== 'https:' || !url.hostname) { voiceRelayError = 'A voice relay is an https:// address.'; return; }
+        const normal = `${url.href.replace(/\/+$/, '')}/`;
+        const list = st.draft.voiceRelays;
+        if (list.includes(normal)) { voiceRelayError = 'That relay is already listed.'; return; }
+        if (list.length >= VOICE_RELAYS_MAX) { voiceRelayError = `At most ${VOICE_RELAYS_MAX} voice relays.`; return; }
+        csSetDraft({ voiceRelays: [...list, normal] });
+        voiceRelayInput = '';
+        voiceRelayError = '';
+    }
+    function removeVoiceRelay(url) {
+        csSetDraft({ voiceRelays: st.draft.voiceRelays.filter((r) => r !== url) });
     }
 </script>
 
@@ -316,6 +340,33 @@
                                     <p class="cs-hint">{st.loading ? 'Loading...' : 'No relays recorded for this community.'}</p>
                                 {/each}
                             </div>
+                        </section>
+
+                        <section class="cs-block" data-anchor="voice-relays">
+                            <h3 class="cs-heading">Voice Relays</h3>
+                            <p class="cs-lede">Voice channels connect through these relays. A relay sees who is calling from where, never what is said.</p>
+                            <div class="cs-relays">
+                                {#each st.draft.voiceRelays as url (url)}
+                                    <div class="cs-relay">
+                                        <span class="cs-relay-icon"><span class="icon icon-volume-max"></span></span>
+                                        <span class="cs-relay-url cutoff"><span class="cs-relay-scheme">{schemeOf(url)}</span>{addressOf(url)}</span>
+                                        {#if st.canEdit}
+                                            <button class="cs-relay-remove" title="Remove" onclick={() => removeVoiceRelay(url)}><span class="icon icon-x"></span></button>
+                                        {/if}
+                                    </div>
+                                {:else}
+                                    <p class="cs-hint">{st.loading ? 'Loading...' : 'Using the default relays run by n0.'}</p>
+                                {/each}
+                            </div>
+                            {#if st.canEdit}
+                                <form class="cs-relay-add" onsubmit={(e) => { e.preventDefault(); addVoiceRelay(); }}>
+                                    <input class="cs-input" type="text" placeholder="https://relay.example.com" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                           disabled={st.draft.voiceRelays.length >= VOICE_RELAYS_MAX}
+                                           bind:value={voiceRelayInput} oninput={() => { voiceRelayError = ''; }} />
+                                    <button class="cs-btn-save" type="submit" disabled={!voiceRelayInput.trim()}>Add</button>
+                                </form>
+                                {#if voiceRelayError}<p class="cs-hint cs-hint-error">{voiceRelayError}</p>{/if}
+                            {/if}
                         </section>
                     {/if}
                 </div>

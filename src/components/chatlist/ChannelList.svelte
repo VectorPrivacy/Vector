@@ -192,7 +192,7 @@
                  oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); voiceCallHandlers().memberMenu?.(communityId, channel.id, p.npub, e.clientX, e.clientY); }}>
                 <Avatar src={h.getProfileAvatarSrc(h.getProfile(p.npub))} size={18} />
                 <span class="cutoff">{h.getName(p.npub)}</span>
-                {#if p.deafened}<span class="icon icon-volume-mute" title="Deafened"></span>{:else if p.muted}<span class="icon icon-mic-off" title="Muted"></span>{/if}
+                {#if p.deafened}<span class="icon icon-volume-mute" class:is-server={p.server_deafened} title={p.server_deafened ? 'Deafened by a moderator' : 'Deafened'}></span>{:else if p.muted}<span class="icon icon-mic-off" class:is-server={p.server_muted} title={p.server_muted ? 'Muted by a moderator' : 'Muted'}></span>{/if}
             </div>
         {/each}
     {/if}

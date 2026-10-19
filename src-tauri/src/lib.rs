@@ -1136,6 +1136,7 @@ pub fn run() {
             commands::community::list_public_invites,
             commands::community::revoke_public_invite,
             commands::community::update_community_metadata,
+            commands::community::set_community_voice_relays,
             commands::community::rename_community_channel,
             commands::community::edit_community_channel,
             commands::community::move_community_channel,

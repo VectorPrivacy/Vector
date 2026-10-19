@@ -1,7 +1,7 @@
 <script>
     // A voice channel's stage, above its chat: who is in the call (speaking, muted, deafened),
     // and joining it, or the call's own controls once in.
-    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, SPEAKING } from '../lib/voice.svelte.js';
+    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, SPEAKING } from '../lib/voice.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -9,6 +9,8 @@
     const shown = $derived(!!stage && openChatId() === stage.channelId);
     const h = $derived(voiceCallHandlers());
     const v = $derived(voiceSession());
+    const micOff = $derived(voiceMicOff(v));
+    const toggleMic = () => toggleVoiceMic(v, h);
     const inCall = $derived(!!v && !!stage && v.channelId === stage.channelId);
     const me = $derived(h.myNpub?.() || '');
     const people = $derived(stage ? voicePresent(stage.channelId) : []);
@@ -40,7 +42,8 @@
                         <div class="voice-tile-avatar" style="--talk: {Math.min(1, level * 2).toFixed(2)}">
                             <Avatar src={h.avatarSrc?.(p.npub)} size={56} />
                             {#if p.muted || p.deafened}
-                                <span class="voice-tile-badge" title={p.deafened ? 'Deafened' : 'Muted'}>
+                                {@const server = p.deafened ? p.server_deafened : p.server_muted}
+                                <span class="voice-tile-badge" class:is-server={server} title={`${p.deafened ? 'Deafened' : 'Muted'}${server ? ' by a moderator' : ''}`}>
                                     <span class="icon" class:icon-volume-mute={p.deafened} class:icon-mic-off={!p.deafened}></span>
                                 </span>
                             {/if}
@@ -57,11 +60,13 @@
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <span class="voice-stage-warn" onclick={() => h.micAccess?.()}>No microphone access: others can't hear you</span>
                 {/if}
-                <button class="call-btn" class:call-btn-on={v.muted} title={v.muted ? 'Unmute (⌘⇧M)' : 'Mute (⌘⇧M)'} onclick={() => h.setMuted(!v.muted)}>
-                    <span class="icon" class:icon-mic-off={v.muted} class:icon-mic-on={!v.muted}></span>
+                <button class="call-btn" class:call-btn-on={micOff} class:call-btn-locked={v.serverMuted}
+                        title={v.serverMuted ? 'Muted by a moderator' : `${micOff ? 'Unmute' : 'Mute'} (${h.keyHint?.('M')})`} onclick={toggleMic}>
+                    <span class="icon" class:icon-mic-off={micOff} class:icon-mic-on={!micOff}></span>
                 </button>
-                <button class="call-btn" class:call-btn-on={v.deafened} title={v.deafened ? 'Undeafen (⌘⇧D)' : 'Deafen (⌘⇧D)'} onclick={() => h.setDeafened(!v.deafened)}>
-                    <span class="icon" class:icon-volume-mute={v.deafened} class:icon-volume-max={!v.deafened}></span>
+                <button class="call-btn" class:call-btn-on={v.deafened || v.serverDeafened} class:call-btn-locked={v.serverDeafened}
+                        title={v.serverDeafened ? 'Deafened by a moderator' : `${v.deafened ? 'Undeafen' : 'Deafen'} (${h.keyHint?.('D')})`} onclick={() => h.setDeafened(!(v.deafened || v.serverDeafened))}>
+                    <span class="icon" class:icon-volume-mute={v.deafened || v.serverDeafened} class:icon-volume-max={!v.deafened && !v.serverDeafened}></span>
                 </button>
                 <button class="voice-stage-leave" onclick={() => h.leave()}>Leave</button>
             {:else}

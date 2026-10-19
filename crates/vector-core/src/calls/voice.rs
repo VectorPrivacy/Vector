@@ -166,7 +166,7 @@ pub fn may_connect(community: &CommunityV2, channel: &ChannelId, member: &Public
     roster.channel_permissions(owner.as_deref(), &hex, &chan, ch.private).contains(Permissions::VIEW_CHANNEL | Permissions::CONNECT)
 }
 
-/// Whether `member` is heard: Speak, and not under a Timeout.
+/// Whether `member` is heard: Speak, not under a Timeout, and not muted or deafened by a moderator.
 pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKey) -> bool {
     let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let chan = crate::simd::hex::bytes_to_hex_32(&channel.0);
@@ -177,8 +177,8 @@ pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKe
         return true;
     }
     let timed_out = crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member));
-    let server_muted = presence::server_state(&chan, member).0;
-    !timed_out && !server_muted && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
+    let (server_muted, server_deafened) = presence::server_state(&chan, member);
+    !timed_out && !server_muted && !server_deafened && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
 }
 
 fn voice_relays(community: &CommunityV2) -> Vec<RelayUrl> {
@@ -249,6 +249,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         return Err("You can't connect to this channel".into());
     }
     let endpoint = bind(&community).await?;
+    crate::log_info!("[voice] joined via {}", relay_of(&endpoint).as_deref().unwrap_or("no relay yet"));
     let media = match super::platform::get() {
         Ok(p) => match p.start_voice().await {
             Ok(m) => Some(m),
@@ -280,6 +281,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
     }
     *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
     if let Some(m) = v.engine() {
+        apply_to(&v, &*m);
         m.chime(Chime::Joined);
     }
     let tasks = vec![
@@ -326,29 +328,16 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
         changed(&v);
         return;
     }
-    let (server_muted, server_deafened) = presence::server_state(channel_hex, &v.me);
     match directive {
-        Directive::Mute | Directive::Unmute => {
-            let on = server_muted || (directive == Directive::Mute);
-            if on {
-                v.muted.store(true, Ordering::SeqCst);
-            }
+        Directive::Mute | Directive::Unmute | Directive::Deafen | Directive::Undeafen => {
             if let Some(m) = v.engine() {
-                m.set_muted(v.muted.load(Ordering::SeqCst));
-                if directive == Directive::Mute {
-                    m.chime(Chime::Muted);
+                apply_to(&v, &*m);
+                match directive {
+                    Directive::Mute | Directive::Deafen => m.chime(Chime::Muted),
+                    _ if !effective(&v).0 => m.chime(Chime::Unmuted),
+                    _ => {}
                 }
             }
-            reannounce(&v);
-        }
-        Directive::Deafen | Directive::Undeafen => {
-            if server_deafened {
-                v.deafened.store(true, Ordering::SeqCst);
-            }
-            if let Some(m) = v.engine() {
-                m.set_deafened(v.deafened.load(Ordering::SeqCst) || server_deafened);
-            }
-            reannounce(&v);
         }
         Directive::Disconnect => {
             crate::db::spawn_bound(async { leave().await });
@@ -383,12 +372,16 @@ pub fn snapshot() -> Option<VoiceState> {
 
 pub fn set_muted(on: bool) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
-    if !on && presence::server_state(&v.channel_hex, &v.me).0 {
+    let (server_muted, server_deafened) = presence::server_state(&v.channel_hex, &v.me);
+    if !on && server_muted {
         return Err("A moderator muted you in this call".into());
+    }
+    if !on && server_deafened {
+        return Err("A moderator deafened you in this call".into());
     }
     v.muted.store(on, Ordering::SeqCst);
     if let Some(m) = v.engine() {
-        m.set_muted(on);
+        apply_to(&v, &*m);
         m.chime(if on { Chime::Muted } else { Chime::Unmuted });
     }
     reannounce(&v);
@@ -403,7 +396,8 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
     }
     v.deafened.store(on, Ordering::SeqCst);
     if let Some(m) = v.engine() {
-        m.set_deafened(on);
+        apply_to(&v, &*m);
+        m.chime(if on { Chime::Muted } else { Chime::Unmuted });
     }
     reannounce(&v);
     changed(&v);
@@ -501,6 +495,23 @@ fn state(v: &Voice) -> VoiceState {
     }
 }
 
+/// What the engine does, (mute, deafen): our own choices, or a moderator's, whichever is
+/// stricter. Deafened also means muted, as it does everywhere voice chat is.
+fn effective(v: &Voice) -> (bool, bool) {
+    stricter((v.muted.load(Ordering::SeqCst), v.deafened.load(Ordering::SeqCst)), presence::server_state(&v.channel_hex, &v.me))
+}
+
+fn stricter((muted, deafened): (bool, bool), (server_muted, server_deafened): (bool, bool)) -> (bool, bool) {
+    let deafened = deafened || server_deafened;
+    (muted || server_muted || deafened, deafened)
+}
+
+fn apply_to(v: &Voice, m: &dyn VoiceMedia) {
+    let (muted, deafened) = effective(v);
+    m.set_muted(muted);
+    m.set_deafened(deafened);
+}
+
 fn changed(v: &Voice) {
     crate::emit_event("voice_state", &state(v));
 }
@@ -531,8 +542,7 @@ pub async fn restart_audio() {
             return;
         }
     };
-    fresh.set_muted(v.muted.load(Ordering::SeqCst));
-    fresh.set_deafened(v.deafened.load(Ordering::SeqCst));
+    apply_to(&v, &*fresh);
     let community = held(&v.community).ok();
     let links: Vec<([u8; 32], PublicKey, Connection)> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, l)| (*id, l.author, l.conn.clone())).collect();
     for (id, author, conn) in links {
@@ -546,9 +556,28 @@ pub async fn restart_audio() {
     changed(&v);
 }
 
+/// Presence every heartbeat, and at once when our home relay changes: peers dial us through it.
 async fn heartbeat(v: Arc<Voice>) {
+    use iroh::Watcher;
+    let mut addr = v.endpoint.watch_addr();
+    let mut relay = relay_of(&v.endpoint);
     loop {
-        crate::rt::time::sleep(Duration::from_millis(presence::HEARTBEAT_MS)).await;
+        let due = web_time::Instant::now() + Duration::from_millis(presence::HEARTBEAT_MS);
+        loop {
+            let left = due.saturating_duration_since(web_time::Instant::now());
+            tokio::select! {
+                _ = crate::rt::time::sleep(left) => break,
+                moved = addr.updated() => {
+                    if moved.is_err() {
+                        return;
+                    }
+                    if relay_of(&v.endpoint) != relay {
+                        break;
+                    }
+                }
+            }
+        }
+        relay = relay_of(&v.endpoint);
         if let Err(e) = announce(&v, true).await {
             crate::log_warn!("[voice] presence heartbeat failed: {e}");
         }
@@ -667,6 +696,15 @@ fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moderator_lifting_their_mute_hands_back_our_own_choice() {
+        assert_eq!(stricter((false, false), (true, false)), (true, false));
+        assert_eq!(stricter((false, false), (false, false)), (false, false), "unmuted again once lifted");
+        assert_eq!(stricter((true, false), (false, false)), (true, false), "our own mute outlives theirs");
+        assert_eq!(stricter((false, true), (false, false)), (true, true), "deafened is muted too");
+        assert_eq!(stricter((false, false), (false, true)), (true, true));
+    }
 
     #[tokio::test]
     async fn a_peer_dropped_from_the_call_never_blocks_on_its_own_state() {

@@ -212,8 +212,8 @@ async function openVoiceMemberMenu(communityId, channelId, npub, x, y) {
     ];
     const moderate = (action, to = null) => invoke('voice_moderate', { communityId, channelId, npub, action, to }).catch((e) => VectorSvelte.showToast(String(e)));
     const mods = [];
-    if (them && powers.mute) mods.push(them.server && them.muted ? { label: 'Server Unmute', icon: 'mic-on', onClick: () => moderate('unmute') } : { label: 'Server Mute', icon: 'mic-off', onClick: () => moderate('mute') });
-    if (them && powers.deafen) mods.push(them.server && them.deafened ? { label: 'Server Undeafen', icon: 'volume-max', onClick: () => moderate('undeafen') } : { label: 'Server Deafen', icon: 'volume-mute', onClick: () => moderate('deafen') });
+    if (them && powers.mute) mods.push(them.server_muted ? { label: 'Server Unmute', icon: 'mic-on', onClick: () => moderate('unmute') } : { label: 'Server Mute', icon: 'mic-off', onClick: () => moderate('mute') });
+    if (them && powers.deafen) mods.push(them.server_deafened ? { label: 'Server Undeafen', icon: 'volume-max', onClick: () => moderate('undeafen') } : { label: 'Server Deafen', icon: 'volume-mute', onClick: () => moderate('deafen') });
     if (them && powers.move) {
         for (const ch of (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice' && c.id !== channelId)) {
             mods.push({ label: `Move to ${ch.name}`, icon: 'volume-max', onClick: () => moderate('move', ch.id) });
@@ -236,12 +236,14 @@ function registerVoiceScreen() {
         avatarSrc: (npub) => getProfileAvatarSrc(getProfile(npub)),
         myNpub: () => strPubkey,
         memberMenu: (communityId, channelId, npub, x, y) => openVoiceMemberMenu(communityId, channelId, npub, x, y),
+        keyHint: (key) => voiceKeyHint(key),
     });
     VectorSvelte.setScreen('voice', {
         h: {
             setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
             setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
             leave: () => invoke('voice_leave').catch(() => {}),
+            keyHint: (key) => voiceKeyHint(key),
             channelName: (communityId, channelId) => voiceChannelOf(communityId, channelId)?.name || 'Voice',
             openChannel: (communityId, channelId) => {
                 const ch = voiceChannelOf(communityId, channelId);
@@ -252,6 +254,11 @@ function registerVoiceScreen() {
     invoke('voice_state').then((s) => voiceOnState(s)).catch(() => {});
 }
 
+/** The mute/deafen shortcut as this OS writes it. */
+function voiceKeyHint(key) {
+    return platformFeatures?.os === 'macos' ? `⌘⇧${key}` : `Ctrl+Shift+${key}`;
+}
+
 // Mute and deafen from anywhere in the app while in a voice call: Cmd/Ctrl+Shift+M and +D.
 document.addEventListener('keydown', (e) => {
     if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
@@ -259,7 +266,10 @@ document.addEventListener('keydown', (e) => {
     if (!v) return;
     if (e.code === 'KeyM') {
         e.preventDefault();
-        invoke('voice_set_muted', { on: !v.muted }).catch(() => {});
+        VectorSvelte.toggleVoiceMic(v, {
+            setMuted: (on) => invoke('voice_set_muted', { on }).catch((err) => VectorSvelte.showToast(String(err))),
+            setDeafened: (on) => invoke('voice_set_deafened', { on }).catch(() => {}),
+        });
     } else if (e.code === 'KeyD') {
         e.preventDefault();
         invoke('voice_set_deafened', { on: !v.deafened }).catch(() => {});

@@ -59,6 +59,7 @@ async function openCommunitySettings(communityId) {
             description: summary.description || '',
             iconSrc: cached ? convertFileSrc(cached) : null,
             relays: summary.relays || [],
+            voiceRelays: summary.voice_relays || [],
             canEdit: !!caps.manage_metadata,
             canBan: !!caps.ban,
             canRoles: !!caps.manage_roles,
@@ -194,6 +195,10 @@ async function csSave() {
     try {
         if (VectorSvelte.csOverviewDirty() && st.canEdit) {
             unlisten = await csSaveOverview(communityId);
+        }
+        if (VectorSvelte.csVoiceRelaysDirty() && st.canEdit) {
+            const voiceRelays = await invoke('set_community_voice_relays', { communityId, relays: st.draft.voiceRelays });
+            VectorSvelte.csCommitted({ voiceRelays });
         }
         if (VectorSvelte.csRoleOrderDirty() || VectorSvelte.csRoleEditDirty()) {
             await csSaveRoles(communityId);

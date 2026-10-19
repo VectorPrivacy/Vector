@@ -3971,6 +3971,7 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   margin: 0 0 0 auto;
   background-color: rgba(255, 255, 255, 0.45);
 }
+.chatlist-voice-member .icon.is-server { background-color: var(--danger-color); }
 
 /* A voice channel's stage, above its chat. */
 .voice-stage {
@@ -3985,6 +3986,10 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 .voice-stage-live {
   border-color: rgba(89, 252, 179, 0.25);
 }
+/* Narrow: the header floats over the pane, so the stage clears it and the messages
+   below need no clearance of their own. */
+body:not(.ws) .voice-stage { margin-top: 68px; }
+body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
 .voice-stage-head {
   display: flex;
   align-items: center;
@@ -4056,6 +4061,9 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   margin: 0;
   background-color: var(--danger-color);
 }
+/* A moderator's mute or deafen: the member can't lift it themselves. */
+.voice-tile-badge.is-server { background: var(--danger-color); }
+.voice-tile-badge.is-server .icon { background-color: #fff; }
 .voice-tile-name {
   max-width: 100%;
   font-size: 12px;
@@ -25726,6 +25734,24 @@ body.profile-switcher-editing .profile-switcher-add {
   user-select: text;
 }
 .cs-relay-scheme { color: #6a6a6a; }
+.cs-relay-remove {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.cs-relay-remove .icon { position: absolute; inset: 6px; width: 14px; height: 14px; margin: 0; background-color: #7a7a7a; }
+.cs-relay-remove:hover { background-color: #1c1c1c; }
+.cs-relay-remove:hover .icon { background-color: var(--danger-color); }
+.cs-relay-add { display: flex; gap: 8px; margin-top: 12px; }
+.cs-relay-add .cs-input { flex: 1; min-width: 0; padding: 8px 12px; font-size: 14px; }
+.cs-relay-add .cs-btn-save { height: auto; }
+.cs-hint-error { color: var(--danger-color); }
 
 /* Settings rows. `.st-line` is a label, its explainer and a control on one line
    (the phone layout's storage rows); `.st-row` is the same line with its explainer
@@ -27973,6 +27999,14 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .call-btn-on:hover {
   background: color-mix(in srgb, var(--accent-color, #59fcb3) 30%, rgba(255, 255, 255, 0.04));
+}
+
+/* Imposed by a moderator: only they can lift it. */
+.call-btn-locked,
+.call-btn-locked:hover {
+  background: color-mix(in srgb, var(--danger-color) 22%, rgba(255, 255, 255, 0.04));
+  color: var(--danger-color);
+  cursor: not-allowed;
 }
 
 .call-btn-hangup {

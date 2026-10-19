@@ -454,6 +454,11 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
             VectorCore.edit_community_metadata(&id, name.as_deref(), description.as_deref()).await.map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
+        "set_community_voice_relays" => {
+            let relays: Vec<String> = a.de("relays")?;
+            let clean = VectorCore.set_voice_relays(&a.str("communityId")?, &relays).await.map_err(|e| e.to_string())?;
+            Ok(json!(clean))
+        }
         "preview_public_invite" => cm::preview_public_invite(&a.str("url")?).await,
         "accept_public_invite" => cm::accept_public_invite(a.str("url")?).await,
         "accept_community_invite" => cm::accept_community_invite(&a.str("communityId")?).await,

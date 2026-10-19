@@ -446,6 +446,7 @@
     "allow-voice-set-volume",
     "allow-voice-moderate",
     "allow-voice-powers",
+    "allow-set-community-voice-relays",
     "allow-call-audio-settings-set",
     "allow-call-mic-test-start",
     "allow-call-mic-test-stop",
