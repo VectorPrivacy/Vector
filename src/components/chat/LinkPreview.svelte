@@ -95,7 +95,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="dmsg-preview btn" url={data.url} style:padding-bottom={data.description && data.image ? '0' : null} onclick={() => h.openUrl(data.url)}>
+<div class="dmsg-preview btn" url={data.url} style:padding-bottom={data.description && data.image && !audio ? '0' : null} onclick={() => h.openUrl(data.url)}>
     <span>
         <img class="favicon" alt="" style:display={faviconHidden ? 'none' : null} use:cached={data.favicon}
              onload={(e) => onLoad(e.currentTarget)} onerror={() => { faviconHidden = true; }}>{data.title}</span>
