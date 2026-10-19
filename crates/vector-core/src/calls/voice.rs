@@ -278,13 +278,18 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
     let community = held(&v.community)?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let endpoint = joined.then(|| (*v.endpoint.id().as_bytes(), relay_of(&v.endpoint)));
-    let showing = presence::Showing {
+    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, showing(v)).await
+}
+
+/// What our presence shows of us now.
+fn showing(v: &Voice) -> presence::Showing {
+    let sending = v.video.sending();
+    presence::Showing {
         muted: v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic()),
         deafened: v.deafened.load(Ordering::SeqCst),
-        screen: v.video.sending().screen,
-        camera: v.video.sending().camera,
-    };
-    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, showing).await
+        screen: sending.screen,
+        camera: sending.camera,
+    }
 }
 
 /// Join a voice Channel's call, leaving any other first.
@@ -642,6 +647,10 @@ pub fn set_peer_volume(member: &PublicKey, gain: f32) -> Result<(), String> {
 
 /// Everyone sees a mute or deafen now, not at the next heartbeat.
 fn reannounce(v: &Arc<Voice>) {
+    // Ours applies the moment it's set, so the list shows it before any relay has the announcement.
+    let at = now_ms();
+    let heard = presence::Heard::announcing(Some((*v.endpoint.id().as_bytes(), relay_of(&v.endpoint))), showing(v));
+    presence::note(&v.channel_hex, v.me, at, heard, at);
     let v = v.clone();
     crate::db::spawn_bound(async move {
         // A call left meanwhile must not announce itself joined after its `left`.

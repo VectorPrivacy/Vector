@@ -389,11 +389,7 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
     let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref().map(|(e, r)| (e, r.as_deref())), showing, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
     let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
-    let transport = endpoint.as_ref().map(|_| chat::TRANSPORT_IROH.to_string());
-    let (ep, relay) = endpoint.map_or((None, None), |(e, r)| (Some(e), r));
-    let joined = ep.is_some();
-    let heard = super::voice::Heard { joined, transport, endpoint: ep, relay, muted: showing.muted && joined, deafened: showing.deafened && joined, screen: showing.screen && joined, camera: showing.camera && joined };
-    super::voice::note(&channel, author_pk, at_ms, heard, at_ms);
+    super::voice::note(&channel, author_pk, at_ms, super::voice::Heard::announcing(endpoint, showing), at_ms);
     Ok(())
 }
 

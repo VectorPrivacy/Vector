@@ -74,6 +74,24 @@ pub struct Heard {
     pub camera: bool,
 }
 
+impl Heard {
+    /// What our own presence says when it names `endpoint` (none is a `left`) and shows `showing`.
+    pub fn announcing(endpoint: Option<([u8; 32], Option<String>)>, showing: Showing) -> Heard {
+        let (endpoint, relay) = endpoint.map_or((None, None), |(e, r)| (Some(e), r));
+        let joined = endpoint.is_some();
+        Heard {
+            joined,
+            transport: joined.then(|| super::chat::TRANSPORT_IROH.to_string()),
+            endpoint,
+            relay,
+            muted: showing.muted && joined,
+            deafened: showing.deafened && joined,
+            screen: showing.screen && joined,
+            camera: showing.camera && joined,
+        }
+    }
+}
+
 /// What a `joined` shows of its author beyond where to reach them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Showing {
