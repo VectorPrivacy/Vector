@@ -131,6 +131,8 @@ pub async fn call_status() -> Option<CallState> {
 /// Join a voice Channel's call, leaving any other.
 #[tauri::command]
 pub async fn voice_join(community_id: String, channel_id: String) -> Result<vector_core::calls::voice::VoiceState, String> {
+    // Asked now, as a call asks. A refusal still joins: heard by no one, hearing everyone.
+    crate::mic_access::ask().await;
     vector_core::db::scoped(vector_core::calls::voice::join(&community_id, &channel_id)).await
 }
 
