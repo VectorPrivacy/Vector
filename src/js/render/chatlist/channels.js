@@ -88,6 +88,7 @@ function loadCommunityChannels() {
     invoke('list_communities')
         .then(list => {
             for (const community of list || []) {
+                if (communityMovesPending(community.community_id)) continue;
                 communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
                 communityLockedChannels.set(community.community_id, lockedChannels(community.channels));
                 communityCategoriesCache.set(community.community_id, categoriesOf(community.categories));
@@ -110,7 +111,7 @@ function categoriesOf(categories) {
 
 /** Adopt a channel set straight off a `get_community` summary the caller already fetched. */
 function setCommunityChannels(communityId, channels, categories) {
-    if (!communityId || !Array.isArray(channels)) return;
+    if (!communityId || !Array.isArray(channels) || communityMovesPending(communityId)) return;
     communityChannelsCache.set(communityId, visibleChannels(channels));
     communityLockedChannels.set(communityId, lockedChannels(channels));
     if (Array.isArray(categories)) communityCategoriesCache.set(communityId, categoriesOf(categories));
@@ -245,12 +246,33 @@ async function moveCommunityChannel(communityId, channelId, categoryId, index) {
     rest.splice(at, 0, next);
     communityChannelsCache.set(communityId, rest);
     communityChanged(communityId);
-    try {
-        await invoke('move_community_channel', { communityId, channelId, categoryId: categoryId || null, index });
-    } catch (e) {
-        showToast(String(e));
-    }
-    refreshCommunityChannels();
+    queueCommunityMove(communityId, () => invoke('move_community_channel', { communityId, channelId, categoryId: categoryId || null, index }));
+}
+
+/** communityId → the moves still publishing there, in the order they were made. */
+const communityMoves = new Map();
+
+/**
+ * Publish moves one at a time, in order. Until the last lands, the list on screen is the
+ * truth: a reload mid-way would show only the moves done so far, then replay the rest.
+ */
+function queueCommunityMove(communityId, publish) {
+    const q = communityMoves.get(communityId) || { chain: Promise.resolve(), pending: 0 };
+    q.pending++;
+    q.chain = q.chain
+        .then(publish)
+        .catch((e) => showToast(String(e)))
+        .finally(() => {
+            if (--q.pending > 0) return;
+            communityMoves.delete(communityId);
+            refreshCommunityChannels();
+        });
+    communityMoves.set(communityId, q);
+}
+
+/** Whether moves are still publishing in this community. */
+function communityMovesPending(communityId) {
+    return communityMoves.has(communityId);
 }
 
 /** Move a Category to `index` among the Categories. */
@@ -262,12 +284,7 @@ async function moveCommunityCategory(communityId, categoryId, index) {
     rest.splice(Math.min(index, rest.length), 0, moved);
     communityCategoriesCache.set(communityId, rest);
     communityChanged(communityId);
-    try {
-        await invoke('move_community_category', { communityId, categoryId, index });
-    } catch (e) {
-        showToast(String(e));
-    }
-    refreshCommunityChannels();
+    queueCommunityMove(communityId, () => invoke('move_community_category', { communityId, categoryId, index }));
 }
 
 /** The Create Category modal. */
