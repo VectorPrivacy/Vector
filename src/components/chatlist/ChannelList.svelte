@@ -61,19 +61,24 @@
     // ── organising ── (the role list's gesture and look)
     const rowEls = new Map();
     const headEls = new Map();
+    const sectionEls = new Map();
     function tracked(map) {
         return (node, id) => { map.set(id, node); return { destroy() { if (map.get(id) === node) map.delete(id); } }; };
     }
     const rowEl = tracked(rowEls);
     const headEl = tracked(headEls);
+    const sectionEl = tracked(sectionEls);
     let dragging = $state(null);   // { kind: 'channel' | 'category', id }
     let drop = $state(null);       // { key, before }, key 'ch:<id>' or 'cat:<id>'
     let ghost = null;
 
     function targets() {
         if (!dragging) return [];
-        const heads = categories.filter((k) => k.id !== dragging.id).map((k) => ({ key: `cat:${k.id}`, el: headEls.get(k.id) }));
-        if (dragging.kind === 'category') return heads.filter((t) => t.el);
+        // A Category moves past whole Categories, its channels included.
+        if (dragging.kind === 'category') {
+            return categories.filter((k) => k.id !== dragging.id).map((k) => ({ key: `cat:${k.id}`, el: sectionEls.get(k.id) })).filter((t) => t.el);
+        }
+        const heads = categories.map((k) => ({ key: `cat:${k.id}`, el: headEls.get(k.id) }));
         const rows = (state?.channels || []).filter((c) => c.id !== dragging.id).map((c) => ({ key: `ch:${c.id}`, el: rowEls.get(c.id) }));
         return [...rows, ...heads].filter((t) => t.el);
     }
@@ -242,7 +247,9 @@
                         </div>
                     </div>
                 {:else}
-                <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)} class:is-dragging={dragging?.id === section.id}>
+                {@const catDrop = dragging?.kind === 'category' && drop?.key === `cat:${section.id}`}
+                <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)} class:is-dragging={dragging?.id === section.id}
+                     class:drop-above={catDrop && drop.before} class:drop-below={catDrop && !drop.before} use:sectionEl={section.id}>
                     <!-- A Category's heading is its handle: dragged among the others, or the top
                          of the Category a dragged channel lands in. -->
                     {#snippet head()}
@@ -261,8 +268,8 @@
                     {/snippet}
                     {#if section.category && state.canManage}
                         <div class="chatlist-channel-section-head"
-                             class:drop-above={drop?.key === `cat:${section.id}` && drop.before}
-                             class:drop-below={drop?.key === `cat:${section.id}` && !drop.before}
+                             class:drop-above={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && drop.before}
+                             class:drop-below={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && !drop.before}
                              use:headEl={section.id} use:categoryGesture={section.category}>
                             {@render head()}
                         </div>

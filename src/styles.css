@@ -4039,13 +4039,16 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 
 /* Organising: the role list's insertion line, on a channel row or a Category heading. */
 .chatlist-channel,
+.chatlist-channel-section,
 .chatlist-channel-section-head { position: relative; }
 .chatlist-channel.is-dragging,
 .chatlist-channel-section.is-dragging { opacity: 0.3; }
 .chatlist-channel.drop-above::after,
 .chatlist-channel.drop-below::after,
 .chatlist-channel-section-head.drop-above::after,
-.chatlist-channel-section-head.drop-below::after {
+.chatlist-channel-section-head.drop-below::after,
+.chatlist-channel-section.drop-above::after,
+.chatlist-channel-section.drop-below::after {
   content: '';
   position: absolute;
   left: 6px;
@@ -4061,6 +4064,14 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 .chatlist-channel-section-head.drop-above::after { top: -1px; }
 .chatlist-channel.drop-below::after,
 .chatlist-channel-section-head.drop-below::after { bottom: -1px; }
+/* A Category's line sits in the gap beside it, clear of its heading and channels. */
+.chatlist-channel-section.drop-above::after { top: -8px; }
+.chatlist-channel-section.drop-below::after { bottom: -8px; }
+/* A dragged heading: its own size, the text centred, not the list's spacing above it. */
+.chatlist-channel-section-head.chatlist-drag-ghost {
+  height: auto !important;
+  padding: 6px 12px !important;
+}
 .chatlist-drag-ghost {
   opacity: 0.92;
   background-color: #161616;
