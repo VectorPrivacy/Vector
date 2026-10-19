@@ -3953,6 +3953,16 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   color: rgba(255, 255, 255, 0.6);
 }
 
+/* Speaking: the name lights and the avatar rings in the live accent. */
+.chatlist-voice-member.is-speaking {
+  color: #fff;
+}
+.chatlist-voice-member.is-speaking .avatar,
+.chatlist-voice-member.is-speaking img {
+  box-shadow: 0 0 0 2px var(--icon-color-primary, #59fcb3);
+  border-radius: 50%;
+}
+
 /* The voice bar sits in the pill's place; the 1:1 call never runs beside it. */
 .voice-bar .call-pill-text {
   cursor: pointer;

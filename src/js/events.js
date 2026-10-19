@@ -1224,6 +1224,7 @@ async function setupRustListeners() {
     _on('call_level', (evt) => VectorSvelte.setCallLevels(evt.payload));
     // Voice channels: the call this device is in, and who is in each channel's call.
     _on('voice_state', (evt) => voiceOnState(evt.payload));
+    _on('voice_levels', (evt) => VectorSvelte.setVoiceSession(evt.payload));
     _on('voice_presence', (evt) => refreshVoicePresent(evt.payload?.channel_id));
     _on('mic_level', (evt) => VectorSvelte.setMicTest(null, evt.payload?.mic || 0));
     // A device came or went: the pickers show what is there now.

@@ -45,6 +45,8 @@ pub struct VoicePeer {
     pub connected: bool,
     /// The selected path is direct, not through a relay.
     pub direct: bool,
+    /// How loud they are now, 0 to 1.
+    pub level: f32,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -56,6 +58,8 @@ pub struct VoiceState {
     pub deafened: bool,
     /// False when no media engine runs here: in the call, but neither heard nor hearing.
     pub audio: bool,
+    /// How loud our microphone is now, 0 to 1.
+    pub mic_level: f32,
 }
 
 struct Link {
@@ -237,6 +241,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
     }
     *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
     let tasks = vec![
+        crate::db::spawn_bound(levels(v.clone())),
         crate::db::spawn_bound(heartbeat(v.clone())),
         crate::db::spawn_bound(dialer(v.clone())),
         crate::db::spawn_bound(acceptor(v.clone())),
@@ -295,6 +300,8 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
 }
 
 fn state(v: &Voice) -> VoiceState {
+    let levels = v.media.as_ref().map(|m| m.levels()).unwrap_or_default();
+    let level_of = |ep: Option<[u8; 32]>| levels.iter().find(|(e, _)| *e == ep).map_or(0.0, |(_, l)| *l);
     let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
     let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now_ms())
         .into_iter()
@@ -305,6 +312,7 @@ fn state(v: &Voice) -> VoiceState {
                 npub: p.author.to_bech32().unwrap_or_default(),
                 connected: link.is_some(),
                 direct: link.is_some_and(|l| l.conn.paths().iter().any(|path| path.is_selected() && path.is_ip())),
+                level: if link.is_some() { level_of(p.endpoint) } else { 0.0 },
             }
         })
         .collect();
@@ -316,11 +324,23 @@ fn state(v: &Voice) -> VoiceState {
         muted: v.muted.load(Ordering::SeqCst),
         deafened: v.deafened.load(Ordering::SeqCst),
         audio: v.media.is_some(),
+        mic_level: level_of(None),
     }
 }
 
 fn changed(v: &Voice) {
     crate::emit_event("voice_state", &state(v));
+}
+
+/// Who is speaking, five times a second while there is audio to show it.
+async fn levels(v: Arc<Voice>) {
+    if v.media.is_none() {
+        return;
+    }
+    loop {
+        crate::rt::time::sleep(Duration::from_millis(200)).await;
+        crate::emit_event("voice_levels", &state(&v));
+    }
 }
 
 async fn heartbeat(v: Arc<Voice>) {

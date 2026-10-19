@@ -6,7 +6,7 @@
     // message repaints one row.
     import { communityVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
     import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
-    import { voicePresent } from '../lib/voice.svelte.js';
+    import { voicePresent, voiceSpeaking } from '../lib/voice.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
@@ -186,7 +186,7 @@
     <!-- Who is in a voice channel's call, whether or not we are. -->
     {#if channel.view === 'voice'}
         {#each voicePresent(channel.id) as npub (npub)}
-            <div class="chatlist-voice-member">
+            <div class="chatlist-voice-member" class:is-speaking={voiceSpeaking(npub)}>
                 <Avatar src={h.getProfileAvatarSrc(h.getProfile(npub))} size={18} />
                 <span class="cutoff">{h.getName(npub)}</span>
             </div>
