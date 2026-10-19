@@ -51,11 +51,14 @@ const SETTINGS_SEEN_KEY: &str = "synced_settings_seen";
 /// at the next boot instead of being silently lost.
 const RAIL_DIRTY_KEY: &str = "synced_rail_dirty";
 
-/// One NIP-44 event holds the whole list, so it inherits the same ~65KB
-/// plaintext ceiling as the Community List. Blocks and nicknames scale with
-/// contacts rather than being capped like pins, so the write path refuses to
-/// grow a list past this rather than publishing something no reader can open.
-const MAX_ENTRIES: usize = 2048;
+/// One NIP-44 event holds the whole list, and blocks and nicknames scale with contacts
+/// rather than being capped like pins: the write path measures the list as it will be
+/// encrypted and refuses an entry that would carry it past what a relay stores.
+fn fits(json: &str) -> bool {
+    crate::event_size::layer_fits(json.len())
+}
+
+const LIST_FULL: &str = "this list is full: it would no longer fit one event";
 
 const FETCH_TIMEOUT_SECS: u64 = 10;
 
@@ -174,10 +177,14 @@ impl NotifyMap {
             self.scopes.remove(scope_id);
             return Ok(());
         }
-        if !self.scopes.contains_key(scope_id) && self.scopes.len() >= MAX_ENTRIES {
-            return Err(format!("this list is full ({MAX_ENTRIES} entries)"));
+        let prev = self.scopes.insert(scope_id.to_string(), entry);
+        if !fits(&self.to_json()) {
+            match prev {
+                Some(p) => self.scopes.insert(scope_id.to_string(), p),
+                None => self.scopes.remove(scope_id),
+            };
+            return Err(LIST_FULL.to_string());
         }
-        self.scopes.insert(scope_id.to_string(), entry);
         Ok(())
     }
 }
@@ -359,10 +366,11 @@ impl IdList {
         if self.contains(id) {
             return Ok(());
         }
-        if self.ids.len() >= MAX_ENTRIES {
-            return Err(format!("this list is full ({MAX_ENTRIES} entries)"));
-        }
         self.ids.push(id.to_string());
+        if !fits(&self.to_json()) {
+            self.ids.pop();
+            return Err(LIST_FULL.to_string());
+        }
         Ok(())
     }
     pub fn remove(&mut self, id: &str) {
@@ -387,10 +395,14 @@ impl NicknameMap {
             self.names.remove(npub);
             return Ok(());
         }
-        if !self.names.contains_key(npub) && self.names.len() >= MAX_ENTRIES {
-            return Err(format!("nickname list is full ({MAX_ENTRIES} entries)"));
+        let prev = self.names.insert(npub.to_string(), name.to_string());
+        if !fits(&self.to_json()) {
+            match prev {
+                Some(p) => self.names.insert(npub.to_string(), p),
+                None => self.names.remove(npub),
+            };
+            return Err(LIST_FULL.to_string());
         }
-        self.names.insert(npub.to_string(), name.to_string());
         Ok(())
     }
 }
@@ -1248,14 +1260,41 @@ mod tests {
 
     #[test]
     fn lists_refuse_to_grow_past_the_event_ceiling() {
+        let npub = |i: usize| format!("npub1{i:0>58}");
         let mut l = IdList::default();
-        for i in 0..MAX_ENTRIES {
-            l.add(&format!("id{i}")).unwrap();
+        let mut n = 0;
+        while l.add(&npub(n)).is_ok() {
+            n += 1;
         }
-        assert!(l.add("one-too-many").is_err(), "a list that cannot be opened is worse than a refusal");
+        assert!(n > 500, "a full list still holds hundreds of npubs, held {n}");
+        assert_eq!(l.ids.len(), n, "the refused entry is not kept");
+        assert!(fits(&l.to_json()));
         // Removing frees a slot again.
-        l.remove("id0");
-        assert!(l.add("one-too-many").is_ok());
+        l.remove(&npub(0));
+        assert!(l.add(&npub(n)).is_ok());
+
+        // Every list, at its fullest, is an event a relay takes.
+        let me = nostr_sdk::prelude::Keys::generate();
+        let mut names = NicknameMap::default();
+        let mut i = 0;
+        while names.set(&npub(i), &"\"".repeat(16)).is_ok() {
+            i += 1;
+        }
+        let mut notify = NotifyMap::default();
+        let mut j = 0;
+        let widest = NotifyEntry { level: Some("mentions".into()), mute_until: i64::MAX, suppress_everyone: Some(true) };
+        while notify.set(&format!("{j:0>64}"), widest.clone()).is_ok() {
+            j += 1;
+        }
+        for json in [l.to_json(), names.to_json(), notify.to_json()] {
+            let ck = nostr_sdk::prelude::nip44::v2::ConversationKey::derive(me.secret_key(), &me.public_key()).unwrap();
+            let ct = crate::community::cipher::encrypt_with_random_nonce(&ck, json.as_bytes()).unwrap();
+            let ev = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(30078), crate::simd::base64::STANDARD.encode_to_string(&ct))
+                .tag(nostr_sdk::prelude::Tag::identifier("vector/blocks"))
+                .finalize(&me)
+                .unwrap();
+            assert!(crate::event_size::check(&ev).is_ok(), "{} bytes", ev.as_json().len());
+        }
     }
 
     #[test]

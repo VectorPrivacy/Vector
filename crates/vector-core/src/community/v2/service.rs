@@ -1048,6 +1048,10 @@ pub fn bundle_of_with_overlay(
         BundleAudience::Link => None,
         BundleAudience::Member(pk) => Some(pk.to_hex()),
     };
+    let lane = match audience {
+        BundleAudience::Link => invite::BundleLane::Link,
+        BundleAudience::Member(_) => invite::BundleLane::Direct,
+    };
     let channels = community
         .vendable_channels(&roster, owner_hex.as_deref(), recipient_hex.as_deref(), with, without)
         .into_iter()
@@ -1058,7 +1062,7 @@ pub fn bundle_of_with_overlay(
             name: c.name.clone(),
         })
         .collect();
-    CommunityInvite {
+    let mut bundle = CommunityInvite {
         community_id: hex(&community.identity.community_id.0),
         owner: hex(&community.identity.owner_xonly),
         owner_salt: hex(&community.identity.owner_salt),
@@ -1075,9 +1079,11 @@ pub fn bundle_of_with_overlay(
         icon: community.icon.clone(),
         expires_at: expires_at_ms,
         creator_npub: creator.map(|p| p.to_hex()),
-        label,
+        label: invite::clamp_label(label),
         extra: Default::default(),
-    }
+    };
+    bundle.fit(lane);
+    bundle
 }
 
 /// Gift-wrap a Direct Invite (kind 3313) of this community straight to `recipient`
@@ -1138,6 +1144,7 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
         // Readers ignore a registry whose author lacks CREATE_INVITE (it can't even
         // flip the community Public) — refuse before minting a link nobody honors.
         ensure_folded_permission(community, &me_pk()?, crate::community::roles::Permissions::CREATE_INVITE, "minting a public invite link")?;
+        let label = invite::clamp_label(label);
         let mut token = [0u8; super::derive::TOKEN_LEN];
         token.copy_from_slice(&super::super::random_32()[..super::derive::TOKEN_LEN]);
         let link_signer = Keys::generate();
@@ -1145,9 +1152,17 @@ pub async fn mint_public_link<T: Transport + ?Sized>(
         let bundle_key = super::derive::invite_bundle_key(&token);
         let bundle_event = invite::build_bundle_event(&link_signer, &bundle, &bundle_key).map_err(|e| e.to_string())?;
         let url = invite::build_invite_url(base, &link_signer.public_key(), &token, &community.relays).map_err(|e| e.to_string())?;
-
-        transport.publish_durable(&bundle_event, &community.relays).await?;
         let minted = MintedLink { url, bundle_event, link_signer, token, expires_at_ms, label: label.clone() };
+        // A link the Invite List can't sync is one no other device can retire: refuse it up front.
+        if let Some(mut list) = fetch_invite_list(transport, &community.relays).await? {
+            list.prune_expired(now_ms());
+            list.entries.push(link_entry(community, &minted));
+            if !list.fits() {
+                return Err("Too many invite links to sync: revoke some, or let them expire, first".into());
+            }
+        }
+
+        transport.publish_durable(&minted.bundle_event, &community.relays).await?;
         // Sync the link across the creator's devices (13303) + publish the Registry
         // (vsk-8) so members see the community is Public. Best-effort — the link works
         // without the sync.
@@ -1209,7 +1224,7 @@ fn live_signers_for(list: &invite::InviteList, community_id_hex: &str, now_ms: u
     list.entries
         .iter()
         .filter(|e| e.community_id == community_id_hex && !dead.contains(e.token.as_str()))
-        .filter(|e| e.expires_at.is_none_or(|exp| now_ms <= exp))
+        .filter(|e| e.expires_at_ms().is_none_or(|exp| now_ms <= exp))
         .filter_map(|e| Keys::parse(&e.signer_sk).ok().map(|k| k.public_key()))
         .collect()
 }
@@ -1251,6 +1266,21 @@ async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, com
     .await
 }
 
+/// A minted link's Invite List entry (CORD-05 §4).
+fn link_entry(community: &CommunityV2, minted: &MintedLink) -> invite::InviteEntry {
+    invite::InviteEntry {
+        token: crate::simd::hex::bytes_to_hex_16(&minted.token),
+        signer_sk: minted.link_signer.secret_key().to_secret_hex(),
+        community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0),
+        url: minted.url.clone(),
+        label: minted.label.clone(),
+        created_at: now_ms() / 1000,
+        expires_at: minted.expires_at_ms.map(|ms| ms / 1000),
+        epoch: Some(community.root_epoch.0),
+        extra: Default::default(),
+    }
+}
+
 /// Record a freshly-minted public link across the creator's devices: append it to the
 /// 13303 Invite List and refresh the Registry (CORD-05 §4/§5).
 async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, minted: &MintedLink) -> Result<(), String> {
@@ -1265,18 +1295,9 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
         // for "no list yet" and clobber the replaceable 13303. Ok(None) IS a fresh
         // creator's honest first list.
         let mut list = fetch_invite_list(transport, &community.relays).await?.unwrap_or_default();
+        list.prune_expired(now_ms());
         if !list.entries.iter().any(|e| e.token == token_hex) {
-            list.entries.push(invite::InviteEntry {
-                token: token_hex,
-                signer_sk: minted.link_signer.secret_key().to_secret_hex(),
-                community_id: cid_hex.clone(),
-                url: minted.url.clone(),
-                label: minted.label.clone(),
-                created_at: now_ms() / 1000,
-                expires_at: minted.expires_at_ms,
-                epoch: Some(community.root_epoch.0),
-                extra: Default::default(),
-            });
+            list.entries.push(link_entry(community, minted));
         }
         let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
         transport.publish(&event, &community.relays).await?;
@@ -1320,8 +1341,9 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
         let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
         transport.publish_durable(&revocation, &community.relays).await?;
         // Tombstone the Invite List entry (permanent — a stale device can't resurrect it).
-        list.tombstones.push(invite::InviteTombstone { token: token_hex.to_string(), community_id: cid_hex.clone(), extra: Default::default() });
+        list.tombstones.push(invite::InviteTombstone::of(&entry));
         list.entries.retain(|e| e.token != token_hex);
+        list.prune_expired(now_ms());
         let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
         transport.publish(&event, &community.relays).await?;
         let signers = live_signers_for(&list, &cid_hex, now_ms());
@@ -1506,14 +1528,11 @@ async fn sever_own_links<T: Transport + ?Sized>(
                 }
                 Err(_) => crate::log_warn!("[Sever] link {} carries a malformed signer — tombstoning the husk", &entry.token[..entry.token.len().min(8)]),
             }
-            list.tombstones.push(invite::InviteTombstone {
-                token: entry.token.clone(),
-                community_id: cid_hex.clone(),
-                extra: Default::default(),
-            });
+            list.tombstones.push(invite::InviteTombstone::of(entry));
             revoked_tokens.push(entry.token.clone());
         }
         list.entries.retain(|e| !revoked_tokens.contains(&e.token));
+        list.prune_expired(now_ms());
         let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
         transport.publish(&event, &community.relays).await?;
         let signers = live_signers_for(&list, &cid_hex, now_ms());
@@ -1591,12 +1610,12 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
             }
             // An expired link can't be joined, so refreshing it just re-states a
             // door that isn't there (CORD-05 §1/§5).
-            if entry.expires_at.is_some_and(|exp| now > exp) {
+            if entry.expires_at_ms().is_some_and(|exp| now > exp) {
                 continue;
             }
             let Ok(link_signer) = Keys::parse(&entry.signer_sk) else { continue };
             let token = crate::simd::hex::hex_to_bytes_16(&entry.token);
-            let bundle = bundle_of(community, BundleAudience::Link, Some(creator), entry.expires_at, entry.label.clone());
+            let bundle = bundle_of(community, BundleAudience::Link, Some(creator), entry.expires_at_ms(), entry.label.clone());
             let bundle_key = super::derive::invite_bundle_key(&token);
             if let Ok(event) = invite::build_bundle_event(&link_signer, &bundle, &bundle_key) {
                 let _ = transport.publish_durable(&event, &community.relays).await;
@@ -1888,10 +1907,11 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // the account's original Join already stands in the guestbook, and every
         // re-publish renders as "<user> has joined" spam for the whole community.
         if announce_join && !already_held {
+            let (bundle_creator, bundle_label) = bundle.attribution();
             let attribution = invited_by
                 .map(|p| p.to_hex())
-                .or_else(|| bundle.creator_npub.clone())
-                .zip(Some(bundle.label.clone().unwrap_or_default()));
+                .or_else(|| bundle_creator.map(str::to_string))
+                .zip(Some(bundle_label.unwrap_or_default().to_string()));
             let attr_ref = attribution.as_ref().map(|(c, l)| (c.as_str(), l.as_str()));
             let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
             let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);

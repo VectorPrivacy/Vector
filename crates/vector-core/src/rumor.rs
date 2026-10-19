@@ -1002,6 +1002,10 @@ fn process_app_specific(
         }
         let tag = |kind: &str| rumor.tags.find_kind(kind).and_then(|t| t.content()).map(|s| s.to_string());
         let call_id = tag("call-id").ok_or("Call signal missing call-id tag")?;
+        // Every reply repeats the caller's id, so only a short token is taken.
+        if call_id.is_empty() || call_id.len() > 64 || !call_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err("Call signal carries a malformed call-id".to_string());
+        }
         let signal = tag("call-signal").ok_or("Call signal missing call-signal tag")?;
         let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
         return Ok(RumorProcessingResult::CallSignal {

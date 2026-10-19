@@ -237,9 +237,11 @@ impl BotManifest {
     pub fn to_event(&self, keys: &Keys) -> Result<Event, String> {
         self.validate()?;
         let content = serde_json::to_string(self).map_err(|e| e.to_string())?;
-        EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), content)
+        let event = EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), content)
             .finalize(keys)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        crate::event_size::check(&event)?;
+        Ok(event)
     }
 }
 

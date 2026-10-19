@@ -522,6 +522,33 @@ mod tests {
     }
 
 
+    /// Seal `content` as a Control edition at its widest envelope (version, prev hash and
+    /// authority citation) and return the wrap's encoded size; the wrap refuses past the ceiling.
+    fn sealed_edition_len(vsk: &str, content: &str) -> usize {
+        let keys = nostr_sdk::prelude::Keys::generate();
+        let group = super::super::derive::channel_group_key(&[1; 32], &crate::community::ChannelId([7; 32]), crate::community::Epoch(u32::MAX as u64));
+        let cite = crate::community::edition::AuthorityCitation { entity_id: [11; 32], version: u64::MAX, edition_hash: [12; 32] };
+        let rumor = super::super::control::build_edition_rumor_bound(keys.public_key(), vsk, &[8; 32], u64::MAX, Some(&[9; 32]), content, 1_792_256_141, Some(&cite), Some([10; 32]));
+        let (wrap, _) = super::super::control::seal_control_edition(&rumor, &group, &keys, nostr_sdk::prelude::Timestamp::from_secs(1_792_256_141)).unwrap();
+        wrap.as_json().len()
+    }
+
+    #[test]
+    fn a_full_tenure_and_a_full_banlist_each_fit_one_relay_event() {
+        let rank = "z".repeat(crate::community::rank::MAX_RANK_KEY_BYTES);
+        let per = TENURE_HEAD_BUDGET / MAX_TENURE_ENTRIES;
+        let sealed = (0..MAX_TENURE_ENTRIES)
+            .map(|e| TenureEntry { rank: rank.clone(), permissions: u64::MAX, heads: (0..per).map(|i| format!("{:064x}", e * per + i)).collect() })
+            .collect();
+        let tenure = TenureContent { member: "f".repeat(64), sealed };
+        let n = sealed_edition_len(super::super::vsk::TENURE, &serde_json::to_string(&tenure).unwrap());
+        assert!(n <= crate::event_size::MAX_EVENT_BYTES, "a full Tenure is {n} bytes");
+
+        let banned: Vec<String> = (0..MAX_BANLIST).map(|i| format!("{i:064x}")).collect();
+        let n = sealed_edition_len(super::super::vsk::BANLIST, &banlist_content_json(&banned).unwrap());
+        assert!(n <= crate::event_size::MAX_EVENT_BYTES, "a full Banlist is {n} bytes");
+    }
+
     #[test]
     fn a_role_republished_here_keeps_what_another_client_wrote() {
         // Armada's hoist flag and a field nobody has invented yet: neither is modelled

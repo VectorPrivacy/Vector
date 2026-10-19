@@ -269,19 +269,19 @@ pub async fn gift_wrap(
     let overridden = TEST_SIGNER.read().is_ok_and(|g| g.is_some());
     #[cfg(not(test))]
     let overridden = false;
+    crate::event_size::check_rumor(&rumor)?;
     let extra_tags: Vec<Tag> = extra_tags.into_iter().collect();
-    if !overridden && signer_kind() == SignerKind::Local {
-        if let Some(identity) = crate::state::my_public_key() {
-            return crate::crypto::GuardedSigner::gift_wrap(&identity, receiver, rumor, extra_tags)
-                .map_err(|e| e.to_string());
-        }
-    }
-    let signer = active_signer()?;
-    GiftWrapBuilder::new(*receiver, rumor)
-        .extra_tags(extra_tags)
-        .finalize_async(&signer)
-        .await
-        .map_err(|e| e.to_string())
+    let local = if !overridden && signer_kind() == SignerKind::Local { crate::state::my_public_key() } else { None };
+    let wrap = match local {
+        Some(identity) => crate::crypto::GuardedSigner::gift_wrap(&identity, receiver, rumor, extra_tags).map_err(|e| e.to_string())?,
+        None => GiftWrapBuilder::new(*receiver, rumor)
+            .extra_tags(extra_tags)
+            .finalize_async(&active_signer()?)
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+    crate::event_size::check(&wrap)?;
+    Ok(wrap)
 }
 
 /// [`unwrap_gift_wrap`] for many wraps, one result per wrap in order. A local key opens

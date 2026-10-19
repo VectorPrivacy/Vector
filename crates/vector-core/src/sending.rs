@@ -370,6 +370,12 @@ async fn retry_send_gift_wrap(
 
     let max_attempts = config.max_send_attempts.max(1);
 
+    // Too large is final: no retry makes a relay take it.
+    if let Err(why) = crate::event_size::check_rumor(&rumor) {
+        fail_pending(&callback, receiver_npub, pending_id, &why).await;
+        return Err(why);
+    }
+
     // A network still starting is waited for once (as long as the retries would have taken, at
     // least its ready budget), so the inbox lookup can reach the relays that list it; one that
     // stays down fails the send with its reason.

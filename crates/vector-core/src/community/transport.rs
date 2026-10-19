@@ -1279,6 +1279,7 @@ pub(crate) async fn unmark_own(client: &Client, event: &Event) {
 impl Transport for LiveTransport {
     async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
         event.verify().map_err(|e| e.to_string())?;
+        crate::event_size::check(event)?;
         let client = Self::warm_client(relays, self.timeout).await?;
         let timeout = self.timeout;
         let mut targets: Vec<String> = Vec::new();
@@ -1437,6 +1438,7 @@ impl Transport for LiveTransport {
         // window we throw — a dead relay set is a failure, not an endless wait. Uses the shared warm client
         // (NEVER shut down here) and targets the community relay set across rounds.
         event.verify().map_err(|e| e.to_string())?;
+        crate::event_size::check(event)?;
         let client = Self::warm_client(relays, self.timeout).await?;
         let timeout = self.timeout;
         let event = event.clone();
@@ -1645,6 +1647,8 @@ pub(crate) mod memory {
     #[async_trait::async_trait]
     impl Transport for MemoryRelay {
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            // Refuse what a real relay would, so every test publish is a size test too.
+            crate::event_size::check(event)?;
             // Honor NIP-09 so the delete→gone cycle is testable offline.
             if event.kind == Kind::EventDeletion {
                 self.apply_deletion(event, relays);

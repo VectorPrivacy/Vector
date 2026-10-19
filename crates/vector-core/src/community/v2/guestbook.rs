@@ -32,9 +32,8 @@ use super::stream::{self, OpenedStream, SealForm, StreamError};
 /// against squatting "latest" with a forged future date.
 pub const MAX_FUTURE_MS: u64 = 3_600_000;
 
-/// Snapshot chunk size: 400 members per event (CORD-02 §5). 400 hex pubkeys of
-/// JSON is ~27 KB — comfortably inside the NIP-44 65,535-byte cap at every
-/// nesting layer, with headroom for the envelope.
+/// Snapshot chunk size: 400 members per event (CORD-02 §5). A full chunk's rumor is
+/// ~27.9 KB, inside the 28,672 bytes a sealed rumor may be and still fit a relay.
 pub const SNAPSHOT_CHUNK: usize = 400;
 
 const TAG_INVITE: &str = "invite";
@@ -977,6 +976,11 @@ mod tests {
         assert_eq!(*r1, refounder.public_key());
         let all: Vec<PublicKey> = m1.iter().chain(m2.iter()).copied().collect();
         assert_eq!(all, members, "membership survives the chunking intact");
+
+        let g = super::super::derive::guestbook_group_key(&[3; 32], &crate::community::CommunityId([4; 32]), crate::community::Epoch(u32::MAX as u64));
+        let full = &build_snapshot_rumors(refounder.public_key(), &members, [0x5a; 32], u64::MAX / 4)[0];
+        let (wrap, _) = seal_guestbook_rumor(full, &g, &refounder, Timestamp::from_secs(u32::MAX as u64)).unwrap();
+        assert!(crate::event_size::check(&wrap).is_ok(), "a full snapshot chunk is {} bytes", wrap.as_json().len());
 
         // No survivors still publishes one observable (empty) chunk.
         let empty = build_snapshot_rumors(refounder.public_key(), &[], [0x5b; 32], 1_000);

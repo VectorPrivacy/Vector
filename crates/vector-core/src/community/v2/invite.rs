@@ -46,6 +46,35 @@ pub const MAX_BUNDLE_CHANNELS: usize = 256;
 /// rotation count.
 pub const MAX_BUNDLE_EPOCH: u64 = 1 << 40;
 
+/// A link's `label` caps at a name's 64 bytes (CORD-05 §1): a joiner echoes it into
+/// their Join, so an unbounded one would make that Join unpublishable.
+pub const MAX_LABEL_BYTES: usize = 64;
+
+/// A sealed rumor's envelope around its content: id, pubkey, a 10-digit `created_at`,
+/// the kind and empty tags.
+const DIRECT_RUMOR_ENVELOPE: usize = 256;
+
+/// The event a bundle rides, which sets its room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleLane {
+    /// One NIP-44 layer: the link's kind 33301.
+    Link,
+    /// A sealed rumor: the Direct Invite's kind 3313.
+    Direct,
+}
+
+/// A label as a writer may mint it: trimmed, cut to the cap on a char boundary, absent if empty.
+pub fn clamp_label(label: Option<String>) -> Option<String> {
+    let label = label?;
+    let label = label.trim();
+    let mut end = label.len().min(MAX_LABEL_BYTES);
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    let label = label[..end].trim_end();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 /// The fragment format byte, which also selects the relay-dictionary generation
 /// (CORD-05 §3). Bumping it re-labels the dictionary universe.
 pub const FRAGMENT_VERSION: u8 = 4;
@@ -213,6 +242,36 @@ impl CommunityInvite {
     /// expiry, only joining refuses (CORD-05 §1).
     pub fn expired(&self, now_ms: u64) -> bool {
         self.expires_at.is_some_and(|e| now_ms > e)
+    }
+
+    /// The attribution a joiner echoes into their Join: a 64-hex creator and a label within
+    /// the cap, anything else echoed as absent (CORD-05 §1).
+    pub fn attribution(&self) -> (Option<&str>, Option<&str>) {
+        let creator = self.creator_npub.as_deref().filter(|c| c.len() == 64 && c.bytes().all(|b| b.is_ascii_hexdigit()));
+        let label = self.label.as_deref().filter(|l| l.len() <= MAX_LABEL_BYTES);
+        (creator, label)
+    }
+
+    /// Whether this bundle's event fits a relay on `lane`.
+    pub fn fits(&self, lane: BundleLane) -> bool {
+        let Ok(json) = serde_json::to_string(self) else { return false };
+        match lane {
+            BundleLane::Link => crate::event_size::layer_fits(json.len()),
+            BundleLane::Direct => {
+                let escaped = serde_json::to_string(&json).map_or(usize::MAX, |s| s.len());
+                escaped + DIRECT_RUMOR_ENVELOPE <= crate::event_size::MAX_SEALED_RUMOR_BYTES
+            }
+        }
+    }
+
+    /// Shed public Channel grants, last first, until the bundle fits `lane`. A joiner derives
+    /// a public Channel from the root and folds it from Control, so only a private Channel's
+    /// key must ride the bundle; one that still won't fit is refused when it is sent.
+    pub fn fit(&mut self, lane: BundleLane) {
+        while !self.fits(lane) {
+            let Some(i) = self.channels.iter().rposition(|c| c.key == self.community_root) else { return };
+            self.channels.remove(i);
+        }
     }
 }
 
@@ -485,8 +544,32 @@ pub struct InviteEntry {
 pub struct InviteTombstone {
     pub token: String,
     pub community_id: String,
+    /// The retired link's expiry, as its entry carried it: past it the link admits no one,
+    /// so the tombstone can go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// An Invite List `expires_at` as unix ms. The list carries seconds, like `created_at`
+/// (CORD-05 §4); a value past the year 5000 in seconds is an older Vector's milliseconds.
+fn list_expiry_ms(v: u64) -> u64 {
+    if v >= 100_000_000_000 { v } else { v.saturating_mul(1000) }
+}
+
+impl InviteEntry {
+    /// When this link stops admitting anyone, in unix ms.
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        self.expires_at.map(list_expiry_ms)
+    }
+}
+
+impl InviteTombstone {
+    /// The tombstone that retires `entry`.
+    pub fn of(entry: &InviteEntry) -> Self {
+        InviteTombstone { token: entry.token.clone(), community_id: entry.community_id.clone(), expires_at: entry.expires_at, extra: Default::default() }
+    }
 }
 
 /// A creator's Invite List — the kind-13303 replaceable, NIP-44-encrypted to
@@ -499,6 +582,20 @@ pub struct InviteList {
     pub tombstones: Vec<InviteTombstone>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl InviteList {
+    /// Forget the links that can no longer admit anyone, entries and tombstones past their
+    /// expiry: one a stale device brings back is as dead as a retired one (CORD-05 §4).
+    pub fn prune_expired(&mut self, now_ms: u64) {
+        self.entries.retain(|e| e.expires_at_ms().is_none_or(|x| now_ms <= x));
+        self.tombstones.retain(|t| t.expires_at.map(list_expiry_ms).is_none_or(|x| now_ms <= x));
+    }
+
+    /// Whether the list, encrypted to self, fits one event.
+    pub fn fits(&self) -> bool {
+        serde_json::to_string(self).is_ok_and(|json| crate::event_size::layer_fits(json.len()))
+    }
 }
 
 /// Merge two Invite Lists without coordination (CORD-05 §4): the token is the
@@ -944,6 +1041,109 @@ mod tests {
         assert!(matches!(bundle.validate(), Err(InviteError::OwnerMismatch)));
     }
 
+    /// The widest bundle a Community can mint: every optional field set, names of quotes
+    /// (escaped once per layer), and every Channel granted.
+    fn widest_bundle(private: usize) -> CommunityInvite {
+        let (_owner, mut b) = valid_bundle();
+        let quotes = "\"".repeat(64);
+        b.control_pk = Some(hex(&random_32()));
+        b.relays = (0..MAX_COMMUNITY_RELAYS).map(|i| format!("wss://{i}{}.example", "r".repeat(240))).collect();
+        b.name = quotes.clone();
+        b.icon = Some(ImageRef { url: format!("https://{}.example/{}", "b".repeat(60), "f".repeat(64)), key: hex(&random_32()), nonce: "ab".repeat(12), hash: hex(&random_32()), extra: Default::default() });
+        b.expires_at = Some(u64::MAX / 2);
+        b.creator_npub = Some(hex(&random_32()));
+        b.label = Some(quotes.clone());
+        b.channels = (0..MAX_BUNDLE_CHANNELS)
+            .map(|i| ChannelGrant {
+                id: hex(&random_32()),
+                key: if i < private { hex(&random_32()) } else { b.community_root.clone() },
+                epoch: MAX_BUNDLE_EPOCH,
+                name: quotes.clone(),
+            })
+            .collect();
+        b
+    }
+
+    #[test]
+    fn a_full_bundle_sheds_public_grants_until_its_event_fits() {
+        let private = 40;
+        let mut link = widest_bundle(private);
+        assert!(!link.fits(BundleLane::Link), "the test must start over the ceiling");
+        link.fit(BundleLane::Link);
+        assert!(link.channels.len() < MAX_BUNDLE_CHANNELS);
+        assert_eq!(link.channels.iter().filter(|c| c.key != link.community_root).count(), private, "every private key still rides");
+        let event = build_bundle_event(&Keys::generate(), &link, &invite_bundle_key(&token16())).unwrap();
+        assert!(crate::event_size::check(&event).is_ok(), "link bundle is {} bytes", event.as_json().len());
+
+        let mut direct = widest_bundle(private);
+        direct.fit(BundleLane::Direct);
+        assert_eq!(direct.channels.iter().filter(|c| c.key != direct.community_root).count(), private);
+        let wrap = build_direct_invite(&Keys::generate(), &Keys::generate().public_key(), &direct).unwrap();
+        assert!(crate::event_size::check(&wrap).is_ok(), "direct invite is {} bytes", wrap.as_json().len());
+
+        // A bundle that already fits is left whole.
+        let (_owner, mut small) = valid_bundle();
+        small.channels = widest_bundle(0).channels.into_iter().take(3).collect();
+        let before = small.clone();
+        small.fit(BundleLane::Direct);
+        assert_eq!(small, before);
+    }
+
+    #[test]
+    fn the_label_is_capped_when_minted_and_when_echoed() {
+        assert_eq!(clamp_label(Some("  Reddit  ".into())).as_deref(), Some("Reddit"));
+        assert_eq!(clamp_label(Some("   ".into())), None);
+        let long = clamp_label(Some("é".repeat(40))).unwrap();
+        assert!(long.len() <= MAX_LABEL_BYTES && long.chars().all(|c| c == 'é'), "cut on a char boundary");
+
+        let (_owner, mut b) = valid_bundle();
+        b.creator_npub = Some(hex(&random_32()));
+        b.label = Some("Conf 2026".into());
+        assert_eq!(b.attribution(), (b.creator_npub.as_deref(), Some("Conf 2026")));
+        b.label = Some("x".repeat(30_000));
+        b.creator_npub = Some("not a key".into());
+        assert_eq!(b.attribution(), (None, None), "a hostile bundle's attribution is echoed as absent");
+    }
+
+    #[test]
+    fn the_invite_list_forgets_expired_links_and_measures_itself() {
+        let entry = |i: usize, expires_at: Option<u64>| InviteEntry {
+            token: format!("{i:0>32}"),
+            signer_sk: hex(&random_32()),
+            community_id: hex(&random_32()),
+            url: format!("https://vectorapp.io/invite/naddr1{}#{}", "q".repeat(120), "z".repeat(60)),
+            label: Some("\"".repeat(64)),
+            created_at: 1_800_000_000,
+            expires_at,
+            epoch: Some(MAX_BUNDLE_EPOCH),
+            extra: Default::default(),
+        };
+        let mut list = InviteList::default();
+        list.entries.push(entry(1, Some(1_000)));
+        list.entries.push(entry(2, Some(5_000)));
+        list.entries.push(entry(3, None));
+        list.tombstones.push(InviteTombstone::of(&entry(4, Some(1_000))));
+        list.tombstones.push(InviteTombstone::of(&entry(5, None)));
+        list.prune_expired(2_000_000);
+        assert_eq!(list.entries.iter().map(|e| e.token.clone()).collect::<Vec<_>>(), vec![entry(2, None).token, entry(3, None).token]);
+        assert_eq!(list.tombstones.len(), 1, "an expired link's tombstone goes, a lasting one stays");
+
+        // The list carries seconds, as Armada writes it; an older Vector wrote milliseconds.
+        assert_eq!(entry(0, Some(1_722_400_000)).expires_at_ms(), Some(1_722_400_000_000));
+        assert_eq!(entry(0, Some(1_722_400_000_000)).expires_at_ms(), Some(1_722_400_000_000));
+
+        let mut i = 10;
+        while list.fits() {
+            list.entries.push(entry(i, None));
+            i += 1;
+        }
+        list.entries.pop();
+        assert!(list.entries.len() > 50, "a full list still holds dozens of links, held {}", list.entries.len());
+        let me = Keys::generate();
+        let event = build_invite_list_event(&me, &list).unwrap();
+        assert!(crate::event_size::check(&event).is_ok(), "a full invite list is {} bytes", event.as_json().len());
+    }
+
     #[test]
     fn from_json_rejects_over_the_channel_cap() {
         let (_owner, mut bundle) = valid_bundle();
@@ -1220,7 +1420,7 @@ mod tests {
         assert_eq!(still.entries[0].label, None);
 
         // Tombstone beats the entry.
-        let tomb = InviteTombstone { token: e.token.clone(), community_id: e.community_id.clone(), extra: Default::default() };
+        let tomb = InviteTombstone::of(&e);
         let b = merge_invite_lists(a, InviteList { tombstones: vec![tomb], ..Default::default() });
         assert!(b.entries.is_empty());
         assert_eq!(b.tombstones.len(), 1);
@@ -1232,8 +1432,8 @@ mod tests {
 
     #[test]
     fn invite_list_tombstones_union() {
-        let t1 = InviteTombstone { token: "11".repeat(16), community_id: "aa".repeat(32), extra: Default::default() };
-        let t2 = InviteTombstone { token: "22".repeat(16), community_id: "bb".repeat(32), extra: Default::default() };
+        let t1 = InviteTombstone { token: "11".repeat(16), community_id: "aa".repeat(32), expires_at: None, extra: Default::default() };
+        let t2 = InviteTombstone { token: "22".repeat(16), community_id: "bb".repeat(32), expires_at: None, extra: Default::default() };
         let merged = merge_invite_lists(
             InviteList { tombstones: vec![t1], ..Default::default() },
             InviteList { tombstones: vec![t2], ..Default::default() },

@@ -80,6 +80,8 @@ pub enum StreamError {
     Parse(String),
     /// A plaintext (wrap/seal/rumor JSON) exceeds the NIP-44 65,535-byte cap.
     Oversize(usize),
+    /// The encoded wrap exceeds the 65,536-byte relay ceiling.
+    TooLarge(usize),
     /// Outer kind is neither 1059 nor 21059.
     BadWrapKind(u16),
     /// Wrap author isn't this plane's group key — not this stream's event.
@@ -119,6 +121,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Decrypt(e) => write!(f, "decrypt: {e}"),
             StreamError::Parse(e) => write!(f, "parse: {e}"),
             StreamError::Oversize(n) => write!(f, "plaintext {n} bytes exceeds NIP-44 cap"),
+            StreamError::TooLarge(n) => f.write_str(&crate::event_size::too_large(*n)),
             StreamError::BadWrapKind(k) => write!(f, "not a stream wrap kind: {k}"),
             StreamError::WrongStream => write!(f, "wrap author is not this stream"),
             StreamError::BadWrapSignature => write!(f, "write-restricted wrap signature invalid"),
@@ -309,6 +312,10 @@ pub fn wrap_seal_with_tags(
         .custom_created_at(wrap_at)
         .finalize(group.keys())
         .map_err(|e| StreamError::Sign(e.to_string()))?;
+    let len = wrap.as_json().len();
+    if len > crate::event_size::MAX_EVENT_BYTES {
+        return Err(StreamError::TooLarge(len));
+    }
     Ok((wrap, ephemeral))
 }
 

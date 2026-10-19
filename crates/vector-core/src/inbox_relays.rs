@@ -828,6 +828,7 @@ pub fn wrap_with_retained_key(
         .custom_created_at(crate::sending::tweaked_timestamp())
         .finalize(&keys)
         .map_err(|e| format!("sign wrap: {}", e))?;
+    crate::event_size::check(&event)?;
     Ok((event, secret))
 }
 
@@ -861,6 +862,7 @@ pub async fn build_gift_wrap_retained(
     rumor: UnsignedEvent,
     extra_tags: impl IntoIterator<Item = Tag>,
 ) -> Result<BuiltGiftWrap, String> {
+    crate::event_size::check_rumor(&rumor)?;
     let seal = crate::signer::seal_rumor(rumor, recipient).await?;
     let (event, secret) = wrap_with_retained_key(recipient, &seal, extra_tags)?;
     Ok(BuiltGiftWrap { event, secret })

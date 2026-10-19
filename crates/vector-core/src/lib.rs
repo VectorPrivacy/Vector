@@ -79,6 +79,7 @@ mod vault_audit;
 
 // === Network ===
 pub mod net;
+pub mod event_size;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
 pub mod events_tracker;
@@ -272,7 +273,7 @@ pub fn tor_relay_options() -> nostr_sdk::prelude::RelayOptions {
     transport_relay_options()
 }
 
-/// Sign an `EventBuilder` with the session signer.
+/// Sign an `EventBuilder` with the session signer, refusing an event no relay would store.
 ///
 /// Stands in for 0.44's `Client::sign_event_builder`, which went away when the
 /// client stopped owning a signer.
@@ -280,10 +281,12 @@ pub async fn sign_builder(
     builder: nostr_sdk::prelude::EventBuilder,
 ) -> std::result::Result<nostr_sdk::prelude::Event, String> {
     let signer = signer::active_signer()?;
-    builder
+    let event = builder
         .finalize_async(&signer)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    event_size::check(&event)?;
+    Ok(event)
 }
 
 /// Sign an `EventBuilder` with the session signer and publish it.

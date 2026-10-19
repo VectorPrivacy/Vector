@@ -438,6 +438,7 @@ async fn notify(receiver: &str, notice: &Notice) {
 /// when we hold none, so a request travels the connections this client already keeps.
 async fn publish(client: &Client, relays: &[String], event: &Event) -> Result<(), String> {
     use crate::inbox_relays::normalize_relay_url;
+    crate::event_size::check(event)?;
     let pool = client.relays().all().await;
     let wanted: Vec<String> = relays.iter().map(|r| normalize_relay_url(r)).collect();
     let mut targets: Vec<Relay> = pool
