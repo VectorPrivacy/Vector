@@ -6845,7 +6845,7 @@ async fn deliver_history<T: Transport + ?Sized>(transport: &T, community: &Commu
         for r in recipients {
             blobs.push(rekey::build_history_blob(&signer, &me.to_bytes(), r, channel, epoch, view).await.map_err(|e| e.to_string())?);
         }
-        for part in blobs.chunks(rekey::MAX_REKEY_BLOBS_PER_EVENT) {
+        for part in blobs.chunks(rekey::MAX_WIDE_BLOBS_PER_EVENT) {
             let rumor = rekey::build_history_rumor(me, channel, epoch, part, at).map_err(|e| e.to_string())?;
             let (wrap, _) = stream::seal_and_wrap_signed(&signer, me, &rumor, stream::SealForm::Encrypted, &group, stream::KIND_WRAP, Timestamp::from_secs(at), &[])
                 .await

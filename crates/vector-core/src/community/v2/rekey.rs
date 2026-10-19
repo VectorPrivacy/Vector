@@ -54,6 +54,15 @@ use super::stream::{self, OpenedStream, SealForm, StreamError};
 /// set splits across chunk events.
 pub const MAX_REKEY_BLOBS_PER_EVENT: usize = 80;
 
+/// [`MAX_REKEY_BLOBS_PER_EVENT`] for the 104- and 136-byte forms (base rotations, history): their
+/// base64 crosses NIP-44's 128-byte padding step to 256, so 80 of them measure ~77 KB and 60 ~55 KB.
+pub const MAX_WIDE_BLOBS_PER_EVENT: usize = 60;
+
+/// How many blobs one event of a rotation at `scope` may carry: a base rotation's are the wide forms.
+pub fn blobs_per_event(scope: RekeyScope) -> usize {
+    if matches!(scope, RekeyScope::Root) { MAX_WIDE_BLOBS_PER_EVENT } else { MAX_REKEY_BLOBS_PER_EVENT }
+}
+
 /// Max blobs Vector will ACCEPT in one received 3303 chunk (a DoS bound checked
 /// after decrypt). Kept at the spec's stated 120 — higher than the send cap — so
 /// a chunk minted by another client at the spec limit (and delivered by a relay
@@ -570,7 +579,7 @@ pub fn build_rekey_rumor(
     if chunk_n < 1 || chunk_i < 1 || chunk_i > chunk_n {
         return Err(RekeyError::BadChunkIndex);
     }
-    if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
+    if blobs.len() > blobs_per_event(scope) {
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
@@ -642,7 +651,7 @@ pub fn build_rekey_chunks_local(
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
     } else {
-        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+        blobs.chunks(blobs_per_event(scope)).collect()
     };
     let n = groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
@@ -686,7 +695,7 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
     } else {
-        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+        blobs.chunks(blobs_per_event(scope)).collect()
     };
     let n = groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
@@ -726,7 +735,7 @@ pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
     } else {
-        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+        blobs.chunks(blobs_per_event(scope)).collect()
     };
     let n = start_after + groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
@@ -1021,7 +1030,7 @@ pub struct HistoryDelivery {
 }
 
 pub fn build_history_rumor(deliverer: PublicKey, channel: &ChannelId, epoch: Epoch, blobs: &[RekeyBlob], at_secs: u64) -> Result<UnsignedEvent, RekeyError> {
-    if blobs.len() > MAX_REKEY_BLOBS_PER_EVENT {
+    if blobs.len() > MAX_WIDE_BLOBS_PER_EVENT {
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
@@ -1539,19 +1548,45 @@ mod tests {
 
     #[test]
     fn a_full_send_chunk_stays_under_the_relay_size_limit() {
-        // The send cap exists so one chunk fits a 64KB strfry event. A full chunk
-        // must serialize under it or relays reject the event.
+        // The send caps exist so one chunk fits a 64KB strfry event, each form at its own: a
+        // base rotation's widest blob (136 bytes, a staff recipient), cited and severed, and a
+        // Channel rotation's 72-byte one.
         let rotator = keys(1);
         let group = base_rekey_group(&root(), &CommunityId([9u8; 32]), Epoch(1));
-        let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS_PER_EVENT)
+        let cite = crate::community::edition::AuthorityCitation { entity_id: [7; 32], version: u64::MAX, edition_hash: [8; 32] };
+        let base: Vec<RekeyBlob> = (0..blobs_per_event(RekeyScope::Root))
             .map(|i| {
                 let r = keys((i % 200 + 20) as u8);
-                build_blob_local(rotator.secret_key(), &xonly(&rotator), &r.public_key(), RekeyScope::Root, Epoch(1), &[0xCDu8; 32]).unwrap()
+                let inner = bound_base_plaintext_b64(Epoch(1), &[0xCD; 32], &[0xAB; 32], Some(&[0xEE; 32]));
+                let ck = ConversationKey::derive(rotator.secret_key(), &r.public_key()).unwrap();
+                let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, inner.as_bytes()).unwrap();
+                RekeyBlob { locator: blob_locator(&xonly(&rotator), &r.public_key().to_bytes(), RekeyScope::Root, Epoch(1)), wrapped: crate::simd::base64::STANDARD.encode_to_string(&payload) }
             })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None, false).unwrap();
-        assert_eq!(chunks.len(), 1, "a full send chunk is exactly one event");
-        assert!(chunks[0].as_json().len() <= 65_536, "a full chunk must fit a 64KB relay event");
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &base, 100, Some(&cite), true).unwrap();
+        assert_eq!(chunks.len(), 1, "a full base chunk is exactly one event");
+        assert!(chunks[0].as_json().len() <= 65_536, "{} bytes: a full base chunk must fit a 64KB relay event", chunks[0].as_json().len());
+
+        let scope = RekeyScope::Channel(crate::community::ChannelId([3; 32]));
+        let narrow: Vec<RekeyBlob> = (0..blobs_per_event(scope))
+            .map(|i| build_blob_local(rotator.secret_key(), &xonly(&rotator), &keys((i % 200 + 20) as u8).public_key(), scope, Epoch(1), &[0xCDu8; 32]).unwrap())
+            .collect();
+        let chunks = build_rekey_chunks_local(&rotator, &group, scope, Epoch(1), Epoch(0), &[0u8; 32], &narrow, 100, Some(&cite), false).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].as_json().len() <= 65_536, "{} bytes: a full channel chunk must fit a 64KB relay event", chunks[0].as_json().len());
+    }
+
+    #[test]
+    fn a_full_history_delivery_stays_under_the_relay_size_limit() {
+        let deliverer = keys(1);
+        let group = base_rekey_group(&root(), &CommunityId([9u8; 32]), Epoch(1));
+        let channel = crate::community::ChannelId([3; 32]);
+        let view = HistoryView { address: [0xAA; 32], conv_key: [0xBB; 32] };
+        let blobs: Vec<RekeyBlob> = (0..MAX_WIDE_BLOBS_PER_EVENT).map(|i| build_history_blob_local(&deliverer, &keys((i % 200 + 20) as u8).public_key(), &channel, Epoch(1), &view).unwrap()).collect();
+        let rumor = build_history_rumor(deliverer.public_key(), &channel, Epoch(1), &blobs, 100).unwrap();
+        let seal = stream::build_seal(&rumor, SealForm::Encrypted, &group, &deliverer).unwrap();
+        let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, nostr_sdk::prelude::Timestamp::from_secs(100)).unwrap();
+        assert!(wrap.as_json().len() <= 65_536, "{} bytes: a full history delivery must fit a 64KB relay event", wrap.as_json().len());
     }
 
     #[test]
@@ -1583,8 +1618,8 @@ mod tests {
     fn oversize_recipient_set_splits_into_chunks() {
         let rotator = keys(1);
         let group = base_rekey_group(&root(), &CommunityId([9u8; 32]), Epoch(1));
-        // One over the send cap → 2 chunks, labeled (1,2) and (2,2).
-        let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS_PER_EVENT + 1)
+        // One over the base rotation's send cap → 2 chunks, labeled (1,2) and (2,2).
+        let blobs: Vec<RekeyBlob> = (0..MAX_WIDE_BLOBS_PER_EVENT + 1)
             .map(|_| RekeyBlob { locator: "aa".repeat(32), wrapped: "x".into() })
             .collect();
         let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None, false).unwrap();
@@ -1592,7 +1627,7 @@ mod tests {
         let parsed: Vec<RekeyChunk> = chunks.iter().map(|w| parse_rekey_chunk(&stream::open_wrap(w, &group).unwrap()).unwrap()).collect();
         assert_eq!(parsed[0].chunk, (1, 2));
         assert_eq!(parsed[1].chunk, (2, 2));
-        assert_eq!(parsed[0].blobs.len(), MAX_REKEY_BLOBS_PER_EVENT);
+        assert_eq!(parsed[0].blobs.len(), MAX_WIDE_BLOBS_PER_EVENT);
         assert_eq!(parsed[1].blobs.len(), 1);
     }
 
