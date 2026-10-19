@@ -168,9 +168,68 @@ impl RateControl {
         (after != before).then_some(after)
     }
 
-    fn setting(&self) -> Setting {
+    /// The encoder setting this ladder stands at now.
+    pub fn setting(&self) -> Setting {
         let fec = (self.loss_avg.round() as u32).clamp(FEC_MIN_PCT, FEC_MAX_PCT);
         Setting { kbps: self.kbps(), fec_pct: fec }
+    }
+}
+
+/// One link's cumulative counts and path, once a second.
+#[derive(Debug, Clone, Copy)]
+pub struct LinkSample {
+    pub id: u64,
+    pub sent_packets: u64,
+    pub lost_packets: u64,
+    pub rtt_ms: u32,
+    pub relay: bool,
+}
+
+/// A voice Channel encodes each frame once for every peer, so the encoder runs at its
+/// weakest link: each link keeps its own ladder, the lowest rung and the largest FEC
+/// budget win, and the whole stays under a ceiling a mesh's upload can afford.
+pub struct MeshRate {
+    links: Vec<(u64, RateControl)>,
+    ceiling_kbps: u32,
+    current: Option<Setting>,
+}
+
+impl MeshRate {
+    pub fn new(ceiling_kbps: u32) -> Self {
+        Self { links: Vec::new(), ceiling_kbps, current: None }
+    }
+
+    /// Once a second, with every live link. Returns a new setting when the encoder
+    /// should change; a link seen for the first time only sets its baseline.
+    pub fn observe(&mut self, samples: &[LinkSample]) -> Option<Setting> {
+        self.links.retain(|(id, _)| samples.iter().any(|s| s.id == *id));
+        for s in samples {
+            match self.links.iter_mut().find(|(id, _)| *id == s.id) {
+                Some((_, rc)) => {
+                    rc.observe(s.sent_packets, s.lost_packets, s.rtt_ms, s.relay);
+                }
+                None => {
+                    let mut rc = RateControl::new();
+                    rc.prime(s.sent_packets, s.lost_packets);
+                    self.links.push((s.id, rc));
+                }
+            }
+        }
+        let worst = self
+            .links
+            .iter()
+            .map(|(_, rc)| rc.setting())
+            .reduce(|a, b| Setting { kbps: a.kbps.min(b.kbps), fec_pct: a.fec_pct.max(b.fec_pct) })?;
+        let next = Setting { kbps: worst.kbps.min(self.ceiling_kbps), ..worst };
+        (self.current != Some(next)).then(|| {
+            self.current = Some(next);
+            next
+        })
+    }
+
+    /// The worst link's recent loss, in percent.
+    pub fn loss_pct(&self) -> f32 {
+        self.links.iter().map(|(_, rc)| rc.loss_pct()).fold(0.0, f32::max)
     }
 }
 
@@ -597,5 +656,46 @@ mod video_tests {
         r.observe(clean(100));
         let lossy = VideoObservation { sent_packets: 200, lost_packets: 3, rtt_ms: 40, floor_ms: Some(40), audio_send_dropped: 0, backlog: false };
         assert_eq!(r.observe(lossy), Some(SCREEN_LADDER[2]));
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+
+    fn sample(id: u64, sent: u64, lost: u64) -> LinkSample {
+        LinkSample { id, sent_packets: sent, lost_packets: lost, rtt_ms: 80, relay: true }
+    }
+
+    #[test]
+    fn the_weakest_link_sets_the_rate_and_its_leaving_lifts_it() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        assert_eq!(mesh.observe(&[sample(1, 0, 0), sample(2, 0, 0)]).map(|s| s.kbps), Some(START_KBPS));
+        // Link 2 loses a fifth of a second's fifty frames; link 1 is clean.
+        let down = mesh.observe(&[sample(1, 50, 0), sample(2, 50, 10)]).expect("a lossy link moves the encoder");
+        assert!(down.kbps < START_KBPS, "the encoder follows the lossy link down");
+        assert!(down.fec_pct > FEC_MIN_PCT, "and spends more on FEC");
+        let up = mesh.observe(&[sample(1, 100, 0)]).expect("the lossy link left");
+        assert_eq!(up.kbps, START_KBPS, "the clean link's rung is back at once");
+    }
+
+    #[test]
+    fn a_clean_mesh_never_climbs_past_its_ceiling() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        let mut changes = Vec::new();
+        for sec in 0..120u64 {
+            if let Some(s) = mesh.observe(&[sample(7, sec * 50, 0)]) {
+                changes.push(s.kbps);
+            }
+        }
+        assert!(changes.iter().all(|k| *k <= START_KBPS), "climbing stops at the ceiling: {changes:?}");
+    }
+
+    #[test]
+    fn a_new_link_counts_from_when_it_joined() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        mesh.observe(&[sample(1, 0, 0)]);
+        // A link whose connection already lost packets before the call saw it.
+        assert_eq!(mesh.observe(&[sample(1, 50, 0), sample(3, 9_000, 900)]), None, "its history is not this second's loss");
     }
 }

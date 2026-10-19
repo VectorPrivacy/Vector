@@ -9,7 +9,7 @@ use super::codec::{Decoder, Encoder, ShareDecoder, ShareEncoder};
 use super::settings::AudioSettings;
 use super::declick::Declicker;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
-use super::rate::RateControl;
+use super::rate::{LinkSample, MeshRate, RateControl, START_KBPS};
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::settings;
@@ -41,6 +41,9 @@ pub(crate) const FLAG_SHARE: u16 = 2;
 const SPEECH_LEVEL: f32 = 0.15;
 /// How long sending goes on after speech stops, so word endings and short pauses stay whole.
 const SPEECH_HANGOVER_MS: u32 = 400;
+/// A mesh uploads each frame once per peer, so a voice Channel climbs no higher than a
+/// 1:1 call starts.
+const VOICE_MAX_KBPS: u32 = START_KBPS;
 
 /// A voice Channel's member sends only while speaking (CORD-07 §8); the rest of the time a
 /// muted frame keeps their liveness count moving at a fraction of the bytes.
@@ -473,6 +476,7 @@ pub(crate) fn capture_thread(
     let mut seq: u16 = stats.next_seq.load(Ordering::Relaxed) as u16;
     let mut netsim = NetSim::from_env();
     let mut rate = RateControl::new();
+    let mut mesh = MeshRate::new(VOICE_MAX_KBPS);
     if let Some(conn) = out.as_ref().and_then(Outbound::one) {
         let net = conn.stats();
         rate.prime(net.udp_tx.datagrams, net.lost_packets);
@@ -568,6 +572,26 @@ pub(crate) fn capture_thread(
                     }
                 }
                 stats.net_loss.store(rate.loss_pct().to_bits(), Ordering::Relaxed);
+            }
+        }
+        if let Some(Outbound::Many(conns)) = out.as_ref() {
+            if rate_tick.elapsed() >= Duration::from_secs(1) {
+                rate_tick = Instant::now();
+                let conns: Vec<Connection> = conns.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let samples: Vec<LinkSample> = conns
+                    .iter()
+                    .map(|c| {
+                        let net = c.stats();
+                        let (relay, rtt_ms) = selected_path(c);
+                        LinkSample { id: c.stable_id() as u64, sent_packets: net.udp_tx.datagrams, lost_packets: net.lost_packets, rtt_ms, relay }
+                    })
+                    .collect();
+                if let Some(setting) = mesh.observe(&samples) {
+                    if enc.set_rate(setting.kbps, setting.fec_pct).is_ok() {
+                        stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
+                    }
+                }
+                stats.net_loss.store(mesh.loss_pct().to_bits(), Ordering::Relaxed);
             }
         }
         std::thread::sleep(Duration::from_millis(5));
