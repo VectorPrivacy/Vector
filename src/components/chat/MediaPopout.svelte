@@ -90,7 +90,7 @@
             const t = splitTitle(session.tracks[trackIdx]?.title);
             return { title: t.main, sub: [`${trackIdx + 1} of ${session.tracks.length}`, splitTitle(meta?.album || '').main || meta?.artist].filter(Boolean).join(' · ') };
         }
-        if (isFrame) return { title: item.title || 'YouTube', sub: chat, place };
+        if (isFrame) return { title: item.title || 'Player', sub: chat, place };
         if (meta?.artist) return { title: meta.track || ref.att.name, sub: meta.artist };
         return { title: meta?.track || ref.att.name || (isVideo ? 'Video' : 'Audio'), sub: chat, place };
     });
@@ -126,7 +126,7 @@
     // A video's height follows its width, so its width also answers to the window's height:
     // the picture keeps to about half of it, and the box to 60% of the window's width.
     let vAspect = $state(null);   // the loaded video's own, over what the row measured
-    const aspect = $derived(isFrame ? 16 / 9 : vAspect || (isVideo && item.aspect) || 16 / 9);
+    const aspect = $derived(isFrame ? item.frameAspect || 16 / 9 : vAspect || (isVideo && item.aspect) || 16 / 9);
     const videoCap = $derived(Math.max(160, Math.min(winW * 0.6, Math.min(winH * 0.55, winH - chromeHeight() - 160) * aspect)));
     // YouTube asks for a player of at least 200px each way, so a player keeps its floor (to the window's).
     const width = $derived(Math.min(Math.max(widths[kindKey], isFrame ? LIMITS.frame[0] : 0), winW - 24,

@@ -78,7 +78,7 @@ createServer(async (req, res) => {
         // Clickjacking guard for the app page; meta CSP can't carry frame-ancestors. Frames:
         // Mini Apps, and the video players a click starts.
         if (extname(file) === '.html') {
-            headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host} https://www.youtube-nocookie.com`;
+            headers['Content-Security-Policy'] = `frame-ancestors 'none'; frame-src http://*.xdc.${req.headers.host} https://www.youtube-nocookie.com https://w.soundcloud.com`;
         }
         if (range) {
             const start = Number(range[1]);

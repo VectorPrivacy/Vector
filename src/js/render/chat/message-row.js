@@ -245,7 +245,7 @@ const _dmsgContentHelpers = {
     nostrEmbedsOn: (ctx) => !!fWebPreviewsEnabled && !ctx.revealedBlocked,
     get embeds() { return NOSTR_EMBED_HELPERS; },
     linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
-    playerUrl: (video) => invoke('player_url', { provider: 'youtube', id: video.id, start: video.start || null })
+    playerUrl: (video) => invoke('player_url', { provider: video.provider || 'youtube', id: video.id, start: video.start || null })
         .catch((e) => { showToast(String(e)); return null; }),
     fmtCountdown: (secs) => _fmtCountdown(secs),
     selfDestructTooltip: (el) => _selfDestructTooltip(el),
@@ -707,12 +707,12 @@ function _dmsgLinkPreviewData(msg) {
     };
 }
 
-/** The YouTube video a card previews, with the start time and `href` of the link as it was sent. */
+/** What a card plays (a YouTube video, a SoundCloud track), with the `href` of the link as it was sent. */
 function _dmsgPreviewVideo(msg, meta) {
     const sent = ((msg.content || '').match(/https?:\/\/\S+/g) || [])
-        .map((href) => { const v = VectorSvelte.youtubeVideo(href); return v && { ...v, href }; })
+        .map((href) => { const v = VectorSvelte.playableLink(href); return v && { ...v, href }; })
         .filter(Boolean);
-    let card = meta.og_url ? VectorSvelte.youtubeVideo(meta.og_url) : sent[0];
+    let card = meta.og_url ? VectorSvelte.playableLink(meta.og_url) : sent[0];
     // An unfurler can return a broken og:url for a YouTube page; its host and thumbnail still name the video.
     if (!card && _dmsgIsYouTubeHost(meta.domain)) {
         let thumb = meta.og_image || '';

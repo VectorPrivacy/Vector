@@ -1,4 +1,5 @@
-//! Embedded video players: a link's card becomes the video, inline in the chat, on a click.
+//! Embedded players: a YouTube or SoundCloud link's card becomes the player, inline in the
+//! chat, on a click.
 //!
 //! YouTube refuses an embed that arrives without a Referer, and a page on a custom scheme
 //! (`tauri://`) sends none. So the card frames a page served from loopback, which frames the
@@ -13,6 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OnceCell, Semaphore};
 
 const YOUTUBE_EMBED: &str = "https://www.youtube-nocookie.com/embed/";
+const SOUNDCLOUD_WIDGET: &str = "https://w.soundcloud.com/player/";
 
 /// Asks the player for its state (YouTube's widget protocol, the one its iframe API speaks)
 /// and tells the app when the video ends or won't play, so the card and the floating player
@@ -56,16 +58,18 @@ static PERMITS: Semaphore = Semaphore::const_new(MAX_CONNECTIONS);
 /// The URL a card frames to play `id`, or why it can't.
 #[tauri::command]
 pub async fn player_url(provider: String, id: String, start: Option<u32>) -> Result<String, String> {
-    if provider != "youtube" || !is_youtube_id(&id) {
-        return Err("Not a video Vector can play".into());
-    }
+    let route = match provider.as_str() {
+        "youtube" if is_youtube_id(&id) => "youtube",
+        "soundcloud" if is_soundcloud_path(&id) => "soundcloud",
+        _ => return Err("Not a link Vector can play".into()),
+    };
     let players_off = vector_core::db::scoped(async { vector_core::synced_prefs::load_settings().players_off }).await;
     if let Some(why) = refusal(vector_core::transport::preference(), players_off) {
         return Err(why.into());
     }
     let port = PORT.get_or_try_init(listen).await?;
-    let start = start.filter(|s| *s > 0).map(|s| format!("?start={s}")).unwrap_or_default();
-    Ok(format!("http://localhost:{port}/youtube/{id}{start}"))
+    let start = start.filter(|s| *s > 0 && route == "youtube").map(|s| format!("?start={s}")).unwrap_or_default();
+    Ok(format!("http://localhost:{port}/{route}/{id}{start}"))
 }
 
 /// Why no player may load now. The player loads outside `vector_core::transport`, so only
@@ -79,6 +83,22 @@ fn refusal(network: Option<vector_core::transport::Kind>, players_off: bool) -> 
 
 fn is_youtube_id(id: &str) -> bool {
     id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A SoundCloud track or playlist: `artist/track` or `artist/sets/name`, either with a private
+/// link's `s-…` token after it. Slugs are the characters SoundCloud gives them, so the path
+/// can sit in a URL and an HTML attribute unescaped.
+fn is_soundcloud_path(path: &str) -> bool {
+    let slug = |s: &str| !s.is_empty() && s.len() <= 255 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    let mut parts: Vec<&str> = path.split('/').collect();
+    if parts.last().is_some_and(|p| p.starts_with("s-") && slug(p)) && parts.len() > 2 {
+        parts.pop();
+    }
+    match parts.as_slice() {
+        [artist, track] => slug(artist) && slug(track) && *track != "sets",
+        [artist, "sets", name] => slug(artist) && slug(name),
+        _ => false,
+    }
 }
 
 async fn listen() -> Result<u16, String> {
@@ -138,6 +158,14 @@ fn page(request: &str, port: u16) -> Option<String> {
         return None;
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if let Some(track) = path.strip_prefix("/soundcloud/").filter(|p| is_soundcloud_path(p)) {
+        return Some(format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Player</title>\
+<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe{{border:0;width:100%;height:100%}}</style>\
+<iframe src=\"{SOUNDCLOUD_WIDGET}?url=https%3A//soundcloud.com/{track}&auto_play=true&visual=false&hide_related=true&show_comments=false&show_reposts=false&show_teaser=false&color=%2359fcb3\" \
+referrerpolicy=\"strict-origin-when-cross-origin\" allow=\"autoplay; encrypted-media\"></iframe>"
+        ));
+    }
     let id = path.strip_prefix("/youtube/").filter(|id| is_youtube_id(id))?;
     let start = query
         .strip_prefix("start=")
@@ -160,7 +188,7 @@ Content-Length: {}\r\n\
 Cache-Control: no-store\r\n\
 Referrer-Policy: strict-origin-when-cross-origin\r\n\
 X-Content-Type-Options: nosniff\r\n\
-Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{}'; frame-src https://www.youtube-nocookie.com; frame-ancestors {FRAME_ANCESTORS}\r\n\
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{}'; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com; frame-ancestors {FRAME_ANCESTORS}\r\n\
 Connection: close\r\n\r\n{body}",
         body.len(),
         relay_hash()
@@ -211,6 +239,18 @@ mod tests {
         assert!(ask(port, get(&format!("localhost.evil.example:{port}")).as_bytes()).await.starts_with("HTTP/1.1 404"));
         assert!(ask(port, get("evil.example").as_bytes()).await.starts_with("HTTP/1.1 404"));
         assert_eq!(ask(port, &[b'a'; MAX_REQUEST + 1024]).await, "", "an oversized request gets no answer");
+    }
+
+    #[test]
+    fn a_soundcloud_page_frames_only_a_track_or_playlist() {
+        let req = |path: &str| format!("GET /soundcloud/{path} HTTP/1.1\r\nHost: localhost:4000\r\n\r\n");
+        let html = page(&req("some-artist/a_track"), 4000).unwrap();
+        assert!(html.contains("w.soundcloud.com/player/?url=https%3A//soundcloud.com/some-artist/a_track&auto_play=true"));
+        assert!(page(&req("some-artist/sets/mix-2026"), 4000).is_some());
+        assert!(page(&req("some-artist/a_track/s-AbC123"), 4000).is_some(), "a private link keeps its token");
+        for bad in ["some-artist", "some-artist/sets", "a/b/c/d", "artist/tr\"ack", "artist/..", "artist//track"] {
+            assert!(page(&req(bad), 4000).filter(|h| h.contains("soundcloud.com/")).is_none(), "{bad}");
+        }
     }
 
     #[test]

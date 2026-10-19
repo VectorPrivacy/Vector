@@ -22511,6 +22511,12 @@ textarea.command-part-input {
   overflow: hidden;
   background: #000;
 }
+/* A track plays in SoundCloud's compact player: its own height, not a screen's shape. */
+.dmsg-preview-video.audio {
+  aspect-ratio: auto;
+  height: 166px;
+  min-height: 0;
+}
 .dmsg-preview .dmsg-preview-video img.dmsg-preview-img {
   height: 100%;
   max-height: none;

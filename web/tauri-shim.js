@@ -186,9 +186,14 @@
     }
     // A real https origin sends YouTube its Referer, so the card frames the player directly.
     local.set('player_url', async ({ provider, id, start }) => {
-        if (provider !== 'youtube' || !/^[A-Za-z0-9_-]{11}$/.test(id) || !playersFramable()) throw 'Not a video Vector can play';
+        const youtube = provider === 'youtube' && /^[A-Za-z0-9_-]{11}$/.test(id);
+        const soundcloud = provider === 'soundcloud' && /^[A-Za-z0-9_-]+\/(?:sets\/)?[A-Za-z0-9_-]+(?:\/s-[A-Za-z0-9]+)?$/.test(id);
+        if ((!youtube && !soundcloud) || !playersFramable()) throw 'Not a link Vector can play';
         const settings = await backend('get_synced_settings').catch(() => null);
         if (!settings || settings.players === false) throw 'Video players are switched off in Settings';
+        if (soundcloud) {
+            return `https://w.soundcloud.com/player/?url=https%3A//soundcloud.com/${id}&auto_play=true&visual=false&hide_related=true&show_comments=false&show_reposts=false&show_teaser=false&color=%2359fcb3`;
+        }
         const at = Number.isInteger(start) && start > 0 ? `&start=${start}` : '';
         return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}${at}`;
     });

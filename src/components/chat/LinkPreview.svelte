@@ -2,7 +2,7 @@
     // The OpenGraph card under a message with a link: favicon and title, the description
     // with its line breaks, the image. Both images come through the backend cache: the
     // linked host is attacker-chosen, and a raw src would be a clearnet fetch past Tor.
-    // A video link's picture plays the video in place, and only once it is clicked.
+    // A video or track link's picture plays it in place, and only once it is clicked.
     import { playersState, playersAvailable, reservePlayer, startPlayer, stopPlayer } from '../lib/players.svelte.js';
     import { createFrame, adoptFrame, ownsFrame, placeFrame, unplaceFrame, dropFrame } from '../lib/framehost.js';
     import { popOut, takeBack, popoutPlayingAudio } from '../lib/popout.svelte.js';
@@ -19,6 +19,8 @@
     let imageHidden = $state(false);
     // Why YouTube refused to play it here, by its error code: the card then opens it on YouTube.
     let refused = $state('');
+    const audio = $derived(data.video?.provider === 'soundcloud');
+    const service = $derived(audio ? 'SoundCloud' : 'YouTube');
     function refusal(code) {
         if (code === 101 || code === 150 || code === 152) return 'Its owner only allows it on YouTube';
         if (code === 100) return 'Removed or made private on YouTube';
@@ -83,7 +85,7 @@
                 // Leaving with it playing: on to the floating player, unless music holds it.
                 if (players.playing === key && playersAvailable() && !popoutPlayingAudio()) {
                     unplaceFrame(key, () => stopPlayer(key));
-                    if (popOut({ kind: 'frame', id: data.msgId, chatId, msg: { id: data.msgId }, frameKey: key, title: data.title })) return;
+                    if (popOut({ kind: 'frame', id: data.msgId, chatId, msg: { id: data.msgId }, frameKey: key, title: data.title, frameAspect: audio ? 356 / 166 : undefined })) return;
                 }
                 dropFrame(key);
                 stopPlayer(key);
@@ -104,7 +106,7 @@
     {/if}
     {#if data.video}
         <!-- A picture that fails leaves a black box: the video can still play. -->
-        <div class="dmsg-preview-video">
+        <div class="dmsg-preview-video" class:audio>
             {#if playing}
                 <div class="dmsg-preview-player" use:place={frameKey}></div>
             {:else}
@@ -115,7 +117,7 @@
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <div class="dmsg-preview-play" class:external={!canPlay || refused} onclick={play}>
                     <div class="dmsg-preview-play-btn"><div class="icon {canPlay && !refused ? 'icon-play' : 'icon-external'}"></div></div>
-                    <div class="dmsg-preview-play-label">{refused || (canPlay ? 'Plays from YouTube' : 'Opens in your browser')}</div>
+                    <div class="dmsg-preview-play-label">{refused || (canPlay ? `Plays from ${service}` : 'Opens in your browser')}</div>
                 </div>
             {/if}
         </div>

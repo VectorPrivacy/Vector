@@ -24,6 +24,31 @@ export function stopPlayer(key) {
     releasePlayback(`frame:${key}`, 'video');
 }
 
+/** What a link plays: `{ provider, id, start? }` for a YouTube video or a SoundCloud track or
+ *  playlist, else null. */
+export function playableLink(href) {
+    const yt = youtubeVideo(href);
+    return yt ? { provider: 'youtube', ...yt } : soundcloudTrack(href);
+}
+
+// The first path segments SoundCloud keeps for its own pages, never an artist.
+const SOUNDCLOUD_PAGES = new Set(['discover', 'stream', 'you', 'search', 'upload', 'charts', 'tags', 'stations', 'pages', 'settings', 'messages', 'notifications', 'people', 'popular', 'terms-of-use', 'pro', 'mobile', 'jobs', 'imprint', 'logout', 'signin']);
+
+/** `{ provider: 'soundcloud', id: 'artist/track' }` for a track or playlist link, else null. */
+export function soundcloudTrack(href) {
+    let u;
+    try { u = new URL(href); } catch { return null; }
+    const host = u.hostname.toLowerCase().replace(/^(?:www|m)\./, '');
+    if (host !== 'soundcloud.com') return null;
+    const parts = u.pathname.replace(/\/+$/, '').split('/').slice(1);
+    const slug = (s) => /^[A-Za-z0-9_-]{1,255}$/.test(s || '');
+    if (!slug(parts[0]) || SOUNDCLOUD_PAGES.has(parts[0].toLowerCase())) return null;
+    const secret = parts.length > 2 && /^s-[A-Za-z0-9]+$/.test(parts[parts.length - 1]) ? parts.pop() : null;
+    const ok = (parts.length === 2 && slug(parts[1]) && parts[1] !== 'sets')
+        || (parts.length === 3 && parts[1] === 'sets' && slug(parts[2]));
+    return ok ? { provider: 'soundcloud', id: [...parts, secret].filter(Boolean).join('/') } : null;
+}
+
 /** `{ id, start }` for a link to one YouTube video, else null. */
 export function youtubeVideo(href) {
     let u;
