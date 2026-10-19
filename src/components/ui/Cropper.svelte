@@ -13,15 +13,9 @@
     const MIN_EDGE = 36;
     // The dots sit 7px outside the box; the image is fitted inside this margin so they stay in.
     const INSET = 10;
-    // The banner template's top 50 of 146 px sit under the channel list's fade.
-    const BANNER_FADE = 50 / 146;
-    // The guide's note needs this much band to sit inside it; otherwise it goes outside the box.
-    const NOTE_H = 22;
-    const NOTE_W = 160;
 
     let stage = $state(null);
     let stageW = $state(0);
-    let noteW = $state(0);
     let natural = $state({ w: 0, h: 0 });
     let img = $state({ left: 0, top: 0, width: 0, height: 0 });
     let crop = $state({ x: 0, y: 0, w: 0, h: 0 });
@@ -129,20 +123,16 @@
 
     const confirm = () => rect && closeCropper(rect);
 
-    const noteInside = $derived(crop.h * BANNER_FADE >= NOTE_H && crop.w >= NOTE_W);
-    const noteAbove = $derived(crop.y - NOTE_H >= 0);
-    // Centred on the box, but never past the stage's sides.
-    const noteLeft = $derived(clamp(crop.x + crop.w / 2 - noteW / 2, 4, Math.max(4, stageW - noteW - 4)));
 
-    // The pane a member sees: the header, the channels, and the banner over their foot.
+    // The pane a member sees: the header, the banner under it, and the channels.
     const pane = $derived(ov.context || { width: 240, sections: [] });
     const paneW = $derived(Math.round(pane.width || 240));
-    const paneBannerH = $derived(Math.round(paneW * 146 / 238));
+    const paneBannerH = $derived(Math.round(paneW * 70 / 238));
     const sections = $derived(pane.sections?.length
         ? pane.sections
         : [{ label: 'Public', rows: [{ name: 'general', tier: 'has-unread' }, { name: 'announcements', tier: 'is-read' }] }]);
 
-    // Rows shown per section: only those that end above the banner, and a section with none
+    // Rows shown per section: only those that fit the pane, and a section with none
     // drops its header too. Measured with everything rendered, then cut, once per pane.
     let listEl = $state(null);
     let rowsShown = $state(null);
@@ -159,7 +149,7 @@
             for (let n = el; n && n !== listEl; n = n.offsetParent) y += n.offsetTop;
             return y;
         };
-        const limit = listEl.clientHeight - paneBannerH - 4;
+        const limit = listEl.clientHeight - 4;
         const out = [];
         let room = true;
         for (const section of listEl.querySelectorAll('.chatlist-channel-section')) {
@@ -228,20 +218,9 @@
                 {#if img.width}
                     <div class="crop-box" class:round={ov.shape === 'round'} class:rail={ov.shape === 'community'} style="left: {crop.x}px; top: {crop.y}px; width: {crop.w}px; height: {crop.h}px;"
                          onpointerdown={(e) => begin(e, 'move', { sx: e.clientX, sy: e.clientY, cx: crop.x, cy: crop.y })}>
-                        {#if ov.preview === 'banner'}
-                            <div class="crop-guide" style="height: {BANNER_FADE * 100}%">
-                                {#if noteInside}<span>Fades under the channel list</span>{/if}
-                            </div>
-                        {/if}
                         {#each ['tl', 'tr', 'bl', 'br'] as corner (corner)}
                             <div class="crop-handle crop-handle-{corner}" onpointerdown={(e) => onCorner(e, corner)}></div>
                         {/each}
-                    </div>
-                {/if}
-                {#if img.width && ov.preview === 'banner' && !noteInside}
-                    <div class="crop-note" class:above={noteAbove} bind:clientWidth={noteW}
-                         style="left: {noteLeft}px; top: {noteAbove ? crop.y - 4 : crop.y + crop.h + 4}px;">
-                        The top band fades under the channel list
                     </div>
                 {/if}
             </div>
@@ -265,6 +244,7 @@
                                 </div>
                                 <div class="chatlist-community-head-caret"><span class="icon icon-chevron-down"></span></div>
                             </div>
+                            <BannerArt src={ov.src} {rect} {natural} class="crop-pane-banner" />
                             <div class="crop-pane-list" bind:this={listEl}>
                                 <div class="chatlist-channels chatlist-channels-pane">
                                     {#each sections as section, s (section.label)}
@@ -289,7 +269,6 @@
                                     {/each}
                                 </div>
                             </div>
-                            <BannerArt src={ov.src} {rect} {natural} class="crop-pane-banner" />
                         </div>
                     </div>
                 {:else}

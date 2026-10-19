@@ -2501,27 +2501,15 @@ body.ws #group-overview .member-pick-row {
 }
 
 /* ===================== Community banner (channel pane) ===================== */
-/* Over the foot of the pane, outside the scroller so it neither rides the list's
-   overscroll nor sits under its mask. The list ends in a band of the banner's
-   height (`--ws-banner-h`, set by CommunityBanner.svelte), so the last channel
-   always clears it; mostly faded, clicks pass through to the channels beneath. */
-/* Registered so they can transition: a notched wheel jumps further per step than
-   the fade spans. */
-@property --banner-top { syntax: '<number>'; inherits: false; initial-value: 1; }
-@property --banner-bottom { syntax: '<number>'; inherits: false; initial-value: 1; }
+/* Under the community's header, outside the scroller: it stays put while the channels scroll. */
 .ws-banner {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2;
-  -webkit-mask-image: linear-gradient(rgba(0, 0, 0, var(--banner-top)), rgba(0, 0, 0, var(--banner-bottom)));
-  mask-image: linear-gradient(rgba(0, 0, 0, var(--banner-top)), rgba(0, 0, 0, var(--banner-bottom)));
-  transition: --banner-top 0.18s ease-out, --banner-bottom 0.18s ease-out;
+  flex: none;
+  border-bottom: 1px solid #1f1f1f;
+  -webkit-user-select: none;
+  user-select: none;
 }
-.ws-banner.faded { pointer-events: none; }
 body.ws #chat-list .chatlist-channels-pane {
-  margin-bottom: max(50px, var(--ws-banner-h, 0px));
+  margin-bottom: 50px;
 }
 
 /* A speaker on a community's shortcut while one of its voice calls is in use; the accent when it's ours. */

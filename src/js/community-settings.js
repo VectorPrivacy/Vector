@@ -112,8 +112,8 @@ async function csPickIcon() {
     VectorSvelte.csSetDraft({ iconPath: filePath, iconPreview: cropped.preview, iconCrop: cropped.crop });
 }
 
-/** The banner template: 238 x 146 at the foot of the channel list. */
-const BANNER_ASPECT = 238 / 146;
+/** The banner template: 238 x 70, under the community's header. */
+const BANNER_ASPECT = 238 / 70;
 
 /**
  * Stage a new banner. One in any other shape goes through the cropper first, which previews

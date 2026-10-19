@@ -87,10 +87,10 @@
          ride the list's overscroll. Empty (and zero-height) otherwise. -->
     <div id="ws-community-head">
         {#if screens.communityHead}<CommunityHead h={screens.communityHead.h} />{/if}
+        {#if shell.ws && screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} />{/if}
     </div>
     <div id="chat-list" bind:this={listEl} use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
         {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
     </div>
-    {#if shell.ws && screens.communityBanner}<CommunityBanner h={screens.communityBanner.h} scroller={listEl} />{/if}
     <div class="fadeout-bottom" style="position: fixed; bottom: 65px;" style:display={listHasRows() ? null : 'none'}></div>
 </div>

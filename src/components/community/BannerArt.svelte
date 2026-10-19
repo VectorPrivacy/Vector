@@ -1,8 +1,7 @@
 <script>
-    // A community banner at the template's proportions, 238 x 146, its top band fading into
-    // whatever sits above it. `rect` (source pixels, with the image's `natural` size) shows a
-    // crop before it is made; without one the image is centred and cut to fit, as a banner
-    // from another client is.
+    // A community banner at the template's proportions, 238 x 70. `rect` (source pixels, with
+    // the image's `natural` size) shows a crop before it is made; without one the image is
+    // centred and cut to fit, as a banner from another client is.
     let { src, rect = null, natural = null, class: cls = '', children = undefined } = $props();
 
     let width = $state(0);
