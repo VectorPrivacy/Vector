@@ -14,7 +14,7 @@ export function setVoiceSession(s) {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,
         mic: s.mic !== false, serverMuted: !!s.server_muted, serverDeafened: !!s.server_deafened,
-        sharing: !!s.sharing, viewers: s.viewers || 0, camera: !!s.camera,
+        sharing: !!s.sharing, viewers: s.viewers || 0, camera: !!s.camera, canVideo: !!s.can_video,
     } : null;
     if (!s) live.focus = null;
 }

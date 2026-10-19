@@ -110,6 +110,8 @@ pub struct VoiceState {
     pub sharing: bool,
     pub viewers: u32,
     pub camera: bool,
+    /// We may send a camera or a screen in this Channel.
+    pub can_video: bool,
 }
 
 struct Link {
@@ -133,6 +135,8 @@ struct Voice {
     nudge: tokio::sync::Notify,
     /// An answer to a newcomer is pending; more arrivals ride it.
     greeting: AtomicBool,
+    /// Whether we hold Video here, as the mesh upkeep last judged it.
+    can_video: AtomicBool,
     video: video::Video,
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
 }
@@ -327,6 +331,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         deafened: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
         greeting: AtomicBool::new(false),
+        can_video: AtomicBool::new(may_video(&community, &channel, &me)),
         video: video::Video::default(),
         tasks: Mutex::new(Vec::new()),
     });
@@ -689,6 +694,7 @@ fn state(v: &Voice) -> VoiceState {
         sharing: sending.screen,
         viewers,
         camera: sending.camera,
+        can_video: v.can_video.load(Ordering::SeqCst),
     }
 }
 
@@ -824,8 +830,12 @@ async fn dialer(v: Arc<Voice>) {
         }
         video::revalidate(&v, |author| may_video(&community, &v.channel, author));
         // Video lost while sending: stop, as every receiver already has.
+        let can_video = may_video(&community, &v.channel, &v.me);
+        if v.can_video.swap(can_video, Ordering::SeqCst) != can_video {
+            changed(&v);
+        }
         let sending = v.video.sending();
-        if sending.any() && !may_video(&community, &v.channel, &v.me) {
+        if sending.any() && !can_video {
             for kind in [crate::calls::wire::VideoKind::Camera, crate::calls::wire::VideoKind::Screen] {
                 let _ = video::set_sending(&v, kind, false);
             }
@@ -962,6 +972,7 @@ mod tests {
             deafened: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
             greeting: AtomicBool::new(false),
+            can_video: AtomicBool::new(false),
             video: video::Video::default(),
             tasks: Mutex::new(Vec::new()),
         });
@@ -1006,6 +1017,7 @@ mod tests {
             deafened: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
             greeting: AtomicBool::new(false),
+            can_video: AtomicBool::new(false),
             video: video::Video::default(),
             tasks: Mutex::new(Vec::new()),
         });

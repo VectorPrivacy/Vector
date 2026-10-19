@@ -156,12 +156,12 @@
                 {#if v.sharing}
                     <span class="voice-stage-sharing">Sharing your screen{v.viewers ? ` · ${v.viewers} watching` : ''}</span>
                 {/if}
-                {#if h.canCamera?.()}
+                {#if v.canVideo && h.canCamera?.()}
                     <button class="call-btn" class:call-btn-on={v.camera} title={v.camera ? 'Turn your camera off' : 'Turn your camera on'} onclick={() => h.camera?.(!v.camera)}>
                         <span class="icon icon-video"></span>
                     </button>
                 {/if}
-                {#if h.canShare?.()}
+                {#if v.canVideo && h.canShare?.()}
                     <button class="call-btn" class:call-btn-on={v.sharing} title={v.sharing ? 'Stop sharing your screen' : 'Share your screen'} onclick={() => h.share?.(!v.sharing)}>
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
