@@ -11967,19 +11967,24 @@ fn apply_category_metadata(out: &mut CommunityV2, id: [u8; 32], meta: control::C
     }
     let position = meta.position.filter(|k| crate::community::rank::is_rank_key(k));
     let next = super::community::CategoryV2 { id, name: meta.name, position, extra: meta.extra };
-    let full = out.categories.len() >= super::community::MAX_CATEGORIES;
-    match out.categories.iter_mut().find(|c| c.id == id) {
+    let changed = match out.categories.iter_mut().find(|c| c.id == id) {
         Some(c) if *c == next => false,
         Some(c) => {
             *c = next;
             true
         }
-        None if full => false,
         None => {
             out.categories.push(next);
             true
         }
+    };
+    // Past the cap, the lowest ids stand: the same set however the heads arrived.
+    if out.categories.len() > super::community::MAX_CATEGORIES {
+        out.categories.sort_by(|a, b| a.id.cmp(&b.id));
+        let dropped = out.categories.split_off(super::community::MAX_CATEGORIES);
+        return !dropped.iter().any(|c| c.id == id);
     }
+    changed
 }
 
 /// Fold a sealed head (CORD-03 §2): the Channel stands as private, and its fields come once
@@ -14566,6 +14571,23 @@ mod tests {
         let rumor = control::build_edition_rumor(signer.public_key(), vsk::COMMUNITY_METADATA, &community.id().0, version, prev.as_ref(), &content, at_secs, cite.as_ref());
         let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    #[test]
+    fn past_the_category_cap_the_lowest_ids_stand_however_they_arrive() {
+        let owner = Keys::generate();
+        let g = control::genesis(&owner, control::CommunityMetadata { name: "A".into(), ..Default::default() }, 1_000).unwrap();
+        let cat = |name: &str| control::CategoryMetadata { name: name.into(), ..Default::default() };
+        let ids: Vec<[u8; 32]> = (0..=crate::community::v2::community::MAX_CATEGORIES).map(|i| { let mut id = [0u8; 32]; id[..8].copy_from_slice(&(i as u64).to_be_bytes()); id }).collect();
+        for order in [ids.clone(), ids.iter().rev().copied().collect()] {
+            let mut held = CommunityV2::from_genesis(&g, "A", None, vec!["wss://r".into()], 0);
+            for id in &order {
+                apply_category_metadata(&mut held, *id, cat("c"));
+            }
+            let mut got: Vec<[u8; 32]> = held.categories.iter().map(|c| c.id).collect();
+            got.sort();
+            assert_eq!(got, ids[..crate::community::v2::community::MAX_CATEGORIES].to_vec(), "the {} lowest ids stand", crate::community::v2::community::MAX_CATEGORIES);
+        }
     }
 
     #[test]
