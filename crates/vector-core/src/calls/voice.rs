@@ -805,22 +805,21 @@ async fn dialer(v: Arc<Voice>) {
             }
         };
         let present = presence::present(&v.channel_hex, now_ms());
-        let gone: Vec<[u8; 32]> = {
-            let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
-            links
-                .iter()
-                .filter(|(id, l)| !present.iter().any(|p| p.endpoint.as_ref() == Some(*id) && p.author == l.author) || !may_connect(&community, &v.channel, &l.author))
-                .map(|(id, _)| *id)
-                .collect()
-        };
+        let linked: Vec<([u8; 32], PublicKey)> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, l)| (*id, l.author)).collect();
+        let gone: Vec<[u8; 32]> = linked
+            .into_iter()
+            .filter(|(id, author)| !present.iter().any(|p| p.endpoint.as_ref() == Some(id) && p.author == *author) || !may_connect(&community, &v.channel, author))
+            .map(|(id, _)| id)
+            .collect();
         for id in gone {
             unlink(&v, &id, b"not in this call");
         }
         if let Some(m) = v.engine() {
-            let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
-            for (id, l) in links.iter() {
-                m.set_audible(id, may_speak(&community, &v.channel, &l.author));
-                m.set_priority(id, has_bit(&community, &v.channel, &l.author, Permissions::PRIORITY_SPEAKER));
+            // Judged outside the lock: every frame we send waits on it.
+            let linked: Vec<([u8; 32], PublicKey)> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, l)| (*id, l.author)).collect();
+            for (id, author) in linked {
+                m.set_audible(&id, may_speak(&community, &v.channel, &author));
+                m.set_priority(&id, has_bit(&community, &v.channel, &author, Permissions::PRIORITY_SPEAKER));
             }
         }
         video::revalidate(&v, |author| may_video(&community, &v.channel, author));
