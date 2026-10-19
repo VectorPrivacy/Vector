@@ -1,7 +1,7 @@
 <script>
     // A voice channel's stage, above its chat: who is in the call (speaking, muted, deafened),
     // and joining it, or the call's own controls once in.
-    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, SPEAKING } from '../lib/voice.svelte.js';
+    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, voiceJoining, SPEAKING } from '../lib/voice.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -14,12 +14,11 @@
     const inCall = $derived(!!v && !!stage && v.channelId === stage.channelId);
     const me = $derived(h.myNpub?.() || '');
     const people = $derived(stage ? voicePresent(stage.channelId) : []);
-    let joining = $state(false);
+    const joining = $derived(!!stage && voiceJoining() === stage.channelId);
 
-    async function join() {
+    function join() {
         if (joining || !stage) return;
-        joining = true;
-        try { await h.join(stage.communityId, stage.channelId); } finally { joining = false; }
+        h.join(stage.communityId, stage.channelId);
     }
     const connected = (npub) => npub === me || !!v?.peers.find((p) => p.npub === npub && p.connected);
     // The call is as good as its slowest link: that round trip, once anyone is linked.

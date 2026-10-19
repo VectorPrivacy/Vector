@@ -230,4 +230,4 @@ export { reactionEls } from './lib/reactionpopups.svelte.js';
 export { miniProfileEls, setMiniProfileRoles, setMiniProfileRoleBusy } from './lib/miniprofile.svelte.js';
 export { railEls, setRailLayout } from './lib/rail.svelte.js';
 export { canvasReadsTrue } from './lib/artcolor.js';
-export { voiceSession, setVoiceSession, setVoicePresent, setVoiceStage, setVoiceCallHandlers, toggleVoiceMic } from './lib/voice.svelte.js';
+export { voiceSession, setVoiceSession, setVoicePresent, setVoiceStage, setVoiceCallHandlers, toggleVoiceMic, voiceJoining, setVoiceJoining } from './lib/voice.svelte.js';

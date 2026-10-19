@@ -27,6 +27,7 @@ const DIAL_EVERY: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// The spread of a room's answers to a newcomer.
 const GREET_JITTER_MS: u64 = 1500;
+const JOIN_TRIES: u32 = 3;
 
 /// A cue the call plays: who came and went, and our own mute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +52,8 @@ pub trait VoiceMedia: Send + Sync {
     fn set_audible(&self, _endpoint: &[u8; 32], _on: bool) {}
     /// How loud a peer plays here, 1.0 as sent, up to 2.0.
     fn set_volume(&self, _endpoint: &[u8; 32], _gain: f32) {}
+    /// A peer with Priority Speaker: while they talk, everyone else plays quieter.
+    fn set_priority(&self, _endpoint: &[u8; 32], _on: bool) {}
     /// False when the call went ahead without a microphone: muted, whatever the switch says.
     fn has_mic(&self) -> bool {
         true
@@ -199,6 +202,15 @@ pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKe
     !timed_out && !server_muted && !server_deafened && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
 }
 
+/// Whether `member` holds `bit` in this Channel; on the original roles, nobody holds the voice bits.
+fn has_bit(community: &CommunityV2, channel: &ChannelId, member: &PublicKey, bit: u64) -> bool {
+    let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let chan = crate::simd::hex::bytes_to_hex_32(&channel.0);
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
+    roster.everyone.is_some() && roster.channel_permissions(owner.as_deref(), &member.to_hex(), &chan, community.channel(channel).is_some_and(|c| c.private)).contains(bit)
+}
+
 /// Whether `member`'s screen is shown: Video, and not under a Timeout (CORD-07 §7).
 pub fn may_video(community: &CommunityV2, channel: &ChannelId, member: &PublicKey) -> bool {
     let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -316,9 +328,15 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         video: video::Video::default(),
         tasks: Mutex::new(Vec::new()),
     });
-    if let Err(e) = announce(&v, true).await {
-        v.endpoint.close().await;
-        return Err(e);
+    // Just after launch the relays may still be connecting: a refused first presence is retried.
+    let mut tries = 0;
+    while let Err(e) = announce(&v, true).await {
+        tries += 1;
+        if tries >= JOIN_TRIES {
+            v.endpoint.close().await;
+            return Err(e);
+        }
+        crate::rt::time::sleep(Duration::from_millis(1500)).await;
     }
     *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
     if let Some(m) = v.engine() {
@@ -699,6 +717,7 @@ async fn dialer(v: Arc<Voice>) {
             let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
             for (id, l) in links.iter() {
                 m.set_audible(id, may_speak(&community, &v.channel, &l.author));
+                m.set_priority(id, has_bit(&community, &v.channel, &l.author, Permissions::PRIORITY_SPEAKER));
             }
         }
         video::revalidate(&v, |author| may_video(&community, &v.channel, author));
@@ -763,6 +782,7 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
         m.chime(Chime::PeerJoined);
         if let Ok(c) = held(&v.community) {
             m.set_audible(&id, may_speak(&c, &v.channel, &author));
+            m.set_priority(&id, has_bit(&c, &v.channel, &author, Permissions::PRIORITY_SPEAKER));
         }
     }
     let watch = v.clone();

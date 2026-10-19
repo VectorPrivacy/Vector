@@ -167,15 +167,19 @@ async function acceptCall(asked = false) {
 
 /** Join a voice channel's call; off Clearnet the account agrees first. */
 async function joinVoiceChannel(communityId, channel, asked = false) {
-    if (VectorSvelte.voiceSession()?.channelId === channel.id) return;
+    if (VectorSvelte.voiceSession()?.channelId === channel.id || VectorSvelte.voiceJoining()) return;
+    VectorSvelte.setVoiceJoining(channel.id);
     try {
         voiceOnState(await invoke('voice_join', { communityId, channelId: channel.id }));
     } catch (e) {
         if (!asked && String(e) === 'realtime_consent_required') {
+            VectorSvelte.setVoiceJoining(null);
             if (await askRealtimeConsent()) return joinVoiceChannel(communityId, channel, true);
             return;
         }
         VectorSvelte.showToast(String(e));
+    } finally {
+        VectorSvelte.setVoiceJoining(null);
     }
 }
 

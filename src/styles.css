@@ -3971,6 +3971,11 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   margin: 0;
   background-color: rgba(255, 255, 255, 0.45);
 }
+.chatlist-voice-member.is-connecting {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  font-style: italic;
+}
 .chatlist-voice-flags {
   display: flex;
   align-items: center;

@@ -21,6 +21,7 @@ struct Peer {
     jitter: Arc<Mutex<Jitter>>,
     stats: Arc<MediaStats>,
     audible: Arc<AtomicBool>,
+    priority: Arc<AtomicBool>,
     gain: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
     rx: tokio::task::JoinHandle<()>,
@@ -116,7 +117,7 @@ impl VoiceMedia for VoiceEngine {
         };
         self.sends.lock().unwrap_or_else(|e| e.into_inner()).push(conn.clone());
         self.conns.lock().unwrap_or_else(|e| e.into_inner()).push((endpoint, conn));
-        let peer = Peer { jitter, stats, audible: Arc::new(AtomicBool::new(true)), gain: Arc::new(AtomicU32::new(1f32.to_bits())), level: Arc::new(AtomicU32::new(0)), rx };
+        let peer = Peer { jitter, stats, audible: Arc::new(AtomicBool::new(true)), priority: Arc::new(AtomicBool::new(false)), gain: Arc::new(AtomicU32::new(1f32.to_bits())), level: Arc::new(AtomicU32::new(0)), rx };
         if let Some(old) = self.peers.lock().unwrap_or_else(|e| e.into_inner()).insert(endpoint, peer) {
             old.rx.abort();
         }
@@ -164,6 +165,12 @@ impl VoiceMedia for VoiceEngine {
         }
     }
 
+    fn set_priority(&self, endpoint: &[u8; 32], on: bool) {
+        if let Some(p) = self.peers.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+            p.priority.store(on, Ordering::Relaxed);
+        }
+    }
+
     fn levels(&self) -> Vec<(Option<[u8; 32]>, f32)> {
         let mut out = vec![(None, f32::from_bits(self.stats.mic_level.load(Ordering::Relaxed)))];
         out.extend(self.peers.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(ep, p)| (Some(*ep), f32::from_bits(p.level.load(Ordering::Relaxed)))));
@@ -186,6 +193,13 @@ impl Drop for VoiceEngine {
     }
 }
 
+/// A priority speaker counts as talking above this level (about -39 dBFS).
+const PRIORITY_TALKING: f32 = 0.35;
+/// Others play at this gain beneath them, reached in a few frames and left over about 200 ms.
+const DUCK_GAIN: f32 = 0.3;
+const DUCK_ATTACK: f32 = 0.5;
+const DUCK_RELEASE: f32 = 0.1;
+
 /// Each peer's decoder state, kept beside the engine's map so a peer gone mid-frame is simply skipped.
 struct Voicing {
     dec: Decoder,
@@ -200,6 +214,9 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
     let mut mix = [0i32; FRAME];
     let mut mix_f32 = [0f32; FRAME];
     let mut resampled = Vec::with_capacity(4096);
+    // This frame's decoded peers, mixed once we know whether a priority speaker is talking.
+    let mut heard: Vec<(f32, bool, [i16; FRAME])> = Vec::new();
+    let mut duck = 1.0f32;
 
     while !stop.load(Ordering::Relaxed) {
         if link.play.len() >= ahead {
@@ -207,7 +224,9 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
             continue;
         }
         mix.fill(0);
+        heard.clear();
         let mut any = false;
+        let mut priority_talking = false;
         {
             let map = peers.lock().unwrap_or_else(|e| e.into_inner());
             decoders.retain(|ep, _| map.contains_key(ep));
@@ -248,13 +267,22 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
                 if !decoded {
                     pcm.fill(0);
                 }
-                peer.level.store(level_of(&pcm).to_bits(), Ordering::Relaxed);
+                let level = level_of(&pcm);
+                peer.level.store(level.to_bits(), Ordering::Relaxed);
                 if peer.audible.load(Ordering::Relaxed) {
-                    let gain = f32::from_bits(peer.gain.load(Ordering::Relaxed));
-                    for (m, s) in mix.iter_mut().zip(pcm.iter()) {
-                        *m += (*s as f32 * gain) as i32;
-                    }
+                    let priority = peer.priority.load(Ordering::Relaxed);
+                    priority_talking |= priority && level > PRIORITY_TALKING;
+                    heard.push((f32::from_bits(peer.gain.load(Ordering::Relaxed)), priority, pcm));
                 }
+            }
+        }
+        // Everyone but the priority speaker dips while they talk: in fast, out slowly.
+        let target = if priority_talking { DUCK_GAIN } else { 1.0 };
+        duck += (target - duck) * if target < duck { DUCK_ATTACK } else { DUCK_RELEASE };
+        for (gain, priority, pcm) in heard.iter() {
+            let gain = if *priority { *gain } else { *gain * duck };
+            for (m, s) in mix.iter_mut().zip(pcm.iter()) {
+                *m += (*s as f32 * gain) as i32;
             }
         }
         if !any {

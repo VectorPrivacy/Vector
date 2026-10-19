@@ -1,7 +1,8 @@
 // The voice Channel call this device is in, who is in each voice Channel's call, and the voice
 // channel the chat pane last opened (its stage shows while that channel is on screen).
 // focus: whose shared screen the stage shows; null picks the first sharer, '' shows none.
-const live = $state({ session: null, stage: null, focus: null });
+// joining: the voice channel a join is under way for.
+const live = $state({ session: null, stage: null, focus: null, joining: null });
 const rooms = $state({});
 let handlers = {};
 
@@ -17,6 +18,9 @@ export function setVoiceSession(s) {
     } : null;
     if (!s) live.focus = null;
 }
+
+export function voiceJoining() { return live.joining; }
+export function setVoiceJoining(channelId) { live.joining = channelId || null; }
 
 export function voiceFocus() { return live.focus; }
 export function setVoiceFocus(npub) { live.focus = npub; }
