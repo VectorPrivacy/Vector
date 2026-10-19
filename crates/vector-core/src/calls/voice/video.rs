@@ -73,6 +73,8 @@ enum Ctl {
     },
     /// My decoder for that picture lost the chain.
     Key { kind: VideoKind },
+    /// My decoder can't take this codec: send another.
+    Unsupported { codec: VideoCodec },
     #[serde(other)]
     Unknown,
 }
@@ -125,6 +127,9 @@ pub(super) struct Video {
     last_frame: Mutex<HashMap<(PublicKey, usize), Instant>>,
     last_rewatch: Mutex<HashMap<PublicKey, Instant>>,
     codec: Mutex<Option<VideoCodec>>,
+    /// What our webview encodes, and the codecs a viewer has refused.
+    encode: Mutex<Vec<String>>,
+    refused: Mutex<Vec<VideoCodec>>,
     rung: [AtomicUsize; 2],
     /// A rate or codec the webview hasn't taken yet: its queue was full.
     rate_unsent: [AtomicBool; 2],
@@ -430,9 +435,16 @@ async fn link_loop(v: Arc<Voice>, mut taker: mpsc::Receiver<LinkConn>) {
                     }
                 }
                 Some(LinkMsg::Control(FromLink::Caps { encode, .. })) => {
-                    let codec = if encode.iter().any(|c| c == "h264") { Some(VideoCodec::H264) } else if encode.iter().any(|c| c == "vp8") { Some(VideoCodec::Vp8) } else { None };
-                    *v.video.codec.lock().unwrap_or_else(|e| e.into_inner()) = codec;
+                    *v.video.encode.lock().unwrap_or_else(|e| e.into_inner()) = encode;
+                    *v.video.codec.lock().unwrap_or_else(|e| e.into_inner()) = choose_codec(&v.video);
                     v.video.tell_codec();
+                }
+                // Our decoder can't take a sender's codec: they are asked for another.
+                Some(LinkMsg::Control(FromLink::Unsupported { codec, peer: Some(peer) })) => {
+                    let Ok(author) = PublicKey::from_hex(&peer) else { continue };
+                    if let Some(id) = endpoint_of(&v, &author) {
+                        send_ctl(&v, &id, Ctl::Unsupported { codec });
+                    }
                 }
                 Some(LinkMsg::Control(FromLink::LostFrom { peer, kind })) => {
                     let Ok(author) = PublicKey::from_hex(&peer) else { continue };
@@ -577,6 +589,7 @@ async fn inbound(v: Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connectio
             Ok(Ok(Inbound::Control(data))) => match serde_json::from_slice::<Ctl>(&data) {
                 Ok(Ctl::Watch { camera, screen }) => on_watch(&v, id, conn_id, Tracks { camera, screen }),
                 Ok(Ctl::Key { kind }) => on_key(&v, id, kind),
+                Ok(Ctl::Unsupported { codec }) => on_unsupported(&v, codec),
                 _ => {}
             },
             Ok(Ok(Inbound::Other)) => {}
@@ -631,6 +644,46 @@ fn on_watch(v: &Arc<Voice>, id: [u8; 32], conn_id: usize, want: Tracks) {
     let live = v.links.lock().unwrap_or_else(|e| e.into_inner()).get(&id).is_some_and(|l| l.conn.stable_id() == conn_id);
     if !live {
         v.video.watchers.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+}
+
+/// The codec to send: the best our encoder has that no viewer refused, H.264 before VP8.
+fn choose_codec(video: &Video) -> Option<VideoCodec> {
+    let encode = video.encode.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let refused = video.refused.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    [(VideoCodec::H264, "h264"), (VideoCodec::Vp8, "vp8")]
+        .into_iter()
+        .find(|(c, name)| !refused.contains(c) && encode.iter().any(|e| e == name))
+        .map(|(c, _)| c)
+}
+
+/// A viewer can't decode what we send: every viewer gets another codec from the next keyframe, if
+/// our encoder has one; VP8 decodes everywhere.
+fn on_unsupported(v: &Voice, codec: VideoCodec) {
+    {
+        let mut refused = v.video.refused.lock().unwrap_or_else(|e| e.into_inner());
+        if refused.contains(&codec) {
+            return;
+        }
+        refused.push(codec);
+    }
+    let next = choose_codec(&v.video);
+    let mut current = v.video.codec.lock().unwrap_or_else(|e| e.into_inner());
+    if *current != Some(codec) || next.is_none() {
+        return;
+    }
+    crate::log_info!("[voice] a viewer can't decode {codec:?}: sending {next:?}");
+    *current = next;
+    drop(current);
+    v.video.tell_codec();
+    for out in v.video.outs() {
+        for kind in KINDS {
+            out.need_key[kind.index()].store(true, Ordering::SeqCst);
+        }
+    }
+    for kind in KINDS {
+        *v.video.last_key_forced[kind.index()].lock().unwrap_or_else(|e| e.into_inner()) = None;
+        v.video.force_key(kind);
     }
 }
 
@@ -804,6 +857,18 @@ mod tests {
         assert_eq!(serde_json::from_str::<Ctl>(r#"{"t":"key","kind":"screen"}"#).unwrap(), Ctl::Key { kind: VideoKind::Screen });
         assert_eq!(serde_json::from_str::<Ctl>(r#"{"t":"hologram","on":true}"#).unwrap(), Ctl::Unknown, "a newer peer's control is skipped");
         assert_eq!(serde_json::to_string(&Ctl::Watch { camera: false, screen: true }).unwrap(), r#"{"t":"watch","camera":false,"screen":true}"#);
+        assert_eq!(serde_json::from_str::<Ctl>(r#"{"t":"unsupported","codec":"h264"}"#).unwrap(), Ctl::Unsupported { codec: VideoCodec::H264 });
+    }
+
+    #[test]
+    fn a_codec_a_viewer_refused_is_never_chosen_again() {
+        let video = Video::default();
+        *video.encode.lock().unwrap() = vec!["h264".into(), "vp8".into()];
+        assert_eq!(choose_codec(&video), Some(VideoCodec::H264), "H.264 first");
+        video.refused.lock().unwrap().push(VideoCodec::H264);
+        assert_eq!(choose_codec(&video), Some(VideoCodec::Vp8), "VP8 once a viewer can't take H.264");
+        *video.encode.lock().unwrap() = vec!["h264".into()];
+        assert_eq!(choose_codec(&video), None, "nothing left to offer");
     }
 
     #[test]

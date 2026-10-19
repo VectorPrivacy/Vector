@@ -357,7 +357,7 @@ function decodeInto(t, frame) {
                 resetDecoder(t);
                 if (decErrors[name] >= 2) {
                     postMessage({ t: 'decode_error', message: e.message, codec: name });
-                    control({ t: 'unsupported', codec: name });
+                    control({ t: 'unsupported', codec: name, peer: t.peer });
                 } else {
                     lost(t);
                 }

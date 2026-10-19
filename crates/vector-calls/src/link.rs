@@ -47,8 +47,13 @@ pub enum FromLink {
     Stats { kind: VideoKind, fps: u32, kbps: u32, width: u32, height: u32 },
     /// My decoder for that track lost the chain: ask the peer for a keyframe.
     Lost { kind: VideoKind },
-    /// My decoder refuses this codec outright: ask the peer to send another.
-    Unsupported { codec: VideoCodec },
+    /// My decoder refuses this codec outright: ask the peer to send another. In a call of
+    /// several, `peer` says whose (their key, hex).
+    Unsupported {
+        codec: VideoCodec,
+        #[serde(default)]
+        peer: Option<String>,
+    },
     /// In a call of several, my decoder for this sender's (their key, hex) track lost the chain.
     LostFrom { peer: String, kind: VideoKind },
     #[serde(other)]
