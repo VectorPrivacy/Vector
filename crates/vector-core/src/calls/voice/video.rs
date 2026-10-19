@@ -59,6 +59,8 @@ const CAMERA_START: usize = 2;
 const CAMERA_RELAY_CAP: usize = 3;
 const CAMERA_DIRECT_CAP: usize = 5;
 const CLIMB_AFTER_SECS: u32 = 8;
+/// What an unwatched picture costs while it idles.
+const IDLE_KBPS: u32 = 100;
 
 /// What a viewer and a sender say to each other.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -133,6 +135,8 @@ pub(super) struct Video {
     rung: [AtomicUsize; 2],
     /// A rate or codec the webview hasn't taken yet: its queue was full.
     rate_unsent: [AtomicBool; 2],
+    /// A picture nobody watches idles at a frame a second until someone does.
+    idle: [AtomicBool; 2],
     codec_unsent: AtomicBool,
     clean_secs: AtomicU32,
     /// The viewer count moved: the next tick repaints, however often a peer flips it.
@@ -211,8 +215,16 @@ impl Video {
 
     fn tell_rung(&self, kind: VideoKind) {
         let r = self.rung(kind);
-        let told = self.tell(&ToLink::Rate { kind, kbps: r.kbps, width: r.width, height: r.height, fps: r.fps });
+        let (kbps, fps) = if self.idle[kind.index()].load(Ordering::SeqCst) { (r.kbps.min(IDLE_KBPS), 1) } else { (r.kbps, r.fps) };
+        let told = self.tell(&ToLink::Rate { kind, kbps, width: r.width, height: r.height, fps });
         self.rate_unsent[kind.index()].store(!told, Ordering::SeqCst);
+    }
+
+    /// Idle a picture nobody watches, or wake it for one who does.
+    fn set_idle(&self, kind: VideoKind, idle: bool) {
+        if self.idle[kind.index()].swap(idle, Ordering::SeqCst) != idle {
+            self.tell_rung(kind);
+        }
     }
 
     fn tell_codec(&self) {
@@ -310,6 +322,7 @@ pub(super) fn set_sending(v: &Arc<Voice>, kind: VideoKind, on: bool) -> Result<(
             VideoKind::Screen => SCREEN_START,
         };
         v.video.rung[kind.index()].store(start, Ordering::SeqCst);
+        v.video.idle[kind.index()].store(false, Ordering::SeqCst);
         v.video.clean_secs.store(0, Ordering::SeqCst);
         v.video.tell_rung(kind);
         *v.video.last_key_forced[kind.index()].lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -634,6 +647,7 @@ fn on_watch(v: &Arc<Voice>, id: [u8; 32], conn_id: usize, want: Tracks) {
         return;
     }
     for kind in KINDS.into_iter().filter(|k| want.has(*k) && !before.has(*k)) {
+        v.video.set_idle(kind, false);
         out.need_key[kind.index()].store(true, Ordering::SeqCst);
         v.video.force_key(kind);
     }
@@ -791,6 +805,7 @@ async fn rate_loop(v: Arc<Voice>) {
         let clean = if lossy_any { 0 } else { v.video.clean_secs.fetch_add(1, Ordering::SeqCst) + 1 };
         let mut moved = false;
         for kind in KINDS.into_iter().filter(|k| sending.has(*k)) {
+            v.video.set_idle(kind, !health.iter().any(|(o, _)| o.wants(kind)));
             let watched = active.iter().filter(|(o, _)| o.wants(kind)).count();
             let lossy = active.iter().filter(|(o, lossy)| *lossy && o.wants(kind)).count();
             let cap = match (kind, relayed) {
