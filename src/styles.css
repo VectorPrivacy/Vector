@@ -4375,6 +4375,8 @@ body:not(.ws) .voice-tile {
   border: 2px solid #0b0b0b;
 }
 .voice-tile-badge .icon {
+  position: static;
+  flex: none;
   width: 12px;
   height: 12px;
   margin: 0;
