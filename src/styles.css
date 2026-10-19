@@ -4118,6 +4118,15 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   padding: 2px 8px 2px 34px;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.chatlist-voice-member img {
+  -webkit-user-drag: none;
+}
+.chatlist-voice-member:hover {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 /* Speaking: the name lights and the avatar rings in the live accent. */

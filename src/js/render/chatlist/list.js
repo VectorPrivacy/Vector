@@ -106,6 +106,7 @@ function chatlistSnapshot() {
  * @property {(chat: object, isGroup: boolean, unread: number, x: number, y: number) => void} showChatRowContextMenu
  * @property {(text: string, el: Element) => void} showGlobalTooltip
  * @property {() => void} hideGlobalTooltip
+ * @property {(npub: string, el: Element, communityId?: string) => void} showMiniProfile
  * @property {(communityId: string) => string} communityMemberSubtext
  * @property {(communityId: string) => object[]|null} getChannels
  * @property {(communityId: string) => boolean} communityHasChannelList
@@ -160,6 +161,7 @@ function chatlistHelpers() {
         showChatRowContextMenu: _showChatRowContextMenu,
         showGlobalTooltip,
         hideGlobalTooltip,
+        showMiniProfile: (npub, el, communityId) => showMiniProfile(npub, el, communityId),
         // community channel lists
         communityMemberSubtext,
         getChannels: getCommunityChannels,

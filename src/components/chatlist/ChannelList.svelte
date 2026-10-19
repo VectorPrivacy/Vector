@@ -190,8 +190,9 @@
             <div class="chatlist-voice-member is-connecting">Connecting…</div>
         {/if}
         {#each voicePresent(channel.id) as p (p.npub)}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div class="chatlist-voice-member" class:is-speaking={live && !p.muted && voiceLevel(p.npub, voiceCallHandlers().myNpub?.()) > SPEAKING}
+                 onclick={(e) => { e.stopPropagation(); h.showMiniProfile(p.npub, e.currentTarget, communityId); }}
                  oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); voiceCallHandlers().memberMenu?.(communityId, channel.id, p.npub, e.clientX, e.clientY); }}>
                 <Avatar src={h.getProfileAvatarSrc(h.getProfile(p.npub))} size={18} />
                 <span class="cutoff">{h.getName(p.npub)}</span>
