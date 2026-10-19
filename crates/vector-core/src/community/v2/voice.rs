@@ -69,8 +69,9 @@ pub struct Heard {
     pub relay: Option<String>,
     pub muted: bool,
     pub deafened: bool,
-    /// They are sharing their screen.
+    /// They are sharing their screen, or their camera.
     pub screen: bool,
+    pub camera: bool,
 }
 
 /// What a `joined` shows of its author beyond where to reach them.
@@ -79,6 +80,7 @@ pub struct Showing {
     pub muted: bool,
     pub deafened: bool,
     pub screen: bool,
+    pub camera: bool,
 }
 
 /// One member in a call.
@@ -95,6 +97,7 @@ pub struct Present {
     pub muted: bool,
     pub deafened: bool,
     pub screen: bool,
+    pub camera: bool,
     /// A moderator's mute or deafen, for as long as they stay in the call.
     pub server_muted: bool,
     pub server_deafened: bool,
@@ -197,6 +200,7 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
                 muted: h.muted,
                 deafened: h.deafened,
                 screen: h.screen,
+                camera: h.camera,
                 server_muted: e.server_muted,
                 server_deafened: e.server_deafened,
             }

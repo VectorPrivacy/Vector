@@ -239,10 +239,12 @@ function registerVoiceScreen() {
         memberMenu: (communityId, channelId, npub, x, y) => openVoiceMemberMenu(communityId, channelId, npub, x, y),
         keyHint: (key) => voiceKeyHint(key),
         canShare: () => !!window.VideoEncoder && !!navigator.mediaDevices?.getDisplayMedia,
+        canCamera: () => !!window.VideoEncoder && !!navigator.mediaDevices?.getUserMedia,
         share: (on) => startVideo('screen', on),
-        watch: (npub, on) => invoke('voice_watch', { npub, on }).catch(() => {}),
-        screenCanvas: (pubkey, el, gone) => attachVoiceScreen(pubkey, el, gone),
-        selfPreview: (el) => attachSelfPreview('screen', el),
+        camera: (on) => startVideo('camera', on),
+        watch: (npub, want) => invoke('voice_watch', { npub, screen: !!want.screen, camera: !!want.camera }).catch(() => {}),
+        videoCanvas: (pubkey, kind, el, gone) => attachVoiceVideo(pubkey, kind, el, gone),
+        selfPreview: (kind, el) => attachSelfPreview(kind, el),
     });
     VectorSvelte.setScreen('voice', {
         h: {
@@ -251,6 +253,7 @@ function registerVoiceScreen() {
             leave: () => invoke('voice_leave').catch(() => {}),
             keyHint: (key) => voiceKeyHint(key),
             share: (on) => startVideo('screen', on),
+            camera: (on) => startVideo('camera', on),
             channelName: (communityId, channelId) => voiceChannelOf(communityId, channelId)?.name || 'Voice',
             openChannel: (communityId, channelId) => {
                 const ch = voiceChannelOf(communityId, channelId);

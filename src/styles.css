@@ -3968,13 +3968,20 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   flex: none;
   width: 12px;
   height: 12px;
-  margin: 0 0 0 auto;
+  margin: 0;
   background-color: rgba(255, 255, 255, 0.45);
 }
+.chatlist-voice-flags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+.chatlist-voice-flags:empty { display: none; }
 .chatlist-voice-member .icon.is-server { background-color: var(--danger-color); }
 .chatlist-voice-live {
   flex: none;
-  margin-left: auto;
   padding: 0 5px;
   border-radius: 5px;
   background: var(--danger-color);
@@ -3984,7 +3991,6 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   letter-spacing: 0.04em;
   line-height: 14px;
 }
-.chatlist-voice-live + .icon { margin-left: 6px; }
 
 /* A voice channel's stage, above its chat. */
 .voice-stage {
@@ -4068,6 +4074,23 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
 .voice-tile { position: relative; }
 .voice-tile.is-sharing { cursor: pointer; }
 .voice-tile.is-viewing { box-shadow: inset 0 0 0 1px rgba(89, 252, 179, 0.45); }
+/* A camera in place of the avatar: the tile widens to a picture. */
+.voice-tile.has-cam { grid-column: span 2; }
+.voice-tile-avatar.voice-tile-cam {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+}
+.voice-tile-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+}
+.voice-tile-cam .voice-tile-badge { right: 6px; bottom: 6px; }
 .voice-tile-live {
   position: absolute;
   top: 6px;

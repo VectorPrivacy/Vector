@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-video"
+description = "Enables the voice_video command without any pre-configured scope."
+commands.allow = ["voice_video"]
+
+[[permission]]
+identifier = "deny-voice-video"
+description = "Denies the voice_video command without any pre-configured scope."
+commands.deny = ["voice_video"]

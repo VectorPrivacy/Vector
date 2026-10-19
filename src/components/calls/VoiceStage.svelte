@@ -31,27 +31,38 @@
     const focus = $derived(voiceFocus());
     const viewing = $derived(!inCall || focus === '' ? null
         : focus && sharers.includes(focus) ? focus : sharers.find((n) => n !== me) ?? null);
-    const viewingKey = $derived(viewing && viewing !== me ? v?.peers.find((p) => p.npub === viewing)?.pubkey : null);
+    const keyOf = (npub) => (inCall ? v.peers.find((p) => p.npub === npub && p.connected)?.pubkey : null) || null;
+    const viewingKey = $derived(viewing && viewing !== me ? keyOf(viewing) : null);
+    const cam = (p) => p.camera || (p.npub === me && !!v?.camera);
     let expanded = $state(false);
-    // Only the screen on the stage is sent to us: watching costs its sharer an upload.
-    let watched = null;
+    // Only what the stage shows is sent to us: every picture we take costs its sender an upload.
+    let watched = {};
     $effect(() => {
-        const want = shown && viewing && viewing !== me ? viewing : null;
-        if (want === watched) return;
-        if (watched) h.watch?.(watched, false);
-        if (want) h.watch?.(want, true);
-        watched = want;
+        const next = {};
+        if (shown && inCall) {
+            for (const p of people) {
+                if (p.npub === me) continue;
+                const want = { screen: viewing === p.npub, camera: !!p.camera };
+                if (want.screen || want.camera) next[p.npub] = want;
+            }
+        }
+        for (const npub of new Set([...Object.keys(watched), ...Object.keys(next)])) {
+            const a = watched[npub], b = next[npub];
+            if (a?.screen === b?.screen && a?.camera === b?.camera) continue;
+            h.watch?.(npub, b || { screen: false, camera: false });
+        }
+        watched = next;
     });
     function pick(npub) {
         setVoiceFocus(viewing === npub ? '' : npub);
     }
-    function screenCanvas(node, key) {
-        h.screenCanvas?.(key, node);
-        return { destroy() { h.screenCanvas?.(key, node, true); } };
+    function videoCanvas(node, [key, kind]) {
+        h.videoCanvas?.(key, kind, node);
+        return { destroy() { h.videoCanvas?.(key, kind, node, true); } };
     }
-    function selfPreview(node) {
-        h.selfPreview?.(node);
-        return { destroy() { h.selfPreview?.(null); } };
+    function selfPreview(node, kind) {
+        h.selfPreview?.(kind, node);
+        return { destroy() { h.selfPreview?.(kind, null); } };
     }
     function pathOf(npub) {
         const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
@@ -72,10 +83,10 @@
         {#if viewing}
             <div class="voice-screen">
                 {#if viewing === me}
-                    <video class="voice-screen-media" use:selfPreview muted playsinline autoplay></video>
+                    <video class="voice-screen-media" use:selfPreview={'screen'} muted playsinline autoplay></video>
                 {:else if viewingKey}
                     {#key viewingKey}
-                        <canvas class="voice-screen-media" use:screenCanvas={viewingKey}></canvas>
+                        <canvas class="voice-screen-media" use:videoCanvas={[viewingKey, 'screen']}></canvas>
                     {/key}
                 {/if}
                 <div class="voice-screen-bar">
@@ -99,12 +110,20 @@
                     {@const level = inCall ? voiceLevel(p.npub, me) : 0}
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <div class="voice-tile" class:is-speaking={level > SPEAKING && !p.muted} class:is-pending={inCall && !connected(p.npub)}
-                         class:is-sharing={sharing(p)} class:is-viewing={viewing === p.npub}
+                         class:is-sharing={sharing(p)} class:is-viewing={viewing === p.npub} class:has-cam={cam(p) && (p.npub === me || !!keyOf(p.npub))}
                          onclick={() => { if (inCall && sharing(p)) pick(p.npub); }}
                          title={p.elsewhere ? 'In this call on another app: you can\'t hear each other' : pathOf(p.npub)}
                          oncontextmenu={(e) => { e.preventDefault(); h.memberMenu?.(stage.communityId, stage.channelId, p.npub, e.clientX, e.clientY); }}>
-                        <div class="voice-tile-avatar" style="--talk: {Math.min(1, level * 2).toFixed(2)}">
-                            <Avatar src={h.avatarSrc?.(p.npub)} size={56} />
+                        <div class="voice-tile-avatar" class:voice-tile-cam={cam(p) && (p.npub === me || !!keyOf(p.npub))} style="--talk: {Math.min(1, level * 2).toFixed(2)}">
+                            {#if cam(p) && p.npub === me}
+                                <video class="voice-tile-video" use:selfPreview={'camera'} muted playsinline autoplay></video>
+                            {:else if cam(p) && keyOf(p.npub)}
+                                {#key keyOf(p.npub)}
+                                    <canvas class="voice-tile-video" use:videoCanvas={[keyOf(p.npub), 'camera']}></canvas>
+                                {/key}
+                            {:else}
+                                <Avatar src={h.avatarSrc?.(p.npub)} size={56} />
+                            {/if}
                             {#if p.muted || p.deafened}
                                 {@const server = p.deafened ? p.server_deafened : p.server_muted}
                                 <span class="voice-tile-badge" class:is-server={server} title={`${p.deafened ? 'Deafened' : 'Muted'}${server ? ' by a moderator' : ''}`}>
@@ -135,6 +154,11 @@
                 </button>
                 {#if v.sharing}
                     <span class="voice-stage-sharing">Sharing your screen{v.viewers ? ` · ${v.viewers} watching` : ''}</span>
+                {/if}
+                {#if h.canCamera?.()}
+                    <button class="call-btn" class:call-btn-on={v.camera} title={v.camera ? 'Turn your camera off' : 'Turn your camera on'} onclick={() => h.camera?.(!v.camera)}>
+                        <span class="icon icon-video"></span>
+                    </button>
                 {/if}
                 {#if h.canShare?.()}
                     <button class="call-btn" class:call-btn-on={v.sharing} title={v.sharing ? 'Stop sharing your screen' : 'Share your screen'} onclick={() => h.share?.(!v.sharing)}>

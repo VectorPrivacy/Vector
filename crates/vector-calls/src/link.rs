@@ -49,8 +49,8 @@ pub enum FromLink {
     Lost { kind: VideoKind },
     /// My decoder refuses this codec outright: ask the peer to send another.
     Unsupported { codec: VideoCodec },
-    /// In a call of several, my decoder for this sender (their key, hex) lost the chain.
-    LostFrom { peer: String },
+    /// In a call of several, my decoder for this sender's (their key, hex) track lost the chain.
+    LostFrom { peer: String, kind: VideoKind },
     #[serde(other)]
     Unknown,
 }

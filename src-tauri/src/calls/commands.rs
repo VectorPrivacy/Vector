@@ -154,17 +154,18 @@ pub async fn voice_set_deafened(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move { vector_core::calls::voice::set_deafened(on) }).await
 }
 
-/// Share our screen in the voice call, or stop.
+/// Send our camera or screen to the voice call, or stop.
 #[tauri::command]
-pub async fn voice_share(on: bool) -> Result<(), String> {
-    vector_core::db::scoped(async move { vector_core::calls::voice::set_sharing(on) }).await
+pub async fn voice_video(kind: VideoKind, on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move { vector_core::calls::voice::set_video(kind, on) }).await
 }
 
-/// Watch a member's shared screen in our voice call, or stop.
+/// Which of a member's pictures this device shows in the voice call.
 #[tauri::command]
-pub async fn voice_watch(npub: String, on: bool) -> Result<(), String> {
+pub async fn voice_watch(npub: String, screen: bool, camera: bool) -> Result<(), String> {
     let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|e| e.to_string())?;
-    vector_core::db::scoped(async move { vector_core::calls::voice::watch(&member, on) }).await
+    let want = vector_core::calls::wire::Tracks { camera, screen };
+    vector_core::db::scoped(async move { vector_core::calls::voice::watch(&member, want) }).await
 }
 
 /// How loud a member plays in this account's calls, 0 to 2; remembered.
@@ -222,7 +223,7 @@ pub async fn voice_present(channel_id: String) -> Vec<serde_json::Value> {
                 let npub = p.author.to_bech32().ok()?;
                 // Another transport's caller is in the call, but out of reach of ours.
                 let elsewhere = p.transport.as_deref().is_some_and(|t| t != vector_core::community::v2::chat::TRANSPORT_IROH) || p.transport.is_none();
-                Some(serde_json::json!({ "npub": npub, "muted": p.muted || p.server_muted, "deafened": p.deafened || p.server_deafened, "server_muted": p.server_muted, "server_deafened": p.server_deafened, "screen": p.screen, "elsewhere": elsewhere }))
+                Some(serde_json::json!({ "npub": npub, "muted": p.muted || p.server_muted, "deafened": p.deafened || p.server_deafened, "server_muted": p.server_muted, "server_deafened": p.server_deafened, "screen": p.screen, "camera": p.camera, "elsewhere": elsewhere }))
             })
             .collect()
     })

@@ -80,8 +80,9 @@ pub struct VoicePeer {
     /// A moderator muted or deafened them for this call.
     pub server_muted: bool,
     pub server_deafened: bool,
-    /// They are sharing their screen.
+    /// They are sharing their screen, or their camera.
     pub screen: bool,
+    pub camera: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -100,9 +101,10 @@ pub struct VoiceState {
     /// A moderator muted or deafened us for this call.
     pub server_muted: bool,
     pub server_deafened: bool,
-    /// We are sharing our screen, and to how many.
+    /// We are sharing our screen, and to how many; our camera is on.
     pub sharing: bool,
     pub viewers: u32,
+    pub camera: bool,
 }
 
 struct Link {
@@ -258,7 +260,8 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
     let showing = presence::Showing {
         muted: v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic()),
         deafened: v.deafened.load(Ordering::SeqCst),
-        screen: v.video.sharing(),
+        screen: v.video.sending().screen,
+        camera: v.video.sending().camera,
     };
     crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, showing).await
 }
@@ -358,23 +361,23 @@ pub async fn leave() {
     crate::emit_event("voice_state", &serde_json::Value::Null);
 }
 
-/// Start or stop sharing our screen with whoever watches (CORD-07 §6). Video is judged by
-/// every receiver; we refuse here too, so a member without it isn't left sharing to no one.
-pub fn set_sharing(on: bool) -> Result<(), String> {
+/// Start or stop sending our camera or screen to whoever watches (CORD-07 §6). Video is judged
+/// by every receiver; we refuse here too, so a member without it isn't left sending to no one.
+pub fn set_video(kind: crate::calls::wire::VideoKind, on: bool) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
     if on && !may_video(&held(&v.community)?, &v.channel, &v.me) {
-        return Err("You can't share your screen in this channel".into());
+        return Err("You can't share video in this channel".into());
     }
-    video::set_sharing(&v, on)?;
+    video::set_sending(&v, kind, on)?;
     reannounce(&v);
     changed(&v);
     Ok(())
 }
 
-/// Watch a member's shared screen in our call, or stop.
-pub fn watch(member: &PublicKey, on: bool) -> Result<(), String> {
+/// Which of a member's pictures we show in our call; neither stops them coming.
+pub fn watch(member: &PublicKey, want: crate::calls::wire::Tracks) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
-    video::watch(&v, member, on)
+    video::watch(&v, member, want)
 }
 
 /// A moderator's directive, already judged: one aimed at us is obeyed, and anyone else's mute
@@ -540,7 +543,7 @@ fn state(v: &Voice) -> VoiceState {
     let levels = v.engine().map(|m| m.levels()).unwrap_or_default();
     let level_of = |ep: Option<[u8; 32]>| levels.iter().find(|(e, _)| *e == ep).map_or(0.0, |(_, l)| *l);
     // Read before the links are held: the video side takes its locks one at a time too.
-    let (sharing, viewers) = (v.video.sharing(), v.video.viewers());
+    let (sending, viewers) = (v.video.sending(), v.video.viewers());
     let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
     let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now_ms())
         .into_iter()
@@ -556,6 +559,7 @@ fn state(v: &Voice) -> VoiceState {
                 npub: p.author.to_bech32().unwrap_or_default(),
                 pubkey: p.author.to_hex(),
                 screen: p.screen,
+                camera: p.camera,
                 connected: link.is_some(),
                 direct: path.is_some_and(|(ip, _)| ip),
                 rtt_ms: path.map_or(0, |(_, rtt)| rtt),
@@ -579,8 +583,9 @@ fn state(v: &Voice) -> VoiceState {
         mic: v.engine().is_some_and(|m| m.has_mic()),
         server_muted: presence::server_state(&v.channel_hex, &v.me).0,
         server_deafened: presence::server_state(&v.channel_hex, &v.me).1,
-        sharing,
+        sharing: sending.screen,
         viewers,
+        camera: sending.camera,
     }
 }
 
@@ -876,7 +881,7 @@ mod tests {
         let id = *b.id().as_bytes();
         v.links.lock().unwrap().insert(id, Link { author: nostr_sdk::prelude::Keys::generate().public_key(), conn });
         v.video.add_watcher(id);
-        v.video.set_sharing_flag(true);
+        v.video.set_sending_for_test(crate::calls::wire::Tracks { camera: true, screen: true });
         let run = |f: Box<dyn Fn() + Send>| {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -889,7 +894,7 @@ mod tests {
         };
         let (s, f) = (v.clone(), v.clone());
         let painted = run(Box::new(move || drop(state(&s))));
-        let fanned = run(Box::new(move || drop(video::targets(&f))));
+        let fanned = run(Box::new(move || drop(video::targets(&f, crate::calls::wire::VideoKind::Screen))));
         let done = painted.recv_timeout(Duration::from_secs(20)).is_ok() && fanned.recv_timeout(Duration::from_secs(20)).is_ok();
         assert!(done, "the state read and a frame's fan-out each take the links and the viewers: never both at once");
     }

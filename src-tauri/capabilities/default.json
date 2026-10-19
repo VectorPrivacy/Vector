@@ -442,7 +442,7 @@
     "allow-voice-state",
     "allow-voice-set-muted",
     "allow-voice-set-deafened",
-    "allow-voice-share",
+    "allow-voice-video",
     "allow-voice-watch",
     "allow-voice-present",
     "allow-voice-set-volume",

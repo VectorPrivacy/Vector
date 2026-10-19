@@ -13,7 +13,7 @@ export function setVoiceSession(s) {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,
         mic: s.mic !== false, serverMuted: !!s.server_muted, serverDeafened: !!s.server_deafened,
-        sharing: !!s.sharing, viewers: s.viewers || 0,
+        sharing: !!s.sharing, viewers: s.viewers || 0, camera: !!s.camera,
     } : null;
     if (!s) live.focus = null;
 }
@@ -47,7 +47,7 @@ export function voiceStage() { return live.stage; }
 export function setVoiceStage(stage) { live.stage = stage || null; }
 
 /** The stage's and the bar's helpers: join, leave, setMuted, setDeafened, micAccess, getProfile,
- *  getName, avatarSrc, myNpub, memberMenu, keyHint, canShare, share, watch, screenCanvas, selfPreview. */
+ *  getName, avatarSrc, myNpub, memberMenu, keyHint, canShare, canCamera, share, camera, watch, videoCanvas, selfPreview. */
 export function voiceCallHandlers() { return handlers; }
 export function setVoiceCallHandlers(h) { handlers = h || {}; }
 

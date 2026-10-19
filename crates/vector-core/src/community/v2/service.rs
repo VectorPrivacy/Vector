@@ -392,7 +392,7 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
     let transport = endpoint.as_ref().map(|_| chat::TRANSPORT_IROH.to_string());
     let (ep, relay) = endpoint.map_or((None, None), |(e, r)| (Some(e), r));
     let joined = ep.is_some();
-    let heard = super::voice::Heard { joined, transport, endpoint: ep, relay, muted: showing.muted && joined, deafened: showing.deafened && joined, screen: showing.screen && joined };
+    let heard = super::voice::Heard { joined, transport, endpoint: ep, relay, muted: showing.muted && joined, deafened: showing.deafened && joined, screen: showing.screen && joined, camera: showing.camera && joined };
     super::voice::note(&channel, author_pk, at_ms, heard, at_ms);
     Ok(())
 }

@@ -117,22 +117,23 @@ async function voiceVideoOnState(s) {
     }).catch(() => {});
 }
 
-/** A sharer's screen in a voice call, painted on `el`, keyed by their key (hex); `gone` takes it back. */
+/** A member's camera or screen in a voice call, painted on `el`, keyed by their key (hex) and
+ *  the picture; `gone` takes it back. */
 const voiceCanvasSeq = { n: 0 };
-function attachVoiceScreen(peer, el, gone = false) {
+function attachVoiceVideo(peer, kind, el, gone = false) {
     if (gone) {
-        if (videoWorker && canvasIds.has(el)) videoWorker.postMessage({ t: 'canvas', peer, canvas: null, id: canvasIds.get(el) });
+        if (videoWorker && canvasIds.has(el)) videoWorker.postMessage({ t: 'canvas', peer, kind, canvas: null, id: canvasIds.get(el) });
         return;
     }
     const id = ++voiceCanvasSeq.n;
     canvasIds.set(el, id);
     const off = el.transferControlToOffscreen();
-    ensureVideoWorker().postMessage({ t: 'canvas', peer, canvas: off, id }, [off]);
+    ensureVideoWorker().postMessage({ t: 'canvas', peer, kind, canvas: off, id }, [off]);
 }
 
 /** Tell whichever call we're in that a picture of ours started or stopped. */
 function videoBackendSet(kind, on) {
-    return voiceLinkChannel ? invoke('voice_share', { on }) : invoke('call_video_set', { kind, on });
+    return voiceLinkChannel ? invoke('voice_video', { kind, on }) : invoke('call_video_set', { kind, on });
 }
 
 /** A request the platform never answers, rather than refuses, leaves the button dead:
@@ -309,7 +310,6 @@ async function startVideo(kind, on = true) {
     if (!on) return stopVideo(kind, true);
     if (selfTracks[kind] || videoStarting[kind]) return;
     const inVoice = !!voiceLinkChannel;
-    if (inVoice && kind !== 'screen') return;
     let stream;
     videoStarting[kind] = true;
     try {

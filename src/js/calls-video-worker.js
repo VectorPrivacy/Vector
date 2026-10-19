@@ -77,11 +77,13 @@ function newTrack(kind) {
     };
 }
 const tracks = { camera: newTrack('camera'), screen: newTrack('screen') };
-// In a voice Channel's call, each sharer's screen: decoder and canvas, keyed by their key (hex).
+// In a voice Channel's call, each member's camera and screen: decoder and canvas, keyed by
+// their key (hex) and the picture.
 const peerTracks = new Map();
-function peerTrack(hex) {
-    let t = peerTracks.get(hex);
-    if (!t) { t = newTrack('screen'); t.peer = hex; peerTracks.set(hex, t); }
+function peerTrack(hex, kind) {
+    const id = `${hex}:${kind}`;
+    let t = peerTracks.get(id);
+    if (!t) { t = newTrack(kind); t.peer = hex; peerTracks.set(id, t); }
     return t;
 }
 function hexOf(bytes) {
@@ -91,7 +93,7 @@ function hexOf(bytes) {
 }
 /** This track's decoder lost the chain: ask whoever sends it for a keyframe. */
 function lost(t) {
-    if (t.peer) control({ t: 'lost_from', peer: t.peer });
+    if (t.peer) control({ t: 'lost_from', peer: t.peer, kind: t.kind });
     else control({ t: 'lost', kind: t.kind });
 }
 
@@ -331,7 +333,8 @@ function onFrame(frame) {
 
 function onPeerFrame(msg) {
     if (msg.length < PEER_TAG_LEN + HEADER_LEN) return;
-    const t = peerTrack(hexOf(msg.subarray(0, PEER_TAG_LEN)));
+    const kind = (msg[PEER_TAG_LEN + 12] & FLAG_SCREEN) ? 'screen' : 'camera';
+    const t = peerTrack(hexOf(msg.subarray(0, PEER_TAG_LEN)), kind);
     // Nothing to paint on yet: decoding would be wasted, and the canvas starts from a keyframe.
     if (!t.canvas) { t.needKey = true; return; }
     decodeInto(t, msg.subarray(PEER_TAG_LEN));
@@ -434,7 +437,7 @@ function stats() {
 
 self.onmessage = (e) => {
     const m = e.data;
-    const t = m.peer ? peerTrack(m.peer) : tracks[m.kind];
+    const t = m.peer ? peerTrack(m.peer, m.kind) : tracks[m.kind];
     switch (m.t) {
         case 'open': open(m.url, m.caps, m.port); break;
         case 'close': close(); break;
@@ -446,7 +449,7 @@ self.onmessage = (e) => {
             t.canvas = m.canvas;
             t.ctx = m.canvas ? m.canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
             // A sharer's screen on a new canvas starts from a keyframe; without one, it's let go.
-            if (t.peer) { resetDecoder(t); if (m.canvas) lost(t); else peerTracks.delete(t.peer); }
+            if (t.peer) { resetDecoder(t); if (m.canvas) lost(t); else peerTracks.delete(`${t.peer}:${t.kind}`); }
             break;
         case 'capture': if (t) startCapture(t, m); break;
         case 'stop': if (t) { t.capture = null; lastRate[t.kind] = null; stopEncoder(t); } break;

@@ -45,9 +45,10 @@ const TAG_ENDPOINT: &str = "endpoint";
 const TAG_RELAY: &str = "relay";
 const TAG_MUTED: &str = "muted";
 const TAG_DEAFENED: &str = "deafened";
-/// `["video", "screen"]` on a `joined`: its author is sharing their screen.
+/// `["video", "screen"]` or `["video", "camera"]` on a `joined`: what its author is sending.
 const TAG_VIDEO: &str = "video";
 const VIDEO_SCREEN: &str = "screen";
+const VIDEO_CAMERA: &str = "camera";
 const TAG_DO: &str = "do";
 const TAG_TO: &str = "to";
 /// The transport a peer-to-peer call names (CORD-07 §8).
@@ -338,6 +339,9 @@ pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epo
         }
         if showing.screen {
             tags.push(Tag::custom(TAG_VIDEO, [VIDEO_SCREEN.to_string()]));
+        }
+        if showing.camera {
+            tags.push(Tag::custom(TAG_VIDEO, [VIDEO_CAMERA.to_string()]));
         }
     }
     stream::build_rumor_ms(kind::VOICE_PRESENCE, author, if endpoint.is_some() { "joined" } else { "left" }, tags, at_ms)
@@ -744,8 +748,9 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
             };
             let flag = |name: &str| opened.rumor.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some(name));
             let (muted, deafened) = (joined && flag(TAG_MUTED), joined && flag(TAG_DEAFENED));
-            let screen = joined && opened.rumor.tags.iter().any(|t| matches!(t.as_slice(), [k, v, ..] if k == TAG_VIDEO && v == VIDEO_SCREEN));
-            Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened, screen } })
+            let video = |what: &str| joined && opened.rumor.tags.iter().any(|t| matches!(t.as_slice(), [k, v, ..] if k == TAG_VIDEO && v == what));
+            let (screen, camera) = (video(VIDEO_SCREEN), video(VIDEO_CAMERA));
+            Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened, screen, camera } })
         }
         kind::VOICE_DIRECTIVE => {
             let target = PublicKey::from_hex(required_tag(&opened.rumor, TAG_TARGET_AUTHOR)?).map_err(|_| ChatError::BadTag(TAG_TARGET_AUTHOR))?;
