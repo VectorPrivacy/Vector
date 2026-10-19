@@ -4041,6 +4041,10 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 .chatlist-channel,
 .chatlist-channel-section,
 .chatlist-channel-section-head { position: relative; }
+.chatlist-channel-section-head {
+  -webkit-user-select: none;
+  user-select: none;
+}
 .chatlist-channel.is-dragging,
 .chatlist-channel-section.is-dragging { opacity: 0.3; }
 .chatlist-channel.drop-above::after,
