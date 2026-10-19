@@ -71,6 +71,7 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`traits.rs`** — EventEmitter trait (abstracts UI notification), ProgressReporter
 - **`rt.rs`** — spawn and timers: tokio natively, the browser event loop on wasm32
 - **`calls/`** — the `vector-calls` crate (wire format, jitter buffer, rate ladder) re-exported; with the `calls` feature, the call session, video track and audio settings, over a `CallPlatform` trait each client implements (endpoint, audio engine, video link)
+  - **`calls/voice.rs`** + **`voice/video.rs`** — voice Channel calls (CORD-07 §8): a full iroh mesh per join, presence-bound dialling, moderator directives, and cameras/screens fanned out to whoever watches each; each client supplies a `VoiceMedia` engine (desktop `src-tauri/src/calls/voice.rs`, web `crates/vector-web/src/calls.rs`). Never hold `links` and `watchers` at once
 
 `src-tauri` consumes vector-core via `path = "../crates/vector-core"`. Types and globals are re-exported — same instances, shared memory.
 
@@ -86,7 +87,7 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
   notifications avatars, inline reply, mark-as-read and click-to-message: one `Backend` per OS (Windows,
   macOS and Linux), with activation, the account guard and image conversion shared. A new OS starts at its module doc.
 - **`miniapps/`** — WebXDC-compatible mini apps (Tauri-specific: custom protocol, WebView, Iroh P2P)
-- **`calls/`** — the desktop's `CallPlatform`: cpal + Opus + SpeexDSP media engine, the webview's video socket, native screen audio
+- **`calls/`** — the desktop's `CallPlatform`: cpal + Opus + SpeexDSP media engine (1:1 and the voice Channel mixer), the webview's video socket, native screen audio
 - **`android/`** — JNI bindings, localhost media server, background sync
 - **`simd/`** — SIMD image, audio, URL, HTML operations (hex moved to vector-core)
 
