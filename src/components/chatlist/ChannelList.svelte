@@ -115,14 +115,22 @@
             ignore: () => !state?.canManage,
         };
     }
-    // A manager's rows reorder; everyone else's keep the plain long-press menu.
+    // A manager's rows reorder; everyone else's keep the plain long-press menu. Each fold
+    // hands the action a fresh channel or Category; the handlers follow it.
     function channelGesture(node, channel) {
-        const menu = (x, y) => h.openChannelMenu(communityId, channel, x, y);
-        if (pane && state?.canManage) return reorderable(node, gestures('channel', channel.id, menu));
-        return h.attachLongPressContextMenu(node, menu);
+        let cur = channel;
+        const menu = (x, y) => h.openChannelMenu(communityId, cur, x, y);
+        if (pane && state?.canManage) {
+            const r = reorderable(node, gestures('channel', cur.id, menu));
+            return { update(next) { cur = next; r.update(gestures('channel', next.id, menu)); }, destroy: r.destroy };
+        }
+        const r = h.attachLongPressContextMenu(node, menu);
+        return { update(next) { cur = next; }, destroy: r?.destroy };
     }
     function categoryGesture(node, category) {
-        return reorderable(node, gestures('category', category.id, (x, y) => h.openCategoryMenu(communityId, category, x, y)));
+        const of = (k) => gestures('category', k.id, (x, y) => h.openCategoryMenu(communityId, k, x, y));
+        const r = reorderable(node, of(category));
+        return { update(next) { r.update(of(next)); }, destroy: r.destroy };
     }
 
     // Collapsed sections: seeded from the persisted set, flipped here so the fold is
