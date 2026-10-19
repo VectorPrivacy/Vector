@@ -97,12 +97,18 @@ pub fn install() {
             if snapshot().is_some() {
                 vector_core::db::spawn_bound(restart_audio());
             }
+            if vector_core::calls::voice::snapshot().is_some() {
+                vector_core::db::spawn_bound(vector_core::calls::voice::restart_audio());
+            }
         }));
     }
 }
 
 /// Hang up from a synchronous context, waiting briefly for the Bye and the signal.
 pub fn hangup_blocking() {
+    if vector_core::calls::voice::snapshot().is_some() {
+        let _ = tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(3), vector_core::db::scoped(vector_core::calls::voice::leave())));
+    }
     if snapshot().is_none() {
         return;
     }

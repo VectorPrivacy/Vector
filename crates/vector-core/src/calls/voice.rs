@@ -106,7 +106,8 @@ struct Voice {
     me: PublicKey,
     links: Mutex<HashMap<[u8; 32], Link>>,
     dialing: Mutex<HashSet<[u8; 32]>>,
-    media: Option<Box<dyn VoiceMedia>>,
+    /// Swapped whole when the devices change.
+    media: Mutex<Option<Arc<dyn VoiceMedia>>>,
     muted: AtomicBool,
     deafened: AtomicBool,
     nudge: tokio::sync::Notify,
@@ -114,6 +115,12 @@ struct Voice {
 }
 
 static VOICE: Mutex<Option<Arc<Voice>>> = Mutex::new(None);
+
+impl Voice {
+    fn engine(&self) -> Option<Arc<dyn VoiceMedia>> {
+        self.media.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
 
 fn live() -> Option<Arc<Voice>> {
     let v = VOICE.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
@@ -216,7 +223,7 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
     let community = held(&v.community)?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let endpoint = joined.then(|| (*v.endpoint.id().as_bytes(), relay_of(&v.endpoint)));
-    let muted = v.muted.load(Ordering::SeqCst) || v.media.as_ref().is_none_or(|m| !m.has_mic());
+    let muted = v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic());
     crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, muted, v.deafened.load(Ordering::SeqCst)).await
 }
 
@@ -261,7 +268,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         me,
         links: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
-        media,
+        media: Mutex::new(media.map(Arc::from)),
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
@@ -272,7 +279,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         return Err(e);
     }
     *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
-    if let Some(m) = &v.media {
+    if let Some(m) = v.engine() {
         m.chime(Chime::Joined);
     }
     let tasks = vec![
@@ -289,7 +296,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
 /// Leave the call, if in one: a `left` is best-effort, staleness heals a missed one.
 pub async fn leave() {
     let Some(v) = VOICE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-    if let Some(m) = &v.media {
+    if let Some(m) = v.engine() {
         m.chime(Chime::Left);
     }
     for t in v.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
@@ -297,10 +304,13 @@ pub async fn leave() {
     }
     for (id, link) in v.links.lock().unwrap_or_else(|e| e.into_inner()).drain() {
         link.conn.close(0u32.into(), b"left");
-        if let Some(m) = &v.media {
+        if let Some(m) = v.engine() {
             m.remove_peer(&id);
         }
     }
+    // The microphone closes now, not when the last task holding the session lets go.
+    let engine = v.media.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(engine);
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
     crate::emit_event("voice_state", &serde_json::Value::Null);
@@ -323,7 +333,7 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
             if on {
                 v.muted.store(true, Ordering::SeqCst);
             }
-            if let Some(m) = &v.media {
+            if let Some(m) = v.engine() {
                 m.set_muted(v.muted.load(Ordering::SeqCst));
                 if directive == Directive::Mute {
                     m.chime(Chime::Muted);
@@ -335,7 +345,7 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
             if server_deafened {
                 v.deafened.store(true, Ordering::SeqCst);
             }
-            if let Some(m) = &v.media {
+            if let Some(m) = v.engine() {
                 m.set_deafened(v.deafened.load(Ordering::SeqCst) || server_deafened);
             }
             reannounce(&v);
@@ -377,7 +387,7 @@ pub fn set_muted(on: bool) -> Result<(), String> {
         return Err("A moderator muted you in this call".into());
     }
     v.muted.store(on, Ordering::SeqCst);
-    if let Some(m) = &v.media {
+    if let Some(m) = v.engine() {
         m.set_muted(on);
         m.chime(if on { Chime::Muted } else { Chime::Unmuted });
     }
@@ -392,7 +402,7 @@ pub fn set_deafened(on: bool) -> Result<(), String> {
         return Err("A moderator deafened you in this call".into());
     }
     v.deafened.store(on, Ordering::SeqCst);
-    if let Some(m) = &v.media {
+    if let Some(m) = v.engine() {
         m.set_deafened(on);
     }
     reannounce(&v);
@@ -433,7 +443,7 @@ pub fn set_peer_volume(member: &PublicKey, gain: f32) -> Result<(), String> {
     }
     store_volumes(all)?;
     if let Some(v) = live() {
-        if let Some(m) = &v.media {
+        if let Some(m) = v.engine() {
             let ids: Vec<[u8; 32]> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, l)| l.author == *member).map(|(id, _)| *id).collect();
             for id in ids {
                 m.set_volume(&id, gain);
@@ -455,7 +465,7 @@ fn reannounce(v: &Arc<Voice>) {
 }
 
 fn state(v: &Voice) -> VoiceState {
-    let levels = v.media.as_ref().map(|m| m.levels()).unwrap_or_default();
+    let levels = v.engine().map(|m| m.levels()).unwrap_or_default();
     let level_of = |ep: Option<[u8; 32]>| levels.iter().find(|(e, _)| *e == ep).map_or(0.0, |(_, l)| *l);
     let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
     let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now_ms())
@@ -483,9 +493,9 @@ fn state(v: &Voice) -> VoiceState {
         peers,
         muted: v.muted.load(Ordering::SeqCst),
         deafened: v.deafened.load(Ordering::SeqCst),
-        audio: v.media.is_some(),
+        audio: v.engine().is_some(),
         mic_level: level_of(None),
-        mic: v.media.as_ref().is_some_and(|m| m.has_mic()),
+        mic: v.engine().is_some_and(|m| m.has_mic()),
         server_muted: presence::server_state(&v.channel_hex, &v.me).0,
         server_deafened: presence::server_state(&v.channel_hex, &v.me).1,
     }
@@ -497,13 +507,43 @@ fn changed(v: &Voice) {
 
 /// Who is speaking, five times a second while there is audio to show it.
 async fn levels(v: Arc<Voice>) {
-    if v.media.is_none() {
-        return;
-    }
     loop {
         crate::rt::time::sleep(Duration::from_millis(200)).await;
-        crate::emit_event("voice_levels", &state(&v));
+        if v.engine().is_some() {
+            crate::emit_event("voice_levels", &state(&v));
+        }
     }
+}
+
+/// The microphone or speaker changed: a fresh engine on the new devices, carrying every peer,
+/// their volume and whether they're heard, and our mute and deafen.
+pub async fn restart_audio() {
+    let Some(v) = live() else { return };
+    let Ok(platform) = super::platform::get() else { return };
+    // The old engine lets go of the devices before the new one opens them.
+    let old = v.media.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(old);
+    let fresh: Arc<dyn VoiceMedia> = match platform.start_voice().await {
+        Ok(m) => Arc::from(m),
+        Err(e) => {
+            crate::log_warn!("[voice] audio didn't restart: {e}");
+            changed(&v);
+            return;
+        }
+    };
+    fresh.set_muted(v.muted.load(Ordering::SeqCst));
+    fresh.set_deafened(v.deafened.load(Ordering::SeqCst));
+    let community = held(&v.community).ok();
+    let links: Vec<([u8; 32], PublicKey, Connection)> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(id, l)| (*id, l.author, l.conn.clone())).collect();
+    for (id, author, conn) in links {
+        fresh.add_peer(id, conn);
+        fresh.set_volume(&id, peer_volume(&author));
+        if let Some(c) = &community {
+            fresh.set_audible(&id, may_speak(c, &v.channel, &author));
+        }
+    }
+    *v.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(fresh);
+    changed(&v);
 }
 
 async fn heartbeat(v: Arc<Voice>) {
@@ -532,7 +572,7 @@ async fn dialer(v: Arc<Voice>) {
         for id in gone {
             unlink(&v, &id, b"not in this call");
         }
-        if let Some(m) = &v.media {
+        if let Some(m) = v.engine() {
             let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
             for (id, l) in links.iter() {
                 m.set_audible(id, may_speak(&community, &v.channel, &l.author));
@@ -592,7 +632,7 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
         }
         links.insert(id, Link { author, conn: conn.clone() });
     }
-    if let Some(m) = &v.media {
+    if let Some(m) = v.engine() {
         m.add_peer(id, conn.clone());
         m.set_volume(&id, peer_volume(&author));
         m.chime(Chime::PeerJoined);
@@ -616,7 +656,7 @@ fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
     let removed = v.links.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
     if let Some(l) = removed {
         l.conn.close(0u32.into(), why);
-        if let Some(m) = &v.media {
+        if let Some(m) = v.engine() {
             m.remove_peer(id);
             m.chime(Chime::PeerLeft);
         }
@@ -651,7 +691,7 @@ mod tests {
             me: nostr_sdk::prelude::Keys::generate().public_key(),
             links: Mutex::new(HashMap::new()),
             dialing: Mutex::new(HashSet::new()),
-            media: None,
+            media: Mutex::new(None),
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
