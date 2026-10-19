@@ -12,6 +12,9 @@ pub const HEARTBEAT_MS: u64 = 30_000;
 pub const FRESH_MS: u64 = 90_000;
 /// A presence dated further ahead than this would outlive its author's leave; it's refused.
 const AHEAD_MS: u64 = 60_000;
+/// A presence dated further behind than this is a replay or a clock gone wrong; it's refused.
+/// Within it, freshness runs from when it arrived, so a sender's skew can't age them out.
+const BEHIND_MS: u64 = 300_000;
 
 /// A moderator's directive in a call (CORD-07 §7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
@@ -124,6 +127,8 @@ pub struct Present {
 #[derive(Clone)]
 struct Entry {
     at_ms: u64,
+    /// When it arrived here: what freshness is judged from.
+    heard_at: u64,
     /// When this stay in the call began: the order everyone is listed in.
     since_ms: u64,
     heard: Heard,
@@ -132,6 +137,13 @@ struct Entry {
     /// When the directive that set each was sent: an older one arriving late changes nothing.
     muted_at: u64,
     deafened_at: u64,
+}
+
+impl Entry {
+    /// In the call: a `joined` heard within the last three heartbeats.
+    fn live(&self, now_ms: u64) -> bool {
+        self.heard.joined && now_ms.saturating_sub(self.heard_at) < FRESH_MS
+    }
 }
 
 /// What folding a presence did.
@@ -153,7 +165,7 @@ fn calls() -> Arc<Mutex<HashMap<String, HashMap<PublicKey, Entry>>>> {
 /// Fold one presence for `channel` (hex); the latest per author wins. Returns whether it changed
 /// who is in the call.
 pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: u64) -> Noted {
-    if at_ms > now_ms.saturating_add(AHEAD_MS) {
+    if at_ms > now_ms.saturating_add(AHEAD_MS) || at_ms.saturating_add(BEHIND_MS) < now_ms {
         return Noted::default();
     }
     let store = calls();
@@ -162,7 +174,7 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
     if room.get(&author).is_some_and(|e| e.at_ms >= at_ms) {
         return Noted::default();
     }
-    let fresh = |e: &Entry| now_ms.saturating_sub(e.at_ms) < FRESH_MS && e.heard.joined;
+    let fresh = |e: &Entry| e.live(now_ms);
     let was = room.get(&author).filter(|e| fresh(e)).cloned();
     let reached = heard.joined && was.as_ref().is_none_or(|e| e.heard.endpoint != heard.endpoint);
     let changed = was.as_ref().map(|e| &e.heard) != Some(&heard);
@@ -172,7 +184,7 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
         _ => (false, false, 0, 0),
     };
     let since_ms = was.as_ref().filter(|_| heard.joined).map_or(at_ms, |e| e.since_ms);
-    room.insert(author, Entry { at_ms, since_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
+    room.insert(author, Entry { at_ms, heard_at: now_ms, since_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
     Noted { changed, reached }
 }
 
@@ -182,7 +194,7 @@ pub fn apply_directive(channel: &str, target: &PublicKey, directive: Directive, 
     let store = calls();
     let mut all = store.lock().unwrap_or_else(|e| e.into_inner());
     let Some(e) = all.get_mut(&channel.to_ascii_lowercase()).and_then(|r| r.get_mut(target)) else { return false };
-    if !e.heard.joined || now_ms.saturating_sub(e.at_ms) >= FRESH_MS {
+    if !e.live(now_ms) {
         return false;
     }
     let before = (e.server_muted, e.server_deafened);
@@ -214,7 +226,7 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
     let store = calls();
     let all = store.lock().unwrap_or_else(|e| e.into_inner());
     let Some(room) = all.get(&channel.to_ascii_lowercase()) else { return Vec::new() };
-    let mut live: Vec<(&PublicKey, &Entry)> = room.iter().filter(|(_, e)| e.heard.joined && now_ms.saturating_sub(e.at_ms) < FRESH_MS).collect();
+    let mut live: Vec<(&PublicKey, &Entry)> = room.iter().filter(|(_, e)| e.live(now_ms)).collect();
     live.sort_by_key(|(a, e)| (e.since_ms, a.to_bytes()));
     let claims = |ep: &[u8; 32]| live.iter().filter(|(_, e)| e.heard.endpoint.as_ref() == Some(ep)).count();
     live.iter()
@@ -302,6 +314,27 @@ mod tests {
         assert!(apply_directive(&ch, &a, Directive::Mute, 45_000, 45_000));
         assert!(!apply_directive(&ch, &a, Directive::Unmute, 45_000, 45_000), "a same-ms tie keeps them muted");
         assert_eq!(server_state(&ch, &a), (true, false));
+    }
+
+    #[test]
+    fn a_member_whose_clock_lags_stays_while_their_heartbeats_arrive() {
+        // The store is the session\'s: a bed test swapping sessions must not run beside this.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (ch, a) = ("ee".repeat(32), Keys::generate().public_key());
+        let joined = Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([5u8; 32]), ..Default::default() };
+        // Their clock runs 80s behind ours: each heartbeat arrives already 80s old by its own date.
+        let lag = 80_000;
+        for beat in 0..6u64 {
+            let now = 1_000_000 + beat * HEARTBEAT_MS;
+            note(&ch, a, now - lag, joined.clone(), now);
+            assert_eq!(present(&ch, now + HEARTBEAT_MS - 1).len(), 1, "still in the call just before heartbeat {}", beat + 1);
+        }
+        let last = 1_000_000 + 5 * HEARTBEAT_MS;
+        assert!(present(&ch, last + FRESH_MS).is_empty(), "three missed heartbeats still age them out");
+
+        let b = Keys::generate().public_key();
+        assert!(!note(&ch, b, 2_000_000 - BEHIND_MS - 1, joined, 2_000_000).changed, "a presence from minutes ago is a replay, not a member");
+        assert!(present(&ch, 2_000_000).is_empty());
     }
 
     #[test]
