@@ -22,6 +22,13 @@
         try { await h.join(stage.communityId, stage.channelId); } finally { joining = false; }
     }
     const connected = (npub) => npub === me || !!v?.peers.find((p) => p.npub === npub && p.connected);
+    // The call is as good as its slowest link: that round trip, once anyone is linked.
+    const linked = $derived(inCall ? v.peers.filter((p) => p.connected && p.rtt_ms) : []);
+    const ping = $derived(linked.length ? Math.max(...linked.map((p) => p.rtt_ms)) : 0);
+    function pathOf(npub) {
+        const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
+        return p?.rtt_ms ? `${p.rtt_ms} ms, ${p.direct ? 'direct' : 'through a relay'}` : null;
+    }
 </script>
 
 {#if shown}
@@ -29,6 +36,9 @@
         <div class="voice-stage-head">
             <span class="icon icon-volume-max"></span>
             <span class="voice-stage-title cutoff">{stage.name}</span>
+            {#if ping}
+                <span class="voice-stage-ping" class:is-slow={ping >= 150} class:is-bad={ping >= 300} title="Round trip to the slowest link in the call">{ping} ms</span>
+            {/if}
             <span class="voice-stage-count">{people.length ? `${people.length} in the call` : 'Nobody is here yet'}</span>
         </div>
         {#if people.length}
@@ -37,7 +47,7 @@
                     {@const level = inCall ? voiceLevel(p.npub, me) : 0}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="voice-tile" class:is-speaking={level > SPEAKING && !p.muted} class:is-pending={inCall && !connected(p.npub)}
-                         title={p.elsewhere ? 'In this call on another app: you can\'t hear each other' : null}
+                         title={p.elsewhere ? 'In this call on another app: you can\'t hear each other' : pathOf(p.npub)}
                          oncontextmenu={(e) => { e.preventDefault(); h.memberMenu?.(stage.communityId, stage.channelId, p.npub, e.clientX, e.clientY); }}>
                         <div class="voice-tile-avatar" style="--talk: {Math.min(1, level * 2).toFixed(2)}">
                             <Avatar src={h.avatarSrc?.(p.npub)} size={56} />

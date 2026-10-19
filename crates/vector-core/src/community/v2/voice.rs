@@ -102,8 +102,9 @@ struct Entry {
 pub struct Noted {
     /// Who is in the call, or how, changed.
     pub changed: bool,
-    /// They came into the call from outside it.
-    pub arrived: bool,
+    /// They are reachable anew: in from outside the call, or back on a new endpoint. Who is
+    /// already in it tells them so, and any standing moderation comes back with them.
+    pub reached: bool,
 }
 
 struct Calls;
@@ -126,7 +127,7 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
     }
     let fresh = |e: &Entry| now_ms.saturating_sub(e.at_ms) < FRESH_MS && e.heard.joined;
     let was = room.get(&author).filter(|e| fresh(e)).cloned();
-    let arrived = heard.joined && was.is_none();
+    let reached = heard.joined && was.as_ref().is_none_or(|e| e.heard.endpoint != heard.endpoint);
     let changed = was.as_ref().map(|e| &e.heard) != Some(&heard);
     // A moderator's mute lasts while they stay: leaving or arriving anew clears it.
     let (server_muted, server_deafened) = match &was {
@@ -134,7 +135,7 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
         _ => (false, false),
     };
     room.insert(author, Entry { at_ms, heard, server_muted, server_deafened });
-    Noted { changed, arrived }
+    Noted { changed, reached }
 }
 
 /// Apply a moderator's mute or deafen to `target`, if they're in the call. Returns whether it changed.
@@ -216,14 +217,14 @@ mod tests {
         let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let (ch, a) = ("aa".repeat(32), Keys::generate().public_key());
         let ep = [1u8; 32];
-        assert!(note(&ch, a, 10_000, Heard { joined: true, transport: Some("iroh".into()), endpoint: Some(ep), ..Default::default() }, 10_000).arrived);
+        assert!(note(&ch, a, 10_000, Heard { joined: true, transport: Some("iroh".into()), endpoint: Some(ep), ..Default::default() }, 10_000).reached);
         assert_eq!(present(&ch, 10_000).len(), 1);
         assert!(!note(&ch, a, 9_000, Heard { joined: false, transport: None, endpoint: None, ..Default::default() }, 10_000).changed, "an older left changes nothing");
         assert_eq!(present(&ch, 10_000 + FRESH_MS - 1).len(), 1, "fresh until three heartbeats go missing");
         assert!(present(&ch, 10_000 + FRESH_MS).is_empty(), "then absent");
         let muted = Heard { joined: true, transport: Some("iroh".into()), endpoint: Some(ep), muted: true, ..Default::default() };
         let n = note(&ch, a, 15_000, muted.clone(), 15_000);
-        assert!(n.changed && !n.arrived, "a mute alone is news, not an arrival");
+        assert!(n.changed && !n.reached, "a mute alone is news, not an arrival");
         assert!(present(&ch, 15_000)[0].muted);
         assert!(!note(&ch, a, 16_000, muted, 16_000).changed, "a heartbeat that says the same is not");
         assert!(note(&ch, a, 20_000, Heard { joined: false, transport: None, endpoint: None, ..Default::default() }, 20_000).changed);
@@ -244,6 +245,9 @@ mod tests {
         note(&ch, a, 31_000, joined(31_000), 31_000);
         assert_eq!(server_state(&ch, &a), (true, false), "a heartbeat keeps it");
         assert!(present(&ch, 31_000)[0].server_muted);
+        let back = Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([4u8; 32]), ..Default::default() };
+        assert!(note(&ch, a, 32_000, back, 32_000).reached, "back on a new endpoint: reachable anew, to be told who is here");
+        assert_eq!(server_state(&ch, &a), (true, false), "and still muted: they never left");
         note(&ch, a, 40_000, Heard::default(), 40_000);
         note(&ch, a, 41_000, joined(41_000), 41_000);
         assert_eq!(server_state(&ch, &a), (false, false), "leaving ends it: a moderator re-asserts on return");

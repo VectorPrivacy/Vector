@@ -3986,6 +3986,25 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 .voice-stage-live {
   border-color: rgba(89, 252, 179, 0.25);
 }
+.voice-stage-ping {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+.voice-stage-ping::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--icon-color-primary, #59fcb3);
+}
+.voice-stage-ping.is-slow::before { background: #f5c451; }
+.voice-stage-ping.is-bad::before { background: var(--danger-color); }
+.voice-stage-ping + .voice-stage-count { margin-left: 12px; }
 /* Narrow: the header floats over the pane, so the stage clears it and the messages
    below need no clearance of their own. */
 body:not(.ws) .voice-stage { margin-top: 68px; }

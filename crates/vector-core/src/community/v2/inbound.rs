@@ -620,9 +620,10 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
         }
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let noted = super::voice::note(&channel_id, opened.author, at_ms, heard, now);
-        if noted.arrived {
-            // Our standing mutes and deafens of them come back with them.
+        if noted.reached {
             super::service::reassert_voice_directives(community, &channel_id, &opened.author);
+            #[cfg(feature = "calls")]
+            crate::calls::voice::greet(&channel_id, &opened.author);
         }
         if !noted.changed {
             return DispatchedV2::Ignored;

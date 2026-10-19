@@ -23,6 +23,8 @@ pub const VOICE_ALPN: &[u8] = b"vector/voice/1";
 pub const MAX_PEERS: usize = 14;
 const DIAL_EVERY: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The spread of a room's answers to a newcomer.
+const GREET_JITTER_MS: u64 = 1500;
 
 /// A cue the call plays: who came and went, and our own mute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +67,8 @@ pub struct VoicePeer {
     pub connected: bool,
     /// The selected path is direct, not through a relay.
     pub direct: bool,
+    /// The selected path's round trip, 0 until there is one.
+    pub rtt_ms: u32,
     /// How loud they are now, 0 to 1.
     pub level: f32,
     pub muted: bool,
@@ -111,6 +115,8 @@ struct Voice {
     muted: AtomicBool,
     deafened: AtomicBool,
     nudge: tokio::sync::Notify,
+    /// An answer to a newcomer is pending; more arrivals ride it.
+    greeting: AtomicBool,
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
 }
 
@@ -273,6 +279,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         muted: AtomicBool::new(false),
         deafened: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
+        greeting: AtomicBool::new(false),
         tasks: Mutex::new(Vec::new()),
     });
     if let Err(e) = announce(&v, true).await {
@@ -357,6 +364,25 @@ pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::
         }
     }
     changed(&v);
+}
+
+/// Someone is newly reachable in our call: answer with our presence now rather than at our next
+/// heartbeat, since whichever of us has the lower id can't dial until it has our endpoint.
+pub fn greet(channel_hex: &str, author: &PublicKey) {
+    let Some(v) = live().filter(|v| v.channel_hex == channel_hex && v.me != *author) else { return };
+    if !crate::rt::can_spawn() || v.greeting.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::db::spawn_bound(async move {
+        crate::rt::time::sleep(Duration::from_millis(rand::random::<u64>() % GREET_JITTER_MS)).await;
+        v.greeting.store(false, Ordering::SeqCst);
+        if !live().is_some_and(|now| Arc::ptr_eq(&now, &v)) {
+            return;
+        }
+        if let Err(e) = announce(&v, true).await {
+            crate::log_warn!("[voice] answering a newcomer failed: {e}");
+        }
+    });
 }
 
 /// Someone's presence changed in a Channel: re-check the mesh if it is ours.
@@ -467,11 +493,16 @@ fn state(v: &Voice) -> VoiceState {
         .filter(|p| p.author != v.me)
         .map(|p| {
             let link = p.endpoint.and_then(|ep| links.get(&ep));
+            let path = link.and_then(|l| {
+                let paths = l.conn.paths();
+                paths.iter().find(|path| path.is_selected()).map(|path| (path.is_ip(), path.rtt().as_millis() as u32))
+            });
             VoicePeer {
                 volume: peer_volume(&p.author),
                 npub: p.author.to_bech32().unwrap_or_default(),
                 connected: link.is_some(),
-                direct: link.is_some_and(|l| l.conn.paths().iter().any(|path| path.is_selected() && path.is_ip())),
+                direct: path.is_some_and(|(ip, _)| ip),
+                rtt_ms: path.map_or(0, |(_, rtt)| rtt),
                 level: if link.is_some() { level_of(p.endpoint) } else { 0.0 },
                 muted: p.muted,
                 deafened: p.deafened,
@@ -733,6 +764,7 @@ mod tests {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
+        greeting: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();

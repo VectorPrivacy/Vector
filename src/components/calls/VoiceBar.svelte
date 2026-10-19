@@ -9,8 +9,9 @@
     // The call's own stage on screen carries the same controls.
     const onStage = $derived(!!v && voiceStage()?.channelId === v.channelId && openChatId() === v.channelId);
     const others = $derived(v ? v.peers.filter((p) => p.connected).length : 0);
+    const ping = $derived(v ? Math.max(0, ...v.peers.filter((p) => p.connected).map((p) => p.rtt_ms || 0)) : 0);
     const status = $derived(!v ? '' : !v.audio ? 'In the call, without audio'
-        : others ? `${others + 1} in the call` : 'Waiting for others');
+        : others ? `${others + 1} in the call${ping ? ` · ${ping} ms` : ''}` : 'Waiting for others');
 </script>
 
 {#if v && !onStage}
