@@ -1,6 +1,7 @@
 // The voice Channel call this device is in, who is in each voice Channel's call, and the voice
 // channel the chat pane last opened (its stage shows while that channel is on screen).
-const live = $state({ session: null, stage: null });
+// focus: whose shared screen the stage shows; null picks the first sharer, '' shows none.
+const live = $state({ session: null, stage: null, focus: null });
 const rooms = $state({});
 let handlers = {};
 
@@ -12,8 +13,13 @@ export function setVoiceSession(s) {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,
         mic: s.mic !== false, serverMuted: !!s.server_muted, serverDeafened: !!s.server_deafened,
+        sharing: !!s.sharing, viewers: s.viewers || 0,
     } : null;
+    if (!s) live.focus = null;
 }
+
+export function voiceFocus() { return live.focus; }
+export function setVoiceFocus(npub) { live.focus = npub; }
 
 /** Whether our microphone is off, for any reason: our mute, a moderator's, or a deafen. */
 export function voiceMicOff(s) {
@@ -41,7 +47,7 @@ export function voiceStage() { return live.stage; }
 export function setVoiceStage(stage) { live.stage = stage || null; }
 
 /** The stage's and the bar's helpers: join, leave, setMuted, setDeafened, micAccess, getProfile,
- *  getName, avatarSrc, myNpub, memberMenu, keyHint. */
+ *  getName, avatarSrc, myNpub, memberMenu, keyHint, canShare, share, watch, screenCanvas, selfPreview. */
 export function voiceCallHandlers() { return handlers; }
 export function setVoiceCallHandlers(h) { handlers = h || {}; }
 

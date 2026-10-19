@@ -442,7 +442,7 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
                             let _ = timeout(Duration::from_secs(1), write_control(&mut *send, &Control::VideoUnsupported { codec })).await;
                         }
                     }
-                    FromLink::Unknown => {}
+                    FromLink::LostFrom { .. } | FromLink::Unknown => {}
                 },
                 None => {}
             }

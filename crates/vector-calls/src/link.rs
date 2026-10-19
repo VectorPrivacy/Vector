@@ -15,6 +15,9 @@ pub const KIND_CONTROL: u8 = 2;
 /// interleaved little-endian f32 samples. Cancelled and encoded on the other side.
 pub const KIND_PCM: u8 = 3;
 pub const PCM_HEADER_LEN: usize = 5;
+/// A peer's video frame in a call of several: the sender's 32-byte key, then the 16-byte
+/// header and the encoded bytes. Only ever sent toward the decoding side.
+pub const KIND_PEER_FRAME: u8 = 4;
 
 /// Sent to the encoder side of the link.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -46,6 +49,8 @@ pub enum FromLink {
     Lost { kind: VideoKind },
     /// My decoder refuses this codec outright: ask the peer to send another.
     Unsupported { codec: VideoCodec },
+    /// In a call of several, my decoder for this sender (their key, hex) lost the chain.
+    LostFrom { peer: String },
     #[serde(other)]
     Unknown,
 }

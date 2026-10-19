@@ -773,6 +773,8 @@ pub fn run() {
             calls::commands::voice_state,
             calls::commands::voice_set_muted,
             calls::commands::voice_set_deafened,
+            calls::commands::voice_share,
+            calls::commands::voice_watch,
             calls::commands::voice_present,
             calls::commands::voice_set_volume,
             calls::commands::voice_moderate,

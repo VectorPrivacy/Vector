@@ -1,7 +1,7 @@
 <script>
     // A voice channel's stage, above its chat: who is in the call (speaking, muted, deafened),
     // and joining it, or the call's own controls once in.
-    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, SPEAKING } from '../lib/voice.svelte.js';
+    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, SPEAKING } from '../lib/voice.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -25,6 +25,34 @@
     // The call is as good as its slowest link: that round trip, once anyone is linked.
     const linked = $derived(inCall ? v.peers.filter((p) => p.connected && p.rtt_ms) : []);
     const ping = $derived(linked.length ? Math.max(...linked.map((p) => p.rtt_ms)) : 0);
+    // Shared screens: whose are live, and the one on the stage. Ours shows only when picked.
+    const sharing = (p) => p.screen || (p.npub === me && !!v?.sharing);
+    const sharers = $derived(people.filter(sharing).map((p) => p.npub));
+    const focus = $derived(voiceFocus());
+    const viewing = $derived(!inCall || focus === '' ? null
+        : focus && sharers.includes(focus) ? focus : sharers.find((n) => n !== me) ?? null);
+    const viewingKey = $derived(viewing && viewing !== me ? v?.peers.find((p) => p.npub === viewing)?.pubkey : null);
+    let expanded = $state(false);
+    // Only the screen on the stage is sent to us: watching costs its sharer an upload.
+    let watched = null;
+    $effect(() => {
+        const want = shown && viewing && viewing !== me ? viewing : null;
+        if (want === watched) return;
+        if (watched) h.watch?.(watched, false);
+        if (want) h.watch?.(want, true);
+        watched = want;
+    });
+    function pick(npub) {
+        setVoiceFocus(viewing === npub ? '' : npub);
+    }
+    function screenCanvas(node, key) {
+        h.screenCanvas?.(key, node);
+        return { destroy() { h.screenCanvas?.(key, node, true); } };
+    }
+    function selfPreview(node) {
+        h.selfPreview?.(node);
+        return { destroy() { h.selfPreview?.(null); } };
+    }
     function pathOf(npub) {
         const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
         return p?.rtt_ms ? `${p.rtt_ms} ms, ${p.direct ? 'direct' : 'through a relay'}` : null;
@@ -32,7 +60,7 @@
 </script>
 
 {#if shown}
-    <div class="voice-stage" class:voice-stage-live={inCall}>
+    <div class="voice-stage" class:voice-stage-live={inCall} class:voice-stage-expanded={expanded && !!viewing}>
         <div class="voice-stage-head">
             <span class="icon icon-volume-max"></span>
             <span class="voice-stage-title cutoff">{stage.name}</span>
@@ -41,12 +69,38 @@
             {/if}
             <span class="voice-stage-count">{people.length ? `${people.length} in the call` : 'Nobody is here yet'}</span>
         </div>
+        {#if viewing}
+            <div class="voice-screen">
+                {#if viewing === me}
+                    <video class="voice-screen-media" use:selfPreview muted playsinline autoplay></video>
+                {:else if viewingKey}
+                    {#key viewingKey}
+                        <canvas class="voice-screen-media" use:screenCanvas={viewingKey}></canvas>
+                    {/key}
+                {/if}
+                <div class="voice-screen-bar">
+                    <span class="voice-screen-label cutoff">{viewing === me ? 'Your screen' : `${h.getName?.(viewing)}'s screen`}</span>
+                    <button class="voice-screen-btn" title={expanded ? 'Smaller' : 'Bigger'} onclick={() => (expanded = !expanded)}>
+                        {#if expanded}
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        {:else}
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        {/if}
+                    </button>
+                    <button class="voice-screen-btn" title="Hide" onclick={() => setVoiceFocus('')}>
+                        <span class="icon icon-x"></span>
+                    </button>
+                </div>
+            </div>
+        {/if}
         {#if people.length}
             <div class="voice-stage-grid">
                 {#each people as p (p.npub)}
                     {@const level = inCall ? voiceLevel(p.npub, me) : 0}
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <div class="voice-tile" class:is-speaking={level > SPEAKING && !p.muted} class:is-pending={inCall && !connected(p.npub)}
+                         class:is-sharing={sharing(p)} class:is-viewing={viewing === p.npub}
+                         onclick={() => { if (inCall && sharing(p)) pick(p.npub); }}
                          title={p.elsewhere ? 'In this call on another app: you can\'t hear each other' : pathOf(p.npub)}
                          oncontextmenu={(e) => { e.preventDefault(); h.memberMenu?.(stage.communityId, stage.channelId, p.npub, e.clientX, e.clientY); }}>
                         <div class="voice-tile-avatar" style="--talk: {Math.min(1, level * 2).toFixed(2)}">
@@ -58,6 +112,7 @@
                                 </span>
                             {/if}
                         </div>
+                        {#if sharing(p)}<span class="voice-tile-live" title={inCall ? (viewing === p.npub ? 'Hide their screen' : 'Show their screen') : 'Sharing their screen'}>LIVE</span>{/if}
                         <span class="voice-tile-name cutoff">{p.npub === me ? 'You' : h.getName?.(p.npub)}</span>
                         {#if p.elsewhere}<span class="voice-tile-note">another app</span>{:else if inCall && !connected(p.npub)}<span class="voice-tile-note">connecting</span>{/if}
                     </div>
@@ -78,6 +133,14 @@
                         title={v.serverDeafened ? 'Deafened by a moderator' : `${v.deafened ? 'Undeafen' : 'Deafen'} (${h.keyHint?.('D')})`} onclick={() => h.setDeafened(!(v.deafened || v.serverDeafened))}>
                     <span class="icon" class:icon-volume-mute={v.deafened || v.serverDeafened} class:icon-volume-max={!v.deafened && !v.serverDeafened}></span>
                 </button>
+                {#if v.sharing}
+                    <span class="voice-stage-sharing">Sharing your screen{v.viewers ? ` · ${v.viewers} watching` : ''}</span>
+                {/if}
+                {#if h.canShare?.()}
+                    <button class="call-btn" class:call-btn-on={v.sharing} title={v.sharing ? 'Stop sharing your screen' : 'Share your screen'} onclick={() => h.share?.(!v.sharing)}>
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    </button>
+                {/if}
                 <button class="voice-stage-leave" onclick={() => h.leave()}>Leave</button>
             {:else}
                 <button class="voice-stage-join" disabled={joining} onclick={join}>{joining ? 'Joining…' : 'Join Voice'}</button>

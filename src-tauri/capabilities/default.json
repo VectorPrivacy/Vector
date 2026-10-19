@@ -442,6 +442,8 @@
     "allow-voice-state",
     "allow-voice-set-muted",
     "allow-voice-set-deafened",
+    "allow-voice-share",
+    "allow-voice-watch",
     "allow-voice-present",
     "allow-voice-set-volume",
     "allow-voice-moderate",

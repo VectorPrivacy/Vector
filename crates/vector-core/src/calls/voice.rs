@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, VarInt};
 use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, TransportAddr};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use serde::Serialize;
@@ -17,6 +17,8 @@ use crate::community::roles::Permissions;
 use crate::community::transport::LiveTransport;
 use crate::community::v2::{community::CommunityV2, voice as presence};
 use crate::community::{ChannelId, CommunityId};
+
+mod video;
 
 pub const VOICE_ALPN: &[u8] = b"vector/voice/1";
 /// Others in a call besides us: a full mesh carries voice to about fifteen (CORD-07 §8).
@@ -62,6 +64,8 @@ pub trait VoiceMedia: Send + Sync {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct VoicePeer {
     pub npub: String,
+    /// Their key, hex: what their screen's frames are tagged with on the video link.
+    pub pubkey: String,
     /// How loud they play here, as this account set it.
     pub volume: f32,
     pub connected: bool,
@@ -76,6 +80,8 @@ pub struct VoicePeer {
     /// A moderator muted or deafened them for this call.
     pub server_muted: bool,
     pub server_deafened: bool,
+    /// They are sharing their screen.
+    pub screen: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -94,6 +100,9 @@ pub struct VoiceState {
     /// A moderator muted or deafened us for this call.
     pub server_muted: bool,
     pub server_deafened: bool,
+    /// We are sharing our screen, and to how many.
+    pub sharing: bool,
+    pub viewers: u32,
 }
 
 struct Link {
@@ -117,6 +126,7 @@ struct Voice {
     nudge: tokio::sync::Notify,
     /// An answer to a newcomer is pending; more arrivals ride it.
     greeting: AtomicBool,
+    video: video::Video,
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
 }
 
@@ -187,6 +197,19 @@ pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKe
     !timed_out && !server_muted && !server_deafened && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
 }
 
+/// Whether `member`'s screen is shown: Video, and not under a Timeout (CORD-07 §7).
+pub fn may_video(community: &CommunityV2, channel: &ChannelId, member: &PublicKey) -> bool {
+    let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let chan = crate::simd::hex::bytes_to_hex_32(&channel.0);
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    let roster = crate::db::community::get_community_roles(&cid).unwrap_or_default();
+    if roster.everyone.is_none() {
+        return true;
+    }
+    let timed_out = crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member));
+    !timed_out && roster.channel_permissions(owner.as_deref(), &member.to_hex(), &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::VIDEO)
+}
+
 fn voice_relays(community: &CommunityV2) -> Vec<RelayUrl> {
     community.voice_relays().iter().filter_map(|u| u.parse().ok()).collect()
 }
@@ -205,6 +228,9 @@ async fn bind(community: &CommunityV2) -> Result<Endpoint, String> {
         .max_idle_timeout(Some(Duration::from_secs(30).try_into().map_err(|e| format!("{e}"))?))
         .send_observed_address_reports(false)
         .receive_observed_address_reports(false)
+        .stream_receive_window(VarInt::from_u32(512 * 1024))
+        .receive_window(VarInt::from_u32(2 * 1024 * 1024))
+        .max_concurrent_uni_streams(VarInt::from_u32(256))
         .build();
     let builder = Endpoint::builder(Voice(mode)).alpns(vec![VOICE_ALPN.to_vec()]).transport_config(transport);
     #[cfg(not(target_arch = "wasm32"))]
@@ -229,8 +255,12 @@ async fn announce(v: &Voice, joined: bool) -> Result<(), String> {
     let community = held(&v.community)?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     let endpoint = joined.then(|| (*v.endpoint.id().as_bytes(), relay_of(&v.endpoint)));
-    let muted = v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic());
-    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, muted, v.deafened.load(Ordering::SeqCst)).await
+    let showing = presence::Showing {
+        muted: v.muted.load(Ordering::SeqCst) || v.engine().is_none_or(|m| !m.has_mic()),
+        deafened: v.deafened.load(Ordering::SeqCst),
+        screen: v.video.sharing(),
+    };
+    crate::community::v2::service::send_voice_presence(&transport, &community, &v.channel, endpoint, showing).await
 }
 
 /// Join a voice Channel's call, leaving any other first.
@@ -280,6 +310,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         deafened: AtomicBool::new(false),
         nudge: tokio::sync::Notify::new(),
         greeting: AtomicBool::new(false),
+        video: video::Video::default(),
         tasks: Mutex::new(Vec::new()),
     });
     if let Err(e) = announce(&v, true).await {
@@ -291,12 +322,13 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         apply_to(&v, &*m);
         m.chime(Chime::Joined);
     }
-    let tasks = vec![
+    let mut tasks = vec![
         crate::db::spawn_bound(levels(v.clone())),
         crate::db::spawn_bound(heartbeat(v.clone())),
         crate::db::spawn_bound(dialer(v.clone())),
         crate::db::spawn_bound(acceptor(v.clone())),
     ];
+    tasks.extend(video::start(&v));
     *v.tasks.lock().unwrap_or_else(|e| e.into_inner()) = tasks;
     changed(&v);
     Ok(state(&v))
@@ -311,6 +343,7 @@ pub async fn leave() {
     for t in v.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
         t.abort();
     }
+    video::stop(&v);
     for (id, link) in v.links.lock().unwrap_or_else(|e| e.into_inner()).drain() {
         link.conn.close(0u32.into(), b"left");
         if let Some(m) = v.engine() {
@@ -323,6 +356,25 @@ pub async fn leave() {
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
     crate::emit_event("voice_state", &serde_json::Value::Null);
+}
+
+/// Start or stop sharing our screen with whoever watches (CORD-07 §6). Video is judged by
+/// every receiver; we refuse here too, so a member without it isn't left sharing to no one.
+pub fn set_sharing(on: bool) -> Result<(), String> {
+    let v = live().ok_or("Not in a call")?;
+    if on && !may_video(&held(&v.community)?, &v.channel, &v.me) {
+        return Err("You can't share your screen in this channel".into());
+    }
+    video::set_sharing(&v, on)?;
+    reannounce(&v);
+    changed(&v);
+    Ok(())
+}
+
+/// Watch a member's shared screen in our call, or stop.
+pub fn watch(member: &PublicKey, on: bool) -> Result<(), String> {
+    let v = live().ok_or("Not in a call")?;
+    video::watch(&v, member, on)
 }
 
 /// A moderator's directive, already judged: one aimed at us is obeyed, and anyone else's mute
@@ -487,6 +539,8 @@ fn reannounce(v: &Arc<Voice>) {
 fn state(v: &Voice) -> VoiceState {
     let levels = v.engine().map(|m| m.levels()).unwrap_or_default();
     let level_of = |ep: Option<[u8; 32]>| levels.iter().find(|(e, _)| *e == ep).map_or(0.0, |(_, l)| *l);
+    // Read before the links are held: the video side takes its locks one at a time too.
+    let (sharing, viewers) = (v.video.sharing(), v.video.viewers());
     let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
     let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now_ms())
         .into_iter()
@@ -500,6 +554,8 @@ fn state(v: &Voice) -> VoiceState {
             VoicePeer {
                 volume: peer_volume(&p.author),
                 npub: p.author.to_bech32().unwrap_or_default(),
+                pubkey: p.author.to_hex(),
+                screen: p.screen,
                 connected: link.is_some(),
                 direct: path.is_some_and(|(ip, _)| ip),
                 rtt_ms: path.map_or(0, |(_, rtt)| rtt),
@@ -523,6 +579,8 @@ fn state(v: &Voice) -> VoiceState {
         mic: v.engine().is_some_and(|m| m.has_mic()),
         server_muted: presence::server_state(&v.channel_hex, &v.me).0,
         server_deafened: presence::server_state(&v.channel_hex, &v.me).1,
+        sharing,
+        viewers,
     }
 }
 
@@ -638,6 +696,7 @@ async fn dialer(v: Arc<Voice>) {
                 m.set_audible(id, may_speak(&community, &v.channel, &l.author));
             }
         }
+        video::revalidate(&v, |author| may_video(&community, &v.channel, author));
         for p in present.iter().filter(|p| p.author != v.me) {
             let (Some(ep), Some(relay)) = (p.endpoint, p.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok())) else { continue };
             let busy = v.links.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&ep) || v.dialing.lock().unwrap_or_else(|e| e.into_inner()).contains(&ep);
@@ -692,6 +751,7 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
         }
         links.insert(id, Link { author, conn: conn.clone() });
     }
+    video::on_link(v, id, author, conn.clone());
     if let Some(m) = v.engine() {
         m.add_peer(id, conn.clone());
         m.set_volume(&id, peer_volume(&author));
@@ -714,6 +774,7 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
 fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
     // Out of the lock first: `changed` reads the links again.
     let removed = v.links.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    video::on_unlink(v, id);
     if let Some(l) = removed {
         l.conn.close(0u32.into(), why);
         if let Some(m) = v.engine() {
@@ -764,7 +825,8 @@ mod tests {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             nudge: tokio::sync::Notify::new(),
-        greeting: AtomicBool::new(false),
+            greeting: AtomicBool::new(false),
+            video: video::Video::default(),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();
@@ -777,6 +839,59 @@ mod tests {
         });
         assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok(), "unlinking repaints the state, which reads the links: it must not hold them");
         assert!(v.links.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_state_and_the_screen_fan_out_never_wait_on_each_other() {
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        struct Offline;
+        impl iroh::endpoint::presets::Preset for Offline {
+            fn apply(self, b: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+                b.relay_mode(RelayMode::Disabled).crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            }
+        }
+        let bind = || async { Endpoint::builder(Offline).alpns(vec![VOICE_ALPN.to_vec()]).bind().await.unwrap() };
+        let (a, b) = (bind().await, bind().await);
+        let server = b.clone();
+        let accepted = tokio::spawn(async move { server.accept().await.unwrap().await.unwrap() });
+        let conn = a.connect(b.addr(), VOICE_ALPN).await.unwrap();
+        let _held = accepted.await.unwrap();
+        let v = Arc::new(Voice {
+            owner: 0,
+            community: CommunityId([0; 32]),
+            channel: ChannelId([2; 32]),
+            channel_hex: crate::simd::hex::bytes_to_hex_32(&[2; 32]),
+            endpoint: a.clone(),
+            me: nostr_sdk::prelude::Keys::generate().public_key(),
+            links: Mutex::new(HashMap::new()),
+            dialing: Mutex::new(HashSet::new()),
+            media: Mutex::new(None),
+            muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
+            nudge: tokio::sync::Notify::new(),
+            greeting: AtomicBool::new(false),
+            video: video::Video::default(),
+            tasks: Mutex::new(Vec::new()),
+        });
+        let id = *b.id().as_bytes();
+        v.links.lock().unwrap().insert(id, Link { author: nostr_sdk::prelude::Keys::generate().public_key(), conn });
+        v.video.add_watcher(id);
+        v.video.set_sharing_flag(true);
+        let run = |f: Box<dyn Fn() + Send>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for _ in 0..20_000 {
+                    f();
+                }
+                let _ = tx.send(());
+            });
+            rx
+        };
+        let (s, f) = (v.clone(), v.clone());
+        let painted = run(Box::new(move || drop(state(&s))));
+        let fanned = run(Box::new(move || drop(video::targets(&f))));
+        let done = painted.recv_timeout(Duration::from_secs(20)).is_ok() && fanned.recv_timeout(Duration::from_secs(20)).is_ok();
+        assert!(done, "the state read and a frame's fan-out each take the links and the viewers: never both at once");
     }
 
     #[test]

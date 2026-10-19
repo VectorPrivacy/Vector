@@ -183,6 +183,7 @@ let _voiceChannel = null;
 /** The backend's voice state: the bar mirrors it, and the channel we joined or left re-reads who is in it. */
 function voiceOnState(s) {
     VectorSvelte.setVoiceSession(s);
+    voiceVideoOnState(s);
     const now = s?.channel_id || null;
     if (_voiceChannel && _voiceChannel !== now) refreshVoicePresent(_voiceChannel);
     if (now) refreshVoicePresent(now);
@@ -237,6 +238,11 @@ function registerVoiceScreen() {
         myNpub: () => strPubkey,
         memberMenu: (communityId, channelId, npub, x, y) => openVoiceMemberMenu(communityId, channelId, npub, x, y),
         keyHint: (key) => voiceKeyHint(key),
+        canShare: () => !!window.VideoEncoder && !!navigator.mediaDevices?.getDisplayMedia,
+        share: (on) => startVideo('screen', on),
+        watch: (npub, on) => invoke('voice_watch', { npub, on }).catch(() => {}),
+        screenCanvas: (pubkey, el, gone) => attachVoiceScreen(pubkey, el, gone),
+        selfPreview: (el) => attachSelfPreview('screen', el),
     });
     VectorSvelte.setScreen('voice', {
         h: {
@@ -244,6 +250,7 @@ function registerVoiceScreen() {
             setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
             leave: () => invoke('voice_leave').catch(() => {}),
             keyHint: (key) => voiceKeyHint(key),
+            share: (on) => startVideo('screen', on),
             channelName: (communityId, channelId) => voiceChannelOf(communityId, channelId)?.name || 'Voice',
             openChannel: (communityId, channelId) => {
                 const ch = voiceChannelOf(communityId, channelId);

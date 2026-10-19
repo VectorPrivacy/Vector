@@ -10,6 +10,9 @@ let videoLinkOpen = false;
 let videoLinkCallId = null;
 let videoProbe = null;
 let decodeErrorShown = false;
+// The voice Channel call the link is open for, while in one. A share then goes to the call's
+// viewers, without its sound: the voice engine has no place for it.
+let voiceLinkChannel = null;
 // Per track: the stream, the detached element frames are pulled from, the preview.
 const selfTracks = { camera: null, screen: null };
 const captureEls = { camera: null, screen: null };
@@ -57,7 +60,7 @@ function ensureVideoWorker() {
                 // The backend dropped the socket: nothing we capture goes anywhere now.
                 if (!m.open) stopAllVideo(false);
                 break;
-            case 'painted': VectorSvelte.setVideoPeerSize(m.kind, m.width, m.height); break;
+            case 'painted': if (!m.peer) VectorSvelte.setVideoPeerSize(m.kind, m.width, m.height); break;
             case 'stats': VectorSvelte.setVideoStats(m.tracks); break;
             case 'constrain': constrainCapture(m); break;
             case 'error': VectorSvelte.showToast(m.message); stopVideo(m.kind, true); break;
@@ -95,6 +98,43 @@ async function callVideoOnState(s) {
     }).catch(() => { videoLinkCallId = null; });
 }
 
+/** Every voice_state: the link opens for a voice call's screens, and closes when it ends. */
+async function voiceVideoOnState(s) {
+    const channel = s?.channel_id || null;
+    if (voiceLinkChannel === channel) return;
+    if (voiceLinkChannel) {
+        stopAllVideo(false);
+        if (videoWorker) videoWorker.postMessage({ t: 'close' });
+    }
+    voiceLinkChannel = channel;
+    if (!channel) return;
+    if (videoProbe) await videoProbe;
+    if (voiceLinkChannel !== channel || !videoCaps.decode.length) return;
+    invoke('call_video_link').then((link) => {
+        if (voiceLinkChannel !== channel) return;
+        if (typeof link === 'string') ensureVideoWorker().postMessage({ t: 'open', url: link, caps: videoCaps });
+        else ensureVideoWorker().postMessage({ t: 'open', port: link.port, caps: videoCaps }, [link.port]);
+    }).catch(() => {});
+}
+
+/** A sharer's screen in a voice call, painted on `el`, keyed by their key (hex); `gone` takes it back. */
+const voiceCanvasSeq = { n: 0 };
+function attachVoiceScreen(peer, el, gone = false) {
+    if (gone) {
+        if (videoWorker && canvasIds.has(el)) videoWorker.postMessage({ t: 'canvas', peer, canvas: null, id: canvasIds.get(el) });
+        return;
+    }
+    const id = ++voiceCanvasSeq.n;
+    canvasIds.set(el, id);
+    const off = el.transferControlToOffscreen();
+    ensureVideoWorker().postMessage({ t: 'canvas', peer, canvas: off, id }, [off]);
+}
+
+/** Tell whichever call we're in that a picture of ours started or stopped. */
+function videoBackendSet(kind, on) {
+    return voiceLinkChannel ? invoke('voice_share', { on }) : invoke('call_video_set', { kind, on });
+}
+
 /** A request the platform never answers, rather than refuses, leaves the button dead:
  *  WebView2 opens no surface picker and settles getDisplayMedia neither way. */
 const VIDEO_SOURCE_WAIT_MS = 120000;
@@ -128,13 +168,13 @@ function sourceFailureMessage(kind, e) {
     return screen ? 'Could not share the screen' : 'Could not open the camera';
 }
 
-function requestSource(kind) {
+function requestSource(kind, withAudio = true) {
     // The screen's sound is asked for too; a platform that cannot give it (or gives
     // it only for a whole screen) simply returns no audio track, and the picker
     // offers the choice where it can. Our own playback is excluded where the
     // platform knows how; the backend cancels it against the mixer's output anyway.
     return waitForSource(kind === 'screen'
-        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: platformFeatures?.share_audio === false ? false : { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
+        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: !withAudio || platformFeatures?.share_audio === false ? false : { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
         : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
 }
 
@@ -268,10 +308,12 @@ function pumpFrames(kind, stream) {
 async function startVideo(kind, on = true) {
     if (!on) return stopVideo(kind, true);
     if (selfTracks[kind] || videoStarting[kind]) return;
+    const inVoice = !!voiceLinkChannel;
+    if (inVoice && kind !== 'screen') return;
     let stream;
     videoStarting[kind] = true;
     try {
-        stream = await requestSource(kind);
+        stream = await requestSource(kind, !inVoice);
     } catch (e) {
         const message = sourceFailureMessage(kind, e);
         if (message) VectorSvelte.showToast(message);
@@ -280,7 +322,7 @@ async function startVideo(kind, on = true) {
         videoStarting[kind] = false;
     }
     try {
-        await invoke('call_video_set', { kind, on: true });
+        await videoBackendSet(kind, true);
     } catch (e) {
         VectorSvelte.showToast(String(e));
         stream.getTracks().forEach((t) => t.stop());
@@ -288,7 +330,7 @@ async function startVideo(kind, on = true) {
     }
     attachSource(kind, stream);
     ensureVideoWorker().postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
-    if (kind === 'screen') {
+    if (kind === 'screen' && !inVoice) {
         // The sound goes with the screen unless the user or the system says no.
         const audio = stream.getAudioTracks()[0];
         VectorSvelte.setShareAudio(false, !!audio || VectorSvelte.shareAudioNative());
@@ -311,7 +353,7 @@ async function changeScreenSource() {
     let stream;
     videoStarting.screen = true;
     try {
-        stream = await requestSource('screen');
+        stream = await requestSource('screen', !voiceLinkChannel);
     } catch (e) {
         const message = sourceFailureMessage('screen', e);
         if (message) VectorSvelte.showToast(message);
@@ -338,7 +380,7 @@ async function stopVideo(kind, tell = true) {
     if (was) was.getTracks().forEach((t) => t.stop());
     if (previewEls[kind]) previewEls[kind].srcObject = null;
     if (videoWorker) videoWorker.postMessage({ t: 'stop', kind });
-    if (tell && was) await invoke('call_video_set', { kind, on: false }).catch(() => {});
+    if (tell && was) await videoBackendSet(kind, false).catch(() => {});
 }
 
 function stopAllVideo(tell) {

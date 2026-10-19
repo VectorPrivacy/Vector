@@ -45,6 +45,9 @@ const TAG_ENDPOINT: &str = "endpoint";
 const TAG_RELAY: &str = "relay";
 const TAG_MUTED: &str = "muted";
 const TAG_DEAFENED: &str = "deafened";
+/// `["video", "screen"]` on a `joined`: its author is sharing their screen.
+const TAG_VIDEO: &str = "video";
+const VIDEO_SCREEN: &str = "screen";
 const TAG_DO: &str = "do";
 const TAG_TO: &str = "to";
 /// The transport a peer-to-peer call names (CORD-07 §8).
@@ -319,7 +322,7 @@ pub fn build_webxdc_rumor(
 /// A voice presence heartbeat (CORD-07 §4): `Some` is `joined` over iroh, naming the endpoint and
 /// the relay it's reached through (a relay names no IP), and whether we're muted or deafened;
 /// None is `left`.
-pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, endpoint: Option<(&[u8; 32], Option<&str>)>, muted: bool, deafened: bool, at_ms: u64) -> UnsignedEvent {
+pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, endpoint: Option<(&[u8; 32], Option<&str>)>, showing: super::voice::Showing, at_ms: u64) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     if let Some((ep, relay)) = endpoint {
         tags.push(Tag::custom(TAG_TRANSPORT, [TRANSPORT_IROH.to_string()]));
@@ -327,11 +330,14 @@ pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epo
         if let Some(r) = relay {
             tags.push(Tag::custom(TAG_RELAY, [r.to_string()]));
         }
-        if muted {
+        if showing.muted {
             tags.push(Tag::custom(TAG_MUTED, Vec::<String>::new()));
         }
-        if deafened {
+        if showing.deafened {
             tags.push(Tag::custom(TAG_DEAFENED, Vec::<String>::new()));
+        }
+        if showing.screen {
+            tags.push(Tag::custom(TAG_VIDEO, [VIDEO_SCREEN.to_string()]));
         }
     }
     stream::build_rumor_ms(kind::VOICE_PRESENCE, author, if endpoint.is_some() { "joined" } else { "left" }, tags, at_ms)
@@ -738,7 +744,8 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
             };
             let flag = |name: &str| opened.rumor.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some(name));
             let (muted, deafened) = (joined && flag(TAG_MUTED), joined && flag(TAG_DEAFENED));
-            Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened } })
+            let screen = joined && opened.rumor.tags.iter().any(|t| matches!(t.as_slice(), [k, v, ..] if k == TAG_VIDEO && v == VIDEO_SCREEN));
+            Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened, screen } })
         }
         kind::VOICE_DIRECTIVE => {
             let target = PublicKey::from_hex(required_tag(&opened.rumor, TAG_TARGET_AUTHOR)?).map_err(|_| ChatError::BadTag(TAG_TARGET_AUTHOR))?;

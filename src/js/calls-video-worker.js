@@ -9,6 +9,9 @@
 
 const KIND_FRAME = 1;
 const KIND_CONTROL = 2;
+// A call of several: a sharer's frame, tagged with their 32-byte key.
+const KIND_PEER_FRAME = 4;
+const PEER_TAG_LEN = 32;
 const HEADER_LEN = 16;
 const FLAG_KEY = 1;
 const FLAG_SCREEN = 2;
@@ -74,6 +77,23 @@ function newTrack(kind) {
     };
 }
 const tracks = { camera: newTrack('camera'), screen: newTrack('screen') };
+// In a voice Channel's call, each sharer's screen: decoder and canvas, keyed by their key (hex).
+const peerTracks = new Map();
+function peerTrack(hex) {
+    let t = peerTracks.get(hex);
+    if (!t) { t = newTrack('screen'); t.peer = hex; peerTracks.set(hex, t); }
+    return t;
+}
+function hexOf(bytes) {
+    let s = '';
+    for (const b of bytes) s += b.toString(16).padStart(2, '0');
+    return s;
+}
+/** This track's decoder lost the chain: ask whoever sends it for a keyframe. */
+function lost(t) {
+    if (t.peer) control({ t: 'lost_from', peer: t.peer });
+    else control({ t: 'lost', kind: t.kind });
+}
 
 function send(bytes) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(bytes);
@@ -135,10 +155,12 @@ function close() {
     clearInterval(statsTimer);
     statsTimer = null;
     for (const t of Object.values(tracks)) { stopEncoder(t); resetDecoder(t); }
+    for (const t of peerTracks.values()) resetDecoder(t);
 }
 
 function onSocket(msg) {
     if (msg[0] === KIND_FRAME) return onFrame(msg.subarray(1));
+    if (msg[0] === KIND_PEER_FRAME) return onPeerFrame(msg.subarray(1));
     if (msg[0] !== KIND_CONTROL) return;
     let c;
     try { c = JSON.parse(new TextDecoder().decode(msg.subarray(1))); } catch (_) { return; }
@@ -303,12 +325,24 @@ function resetDecoder(t) {
 
 function onFrame(frame) {
     if (frame.length < HEADER_LEN) return;
+    const flags = frame[12];
+    decodeInto((flags & FLAG_SCREEN) ? tracks.screen : tracks.camera, frame);
+}
+
+function onPeerFrame(msg) {
+    if (msg.length < PEER_TAG_LEN + HEADER_LEN) return;
+    const t = peerTrack(hexOf(msg.subarray(0, PEER_TAG_LEN)));
+    // Nothing to paint on yet: decoding would be wasted, and the canvas starts from a keyframe.
+    if (!t.canvas) { t.needKey = true; return; }
+    decodeInto(t, msg.subarray(PEER_TAG_LEN));
+}
+
+function decodeInto(t, frame) {
     const view = new DataView(frame.buffer, frame.byteOffset, frame.length);
     const flags = view.getUint8(12);
     const name = CODEC_NAME[view.getUint8(13)];
     const ts = Number(view.getBigUint64(4) & 0x1fffffffffffffn);
     const key = (flags & FLAG_KEY) !== 0;
-    const t = (flags & FLAG_SCREEN) ? tracks.screen : tracks.camera;
     if (!name) return;
     if (!t.decoder || t.decCodec !== name) {
         if (!key) { t.needKey = true; return; }
@@ -322,7 +356,7 @@ function onFrame(frame) {
                     postMessage({ t: 'decode_error', message: e.message, codec: name });
                     control({ t: 'unsupported', codec: name });
                 } else {
-                    control({ t: 'lost', kind: t.kind });
+                    lost(t);
                 }
             },
         });
@@ -332,7 +366,7 @@ function onFrame(frame) {
     if (t.needKey && !key) {
         // Waiting on a keyframe nobody asked for is waiting on luck; the backend
         // rate-limits the request, so asking on every dropped delta is safe.
-        control({ t: 'lost', kind: t.kind });
+        lost(t);
         return;
     }
     t.needKey = false;
@@ -342,7 +376,7 @@ function onFrame(frame) {
         t.decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data: frame.subarray(HEADER_LEN) }));
     } catch (_) {
         resetDecoder(t);
-        control({ t: 'lost', kind: t.kind });
+        lost(t);
     }
 }
 
@@ -356,7 +390,7 @@ function paint(t, vf) {
     if (vf.displayWidth * vf.displayHeight > MAX_DECODE_PX) {
         vf.close();
         resetDecoder(t);
-        control({ t: 'lost', kind: t.kind });
+        lost(t);
         return;
     }
     if (t.pending) t.pending.close();
@@ -378,7 +412,7 @@ function paintPending(t) {
         if (t.canvas.width !== vf.displayWidth || t.canvas.height !== vf.displayHeight) {
             t.canvas.width = vf.displayWidth;
             t.canvas.height = vf.displayHeight;
-            postMessage({ t: 'painted', kind: t.kind, width: vf.displayWidth, height: vf.displayHeight });
+            postMessage({ t: 'painted', kind: t.kind, peer: t.peer, width: vf.displayWidth, height: vf.displayHeight });
         }
         t.ctx.drawImage(vf, 0, 0);
         t.dec.frames++;
@@ -400,7 +434,7 @@ function stats() {
 
 self.onmessage = (e) => {
     const m = e.data;
-    const t = tracks[m.kind];
+    const t = m.peer ? peerTrack(m.peer) : tracks[m.kind];
     switch (m.t) {
         case 'open': open(m.url, m.caps, m.port); break;
         case 'close': close(); break;
@@ -411,6 +445,8 @@ self.onmessage = (e) => {
             t.canvasId = m.id;
             t.canvas = m.canvas;
             t.ctx = m.canvas ? m.canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
+            // A sharer's screen on a new canvas starts from a keyframe; without one, it's let go.
+            if (t.peer) { resetDecoder(t); if (m.canvas) lost(t); else peerTracks.delete(t.peer); }
             break;
         case 'capture': if (t) startCapture(t, m); break;
         case 'stop': if (t) { t.capture = null; lastRate[t.kind] = null; stopEncoder(t); } break;

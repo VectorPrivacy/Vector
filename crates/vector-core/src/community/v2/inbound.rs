@@ -954,7 +954,7 @@ mod tests {
         assert!(matches!(dispatch_wrap(&typing(&w2, Some(Epoch(2))), &community, &me.public_key(), &rec), DispatchedV2::Typing { .. }), "a writer does");
         // Being in a call is CONNECT, not posting: presence counts at the read address.
         let presence = |endpoint: Option<[u8; 32]>, at_ms: u64| {
-            let rumor = chat::build_voice_presence_rumor(member.public_key(), &general, epoch, endpoint.as_ref().map(|e| (e, Some("https://relay.example./"))), true, false, at_ms);
+            let rumor = chat::build_voice_presence_rumor(member.public_key(), &general, epoch, endpoint.as_ref().map(|e| (e, Some("https://relay.example./"))), crate::community::v2::voice::Showing { muted: true, ..Default::default() }, at_ms);
             chat::seal_chat_rumor(&rumor, &read, &member, Timestamp::from_secs(at_ms / 1000), true).unwrap().0
         };
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;

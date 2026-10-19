@@ -382,17 +382,17 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
     community: &CommunityV2,
     channel_id: &ChannelId,
     endpoint: Option<([u8; 32], Option<String>)>,
-    muted: bool,
-    deafened: bool,
+    showing: super::voice::Showing,
 ) -> Result<(), String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
-    let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref().map(|(e, r)| (e, r.as_deref())), muted, deafened, at_ms);
+    let rumor = chat::build_voice_presence_rumor(author_pk, channel_id, epoch, endpoint.as_ref().map(|(e, r)| (e, r.as_deref())), showing, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
     let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
     let transport = endpoint.as_ref().map(|_| chat::TRANSPORT_IROH.to_string());
     let (ep, relay) = endpoint.map_or((None, None), |(e, r)| (Some(e), r));
-    let heard = super::voice::Heard { joined: ep.is_some(), transport, endpoint: ep, relay, muted: muted && ep.is_some(), deafened: deafened && ep.is_some() };
+    let joined = ep.is_some();
+    let heard = super::voice::Heard { joined, transport, endpoint: ep, relay, muted: showing.muted && joined, deafened: showing.deafened && joined, screen: showing.screen && joined };
     super::voice::note(&channel, author_pk, at_ms, heard, at_ms);
     Ok(())
 }
@@ -400,8 +400,9 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
 /// The mutes and deafens this device stands behind, per (Channel, target): re-sent whenever the
 /// target comes back into the call, since a directive lasts only while they stay (CORD-07 §7).
 struct StandingDirectives;
+type Standing = std::collections::HashMap<(String, PublicKey), std::collections::BTreeSet<super::voice::Directive>>;
 
-fn standing_directives() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, PublicKey), std::collections::BTreeSet<super::voice::Directive>>>> {
+fn standing_directives() -> std::sync::Arc<std::sync::Mutex<Standing>> {
     crate::db::current_session().scoped::<StandingDirectives, _>()
 }
 

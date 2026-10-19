@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-watch"
+description = "Enables the voice_watch command without any pre-configured scope."
+commands.allow = ["voice_watch"]
+
+[[permission]]
+identifier = "deny-voice-watch"
+description = "Denies the voice_watch command without any pre-configured scope."
+commands.deny = ["voice_watch"]

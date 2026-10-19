@@ -69,6 +69,16 @@ pub struct Heard {
     pub relay: Option<String>,
     pub muted: bool,
     pub deafened: bool,
+    /// They are sharing their screen.
+    pub screen: bool,
+}
+
+/// What a `joined` shows of its author beyond where to reach them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Showing {
+    pub muted: bool,
+    pub deafened: bool,
+    pub screen: bool,
 }
 
 /// One member in a call.
@@ -84,6 +94,7 @@ pub struct Present {
     pub relay: Option<String>,
     pub muted: bool,
     pub deafened: bool,
+    pub screen: bool,
     /// A moderator's mute or deafen, for as long as they stay in the call.
     pub server_muted: bool,
     pub server_deafened: bool,
@@ -185,6 +196,7 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
                 relay: endpoint.and(h.relay.clone()),
                 muted: h.muted,
                 deafened: h.deafened,
+                screen: h.screen,
                 server_muted: e.server_muted,
                 server_deafened: e.server_deafened,
             }
