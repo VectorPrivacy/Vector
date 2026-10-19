@@ -20,6 +20,18 @@
             <div class="context-menu-divider"></div>
         {:else if item.header}
             <div class="context-menu-header">{item.header}</div>
+        {:else if item.slider}
+            <!-- A live value: it applies as it moves, and the menu stays open. -->
+            <div class="context-menu-slider">
+                <div class="context-menu-slider-head">
+                    <span>{item.label}</span>
+                    <span class="context-menu-slider-value">{item.slider.format ? item.slider.format(item.slider.value) : item.slider.value}</span>
+                </div>
+                <input type="range" class="st-slider" min={item.slider.min} max={item.slider.max} step={item.slider.step} value={item.slider.value}
+                       aria-label={item.label}
+                       style:--slider-pct="{((item.slider.value - item.slider.min) / (item.slider.max - item.slider.min)) * 100}%"
+                       oninput={(e) => { const v = Number(e.currentTarget.value); item.slider.value = v; item.slider.onInput(v); }}>
+            </div>
         {:else}
             <div class="context-menu-item" class:is-danger={item.danger} class:is-back={item.back}
                  class:is-disabled={item.disabled} role="menuitem" tabindex="-1"

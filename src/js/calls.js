@@ -211,9 +211,15 @@ async function openVoiceMemberMenu(communityId, channelId, npub, x, y) {
     const powers = await invoke('voice_powers', { communityId, npub }).catch(() => ({}));
     const volume = peer ? peer.volume : 1;
     const setVolume = (v) => invoke('voice_set_volume', { npub, volume: v }).catch((e) => VectorSvelte.showToast(String(e)));
+    let dragVolume = volume;
+    let dragFrame = 0;
     const items = [
         { label: volume === 0 ? 'Unmute for Me' : 'Mute for Me', icon: volume === 0 ? 'volume-max' : 'volume-mute', onClick: () => setVolume(volume === 0 ? 1 : 0) },
-        ...[0.5, 1, 1.5, 2].map((v) => ({ label: `Volume ${Math.round(v * 100)}%`, icon: Math.abs(volume - v) < 0.01 ? 'check' : undefined, onClick: () => setVolume(v) })),
+        { label: 'Volume', slider: { min: 0, max: 200, step: 5, value: Math.round(volume * 100), format: (v) => `${v}%`, onInput: (v) => {
+            // A drag fires per pixel; one write per frame keeps up with it.
+            dragVolume = v / 100;
+            if (!dragFrame) dragFrame = requestAnimationFrame(() => { dragFrame = 0; setVolume(dragVolume); });
+        } } },
     ];
     const moderate = (action, to = null) => invoke('voice_moderate', { communityId, channelId, npub, action, to }).catch((e) => VectorSvelte.showToast(String(e)));
     const mods = [];

@@ -3079,6 +3079,26 @@ body.mobile #chat-new-scan-btn { display: block; }
   cursor: default;
 }
 
+/* A slider row: its label and live value above the settings slider. */
+.context-menu-slider {
+  padding: 9px 14px 11px;
+  min-width: 190px;
+  cursor: default;
+  user-select: none;
+}
+.context-menu-slider-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 9px;
+  color: #b2b2b2;
+  font-size: 14px;
+}
+.context-menu-slider-value {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.context-menu-slider .st-slider { display: block; }
+
 /* The row back out of a submenu: its chevron leads, so it reads as a return
    rather than another command. */
 .context-menu-item.is-back {
