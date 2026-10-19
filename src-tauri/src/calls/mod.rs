@@ -16,5 +16,5 @@ pub mod voice;
 
 // The platform-free half lives in vector-core; the device, codec and Tauri halves here.
 pub use vector_core::calls::wire as transport;
-pub use vector_core::calls::{declick, jitter, rate, resample, ring, settings, stats};
+pub use vector_core::calls::{declick, gate, jitter, rate, resample, ring, settings, stats};
 pub use vector_core::calls::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};

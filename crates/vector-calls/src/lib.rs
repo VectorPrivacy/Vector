@@ -7,6 +7,7 @@
 //! same code runs under tokio, on a thread, and in a browser.
 
 pub mod declick;
+pub mod gate;
 pub mod jitter;
 pub mod link;
 pub mod rate;

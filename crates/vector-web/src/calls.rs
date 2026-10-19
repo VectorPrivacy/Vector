@@ -16,6 +16,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
+use vector_core::calls::gate::SpeechGate;
 use vector_core::calls::jitter::{Jitter, Pop, MAX_PLC_RUN};
 use vector_core::calls::platform::{AudioStart, CallAudio, CallPlatform, LinkConn};
 use vector_core::calls::rate::RateControl;
@@ -364,6 +365,7 @@ struct VoiceEngine {
     started: Instant,
     duck: Mutex<f32>,
     priority_heard: Mutex<Option<Instant>>,
+    gate: Mutex<SpeechGate>,
 }
 
 static VOICE: Mutex<Option<Arc<VoiceEngine>>> = Mutex::new(None);
@@ -373,12 +375,14 @@ fn voice() -> Option<Arc<VoiceEngine>> {
 }
 
 impl VoiceEngine {
-    /// One encoded microphone frame to every peer; muted, deafened or empty goes as a muted frame,
-    /// which keeps each peer's liveness count moving.
+    /// One encoded microphone frame to every peer; muted, deafened, not speaking or empty goes
+    /// as a muted frame, which keeps each peer's liveness count moving. The page meters each
+    /// frame as it hands it to the encoder, so the level read here is this frame's or just after.
     fn send(&self, packet: &[u8], ok: bool) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) as u16;
         let ts = self.started.elapsed().as_millis() as u32;
-        let quiet = !ok || self.muted.load(Ordering::Relaxed) || self.deafened.load(Ordering::Relaxed);
+        let speaking = self.gate.lock().unwrap_or_else(|e| e.into_inner()).open(f32::from_bits(self.mic_level.load(Ordering::Relaxed)));
+        let quiet = !ok || !speaking || self.muted.load(Ordering::Relaxed) || self.deafened.load(Ordering::Relaxed);
         let datagram = if quiet { pack(seq, ts, FLAG_MUTED, &[]) } else { pack(seq, ts, 0, packet) };
         let conns: Vec<Connection> = self.peers.lock().unwrap_or_else(|e| e.into_inner()).values().map(|p| p.conn.clone()).collect();
         for conn in conns {
@@ -406,6 +410,7 @@ impl WebVoice {
             started: Instant::now(),
             duck: Mutex::new(1.0),
             priority_heard: Mutex::new(None),
+            gate: Mutex::new(SpeechGate::default()),
         });
         let (tx, rx) = oneshot::channel();
         *READY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);

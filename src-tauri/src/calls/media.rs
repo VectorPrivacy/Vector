@@ -8,6 +8,7 @@ use super::aec::{EchoCanceller, SpeexAec};
 use super::codec::{Decoder, Encoder, ShareDecoder, ShareEncoder};
 use super::settings::AudioSettings;
 use super::declick::Declicker;
+use super::gate::SpeechGate;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
 use super::rate::{LinkSample, MeshRate, RateControl, START_KBPS};
 use super::resample::Resampler;
@@ -37,32 +38,9 @@ pub(crate) const FLAG_MUTED: u16 = 1;
 /// Datagram flag: a frame of the shared screen's sound, stereo, its own sequence.
 pub(crate) const FLAG_SHARE: u16 = 2;
 
-/// The level counted as speech: the stage's speaking ring (`SPEAKING`) lights at the same.
-const SPEECH_LEVEL: f32 = 0.15;
-/// How long sending goes on after speech stops, so word endings and short pauses stay whole.
-const SPEECH_HANGOVER_MS: u32 = 400;
 /// A mesh uploads each frame once per peer, so a voice Channel climbs no higher than a
 /// 1:1 call starts.
 const VOICE_MAX_KBPS: u32 = START_KBPS;
-
-/// A voice Channel's member sends only while speaking (CORD-07 §8); the rest of the time a
-/// muted frame keeps their liveness count moving at a fraction of the bytes.
-#[derive(Default)]
-struct SpeechGate {
-    hang: u32,
-}
-
-impl SpeechGate {
-    /// Whether this frame goes out as audio: the first frame at speech level opens the gate.
-    fn open(&mut self, level: f32) -> bool {
-        if level > SPEECH_LEVEL {
-            self.hang = SPEECH_HANGOVER_MS / FRAME_MS;
-        } else {
-            self.hang = self.hang.saturating_sub(1);
-        }
-        self.hang > 0
-    }
-}
 
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
@@ -1071,21 +1049,3 @@ mod lag_probe_tests {
     }
 }
 
-#[cfg(test)]
-mod speech_gate_tests {
-    use super::*;
-
-    #[test]
-    fn speech_opens_the_gate_at_once_and_a_hangover_closes_it() {
-        let mut gate = SpeechGate::default();
-        assert!(!gate.open(0.0), "silence sends nothing");
-        assert!(!gate.open(SPEECH_LEVEL), "the threshold itself is not speech");
-        assert!(gate.open(0.4), "the first loud frame goes out");
-        let hang = SPEECH_HANGOVER_MS / FRAME_MS;
-        for _ in 1..hang {
-            assert!(gate.open(0.0), "a pause shorter than the hangover keeps sending");
-        }
-        assert!(!gate.open(0.0), "the hangover ends");
-        assert!(gate.open(0.3), "speech again reopens it");
-    }
-}
