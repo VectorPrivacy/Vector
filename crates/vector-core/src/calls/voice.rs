@@ -21,7 +21,7 @@ use crate::community::{ChannelId, CommunityId};
 
 mod video;
 
-pub const VOICE_ALPN: &[u8] = b"vector/voice/1";
+pub const VOICE_ALPN: &[u8] = b"concord/voice/1";
 /// Others in a call besides us: a full mesh carries voice to about fifteen (CORD-07 §8).
 pub const MAX_PEERS: usize = 14;
 const DIAL_EVERY: Duration = Duration::from_secs(3);
