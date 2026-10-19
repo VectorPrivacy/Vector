@@ -158,7 +158,35 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+#[cfg(target_os = "android")]
+mod imp {
+    use super::Level;
+    use std::sync::Mutex;
+
+    // A call's hold is its foreground service; Display also keeps the screen lit.
+    static HELD: Mutex<Option<Level>> = Mutex::new(None);
+
+    pub fn apply(level: Option<Level>) {
+        let wanted = level.filter(|l| *l >= Level::System);
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if *held == wanted {
+            return;
+        }
+        let (was_call, was_display) = (held.is_some(), *held == Some(Level::Display));
+        match wanted {
+            Some(_) if !was_call => crate::android::call_service::start(),
+            None if was_call => crate::android::call_service::stop(),
+            _ => {}
+        }
+        let display = wanted == Some(Level::Display);
+        if display != was_display {
+            crate::android::call_service::keep_screen_on(display);
+        }
+        *held = wanted;
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux", target_os = "android")))]
 mod imp {
     pub fn apply(_level: Option<super::Level>) {}
 }

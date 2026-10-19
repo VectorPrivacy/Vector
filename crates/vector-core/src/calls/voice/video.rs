@@ -178,6 +178,11 @@ impl Video {
         *self.sending.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether any picture is on our screen or leaving it.
+    pub(super) fn any(&self) -> bool {
+        self.sending().any() || !self.watching.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
     /// How many watch our screen while we share it.
     pub(super) fn viewers(&self) -> u32 {
         if !self.sending().screen {

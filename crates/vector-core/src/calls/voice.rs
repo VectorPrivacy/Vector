@@ -13,6 +13,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, TransportAddr};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use serde::Serialize;
 
+use super::platform::AwakeLevel;
 use crate::community::roles::Permissions;
 use crate::community::transport::LiveTransport;
 use crate::community::v2::{community::CommunityV2, voice as presence};
@@ -138,6 +139,8 @@ struct Voice {
     /// Whether we hold Video here, as the mesh upkeep last judged it.
     can_video: AtomicBool,
     video: video::Video,
+    /// The machine stays awake for the call, and the display too while video shows.
+    awake: Mutex<Option<(AwakeLevel, Box<dyn std::any::Any + Send>)>>,
     tasks: Mutex<Vec<crate::rt::JoinHandle<()>>>,
 }
 
@@ -333,6 +336,7 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         greeting: AtomicBool::new(false),
         can_video: AtomicBool::new(may_video(&community, &channel, &me)),
         video: video::Video::default(),
+        awake: Mutex::new(None),
         tasks: Mutex::new(Vec::new()),
     });
     // Just after launch the relays may still be connecting: a refused first presence is retried.
@@ -395,6 +399,7 @@ async fn shutdown(v: Arc<Voice>) {
     }
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
+    v.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 /// Start or stop sending our camera or screen to whoever watches (CORD-07 §6). Video is judged
@@ -413,7 +418,9 @@ pub fn set_video(kind: crate::calls::wire::VideoKind, on: bool) -> Result<(), St
 /// Which of a member's pictures we show in our call; neither stops them coming.
 pub fn watch(member: &PublicKey, want: crate::calls::wire::Tracks) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
-    video::watch(&v, member, want)
+    video::watch(&v, member, want)?;
+    refresh_awake(&v);
+    Ok(())
 }
 
 /// A moderator's directive, already judged: one aimed at us is obeyed, and anyone else's mute
@@ -719,8 +726,21 @@ fn apply_to(v: &Voice, m: &dyn VoiceMedia) {
 fn changed(v: &Voice) {
     let state = state(v);
     if live().is_some_and(|now| std::ptr::eq(Arc::as_ptr(&now), v)) {
+        refresh_awake(v);
         crate::emit_event("voice_state", &state);
     }
+}
+
+/// The hold the call needs now; the new one is taken before the old goes, so the machine is
+/// covered in between.
+fn refresh_awake(v: &Voice) {
+    let level = if v.video.any() { AwakeLevel::Display } else { AwakeLevel::System };
+    let mut slot = v.awake.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|(held, _)| *held == level) {
+        return;
+    }
+    let Some(hold) = super::platform::get().ok().and_then(|p| p.hold_awake(level)) else { return };
+    *slot = Some((level, hold));
 }
 
 /// Who is speaking, five times a second while there is audio to show it.
@@ -974,6 +994,7 @@ mod tests {
             greeting: AtomicBool::new(false),
             can_video: AtomicBool::new(false),
             video: video::Video::default(),
+            awake: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();
@@ -1019,6 +1040,7 @@ mod tests {
             greeting: AtomicBool::new(false),
             can_video: AtomicBool::new(false),
             video: video::Video::default(),
+            awake: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
         });
         let id = *b.id().as_bytes();
