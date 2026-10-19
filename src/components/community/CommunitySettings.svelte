@@ -256,7 +256,10 @@
                                     {:else}
                                         <div class="cs-banner-empty">
                                             <span class="icon icon-image"></span>
-                                            <span>{st.canEdit ? 'Add a banner' : 'No banner'}</span>
+                                            <span class="cs-banner-empty-text">
+                                                <span>{st.canEdit ? 'Add a banner' : 'No banner'}</span>
+                                                {#if st.canEdit}<span class="cs-banner-size">(952 × 280)</span>{/if}
+                                            </span>
                                         </div>
                                     {/if}
                                     {#if st.canEdit && bannerSrc}

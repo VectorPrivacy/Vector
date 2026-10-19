@@ -25986,19 +25986,21 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-banner-frame.editable:hover .cs-icon-edit { opacity: 1; }
 .cs-banner-empty {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  aspect-ratio: 238 / 146;
+  gap: 10px;
+  aspect-ratio: 238 / 70;
   border: 1px dashed #333;
   border-radius: 12px;
   box-sizing: border-box;
   color: rgba(255, 255, 255, 0.45);
   font-size: 12.5px;
 }
-/* margin: 0, or .icon's auto margins split the column's free space around it. */
-.cs-banner-empty .icon { position: relative; width: 40px; height: 40px; margin: 0; background-color: currentColor; }
+/* margin: 0, or .icon's auto margins split the row's free space around it. */
+.cs-banner-empty .icon { position: relative; flex: none; width: 24px; height: 24px; margin: 0; background-color: currentColor; }
+.cs-banner-empty-text { display: flex; flex-direction: column; gap: 2px; line-height: 1.2; }
+/* The size a banner is drawn sharp at: four times the 238 x 70 strip. */
+.cs-banner-size { font-size: 11px; opacity: 0.7; font-variant-numeric: tabular-nums; }
 .cs-banner-frame.editable:hover .cs-banner-empty { border-color: #555; color: rgba(255, 255, 255, 0.7); }
 
 .cs-field { display: flex; flex-direction: column; }
