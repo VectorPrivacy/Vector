@@ -141,6 +141,8 @@ function cmpTokenize(src, opts) {
         // marked's own rule: up to three spaces, then `-`, `*` or `1.`, then a space.
         // `+` is deliberately absent — the message renderer refuses it too.
         + '|(^ {0,3}(?:[-*]|\\d{1,9}\\.) )'
+        // A channel's link, which a `#` pick inserts: shown as the channel it names.
+        + '|(https://vectorapp\\.io/go#c/[0-9a-f]{64}/[0-9a-f]{64}(?![0-9a-zA-Z/]))'
         + '|' + CMP_EMOJI,
         'gmu');
     let last = 0;
@@ -209,6 +211,9 @@ function cmpTokenize(src, opts) {
             out.push({ kind: 'subtext', from, to, mark: 3 });
         } else if (m[15]) {
             out.push({ kind: 'listmark', from, to });
+        } else if (m[16]) {
+            const room = safe(opts.resolveChannelLink, raw);
+            out.push(room ? { kind: 'channelref', from, to, label: room.name, voice: room.voice } : { kind: 'text', from, to });
         } else {
             // Unicode emoji. No Twemoji artwork (skin tones, very new emoji) falls
             // back to plain text, which the system font renders.
@@ -244,7 +249,7 @@ function cmpApplyTime(src, tokens) {
 }
 
 // Tokens whose text keeps its own look, as a sent message's colour skips them.
-const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'timestamp', 'emoji', 'twemoji', 'spoiler', 'ansitext', 'ansicode', 'fence', 'colormark']);
+const CMP_UNPAINTED = new Set(['code', 'mention', 'npubmention', 'channelref', 'timestamp', 'emoji', 'twemoji', 'spoiler', 'ansitext', 'ansicode', 'fence', 'colormark']);
 
 /**
  * Colour markup and a leading colour command, previewed as they'll send: the tags
@@ -569,6 +574,21 @@ function createRichComposer(host, opts = {}) {
                     w.contentEditable = 'false';
                     w.dataset.src = raw;
                     w.title = ttFull(t.unix);
+                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    el.appendChild(w);
+                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    break;
+                }
+                case 'channelref': {
+                    // Atomic: the link is the source, the channel's name is what shows.
+                    const w = span('cmp-mention cmp-channel', t.voice ? '' : '#' + t.label);
+                    if (t.voice) {
+                        const icon = document.createElement('span');
+                        icon.className = 'icon icon-volume-max cmp-channel-icon';
+                        w.append(icon, document.createTextNode(t.label));
+                    }
+                    w.contentEditable = 'false';
+                    w.dataset.src = raw;
                     el.appendChild(document.createTextNode(CMP_ZWSP));
                     el.appendChild(w);
                     el.appendChild(document.createTextNode(CMP_ZWSP));

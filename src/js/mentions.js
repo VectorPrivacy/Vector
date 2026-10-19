@@ -204,3 +204,116 @@ function initMentionSelector(textarea, candidatesFn) {
         }
     };
 }
+
+/**
+ * The #channel autocomplete: `#` at a word's start offers the open community's channels,
+ * text and voice. Picking one inserts the channel's link, which the composer shows as a
+ * pill and every client renders as the channel.
+ */
+// eslint-disable-next-line no-unused-vars
+function initChannelSelector(textarea, candidatesFn) {
+    let open = false;
+    let hashAt = -1;
+    let query = '';
+    let active = 0;
+    let pool = null;
+    let skipNextInput = false;
+
+    function hide() {
+        if (open) {
+            open = false;
+            VectorSvelte.closePopup('mention');
+        }
+        hashAt = -1;
+        query = '';
+        active = 0;
+        pool = null;
+    }
+
+    function matches() {
+        if (!pool) pool = candidatesFn();
+        const q = query.toLowerCase();
+        const tier = (c) => {
+            const n = c.name.toLowerCase();
+            return !q || n.startsWith(q) ? 0 : n.includes(q) ? 1 : 2;
+        };
+        return pool.map((c) => [tier(c), c]).filter(([t]) => t < 2).sort((a, b) => a[0] - b[0]).map(([, c]) => c).slice(0, 8);
+    }
+
+    function show(items) {
+        if (!items.length) { hide(); return; }
+        open = true;
+        VectorSvelte.openPopup('mention', { items, active, pick: (i) => pick(items[i]) });
+    }
+
+    function pick(item) {
+        const before = textarea.value.substring(0, hashAt);
+        const after = textarea.value.substring(textarea.selectionStart);
+        const insert = item.url + ' ';
+        textarea.value = before + insert + after;
+        textarea.selectionStart = textarea.selectionEnd = hashAt + insert.length;
+        hide();
+        skipNextInput = true;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function onInput() {
+        if (skipNextInput) { skipNextInput = false; return; }
+        const val = textarea.value;
+        const caret = textarea.selectionStart;
+        let found = -1;
+        for (let i = caret - 1; i >= 0; i--) {
+            if (val[i] === '#') {
+                if (i === 0 || /\s/.test(val[i - 1])) found = i;
+                break;
+            }
+            if (/\s/.test(val[i])) break;
+        }
+        if (found === -1) { if (open) hide(); return; }
+        hashAt = found;
+        query = val.substring(found + 1, caret);
+        active = 0;
+        show(matches());
+    }
+
+    function onKeyDown(e) {
+        if (!open) return;
+        const items = matches();
+        if (!items.length) return;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            active = (active + 1) % items.length;
+            show(items);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            active = (active - 1 + items.length) % items.length;
+            show(items);
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            e.stopPropagation();
+            pick(items[active]);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            hide();
+        }
+    }
+
+    function onBlur() {
+        setTimeout(() => { if (open) hide(); }, 150);
+    }
+
+    textarea.addEventListener('input', onInput);
+    textarea.addEventListener('keydown', onKeyDown);
+    textarea.addEventListener('blur', onBlur);
+
+    return {
+        isOpen() { return open; },
+        destroy() {
+            textarea.removeEventListener('input', onInput);
+            textarea.removeEventListener('keydown', onKeyDown);
+            textarea.removeEventListener('blur', onBlur);
+            hide();
+        },
+    };
+}

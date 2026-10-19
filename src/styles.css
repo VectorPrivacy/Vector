@@ -5969,6 +5969,16 @@ textarea#chat-input::placeholder {
 }
 /* Now that the composer is the same Rubik 15px as a message row, the in-chat
    `.mention` weight of 500 matches exactly — no optical compensation needed. */
+/* A voice channel's pill leads with its speaker, as the channel list does. */
+#chat-input.rich-composer .cmp-channel-icon {
+  position: relative;
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin: 0 3px 0 1px;
+  vertical-align: -0.12em;
+  background-color: currentColor;
+}
 #chat-input.rich-composer .cmp-mention {
   color: var(--icon-color-primary, #59fcb3);
   background: rgba(89, 252, 179, 0.13);
@@ -20876,6 +20886,17 @@ hr {
   background: var(--icon-color-primary, #59fcb3);
 }
 
+.mention-item-channel {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+.mention-item-channel .icon {
+  width: 18px;
+  height: 18px;
+  background-color: #b2b2b2;
+}
 .mention-item-role {
   width: 28px;
   height: 28px;

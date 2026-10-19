@@ -13,7 +13,7 @@
 </script>
 
 <AnchoredPanel cls="mention-selector" {open} {anchor} {view}>
-    <div class="mention-selector-header">{view.items.some((i) => !i.special) ? 'Members' : 'Time'}</div>
+    <div class="mention-selector-header">{view.items[0]?.channel ? 'Channels' : view.items.some((i) => !i.special) ? 'Members' : 'Time'}</div>
     {#each view.items as item, i (item.npub)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -21,7 +21,11 @@
             class:active={i === view.active}
             onmousedown={(e) => { e.preventDefault(); view.pick(i); }}
         >
-            {#if item.special === 'time'}
+            {#if item.channel}
+                <span class="mention-item-channel"><span class="icon icon-{item.channel.voice ? 'volume-max' : 'channel-hash'}"></span></span>
+                <span class="mention-item-name">{item.name}</span>
+                <span class="mention-item-hint">{item.channel.voice ? 'Voice' : 'Text'}</span>
+            {:else if item.special === 'time'}
                 <span class="mention-item-time"><span class="icon icon-clock"></span></span>
                 <span class="mention-item-name">time</span>
                 <span class="mention-item-hint">A time everyone sees in their own zone</span>

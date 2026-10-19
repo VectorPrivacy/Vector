@@ -392,6 +392,7 @@ async function sendMessage(messageText) {
 /** A mention, emoji, time or command selector is open, and owns Enter. */
 function composerSelectorOpen() {
     return !!((mentionCtrl && mentionCtrl.isOpen && mentionCtrl.isOpen())
+        || (channelCtrl && channelCtrl.isOpen())
         || (timeCtrl && timeCtrl.isOpen())
         || (emojiShortcodeCtrl && emojiShortcodeCtrl.isOpen && emojiShortcodeCtrl.isOpen())
         || (commandCtrl && commandCtrl.isOpen && commandCtrl.isOpen()));
@@ -510,6 +511,19 @@ function getMentionCandidates(includeSelf = false) {
 }
 
 let mentionCtrl = null;
+let channelCtrl = null;
+
+/** The open community's channels a `#` can name, as links. */
+function getChannelCandidates() {
+    const community = communityIdOfChat(arrChats.find((c) => c.id === strOpenChat));
+    if (!community) return [];
+    return (getCommunityChannels(community) || []).map((c) => ({
+        npub: c.id,
+        name: c.name || 'channel',
+        channel: { voice: c.view === 'voice' },
+        url: goLinkUrl({ community, channel: c.id }),
+    }));
+}
 let timeCtrl = null;
 let timeSuggestCtrl = null;
 let emojiShortcodeCtrl = null;
@@ -559,6 +573,7 @@ function initComposerControllers() {
     // Hand the composer its mention source now that one exists, so an inserted
     // `@Name` renders as a pill.
     composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
+    channelCtrl = initChannelSelector(domChatMessageInput, getChannelCandidates);
     emojiShortcodeCtrl = initEmojiShortcodeSelector(domChatMessageInput);
     timeSuggestCtrl = initTimeSuggest(domChatMessageInput, {
         enabled: () => timeSuggestionsEnabled,

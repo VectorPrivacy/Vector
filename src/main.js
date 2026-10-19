@@ -303,6 +303,12 @@ function buildRichComposer(host) {
     // resolver and already shortens an npub it doesn't know, so this never renders
     // a wall of bech32.
     resolveNpub: (npub) => getName(npub),
+    // A channel link pills as its channel when this device can open it; otherwise it stays a link.
+    resolveChannelLink: (url) => {
+        const link = parseGoLink(url);
+        const r = link && resolveGoLink(link);
+        return r && r.kind === 'channel' && r.state === 'ok' ? { name: r.channelName, voice: !!r.voice } : null;
+    },
     // Preview a colour command only where Vector runs it; a bot claiming the name wins.
     ownsCommand: (name) => !commandCtrl || commandCtrl.systemOwns(name),
     // Which tracked name, if any, sits at `at` in `src`. The LONGEST wins, so
