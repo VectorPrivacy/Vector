@@ -2,7 +2,7 @@
     // A voice channel's stage, above its chat: who is in the call (speaking, muted, deafened),
     // and joining it, or the call's own controls once in.
     import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, voiceJoining, SPEAKING } from '../lib/voice.svelte.js';
-    import { openChatId } from '../lib/signals.svelte.js';
+    import { openChatId, profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     const stage = $derived(voiceStage());
@@ -63,6 +63,8 @@
         h.selfPreview?.(kind, node);
         return { destroy() { h.selfPreview?.(kind, null); } };
     }
+    // A name follows its profile as it loads.
+    const nameOf = (npub) => (profileVersion(npub), h.getName?.(npub));
     function pathOf(npub) {
         const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
         return p?.rtt_ms ? `${p.rtt_ms} ms, ${p.direct ? 'direct' : 'through a relay'}` : null;
@@ -89,7 +91,7 @@
                     {/key}
                 {/if}
                 <div class="voice-screen-bar">
-                    <span class="voice-screen-label cutoff">{viewing === me ? 'Your screen' : `${h.getName?.(viewing)}'s screen`}</span>
+                    <span class="voice-screen-label cutoff">{viewing === me ? 'Your screen' : `${nameOf(viewing)}'s screen`}</span>
                     <button class="voice-screen-btn" title={expanded ? 'Smaller' : 'Bigger'} onclick={() => (expanded = !expanded)}>
                         {#if expanded}
                             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -131,7 +133,7 @@
                             {/if}
                         </div>
                         {#if sharing(p)}<span class="voice-tile-live" title={inCall ? (viewing === p.npub ? 'Hide their screen' : 'Show their screen') : 'Sharing their screen'}>LIVE</span>{/if}
-                        <span class="voice-tile-name cutoff">{p.npub === me ? 'You' : h.getName?.(p.npub)}</span>
+                        <span class="voice-tile-name cutoff">{p.npub === me ? 'You' : nameOf(p.npub)}</span>
                         {#if p.elsewhere}<span class="voice-tile-note">another app</span>{:else if inCall && !connected(p.npub)}<span class="voice-tile-note">connecting</span>{/if}
                     </div>
                 {/each}

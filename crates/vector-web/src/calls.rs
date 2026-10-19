@@ -5,6 +5,7 @@
 //! The datagrams, the jitter buffer and the rate ladder stay here.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -21,7 +22,8 @@ use vector_core::calls::rate::RateControl;
 use vector_core::calls::session;
 use vector_core::calls::settings::{self, AudioSettings};
 use vector_core::calls::stats::MediaStats;
-use vector_core::calls::wire::{pack, unpack, VideoKind};
+use vector_core::calls::voice::{self, Chime, VoiceMedia};
+use vector_core::calls::wire::{pack, unpack, Tracks, VideoKind};
 use vector_core::calls::FRAME_MS;
 use vector_core::rt::JoinHandle;
 use wasm_bindgen::prelude::*;
@@ -53,6 +55,10 @@ impl CallPlatform for WebCalls {
 
     async fn start_audio(&self, conn: Connection, start: AudioStart) -> Result<Box<dyn CallAudio>, String> {
         WebAudio::start(conn, start).await
+    }
+
+    async fn start_voice(&self) -> Result<Box<dyn VoiceMedia>, String> {
+        WebVoice::start().await
     }
 
     fn set_video_taker(&self, taker: Option<mpsc::Sender<LinkConn>>) {
@@ -224,6 +230,10 @@ pub fn call_audio_ready(error: Option<String>) {
 /// nothing: a muted frame keeps the peer's liveness count moving.
 #[wasm_bindgen]
 pub fn call_audio_frame(packet: &[u8], ok: bool) {
+    if let Some(v) = voice() {
+        v.send(packet, ok);
+        return;
+    }
     let Some(e) = engine() else { return };
     let seq = e.stats.next_seq.load(Ordering::Relaxed) as u16;
     let ts = e.started.elapsed().as_millis() as u32;
@@ -264,6 +274,12 @@ pub fn call_audio_starved(frames: u32) {
 /// Loudness for the meters, 0 to 1: `peer` false is the microphone.
 #[wasm_bindgen]
 pub fn call_audio_level(peer: bool, level: f32) {
+    if let Some(v) = voice() {
+        if !peer {
+            v.mic_level.store(level.to_bits(), Ordering::Relaxed);
+        }
+        return;
+    }
     let Some(e) = engine() else { return };
     let slot = if peer { &e.stats.peer_level } else { &e.stats.mic_level };
     slot.store(level.to_bits(), Ordering::Relaxed);
@@ -306,6 +322,290 @@ pub fn call_audio_pull(ahead_ms: u32) -> JsValue {
         Pop::Wait => 0,
     };
     set("k", &JsValue::from(kind));
+    out.into()
+}
+
+// --- A voice Channel's call ----------------------------------------------------------
+//
+// The same page graph as a 1:1 call, one microphone and one speaker; here each peer has its own
+// jitter buffer, and the worker decodes every peer's frame and mixes them by the gains given here.
+
+/// A priority speaker counts as talking above this level; everyone else then plays at the duck.
+const PRIORITY_TALKING: f32 = 0.35;
+const DUCK_GAIN: f32 = 0.3;
+const DUCK_ATTACK: f32 = 0.5;
+const DUCK_RELEASE: f32 = 0.1;
+/// What a voice call's microphone sends, as desktop's.
+const VOICE_KBPS: u32 = 32;
+
+struct VoicePeer {
+    slot: u32,
+    conn: Connection,
+    jitter: Mutex<Jitter>,
+    stats: MediaStats,
+    plc_run: AtomicU32,
+    gain: AtomicU32,
+    audible: AtomicBool,
+    priority: AtomicBool,
+    level: AtomicU32,
+    rx: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct VoiceEngine {
+    /// False once the call went ahead without a microphone.
+    mic: AtomicBool,
+    peers: Mutex<HashMap<[u8; 32], Arc<VoicePeer>>>,
+    next_slot: AtomicU32,
+    muted: AtomicBool,
+    deafened: AtomicBool,
+    mic_level: AtomicU32,
+    seq: AtomicU32,
+    started: Instant,
+    duck: Mutex<f32>,
+}
+
+static VOICE: Mutex<Option<Arc<VoiceEngine>>> = Mutex::new(None);
+
+fn voice() -> Option<Arc<VoiceEngine>> {
+    VOICE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+impl VoiceEngine {
+    /// One encoded microphone frame to every peer; muted, deafened or empty goes as a muted frame,
+    /// which keeps each peer's liveness count moving.
+    fn send(&self, packet: &[u8], ok: bool) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) as u16;
+        let ts = self.started.elapsed().as_millis() as u32;
+        let quiet = !ok || self.muted.load(Ordering::Relaxed) || self.deafened.load(Ordering::Relaxed);
+        let datagram = if quiet { pack(seq, ts, FLAG_MUTED, &[]) } else { pack(seq, ts, 0, packet) };
+        let conns: Vec<Connection> = self.peers.lock().unwrap_or_else(|e| e.into_inner()).values().map(|p| p.conn.clone()).collect();
+        for conn in conns {
+            let _ = conn.send_datagram(datagram.clone());
+        }
+    }
+
+    fn peer_by_slot(&self, slot: u32) -> Option<Arc<VoicePeer>> {
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).values().find(|p| p.slot == slot).cloned()
+    }
+}
+
+struct WebVoice(Arc<VoiceEngine>);
+
+impl WebVoice {
+    async fn start() -> Result<Box<dyn VoiceMedia>, String> {
+        let v = Arc::new(VoiceEngine {
+            mic: AtomicBool::new(true),
+            peers: Mutex::new(HashMap::new()),
+            next_slot: AtomicU32::new(1),
+            muted: AtomicBool::new(false),
+            deafened: AtomicBool::new(false),
+            mic_level: AtomicU32::new(0),
+            seq: AtomicU32::new(0),
+            started: Instant::now(),
+            duck: Mutex::new(1.0),
+        });
+        let (tx, rx) = oneshot::channel();
+        *READY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+        *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&v));
+        tell("start", json!({ "kbps": VOICE_KBPS, "fec": 10, "volume": 1.0, "settings": settings::load(), "voice": true }));
+        let failure = match vector_core::rt::time::timeout(AUDIO_START_TIMEOUT, rx).await {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(e))) => Some(e),
+            _ => Some("The microphone did not start".to_string()),
+        };
+        if let Some(e) = failure {
+            release_voice(&v);
+            return Err(e);
+        }
+        Ok(Box::new(WebVoice(v)))
+    }
+}
+
+/// Takes the voice engine down, if it is still the live one, and tells the page.
+fn release_voice(v: &Arc<VoiceEngine>) {
+    let mut slot = VOICE.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|e| Arc::ptr_eq(e, v)) {
+        *slot = None;
+        drop(slot);
+        tell("stop", Value::Null);
+    }
+}
+
+impl VoiceMedia for WebVoice {
+    fn add_peer(&self, endpoint: [u8; 32], conn: Connection) {
+        let peer = Arc::new(VoicePeer {
+            slot: self.0.next_slot.fetch_add(1, Ordering::Relaxed),
+            conn: conn.clone(),
+            jitter: Mutex::new(Jitter::default()),
+            stats: MediaStats::default(),
+            plc_run: AtomicU32::new(0),
+            gain: AtomicU32::new(1f32.to_bits()),
+            audible: AtomicBool::new(true),
+            priority: AtomicBool::new(false),
+            level: AtomicU32::new(0),
+            rx: Mutex::new(None),
+        });
+        let reader = Arc::clone(&peer);
+        let rx = vector_core::db::spawn_bound(async move {
+            while let Ok(datagram) = reader.conn.read_datagram().await {
+                let Some(frame) = unpack(&datagram) else { continue };
+                if frame.flags & FLAG_SHARE != 0 {
+                    continue;
+                }
+                reader.stats.received.fetch_add(1, Ordering::Relaxed);
+                reader.jitter.lock().unwrap_or_else(|e| e.into_inner()).push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &reader.stats);
+            }
+        });
+        *peer.rx.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+        let old = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).insert(endpoint, peer);
+        if let Some(old) = old {
+            drop_peer(&old);
+        }
+    }
+
+    fn remove_peer(&self, endpoint: &[u8; 32]) {
+        let gone = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).remove(endpoint);
+        if let Some(p) = gone {
+            drop_peer(&p);
+        }
+    }
+
+    fn set_muted(&self, on: bool) {
+        self.0.muted.store(on, Ordering::Relaxed);
+    }
+
+    fn set_deafened(&self, on: bool) {
+        self.0.deafened.store(on, Ordering::Relaxed);
+    }
+
+    fn has_mic(&self) -> bool {
+        self.0.mic.load(Ordering::Relaxed)
+    }
+
+    fn set_audible(&self, endpoint: &[u8; 32], on: bool) {
+        if let Some(p) = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+            p.audible.store(on, Ordering::Relaxed);
+        }
+    }
+
+    fn set_volume(&self, endpoint: &[u8; 32], gain: f32) {
+        if let Some(p) = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+            p.gain.store(gain.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    fn set_priority(&self, endpoint: &[u8; 32], on: bool) {
+        if let Some(p) = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+            p.priority.store(on, Ordering::Relaxed);
+        }
+    }
+
+    fn levels(&self) -> Vec<(Option<[u8; 32]>, f32)> {
+        let mut out = vec![(None, f32::from_bits(self.0.mic_level.load(Ordering::Relaxed)))];
+        out.extend(self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(ep, p)| (Some(*ep), f32::from_bits(p.level.load(Ordering::Relaxed)))));
+        out
+    }
+
+    fn chime(&self, cue: Chime) {
+        let cue = match cue {
+            Chime::Joined => "joined",
+            Chime::Left => "left",
+            Chime::PeerJoined => "peer_joined",
+            Chime::PeerLeft => "peer_left",
+            Chime::Muted => "muted",
+            Chime::Unmuted => "unmuted",
+        };
+        tell("chime", json!({ "cue": cue }));
+    }
+}
+
+fn drop_peer(p: &VoicePeer) {
+    if let Some(rx) = p.rx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        rx.abort();
+    }
+    tell("voice-peer-gone", json!({ "slot": p.slot }));
+}
+
+impl Drop for WebVoice {
+    fn drop(&mut self) {
+        let peers: Vec<Arc<VoicePeer>> = self.0.peers.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, p)| p).collect();
+        for p in peers {
+            drop_peer(&p);
+        }
+        release_voice(&self.0);
+    }
+}
+
+/// The page could not open a microphone: the voice call plays, and sends nothing.
+#[wasm_bindgen]
+pub fn voice_set_mic(on: bool) {
+    if let Some(v) = voice() {
+        v.mic.store(on, Ordering::Relaxed);
+    }
+}
+
+/// A peer's decoded loudness, 0 to 1, from the worker's decoder for `slot`.
+#[wasm_bindgen]
+pub fn voice_audio_level(slot: u32, level: f32) {
+    if let Some(p) = voice().and_then(|v| v.peer_by_slot(slot)) {
+        p.level.store(level.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The speaker wants its next 20 ms of a voice call: every peer's next frame and the gain to mix
+/// it at. `{ e: [{ s, k, d, run, g }], quiet }`, with `k` as in `call_audio_pull`; `quiet` is a
+/// frame of silence while deafened. No entries and not quiet: nothing yet.
+#[wasm_bindgen]
+pub fn voice_audio_pull(_ahead_ms: u32) -> JsValue {
+    let Some(v) = voice() else { return JsValue::NULL };
+    let peers: Vec<Arc<VoicePeer>> = v.peers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+    let talking = peers.iter().any(|p| p.audible.load(Ordering::Relaxed) && p.priority.load(Ordering::Relaxed) && f32::from_bits(p.level.load(Ordering::Relaxed)) > PRIORITY_TALKING);
+    let duck = {
+        let mut duck = v.duck.lock().unwrap_or_else(|e| e.into_inner());
+        let target = if talking { DUCK_GAIN } else { 1.0 };
+        *duck += (target - *duck) * if target < *duck { DUCK_ATTACK } else { DUCK_RELEASE };
+        *duck
+    };
+    let deafened = v.deafened.load(Ordering::Relaxed);
+    let entries = js_sys::Array::new();
+    for p in peers {
+        let run = p.plc_run.load(Ordering::Relaxed);
+        let next = p.jitter.lock().unwrap_or_else(|e| e.into_inner()).pop(run, now_ms(), &p.stats);
+        let entry = js_sys::Object::new();
+        let set = |k: &str, val: &JsValue| {
+            let _ = js_sys::Reflect::set(&entry, &JsValue::from_str(k), val);
+        };
+        let kind = match next {
+            Pop::Frame(d) => {
+                p.plc_run.store(0, Ordering::Relaxed);
+                set("d", &js_sys::Uint8Array::from(d.as_slice()).into());
+                1
+            }
+            Pop::Muted => {
+                p.plc_run.store(0, Ordering::Relaxed);
+                p.level.store(0f32.to_bits(), Ordering::Relaxed);
+                continue;
+            }
+            Pop::Fec(_) | Pop::Conceal => {
+                p.plc_run.store((run + 1).min(MAX_PLC_RUN), Ordering::Relaxed);
+                set("run", &JsValue::from(run + 1));
+                3
+            }
+            Pop::Wait => continue,
+        };
+        // Deafened, or a peer who may not speak: drained, never played.
+        if deafened || !p.audible.load(Ordering::Relaxed) {
+            continue;
+        }
+        let gain = f32::from_bits(p.gain.load(Ordering::Relaxed)) * if p.priority.load(Ordering::Relaxed) { 1.0 } else { duck };
+        set("s", &JsValue::from(p.slot));
+        set("k", &JsValue::from(kind));
+        set("g", &JsValue::from(gain));
+        entries.push(&entry);
+    }
+    let out = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&out, &JsValue::from_str("e"), &entries);
+    let _ = js_sys::Reflect::set(&out, &JsValue::from_str("quiet"), &JsValue::from(deafened));
     out.into()
 }
 
@@ -368,6 +668,10 @@ pub fn call_link_close(id: u32) {
 
 // --- Commands ---------------------------------------------------------------------
 
+fn member(a: &Args) -> Result<nostr_sdk::prelude::PublicKey, String> {
+    nostr_sdk::prelude::PublicKey::parse(&a.str("npub")?).map_err(|e| e.to_string())
+}
+
 pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Option<Result<Value, String>>> + 'a>> {
     Box::pin(async move {
         let result = match cmd {
@@ -427,6 +731,54 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 Err(e) => Err(e),
             },
             "call_status" => to_value(session::snapshot()),
+            "voice_join" => match (a.str("communityId"), a.str("channelId")) {
+                (Ok(c), Ok(ch)) => vector_core::db::scoped_result(async move { voice::join(&c, &ch).await }).await.and_then(to_value),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            },
+            "voice_leave" => {
+                vector_core::db::scoped(voice::leave()).await;
+                Ok(Value::Null)
+            }
+            "voice_state" => to_value(vector_core::db::scoped(async { voice::snapshot() }).await),
+            "voice_set_muted" => match a.bool("on") {
+                Some(on) => vector_core::db::scoped_result(async move { voice::set_muted(on) }).await.map(|_| Value::Null),
+                None => Err("Missing on".into()),
+            },
+            "voice_set_deafened" => match a.bool("on") {
+                Some(on) => vector_core::db::scoped_result(async move { voice::set_deafened(on) }).await.map(|_| Value::Null),
+                None => Err("Missing on".into()),
+            },
+            "voice_video" => match (a.de::<VideoKind>("kind"), a.bool("on")) {
+                (Ok(kind), Some(on)) => vector_core::db::scoped_result(async move { voice::set_video(kind, on) }).await.map(|_| Value::Null),
+                (Err(e), _) => Err(e),
+                (_, None) => Err("Missing on".into()),
+            },
+            "voice_watch" => match member(a) {
+                Ok(pk) => {
+                    let want = Tracks { camera: a.bool("camera").unwrap_or(false), screen: a.bool("screen").unwrap_or(false) };
+                    vector_core::db::scoped_result(async move { voice::watch(&pk, want) }).await.map(|_| Value::Null)
+                }
+                Err(e) => Err(e),
+            },
+            "voice_set_volume" => match (member(a), a.de::<f32>("volume")) {
+                (Ok(pk), Ok(volume)) => vector_core::db::scoped_result(async move { voice::set_peer_volume(&pk, volume) }).await.map(|_| Value::Null),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            },
+            "voice_moderate" => match (a.str("communityId"), a.str("channelId"), member(a), a.str("action")) {
+                (Ok(c), Ok(ch), Ok(pk), Ok(action)) => {
+                    let to = a.opt_str("to");
+                    vector_core::db::scoped_result(async move { voice::moderate(&c, &ch, &pk, &action, to.as_deref()).await }).await.map(|_| Value::Null)
+                }
+                (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), _) | (.., Err(e)) => Err(e),
+            },
+            "voice_powers" => match (a.str("communityId"), member(a)) {
+                (Ok(c), Ok(pk)) => to_value(vector_core::db::scoped(async move { voice::powers(&c, &pk) }).await),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            },
+            "voice_present" => match a.str("channelId") {
+                Ok(ch) => to_value(vector_core::db::scoped(async move { voice::in_call(&ch) }).await),
+                Err(e) => Err(e),
+            },
             _ => return None,
         };
         Some(result)

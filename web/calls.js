@@ -79,9 +79,9 @@
 
     function stopGraph() {
         if (!graph) return;
-        graph.mic.port.postMessage({ stop: true });
+        graph.mic?.port.postMessage({ stop: true });
         graph.spk.port.postMessage({ stop: true });
-        for (const node of [graph.src, graph.mic, graph.sink, graph.spk]) node.disconnect();
+        for (const node of [graph.src, graph.mic, graph.sink, graph.spk]) node?.disconnect();
         graph = null;
     }
 
@@ -99,27 +99,39 @@
         if (!test) ctx?.suspend().catch(() => {});
     }
 
-    async function startGraph() {
+    async function startGraph(voice) {
         try {
-            await prepare();
+            try {
+                await prepare();
+            } catch (e) {
+                // A voice call still plays without a microphone; a 1:1 call does not start.
+                if (!voice || !supported()) throw e;
+                context();
+                worklets ??= ctx.audioWorklet.addModule('/web/calls-worklet.js');
+                await worklets;
+            }
             stopGraph();
-            const src = ctx.createMediaStreamSource(mic);
-            const micNode = new AudioWorkletNode(ctx, 'vector-mic', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
-            // A silent path to the output keeps the capture node pulled on every engine.
-            const sink = ctx.createGain();
-            sink.gain.value = 0;
-            src.connect(micNode);
-            micNode.connect(sink);
-            sink.connect(ctx.destination);
+            const toMic = new MessageChannel();
+            let src = null, micNode = null, sink = null;
+            if (mic) {
+                src = ctx.createMediaStreamSource(mic);
+                micNode = new AudioWorkletNode(ctx, 'vector-mic', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
+                // A silent path to the output keeps the capture node pulled on every engine.
+                sink = ctx.createGain();
+                sink.gain.value = 0;
+                src.connect(micNode);
+                micNode.connect(sink);
+                sink.connect(ctx.destination);
+            }
             const spk = new AudioWorkletNode(ctx, 'vector-speaker', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
             // A media element that failed to start leaves the context's own output, which still plays.
             spk.connect(out?.playing ? out.dest : ctx.destination);
-            const toMic = new MessageChannel();
             const toSpk = new MessageChannel();
-            micNode.port.postMessage({ port: toMic.port1, rate: ctx.sampleRate }, [toMic.port1]);
+            micNode?.port.postMessage({ port: toMic.port1, rate: ctx.sampleRate }, [toMic.port1]);
             spk.port.postMessage({ port: toSpk.port1, rate: ctx.sampleRate }, [toSpk.port1]);
             graph = { src, mic: micNode, sink, spk };
-            web.callPost({ t: 'call-ports', mic: toMic.port2, spk: toSpk.port2 }, [toMic.port2, toSpk.port2]);
+            if (micNode) web.callPost({ t: 'call-ports', mic: toMic.port2, spk: toSpk.port2 }, [toMic.port2, toSpk.port2]);
+            else web.callPost({ t: 'call-ports', mic: null, spk: toSpk.port2 }, [toSpk.port2]);
         } catch (e) {
             web.callPost({ t: 'call-failed', error: micMessage(e) });
         }
@@ -140,10 +152,39 @@
         } catch (_) {}
     }
 
+    /** A voice call's cues, the same two notes as desktop's: up for arrivals and unmuting. */
+    const CHIMES = {
+        joined: [523.25, 783.99, 120, 0.22], left: [783.99, 523.25, 120, 0.22],
+        peer_joined: [659.25, 880.0, 90, 0.16], peer_left: [880.0, 659.25, 90, 0.16],
+        unmuted: [740.0, 987.77, 45, 0.12], muted: [987.77, 740.0, 45, 0.12],
+    };
+    function voiceChime(cue) {
+        const c = ctx;
+        const note = CHIMES[cue];
+        if (!c || !note || c.state !== 'running') return;
+        const [a, b, ms, peak] = note;
+        const len = ms / 1000;
+        [a, b].forEach((freq, i) => {
+            const at = c.currentTime + i * len;
+            const osc = c.createOscillator();
+            const gain = c.createGain();
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0, at);
+            gain.gain.linearRampToValueAtTime(peak * (i ? 1 : 0.85), at + 0.005);
+            gain.gain.exponentialRampToValueAtTime(0.0001, at + len);
+            osc.connect(gain).connect(out?.playing ? out.dest : c.destination);
+            osc.start(at);
+            osc.stop(at + len);
+        });
+    }
+
     web.onCall = (msg) => {
         switch (msg.op) {
+            case 'chime':
+                voiceChime(msg.cue);
+                break;
             case 'start':
-                startGraph();
+                startGraph(!!msg.voice);
                 break;
             case 'stop':
                 release();
@@ -165,6 +206,12 @@
         );
     register('call_start', withAudio('call_start'));
     register('call_accept', withAudio('call_accept'));
+    // Joining a voice channel is a tap too; the call may still go on without a microphone.
+    register('voice_join', (args) =>
+        prepare().then(
+            () => backend('voice_join', args).catch((e) => { release(); throw e; }),
+            () => { release(); return backend('voice_join', args); },
+        ));
 
     // The video worker's link to the backend: a port where desktop hands out a socket URL.
     register('call_video_link', () => {

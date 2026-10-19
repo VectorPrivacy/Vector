@@ -4162,8 +4162,8 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
   cursor: pointer;
 }
 .voice-screen-btn:hover { background: rgba(255, 255, 255, 0.22); }
-.voice-screen-btn svg { width: 16px; height: 16px; }
-.voice-screen-btn .icon { position: static; width: 12px; height: 12px; margin: 0; background-color: #fff; }
+.voice-screen-btn svg { flex: none; width: 16px; height: 16px; }
+.voice-screen-btn .icon { position: static; flex: none; width: 12px; height: 12px; margin: 0; background-color: #fff; }
 .voice-tile-avatar {
   position: relative;
   display: flex;

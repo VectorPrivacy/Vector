@@ -465,6 +465,74 @@ pub fn nudge(channel_hex: &str) {
     }
 }
 
+/// A member in a voice Channel's call, as every client lists them.
+#[derive(Clone, Debug, Serialize)]
+pub struct InCall {
+    pub npub: String,
+    /// Their own mute or deafen, or a moderator's.
+    pub muted: bool,
+    pub deafened: bool,
+    pub server_muted: bool,
+    pub server_deafened: bool,
+    pub screen: bool,
+    pub camera: bool,
+    /// In the call on another transport: out of reach of ours.
+    pub elsewhere: bool,
+}
+
+/// Who is in a voice Channel's call now, whether or not we are, earliest first.
+pub fn in_call(channel_hex: &str) -> Vec<InCall> {
+    presence::present(channel_hex, now_ms())
+        .into_iter()
+        .filter_map(|p| {
+            let elsewhere = p.transport.as_deref() != Some(crate::community::v2::chat::TRANSPORT_IROH);
+            Some(InCall {
+                npub: p.author.to_bech32().ok()?,
+                muted: p.muted || p.server_muted,
+                deafened: p.deafened || p.server_deafened,
+                server_muted: p.server_muted,
+                server_deafened: p.server_deafened,
+                screen: p.screen,
+                camera: p.camera,
+                elsewhere,
+            })
+        })
+        .collect()
+}
+
+/// What this account may do to a member in a voice call.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct Powers {
+    pub mute: bool,
+    pub deafen: bool,
+    #[serde(rename = "move")]
+    pub move_: bool,
+}
+
+/// Our moderation powers over `target` in `community`: never over ourselves or the owner.
+pub fn powers(community_id: &str, target: &PublicKey) -> Powers {
+    let Some(me) = crate::state::my_public_key() else { return Powers::default() };
+    let Some(id) = crate::simd::hex::hex_to_bytes_32_checked(community_id) else { return Powers::default() };
+    let Ok(Some(community)) = crate::db::community::load_community_v2(&CommunityId(id)) else { return Powers::default() };
+    let owner = community.owner().ok().map(|o| o.to_hex());
+    let roles = crate::db::community::get_community_roles(community_id).unwrap_or_default();
+    let (me, them) = (me.to_hex(), target.to_hex());
+    let can = |bit: u64| me != them && owner.as_deref() != Some(them.as_str()) && (owner.as_deref() == Some(me.as_str()) || roles.can_act_on_member(&me, owner.as_deref(), &them, bit));
+    Powers { mute: can(Permissions::MUTE_MEMBERS), deafen: can(Permissions::DEAFEN_MEMBERS), move_: can(Permissions::MOVE_MEMBERS) }
+}
+
+/// Mute, deafen, move or disconnect `target` in a voice Channel's call, as a moderator
+/// (CORD-07 §7). `to` names the Channel a move sends them to.
+pub async fn moderate(community_id: &str, channel_id: &str, target: &PublicKey, action: &str, to: Option<&str>) -> Result<(), String> {
+    let directive = presence::Directive::parse(action).ok_or("unknown action")?;
+    let id = CommunityId(crate::simd::hex::hex_to_bytes_32_checked(community_id).ok_or("bad community id")?);
+    let channel = ChannelId(crate::simd::hex::hex_to_bytes_32_checked(channel_id).ok_or("bad channel id")?);
+    let to = to.map(|t| crate::simd::hex::hex_to_bytes_32_checked(t).ok_or("bad channel id")).transpose()?;
+    let community = held(&id)?;
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    crate::community::v2::service::send_voice_directive(&transport, &community, &channel, target, directive, to).await
+}
+
 pub fn snapshot() -> Option<VoiceState> {
     live().map(|v| state(&v))
 }

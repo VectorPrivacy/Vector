@@ -1,7 +1,7 @@
 // Vector Web calls, the worker's half: Opus through WebCodecs, between the page's
 // audio worklets and the engine in Rust (crates/vector-web/src/calls.rs), which
 // owns the datagrams, the jitter buffer and the rate ladder.
-import { call_audio_frame, call_audio_level, call_audio_pull, call_audio_ready, call_audio_starved, call_link_close, call_link_open, call_link_send } from './pkg/vector_web.js';
+import { call_audio_frame, call_audio_level, call_audio_pull, call_audio_ready, call_audio_starved, call_link_close, call_link_open, call_link_send, voice_audio_level, voice_audio_pull, voice_set_mic } from './pkg/vector_web.js';
 
 const RATE = 48000;
 const FRAME = 960;
@@ -62,6 +62,12 @@ export function onSink(op, json, bytes) {
         case 'ended':
             postMessage({ t: 'call', op: 'ended' });
             break;
+        case 'voice-peer-gone':
+            dropPeer(p.slot);
+            break;
+        case 'chime':
+            postMessage({ t: 'call', op: 'chime', cue: p.cue });
+            break;
     }
 }
 
@@ -71,9 +77,9 @@ function begin(p) {
         call_audio_ready("This browser can't encode call audio");
         return;
     }
-    call = { kbps: p.kbps, fec: p.fec, volume: p.volume ?? 1, micGain: 1, speakerGain: 1, enc: null, dec: null, mic: null, spk: null, ts: 0, dts: 0, slots: [], decoding: [], last: null };
+    call = { kbps: p.kbps, fec: p.fec, volume: p.volume ?? 1, micGain: 1, speakerGain: 1, enc: null, dec: null, mic: null, spk: null, ts: 0, dts: 0, slots: [], decoding: [], last: null, voice: !!p.voice, peers: new Map() };
     applySettings(p.settings);
-    postMessage({ t: 'call', op: 'start', settings: p.settings });
+    postMessage({ t: 'call', op: 'start', settings: p.settings, voice: call.voice });
 }
 
 function end() {
@@ -82,6 +88,7 @@ function end() {
     call = null;
     try { c.enc?.close(); } catch (_) {}
     try { c.dec?.close(); } catch (_) {}
+    for (const peer of c.peers.values()) try { peer.dec?.close(); } catch (_) {}
     c.mic?.close();
     c.spk?.close();
 }
@@ -125,20 +132,22 @@ export function onPageMessage(data) {
     }
     if (data.t !== 'call-ports') return;
     if (!call) {
-        data.mic.close();
+        data.mic?.close();
         data.spk.close();
         return;
     }
     try {
         call.enc = makeEncoder();
-        call.dec = makeDecoder();
+        if (!call.voice) call.dec = makeDecoder();
     } catch (e) {
         call_audio_ready(String(e?.message ?? e));
         return;
     }
     call.mic = data.mic;
     call.spk = data.spk;
-    call.mic.onmessage = ({ data }) => onMic(data);
+    // A voice call goes on without a microphone: heard by no one, hearing everyone.
+    if (call.mic) call.mic.onmessage = ({ data }) => onMic(data);
+    else voice_set_mic(false);
     call.spk.onmessage = ({ data }) => {
         if (data.starved) call_audio_starved(data.starved);
         else pull(data.ahead ?? 0);
@@ -243,6 +252,7 @@ function onMic(pcm) {
 /** The speaker's next frame, answered in the order asked even though decodes finish later. */
 function pull(ahead) {
     if (!call) return;
+    if (call.voice) return voicePull(ahead);
     const r = call_audio_pull(ahead);
     const slot = { pcm: null };
     call.slots.push(slot);
@@ -281,6 +291,101 @@ function conceal(run) {
     return out;
 }
 
+// ── A voice Channel's call: every peer's frame decoded on its own decoder, then mixed ──
+
+/** One peer of a voice call, by the engine's slot for it. */
+function peerOf(slot) {
+    let peer = call.peers.get(slot);
+    if (!peer) {
+        peer = { slot, dec: null, dts: 0, decoding: [], last: null };
+        call.peers.set(slot, peer);
+    }
+    return peer;
+}
+
+function dropPeer(slot) {
+    const peer = call?.peers.get(slot);
+    if (!peer) return;
+    call.peers.delete(slot);
+    try { peer.dec?.close(); } catch (_) {}
+    for (const job of peer.decoding.splice(0)) done(job.slot);
+}
+
+function makePeerDecoder(peer) {
+    const dec = new AudioDecoder({
+        output: (data) => {
+            const pcm = toMono48k(data);
+            data.close();
+            peer.last = pcm;
+            voice_audio_level(peer.slot, level(pcm));
+            const job = peer.decoding.shift();
+            if (!job) return;
+            mixInto(job.slot.mix, pcm, job.gain);
+            done(job.slot);
+        },
+        error: (e) => {
+            console.warn('[voice] decoder:', e?.message ?? e);
+            if (peer.dec !== dec) return;
+            peer.dec = null;
+            for (const job of peer.decoding.splice(0)) done(job.slot);
+        },
+    });
+    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: 1 });
+    return dec;
+}
+
+function mixInto(mix, pcm, gain) {
+    const n = Math.min(mix.length, pcm.length);
+    for (let i = 0; i < n; i++) mix[i] += pcm[i] * gain;
+}
+
+/** One of a mixed frame's decodes landed; the last one finishes the frame. */
+function done(slot) {
+    if (--slot.pending > 0) return;
+    const mix = slot.mix;
+    for (let i = 0; i < mix.length; i++) mix[i] = softClip(mix[i]);
+    slot.pcm = mix;
+    flush();
+}
+
+/** Loud sums bend instead of breaking, as desktop's mixer does. */
+function softClip(x) {
+    const knee = 0.8;
+    const a = Math.abs(x);
+    if (a <= knee) return x;
+    return Math.sign(x) * (knee + (1 - knee) * Math.tanh((a - knee) / (1 - knee)));
+}
+
+function voicePull(ahead) {
+    const r = voice_audio_pull(ahead);
+    const slot = { pcm: null, mix: null, pending: 1 };
+    call.slots.push(slot);
+    if (!r || (!r.e.length && !r.quiet)) {
+        slot.pcm = NONE;
+        flush();
+        return;
+    }
+    slot.mix = new Float32Array(FRAME);
+    for (const x of r.e) {
+        const peer = peerOf(x.s);
+        if (x.k === 1) {
+            if (!peer.dec) {
+                try { peer.dec = makePeerDecoder(peer); } catch (_) {}
+            }
+            if (!peer.dec) continue;
+            slot.pending++;
+            peer.decoding.push({ slot, gain: x.g });
+            peer.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: peer.dts, data: x.d }));
+            peer.dts += FRAME_US;
+        } else if (x.k === 3 && peer.last && x.run <= 1) {
+            // The last frame fading to nothing, as a 1:1 call conceals.
+            const last = peer.last;
+            for (let i = 0; i < slot.mix.length && i < last.length; i++) slot.mix[i] += last[i] * x.g * (1 - i / last.length);
+        }
+    }
+    done(slot);
+}
+
 function flush() {
     const c = call;
     if (!c) return;
@@ -290,7 +395,7 @@ function flush() {
             c.spk?.postMessage({});
             continue;
         }
-        call_audio_level(true, level(pcm));
+        if (!c.voice) call_audio_level(true, level(pcm));
         const gain = c.speakerGain * c.volume;
         if (gain !== 1) for (let i = 0; i < pcm.length; i++) pcm[i] = Math.max(-1, Math.min(1, pcm[i] * gain));
         c.spk?.postMessage({ pcm }, [pcm.buffer]);
