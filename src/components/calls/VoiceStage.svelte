@@ -3,6 +3,7 @@
     // and joining it, or the call's own controls once in.
     import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, voiceJoining, SPEAKING } from '../lib/voice.svelte.js';
     import { openChatId, profileVersion } from '../lib/signals.svelte.js';
+    import { rttQuality } from '../lib/calls.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     const stage = $derived(voiceStage());
@@ -24,6 +25,7 @@
     // The call is as good as its slowest link: that round trip, once anyone is linked.
     const linked = $derived(inCall ? v.peers.filter((p) => p.connected && p.rtt_ms) : []);
     const ping = $derived(linked.length ? Math.max(...linked.map((p) => p.rtt_ms)) : 0);
+    const quality = $derived(rttQuality(ping));
     // Shared screens: whose are live, and the one on the stage. Ours shows only when picked.
     const sharing = (p) => p.screen || (p.npub === me && !!v?.sharing);
     const sharers = $derived(people.filter(sharing).map((p) => p.npub));
@@ -72,14 +74,19 @@
 </script>
 
 {#if shown}
-    <div class="voice-stage" class:voice-stage-live={inCall} class:voice-stage-expanded={expanded && !!viewing}>
+    <div class="voice-stage" class:voice-stage-expanded={expanded && !!viewing}>
         <div class="voice-stage-head">
-            <span class="icon icon-volume-max"></span>
-            <span class="voice-stage-title cutoff">{stage.name}</span>
-            {#if ping}
-                <span class="voice-stage-ping" class:is-slow={ping >= 150} class:is-bad={ping >= 300} title="Round trip to the slowest link in the call">{ping} ms</span>
-            {/if}
             <span class="voice-stage-count">{people.length ? `${people.length} in the call` : 'Nobody is here yet'}</span>
+            {#if inCall && v.sharing}
+                <span class="voice-stage-sharing">Sharing your screen{v.viewers ? ` · ${v.viewers} watching` : ''}</span>
+            {/if}
+            {#if inCall && !v.mic}
+                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                <span class="voice-stage-warn" onclick={() => h.micAccess?.()}>No microphone access: others can't hear you</span>
+            {/if}
+            {#if quality}
+                <span class="voice-stage-ping" title="Round trip to the slowest link in the call"><span class="call-dot call-dot-{quality}"></span>{ping} ms</span>
+            {/if}
         </div>
         {#if viewing}
             <div class="voice-screen">
@@ -123,7 +130,7 @@
                                     <canvas class="voice-tile-video" use:videoCanvas={[keyOf(p.npub), 'camera']}></canvas>
                                 {/key}
                             {:else}
-                                <Avatar src={h.avatarSrc?.(p.npub)} size={56} />
+                                <Avatar src={h.avatarSrc?.(p.npub)} size={viewing ? 40 : 64} />
                             {/if}
                             {#if p.muted || p.deafened}
                                 {@const server = p.deafened ? p.server_deafened : p.server_muted}
@@ -141,21 +148,6 @@
         {/if}
         <div class="voice-stage-actions">
             {#if inCall}
-                {#if !v.mic}
-                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                    <span class="voice-stage-warn" onclick={() => h.micAccess?.()}>No microphone access: others can't hear you</span>
-                {/if}
-                <button class="call-btn" class:call-btn-on={micOff} class:call-btn-locked={v.serverMuted}
-                        title={v.serverMuted ? 'Muted by a moderator' : `${micOff ? 'Unmute' : 'Mute'} (${h.keyHint?.('M')})`} onclick={toggleMic}>
-                    <span class="icon" class:icon-mic-off={micOff} class:icon-mic-on={!micOff}></span>
-                </button>
-                <button class="call-btn" class:call-btn-on={v.deafened || v.serverDeafened} class:call-btn-locked={v.serverDeafened}
-                        title={v.serverDeafened ? 'Deafened by a moderator' : `${v.deafened ? 'Undeafen' : 'Deafen'} (${h.keyHint?.('D')})`} onclick={() => h.setDeafened(!(v.deafened || v.serverDeafened))}>
-                    <span class="icon" class:icon-volume-mute={v.deafened || v.serverDeafened} class:icon-volume-max={!v.deafened && !v.serverDeafened}></span>
-                </button>
-                {#if v.sharing}
-                    <span class="voice-stage-sharing">Sharing your screen{v.viewers ? ` · ${v.viewers} watching` : ''}</span>
-                {/if}
                 {#if v.canVideo && h.canCamera?.()}
                     <button class="call-btn" class:call-btn-on={v.camera} title={v.camera ? 'Turn your camera off' : 'Turn your camera on'} onclick={() => h.camera?.(!v.camera)}>
                         <span class="icon icon-video"></span>
@@ -166,7 +158,19 @@
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
-                <button class="voice-stage-leave" onclick={() => h.leave()}>Leave</button>
+                <button class="call-btn" class:call-btn-on={micOff} class:call-btn-locked={v.serverMuted}
+                        title={v.serverMuted ? 'Muted by a moderator' : `${micOff ? 'Unmute' : 'Mute'} (${h.keyHint?.('M')})`} onclick={toggleMic}>
+                    <span class="icon" class:icon-mic-off={micOff} class:icon-mic-on={!micOff}></span>
+                </button>
+                <button class="call-btn" class:call-btn-on={v.deafened || v.serverDeafened} class:call-btn-locked={v.serverDeafened}
+                        title={v.serverDeafened ? 'Deafened by a moderator' : `${v.deafened ? 'Undeafen' : 'Deafen'} (${h.keyHint?.('D')})`} onclick={() => h.setDeafened(!(v.deafened || v.serverDeafened))}>
+                    <span class="icon" class:icon-volume-mute={v.deafened || v.serverDeafened} class:icon-volume-max={!v.deafened && !v.serverDeafened}></span>
+                </button>
+                <button class="call-btn call-btn-hangup" title="Leave the call" onclick={() => h.leave()}>
+                    <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
             {:else}
                 <button class="voice-stage-join" disabled={joining} onclick={join}>{joining ? 'Joining…' : 'Join Voice'}</button>
             {/if}

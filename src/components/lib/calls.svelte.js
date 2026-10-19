@@ -148,10 +148,17 @@ function qualityOf(history) {
     const recent = history.slice(-10);
     if (!recent.length) return null;
     const avg = (k) => recent.reduce((a, r) => a + r[k], 0) / recent.length;
-    const lost = avg('lost');
-    const rtt = avg('rtt');
+    return grade(avg('lost'), avg('rtt'));
+}
+
+function grade(lost, rtt) {
     if (lost < 0.5 && rtt < 150) return 'excellent';
     if (lost < 2 && rtt < 300) return 'good';
     if (lost < 5 && rtt < 500) return 'fair';
     return 'poor';
+}
+
+/** A call's grade on the same tiers from its round trip alone, for a call that reports no loss. */
+export function rttQuality(rtt) {
+    return rtt > 0 ? grade(0, rtt) : null;
 }

@@ -3997,18 +3997,15 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   line-height: 14px;
 }
 
-/* A voice channel's stage, above its chat. */
+/* A voice channel's stage, above its chat: the call pill's surface, as one of the app's panels. */
 .voice-stage {
   position: relative;
   z-index: 2;
   margin: 8px 16px 0;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-.voice-stage-live {
-  border-color: rgba(89, 252, 179, 0.25);
+  padding: 12px 14px 14px;
+  border-radius: 16px;
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid #262626;
 }
 .voice-stage-ping {
   display: inline-flex;
@@ -4016,19 +4013,9 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   gap: 5px;
   margin-left: auto;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.55);
+  color: #b2b2b2;
   font-variant-numeric: tabular-nums;
 }
-.voice-stage-ping::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--icon-color-primary, #59fcb3);
-}
-.voice-stage-ping.is-slow::before { background: #f5c451; }
-.voice-stage-ping.is-bad::before { background: var(--danger-color); }
-.voice-stage-ping + .voice-stage-count { margin-left: 12px; }
 /* Narrow: the header floats over the pane, so the stage clears it and the messages
    below need no clearance of their own. */
 body:not(.ws) .voice-stage { margin-top: 68px; }
@@ -4037,63 +4024,88 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
-  color: #fff;
-}
-.voice-stage-head .icon {
-  position: static;
-  flex: none;
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  background-color: currentColor;
-  opacity: 0.7;
-}
-.voice-stage-title {
-  font-weight: 600;
 }
 .voice-stage-count {
-  margin-left: auto;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
+  color: #b2b2b2;
 }
+/* Every tile is the same card, gathered in the middle however wide the pane; a camera fills
+   its card, an avatar sits centred in one. */
 .voice-stage-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 240px));
+  justify-content: center;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 10px;
 }
 .voice-tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 10px 6px;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  aspect-ratio: 16 / 10;
+  padding: 10px 8px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.04);
   min-width: 0;
+  overflow: hidden;
+}
+/* Narrow: two across, a little taller, so a call of two never stacks down the screen. */
+body:not(.ws) .voice-stage-grid {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+body:not(.ws) .voice-tile {
+  aspect-ratio: 4 / 3;
+}
+/* A screen on the stage is what people look at: the tiles shrink to a strip beneath it. */
+.voice-stage:has(.voice-screen) .voice-stage-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 150px));
+}
+.voice-stage:has(.voice-screen) .voice-tile {
+  gap: 4px;
+  padding: 6px;
 }
 .voice-tile.is-pending {
   opacity: 0.55;
 }
 .voice-tile { position: relative; }
 .voice-tile.is-sharing { cursor: pointer; }
-.voice-tile.is-viewing { box-shadow: inset 0 0 0 1px rgba(89, 252, 179, 0.45); }
+.voice-tile.is-viewing { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent); }
 /* A camera in place of the avatar: the tile widens to a picture. */
-.voice-tile.has-cam { grid-column: span 2; }
+.voice-tile.has-cam { padding: 0; }
 .voice-tile-avatar.voice-tile-cam {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border-radius: 10px;
-  overflow: hidden;
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
   background: #000;
+  box-shadow: none;
 }
+/* The speaking ring, drawn over the picture since the picture fills the card. */
+.voice-tile-avatar.voice-tile-cam::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent-color, #59fcb3) calc(var(--talk, 0) * 95%), transparent);
+  pointer-events: none;
+}
+.voice-tile.has-cam .voice-tile-name {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 48px);
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+}
+.voice-tile.has-cam .voice-tile-note { display: none; }
 .voice-tile-video {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 10px;
 }
 .voice-tile-cam .voice-tile-badge { right: 6px; bottom: 6px; }
 .voice-tile-live {
@@ -4123,7 +4135,7 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
 .voice-screen-media {
   display: block;
   max-width: 100%;
-  max-height: 46vh;
+  max-height: 42vh;
   object-fit: contain;
   background: #000;
 }
@@ -4169,8 +4181,8 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
   display: flex;
   border-radius: 50%;
   box-shadow:
-    0 0 0 2px rgba(89, 252, 179, calc(var(--talk, 0) * 0.95)),
-    0 0 calc(var(--talk, 0) * 14px) rgba(89, 252, 179, calc(var(--talk, 0) * 0.6));
+    0 0 0 2px color-mix(in srgb, var(--accent-color, #59fcb3) calc(var(--talk, 0) * 95%), transparent),
+    0 0 calc(var(--talk, 0) * 14px) color-mix(in srgb, var(--accent-color, #59fcb3) calc(var(--talk, 0) * 60%), transparent);
   transition: box-shadow 0.1s linear;
 }
 .voice-tile-badge {
@@ -4197,8 +4209,9 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
 .voice-tile-badge.is-server .icon { background-color: #fff; }
 .voice-tile-name {
   max-width: 100%;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-color, #f6f6f6);
 }
 .voice-tile-note {
   font-size: 10px;
@@ -4207,56 +4220,59 @@ body:not(.ws) #chat:has(> .voice-stage) .chat-messages { padding-top: 12px; }
 .voice-stage-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 8px;
   margin-top: 12px;
 }
-.voice-stage-warn {
-  margin-right: auto;
+.voice-stage-warn,
+.voice-stage-sharing {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
+}
+.voice-stage-warn {
   color: var(--status-fair);
   cursor: pointer;
 }
 .voice-stage-sharing {
-  margin-right: auto;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--accent-color, #59fcb3);
 }
-.voice-stage-warn + .voice-stage-sharing { margin-right: auto; margin-left: 12px; }
-.voice-stage-join,
-.voice-stage-leave {
-  height: 32px;
-  padding: 0 16px;
-  border-radius: 10px;
-  border: none;
-  font-weight: 600;
-  cursor: pointer;
+.voice-stage-sharing::before,
+.voice-stage-warn::before {
+  content: '·';
+  margin-right: 8px;
+  color: #b2b2b2;
 }
 .voice-stage-join {
-  background: #59fcb3;
-  color: #04120b;
+  height: 34px;
+  padding: 0 18px;
+  border-radius: 17px;
+  border: none;
+  background-color: var(--accent-color, #59fcb3);
+  color: #000;
+  font-weight: 600;
+  cursor: pointer;
 }
 .voice-stage-join:disabled {
   opacity: 0.6;
   cursor: default;
 }
-.voice-stage-leave {
-  background: var(--danger-color);
-  color: #fff;
-}
 
-/* The voice bar sits in the pill's place; the 1:1 call never runs beside it. */
-.voice-bar .call-pill-text {
-  cursor: pointer;
+/* The voice bar is the 1:1 call's pill, one button wider; the two never run together. */
+.call-pill.voice-bar {
+  max-width: min(420px, calc(100% - 24px));
 }
 .voice-bar .call-pill-name .icon {
   position: static;
   display: inline-block;
   width: 12px;
   height: 12px;
-  margin: 0 2px 0 0;
+  margin: 0 4px 0 0;
   vertical-align: -1px;
   background-color: currentColor;
+  opacity: 0.7;
 }
 
 .chatlist-channel-badge {
@@ -28030,8 +28046,8 @@ body.profile-switcher-editing .profile-switcher-add {
   flex: none;
   border-radius: 50%;
   box-shadow:
-    0 0 0 2px rgba(89, 252, 179, calc(0.12 + var(--talk, 0) * 0.88)),
-    0 0 calc(var(--talk, 0) * 12px) rgba(89, 252, 179, calc(var(--talk, 0) * 0.7));
+    0 0 0 2px color-mix(in srgb, var(--accent-color, #59fcb3) calc(12% + var(--talk, 0) * 88%), transparent),
+    0 0 calc(var(--talk, 0) * 12px) color-mix(in srgb, var(--accent-color, #59fcb3) calc(var(--talk, 0) * 70%), transparent);
   transition: box-shadow 0.1s linear;
 }
 

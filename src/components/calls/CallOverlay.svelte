@@ -11,6 +11,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
+    import { loadPillPos, savePillPos, clampPill, pillDrag } from '../lib/call-pill.js';
 
     /**
      * @typedef {object} CallHelpers
@@ -172,57 +173,13 @@
     };
 
     // ── the pill's place: dragged anywhere, remembered per device ──
-    const POS_KEY = 'call_pill_pos';
-    let pos = $state(loadPos());
+    let pos = $state(loadPillPos());
     let expanded = $state(false);
     let pill = $state(null);
-    let drag = null;
-    function loadPos() {
-        try {
-            const p = JSON.parse(localStorage.getItem(POS_KEY));
-            if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return p;
-        } catch (_) {}
-        return null;
-    }
-    function savePos() {
-        try { localStorage.setItem(POS_KEY, JSON.stringify(pos)); } catch (_) {}
-    }
-    // The window chrome's strip is off limits: the pill must never cover its buttons.
-    function chromeHeight() {
-        const v = parseFloat(getComputedStyle(document.body).getPropertyValue('--chrome-h'));
-        return Number.isFinite(v) ? v : 0;
-    }
     function clamp(p, w = pill?.offsetWidth || 300) {
-        const hgt = pill?.offsetHeight || 48;
-        const top = chromeHeight() + 8;
-        const x = Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8));
-        const y = Math.min(Math.max(top, p.y), Math.max(top, window.innerHeight - hgt - 8));
-        // The same object when nothing moved, so a re-clamp never counts as a change.
-        return x === p.x && y === p.y ? p : { x, y };
+        return clampPill(p, w, pill?.offsetHeight || 48);
     }
-    function onPointerDown(e) {
-        if (e.button !== 0 || e.target.closest('button, input, a')) return;
-        const r = pill.getBoundingClientRect();
-        drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
-        // Capture on the row that listens, so its own pointerup ends the drag.
-        e.currentTarget.setPointerCapture(e.pointerId);
-    }
-    function onPointerMove(e) {
-        if (!drag) return;
-        const dx = e.clientX - drag.sx;
-        const dy = e.clientY - drag.sy;
-        // A few pixels of slop separate a tap from a drag.
-        if (!drag.moved && Math.hypot(dx, dy) < 4) return;
-        drag.moved = true;
-        pos = clamp({ x: drag.ox + dx, y: drag.oy + dy });
-    }
-    function onPointerUp() {
-        if (!drag) return;
-        const moved = drag.moved;
-        drag = null;
-        if (moved) { home = null; savePos(); }
-        else toggle();
-    }
+    const dragger = pillDrag(() => pill, (p) => { pos = clamp(p); }, () => { home = null; savePillPos(pos); }, () => toggle());
 
     // Width is animated by hand: the closed pill hugs its content, which CSS cannot
     // tween from, so the width is pinned for the transition and released after.
@@ -408,7 +365,7 @@
          style={placement} bind:this={pill}>
         <!-- Only the header row drags or toggles; what is below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
+        <div class="call-pill-row" onpointerdown={dragger.down} onpointermove={dragger.move} onpointerup={dragger.up} onpointercancel={dragger.up}>
             <span class="call-pill-avatar" style="--talk: {talk.toFixed(2)}">
                 <Avatar src={peer?.avatar} size={30} />
             </span>

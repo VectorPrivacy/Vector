@@ -258,7 +258,11 @@ function registerVoiceScreen() {
             keyHint: (key) => voiceKeyHint(key),
             share: (on) => startVideo('screen', on),
             camera: (on) => startVideo('camera', on),
+            canShare: () => !!window.VideoEncoder && !!navigator.mediaDevices?.getDisplayMedia,
+            canCamera: () => !!window.VideoEncoder && !!navigator.mediaDevices?.getUserMedia,
             channelName: (communityId, channelId) => voiceChannelOf(communityId, channelId)?.name || 'Voice',
+            communityAvatar: (communityId) => findCommunityChat(communityId)?.metadata?.avatar_cached || null,
+            convertFileSrc: (p) => convertFileSrc(p),
             openChannel: (communityId, channelId) => {
                 const ch = voiceChannelOf(communityId, channelId);
                 if (ch) openCommunityChannel(communityId, ch);

@@ -2,7 +2,8 @@
 // channel the chat pane last opened (its stage shows while that channel is on screen).
 // focus: whose shared screen the stage shows; null picks the first sharer, '' shows none.
 // joining: the voice channel a join is under way for.
-const live = $state({ session: null, stage: null, focus: null, joining: null });
+// since: when we joined the call, for its timer.
+const live = $state({ session: null, stage: null, focus: null, joining: null, since: 0 });
 const rooms = $state({});
 let handlers = {};
 
@@ -10,6 +11,8 @@ export function voiceSession() { return live.session; }
 
 /** The backend's voice state; null once out of the call. */
 export function setVoiceSession(s) {
+    if (!s) live.since = 0;
+    else if (!live.session || live.session.channelId !== s.channel_id) live.since = Date.now();
     live.session = s ? {
         communityId: s.community_id, channelId: s.channel_id, peers: s.peers || [],
         muted: !!s.muted, deafened: !!s.deafened, audio: !!s.audio, micLevel: s.mic_level || 0,
@@ -18,6 +21,9 @@ export function setVoiceSession(s) {
     } : null;
     if (!s) live.focus = null;
 }
+
+/** When we joined the call we are in, in ms; 0 when in none. */
+export function voiceSince() { return live.since; }
 
 export function voiceJoining() { return live.joining; }
 export function setVoiceJoining(channelId) { live.joining = channelId || null; }
