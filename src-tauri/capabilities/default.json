@@ -146,6 +146,7 @@
     "allow-sync-community-channel",
     "allow-sync-communities-boot",
     "allow-debug-v2-community-state",
+    "allow-debug-v2-control-editions",
     "allow-debug-v2-probe-rekey-planes",
     "allow-debug-v2-follow-trace",
     "allow-debug-v2-explain-base-rekey",

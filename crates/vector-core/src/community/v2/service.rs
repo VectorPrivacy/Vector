@@ -1664,6 +1664,41 @@ pub async fn community_is_public<T: Transport + ?Sized>(transport: &T, community
 /// comes from the community root they hold. `None` = it could NOT be read whole
 /// (transport failure, same-second wall, pager depth), so a caller must not mistake
 /// an empty fold for absence.
+/// Every Control edition on the relays, newest first, for forensics: who wrote what, and
+/// whether this client's fold kept a head for it. Content is cut short; it holds no secret.
+pub async fn debug_control_editions(community: &CommunityV2) -> Result<serde_json::Value, String> {
+    let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+    let mut editions = fetch_control_plane_whole(&transport, community).await.ok_or("the Control Plane couldn't be read whole")?;
+    editions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let heads: std::collections::HashMap<String, (u64, [u8; 32])> = crate::db::community::get_all_edition_heads_full(&cid_hex)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(entity, f)| (entity, (f.1, f.2)))
+        .collect();
+    let rows: Vec<serde_json::Value> = editions
+        .iter()
+        .map(|e| {
+            let eid = crate::simd::hex::bytes_to_hex_32(&e.entity_id);
+            let head = heads.get(&eid);
+            serde_json::json!({
+                "at": e.created_at,
+                "vsk": e.vsk,
+                "entity": &eid[..12],
+                "version": e.version,
+                "author": &e.author.to_hex()[..12],
+                "marked": e.binding.is_some(),
+                "cites": e.authority.is_some(),
+                "is_head": head.is_some_and(|h| h.1 == e.self_hash),
+                "head_version": head.map(|h| h.0),
+                "content": e.content.chars().take(240).collect::<String>(),
+            })
+        })
+        .collect();
+    let owner = community.owner().map(|o| o.to_hex()).unwrap_or_default();
+    Ok(serde_json::json!({ "owner": owner, "control_pk": community.control_pk.map(|p| p.to_hex()), "editions": rows }))
+}
+
 async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Option<Vec<ParsedEdition>> {
     let control = control::ControlPlane::of(community);
     let mut editions: Vec<ParsedEdition> = Vec::new();
@@ -22845,7 +22880,7 @@ mod tests {
         client.add_managed_relay(relay.as_str()).await.ok();
         client.connect().await;
         crate::state::set_nostr_client(client);
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
         let become_acct = |k: &Keys| {
             let npub = k.public_key().to_bech32().unwrap();
             crate::db::set_current_account(npub.clone()).unwrap();
@@ -31022,7 +31057,7 @@ mod tests {
         client.add_managed_relay(relay.as_str()).await.ok();
         client.connect().await;
         crate::state::set_nostr_client(client);
-        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
 
         // Create → send → fetch-back → verify.
         let community = create_community(&transport, "V2 Live Smoke", relays.clone(), None).await.expect("create");

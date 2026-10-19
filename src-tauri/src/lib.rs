@@ -1118,6 +1118,8 @@ pub fn run() {
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,
             #[cfg(debug_assertions)]
+            commands::community::debug_v2_control_editions,
+            #[cfg(debug_assertions)]
             commands::community::debug_v2_probe_rekey_planes,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_follow_trace,

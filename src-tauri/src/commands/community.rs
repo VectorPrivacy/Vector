@@ -1440,6 +1440,15 @@ async fn sync_community_channel_inner(
 /// guestbook cursor. NO secret material crosses this boundary — roots and keys
 /// are reported as epoch numbers, counts, and PUBLIC keys only. Pairs with the
 /// dev debug bridge for live epoch-wedge forensics.
+/// Every Control edition of a held v2 community, newest first, and whether the fold kept it.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_v2_control_editions(community_id: String) -> Result<serde_json::Value, String> {
+    let id = CommunityId(hex_to_id32(&community_id)?);
+    let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+    vector_core::community::v2::service::debug_control_editions(&c).await
+}
+
 #[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json::Value, String> {
