@@ -133,9 +133,13 @@
                                 <Avatar src={h.avatarSrc?.(p.npub)} size={viewing ? 40 : 64} />
                             {/if}
                             {#if p.muted || p.deafened}
-                                {@const server = p.deafened ? p.server_deafened : p.server_muted}
-                                <span class="voice-tile-badge" class:is-server={server} title={`${p.deafened ? 'Deafened' : 'Muted'}${server ? ' by a moderator' : ''}`}>
-                                    <span class="icon" class:icon-volume-mute={p.deafened} class:icon-mic-off={!p.deafened}></span>
+                                <span class="voice-tile-badges">
+                                    {#if p.muted}
+                                        <span class="voice-tile-badge" class:is-server={p.server_muted} title={p.server_muted ? 'Muted by a moderator' : 'Muted'}><span class="icon icon-mic-off"></span></span>
+                                    {/if}
+                                    {#if p.deafened}
+                                        <span class="voice-tile-badge" class:is-server={p.server_deafened} title={p.server_deafened ? 'Deafened by a moderator' : 'Deafened'}><span class="icon icon-volume-mute"></span></span>
+                                    {/if}
                                 </span>
                             {/if}
                         </div>

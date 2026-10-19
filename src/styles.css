@@ -4283,7 +4283,7 @@ body:not(.ws) .voice-tile {
   height: 100%;
   object-fit: cover;
 }
-.voice-tile-cam .voice-tile-badge { right: 6px; bottom: 6px; }
+.voice-tile-cam .voice-tile-badges { right: 6px; bottom: 6px; }
 .voice-tile-live {
   position: absolute;
   top: 6px;
@@ -4361,10 +4361,14 @@ body:not(.ws) .voice-tile {
     0 0 calc(var(--talk, 0) * 14px) color-mix(in srgb, var(--accent-color, #59fcb3) calc(var(--talk, 0) * 60%), transparent);
   transition: box-shadow 0.1s linear;
 }
-.voice-tile-badge {
+.voice-tile-badges {
   position: absolute;
   right: -4px;
   bottom: -4px;
+  display: flex;
+  gap: 2px;
+}
+.voice-tile-badge {
   display: flex;
   align-items: center;
   justify-content: center;
