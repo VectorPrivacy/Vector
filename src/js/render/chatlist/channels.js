@@ -96,6 +96,9 @@ function loadCommunityChannels() {
                 communityChanged(community.community_id);
                 leaveHiddenChannel(community.community_id);
             }
+            // The open channel's header reads its topic from what just reloaded.
+            const open = strOpenChat ? arrChats.find((c) => c.id === strOpenChat) : null;
+            if (open && communityIdOfChat(open)) setChatHeader(open);
         })
         .catch(() => {})
         .finally(() => { communityChannelsLoading = false; });
@@ -358,6 +361,9 @@ async function saveChannelEditor() {
             st.name = saved.name;
             st.topic = saved.topic;
             VectorSvelte.channelEditorSaved(saved);
+            const chat = arrChats.find((c) => c.id === channelId);
+            if (chat?.metadata?.custom_fields) chat.metadata.custom_fields.channel_name = saved.name;
+            if (chat && strOpenChat === channelId) setChatHeader(chat);
             refreshCommunityChannels();
         }
         if (VectorSvelte.overwriteDirty()) {
