@@ -37,6 +37,30 @@ pub(crate) const FLAG_MUTED: u16 = 1;
 /// Datagram flag: a frame of the shared screen's sound, stereo, its own sequence.
 pub(crate) const FLAG_SHARE: u16 = 2;
 
+/// The level counted as speech: the stage's speaking ring (`SPEAKING`) lights at the same.
+const SPEECH_LEVEL: f32 = 0.15;
+/// How long sending goes on after speech stops, so word endings and short pauses stay whole.
+const SPEECH_HANGOVER_MS: u32 = 400;
+
+/// A voice Channel's member sends only while speaking (CORD-07 §8); the rest of the time a
+/// muted frame keeps their liveness count moving at a fraction of the bytes.
+#[derive(Default)]
+struct SpeechGate {
+    hang: u32,
+}
+
+impl SpeechGate {
+    /// Whether this frame goes out as audio: the first frame at speech level opens the gate.
+    fn open(&mut self, level: f32) -> bool {
+        if level > SPEECH_LEVEL {
+            self.hang = SPEECH_HANGOVER_MS / FRAME_MS;
+        } else {
+            self.hang = self.hang.saturating_sub(1);
+        }
+        self.hang > 0
+    }
+}
+
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
 pub(crate) const PLAY_AHEAD_MS: u32 = 30;
@@ -443,6 +467,8 @@ pub(crate) fn capture_thread(
     let mut far_i16 = [0i16; FRAME];
     let mut clean = [0i16; FRAME];
     let mut packet = [0u8; 1500];
+    let gated = matches!(out, Some(Outbound::Many(_)));
+    let mut gate = SpeechGate::default();
     let started = Instant::now();
     let mut seq: u16 = stats.next_seq.load(Ordering::Relaxed) as u16;
     let mut netsim = NetSim::from_env();
@@ -502,7 +528,9 @@ pub(crate) fn capture_thread(
                     *s = (*s as f32 * gain) as i16;
                 }
             }
-            stats.mic_level.store(level_of(&clean).to_bits(), Ordering::Relaxed);
+            let level = level_of(&clean);
+            stats.mic_level.store(level.to_bits(), Ordering::Relaxed);
+            let speaking = gate.open(level);
 
             let Some(out) = out.as_ref() else {
                 seq = seq.wrapping_add(1);
@@ -510,7 +538,7 @@ pub(crate) fn capture_thread(
                 continue;
             };
             let ts = started.elapsed().as_millis() as u32;
-            let datagram = if silent || muted.load(Ordering::Relaxed) {
+            let datagram = if silent || muted.load(Ordering::Relaxed) || (gated && !speaking) {
                 pack(seq, ts, FLAG_MUTED, &[])
             } else {
                 match enc.encode(&clean, &mut packet) {
@@ -1016,5 +1044,24 @@ mod lag_probe_tests {
             probe.push(&zero, &zero, &zero);
         }
         assert!(probe.estimate().is_none());
+    }
+}
+
+#[cfg(test)]
+mod speech_gate_tests {
+    use super::*;
+
+    #[test]
+    fn speech_opens_the_gate_at_once_and_a_hangover_closes_it() {
+        let mut gate = SpeechGate::default();
+        assert!(!gate.open(0.0), "silence sends nothing");
+        assert!(!gate.open(SPEECH_LEVEL), "the threshold itself is not speech");
+        assert!(gate.open(0.4), "the first loud frame goes out");
+        let hang = SPEECH_HANGOVER_MS / FRAME_MS;
+        for _ in 1..hang {
+            assert!(gate.open(0.0), "a pause shorter than the hangover keeps sending");
+        }
+        assert!(!gate.open(0.0), "the hangover ends");
+        assert!(gate.open(0.3), "speech again reopens it");
     }
 }
