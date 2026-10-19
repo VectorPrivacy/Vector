@@ -35,6 +35,7 @@ export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/networ
 export { transportState, setTransportView, setTransportViewKind, setTransportLocked, setI2pConfig, setAliases, setRoutes, setI2pStranded, openNetInfo } from './lib/transport.svelte.js';
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
+export { createChannelModal } from './lib/create-channel.svelte.js';
 export { keysModal } from './lib/keys.svelte.js';
 export { secretGuard } from './lib/secretguard.svelte.js';
 export { transferModal } from './lib/transfer.svelte.js';

@@ -244,7 +244,7 @@
                         {#if section.canAdd}
                             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                             <div class="chatlist-channel-section-add btn" title={section.category ? `Add a channel to ${section.label}` : `Add a ${section.label.toLowerCase()} channel`}
-                                 onclick={(e) => { e.stopPropagation(); h.createChannelMenu(communityId, section.id === 'private', section.category?.id || null, e.clientX, e.clientY); }}>
+                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, section.id === 'private', section.category?.id || null); }}>
                                 <span class="icon icon-plus"></span>
                             </div>
                         {/if}

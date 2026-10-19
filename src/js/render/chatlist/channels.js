@@ -267,15 +267,9 @@ async function moveCommunityCategory(communityId, categoryId, index) {
     refreshCommunityChannels();
 }
 
-async function promptCreateCategory(communityId) {
-    const name = await popupConfirm('New category', 'A heading to group channels under.', false, 'category name');
-    if (!name || !String(name).trim()) return;
-    try {
-        await invoke('create_community_category', { communityId, name: String(name).trim() });
-        refreshCommunityChannels();
-    } catch (e) {
-        await popupConfirm("Couldn't add the category", escapeHtml(String(e)), true, '', 'vector_warning.svg');
-    }
+/** The Create Category modal. */
+function promptCreateCategory(communityId) {
+    openCreateModal({ category: true, communityId });
 }
 
 async function promptRenameCategory(communityId, category) {
@@ -307,8 +301,6 @@ function openCategoryMenu(communityId, category, x, y) {
     if (!communityCanAddChannels(communityId)) return;
     showContextMenu({ x, y, items: [
         { label: 'Create Channel', icon: 'plus', onClick: () => promptCreateChannel(communityId, false, category.id) },
-        { label: 'Create Private Channel', icon: 'locked', onClick: () => promptCreateChannel(communityId, true, category.id) },
-        { label: 'Create Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(communityId, false, category.id, true) },
         { label: 'Edit Permissions', icon: 'shield-filled', onClick: () => openChannelEditorFor(communityId, { id: category.id, name: category.name }, true) },
         { divider: true },
         { label: 'Rename Category', icon: 'edit', onClick: () => promptRenameCategory(communityId, category) },
@@ -640,7 +632,6 @@ async function openCommunityMenu(chat, ev, at) {
     if (caps?.manage_channels) {
         items.push(
             { label: 'Create Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(cf.community_id) },
-            { label: 'Create Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(cf.community_id, false, null, true) },
             { label: 'Create Category', icon: 'plus', onClick: () => promptCreateCategory(cf.community_id) },
         );
     }
@@ -744,30 +735,51 @@ async function openChannelMenu(communityId, channel, x, y) {
     showContextMenu({ x, y, items });
 }
 
-/** The section "+": a text channel or a voice one. */
-function openCreateChannelMenu(communityId, isPrivate, categoryId, x, y) {
-    showContextMenu({ x, y, items: [
-        { label: isPrivate ? 'Private Text Channel' : 'Text Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(communityId, isPrivate, categoryId) },
-        { label: isPrivate ? 'Private Voice Channel' : 'Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(communityId, isPrivate, categoryId, true) },
-    ] });
+/** The Create Channel modal, its type, privacy and Category preset from where it was opened. */
+function promptCreateChannel(communityId, isPrivate = false, categoryId = null, voice = false) {
+    openCreateModal({ communityId, categoryId, kind: voice ? 'voice' : 'text', isPrivate });
 }
 
-async function promptCreateChannel(communityId, isPrivate = false, categoryId = null, voice = false) {
-    const title = voice ? (isPrivate ? 'New private voice channel' : 'New voice channel') : (isPrivate ? 'New private channel' : 'New channel');
-    const about = voice
-        ? (isPrivate ? 'Only members you let in can join its calls and read its chat.' : 'Anyone in the community can hop into its call, with a chat beside it.')
-        : (isPrivate ? 'Only members you grant access to can read it.' : 'Everyone in the community can read and post in it.');
-    const name = await popupConfirm(title, about, false, 'channel name');
-    if (!name || !String(name).trim()) return;
+function openCreateModal(view) {
+    const categoryName = view.categoryId ? (getCommunityCategories(view.communityId).find(c => c.id === view.categoryId)?.name || '') : '';
+    VectorSvelte.createChannelModal.open({
+        category: false, categoryId: null, kind: 'text', isPrivate: false,
+        ...view, categoryName, name: '', busy: false, error: '',
+    });
+    pushBack('create-channel', closeCreateModal);
+}
+
+function closeCreateModal() {
+    if (VectorSvelte.createChannelModal.closing()) return;
+    popBack('create-channel');
+    VectorSvelte.createChannelModal.close();
+}
+
+async function submitCreateModal() {
+    const modal = VectorSvelte.createChannelModal;
+    const s = modal.state();
+    const name = s.name.trim();
+    if (!name || s.busy) return;
+    modal.patch({ busy: true, error: '' });
     try {
-        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate, categoryId, voice });
+        if (s.category) {
+            await invoke('create_community_category', { communityId: s.communityId, name });
+            closeCreateModal();
+            refreshCommunityChannels();
+            return;
+        }
+        const voice = s.kind === 'voice';
+        const channelId = await invoke('create_community_channel', { communityId: s.communityId, name, private: s.isPrivate, categoryId: s.categoryId, voice });
+        closeCreateModal();
         refreshCommunityChannels();
-        expandedCommunities.add(communityId);
-        openCommunityChannel(communityId, { id: channelId, name, view: voice ? 'voice' : 'chat' });
+        expandedCommunities.add(s.communityId);
+        openCommunityChannel(s.communityId, { id: channelId, name, view: voice ? 'voice' : 'chat' });
     } catch (e) {
-        await popupConfirm("Couldn't add the channel", escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        modal.patch({ busy: false, error: String(e) });
     }
 }
+
+VectorSvelte.setScreen('createChannel', { h: { submit: () => submitCreateModal(), close: () => closeCreateModal() } });
 
 async function promptDeleteChannel(communityId, channel) {
     const ok = await popupConfirm('Delete channel',

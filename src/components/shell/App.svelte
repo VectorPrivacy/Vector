@@ -30,6 +30,7 @@
     import RekeyProgress from '../community/RekeyProgress.svelte';
     import InviteModal from '../community/InviteModal.svelte';
     import ChannelEditor from '../community/ChannelEditor.svelte';
+    import CreateChannelModal from '../community/CreateChannelModal.svelte';
     import Tooltip from './Tooltip.svelte';
     import ComposerPopups from '../composer/ComposerPopups.svelte';
 import CallOverlay from '../calls/CallOverlay.svelte';
@@ -160,6 +161,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
 {#if screens.statusDialog}<StatusDialog h={screens.statusDialog.h} />{/if}
 {#if screens.keysModal}<KeysModal h={screens.keysModal.h} />{/if}
 {#if screens.channelEditor}<ChannelEditor h={screens.channelEditor.h} />{/if}
+{#if screens.createChannel}<CreateChannelModal h={screens.createChannel.h} />{/if}
 {#if screens.secretGuard}<SecretGuard h={screens.secretGuard.h} />{/if}
 {#if screens.transferModal}<TransferModal h={screens.transferModal.h} />{/if}
 {#if screens.call}<CallOverlay h={screens.call.h} />{/if}
