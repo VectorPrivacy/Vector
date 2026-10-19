@@ -184,7 +184,7 @@
         <SectionNav sections={SECTIONS} section={section.id} anchor={anchors.active} query={st.query}
                     onquery={setChannelEditorQuery} ongo={goSection} onanchor={goAnchor}>
             {#snippet head()}
-                <span class="cs-nav-glyph"><span class="icon {st.isCategory ? 'icon-folder' : st.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
+                <span class="cs-nav-glyph"><span class="icon {st.isCategory ? 'icon-folder' : st.saved.view === 'voice' ? 'icon-volume-max' : st.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
                 <span class="cs-nav-title cutoff">{st.saved.name || (st.isCategory ? 'Category' : 'Channel')}</span>
             {/snippet}
         </SectionNav>

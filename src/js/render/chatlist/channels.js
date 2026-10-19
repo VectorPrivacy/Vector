@@ -771,7 +771,7 @@ async function promptCreateChannel(communityId, isPrivate = false, categoryId = 
 
 async function promptDeleteChannel(communityId, channel) {
     const ok = await popupConfirm('Delete channel',
-        `Delete <b>#${escapeHtml(channel.name)}</b>? Everyone loses access to it. Messages already on this device are kept.`,
+        `Delete <b>${channel.view === 'voice' ? '' : '#'}${escapeHtml(channel.name)}</b>? Everyone loses access to it. Messages already on this device are kept.`,
         false, '', 'vector_warning.svg');
     if (!ok) return;
     try {
@@ -827,5 +827,6 @@ function communityChatTitle(chat) {
         return cf.channel_name || name;
     }
     if (isPrimaryChannelChat(chat) || !cf.channel_name) return name;
-    return `${name} › #${cf.channel_name}`;
+    const voice = (getCommunityChannels(communityIdOfChat(chat)) || []).some((c) => c.id === chat.id && c.view === 'voice');
+    return `${name} › ${voice ? '' : '#'}${cf.channel_name}`;
 }

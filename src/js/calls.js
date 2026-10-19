@@ -209,7 +209,7 @@ async function openVoiceMemberMenu(communityId, channelId, npub, x, y) {
     const setVolume = (v) => invoke('voice_set_volume', { npub, volume: v }).catch((e) => VectorSvelte.showToast(String(e)));
     const items = [
         { label: volume === 0 ? 'Unmute for Me' : 'Mute for Me', icon: volume === 0 ? 'volume-max' : 'volume-mute', onClick: () => setVolume(volume === 0 ? 1 : 0) },
-        ...[0.5, 1, 1.5, 2].map((v) => ({ label: `${Math.abs(volume - v) < 0.01 ? '✓ ' : ''}Volume ${Math.round(v * 100)}%`, onClick: () => setVolume(v) })),
+        ...[0.5, 1, 1.5, 2].map((v) => ({ label: `Volume ${Math.round(v * 100)}%`, icon: Math.abs(volume - v) < 0.01 ? 'check' : undefined, onClick: () => setVolume(v) })),
     ];
     const moderate = (action, to = null) => invoke('voice_moderate', { communityId, channelId, npub, action, to }).catch((e) => VectorSvelte.showToast(String(e)));
     const mods = [];

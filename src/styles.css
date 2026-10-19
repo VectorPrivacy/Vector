@@ -25798,6 +25798,7 @@ body.profile-switcher-editing .profile-switcher-add {
   user-select: text;
 }
 .cs-input:focus { border-color: var(--icon-color-primary); }
+.cs-input::placeholder { color: #5c5c5c; font-weight: 400; }
 .cs-input:disabled { opacity: 0.6; }
 .cs-textarea {
   font-weight: 400;
