@@ -66,6 +66,7 @@ function renderRailShortcuts() {
      * @property {(chatId: string) => void} openChat
      * @property {() => void} openDmHome
      * @property {(communityId: string) => string|null} wsChannelForCommunity
+     * @property {(communityId: string) => string[]} voiceChannelIds
      * @property {(el: Element, onMenu: (x: number, y: number) => void) => void} attachLongPressContextMenu
      * @property {(chat: object, x: number, y: number) => void} openCommunityMenu
      * @property {(chat: object, isGroup: boolean, unread: number, x: number, y: number) => void} showChatRowContextMenu
@@ -93,6 +94,7 @@ function renderRailShortcuts() {
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
             openDmHome: wsOpenDmHome,
             wsChannelForCommunity,
+            voiceChannelIds: (communityId) => (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice').map((c) => c.id),
             attachLongPressContextMenu,
             // A shortcut stands for the whole community, so it opens the community's menu
             // rather than its anchoring channel's row menu.

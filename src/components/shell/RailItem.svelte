@@ -5,6 +5,7 @@
     import { avatarThumb } from '../lib/avatar.js';
     import Avatar from '../ui/Avatar.svelte';
     import { reorderable } from '../lib/reorder.js';
+    import { voicePresent, voiceSession } from '../lib/voice.svelte.js';
 
     // press: the rail's drag handlers when this row can be rearranged (it then owns the
     // context menu too, so one arbiter decides every press); mark: where a drop would land.
@@ -38,6 +39,12 @@
     });
 
     const isDot = $derived(!vm.pings);
+    // Someone is in one of the community's voice calls; ours, if it's the one we're in.
+    const voice = $derived.by(() => {
+        if (!vm.communityId) return null;
+        if (voiceSession()?.communityId === vm.communityId) return 'mine';
+        return (h.voiceChannelIds?.(vm.communityId) || []).some((id) => voicePresent(id).length) ? 'busy' : null;
+    });
 
     // Keyed on the string so a re-derive that yields the same name never restarts twemoji.
     function name(node, v) {
@@ -93,6 +100,9 @@
 >
     <Avatar src={vm.src} size={26} group={isCommunity} class="ws-rail-item-avatar" />
     <span class="ws-rail-item-name cutoff" use:name={vm}></span>
+    {#if voice}
+        <span class="ws-rail-item-voice" class:is-mine={voice === 'mine'} title={voice === 'mine' ? 'You are in a voice call here' : 'Someone is in a voice call'}><span class="icon icon-volume-max"></span></span>
+    {/if}
     {#if vm.pings || vm.unread}
         <span class="ws-rail-item-badge" class:is-dot={isDot} class:muted={vm.muted && !isDot}>
             {isDot ? '' : (vm.pings > 99 ? '99+' : String(vm.pings))}

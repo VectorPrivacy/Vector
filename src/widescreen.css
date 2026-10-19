@@ -2523,3 +2523,28 @@ body.ws #group-overview .member-pick-row {
 body.ws #chat-list .chatlist-channels-pane {
   margin-bottom: max(50px, var(--ws-banner-h, 0px));
 }
+
+/* A speaker on a community's shortcut while one of its voice calls is in use; the accent when it's ours. */
+.ws-rail-item-voice {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #1c1c1c;
+  border: 2px solid #0c0c0c;
+  pointer-events: none;
+}
+.ws-rail-item-voice .icon {
+  position: static;
+  width: 8px;
+  height: 8px;
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.7);
+}
+.ws-rail-item-voice.is-mine { background: var(--icon-color-primary, #59fcb3); }
+.ws-rail-item-voice.is-mine .icon { background-color: #000; }
