@@ -154,6 +154,49 @@ pub async fn voice_set_deafened(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move { vector_core::calls::voice::set_deafened(on) }).await
 }
 
+/// How loud a member plays in this account's calls, 0 to 2; remembered.
+#[tauri::command]
+pub async fn voice_set_volume(npub: String, volume: f32) -> Result<(), String> {
+    let pk = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|e| e.to_string())?;
+    vector_core::db::scoped(async move { vector_core::calls::voice::set_peer_volume(&pk, volume) }).await
+}
+
+/// Mute, deafen, move or disconnect a member in a voice channel's call, as a moderator.
+#[tauri::command]
+pub async fn voice_moderate(community_id: String, channel_id: String, npub: String, action: String, to: Option<String>) -> Result<(), String> {
+    use vector_core::community::v2::voice::Directive;
+    vector_core::db::scoped(async move {
+        let target = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|e| e.to_string())?;
+        let directive = Directive::parse(&action).ok_or("unknown action")?;
+        let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32_checked(&community_id).ok_or("bad community id")?);
+        let channel = vector_core::community::ChannelId(vector_core::simd::hex::hex_to_bytes_32_checked(&channel_id).ok_or("bad channel id")?);
+        let to = to.as_deref().map(|t| vector_core::simd::hex::hex_to_bytes_32_checked(t).ok_or("bad channel id")).transpose()?;
+        let community = vector_core::db::community::load_community_v2(&id)?.ok_or("Community not found")?;
+        let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        vector_core::community::v2::service::send_voice_directive(&transport, &community, &channel, &target, directive, to).await
+    })
+    .await
+}
+
+/// What this account may do to a member in a voice call: { mute, deafen, move }.
+#[tauri::command]
+pub async fn voice_powers(community_id: String, npub: String) -> serde_json::Value {
+    use vector_core::community::roles::Permissions;
+    vector_core::db::scoped(async move {
+        let none = serde_json::json!({ "mute": false, "deafen": false, "move": false });
+        let (Some(me), Ok(target)) = (vector_core::state::my_public_key(), nostr_sdk::prelude::PublicKey::parse(&npub)) else { return none };
+        let Some(id) = vector_core::simd::hex::hex_to_bytes_32_checked(&community_id) else { return none };
+        let Ok(Some(community)) = vector_core::db::community::load_community_v2(&vector_core::community::CommunityId(id)) else { return none };
+        let owner = community.owner().ok().map(|o| o.to_hex());
+        let roles = vector_core::db::community::get_community_roles(&community_id).unwrap_or_default();
+        let (me, them) = (me.to_hex(), target.to_hex());
+        let can = |bit: u64| me != them && owner.as_deref() != Some(them.as_str())
+            && (owner.as_deref() == Some(me.as_str()) || roles.can_act_on_member(&me, owner.as_deref(), &them, bit));
+        serde_json::json!({ "mute": can(Permissions::MUTE_MEMBERS), "deafen": can(Permissions::DEAFEN_MEMBERS), "move": can(Permissions::MOVE_MEMBERS) })
+    })
+    .await
+}
+
 /// Who is in a voice Channel's call now, whether or not we are, earliest first.
 #[tauri::command]
 pub async fn voice_present(channel_id: String) -> Vec<serde_json::Value> {
@@ -166,7 +209,7 @@ pub async fn voice_present(channel_id: String) -> Vec<serde_json::Value> {
                 let npub = p.author.to_bech32().ok()?;
                 // Another transport's caller is in the call, but out of reach of ours.
                 let elsewhere = p.transport.as_deref().is_some_and(|t| t != vector_core::community::v2::chat::TRANSPORT_IROH) || p.transport.is_none();
-                Some(serde_json::json!({ "npub": npub, "muted": p.muted, "deafened": p.deafened, "elsewhere": elsewhere }))
+                Some(serde_json::json!({ "npub": npub, "muted": p.muted || p.server_muted, "deafened": p.deafened || p.server_deafened, "server": p.server_muted || p.server_deafened, "elsewhere": elsewhere }))
             })
             .collect()
     })

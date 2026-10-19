@@ -308,6 +308,7 @@ function openCategoryMenu(communityId, category, x, y) {
     showContextMenu({ x, y, items: [
         { label: 'Create Channel', icon: 'plus', onClick: () => promptCreateChannel(communityId, false, category.id) },
         { label: 'Create Private Channel', icon: 'locked', onClick: () => promptCreateChannel(communityId, true, category.id) },
+        { label: 'Create Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(communityId, false, category.id, true) },
         { label: 'Edit Permissions', icon: 'shield-filled', onClick: () => openChannelEditorFor(communityId, { id: category.id, name: category.name }, true) },
         { divider: true },
         { label: 'Rename Category', icon: 'edit', onClick: () => promptRenameCategory(communityId, category) },
@@ -743,18 +744,26 @@ async function openChannelMenu(communityId, channel, x, y) {
     showContextMenu({ x, y, items });
 }
 
-async function promptCreateChannel(communityId, isPrivate = false, categoryId = null) {
-    const name = await popupConfirm(isPrivate ? 'New private channel' : 'New channel',
-        isPrivate
-            ? 'Only members you grant access to can read it.'
-            : 'Everyone in the community can read and post in it.',
-        false, 'channel name');
+/** The section "+": a text channel or a voice one. */
+function openCreateChannelMenu(communityId, isPrivate, categoryId, x, y) {
+    showContextMenu({ x, y, items: [
+        { label: isPrivate ? 'Private Text Channel' : 'Text Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(communityId, isPrivate, categoryId) },
+        { label: isPrivate ? 'Private Voice Channel' : 'Voice Channel', icon: 'volume-max', onClick: () => promptCreateChannel(communityId, isPrivate, categoryId, true) },
+    ] });
+}
+
+async function promptCreateChannel(communityId, isPrivate = false, categoryId = null, voice = false) {
+    const title = voice ? (isPrivate ? 'New private voice channel' : 'New voice channel') : (isPrivate ? 'New private channel' : 'New channel');
+    const about = voice
+        ? (isPrivate ? 'Only members you let in can join its calls and read its chat.' : 'Anyone in the community can hop into its call, with a chat beside it.')
+        : (isPrivate ? 'Only members you grant access to can read it.' : 'Everyone in the community can read and post in it.');
+    const name = await popupConfirm(title, about, false, 'channel name');
     if (!name || !String(name).trim()) return;
     try {
-        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate, categoryId });
+        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate, categoryId, voice });
         refreshCommunityChannels();
         expandedCommunities.add(communityId);
-        openCommunityChannel(communityId, { id: channelId, name });
+        openCommunityChannel(communityId, { id: channelId, name, view: voice ? 'voice' : 'chat' });
     } catch (e) {
         await popupConfirm("Couldn't add the channel", escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }

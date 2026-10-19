@@ -24,15 +24,29 @@ pub const MAX_PEERS: usize = 14;
 const DIAL_EVERY: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A cue the call plays: who came and went, and our own mute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chime {
+    Joined,
+    Left,
+    PeerJoined,
+    PeerLeft,
+    Muted,
+    Unmuted,
+}
+
 /// What a client's media engine does with a call's peers: one capture sent to every connection,
 /// and every connection's audio mixed for playout.
 pub trait VoiceMedia: Send + Sync {
+    fn chime(&self, _cue: Chime) {}
     fn add_peer(&self, endpoint: [u8; 32], conn: Connection);
     fn remove_peer(&self, endpoint: &[u8; 32]);
     fn set_muted(&self, on: bool);
     fn set_deafened(&self, on: bool);
     /// Whether a peer's audio plays: a member without SPEAK, or timed out, isn't heard.
     fn set_audible(&self, _endpoint: &[u8; 32], _on: bool) {}
+    /// How loud a peer plays here, 1.0 as sent, up to 2.0.
+    fn set_volume(&self, _endpoint: &[u8; 32], _gain: f32) {}
     /// False when the call went ahead without a microphone: muted, whatever the switch says.
     fn has_mic(&self) -> bool {
         true
@@ -46,6 +60,8 @@ pub trait VoiceMedia: Send + Sync {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct VoicePeer {
     pub npub: String,
+    /// How loud they play here, as this account set it.
+    pub volume: f32,
     pub connected: bool,
     /// The selected path is direct, not through a relay.
     pub direct: bool,
@@ -53,6 +69,9 @@ pub struct VoicePeer {
     pub level: f32,
     pub muted: bool,
     pub deafened: bool,
+    /// A moderator muted or deafened them for this call.
+    pub server_muted: bool,
+    pub server_deafened: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -68,6 +87,9 @@ pub struct VoiceState {
     pub mic_level: f32,
     /// False when there's no microphone to hear: refused access, or none there.
     pub mic: bool,
+    /// A moderator muted or deafened us for this call.
+    pub server_muted: bool,
+    pub server_deafened: bool,
 }
 
 struct Link {
@@ -148,7 +170,8 @@ pub fn may_speak(community: &CommunityV2, channel: &ChannelId, member: &PublicKe
         return true;
     }
     let timed_out = crate::community::v2::service::community_timeouts(community).is_ok_and(|t| t.contains_key(member));
-    !timed_out && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
+    let server_muted = presence::server_state(&chan, member).0;
+    !timed_out && !server_muted && roster.channel_permissions(owner.as_deref(), &hex, &chan, community.channel(channel).is_some_and(|c| c.private)).contains(Permissions::SPEAK)
 }
 
 fn voice_relays(community: &CommunityV2) -> Vec<RelayUrl> {
@@ -249,6 +272,9 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
         return Err(e);
     }
     *VOICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.clone());
+    if let Some(m) = &v.media {
+        m.chime(Chime::Joined);
+    }
     let tasks = vec![
         crate::db::spawn_bound(levels(v.clone())),
         crate::db::spawn_bound(heartbeat(v.clone())),
@@ -263,6 +289,9 @@ pub async fn join(community_id: &str, channel_id: &str) -> Result<VoiceState, St
 /// Leave the call, if in one: a `left` is best-effort, staleness heals a missed one.
 pub async fn leave() {
     let Some(v) = VOICE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    if let Some(m) = &v.media {
+        m.chime(Chime::Left);
+    }
     for t in v.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
         t.abort();
     }
@@ -275,6 +304,60 @@ pub async fn leave() {
     let _ = announce(&v, false).await;
     v.endpoint.close().await;
     crate::emit_event("voice_state", &serde_json::Value::Null);
+}
+
+/// A moderator's directive, already judged: one aimed at us is obeyed, and anyone else's mute
+/// changes who is heard.
+pub fn on_directive(channel_hex: &str, target: &PublicKey, directive: presence::Directive, to: Option<[u8; 32]>) {
+    use presence::Directive;
+    let Some(v) = live().filter(|v| v.channel_hex == channel_hex) else { return };
+    if *target != v.me {
+        v.nudge.notify_one();
+        changed(&v);
+        return;
+    }
+    let (server_muted, server_deafened) = presence::server_state(channel_hex, &v.me);
+    match directive {
+        Directive::Mute | Directive::Unmute => {
+            let on = server_muted || (directive == Directive::Mute);
+            if on {
+                v.muted.store(true, Ordering::SeqCst);
+            }
+            if let Some(m) = &v.media {
+                m.set_muted(v.muted.load(Ordering::SeqCst));
+                if directive == Directive::Mute {
+                    m.chime(Chime::Muted);
+                }
+            }
+            reannounce(&v);
+        }
+        Directive::Deafen | Directive::Undeafen => {
+            if server_deafened {
+                v.deafened.store(true, Ordering::SeqCst);
+            }
+            if let Some(m) = &v.media {
+                m.set_deafened(v.deafened.load(Ordering::SeqCst) || server_deafened);
+            }
+            reannounce(&v);
+        }
+        Directive::Disconnect => {
+            crate::db::spawn_bound(async { leave().await });
+            return;
+        }
+        Directive::Move => {
+            let Some(to) = to else { return };
+            let community = crate::simd::hex::bytes_to_hex_32(&v.community.0);
+            let to = crate::simd::hex::bytes_to_hex_32(&to);
+            crate::db::spawn_bound(async move {
+                if let Err(e) = join(&community, &to).await {
+                    crate::log_warn!("[voice] couldn't follow a move: {e}");
+                    leave().await;
+                }
+            });
+            return;
+        }
+    }
+    changed(&v);
 }
 
 /// Someone's presence changed in a Channel: re-check the mesh if it is ours.
@@ -290,9 +373,13 @@ pub fn snapshot() -> Option<VoiceState> {
 
 pub fn set_muted(on: bool) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
+    if !on && presence::server_state(&v.channel_hex, &v.me).0 {
+        return Err("A moderator muted you in this call".into());
+    }
     v.muted.store(on, Ordering::SeqCst);
     if let Some(m) = &v.media {
         m.set_muted(on);
+        m.chime(if on { Chime::Muted } else { Chime::Unmuted });
     }
     reannounce(&v);
     changed(&v);
@@ -301,12 +388,59 @@ pub fn set_muted(on: bool) -> Result<(), String> {
 
 pub fn set_deafened(on: bool) -> Result<(), String> {
     let v = live().ok_or("Not in a call")?;
+    if !on && presence::server_state(&v.channel_hex, &v.me).1 {
+        return Err("A moderator deafened you in this call".into());
+    }
     v.deafened.store(on, Ordering::SeqCst);
     if let Some(m) = &v.media {
         m.set_deafened(on);
     }
     reannounce(&v);
     changed(&v);
+    Ok(())
+}
+
+const VOLUMES_KEY: &str = "voice_volumes";
+
+struct Volumes;
+
+/// Read once per account, then kept: the state repaints five times a second.
+fn volumes() -> HashMap<String, f32> {
+    let cache = crate::db::current_session().scoped::<Volumes, Mutex<Option<HashMap<String, f32>>>>();
+    let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+    held.get_or_insert_with(|| crate::db::get_sql_setting(VOLUMES_KEY.to_string()).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()).clone()
+}
+
+fn store_volumes(all: HashMap<String, f32>) -> Result<(), String> {
+    crate::db::set_sql_setting(VOLUMES_KEY.to_string(), serde_json::to_string(&all).map_err(|e| e.to_string())?)?;
+    *crate::db::current_session().scoped::<Volumes, Mutex<Option<HashMap<String, f32>>>>().lock().unwrap_or_else(|e| e.into_inner()) = Some(all);
+    Ok(())
+}
+
+/// How loud `member` plays in this account's calls: 1.0 unless set.
+pub fn peer_volume(member: &PublicKey) -> f32 {
+    volumes().get(&member.to_hex()).copied().unwrap_or(1.0)
+}
+
+/// Remember how loud `member` plays, 0 to 2, and apply it to the call in progress.
+pub fn set_peer_volume(member: &PublicKey, gain: f32) -> Result<(), String> {
+    let gain = if gain.is_finite() { gain.clamp(0.0, 2.0) } else { 1.0 };
+    let mut all = volumes();
+    if (gain - 1.0).abs() < 0.01 {
+        all.remove(&member.to_hex());
+    } else {
+        all.insert(member.to_hex(), gain);
+    }
+    store_volumes(all)?;
+    if let Some(v) = live() {
+        if let Some(m) = &v.media {
+            let ids: Vec<[u8; 32]> = v.links.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, l)| l.author == *member).map(|(id, _)| *id).collect();
+            for id in ids {
+                m.set_volume(&id, gain);
+            }
+        }
+        changed(&v);
+    }
     Ok(())
 }
 
@@ -330,12 +464,15 @@ fn state(v: &Voice) -> VoiceState {
         .map(|p| {
             let link = p.endpoint.and_then(|ep| links.get(&ep));
             VoicePeer {
+                volume: peer_volume(&p.author),
                 npub: p.author.to_bech32().unwrap_or_default(),
                 connected: link.is_some(),
                 direct: link.is_some_and(|l| l.conn.paths().iter().any(|path| path.is_selected() && path.is_ip())),
                 level: if link.is_some() { level_of(p.endpoint) } else { 0.0 },
                 muted: p.muted,
                 deafened: p.deafened,
+                server_muted: p.server_muted,
+                server_deafened: p.server_deafened,
             }
         })
         .collect();
@@ -349,6 +486,8 @@ fn state(v: &Voice) -> VoiceState {
         audio: v.media.is_some(),
         mic_level: level_of(None),
         mic: v.media.as_ref().is_some_and(|m| m.has_mic()),
+        server_muted: presence::server_state(&v.channel_hex, &v.me).0,
+        server_deafened: presence::server_state(&v.channel_hex, &v.me).1,
     }
 }
 
@@ -455,6 +594,8 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
     }
     if let Some(m) = &v.media {
         m.add_peer(id, conn.clone());
+        m.set_volume(&id, peer_volume(&author));
+        m.chime(Chime::PeerJoined);
         if let Ok(c) = held(&v.community) {
             m.set_audible(&id, may_speak(&c, &v.channel, &author));
         }
@@ -477,6 +618,7 @@ fn unlink(v: &Voice, id: &[u8; 32], why: &[u8]) {
         l.conn.close(0u32.into(), why);
         if let Some(m) = &v.media {
             m.remove_peer(id);
+            m.chime(Chime::PeerLeft);
         }
         changed(v);
     }

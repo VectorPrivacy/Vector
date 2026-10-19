@@ -187,7 +187,9 @@
     {#if channel.view === 'voice'}
         {@const live = voiceSession()?.channelId === channel.id}
         {#each voicePresent(channel.id) as p (p.npub)}
-            <div class="chatlist-voice-member" class:is-speaking={live && !p.muted && voiceLevel(p.npub, voiceCallHandlers().myNpub?.()) > SPEAKING}>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="chatlist-voice-member" class:is-speaking={live && !p.muted && voiceLevel(p.npub, voiceCallHandlers().myNpub?.()) > SPEAKING}
+                 oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); voiceCallHandlers().memberMenu?.(communityId, channel.id, p.npub, e.clientX, e.clientY); }}>
                 <Avatar src={h.getProfileAvatarSrc(h.getProfile(p.npub))} size={18} />
                 <span class="cutoff">{h.getName(p.npub)}</span>
                 {#if p.deafened}<span class="icon icon-volume-mute" title="Deafened"></span>{:else if p.muted}<span class="icon icon-mic-off" title="Muted"></span>{/if}
@@ -235,7 +237,7 @@
                         {#if section.canAdd}
                             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                             <div class="chatlist-channel-section-add btn" title={section.category ? `Add a channel to ${section.label}` : `Add a ${section.label.toLowerCase()} channel`}
-                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, section.id === 'private', section.category?.id || null); }}>
+                                 onclick={(e) => { e.stopPropagation(); h.createChannelMenu(communityId, section.id === 'private', section.category?.id || null, e.clientX, e.clientY); }}>
                                 <span class="icon icon-plus"></span>
                             </div>
                         {/if}

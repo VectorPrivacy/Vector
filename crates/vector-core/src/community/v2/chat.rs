@@ -45,6 +45,8 @@ const TAG_ENDPOINT: &str = "endpoint";
 const TAG_RELAY: &str = "relay";
 const TAG_MUTED: &str = "muted";
 const TAG_DEAFENED: &str = "deafened";
+const TAG_DO: &str = "do";
+const TAG_TO: &str = "to";
 /// The transport a peer-to-peer call names (CORD-07 §8).
 pub const TRANSPORT_IROH: &str = "iroh";
 
@@ -335,6 +337,30 @@ pub fn build_voice_presence_rumor(author: PublicKey, channel_id: &ChannelId, epo
     stream::build_rumor_ms(kind::VOICE_PRESENCE, author, if endpoint.is_some() { "joined" } else { "left" }, tags, at_ms)
 }
 
+/// A moderator's voice directive (CORD-07 §7), citing the signer's standing.
+#[allow(clippy::too_many_arguments)]
+pub fn build_voice_directive_rumor(
+    actor: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    target: &PublicKey,
+    directive: super::voice::Directive,
+    to: Option<&[u8; 32]>,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+    at_ms: u64,
+) -> UnsignedEvent {
+    let mut tags = stream::channel_binding_tags(channel_id, epoch);
+    tags.push(Tag::public_key(*target));
+    tags.push(Tag::custom(TAG_DO, [directive.as_str().to_string()]));
+    if let Some(to) = to {
+        tags.push(Tag::custom(TAG_TO, [crate::simd::hex::bytes_to_hex_32(to)]));
+    }
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
+    stream::build_rumor_ms(kind::VOICE_DIRECTIVE, actor, "", tags, at_ms)
+}
+
 pub fn build_typing_rumor(author: PublicKey, channel_id: &ChannelId, epoch: Epoch, at_ms: u64) -> UnsignedEvent {
     let tags = stream::channel_binding_tags(channel_id, epoch);
     stream::build_rumor_ms(kind::TYPING, author, "", tags, at_ms)
@@ -453,6 +479,9 @@ pub enum ChatEvent {
     /// Kind 23313 (CORD-07 §4): in a Channel's call, or out of it. A `joined` names how it's
     /// reached: on iroh, `endpoint`; any other transport leaves it None but still counts.
     VoicePresence { opened: OpenedStream, heard: super::voice::Heard },
+    /// Kind 23314 (CORD-07 §7): a moderator mutes, deafens, moves or disconnects `target`;
+    /// `to` is a move's destination Channel.
+    VoiceDirective { opened: OpenedStream, target: PublicKey, directive: super::voice::Directive, to: Option<[u8; 32]> },
 }
 
 impl ChatEvent {
@@ -472,7 +501,8 @@ impl ChatEvent {
             | ChatEvent::Edit { opened, .. }
             | ChatEvent::Webxdc { opened }
             | ChatEvent::Typing { opened }
-            | ChatEvent::VoicePresence { opened, .. } => opened,
+            | ChatEvent::VoicePresence { opened, .. }
+            | ChatEvent::VoiceDirective { opened, .. } => opened,
         }
     }
 }
@@ -584,7 +614,7 @@ pub fn with_writer(rumor: UnsignedEvent, wepoch: Epoch, cert: Option<&[u8; 64]>)
 /// judged by its signer's authority wherever it lands. Typing signals posting, so it moves too.
 /// Voice presence stays: being in a call is CONNECT, not posting.
 pub fn rides_writer_address(kind: u16) -> bool {
-    !matches!(kind, kind::REACTION | kind::DELETE | kind::VOICE_PRESENCE)
+    !matches!(kind, kind::REACTION | kind::DELETE | kind::VOICE_PRESENCE | kind::VOICE_DIRECTIVE)
 }
 
 /// Open a chat wrap against every `(epoch, secret)` a client holds for one
@@ -617,7 +647,7 @@ pub fn open_chat_event_multi(
 fn is_chat_kind(k: u16) -> bool {
     matches!(
         k,
-        kind::MESSAGE | kind::COMMENT | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING | kind::VOICE_PRESENCE
+        kind::MESSAGE | kind::COMMENT | kind::REACTION | kind::DELETE | kind::EDIT | kind::WEBXDC | kind::TYPING | kind::VOICE_PRESENCE | kind::VOICE_DIRECTIVE
     )
 }
 
@@ -709,6 +739,18 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
             let flag = |name: &str| opened.rumor.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some(name));
             let (muted, deafened) = (joined && flag(TAG_MUTED), joined && flag(TAG_DEAFENED));
             Ok(ChatEvent::VoicePresence { opened, heard: super::voice::Heard { joined, transport, endpoint, relay, muted, deafened } })
+        }
+        kind::VOICE_DIRECTIVE => {
+            let target = PublicKey::from_hex(required_tag(&opened.rumor, TAG_TARGET_AUTHOR)?).map_err(|_| ChatError::BadTag(TAG_TARGET_AUTHOR))?;
+            let directive = super::voice::Directive::parse(required_tag(&opened.rumor, TAG_DO)?).ok_or(ChatError::BadTag(TAG_DO))?;
+            let to = match unique_tag(&opened.rumor, TAG_TO)? {
+                Some(t) => Some(decode_id32(value_of(t, TAG_TO)?, TAG_TO)?),
+                None => None,
+            };
+            if directive == super::voice::Directive::Move && to.is_none() {
+                return Err(ChatError::MissingTag(TAG_TO));
+            }
+            Ok(ChatEvent::VoiceDirective { opened, target, directive, to })
         }
         k => Err(ChatError::UnknownKind(k)),
     }

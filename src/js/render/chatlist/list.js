@@ -121,6 +121,7 @@ function chatlistSnapshot() {
  * @property {(communityId: string, channel: object, x: number, y: number) => void} openChannelMenu
  * @property {(vm: object) => void} rowClick
  * @property {(communityId: string, isPrivate: boolean, categoryId?: string|null) => void} createChannel
+ * @property {(communityId: string, isPrivate: boolean, categoryId: string|null, x: number, y: number) => void} createChannelMenu   text or voice
  * @property {(communityId: string) => object[]} getCategories   [{ id, name }] in sidebar order
  * @property {(communityId: string, channelId: string, categoryId: string|null, index: number) => void} moveChannel
  * @property {(communityId: string, categoryId: string, index: number) => void} moveCategory
@@ -188,6 +189,7 @@ function chatlistHelpers() {
             openChat(vm.chat.id);
         },
         createChannel: promptCreateChannel,
+        createChannelMenu: openCreateChannelMenu,
         deleteChannel: promptDeleteChannel,
         getCategories: getCommunityCategories,
         moveChannel: moveCommunityChannel,

@@ -36,7 +36,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div class="voice-tile" class:is-speaking={level > SPEAKING && !p.muted} class:is-pending={inCall && !connected(p.npub)}
                          title={p.elsewhere ? 'In this call on another app: you can\'t hear each other' : null}
-                         oncontextmenu={(e) => { e.preventDefault(); h.memberMenu?.(p.npub, e.clientX, e.clientY); }}>
+                         oncontextmenu={(e) => { e.preventDefault(); h.memberMenu?.(stage.communityId, stage.channelId, p.npub, e.clientX, e.clientY); }}>
                         <div class="voice-tile-avatar" style="--talk: {Math.min(1, level * 2).toFixed(2)}">
                             <Avatar src={h.avatarSrc?.(p.npub)} size={56} />
                             {#if p.muted || p.deafened}
@@ -57,10 +57,10 @@
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <span class="voice-stage-warn" onclick={() => h.micAccess?.()}>No microphone access: others can't hear you</span>
                 {/if}
-                <button class="call-btn" class:call-btn-on={v.muted} title={v.muted ? 'Unmute' : 'Mute'} onclick={() => h.setMuted(!v.muted)}>
+                <button class="call-btn" class:call-btn-on={v.muted} title={v.muted ? 'Unmute (⌘⇧M)' : 'Mute (⌘⇧M)'} onclick={() => h.setMuted(!v.muted)}>
                     <span class="icon" class:icon-mic-off={v.muted} class:icon-mic-on={!v.muted}></span>
                 </button>
-                <button class="call-btn" class:call-btn-on={v.deafened} title={v.deafened ? 'Undeafen' : 'Deafen'} onclick={() => h.setDeafened(!v.deafened)}>
+                <button class="call-btn" class:call-btn-on={v.deafened} title={v.deafened ? 'Undeafen (⌘⇧D)' : 'Deafen (⌘⇧D)'} onclick={() => h.setDeafened(!v.deafened)}>
                     <span class="icon" class:icon-volume-mute={v.deafened} class:icon-volume-max={!v.deafened}></span>
                 </button>
                 <button class="voice-stage-leave" onclick={() => h.leave()}>Leave</button>

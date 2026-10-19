@@ -68,9 +68,10 @@ pub mod kind {
     pub const DIRECT_INVITE: u16 = 3313;
     /// Typing indicator (ephemeral tier — 21059 wrap, never stored).
     pub const TYPING: u16 = 23311;
-    /// Voice presence heartbeat (ephemeral tier; CORD-07 — deferred in Vector,
-    /// constant reserved so nothing else claims it).
+    /// Voice presence heartbeat (ephemeral tier; CORD-07 §4).
     pub const VOICE_PRESENCE: u16 = 23313;
+    /// A moderator's voice directive (ephemeral tier; CORD-07 §7): `["p", target]`, `["do", …]`.
+    pub const VOICE_DIRECTIVE: u16 = 23314;
     /// Public invite bundle — bare addressable event signed by the per-link
     /// keypair at an empty `d` (CORD-05 §2). Outside the wrap.
     pub const INVITE_BUNDLE: u16 = 33301;

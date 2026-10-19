@@ -15,7 +15,7 @@ export function setVoiceSession(s) {
     } : null;
 }
 
-/** Who is in `channelId`'s call, earliest first: [{ npub, muted, deafened, elsewhere }]. */
+/** Who is in `channelId`'s call, earliest first: [{ npub, muted, deafened, server, elsewhere }]. */
 export function voicePresent(channelId) { return rooms[channelId] || []; }
 export function setVoicePresent(channelId, list) { rooms[channelId] = list || []; }
 

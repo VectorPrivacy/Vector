@@ -2531,8 +2531,9 @@ pub async fn create_community_channel(
     name: String,
     private: Option<bool>,
     category_id: Option<String>,
+    voice: Option<bool>,
 ) -> Result<String, String> {
-    vector_core::db::scoped_result(create_community_channel_inner(community_id, name, private, category_id)).await
+    vector_core::db::scoped_result(create_community_channel_inner(community_id, name, private, category_id, voice.unwrap_or(false))).await
 }
 
 async fn create_community_channel_inner(
@@ -2540,6 +2541,7 @@ async fn create_community_channel_inner(
     name: String,
     private: Option<bool>,
     category_id: Option<String>,
+    voice: bool,
 ) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -2551,6 +2553,10 @@ async fn create_community_channel_inner(
     let transport = LiveTransport::with_timeout(Duration::from_secs(20));
     let category = category_id.as_deref().map(hex_to_id32).transpose()?;
     let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, trimmed, private.unwrap_or(false), category).await?;
+    let channel_hex = vector_core::simd::hex::bytes_to_hex_32(&channel_id.0);
+    if voice {
+        vector_core::VectorCore.edit_channel_details(&community_id, &channel_hex, trimmed, None, "voice").await.map_err(|e| e.to_string())?;
+    }
     // Re-load: the create wrote the new channel onto the held document, and registering
     // from the stale in-memory copy would drop it again.
     if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {

@@ -397,6 +397,85 @@ pub async fn send_voice_presence<T: Transport + ?Sized>(
     Ok(())
 }
 
+/// The mutes and deafens this device stands behind, per (Channel, target): re-sent whenever the
+/// target comes back into the call, since a directive lasts only while they stay (CORD-07 §7).
+struct StandingDirectives;
+
+fn standing_directives() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, PublicKey), std::collections::BTreeSet<super::voice::Directive>>>> {
+    crate::db::current_session().scoped::<StandingDirectives, _>()
+}
+
+/// Mute, deafen, move or disconnect `target` in a voice Channel's call (CORD-07 §7): the signer
+/// holds the directive's bit and strictly outranks them, judged on today's Roster.
+pub async fn send_voice_directive<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    target: &PublicKey,
+    directive: super::voice::Directive,
+    to: Option<[u8; 32]>,
+) -> Result<(), String> {
+    use super::voice::Directive;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
+    let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let owner = community.owner()?.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid).unwrap_or_default();
+    let me = author_pk.to_hex();
+    if !((me == owner && target.to_hex() != owner) || roles.can_act_on_member(&me, Some(&owner), &target.to_hex(), directive.permission())) {
+        return Err("you can't do that to this member".into());
+    }
+    if directive == Directive::Move && to.is_none_or(|t| !community.channels.iter().any(|c| c.id.0 == t && c.view() == super::community::ChannelView::Voice)) {
+        return Err("move them to a voice channel".into());
+    }
+    let at_ms = now_ms();
+    let rumor = chat::build_voice_directive_rumor(author_pk, channel_id, epoch, target, directive, to.as_ref(), my_authority_citation(community, &author_pk).as_ref(), at_ms);
+    publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
+    let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    super::voice::apply_directive(&channel, target, directive, at_ms);
+    let standing = standing_directives();
+    let mut held = standing.lock().unwrap_or_else(|e| e.into_inner());
+    let set = held.entry((channel, *target)).or_default();
+    match directive {
+        Directive::Mute => {
+            set.insert(Directive::Mute);
+        }
+        Directive::Unmute => {
+            set.remove(&Directive::Mute);
+        }
+        Directive::Deafen => {
+            set.insert(Directive::Deafen);
+        }
+        Directive::Undeafen => {
+            set.remove(&Directive::Deafen);
+        }
+        Directive::Move | Directive::Disconnect => set.clear(),
+    }
+    Ok(())
+}
+
+/// Re-send what this device stands behind against `target`, now back in the call.
+pub fn reassert_voice_directives(community: &CommunityV2, channel_hex: &str, target: &PublicKey) {
+    let standing: Vec<super::voice::Directive> = standing_directives()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(channel_hex.to_string(), *target))
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_default();
+    if standing.is_empty() || !crate::rt::can_spawn() {
+        return;
+    }
+    let (community, target) = (community.clone(), *target);
+    let Some(channel) = crate::community::id32_from_hex(channel_hex).map(ChannelId) else { return };
+    crate::db::spawn_bound(async move {
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        for d in standing {
+            if let Err(e) = send_voice_directive(&transport, &community, &channel, &target, d, None).await {
+                crate::log_warn!("[voice] re-asserting a {} failed: {e}", d.as_str());
+            }
+        }
+    });
+}
+
 /// Ephemeral typing indicator (kind 23311 in a 21059 wrap — relays never store it).
 pub async fn send_typing<T: Transport + ?Sized>(
     transport: &T,
@@ -24038,6 +24117,43 @@ mod tests {
         let mut listed = held();
         listed.meta_extra.insert("voice_relays".into(), serde_json::json!(["https://voice.example.org/", "http://plain.example.org/"]));
         assert!(allowed_relay(&own, &listed) && !allowed_relay(&"http://plain.example.org/".parse().unwrap(), &listed), "and only over https");
+    }
+
+    #[tokio::test]
+    async fn a_voice_directive_stands_only_from_who_holds_the_bit_and_outranks_the_target() {
+        use super::super::voice::{self, Directive, Heard};
+        let (bed, owner, x, community) = v2_bed_with_admin("Directives").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let ch = held().channels[0].id;
+        let chan = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let m = Keys::generate();
+        let now = now_ms();
+        for k in [m.public_key(), x.public_key(), owner.keys.public_key()] {
+            voice::note(&chan, k, now, Heard { joined: true, transport: Some("iroh".into()), endpoint: Some(k.to_bytes()), ..Default::default() }, now);
+        }
+        let (secret, epoch) = held().channel_secret(held().channel(&ch).unwrap());
+        let read = channel_group_key(&secret, &ch, epoch);
+        let wrap = |actor: &Keys, target: &PublicKey, d: Directive| {
+            let rumor = chat::build_voice_directive_rumor(actor.public_key(), &ch, epoch, target, d, None, None, now_ms());
+            chat::seal_chat_rumor(&rumor, &read, actor, Timestamp::now(), true).unwrap().0
+        };
+        let me = m.public_key();
+        let dispatch = |w: &nostr_sdk::prelude::Event| super::super::inbound::dispatch_wrap(w, &held(), &me, &crate::event_handler::NoOpEventHandler);
+        dispatch(&wrap(&x, &m.public_key(), Directive::Mute));
+        assert_eq!(voice::server_state(&chan, &m.public_key()), (false, false), "an admin without Mute Members mutes nobody");
+        dispatch(&wrap(&owner.keys, &m.public_key(), Directive::Mute));
+        assert_eq!(voice::server_state(&chan, &m.public_key()), (true, false), "the owner does");
+        dispatch(&wrap(&x, &owner.keys.public_key(), Directive::Deafen));
+        assert_eq!(voice::server_state(&chan, &owner.keys.public_key()), (false, false), "and nobody deafens the owner");
+        dispatch(&wrap(&owner.keys, &x.public_key(), Directive::Deafen));
+        assert_eq!(voice::server_state(&chan, &x.public_key()), (false, true));
+        assert!(voice::present(&chan, now_ms()).iter().any(|p| p.author == m.public_key() && p.server_muted));
+        act_as(&x);
+        assert!(send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Mute, None).await.is_err(), "nor can they send one");
+        act_as(&owner.keys);
+        assert!(send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Move, Some([9; 32])).await.is_err(), "a move needs a voice channel to go to");
+        send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Unmute, None).await.unwrap();
+        assert_eq!(voice::server_state(&chan, &m.public_key()), (false, false));
     }
 
     #[tokio::test]

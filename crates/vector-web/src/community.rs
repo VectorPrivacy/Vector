@@ -304,7 +304,7 @@ pub async fn create_community(name: String, channel_name: Option<String>, relays
     }))
 }
 
-pub async fn create_community_channel(community_id: String, name: String, private: bool, category_id: Option<String>) -> Result<Value, String> {
+pub async fn create_community_channel(community_id: String, name: String, private: bool, category_id: Option<String>, voice: bool) -> Result<Value, String> {
     db::scoped_result(async move {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -314,6 +314,9 @@ pub async fn create_community_channel(community_id: String, name: String, privat
         let transport = LiveTransport::with_timeout(Duration::from_secs(20));
         let category = category_id.as_deref().map(id32).transpose()?;
         let channel_id = vector_core::community::v2::service::create_channel_in(&transport, &community, &name, private, category).await?;
+        if voice {
+            VectorCore.edit_channel_details(&community_id, &bytes_to_hex_32(&channel_id.0), &name, None, "voice").await.map_err(|e| e.to_string())?;
+        }
         if let Ok(c) = load_v2(&community_id) {
             VectorCore.register_v2_chats(&c, &db::current_session()).await;
         }

@@ -294,7 +294,7 @@ fn apply_chat_to_state_in(
             let _ = state.remove_message(&target_id);
             Some(ChatPersist::Removed(target_id))
         }
-        ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } | ChatEvent::VoicePresence { .. } => None,
+        ChatEvent::Typing { .. } | ChatEvent::Webxdc { .. } | ChatEvent::VoicePresence { .. } | ChatEvent::VoiceDirective { .. } => None,
     }
 }
 
@@ -619,11 +619,35 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
             return DispatchedV2::Ignored;
         }
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        if !super::voice::note(&channel_id, opened.author, at_ms, heard, now) {
+        let noted = super::voice::note(&channel_id, opened.author, at_ms, heard, now);
+        if noted.arrived {
+            // Our standing mutes and deafens of them come back with them.
+            super::service::reassert_voice_directives(community, &channel_id, &opened.author);
+        }
+        if !noted.changed {
             return DispatchedV2::Ignored;
         }
         #[cfg(feature = "calls")]
         crate::calls::voice::nudge(&channel_id);
+        handler.on_voice_presence(&channel_id);
+        return DispatchedV2::VoicePresence { channel_id };
+    }
+    if let ChatEvent::VoiceDirective { opened, target, directive, to } = event {
+        let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().ok().map(|o| o.to_hex());
+        let actor = opened.author.to_hex();
+        let roles = crate::db::community::get_community_roles(&cid).unwrap_or_default();
+        let authorized = (owner.as_deref() == Some(actor.as_str()) && owner.as_deref() != Some(target.to_hex().as_str()))
+            || roles.can_act_on_member(&actor, owner.as_deref(), &target.to_hex(), directive.permission());
+        if !authorized || author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
+            return DispatchedV2::Ignored;
+        }
+        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        super::voice::apply_directive(&channel_id, &target, directive, now);
+        #[cfg(feature = "calls")]
+        crate::calls::voice::on_directive(&channel_id, &target, directive, to);
+        #[cfg(not(feature = "calls"))]
+        let _ = to;
         handler.on_voice_presence(&channel_id);
         return DispatchedV2::VoicePresence { channel_id };
     }

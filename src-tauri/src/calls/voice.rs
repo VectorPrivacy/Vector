@@ -15,12 +15,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use vector_core::calls::voice::VoiceMedia;
+use vector_core::calls::voice::{Chime, VoiceMedia};
 
 struct Peer {
     jitter: Arc<Mutex<Jitter>>,
     stats: Arc<MediaStats>,
     audible: Arc<AtomicBool>,
+    gain: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
     rx: tokio::task::JoinHandle<()>,
 }
@@ -115,7 +116,7 @@ impl VoiceMedia for VoiceEngine {
         };
         self.sends.lock().unwrap_or_else(|e| e.into_inner()).push(conn.clone());
         self.conns.lock().unwrap_or_else(|e| e.into_inner()).push((endpoint, conn));
-        let peer = Peer { jitter, stats, audible: Arc::new(AtomicBool::new(true)), level: Arc::new(AtomicU32::new(0)), rx };
+        let peer = Peer { jitter, stats, audible: Arc::new(AtomicBool::new(true)), gain: Arc::new(AtomicU32::new(1f32.to_bits())), level: Arc::new(AtomicU32::new(0)), rx };
         if let Some(old) = self.peers.lock().unwrap_or_else(|e| e.into_inner()).insert(endpoint, peer) {
             old.rx.abort();
         }
@@ -141,6 +142,20 @@ impl VoiceMedia for VoiceEngine {
 
     fn has_mic(&self) -> bool {
         self.mic.load(Ordering::Relaxed)
+    }
+
+    fn chime(&self, cue: Chime) {
+        let Ok(engine) = AudioEngine::get() else { return };
+        let Ok(rate) = engine.output_rate() else { return };
+        if let Err(e) = engine.play_oneshot(chime_samples(cue, rate), rate) {
+            vector_core::log_warn!("[voice] chime failed: {e}");
+        }
+    }
+
+    fn set_volume(&self, endpoint: &[u8; 32], gain: f32) {
+        if let Some(p) = self.peers.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+            p.gain.store(gain.to_bits(), Ordering::Relaxed);
+        }
     }
 
     fn set_audible(&self, endpoint: &[u8; 32], on: bool) {
@@ -235,8 +250,9 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
                 }
                 peer.level.store(level_of(&pcm).to_bits(), Ordering::Relaxed);
                 if peer.audible.load(Ordering::Relaxed) {
+                    let gain = f32::from_bits(peer.gain.load(Ordering::Relaxed));
                     for (m, s) in mix.iter_mut().zip(pcm.iter()) {
-                        *m += *s as i32;
+                        *m += (*s as f32 * gain) as i32;
                     }
                 }
             }
@@ -255,6 +271,32 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
     }
 }
 
+/// Two soft notes: up for arrivals and unmuting, down for departures and muting; our own join and
+/// leave a fifth wider than someone else's.
+fn chime_samples(cue: Chime, rate: u32) -> Vec<f32> {
+    let (a, b, len_ms, level) = match cue {
+        Chime::Joined => (523.25, 783.99, 120, 0.22),
+        Chime::Left => (783.99, 523.25, 120, 0.22),
+        Chime::PeerJoined => (659.25, 880.0, 90, 0.16),
+        Chime::PeerLeft => (880.0, 659.25, 90, 0.16),
+        Chime::Unmuted => (740.0, 987.77, 45, 0.12),
+        Chime::Muted => (987.77, 740.0, 45, 0.12),
+    };
+    let note = (rate as usize * len_ms) / 1000;
+    let mut out = Vec::with_capacity(note * 2);
+    for (i, freq) in [a, b].into_iter().enumerate() {
+        for n in 0..note {
+            let t = n as f32 / rate as f32;
+            // A quick attack and a smooth release, so nothing clicks.
+            let attack = (n as f32 / (rate as f32 * 0.005)).min(1.0);
+            let release = (1.0 - n as f32 / note as f32).powf(1.6);
+            let partial = (2.0 * std::f32::consts::PI * freq * t).sin() + 0.25 * (4.0 * std::f32::consts::PI * freq * t).sin();
+            out.push(partial * attack * release * level * if i == 1 { 1.0 } else { 0.85 });
+        }
+    }
+    out
+}
+
 /// Several voices at once can sum past full scale: past 0.8 the mix bends toward ±1 instead of clipping.
 fn soft_clip(x: f32) -> f32 {
     const KNEE: f32 = 0.8;
@@ -268,7 +310,17 @@ fn soft_clip(x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::soft_clip;
+    use super::{chime_samples, soft_clip, Chime};
+
+    #[test]
+    fn a_chime_is_short_and_never_clips() {
+        for cue in [Chime::Joined, Chime::Left, Chime::PeerJoined, Chime::PeerLeft, Chime::Muted, Chime::Unmuted] {
+            let s = chime_samples(cue, 48_000);
+            assert!(!s.is_empty() && s.len() <= 48_000 / 4, "{cue:?}: {} samples", s.len());
+            assert!(s.iter().all(|x| x.abs() < 0.5), "{cue:?} stays well under full scale");
+            assert!(s[0].abs() < 0.01 && s[s.len() - 1].abs() < 0.01, "{cue:?} starts and ends silent");
+        }
+    }
 
     #[test]
     fn a_mix_never_leaves_full_scale_and_quiet_voices_pass_untouched() {

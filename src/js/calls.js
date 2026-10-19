@@ -196,6 +196,35 @@ function refreshVoicePresent(channelId) {
 
 const voiceChannelOf = (communityId, channelId) => (getCommunityChannels(communityId) || []).find((c) => c.id === channelId) || null;
 
+/** A member of a voice call: how loud they play here, and what a moderator may do to them. */
+async function openVoiceMemberMenu(communityId, channelId, npub, x, y) {
+    if (npub === strPubkey) return;
+    const live = VectorSvelte.voiceSession();
+    const peer = live?.channelId === channelId ? live.peers.find((p) => p.npub === npub) : null;
+    const present = await invoke('voice_present', { channelId }).catch(() => []);
+    const them = present.find((p) => p.npub === npub);
+    const powers = await invoke('voice_powers', { communityId, npub }).catch(() => ({}));
+    const volume = peer ? peer.volume : 1;
+    const setVolume = (v) => invoke('voice_set_volume', { npub, volume: v }).catch((e) => VectorSvelte.showToast(String(e)));
+    const items = [
+        { label: volume === 0 ? 'Unmute for Me' : 'Mute for Me', icon: volume === 0 ? 'volume-max' : 'volume-mute', onClick: () => setVolume(volume === 0 ? 1 : 0) },
+        ...[0.5, 1, 1.5, 2].map((v) => ({ label: `${Math.abs(volume - v) < 0.01 ? '✓ ' : ''}Volume ${Math.round(v * 100)}%`, onClick: () => setVolume(v) })),
+    ];
+    const moderate = (action, to = null) => invoke('voice_moderate', { communityId, channelId, npub, action, to }).catch((e) => VectorSvelte.showToast(String(e)));
+    const mods = [];
+    if (them && powers.mute) mods.push(them.server && them.muted ? { label: 'Server Unmute', icon: 'mic-on', onClick: () => moderate('unmute') } : { label: 'Server Mute', icon: 'mic-off', onClick: () => moderate('mute') });
+    if (them && powers.deafen) mods.push(them.server && them.deafened ? { label: 'Server Undeafen', icon: 'volume-max', onClick: () => moderate('undeafen') } : { label: 'Server Deafen', icon: 'volume-mute', onClick: () => moderate('deafen') });
+    if (them && powers.move) {
+        for (const ch of (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice' && c.id !== channelId)) {
+            mods.push({ label: `Move to ${ch.name}`, icon: 'volume-max', onClick: () => moderate('move', ch.id) });
+        }
+        mods.push({ label: 'Disconnect', icon: 'x', danger: true, onClick: () => moderate('disconnect') });
+    }
+    if (mods.length) items.push({ divider: true }, ...mods);
+    items.push({ divider: true }, { label: 'View Profile', icon: 'user-circle', onClick: () => openProfile(getProfile(npub) || { id: npub }) });
+    showContextMenu({ x, y, items });
+}
+
 function registerVoiceScreen() {
     VectorSvelte.setVoiceCallHandlers({
         join: (communityId, channelId) => joinVoiceChannel(communityId, { id: channelId }),
@@ -206,6 +235,7 @@ function registerVoiceScreen() {
         getName: (npub) => getName(npub),
         avatarSrc: (npub) => getProfileAvatarSrc(getProfile(npub)),
         myNpub: () => strPubkey,
+        memberMenu: (communityId, channelId, npub, x, y) => openVoiceMemberMenu(communityId, channelId, npub, x, y),
     });
     VectorSvelte.setScreen('voice', {
         h: {
@@ -221,6 +251,20 @@ function registerVoiceScreen() {
     });
     invoke('voice_state').then((s) => voiceOnState(s)).catch(() => {});
 }
+
+// Mute and deafen from anywhere in the app while in a voice call: Cmd/Ctrl+Shift+M and +D.
+document.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
+    const v = VectorSvelte.voiceSession();
+    if (!v) return;
+    if (e.code === 'KeyM') {
+        e.preventDefault();
+        invoke('voice_set_muted', { on: !v.muted }).catch(() => {});
+    } else if (e.code === 'KeyD') {
+        e.preventDefault();
+        invoke('voice_set_deafened', { on: !v.deafened }).catch(() => {});
+    }
+});
 
 document.addEventListener('DOMContentLoaded', registerCallScreen, { once: true });
 document.addEventListener('DOMContentLoaded', registerVoiceScreen, { once: true });
