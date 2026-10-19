@@ -4168,7 +4168,7 @@ body.ws #chat-list .chatlist-archive-icon .icon {
 .voice-stage {
   position: relative;
   z-index: 2;
-  margin: 8px 16px 0;
+  margin: 8px 16px;
   padding: 12px 14px 14px;
   border-radius: 16px;
   background: rgba(20, 20, 20, 0.95);

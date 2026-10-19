@@ -24252,6 +24252,8 @@ mod tests {
         assert!(send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Mute, None).await.is_err(), "nor can they send one");
         act_as(&owner.keys);
         assert!(send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Move, Some([9; 32])).await.is_err(), "a move needs a voice channel to go to");
+        // A same-ms tie keeps them muted: the lift is sent a moment after the mute.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         send_voice_directive(&bed.relay, &held(), &ch, &m.public_key(), Directive::Unmute, None).await.unwrap();
         assert_eq!(voice::server_state(&chan, &m.public_key()), (false, false));
     }

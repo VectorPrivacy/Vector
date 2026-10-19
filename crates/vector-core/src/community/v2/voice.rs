@@ -106,6 +106,8 @@ pub struct Present {
 #[derive(Clone)]
 struct Entry {
     at_ms: u64,
+    /// When this stay in the call began: the order everyone is listed in.
+    since_ms: u64,
     heard: Heard,
     server_muted: bool,
     server_deafened: bool,
@@ -151,7 +153,8 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
         Some(e) if heard.joined => (e.server_muted, e.server_deafened, e.muted_at, e.deafened_at),
         _ => (false, false, 0, 0),
     };
-    room.insert(author, Entry { at_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
+    let since_ms = was.as_ref().filter(|_| heard.joined).map_or(at_ms, |e| e.since_ms);
+    room.insert(author, Entry { at_ms, since_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
     Noted { changed, reached }
 }
 
@@ -193,10 +196,10 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
     let store = calls();
     let all = store.lock().unwrap_or_else(|e| e.into_inner());
     let Some(room) = all.get(&channel.to_ascii_lowercase()) else { return Vec::new() };
-    let live: Vec<(&PublicKey, &Entry)> = room.iter().filter(|(_, e)| e.heard.joined && now_ms.saturating_sub(e.at_ms) < FRESH_MS).collect();
+    let mut live: Vec<(&PublicKey, &Entry)> = room.iter().filter(|(_, e)| e.heard.joined && now_ms.saturating_sub(e.at_ms) < FRESH_MS).collect();
+    live.sort_by_key(|(a, e)| (e.since_ms, a.to_bytes()));
     let claims = |ep: &[u8; 32]| live.iter().filter(|(_, e)| e.heard.endpoint.as_ref() == Some(ep)).count();
-    let mut out: Vec<Present> = live
-        .iter()
+    live.iter()
         .map(|(a, e)| {
             let h = &e.heard;
             let endpoint = h.endpoint.filter(|ep| claims(ep) == 1);
@@ -214,9 +217,7 @@ pub fn present(channel: &str, now_ms: u64) -> Vec<Present> {
                 server_deafened: e.server_deafened,
             }
         })
-        .collect();
-    out.sort_by_key(|p| p.at_ms);
-    out
+        .collect()
 }
 
 /// The member a live presence binds `endpoint` to, if exactly one does.
@@ -283,6 +284,29 @@ mod tests {
         assert!(apply_directive(&ch, &a, Directive::Mute, 45_000, 45_000));
         assert!(!apply_directive(&ch, &a, Directive::Unmute, 45_000, 45_000), "a same-ms tie keeps them muted");
         assert_eq!(server_state(&ch, &a), (true, false));
+    }
+
+    #[test]
+    fn heartbeats_keep_everyone_where_they_arrived() {
+        // The store is the session\'s: a bed test swapping sessions must not run beside this.
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let ch = "dd".repeat(32);
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let joined = |ep: u8| Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([ep; 32]), ..Default::default() };
+        note(&ch, a, 1_000, joined(1), 1_000);
+        note(&ch, b, 2_000, joined(2), 2_000);
+        for beat in 1..=4u64 {
+            let at = 2_000 + beat * 30_000;
+            note(&ch, b, at, joined(2), at);
+            note(&ch, a, at + 500, joined(1), at + 500);
+            let order: Vec<_> = present(&ch, at + 500).iter().map(|p| p.author).collect();
+            assert_eq!(order, vec![a, b], "a's newer heartbeat must not move them behind b");
+        }
+        note(&ch, a, 130_000, Heard::default(), 130_000);
+        note(&ch, a, 131_000, joined(1), 131_000);
+        note(&ch, b, 132_000, joined(2), 132_000);
+        let order: Vec<_> = present(&ch, 132_000).iter().map(|p| p.author).collect();
+        assert_eq!(order, vec![b, a], "leaving and coming back joins the end");
     }
 
     #[test]
