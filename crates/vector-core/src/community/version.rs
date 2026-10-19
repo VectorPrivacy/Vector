@@ -565,4 +565,14 @@ mod tests {
         assert_eq!(r2.head, Some(0));
         assert!(r2.gap, "a wrong prev_hash link does not advance the head");
     }
+
+    /// The CORD-04 §1 test vector: a plain and a marked edition over the same bytes.
+    #[test]
+    fn edition_hashes_match_the_spec_vectors() {
+        let (entity, prev, signer) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
+        let content = br#"{"name":"Mods"}"#;
+        let hex = |h: [u8; 32]| crate::simd::hex::bytes_to_hex_32(&h);
+        assert_eq!(hex(edition_hash(&entity, 2, Some(&prev), content)), "3c1d4111bff28cea4c1f237dcce34efbc227db6e304cdd1146e1413657972475");
+        assert_eq!(hex(edition_hash_signed(&entity, 2, Some(&prev), content, &signer)), "462cc81a6f74622e5ff660ab3efcc007527c8d108e8242942f7ba7787a27d0ed");
+    }
 }
