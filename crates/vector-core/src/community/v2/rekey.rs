@@ -532,6 +532,8 @@ pub struct RekeyChunk {
     pub citation: Option<crate::community::edition::AuthorityCitation>,
     /// Severing containment marker ([`TAG_SEVER`], root scope only).
     pub severed: bool,
+    /// When the rotator sent it, in ms.
+    pub at_ms: u64,
 }
 
 /// The key that groups chunks of ONE rotation: `(rotator, scope_id, new_epoch,
@@ -786,6 +788,7 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         blobs,
         citation: crate::community::edition::AuthorityCitation::from_tags(&rumor.tags),
         severed,
+        at_ms: opened.at_ms,
     })
 }
 
@@ -1108,6 +1111,8 @@ pub struct Rotation {
     /// OR across chunks: any severed chunk marks the whole rotation severed, so
     /// an extension (rescue) can never launder the flag away.
     pub severed: bool,
+    /// When it was sent: its earliest chunk's time, in ms.
+    pub at_ms: u64,
 }
 
 impl Rotation {
@@ -1155,8 +1160,10 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             held_chunks: std::collections::BTreeSet::new(),
             citation: c.citation.clone(),
             severed: c.severed,
+            at_ms: c.at_ms,
         });
         entry.severed |= c.severed;
+        entry.at_ms = entry.at_ms.min(c.at_ms);
         // UNION the blobs, even when the index is already held. Treating a second
         // chunk at a known index as pure idempotent re-delivery is safe only while
         // re-delivery is byte-identical; when two chunks genuinely differ (a
@@ -1633,7 +1640,21 @@ mod tests {
             blobs,
             citation: None,
             severed: false,
+            at_ms: 0,
         }
+    }
+
+    #[test]
+    fn a_rotation_dates_from_its_earliest_chunk() {
+        let rotator = Keys::generate();
+        let prev = [3u8; 32];
+        let mut late = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 1, 2);
+        late.at_ms = 9_000;
+        let mut early = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 2, 2);
+        early.at_ms = 4_000;
+        let rotations = collect_rotations(&[late, early]);
+        assert_eq!(rotations.len(), 1);
+        assert_eq!(rotations[0].at_ms, 4_000, "a re-sent chunk never moves a rotation later");
     }
 
     #[test]

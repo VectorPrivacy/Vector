@@ -1104,7 +1104,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 // Retain the epoch keys: they open no future epoch, and dropping them
                 // destroys the ability to self-delete our own past messages. Every other
                 // self-removal trigger already retains; this one silently did not.
-                super::service::record_eviction(&current, super::service::now_ms());
+                super::service::record_eviction(&current, follow.removed_at.unwrap_or_else(super::service::now_ms));
                 let _ = crate::db::community::delete_community_retain_keys(&community_id);
                 refresh_subscription(&client).await;
                 handler.on_community_self_removed(&community_id);
@@ -1279,7 +1279,12 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         if let Some(me) = crate::my_public_key() {
             if crate::db::community::is_author_banned(&community_id, &me) {
                 crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);
-                super::service::record_eviction(&current, super::service::now_ms());
+                // Dated by the banlist edition that named us, not by when we noticed it.
+                let banned_at = crate::db::community::get_community_ban_marks(&community_id)
+                    .ok()
+                    .and_then(|marks| marks.get(&me.to_hex()).map(|s| s.saturating_mul(1000)))
+                    .unwrap_or_else(super::service::now_ms);
+                super::service::record_eviction(&current, banned_at.min(super::service::now_ms()));
                 handler.on_community_self_removed(&community_id);
                 return;
             }

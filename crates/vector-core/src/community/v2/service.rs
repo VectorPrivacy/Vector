@@ -12130,6 +12130,8 @@ pub struct RekeyFollow {
     /// A base rotation removed us — the caller tears the local hold down (the
     /// updated community is not persisted in that case).
     pub self_removed: bool,
+    /// When that rotation was sent, in ms: the eviction's own time.
+    pub removed_at: Option<u64>,
     /// An owner tombstone sits on the dissolved plane (CORD-02 §9) — the local
     /// flag is already set; the caller surfaces the death and stops following.
     pub dissolved: bool,
@@ -12345,7 +12347,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // past its tombstone — don't adopt a rotation into a grave.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
-            return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true, wedged: false });
+            return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: true, wedged: false });
         }
         // An offline member must also LEARN of a death: the tombstone rides its own
         // public plane, which the live sub watches but no catch-up fetch touched —
@@ -12356,7 +12358,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             if session.is_live() {
                 let _ = crate::db::community::set_community_dissolved(&cid_hex);
             }
-            return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: true, wedged: false });
+            return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: true, wedged: false });
         }
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
@@ -12670,7 +12672,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                     // A complete rotation without me: cut, or still keyless. Either way the
                     // channel stays known at that epoch, so the walk goes on to the CURRENT one,
                     // where a later rotation that names me again (a re-grant) lets me back in.
-                    Advance::Removed => {
+                    Advance::Removed { .. } => {
                         if held_key.is_some() {
                             crate::log_debug!("[v2:follow {}] ch {} cut at e{}", &cid_hex[..8], &ch_hex[..8], next.0);
                         }
@@ -12766,14 +12768,14 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                                 }
                             }
                             // Gone mid-walk: stop rather than resurrect it.
-                            Ok(false) => return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged }),
+                            Ok(false) => return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: false, wedged }),
                             Err(e) => crate::log_warn!("v2: hop checkpoint skipped at epoch {}: {e}", next.0),
                         }
                         advanced = true;
                         changed = true;
                     }
-                    Advance::Removed => {
-                        return Ok(RekeyFollow { updated: None, self_removed: true, dissolved: false, wedged: false });
+                    Advance::Removed { at_ms } => {
+                        return Ok(RekeyFollow { updated: None, self_removed: true, removed_at: Some(at_ms), dissolved: false, wedged: false });
                     }
                     Advance::Stay => {}
                     Advance::StayWedged => {
@@ -12809,12 +12811,12 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // blip leaves the community reading Public (and every future ban
             // refound-less) until someone happens to rotate again.
             retry_pending_severance(transport, &cur).await;
-            return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
+            return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: false, wedged });
         }
         // A leave/delete raced this follow: saving would resurrect the community row
         // (the save is an upsert) with no floor rows behind it.
         if !crate::db::community::community_held(community.id())? {
-            return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
+            return Ok(RekeyFollow { updated: None, self_removed: false, removed_at: None, dissolved: false, wedged });
         }
         unseal_held(&mut cur);
         crate::db::community::save_community_v2(&cur)?;
@@ -12844,7 +12846,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // A pending sever mark (mine or adopted) whose revoke never completed
         // keeps retrying while condemned links remain (B4).
         retry_pending_severance(transport, &cur).await;
-        Ok(RekeyFollow { updated: Some(cur), self_removed: false, dissolved: false, wedged })
+        Ok(RekeyFollow { updated: Some(cur), self_removed: false, removed_at: None, dissolved: false, wedged })
     })
     .await
 }
@@ -12859,8 +12861,8 @@ enum Advance {
     /// neither (that epoch's Control folds at the legacy address), and channel
     /// rotations never carry any.
     Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool, rotator: PublicKey },
-    /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed.
-    Removed,
+    /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed, as of `at_ms`.
+    Removed { at_ms: u64 },
     /// No owner rotation extends my held epoch (yet) — keep the current key.
     Stay,
     /// A complete authorized rotation carried a blob at MY locator that would
@@ -12973,6 +12975,8 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     // snapshot authority for the adopted epoch (CORD-02 §5) is exactly this npub.
     let mut winner_rotator: Vec<PublicKey> = Vec::new();
     let mut saw_complete_candidate = false;
+    // The latest complete rotation considered: a removal dates from it.
+    let mut removed_at: u64 = 0;
     // Did any qualifying rotation actually carry recipients? See the removal gate.
     let mut saw_nonempty_candidate = false;
     let mut saw_outranking_candidate = false;
@@ -13013,6 +13017,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
             // it too. (A rotation that fails admissibility on partial data is still
             // skipped, never adopted — the unsafe direction stays closed.)
             if r.is_complete() {
+                removed_at = removed_at.max(r.at_ms);
                 saw_complete_candidate = true;
                 saw_nonempty_candidate |= !r.blobs.is_empty();
                 saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
@@ -13079,7 +13084,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
         return Advance::Stay;
     }
     if saw_complete_candidate && !my_blob_unopenable && (!keyed || saw_outranking_candidate) {
-        Advance::Removed
+        Advance::Removed { at_ms: removed_at.min(now_ms()) }
     } else if my_blob_unopenable {
         Advance::StayWedged
     } else {
@@ -18532,6 +18537,9 @@ mod tests {
         bed.swap_to(&me);
         let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(follow.self_removed, "an authorized rotation that excluded me IS a removal");
+        // Dated by the rotation, not by when this device noticed it: a rejoin made in between
+        // must not be out-dated by a late notice.
+        assert_eq!(follow.removed_at, Some(2_000_000), "the rotation's own time (the helper sends it at 2 000 s)");
 
         // The teardown the caller performs on self_removed.
         crate::db::community::delete_community_retain_keys(&cid_hex).unwrap();
