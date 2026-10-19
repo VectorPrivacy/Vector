@@ -432,7 +432,7 @@ pub async fn send_voice_directive<T: Transport + ?Sized>(
     let rumor = chat::build_voice_directive_rumor(author_pk, channel_id, epoch, target, directive, to.as_ref(), my_authority_citation(community, &author_pk).as_ref(), at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
     let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
-    super::voice::apply_directive(&channel, target, directive, at_ms);
+    super::voice::apply_directive(&channel, target, directive, at_ms, at_ms);
     let standing = standing_directives();
     let mut held = standing.lock().unwrap_or_else(|e| e.into_inner());
     let set = held.entry((channel, *target)).or_default();
@@ -452,6 +452,20 @@ pub async fn send_voice_directive<T: Transport + ?Sized>(
         Directive::Move | Directive::Disconnect => set.clear(),
     }
     Ok(())
+}
+
+/// A newer lift from any moderator ends what this device stood behind: re-asserting it on the
+/// target's return would undo a decision made after ours.
+pub(crate) fn yield_voice_directive(channel_hex: &str, target: &PublicKey, directive: super::voice::Directive) {
+    use super::voice::Directive;
+    let lifted = match directive {
+        Directive::Unmute => Directive::Mute,
+        Directive::Undeafen => Directive::Deafen,
+        _ => return,
+    };
+    if let Some(set) = standing_directives().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&(channel_hex.to_string(), *target)) {
+        set.remove(&lifted);
+    }
 }
 
 /// Re-send what this device stands behind against `target`, now back in the call.

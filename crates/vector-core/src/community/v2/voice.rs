@@ -109,6 +109,9 @@ struct Entry {
     heard: Heard,
     server_muted: bool,
     server_deafened: bool,
+    /// When the directive that set each was sent: an older one arriving late changes nothing.
+    muted_at: u64,
+    deafened_at: u64,
 }
 
 /// What folding a presence did.
@@ -144,16 +147,17 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
     let reached = heard.joined && was.as_ref().is_none_or(|e| e.heard.endpoint != heard.endpoint);
     let changed = was.as_ref().map(|e| &e.heard) != Some(&heard);
     // A moderator's mute lasts while they stay: leaving or arriving anew clears it.
-    let (server_muted, server_deafened) = match &was {
-        Some(e) if heard.joined => (e.server_muted, e.server_deafened),
-        _ => (false, false),
+    let (server_muted, server_deafened, muted_at, deafened_at) = match &was {
+        Some(e) if heard.joined => (e.server_muted, e.server_deafened, e.muted_at, e.deafened_at),
+        _ => (false, false, 0, 0),
     };
-    room.insert(author, Entry { at_ms, heard, server_muted, server_deafened });
+    room.insert(author, Entry { at_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
     Noted { changed, reached }
 }
 
-/// Apply a moderator's mute or deafen to `target`, if they're in the call. Returns whether it changed.
-pub fn apply_directive(channel: &str, target: &PublicKey, directive: Directive, now_ms: u64) -> bool {
+/// Apply a moderator's mute or deafen, sent at `at_ms`, to `target` if they're in the call. Per
+/// pair the newest wins, a same-ms tie keeping them muted or deafened. Returns whether it changed.
+pub fn apply_directive(channel: &str, target: &PublicKey, directive: Directive, at_ms: u64, now_ms: u64) -> bool {
     let store = calls();
     let mut all = store.lock().unwrap_or_else(|e| e.into_inner());
     let Some(e) = all.get_mut(&channel.to_ascii_lowercase()).and_then(|r| r.get_mut(target)) else { return false };
@@ -161,12 +165,17 @@ pub fn apply_directive(channel: &str, target: &PublicKey, directive: Directive, 
         return false;
     }
     let before = (e.server_muted, e.server_deafened);
+    let newer = |set_at: u64, on: bool| at_ms > set_at || (at_ms == set_at && on);
     match directive {
-        Directive::Mute => e.server_muted = true,
-        Directive::Unmute => e.server_muted = false,
-        Directive::Deafen => e.server_deafened = true,
-        Directive::Undeafen => e.server_deafened = false,
-        Directive::Move | Directive::Disconnect => {}
+        Directive::Mute | Directive::Unmute if newer(e.muted_at, directive == Directive::Mute) => {
+            e.server_muted = directive == Directive::Mute;
+            e.muted_at = at_ms;
+        }
+        Directive::Deafen | Directive::Undeafen if newer(e.deafened_at, directive == Directive::Deafen) => {
+            e.server_deafened = directive == Directive::Deafen;
+            e.deafened_at = at_ms;
+        }
+        _ => {}
     }
     before != (e.server_muted, e.server_deafened)
 }
@@ -254,10 +263,10 @@ mod tests {
         let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let (ch, a) = ("cc".repeat(32), Keys::generate().public_key());
         let joined = |_at: u64| Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([3u8; 32]), ..Default::default() };
-        assert!(!apply_directive(&ch, &a, Directive::Mute, 1_000), "nobody to mute yet");
+        assert!(!apply_directive(&ch, &a, Directive::Mute, 1_000, 1_000), "nobody to mute yet");
         note(&ch, a, 1_000, joined(1_000), 1_000);
-        assert!(apply_directive(&ch, &a, Directive::Mute, 1_000));
-        assert!(!apply_directive(&ch, &a, Directive::Mute, 1_000), "once");
+        assert!(apply_directive(&ch, &a, Directive::Mute, 1_000, 1_000));
+        assert!(!apply_directive(&ch, &a, Directive::Mute, 1_000, 1_000), "once");
         note(&ch, a, 31_000, joined(31_000), 31_000);
         assert_eq!(server_state(&ch, &a), (true, false), "a heartbeat keeps it");
         assert!(present(&ch, 31_000)[0].server_muted);
@@ -267,7 +276,13 @@ mod tests {
         note(&ch, a, 40_000, Heard::default(), 40_000);
         note(&ch, a, 41_000, joined(41_000), 41_000);
         assert_eq!(server_state(&ch, &a), (false, false), "leaving ends it: a moderator re-asserts on return");
-        assert!(apply_directive(&ch, &a, Directive::Deafen, 41_000) && apply_directive(&ch, &a, Directive::Undeafen, 41_000));
+        assert!(apply_directive(&ch, &a, Directive::Deafen, 41_000, 41_000) && apply_directive(&ch, &a, Directive::Undeafen, 41_001, 41_001));
+        // Two moderators disagreeing: the newest stands, in whichever order they arrive.
+        assert!(apply_directive(&ch, &a, Directive::Unmute, 43_000, 44_000) == false, "already unmuted");
+        assert!(apply_directive(&ch, &a, Directive::Mute, 42_000, 44_000) == false, "an older mute arriving late changes nothing");
+        assert!(apply_directive(&ch, &a, Directive::Mute, 45_000, 45_000));
+        assert!(!apply_directive(&ch, &a, Directive::Unmute, 45_000, 45_000), "a same-ms tie keeps them muted");
+        assert_eq!(server_state(&ch, &a), (true, false));
     }
 
     #[test]

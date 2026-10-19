@@ -644,7 +644,9 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
             return DispatchedV2::Ignored;
         }
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        super::voice::apply_directive(&channel_id, &target, directive, now);
+        if super::voice::apply_directive(&channel_id, &target, directive, at_ms, now) {
+            super::service::yield_voice_directive(&channel_id, &target, directive);
+        }
         #[cfg(feature = "calls")]
         crate::calls::voice::on_directive(&channel_id, &target, directive, to);
         #[cfg(not(feature = "calls"))]
