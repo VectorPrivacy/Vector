@@ -26,6 +26,9 @@ pub const VOICE_ALPN: &[u8] = b"concord/voice/1";
 pub const MAX_PEERS: usize = 14;
 const DIAL_EVERY: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an incoming connection waits for the presence that names it: whoever dials us
+/// saw our presence first, and theirs can still be crossing the relays to us.
+const PRESENCE_GRACE: Duration = Duration::from_secs(15);
 /// The spread of a room's answers to a newcomer.
 const GREET_JITTER_MS: u64 = 1500;
 const JOIN_TRIES: u32 = 3;
@@ -906,7 +909,23 @@ async fn acceptor(v: Arc<Voice>) {
         crate::db::spawn_bound(async move {
             let Ok(conn) = incoming.await else { return };
             let id = *conn.remote_id().as_bytes();
-            let author = presence::author_of(&v.channel_hex, &id, now_ms()).filter(|a| *a != v.me);
+            if !dials(&id, &my_id) {
+                conn.close(0u32.into(), b"not in this call");
+                return;
+            }
+            let named = || presence::author_of(&v.channel_hex, &id, now_ms()).filter(|a| *a != v.me);
+            let waited = crate::rt::time::timeout(PRESENCE_GRACE, async {
+                loop {
+                    if let Some(a) = named() {
+                        return a;
+                    }
+                    crate::rt::time::sleep(Duration::from_millis(250)).await;
+                }
+            });
+            let author = tokio::select! {
+                a = waited => a.ok(),
+                _ = conn.closed() => return,
+            };
             let allowed = author.is_some_and(|a| held(&v.community).is_ok_and(|c| may_connect(&c, &v.channel, &a)));
             match author {
                 Some(a) if allowed && dials(&id, &my_id) => link(&v, id, a, conn),
