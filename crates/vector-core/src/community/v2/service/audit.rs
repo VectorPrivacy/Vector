@@ -735,6 +735,25 @@ fn channel_pins(community: &CommunityV2, e: &ParsedEdition, channel_hex: &str) -
     Some(read.entries.iter().filter_map(|p| super::super::pins::verify_pin_entry(p, channel_hex)).map(|p| (p.rumor_id, p.author)).collect())
 }
 
+/// Where an act falls among others dated the same second (times are whole seconds): a
+/// community's creation comes before what's made in it, which comes before what's done to it.
+fn same_second_rank(action: &str) -> u8 {
+    match action {
+        "community_create" => 0,
+        "channel_create" | "category_create" | "role_create" | "roles_activate" => 1,
+        _ => 2,
+    }
+}
+
+/// Newest first, acts in one second in the order they could have happened.
+fn newest_first(entries: &mut [AuditEntry]) {
+    entries.sort_by(|a, b| {
+        b.at.cmp(&a.at)
+            .then_with(|| same_second_rank(b.action).cmp(&same_second_rank(a.action)))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+}
+
 /// The whole Audit Log of `community`, newest first.
 pub async fn audit_log<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<AuditLog, String> {
     let cid_hex = hex(&community.id().0);
@@ -748,7 +767,7 @@ pub async fn audit_log<T: Transport + ?Sized>(transport: &T, community: &Communi
     entries.extend(local_entries(&cid_hex, &names));
     let mut seen = HashSet::new();
     entries.retain(|e| seen.insert(e.id.clone()));
-    entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.id.cmp(&a.id)));
+    newest_first(&mut entries);
     Ok(AuditLog { entries, compacted })
 }
 
@@ -790,6 +809,17 @@ mod tests {
         let (mut out, _) = control_entries(&CID, editions, &heads, &[], &Readers { channel: &channel, pins: &pins });
         out.sort_by_key(|e| e.at);
         out
+    }
+
+    #[test]
+    fn a_community_is_created_before_anything_in_the_same_second() {
+        let entry = |id: &str, action: &'static str, at: u64| AuditEntry { id: id.into(), at, actor: None, action, target: None, changes: Vec::new(), partial: false };
+        // Ids that would put the community's creation above its #general were they the tiebreak.
+        let mut log = vec![entry("00", "channel_create", 5_000), entry("ff", "community_create", 5_000), entry("aa", "roles_activate", 5_000), entry("11", "role_update", 9_000)];
+        newest_first(&mut log);
+        let order: Vec<&str> = log.iter().map(|e| e.action).collect();
+        assert_eq!(order.first(), Some(&"role_update"), "newest first");
+        assert_eq!(order.last(), Some(&"community_create"), "read bottom up: the community, then what's made in it");
     }
 
     #[test]
