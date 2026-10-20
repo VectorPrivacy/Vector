@@ -904,6 +904,11 @@ body.ws .chatlist-channel-section + .chatlist-channel-section {
   margin-top: 14px;
 }
 
+/* Channels in no Category head the list, spaced as a heading would space them. */
+body.ws .chatlist-channel-section-loose {
+  padding-top: 10px;
+}
+
 body.ws .chatlist-channel-section-head {
   display: flex;
   align-items: center;

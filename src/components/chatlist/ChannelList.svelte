@@ -1,6 +1,6 @@
 <script>
     // A community's channels: nested under its chat-list row as a flat disclosure, or as
-    // the widescreen pane in its Categories (Public / Private sections where it has none).
+    // the widescreen pane in its Categories, channels in none first without a heading.
     // A manager drags channels between and within them, and Categories among themselves.
     // Each row derives its own weight (muted, unread, pings) from its chat's signal, so a
     // message repaints one row.
@@ -11,7 +11,7 @@
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, getCategories, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
-    //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelMenu,
+    //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelChat, openChannelMenu,
     //    openCategoryMenu, attachLongPressContextMenu, createChannel, deleteChannel, moveChannel, moveCategory
 
     const state = $derived.by(() => {
@@ -30,21 +30,12 @@
 
     const categories = $derived.by(() => { communityVersion(communityId); return h.getCategories(communityId); });
 
-    // A section is { id, label, channels, canAdd, category }: a Category, the channels filed
-    // under none (first, without a heading), or, in a community without Categories, the
-    // Public and Private halves of its one list.
+    // A section is { id, label, channels, canAdd, category }: a Category, or the channels
+    // filed under none, first and without a heading.
     const sections = $derived.by(() => {
         if (!state) return [];
         const { channels, canManage } = state;
         const out = [];
-        if (!categories.length) {
-            const open = channels.filter(c => !c.private);
-            const shut = channels.filter(c => c.private);
-            if (open.length) out.push({ id: 'public', label: 'Public', channels: open, canAdd: canManage, category: null });
-            if (shut.length) out.push({ id: 'private', label: 'Private', channels: shut, canAdd: canManage, category: null });
-            if (!out.length && canManage) out.push({ id: 'public', label: 'Public', channels: [], canAdd: true, category: null });
-            return out;
-        }
         const loose = channels.filter(c => !c.category);
         if (loose.length || (canManage && dragging?.kind === 'channel')) {
             out.push({ id: 'none', label: '', channels: loose, canAdd: false, category: null, headless: true });
@@ -188,6 +179,12 @@
         {#if r.pings}
             <span class="chatlist-channel-badge">{r.pings > 99 ? '99+' : r.pings}</span>
         {/if}
+        {#if channel.view === 'voice'}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="chatlist-channel-action btn" title="Open Chat" onclick={(e) => { e.stopPropagation(); h.openChannelChat(communityId, channel); }}>
+                <span class="icon icon-chat-bubble"></span>
+            </div>
+        {/if}
         <!-- The primary channel anchors the community's row and history; the backend refuses to tombstone it. -->
         {#if canManage && !h.isPrimaryChannelId(channel.id)}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -260,8 +257,8 @@
                         </div>
                         {#if section.canAdd}
                             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                            <div class="chatlist-channel-section-add btn" title={section.category ? `Add a channel to ${section.label}` : `Add a ${section.label.toLowerCase()} channel`}
-                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, section.id === 'private', section.category?.id || null); }}>
+                            <div class="chatlist-channel-section-add btn" title={`Add a channel to ${section.label}`}
+                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, false, section.category?.id || null); }}>
                                 <span class="icon icon-plus"></span>
                             </div>
                         {/if}
@@ -274,7 +271,8 @@
                             {@render head()}
                         </div>
                     {:else}
-                        <div class="chatlist-channel-section-head">{@render head()}</div>
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div class="chatlist-channel-section-head" oncontextmenu={(e) => e.preventDefault()}>{@render head()}</div>
                     {/if}
                     <div class="chatlist-channel-section-body">
                         {#each section.channels as channel (channel.id)}

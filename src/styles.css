@@ -4525,6 +4525,34 @@ body:not(.ws) .voice-tile {
   opacity: 1 !important;
 }
 
+/* A voice channel's chat, opened without joining its call: shown on hover, like the delete. */
+.chatlist-channel-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatlist-channel:hover .chatlist-channel-action {
+  opacity: 0.6;
+}
+
+.chatlist-channel-action:hover {
+  opacity: 1 !important;
+}
+
+.chatlist-channel-action .icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background-color: #fff;
+}
+
 .chatlist-channel-delete .icon {
   position: relative;
   width: 12px;

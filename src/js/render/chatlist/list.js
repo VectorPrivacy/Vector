@@ -119,6 +119,7 @@ function chatlistSnapshot() {
  * @property {(chat: object) => number} countPingMessages
  * @property {(id: string) => boolean} isPrimaryChannelId
  * @property {(communityId: string, channel: object) => void} openChannel   a voice channel's also joins its call
+ * @property {(communityId: string, channel: object) => void} openChannelChat   a voice channel's chat, without joining
  * @property {(communityId: string, channel: object, x: number, y: number) => void} openChannelMenu
  * @property {(vm: object) => void} rowClick
  * @property {(communityId: string, isPrivate: boolean, categoryId?: string|null) => void} createChannel
@@ -179,6 +180,7 @@ function chatlistHelpers() {
             if (channel.view === 'voice') joinVoiceChannel(communityId, channel);
             openCommunityChannel(communityId, channel);
         },
+        openChannelChat: (communityId, channel) => openCommunityChannel(communityId, channel),
         openChannelMenu,
         // A tap that dismissed an open context menu must only close it, not also open the
         // chat behind it; the trailing tap a long-press synthesises is swallowed the same way.
