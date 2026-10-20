@@ -22,6 +22,7 @@
         border-radius: 8px;
         z-index: 10000;
         font-size: 14px;
+        overflow-wrap: anywhere;
         opacity: 0;
         transition: opacity 0.3s ease;
         pointer-events: none;

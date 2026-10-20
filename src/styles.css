@@ -420,6 +420,8 @@
 html, body {
   height: 100%;
   margin: 0;
+  /* Names are user-chosen: a word too long for its line breaks rather than spills. */
+  overflow-wrap: break-word;
 }
 
 ::selection {
@@ -3008,6 +3010,7 @@ body.mobile #chat-new-scan-btn { display: block; }
   /* Edge-to-edge items (rounded corners clip the first/last hover); consistent with .profile-more-dropdown. */
   padding: 0;
   min-width: 160px;
+  max-width: min(320px, calc(100vw - 16px));
   overflow: hidden;
   z-index: 3000;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
@@ -3040,6 +3043,11 @@ body.mobile #chat-new-scan-btn { display: block; }
 .context-menu-item:hover {
   background: #2a2a2a;
   color: #fff;
+}
+.context-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .context-menu-item.is-danger        { color: var(--danger-color); }
 .context-menu-item.is-danger:hover  { background: var(--danger-color-hover); color: var(--danger-color); }
@@ -4854,6 +4862,9 @@ body.chat-bg-disabled .chat-messages::before {
    mini-profile as a chat name/avatar tap. The whole name+suffix text is the hit area;
    the name is a touch bolder than the dim line, brightening + underline on hover. */
 .system-event-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: center;
   cursor: pointer;
 }
 .system-event-avatar {
@@ -5720,6 +5731,9 @@ button.mini-profile-role-dot:disabled { cursor: default; }
   font-size: 13.5px;
   white-space: nowrap;
   flex-shrink: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #chat-reply-bar-name {
@@ -8105,6 +8119,11 @@ img.emoji-img-loading {
   font-size: 12px;
   text-align: left;
   cursor: pointer;
+}
+
+.ne-veil-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ne-veil-action {
@@ -16379,6 +16398,10 @@ button.popout-thumb {
 }
 
 .member-section-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
   color: rgba(255, 255, 255, 0.38);
@@ -16386,6 +16409,7 @@ button.popout-thumb {
 }
 
 .member-section-count {
+  flex-shrink: 0;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.24);
@@ -22479,6 +22503,9 @@ textarea.command-part-input {
 }
 .dmsg-reply-name {
   flex-shrink: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -28771,6 +28798,7 @@ body.profile-switcher-editing .profile-switcher-add {
   align-items: center;
   gap: 8px;
   min-width: 240px;
+  max-width: calc(100vw - 96px);
   padding: 28px 32px 24px;
   border-radius: 20px;
   background: #1b1b1b;
@@ -28779,6 +28807,10 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-ring-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   margin-top: 8px;
   font-size: 18px;
   font-weight: 600;

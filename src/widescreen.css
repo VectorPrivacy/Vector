@@ -928,6 +928,10 @@ body.ws .chatlist-channel-section-toggle {
 }
 
 body.ws .chatlist-channel-section-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 15px;
   color: rgba(255, 255, 255, 0.38);

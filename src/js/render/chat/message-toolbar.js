@@ -696,8 +696,8 @@ function _dmsgInitGestures() {
             _dmsgClearLongTimer();
             _gAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
             if (_gAxis === 'v') { _gTouchRow = null; return; }  // vertical = scroll
-            // A code block or table with room to scroll owns the drag; at its edge, the swipe applies.
-            if (_dmsgCanScrollX(e.target, _gTouchRow, dx)) { _gTouchRow = null; _gAxis = null; return; }
+            // A 3D model turns under the drag, and a code block or table with room to scroll owns it; at its edge, the swipe applies.
+            if (e.target.closest('.model3d canvas') || _dmsgCanScrollX(e.target, _gTouchRow, dx)) { _gTouchRow = null; _gAxis = null; return; }
             _dmsgBeginSwipeVisual(_gTouchRow);
         }
         if (_gAxis !== 'h') return;
