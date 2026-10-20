@@ -23,12 +23,12 @@ const s = $state({
 
 export function channelEditorState() { return s; }
 
-/** Open on `channel` ({ id, name, topic, view, private }) of `communityId`, or on a Category's permissions. */
-export function openChannelEditor(communityId, channel, isCategory = false) {
+/** Open on `channel` ({ id, name, topic, view, private }) of `communityId`, or a Category, at `section`. */
+export function openChannelEditor(communityId, channel, isCategory = false, section = 'overview') {
     const saved = { name: channel.name || '', topic: channel.topic || '', view: channel.view || 'chat' };
     Object.assign(s, {
         communityId, channelId: channel.id, ...saved, saved, busy: false, error: '',
-        section: isCategory ? 'permissions' : 'overview', query: '',
+        section, query: '',
         perms: null, target: 'everyone', draft: null, isCategory, private: !!channel.private,
     });
     ceOverlay.open({});
@@ -51,7 +51,8 @@ export function resetChannelEditor() {
 
 /** Whether the name, topic or view differ from what the channel holds. */
 export function channelOverviewDirty() {
-    return !s.isCategory && (s.name !== s.saved.name || s.topic !== s.saved.topic || s.view !== s.saved.view);
+    if (s.isCategory) return s.name !== s.saved.name;
+    return s.name !== s.saved.name || s.topic !== s.saved.topic || s.view !== s.saved.view;
 }
 export function channelEditorDirty() { return channelOverviewDirty() || overwriteDirty(); }
 

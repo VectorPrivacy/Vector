@@ -293,27 +293,19 @@ function promptCreateCategory(communityId) {
     openCreateModal({ category: true, communityId });
 }
 
-async function promptRenameCategory(communityId, category) {
-    const name = await popupConfirm('Rename category', escapeHtml(category.name), false, 'category name');
-    if (!name || !String(name).trim()) return;
-    try {
-        await invoke('rename_community_category', { communityId, categoryId: category.id, name: String(name).trim() });
-        refreshCommunityChannels();
-    } catch (e) {
-        showToast(String(e));
-    }
-}
-
+/** Whether the category was deleted. */
 async function promptDeleteCategory(communityId, category) {
     const ok = await popupConfirm('Delete category',
         `Delete <b>${escapeHtml(category.name)}</b>? Its channels stay, uncategorized.`,
         false, '', 'vector_warning.svg');
-    if (!ok) return;
+    if (!ok) return false;
     try {
         await invoke('delete_community_category', { communityId, categoryId: category.id });
         refreshCommunityChannels();
+        return true;
     } catch (e) {
         showToast(String(e));
+        return false;
     }
 }
 
@@ -322,9 +314,8 @@ function openCategoryMenu(communityId, category, x, y) {
     if (!communityCanAddChannels(communityId)) return;
     showContextMenu({ x, y, items: [
         { label: 'Create Channel', icon: 'plus', onClick: () => promptCreateChannel(communityId, false, category.id) },
-        { label: 'Edit Permissions', icon: 'shield-filled', onClick: () => openChannelEditorFor(communityId, { id: category.id, name: category.name }, true) },
+        { label: 'Edit Category', icon: 'edit', onClick: () => openChannelEditorFor(communityId, { id: category.id, name: category.name }, true) },
         { divider: true },
-        { label: 'Rename Category', icon: 'edit', onClick: () => promptRenameCategory(communityId, category) },
         { label: 'Delete Category', icon: 'x', danger: true, onClick: () => promptDeleteCategory(communityId, category) },
     ] });
 }
@@ -373,7 +364,13 @@ async function saveChannelEditor() {
     const { communityId, channelId } = st;
     VectorSvelte.setChannelEditorBusy(true);
     try {
-        if (VectorSvelte.channelOverviewDirty()) {
+        if (VectorSvelte.channelOverviewDirty() && st.isCategory) {
+            const name = st.name.trim();
+            await invoke('rename_community_category', { communityId, categoryId: channelId, name });
+            st.name = name;
+            VectorSvelte.channelEditorSaved({ name, topic: '', view: 'chat' });
+            refreshCommunityChannels();
+        } else if (VectorSvelte.channelOverviewDirty()) {
             const saved = { name: st.name.trim(), topic: st.topic.trim(), view: st.view };
             await invoke('edit_community_channel', { communityId, channelId, name: saved.name, topic: saved.topic || null, view: saved.view });
             st.name = saved.name;
@@ -401,6 +398,8 @@ async function saveChannelEditor() {
  * @property {() => void} save
  * @property {() => void} reset
  * @property {(sync: { communityId: string, channelId: string, categoryId: string|null }) => void} setSync
+ * @property {() => boolean} canDelete   the primary channel can't be deleted
+ * @property {() => void} remove   delete the channel or category, after a confirm, and close
  * @property {(p: { communityId: string, channelId: string, private: boolean }) => void} setPrivate   a key of its own, or back to the community's
  * @property {(npub: string) => string} name   empty when they have no name of their own
  * @property {(npub: string) => boolean} veiled   Streamer Mode hides the name and key
@@ -414,6 +413,18 @@ VectorSvelte.setScreen('channelEditor', {
         close: () => closeChannelEditorGuarded(),
         save: () => saveChannelEditor(),
         reset: () => VectorSvelte.resetChannelEditor(),
+        canDelete: () => {
+            const st = VectorSvelte.channelEditorState();
+            return st.isCategory || !arrChats.some(c => c.id === st.channelId && c.metadata?.custom_fields?.primary_channel === st.channelId);
+        },
+        remove: async () => {
+            const st = VectorSvelte.channelEditorState();
+            const target = { id: st.channelId, name: st.saved.name, view: st.saved.view };
+            const done = st.isCategory ? await promptDeleteCategory(st.communityId, target) : await promptDeleteChannel(st.communityId, target);
+            if (!done) return;
+            popBack('channel-editor');
+            VectorSvelte.closeChannelEditor();
+        },
         setSync: async ({ communityId, channelId, categoryId }) => {
             VectorSvelte.setChannelEditorBusy(true);
             try {
@@ -818,17 +829,20 @@ async function submitCreateModal() {
 
 VectorSvelte.setScreen('createChannel', { h: { submit: () => submitCreateModal(), close: () => closeCreateModal() } });
 
+/** Whether the channel was deleted. */
 async function promptDeleteChannel(communityId, channel) {
     const ok = await popupConfirm('Delete channel',
         `Delete <b>${channel.view === 'voice' ? '' : '#'}${escapeHtml(channel.name)}</b>? Everyone loses access to it. Messages already on this device are kept.`,
         false, '', 'vector_warning.svg');
-    if (!ok) return;
+    if (!ok) return false;
     try {
         await invoke('delete_community_channel', { communityId, channelId: channel.id });
         if (strOpenChat === channel.id) closeChat();
         refreshCommunityChannels();
+        return true;
     } catch (e) {
         await popupConfirm("Couldn't delete the channel", escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        return false;
     }
 }
 

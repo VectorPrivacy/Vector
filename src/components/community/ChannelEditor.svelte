@@ -53,17 +53,19 @@
     const syncable = $derived(permsOpen && !st.isCategory && (!!st.perms?.synced || !!st.perms?.category));
 
     const SECTIONS = $derived([
-        ...(st.isCategory ? [] : [{
+        {
             id: 'overview',
             label: 'Overview',
             icon: 'info',
-            anchors: [
+            anchors: st.isCategory ? [
+                { id: 'ch-name', label: 'Name', icon: 'edit', keys: 'name rename title' },
+            ] : [
                 { id: 'ch-name', label: 'Name', icon: 'edit', keys: 'name rename title' },
                 { id: 'ch-topic', label: 'Topic', icon: 'align-left', keys: 'topic description about' },
                 { id: 'ch-view', label: 'Opens As', icon: 'channel-hash', keys: 'view text voice opens' },
                 ...(st.perms?.activated ? [{ id: 'ch-private', label: 'Privacy', icon: 'locked', keys: 'private privacy public hidden key' }] : []),
             ],
-        }]),
+        },
         {
             id: 'permissions',
             label: 'Permissions',
@@ -76,7 +78,7 @@
         },
     ]);
     const section = $derived(SECTIONS.find((x) => x.id === st.section) || SECTIONS[0]);
-    const anchors = anchorScroll(st.isCategory ? 'ch-targets' : 'ch-name');
+    const anchors = anchorScroll(st.section === 'permissions' ? 'ch-targets' : 'ch-name');
 
     async function goSection(id) {
         if (st.section === id) return;
@@ -187,7 +189,7 @@
     const enc = new TextEncoder();
     const nameBytes = $derived(enc.encode(st.name).length);
     const topicBytes = $derived(enc.encode(st.topic).length);
-    const valid = $derived(st.isCategory || (!!st.name.trim() && nameBytes <= 64 && topicBytes <= 1024));
+    const valid = $derived(!!st.name.trim() && nameBytes <= 64 && (st.isCategory || topicBytes <= 1024));
     const bar = $derived(dirty || st.busy || !!st.error);
 </script>
 
@@ -202,6 +204,14 @@
             {#snippet head()}
                 <span class="cs-nav-glyph"><span class="icon {st.isCategory ? 'icon-folder' : st.saved.view === 'voice' ? 'icon-volume-max' : st.private ? 'icon-locked' : 'icon-channel-hash'}"></span></span>
                 <span class="cs-nav-title cutoff">{st.saved.name || (st.isCategory ? 'Category' : 'Channel')}</span>
+            {/snippet}
+            {#snippet footer()}
+                {#if h.canDelete()}
+                    <button class="cs-section danger" disabled={st.busy} onclick={() => h.remove()}>
+                        <span class="cs-section-icon"><span class="icon icon-trash"></span></span>
+                        <span class="cutoff">Delete {st.isCategory ? 'Category' : 'Channel'}</span>
+                    </button>
+                {/if}
             {/snippet}
         </SectionNav>
 
@@ -222,13 +232,14 @@
                             <h3 class="cs-heading">Name</h3>
                             <div class="cs-field">
                                 <div class="cs-field-head">
-                                    <label class="cs-label" for="ce-name">Channel Name</label>
+                                    <label class="cs-label" for="ce-name">{st.isCategory ? 'Category' : 'Channel'} Name</label>
                                     <span class="cs-count" class:warn={nameBytes > 64 || !st.name.trim()}>{nameBytes}/64</span>
                                 </div>
                                 <input id="ce-name" class="cs-input" type="text" disabled={st.busy} bind:value={st.name}
                                        onkeydown={(e) => { if (e.key === 'Enter' && valid) h.save(); }}>
                             </div>
                         </section>
+                        {#if !st.isCategory}
                         <section class="cs-block" data-anchor="ch-topic">
                             <h3 class="cs-heading">Topic</h3>
                             <div class="cs-field">
@@ -265,6 +276,7 @@
                                     <span class="neon-toggle"></span>
                                 </label>
                             </section>
+                        {/if}
                         {/if}
                     {:else if !st.perms}
                         <section class="cs-block" data-anchor="ch-targets">
