@@ -274,6 +274,7 @@ async fn resolve_delete_options(
     // keeps Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
     // confident "no community" for every row of the channel.
     let mut community_cache: HashMap<String, Result<Option<ModerationContext>, ()>> = HashMap::new();
+    let mut private_cache: HashMap<String, bool> = HashMap::new();
     let mut out = HashMap::with_capacity(ctxs.len());
 
     for (id, ctx) in ctxs {
@@ -293,11 +294,13 @@ async fn resolve_delete_options(
                         // Transient store failure: omit rather than cache a false "no Hide".
                         Err(()) => continue,
                         Ok(None) => false,
-                        Ok(Some((owner, roster))) => vector_core::community::moderation::can_hide(
+                        Ok(Some((owner, roster))) => vector_core::community::moderation::can_hide_in_channel(
                             owner.as_deref(),
                             roster,
                             &me.to_hex(),
                             author_hex,
+                            &ctx.chat_id,
+                            *private_cache.entry(ctx.chat_id.clone()).or_insert_with(|| vector_core::db::community::channel_is_private(&ctx.chat_id).ok().flatten().unwrap_or(false)),
                         ),
                     }
                 }

@@ -50,11 +50,28 @@ pub fn can_hide(
     )
 }
 
-/// [`can_hide`] with the owner and roster resolved from the store. Callers
-/// judging a whole page should resolve those once and call [`can_hide`] instead.
-pub fn can_hide_in(community_id: &str, actor_hex: &str, author_hex: &str) -> bool {
-    let roster = crate::db::community::get_community_roles(community_id).unwrap_or_default();
-    can_hide(owner_hex(community_id).as_deref(), &roster, actor_hex, author_hex)
+/// [`can_hide`] in one Channel: MANAGE_MESSAGES is overwritable, so it's resolved there
+/// (CORD-04 §8), while the outrank stays server-wide.
+pub fn can_hide_in_channel(
+    owner_hex: Option<&str>,
+    roster: &CommunityRoles,
+    actor_hex: &str,
+    author_hex: &str,
+    channel_hex: &str,
+    private: bool,
+) -> bool {
+    let to_hex = |s: &str| {
+        nostr_sdk::prelude::PublicKey::parse(s)
+            .map(|pk| pk.to_hex())
+            .unwrap_or_else(|_| s.to_string())
+    };
+    let actor = to_hex(actor_hex);
+    // A legacy Roster has no Channel permissions to resolve.
+    if roster.everyone.is_none() {
+        return can_hide(owner_hex, roster, &actor, author_hex);
+    }
+    roster.can_act_on_member(&actor, owner_hex, &to_hex(author_hex), 0)
+        && roster.channel_permissions(owner_hex, &actor, channel_hex, private).contains(Permissions::MANAGE_MESSAGES)
 }
 
 #[cfg(test)]
@@ -73,6 +90,25 @@ mod tests {
             MemberGrant { member: mod_hex.to_string(), role_ids: vec![moderator.role_id.clone()] },
         ];
         CommunityRoles { grants, roles: vec![admin, moderator], everyone: None, overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default() }
+    }
+
+    #[test]
+    fn a_hide_resolves_manage_messages_in_its_channel() {
+        use crate::community::roles::{Overwrite, OverwriteTarget, Permissions as P};
+        let (owner, admin_a, admin_b, moderator) = ("11".repeat(32), "22".repeat(32), "33".repeat(32), "44".repeat(32));
+        let mut r = roster(&owner, &admin_a, &admin_b, &moderator);
+        r.everyone = Some(P(P::VIEW_CHANNEL | P::SEND_MESSAGES));
+        let (here, there) = ("cc".repeat(32), "dd".repeat(32));
+        let member = "55".repeat(32);
+        r.overwrites.push(Overwrite { scope: here.clone(), target: OverwriteTarget::Role("b".repeat(64)), allow: P(0), deny: P(P::MANAGE_MESSAGES) });
+        assert!(can_hide_in_channel(Some(&owner), &r, &moderator, &member, &there, false), "the server-wide bit stands elsewhere");
+        assert!(!can_hide_in_channel(Some(&owner), &r, &moderator, &member, &here, false), "an overwrite's deny takes it away here");
+        r.overwrites.push(Overwrite { scope: here.clone(), target: OverwriteTarget::Member(member.clone()), allow: P(P::MANAGE_MESSAGES), deny: P(0) });
+        assert!(!can_hide_in_channel(Some(&owner), &r, &member, &moderator, &here, false), "an allow never lifts an outrank");
+        assert!(!can_hide_in_channel(Some(&owner), &r, &admin_a, &member, &here, true), "a Private Channel's view comes only through an allow");
+        assert!(can_hide_in_channel(Some(&owner), &r, &owner, &member, &here, true), "the owner holds everything everywhere");
+        r.everyone = None;
+        assert!(can_hide_in_channel(Some(&owner), &r, &moderator, &member, &here, false), "a legacy Roster judges server-wide");
     }
 
     #[test]

@@ -551,15 +551,9 @@ pub fn sealed_tombstone(content: &str) -> Option<String> {
 /// `meta` with whatever breaks the protocol caps dropped, the name cut to fit: what folds is
 /// shown, and what a writer re-seals must validate.
 pub fn sanitize_channel_metadata(mut meta: ChannelMetadata) -> ChannelMetadata {
-    if meta.name.len() > MAX_NAME_BYTES {
-        let mut end = MAX_NAME_BYTES;
-        while !meta.name.is_char_boundary(end) {
-            end -= 1;
-        }
-        meta.name.truncate(end);
-    }
+    cut_name(&mut meta.name);
     let text = |m: &ChannelMetadata, k: &str| m.extra.get(k).map(|v| v.as_str().map(str::to_string));
-    if text(&meta, "topic").is_some_and(|t| t.is_none_or(|t| t.len() > MAX_TOPIC_BYTES)) {
+    if text(&meta, "topic").is_some_and(|t| t.is_none_or(|t| t.is_empty() || t.len() > MAX_TOPIC_BYTES)) {
         meta.extra.remove("topic");
     }
     if text(&meta, "position").is_some_and(|k| k.is_none_or(|k| !crate::community::rank::is_rank_key(&k))) {
@@ -600,6 +594,29 @@ pub fn validate_channel_metadata(meta: &ChannelMetadata) -> Result<(), ControlEr
     Ok(())
 }
 
+/// A name past the 64-byte cap, cut to the last whole character within it: what a reader shows.
+pub fn cut_name(name: &mut String) {
+    if name.len() > MAX_NAME_BYTES {
+        let mut end = MAX_NAME_BYTES;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+}
+
+/// An optional string field of another type reads as absent, never sinking the edition.
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+fn lenient_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    lenient_string(d).map(Option::unwrap_or_default)
+}
+
 /// A Channel's topic cap (CORD-03 §2).
 pub const MAX_TOPIC_BYTES: usize = 1024;
 
@@ -607,9 +624,9 @@ pub const MAX_TOPIC_BYTES: usize = 1024;
 /// Deletion is terminal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CategoryMetadata {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty", deserialize_with = "lenient_name")]
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_string")]
     pub position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,

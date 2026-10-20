@@ -561,6 +561,16 @@ fn query_community_for_channel(channel_id: &str) -> Result<Option<String>, Strin
         .map_err(|e| format!("community_id_for_channel: {e}"))
 }
 
+/// Whether a stored Channel is private, `None` when it isn't stored.
+pub fn channel_is_private(channel_id: &str) -> Result<Option<bool>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.prepare_cached("SELECT private FROM community_channels WHERE channel_id = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![channel_id], |r| r.get::<_, i64>(0)))
+        .optional()
+        .map(|p| p.map(|p| p != 0))
+        .map_err(|e| format!("channel_is_private: {e}"))
+}
+
 /// The id of the Community that owns `channel`, if one is stored locally.
 pub fn community_for_channel(channel: &[u8; 32]) -> Result<Option<[u8; 32]>, String> {
     let cache = channel_community_cache();

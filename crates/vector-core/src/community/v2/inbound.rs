@@ -118,7 +118,8 @@ fn moderation_delete_authorized(
         return false;
     }
     let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    crate::community::moderation::can_hide(Some(&owner_hex), &roster, &deleter_hex, &author.to_hex())
+    let private = crate::db::community::channel_is_private(channel_id).ok().flatten().unwrap_or(false);
+    crate::community::moderation::can_hide_in_channel(Some(&owner_hex), &roster, &deleter_hex, &author.to_hex(), channel_id, private)
 }
 
 /// What applying a v2 chat event to STATE yielded — the caller persists it (async)

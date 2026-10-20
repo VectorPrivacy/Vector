@@ -336,13 +336,16 @@ pub async fn moderation_delete<T: Transport + ?Sized>(
     }
     let owner_hex = community.owner()?.to_hex();
     let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    if !crate::community::moderation::can_hide(
+    let private = community.channel(channel_id).is_some_and(|c| c.private);
+    if !crate::community::moderation::can_hide_in_channel(
         Some(&owner_hex),
         &roster,
         &author_pk.to_hex(),
         &target_author.to_hex(),
+        &crate::simd::hex::bytes_to_hex_32(&channel_id.0),
+        private,
     ) {
-        return Err("you can't hide a message from a member who outranks you (or the owner)".to_string());
+        return Err("you can't hide that message in this channel".to_string());
     }
     let at_ms = next_send_ms();
     let citation = required_authority_citation(community, &author_pk)?;
@@ -2893,7 +2896,9 @@ fn fold_members(
     // kick equal).
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
-        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        // A banned member's Guestbook events count for nothing (CORD-04 §4).
+        !crate::db::community::is_author_banned(&cid_hex, actor)
+            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     let now = now_ms();
@@ -3100,7 +3105,9 @@ pub async fn wire_guestbook_members<T: Transport + ?Sized>(
     let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
-        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        // A banned member's Guestbook events count for nothing (CORD-04 §4).
+        !crate::db::community::is_author_banned(&cid_hex, actor)
+            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
@@ -3131,7 +3138,9 @@ pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collection
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
-        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        // A banned member's Guestbook events count for nothing (CORD-04 §4).
+        !crate::db::community::is_author_banned(&cid_hex, actor)
+            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, st)| (pk, st.at_ms)).collect()
@@ -3168,7 +3177,9 @@ fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> DepartureSp
     let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
-        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        // A banned member's Guestbook events count for nothing (CORD-04 §4).
+        !crate::db::community::is_author_banned(&cid_hex, actor)
+            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     guestbook::departure_windows(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick)
@@ -3237,7 +3248,9 @@ pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64
     let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
-        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        // A banned member's Guestbook events count for nothing (CORD-04 §4).
+        !crate::db::community::is_author_banned(&cid_hex, actor)
+            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
     guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick)
@@ -5549,7 +5562,7 @@ pub(super) fn citation_is_synced(
 }
 
 /// [`my_authority_citation`], but refusing to emit an action every reader will
-/// drop (CORD-04 §5: an uncited non-owner action is not honored).
+/// drop (CORD-04 §5: which non-owner actions must cite).
 ///
 /// The citation is built from PERSISTED heads, which only `follow_control` writes
 /// — so an admin who hasn't folded yet (just promoted, or freshly restored) would
@@ -8527,7 +8540,9 @@ pub async fn edit_channel_details<T: Transport + ?Sized>(
         Some(t) => meta.extra.insert("topic".into(), t.into()),
         None => meta.extra.remove("topic"),
     };
+    // An unchanged view a later revision defined stays as written.
     match view {
+        _ if view == ch.view() && meta.extra.contains_key("view") => None,
         super::community::ChannelView::Chat if ch.voice != Some(true) => meta.extra.remove("view"),
         v => meta.extra.insert("view".into(), v.as_str().into()),
     };
@@ -8823,7 +8838,11 @@ pub fn judge_channel_key_vend(
 
     // (4) The vendor must be entitled too — they hold the real key, so a wrong
     // key from them costs isolation, never confidentiality. A channel manager may be
-    // let in by a creator rule only a holder can read, so they count as one.
+    // let in by a creator rule only a holder can read, so they count as one. A banned
+    // vendor delivers nothing (CORD-03 §5).
+    if PublicKey::from_hex(sender_hex).is_ok_and(|pk| crate::db::community::is_author_banned_in(&community.id().0, &pk)) {
+        return VendVerdict::Refuse("vendor is banned");
+    }
     let manages = roster.is_authorized(sender_hex, Some(&owner_hex), crate::community::roles::Permissions::MANAGE_CHANNELS);
     if sender_hex != owner_hex && !manages && !roster.is_entitled(Some(&owner_hex), sender_hex, &chan_hex, &[], &[]) {
         return VendVerdict::Park("vendor's entitlement has not folded yet");
@@ -10350,10 +10369,28 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         .map(|ch| (super::derive::writers_locator(community.id(), &ch.id), crate::simd::hex::bytes_to_hex_32(&ch.id.0)))
         .collect();
     // A channel id is minted at random, so one shared with another entity's coordinate is aimed
-    // at that entity: floor rows key on the coordinate alone.
+    // at that entity: floor rows key on the coordinate alone. Only an edition its kind's bit
+    // backs claims a coordinate, so nobody without that bit can hide a Channel behind one.
     let banlist_eid = super::derive::banlist_locator(community.id());
+    let claims = |kind: &str, author: &PublicKey| {
+        let bit = match kind {
+            vsk::COMMUNITY_METADATA => Permissions::MANAGE_METADATA,
+            vsk::CHANNEL_METADATA | vsk::CATEGORY | vsk::WRITERS => Permissions::MANAGE_CHANNELS,
+            vsk::ROLE | vsk::GRANT | vsk::ROLE_V2 | vsk::CHANNEL_ACL | vsk::TENURE | vsk::CHANNEL_SYNC => Permissions::MANAGE_ROLES,
+            vsk::BANLIST => Permissions::BAN,
+            vsk::INVITE_LINKS => Permissions::CREATE_INVITE,
+            vsk::PINS => Permissions::PIN_MESSAGES,
+            _ => return false,
+        };
+        authority.roles.is_authorized(&author.to_hex(), owner_hex.as_deref(), bit)
+    };
     let taken_by = |kind: &str| -> std::collections::HashSet<[u8; 32]> {
-        groups.keys().filter(|(v, _)| v != kind).map(|(_, e)| *e).chain([banlist_eid, super::derive::everyone_locator(community.id())]).collect()
+        groups
+            .iter()
+            .filter(|((v, _), g)| v != kind && g.iter().any(|e| claims(v, &e.author)))
+            .map(|((_, e), _)| *e)
+            .chain([banlist_eid, super::derive::everyone_locator(community.id())])
+            .collect()
     };
     let (taken, taken_cat) = (taken_by(vsk::CHANNEL_METADATA), taken_by(vsk::CATEGORY));
     for ((vsk_code, eid), group) in &groups {
@@ -10367,6 +10404,17 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         let pins_channel = (vsk_code == vsk::PINS).then(|| pins_by_eid.get(eid)).flatten();
         let is_category = vsk_code == vsk::CATEGORY && *eid != community.id().0 && !taken_cat.contains(eid);
         let writers_channel = (vsk_code == vsk::WRITERS).then(|| writers_by_eid.get(eid)).flatten();
+        // One aimed at another entity folds as none, so a reader holding it agrees with a fresh one.
+        if vsk_code == vsk::CHANNEL_METADATA && !is_channel && *eid != community.id().0 {
+            let before = out.channels.len();
+            out.channels.retain(|c| c.id.0 != *eid);
+            changed |= out.channels.len() != before;
+        }
+        if vsk_code == vsk::CATEGORY && !is_category && *eid != community.id().0 {
+            let before = out.categories.len();
+            out.categories.retain(|c| c.id != *eid);
+            changed |= out.categories.len() != before;
+        }
         if !is_meta && !is_channel && !is_category && pins_channel.is_none() && writers_channel.is_none() {
             continue;
         }
@@ -10444,10 +10492,17 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         // An authorized edition built on the held one moves the entity on, refused or not.
         let (linked, entity_gapped) = fold_head_among(&fold_eds, floor, &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)), &|i| ok[i]);
         gapped |= entity_gapped;
-        // A Category's deletion is terminal over every authorized edition, not the head alone.
+        // A Channel's or Category's deletion is terminal over every authorized edition, not the head alone.
+        let deleted = |c: &str| {
+            if is_category {
+                serde_json::from_str::<control::CategoryMetadata>(c).is_ok_and(|m| m.deleted == Some(true))
+            } else {
+                control::parse_sealed_channel_meta(c).map(|s| s.deleted).or_else(|| serde_json::from_str::<control::ChannelMetadata>(c).ok().map(|m| m.deleted == Some(true))).unwrap_or(false)
+            }
+        };
         let deletion = (0..group.len())
-            .filter(|&i| is_category && ok[i])
-            .filter(|&i| serde_json::from_str::<control::CategoryMetadata>(&group[i].content).is_ok_and(|m| m.deleted == Some(true)))
+            .filter(|&i| (is_category || is_channel) && ok[i])
+            .filter(|&i| deleted(&group[i].content))
             .max_by_key(|&i| (group[i].version, std::cmp::Reverse(group[i].inner_id)));
         let (hi, rebased) = match deletion.or(linked) {
             Some(hi) => (hi, false),
@@ -10475,7 +10530,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                 // vsk-2 carries no community binding; a same-owner
                 // cross-community replay can inject a phantom PUBLIC channel (bounded:
                 // root-scoped key, eids don't collide). Binding is a deferred wire change.
-                changed |= apply_channel_metadata(&mut out, ChannelId(*eid), meta);
+                changed |= apply_channel_metadata(&mut out, ChannelId(*eid), control::sanitize_channel_metadata(meta));
             }
         } else if is_category {
             if let Ok(meta) = serde_json::from_str::<control::CategoryMetadata>(&head.content) {
@@ -12027,11 +12082,10 @@ fn apply_category_metadata(out: &mut CommunityV2, id: [u8; 32], meta: control::C
         out.categories.retain(|c| c.id != id);
         return out.categories.len() != before;
     }
-    if meta.name.len() > control::MAX_NAME_BYTES {
-        return false;
-    }
+    let mut name = meta.name;
+    control::cut_name(&mut name);
     let position = meta.position.filter(|k| crate::community::rank::is_rank_key(k));
-    let next = super::community::CategoryV2 { id, name: meta.name, position, extra: meta.extra };
+    let next = super::community::CategoryV2 { id, name, position, extra: meta.extra };
     let changed = match out.categories.iter_mut().find(|c| c.id == id) {
         Some(c) if *c == next => false,
         Some(c) => {
@@ -23526,6 +23580,48 @@ mod tests {
         assert_eq!(updated.channels.len(), 1, "only #general remains");
     }
 
+    #[tokio::test]
+    async fn a_later_edition_never_revives_a_deleted_channel() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Grave", vec!["wss://r".into()], None).await.unwrap();
+        let extra = ChannelId([0x78; 32]);
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.expect("added");
+        publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
+        publish_channel_edition(&relay, &community, &owner, &extra, "back", false, 3, false).await;
+        let tracked = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
+        assert!(tracked.channel(&extra).is_none(), "deletion is terminal over the chain, not the head");
+        crate::db::community::save_community_v2(&community).unwrap();
+        let fresh = follow_control(&relay, &community).await.unwrap().updated.unwrap_or(community.clone());
+        assert!(fresh.channel(&extra).is_none(), "a fresh reader agrees");
+    }
+
+    #[tokio::test]
+    async fn an_edition_without_its_kinds_bit_cannot_hide_a_channel() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Squat", vec!["wss://r".into()], None).await.unwrap();
+        let extra = ChannelId([0x79; 32]);
+        publish_channel_edition(&relay, &community, &owner, &extra, "kept", false, 1, false).await;
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let stranger = Keys::generate();
+        for (signer, kind) in [(&owner, "99"), (&stranger, vsk::ROLE_V2)] {
+            let rumor = control::build_edition_rumor(signer.public_key(), kind, &extra.0, 1, None, r#"{"role_id":"x"}"#, 1_000, None);
+            let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("added");
+        assert!(updated.channel(&extra).is_some(), "an unknown kind, or one its signer can't write, claims no coordinate");
+
+        // One its signer can write does claim it, and a reader that held the Channel lets it go too.
+        let rumor = control::build_edition_rumor_bound(owner.public_key(), vsk::CATEGORY, &extra.0, 1, None, r#"{"name":"Staff"}"#, 1_000, None, Some(crate::community::v2::derive::edition_binding(community.id())));
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(1_000)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let tracked = follow_control(&relay, &updated).await.unwrap().updated.expect("let go");
+        assert!(tracked.channel(&extra).is_none(), "an edition aimed at another entity folds as no Channel");
+    }
+
     /// Re-inject only the OLD prefix (every edition at/below `max_version`) of a
     /// community's control plane onto a second relay URL — the withholding-relay
     /// simulation: everything it serves is genuinely owner-signed, just stale.
@@ -29372,6 +29468,13 @@ mod tests {
             everyone: None,
             overwrites: Vec::new(), syncs: Default::default(), legacy_channels: None, creators: Default::default(),
         };
+        let vendor = Keys::generate().public_key().to_hex();
+        crate::db::community::set_community_banlist(&cid_hex, &[vendor.clone()], 1).unwrap();
+        assert!(
+            matches!(judge_channel_key_vend(&member_view, &folded, &priv_id, Epoch(1), &vendor), VendVerdict::Refuse("vendor is banned")),
+            "a banned member delivers nothing"
+        );
+        crate::db::community::set_community_banlist(&cid_hex, &[], 2).unwrap();
         crate::db::community::set_community_roles(&cid_hex, &folded, 1).unwrap();
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let adopted = absorb_parked_channel_keys(&reloaded, &session);
@@ -31958,8 +32061,13 @@ mod tests {
             "an uncited kick from an admin is not honored"
         );
         assert!(
-            !fold(&[joined, kick(Some(cite), 3, 3_000)]).contains(&member_pk),
+            !fold(&[joined.clone(), kick(Some(cite.clone()), 3, 3_000)]).contains(&member_pk),
             "the same kick WITH its synced citation removes them"
+        );
+        crate::db::community::set_community_banlist(&cid_hex, &[admin.public_key().to_hex()], 4_000).unwrap();
+        assert!(
+            fold(&[joined, kick(Some(cite), 3, 3_000)]).contains(&member_pk),
+            "a banned admin's Guestbook events count for nothing (CORD-04 §4)"
         );
     }
 

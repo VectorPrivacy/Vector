@@ -1398,7 +1398,8 @@ impl Channel {
     }
 
     /// Moderation-hide someone ELSE's message. Community channels only, and
-    /// requires `MANAGE_MESSAGES`.
+    /// requires `MANAGE_MESSAGES` in this channel (a channel overwrite can grant
+    /// or deny it) plus a strict outrank of the author.
     ///
     /// Distinct from [`delete`](Self::delete), which publishes the cooperative
     /// tombstone an AUTHOR uses on their own message. This one re-derives the
@@ -1406,23 +1407,11 @@ impl Channel {
     /// peers verify the claim rather than treating it as one client's local
     /// suppression.
     ///
-    /// The permission is checked HERE, before anything is published. The
-    /// protocol re-verifies it anyway, but a bot that only learns it lacks the
-    /// role from a silent drop retry-loops a publish every reader discards.
+    /// The permission is checked before anything is published, the way every
+    /// reader will judge it, so a refused hide errors instead of being dropped.
     pub async fn hide(&self, message_id: &str) -> Result<()> {
         if !matches!(self.kind, ChannelKind::Community) {
             return Err(Error::Other("moderation-hide applies to community channels, not DMs".into()));
-        }
-        let community_id = vector_core::db::community::community_id_for_channel(&self.id)
-            .ok()
-            .flatten()
-            .ok_or_else(|| Error::Other("unknown community channel".into()))?;
-        let caps = self.core.community_capabilities(&community_id)?;
-        if !caps["manage_messages"].as_bool().unwrap_or(false) {
-            return Err(Error::Other(format!(
-                "cannot hide messages in {}: this account holds no role carrying MANAGE_MESSAGES",
-                &community_id[..community_id.len().min(12)]
-            )));
         }
         self.core.hide_community_message(&self.id, message_id).await
     }

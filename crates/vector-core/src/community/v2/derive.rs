@@ -322,8 +322,8 @@ pub fn edition_binding(community_id: &CommunityId) -> [u8; 32] {
 
 /// A member's Tenure from one writer (CORD-04 §9): each writer seals in an entity of their
 /// own, so nobody re-signs a standing another writer sealed.
-pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32], writer_xonly: &[u8; 32]) -> [u8; 32] {
-    let pair: [u8; 32] = Sha256::new().chain_update(member_xonly).chain_update(writer_xonly).finalize().into();
+pub fn tenure_locator(community_id: &CommunityId, member_xonly: &[u8; 32], sealer_xonly: &[u8; 32]) -> [u8; 32] {
+    let pair: [u8; 32] = Sha256::new().chain_update(member_xonly).chain_update(sealer_xonly).finalize().into();
     hkdf32(&community_id.0, &build_info(LABEL_TENURE, &pair, None))
 }
 
@@ -428,6 +428,29 @@ pub fn epoch_key_commitment(prev_epoch: Epoch, prev_key: &[u8; 32]) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinates_match_the_spec_vectors() {
+        use crate::community::roles::OverwriteTarget;
+        use crate::community::v2::roles::overwrite_target_bytes;
+        let h = |b: [u8; 32]| crate::simd::hex::bytes_to_hex_32(&b);
+        let (cid, ch, member, sealer, role) = (CommunityId([1; 32]), ChannelId([2; 32]), [3u8; 32], [4u8; 32], [5u8; 32]);
+        assert_eq!(h(grant_locator(&cid, &member)), "087cc31d524f398b0810e36aa18b9d135427514c3788382c39c50c0bc50381f3");
+        assert_eq!(h(banlist_locator(&cid)), "cf2767777adcceb8a2ce51d5c3d3c20de9c74bf4867bc2373e5b12eacb5c73d8");
+        assert_eq!(h(everyone_locator(&cid)), "3fbe677b7b2bbddc50d08a428d4e61c8e4c7fdba586d13f1b0f421ab906eeebd");
+        assert_eq!(h(edition_binding(&cid)), "d09129fb5961dc61a181cdfaa2c6588396465ebbdb2c45d79b3fae0b9ad71955");
+        assert_eq!(h(tenure_locator(&cid, &member, &sealer)), "e252eea5e2d7172d166c2dc9c6902df736180fb2105bfaf859f990f509be57d1");
+        assert_eq!(h(sync_locator(&cid, &ch)), "6b08541be1e17ef80f2552273d2534d5b6eac9ab244c4044d2cf150cecfab49f");
+        assert_eq!(h(writers_locator(&cid, &ch)), "f79c6f82f7076ca71112846c985a42acee711f95e2b37aaf05ed4777b0779324");
+        assert_eq!(h(pins_locator(&cid, &ch)), "6e1aa2cb6c78baed7d417d2f6432b1b651b8b605db58515d0749f400b0593a00");
+        for (target, acl) in [
+            (OverwriteTarget::Everyone, "5b337620f7f8d929a0434be597e20ce5c4440bce8c377eb41e0b3b250b6a0ffe"),
+            (OverwriteTarget::Role(h(role)), "cf60d1469c48371fe46a8a2643b4dc0e9da025ba3ac1b08c07acc63ca27d1393"),
+            (OverwriteTarget::Member(h(member)), "1ac57124b4398297a2ac7c96099cef0f21b206e3602921f740c89408c3e69ed1"),
+        ] {
+            assert_eq!(h(acl_locator(&cid, &ch.0, &overwrite_target_bytes(&cid, &target).unwrap())), acl);
+        }
+    }
 
     #[test]
     fn a_full_group_key_memo_starts_over_in_a_small_table() {

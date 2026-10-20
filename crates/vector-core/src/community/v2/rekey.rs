@@ -45,17 +45,13 @@ use super::derive::{
 };
 use super::stream::{self, OpenedStream, SealForm, StreamError};
 
-/// Max recipients (blobs) Vector puts in ONE 3303 event when SENDING. Lower than
-/// the spec's stated 120 because a v2 rekey rides the CORD-01 double-wrap (blob
-/// array → encrypted seal → wrap, two NIP-44 base64 expansions): a 120-blob event
-/// measures ~77 KB, over strfry's 64 KB `maxEventSize`, while 80 blobs measure
-/// ~55 KB (a full one is size-guarded by test). The spec's 120 assumes a lighter
-/// envelope — a CORD-06 erratum (see the divergence ledger). A larger recipient
-/// set splits across chunk events.
+/// Max recipients (blobs) in ONE 3303 event when sending (CORD-06 §1): the CORD-01
+/// double wrap expands the blob array twice, and 80 blobs measure ~55 KB, under a 64 KB
+/// relay event (size-guarded by test). A larger recipient set splits across chunk events.
 pub const MAX_REKEY_BLOBS_PER_EVENT: usize = 80;
 
-/// [`MAX_REKEY_BLOBS_PER_EVENT`] for the 104- and 136-byte forms (base rotations, history): their
-/// base64 crosses NIP-44's 128-byte padding step to 256, so 80 of them measure ~77 KB and 60 ~55 KB.
+/// [`MAX_REKEY_BLOBS_PER_EVENT`] for the 104- and 136-byte forms (base rotations, history): 80 of
+/// them push the rumor past a NIP-44 padding step that carries through the seal (~77 KB); 60 ~55 KB.
 pub const MAX_WIDE_BLOBS_PER_EVENT: usize = 60;
 
 /// How many blobs one event of a rotation at `scope` may carry: a base rotation's are the wide forms.
@@ -632,7 +628,7 @@ pub fn seal_rekey_chunk(
     Ok(stream::wrap_seal(&seal, rekey_group, stream::KIND_WRAP, wrap_at)?)
 }
 
-/// Split a full recipient blob set into 3303 chunk events (≤120 blobs each),
+/// Split a full recipient blob set into 3303 chunk events ([`blobs_per_event`] each),
 /// all sharing the rotation's `(scope, new_epoch, prev_commit)` so a receiver
 /// correlates them. Local-keys convenience.
 #[allow(clippy::too_many_arguments)]

@@ -267,6 +267,7 @@ async fn resolve_delete_options(message_ids: &[String]) -> HashMap<String, Messa
 
     let me = vector_core::state::my_public_key();
     let mut communities: HashMap<String, Result<Option<ModerationContext>, ()>> = HashMap::new();
+    let mut privates: HashMap<String, bool> = HashMap::new();
     let mut out = HashMap::with_capacity(ctxs.len());
     for (id, ctx) in ctxs {
         let maybe_community = !matches!(ctx.chat_type, Some(ChatType::DirectMessage));
@@ -276,7 +277,8 @@ async fn resolve_delete_options(message_ids: &[String]) -> HashMap<String, Messa
                     Err(()) => continue,
                     Ok(None) => false,
                     Ok(Some((owner, roster))) => {
-                        vector_core::community::moderation::can_hide(owner.as_deref(), roster, &me.to_hex(), author)
+                        let private = *privates.entry(ctx.chat_id.clone()).or_insert_with(|| vector_core::db::community::channel_is_private(&ctx.chat_id).ok().flatten().unwrap_or(false));
+                        vector_core::community::moderation::can_hide_in_channel(owner.as_deref(), roster, &me.to_hex(), author, &ctx.chat_id, private)
                     }
                 }
             }

@@ -52,9 +52,11 @@ impl RoleContent {
         }
     }
     pub fn into_role(self) -> Role {
+        let mut name = self.name;
+        super::control::cut_name(&mut name);
         Role {
-            role_id: self.role_id,
-            name: self.name,
+            role_id: self.role_id.to_ascii_lowercase(),
+            name,
             position: self.position,
             permissions: Permissions(self.permissions),
             scope: self.scope,
@@ -94,7 +96,8 @@ impl GrantContent {
         GrantContent { member: g.member.clone(), role_ids: g.role_ids.clone(), control_wrap: None, extra: serde_json::Map::new() }
     }
     pub fn into_grant(self) -> MemberGrant {
-        MemberGrant { member: self.member, role_ids: self.role_ids }
+        let lower = |h: String| h.to_ascii_lowercase();
+        MemberGrant { member: lower(self.member), role_ids: self.role_ids.into_iter().map(lower).collect() }
     }
 }
 
@@ -145,7 +148,7 @@ pub fn banlist_content_json(banned: &[String]) -> Result<String, String> {
 /// Parse a vsk-4 edition's content into the banned set (lowercase hex). Non-array or
 /// malformed content yields `None` (dropped, never a partial ban).
 pub fn parse_banlist_content(content: &str) -> Option<Vec<String>> {
-    serde_json::from_str::<Vec<String>>(content).ok()
+    serde_json::from_str::<Vec<String>>(content).ok().map(|v| v.into_iter().map(|h| h.to_ascii_lowercase()).collect())
 }
 
 /// A Role's content byte-fits its cap discipline: name ≤ 64 bytes. (The 100-per-
@@ -234,12 +237,14 @@ pub const EVERYONE_DEFAULT: u64 = Permissions::VIEW_CHANNEL
 pub fn parse_role_v2_content(content: &str) -> Option<RoleV2> {
     let c: RoleV2Content = serde_json::from_str(content).ok()?;
     if c.deleted == Some(true) {
-        return Some(RoleV2::Deleted { role_id: c.role_id });
+        return Some(RoleV2::Deleted { role_id: c.role_id.to_ascii_lowercase() });
     }
     let rank = c.rank.filter(|k| crate::community::rank::is_rank_key(k))?;
+    let mut name = c.name.unwrap_or_default();
+    super::control::cut_name(&mut name);
     Some(RoleV2::Live(Role {
-        role_id: c.role_id,
-        name: c.name.unwrap_or_default(),
+        role_id: c.role_id.to_ascii_lowercase(),
+        name,
         position: u32::MAX,
         permissions: Permissions(c.permissions.unwrap_or(0)),
         scope: RoleScope::Server,
@@ -277,6 +282,10 @@ pub fn role_v2_deleted_json(role_id: &str) -> String {
 /// (lowercase hex, at most [`MAX_LEGACY_CHANNELS`]; a malformed id is dropped).
 pub fn parse_everyone_content(content: &str) -> Option<(u64, Option<std::collections::BTreeSet<String>>)> {
     let c = serde_json::from_str::<EveryoneContent>(content).ok()?;
+    // A Role's shape at `@everyone`'s coordinate is a Role aimed there, not `@everyone`.
+    if c.extra.contains_key("role_id") {
+        return None;
+    }
     let legacy = c.legacy.map(|l| {
         l.iter()
             .filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h))
@@ -339,10 +348,12 @@ pub const MAX_TENURE_HEADS: usize = 512;
 /// Parse a Tenure; entries with a malformed rank key are dropped, and oversize lists cut.
 pub fn parse_tenure_content(content: &str) -> Option<TenureContent> {
     let mut t: TenureContent = serde_json::from_str(content).ok()?;
+    t.member.make_ascii_lowercase();
     t.sealed.retain(|e| crate::community::rank::is_rank_key(&e.rank));
     t.sealed.truncate(MAX_TENURE_ENTRIES);
     for e in &mut t.sealed {
         e.heads.retain(|h| crate::simd::hex::hex_to_bytes_32_checked(h).is_some());
+        e.heads.iter_mut().for_each(|h| h.make_ascii_lowercase());
         e.heads.truncate(MAX_TENURE_HEADS);
     }
     Some(t)
@@ -655,5 +666,73 @@ mod tests {
         long.name = "x".repeat(65);
         assert!(validate_role(&long).is_err());
         assert!(validate_banlist(&vec!["z".into(); MAX_BANLIST + 1]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod spec_vectors {
+    use super::*;
+    use crate::community::roles::{Overwrite, OverwriteTarget, Permissions as P, Role, RoleScope};
+
+    fn hx(b: u8) -> String { crate::simd::hex::bytes_to_hex_32(&[b; 32]) }
+    fn pk(b: u8) -> String { nostr_sdk::prelude::Keys::new(nostr_sdk::prelude::SecretKey::from_slice(&[b; 32]).unwrap()).public_key().to_hex() }
+
+    const ACL: [&str; 3] = [
+        r#"{"scope":"0202020202020202020202020202020202020202020202020202020202020202","target":{"kind":"everyone"},"allow":"0","deny":"16384"}"#,
+        r#"{"scope":"0202020202020202020202020202020202020202020202020202020202020202","target":{"kind":"role","id":"0505050505050505050505050505050505050505050505050505050505050505"},"allow":"16384","deny":"0"}"#,
+        r#"{"scope":"0202020202020202020202020202020202020202020202020202020202020202","target":{"kind":"member","id":"531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"},"allow":"0","deny":"131072"}"#,
+    ];
+
+    #[test]
+    fn readers_normalise_what_writers_might_vary() {
+        let role_at_everyone = format!(r#"{{"role_id":"{}","name":"X","rank":"V","permissions":"8"}}"#, hx(5));
+        assert!(parse_everyone_content(&role_at_everyone).is_none(), "a Role's shape at @everyone is no @everyone");
+        assert!(parse_everyone_content(r#"{"permissions":"8"}"#).is_some());
+        let long = "é".repeat(40);
+        let role = format!(r#"{{"role_id":"{}","name":"{long}","rank":"V"}}"#, hx(5).to_uppercase());
+        let Some(RoleV2::Live(r)) = parse_role_v2_content(&role) else { panic!("parses") };
+        assert_eq!((r.name.len(), r.role_id.as_str()), (64, hx(5).as_str()), "names cut on a whole character, ids lowercase");
+        let del = format!(r#"{{"role_id":"{}","deleted":true}}"#, hx(5).to_uppercase());
+        assert_eq!(parse_role_v2_content(&del), Some(RoleV2::Deleted { role_id: hx(5) }));
+        let g = parse_grant_content(&format!(r#"{{"member":"{}","role_ids":["{}"]}}"#, pk(3).to_uppercase(), hx(5).to_uppercase())).unwrap();
+        assert_eq!((g.member, g.role_ids), (pk(3), vec![hx(5)]));
+        assert_eq!(parse_banlist_content(&format!(r#"["{}"]"#, pk(3).to_uppercase())).unwrap(), vec![pk(3)]);
+        let cat: super::super::control::CategoryMetadata = serde_json::from_str(r#"{"name":"Staff","position":5}"#).unwrap();
+        assert_eq!((cat.name.as_str(), cat.position), ("Staff", None), "a position of another type reads as absent");
+    }
+
+    #[test]
+    fn contents_match_the_spec_vectors() {
+        let role = Role { role_id: hx(5), name: "Moderators".into(), position: u32::MAX, permissions: P(P::KICK | P::MANAGE_MESSAGES | P::MODERATE_MEMBERS), scope: RoleScope::Server, color: 15158332, rank: Some("M".into()), display: true, mentionable: true, extra: Default::default() };
+        assert_eq!(role_v2_content_json(&role).unwrap(), r#"{"role_id":"0505050505050505050505050505050505050505050505050505050505050505","name":"Moderators","rank":"M","permissions":"67108904","color":15158332,"display":true,"mentionable":true}"#);
+        assert_eq!(role_v2_deleted_json(&hx(5)), r#"{"deleted":true,"role_id":"0505050505050505050505050505050505050505050505050505050505050505"}"#);
+        let legacy: std::collections::BTreeSet<String> = [hx(2)].into_iter().collect();
+        assert_eq!(everyone_content_json_with(EVERYONE_DEFAULT, Some(&legacy)), r#"{"permissions":"4186112","legacy":["0202020202020202020202020202020202020202020202020202020202020202"]}"#);
+        assert_eq!(grant_content_json(&MemberGrant { member: pk(3), role_ids: vec![hx(5)] }).unwrap(), r#"{"member":"531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337","role_ids":["0505050505050505050505050505050505050505050505050505050505050505"]}"#);
+        assert_eq!(banlist_content_json(&[pk(3)]).unwrap(), r#"["531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"]"#);
+        for (i, (t, a, d)) in [(OverwriteTarget::Everyone, 0, P::SEND_MESSAGES), (OverwriteTarget::Role(hx(5)), P::SEND_MESSAGES, 0), (OverwriteTarget::Member(pk(3)), 0, P::ADD_REACTIONS)].into_iter().enumerate() {
+            assert_eq!(overwrite_content_json(&Overwrite { scope: hx(2), target: t, allow: P(a), deny: P(d) }), ACL[i]);
+        }
+        assert_eq!(sync_content_json(&hx(2), Some(&hx(6))), r#"{"channel":"0202020202020202020202020202020202020202020202020202020202020202","sync":"0606060606060606060606060606060606060606060606060606060606060606"}"#);
+        assert_eq!(sync_content_json(&hx(2), None), r#"{"channel":"0202020202020202020202020202020202020202020202020202020202020202"}"#);
+        let t = TenureContent { member: pk(3), sealed: vec![TenureEntry { rank: "D".into(), permissions: P::MANAGE_CHANNELS | P::BAN | P::PIN_MESSAGES, heads: vec![hx(7), hx(8)] }] };
+        assert_eq!(tenure_content_json(&t).unwrap(), r#"{"member":"531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337","sealed":[{"rank":"D","permissions":"2066","heads":["0707070707070707070707070707070707070707070707070707070707070707","0808080808080808080808080808080808080808080808080808080808080808"]}]}"#);
+        use super::super::control::*;
+        let mut ch = ChannelMetadata { name: "announcements".into(), private: false, ..Default::default() };
+        assert_eq!(serde_json::to_string(&ChannelMetadata { name: "general".into(), private: false, ..Default::default() }).unwrap(), r#"{"name":"general","private":false}"#);
+        ch.extra.insert("position".into(), "M".into());
+        ch.extra.insert("category".into(), hx(6).into());
+        ch.extra.insert("topic".into(), "Release notes".into());
+        assert_eq!(serde_json::to_string(&ch).unwrap(), r#"{"name":"announcements","private":false,"category":"0606060606060606060606060606060606060606060606060606060606060606","position":"M","topic":"Release notes"}"#);
+        let mut v = ChannelMetadata { name: "lounge".into(), private: false, ..Default::default() };
+        v.extra.insert("position".into(), "N".into());
+        v.extra.insert("view".into(), "voice".into());
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"name":"lounge","private":false,"position":"N","view":"voice"}"#);
+        assert_eq!(serde_json::to_string(&ChannelMetadata { name: "general".into(), private: false, deleted: Some(true), ..Default::default() }).unwrap(), r#"{"name":"general","private":false,"deleted":true}"#);
+        assert_eq!(serde_json::to_string(&CategoryMetadata { name: "Staff".into(), position: Some("B".into()), ..Default::default() }).unwrap(), r#"{"name":"Staff","position":"B"}"#);
+        assert_eq!(serde_json::to_string(&CategoryMetadata { deleted: Some(true), ..Default::default() }).unwrap(), r#"{"deleted":true}"#);
+        let ledger = format!(r#"{{"channel":"{}","ledger":[{{"at":1722500000000,"epoch":3,"writer":"{}","root":2,"by":"{}","certifier":"{}"}},{{"at":1722600000000,"stop":"{}","from":1722550000000}},{{"at":1722700000000,"open":true}}],"retired":[[1,"{}",1719800000000,1720000000000,"{}"],[2,"{}",1720100000000,1721000000000]]}}"#, hx(2), pk(10), pk(11), pk(12), pk(3), pk(13), pk(14), pk(15));
+        let l = super::super::writers::Ledger::parse(&ledger).expect("parses");
+        assert_eq!(l.to_json(), r#"{"channel":"0202020202020202020202020202020202020202020202020202020202020202","ledger":[{"at":1722500000000,"by":"552c630b64b54bf50210c9e253d38bd4949c72e22873500f6285c2bede312a84","certifier":"0f0fb9a244ad31a369ee02b7abfbbb0bfa3812b9a39ed93346d03d67d412d177","epoch":3,"root":2,"writer":"f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e"},{"at":1722600000000,"from":1722550000000,"stop":"531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"},{"at":1722700000000,"open":true}],"retired":[[1,"2f1b310f4c065331bc0d79ba4661bb9822d67d7c4a1b0a1892e1fd0cd23aa68d",1719800000000,1720000000000,"99c2aa85d2b21a62f396907a802a58e521dafd5bddaccbd72786eea189bc4dc9"],[2,"1a7a569e91dbf60581509c7fc946d1003b60c7dee85299538db6353538d59574",1720100000000,1721000000000]]}"#);
     }
 }
