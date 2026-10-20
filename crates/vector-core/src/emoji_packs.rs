@@ -78,11 +78,13 @@ pub const MAX_EMOJIS_PER_PACK: usize = EMOJIS_PER_PACK_BY_TIER[0];
 /// In-app equipped-pack cap for the current account, scaled by effective tier.
 /// Gate the in-app subscribe/create action on this — never the load/display path.
 pub fn effective_max_equipped_packs() -> usize {
+    if crate::badges::is_bot() { return usize::MAX; }
     EQUIPPED_PACKS_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
 /// Per-pack emoji authoring cap for the current account, scaled by effective tier.
 pub fn effective_max_emojis_per_pack() -> usize {
+    if crate::badges::is_bot() { return usize::MAX; }
     EMOJIS_PER_PACK_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
@@ -225,6 +227,7 @@ pub fn set_theme_emoji_tags(tags: Vec<(String, String)>) {
 /// what the picker displayed — otherwise a large pack's hidden tail (the picker
 /// only shows the first N) would enter the candidate set and shift the indices.
 pub fn effective_display_cap() -> usize {
+    if crate::badges::is_bot() { return usize::MAX; }
     EMOJIS_PER_PACK_BY_TIER[crate::badges::effective_tier() as usize]
 }
 
@@ -241,28 +244,14 @@ fn resolve_emoji_token(by_code: &HashMap<String, Vec<String>>, token: &str) -> O
     by_code.get(token).and_then(|urls| urls.first().cloned())
 }
 
-/// Scan `content` for `:shortcode:` patterns and resolve them against the user's
-/// currently-subscribed packs (plus the active theme pack). Returns deduped emoji
-/// tags in first-match order. Used by the send pipeline to attach NIP-30 emoji
-/// tags so recipients without the pack subscribed still render.
-///
-/// Duplicate shortcodes across packs are disambiguated `base~N` (1-based) by a
-/// lexicographic URL sort — the SAME ordering the frontend's `_assignEmojiDisambig`
-/// uses — so a `:love~2:` the picker inserted resolves here to the same image.
-pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag> {
-    if content.is_empty() || !content.contains(':') {
-        return Vec::new();
-    }
-
-    // base shortcode -> ordered candidate URLs (one per distinct image).
+/// Every `(pack addr, shortcode, url)` a send may tag, in picker order: subscribed
+/// live packs (each capped to what the picker displays), then the active theme pack.
+fn sendable_candidates() -> Vec<(Option<String>, String, String)> {
     let cap = effective_display_cap();
-    let mut by_code: HashMap<String, Vec<String>> = HashMap::new();
+    let mut out = Vec::new();
 
-    // Subscribed packs. INNER JOIN matches `load_all_packs` — soft-removed own
-    // packs shouldn't leak their Blossom URLs through outbound tags when the
-    // user types a shortcode they thought was hidden. Dead packs (revoked /
-    // missing) are excluded too: their emojis are retired from sending, not
-    // just from the picker.
+    // Soft-removed own packs and dead (revoked / missing) packs are retired from
+    // sending, matching `load_all_packs`.
     if let Ok(conn) = crate::db::get_db_connection_guard_static() {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT p.addr, i.shortcode, i.url
@@ -275,37 +264,84 @@ pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag>
             if let Ok(rows) = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             }) {
-                // Mirror the picker's per-pack display cap so hidden tail emojis
-                // don't enter (and skew) disambiguation.
+                // A hidden tail past the display cap would shift the `~N` indices.
                 let mut per_pack: HashMap<String, usize> = HashMap::new();
                 for (addr, code, url) in rows.flatten() {
-                    let n = per_pack.entry(addr).or_insert(0);
+                    let n = per_pack.entry(addr.clone()).or_insert(0);
                     if *n >= cap { continue; }
                     *n += 1;
-                    by_code.entry(code).or_default().push(url);
+                    out.push((Some(addr), code, url));
                 }
             }
         }
     }
 
-    // Active theme pack fills any gaps. It's shown in the picker without being
-    // a real subscription, so its shortcodes aren't in the DB — registered
-    // from the frontend via `set_theme_emoji_tags` (already capped there).
+    // The theme pack shows in the picker without a subscription, registered via
+    // `set_theme_emoji_tags` (already capped there).
     if let Ok(theme) = theme_emoji_tags().lock() {
-        for (code, url) in theme.iter() {
-            by_code.entry(code.clone()).or_default().push(url.clone());
-        }
+        out.extend(theme.iter().map(|(code, url)| (None, code.clone(), url.clone())));
     }
+    out
+}
 
-    if by_code.is_empty() {
-        return Vec::new();
+/// Base shortcode -> its distinct images, URL-sorted: the order the picker's
+/// `_assignEmojiDisambig` numbers `~N` by, so two packs sharing an image collapse.
+fn candidates_by_code(candidates: &[(Option<String>, String, String)]) -> HashMap<String, Vec<String>> {
+    let mut by_code: HashMap<String, Vec<String>> = HashMap::new();
+    for (_, code, url) in candidates {
+        by_code.entry(code.clone()).or_default().push(url.clone());
     }
-
-    // De-dup identical images + lexicographic sort so `~N` is stable and matches
-    // the frontend (two packs carrying the same URL collapse to one candidate).
     for urls in by_code.values_mut() {
         urls.sort();
         urls.dedup();
+    }
+    by_code
+}
+
+/// One custom emoji this account can send: type `:code:` and the send tags it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SendableEmoji {
+    /// The shortcode to write between colons, `~N`-suffixed when packs collide.
+    pub code: String,
+    pub url: String,
+    /// The pack's `naddr1...`, or `None` for the active theme pack.
+    pub pack: Option<String>,
+}
+
+/// Every custom emoji a send resolves, named exactly as the picker names them:
+/// a shortcode two packs use with different images becomes `code~1`, `code~2`.
+pub fn sendable_emojis() -> Vec<SendableEmoji> {
+    let candidates = sendable_candidates();
+    let by_code = candidates_by_code(&candidates);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (addr, shortcode, url) in candidates {
+        if !seen.insert((shortcode.clone(), url.clone())) { continue; }
+        let urls = &by_code[&shortcode];
+        let code = match urls.iter().position(|u| *u == url) {
+            Some(i) if urls.len() > 1 => format!("{shortcode}~{}", i + 1),
+            _ => shortcode,
+        };
+        out.push(SendableEmoji { code, url, pack: addr.and_then(|a| naddr_from_addr(&a).ok()) });
+    }
+    out
+}
+
+/// Scan `content` for `:shortcode:` patterns and resolve them against the user's
+/// currently-subscribed packs (plus the active theme pack). Returns deduped emoji
+/// tags in first-match order. Used by the send pipeline to attach NIP-30 emoji
+/// tags so recipients without the pack subscribed still render.
+///
+/// Duplicate shortcodes across packs are disambiguated `base~N` (1-based) by a
+/// lexicographic URL sort — the SAME ordering the frontend's `_assignEmojiDisambig`
+/// uses — so a `:love~2:` the picker inserted resolves here to the same image.
+pub fn resolve_outbound_emoji_tags(content: &str) -> Vec<crate::types::EmojiTag> {
+    if content.is_empty() || !content.contains(':') {
+        return Vec::new();
+    }
+    let by_code = candidates_by_code(&sendable_candidates());
+    if by_code.is_empty() {
+        return Vec::new();
     }
 
     let mut out: Vec<crate::types::EmojiTag> = Vec::new();
@@ -2382,6 +2418,28 @@ mod tests {
         assert!(!deletion_matches(&forged, &author.public_key(), &addr));
         let real = build_deletion_event(&author, &addr);
         assert!(deletion_matches(&real, &author.public_key(), &addr));
+    }
+
+    #[test]
+    fn sendable_emojis_name_what_the_send_resolves() {
+        let (_tmp, _guard) = init_test_db();
+        let (a, b) = (keys(), keys());
+        let pa = seed_pack(&a, "one", &[("love", "https://b.x/love.gif"), ("cat", "https://a.x/cat.png")]);
+        let pb = seed_pack(&b, "two", &[("love", "https://a.x/love.gif"), ("cat", "https://a.x/cat.png")]);
+        let off = seed_pack(&keys(), "unsubscribed", &[("dog", "https://a.x/dog.png")]);
+        save_subscriptions(&[pa.clone(), pb.clone()]).unwrap();
+
+        let list = sendable_emojis();
+        let mut codes: Vec<&str> = list.iter().map(|e| e.code.as_str()).collect();
+        codes.sort();
+        // A shared image collapses to one plain code; differing images number by URL.
+        assert_eq!(codes, ["cat", "love~1", "love~2"]);
+        assert!(!list.iter().any(|e| e.pack.as_deref() == naddr_from_addr(&off).ok().as_deref()));
+        for e in &list {
+            let tags = resolve_outbound_emoji_tags(&format!("hi :{}:", e.code));
+            assert_eq!(tags.len(), 1);
+            assert_eq!((tags[0].shortcode.as_str(), tags[0].url.as_str()), (e.code.as_str(), e.url.as_str()));
+        }
     }
 
     #[test]

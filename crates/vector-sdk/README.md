@@ -69,6 +69,16 @@ bot.channel(id).send("hi").await?;
 On an incoming message: `msg.reply(text)` answers it, `msg.react(emoji)` reacts to it,
 and any received files are on `msg.message.attachments`.
 
+**Custom emoji** — equip a pack and write its emoji as `:code:` in anything the bot sends:
+
+```rust
+bot.subscribe_emoji_pack("naddr1...").await?;
+for e in bot.emojis() { println!(":{}:", e.code); }  // names match Vector's picker
+bot.channel(id).send("gm :wave:").await?;
+```
+
+A shortcode two packs share with different images is numbered, `:love~1:` and `:love~2:`.
+
 **Communities** — when a message comes from a community, you get the sender as a member
 you can act on directly:
 

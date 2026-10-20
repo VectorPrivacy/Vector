@@ -55,6 +55,7 @@
 //! | --- | --- |
 //! | Send / reply / edit / delete | [`Channel::send`] · [`reply`](Channel::reply) · [`edit`](Channel::edit) · [`delete`](Channel::delete) |
 //! | React (emoji or custom image) | [`Channel::react`] · [`react_custom`](Channel::react_custom) |
+//! | Write custom emoji in messages (`:code:`) | [`subscribe_emoji_pack`](VectorBot::subscribe_emoji_pack) · [`emojis`](VectorBot::emojis) |
 //! | Send & receive files | [`Channel::send_file`] · [`VectorBot::download_attachment`] / [`save_attachment`](VectorBot::save_attachment) |
 //! | Receive messages | [`VectorBot::on_message`] |
 //! | Answer typed slash commands (with a `/` picker) | [`VectorBot::command`] → [`CommandBuilder`] |
@@ -227,6 +228,9 @@ pub use vector_core::{
     SendResult, SerializableChat, SiteMetadata, SlimProfile, Status, SyncPriority, VectorCore,
     VectorError,
 };
+
+/// Custom emoji packs (NIP-30 / NIP-51) and the emoji a send can tag.
+pub use vector_core::emoji_packs::{EmojiPack, PackEmoji, SendableEmoji};
 
 /// What a [`Community::contain_raid`] call actually accomplished.
 pub use vector_core::community::v2::service::ContainmentReport;
@@ -635,6 +639,51 @@ impl VectorBot {
         self.core.get_blocked_users().await
     }
 
+    // ---- custom emoji ----
+
+    /// Equip an emoji pack by its `naddr1...`. From then on, every `:code:` in
+    /// text this bot sends (messages, replies, edits, status) that names one of
+    /// its emoji is tagged with the image, so every client renders it.
+    ///
+    /// ```no_run
+    /// # async fn run(bot: vector_sdk::VectorBot) -> vector_sdk::Result<()> {
+    /// bot.subscribe_emoji_pack("naddr1...").await?;
+    /// for e in bot.emojis() { println!(":{}:", e.code); }
+    /// bot.channel("npub1...").send("gm :wave:").await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Equipped packs persist in the bot's data dir, and publish as its kind
+    /// 10030 list like any Vector account's. Bots have no tier caps: equip any
+    /// number of packs, and every emoji in each is usable.
+    pub async fn subscribe_emoji_pack(&self, naddr: &str) -> Result<EmojiPack> {
+        vector_core::emoji_packs::subscribe_pack(naddr).await.map_err(VectorError::Other)
+    }
+
+    /// Unequip an emoji pack; its codes stop resolving in what the bot sends.
+    pub async fn unsubscribe_emoji_pack(&self, naddr: &str) -> Result<()> {
+        vector_core::emoji_packs::unsubscribe_pack(naddr).await.map_err(VectorError::Other)
+    }
+
+    /// The packs this bot has equipped (and any it authored), from local cache.
+    pub fn emoji_packs(&self) -> Result<Vec<EmojiPack>> {
+        vector_core::emoji_packs::load_all_packs().map_err(VectorError::Other)
+    }
+
+    /// Every custom emoji the bot can write, named as Vector's picker names it:
+    /// write `:{code}:`. A shortcode two packs use for different images
+    /// numbers by image, `love~1` and `love~2`; a bare `:love:` picks `love~1`.
+    pub fn emojis(&self) -> Vec<SendableEmoji> {
+        vector_core::emoji_packs::sendable_emojis()
+    }
+
+    /// Re-fetch the bot's pack list and every equipped pack from relays, picking
+    /// up packs equipped from another client on the same key and pack edits.
+    /// Runs at startup and hourly on its own while the bot has packs equipped.
+    pub async fn refresh_emoji_packs(&self) -> Result<Vec<EmojiPack>> {
+        vector_core::emoji_packs::refresh_subscribed_packs().await.map_err(VectorError::Other)
+    }
+
     // ---- attachments ----
 
     /// Download a received attachment and decrypt it to plaintext bytes (fetches the encrypted blob
@@ -702,6 +751,23 @@ fn spawn_ready_listener() {
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
+        }
+    });
+}
+
+/// How often a running bot re-fetches its equipped packs.
+const EMOJI_REFRESH: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Keep equipped packs current for as long as the bot's account is live: edits,
+/// revocations and packs equipped from another client on the same key. A bot
+/// with nothing equipped makes no requests.
+fn spawn_emoji_refresh() {
+    vector_core::db::spawn_bound(async {
+        while vector_core::db::session_is_live() {
+            if vector_core::emoji_packs::load_subscriptions().is_ok_and(|s| !s.is_empty()) {
+                let _ = vector_core::emoji_packs::refresh_subscribed_packs().await;
+            }
+            tokio::time::sleep(EMOJI_REFRESH).await;
         }
     });
 }
@@ -943,6 +1009,7 @@ impl VectorBotBuilder {
         let data_dir = self.data_dir.unwrap_or_else(default_data_dir);
         std::fs::create_dir_all(&data_dir).ok();
 
+        vector_core::badges::set_bot(true);
         let core = VectorCore::init(CoreConfig {
             data_dir: data_dir.clone(),
             event_emitter: self.event_emitter,
@@ -1018,6 +1085,7 @@ impl VectorBotBuilder {
 
         let result = core.login(&key, self.password.as_deref()).await?;
         spawn_ready_listener();
+        spawn_emoji_refresh();
 
         // One-time provisioning notice — the only thing the SDK writes to stderr.
         if let Some(path) = fresh_identity {

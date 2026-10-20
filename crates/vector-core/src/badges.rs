@@ -104,7 +104,22 @@ pub fn bug_hunter_tier() -> u8 {
 /// and the V for Vector badge (full premium = tier 3). Per-account perks (emoji
 /// limits) read this.
 pub fn effective_tier() -> u8 {
+    if is_bot() { return 3; }
     bug_hunter_tier().max(if has_vector_badge() { 3 } else { 0 })
+}
+
+/// A process role, not account state: the SDK runs one bot per process.
+static BOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run this process as a bot: every tiered perk at its top tier, and emoji packs
+/// uncapped (any number equipped, every emoji in each). Fixed protocol ceilings,
+/// like a message's reaction groups and the 64 KB event, still apply.
+pub fn set_bot(on: bool) {
+    BOT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_bot() -> bool {
+    BOT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Per-effective-tier cap on NEW reaction groups one user may open on a single

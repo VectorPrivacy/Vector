@@ -10,6 +10,13 @@ so the transport changes below reach SDK users through `vector_sdk::vector_core`
 
 ### Added
 
+- **Custom emoji in what a bot writes.** `subscribe_emoji_pack(naddr)` equips a pack, and every
+  `:code:` the bot sends that names one of its emoji carries the image tag. `emojis()` lists each
+  code exactly as Vector's picker names it (`love~1`, `love~2` when packs collide);
+  `unsubscribe_emoji_pack`, `emoji_packs` and `refresh_emoji_packs` round it out. Equipped packs
+  refresh at startup and hourly.
+- **Bots skip every tier.** Any number of emoji packs with every emoji in each, the top tier's
+  12 new reactions per message (the message's own ceiling) and the top tier's pinned chats. Re-exports `EmojiPack`, `PackEmoji` and `SendableEmoji`.
 - **I2P, behind the `i2p` feature.** `.i2p()` and `.i2p_with(I2pOptions { .. })` route the bot
   through the I2P router already running on the machine (SAMv3); `.clearnet()` moves a bot back
   to direct connections. A bot whose account chose Tor or I2P must name its network on every run.
