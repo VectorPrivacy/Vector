@@ -187,6 +187,8 @@
     "allow-kick-community-member",
     "allow-get-community-banlist",
     "allow-get-community-audit-log",
+    "allow-set-community-relays",
+    "allow-check-community-relays",
     "allow-hide-community-message",
     "allow-leave-community",
     "allow-open-attachment",

@@ -203,6 +203,9 @@ async function csSave() {
             const voiceRelays = await invoke('set_community_voice_relays', { communityId, relays: st.draft.voiceRelays });
             VectorSvelte.csCommitted({ voiceRelays });
         }
+        if (VectorSvelte.csRelaysDirty() && st.canEdit) {
+            await csMoveRelays(communityId, st.draft.relays);
+        }
         if (VectorSvelte.csRoleOrderDirty() || VectorSvelte.csRoleEditDirty()) {
             await csSaveRoles(communityId);
         }
@@ -214,6 +217,59 @@ async function csSave() {
     } finally {
         if (unlisten) unlisten();
         VectorSvelte.csSetSaving(false);
+    }
+}
+
+/**
+ * Move the community to `relays` under the locked progress ring. The new relays are checked
+ * first: one that can't hold a community stops the move, and one that throttles is named, and
+ * the move waits on a yes, since a community there can drop posts under load. Then they're given
+ * the whole community and its history, and only then is the move announced.
+ */
+async function csMoveRelays(communityId, relays) {
+    let progress = await showRekeyProgressModal('Checking the new relays', 'community_relay_move');
+    let checks;
+    try {
+        checks = await invoke('check_community_relays', { communityId, relays });
+    } finally {
+        progress.close();
+    }
+    const refused = checks.find((c) => !c.ok);
+    if (refused) {
+        await popupConfirm('This relay can\'t host the community', escapeHtml(refused.reason || `${refused.relay} can't hold this community.`),
+            true, '', 'vector_warning.svg');
+        return;
+    }
+    // What would make the move worse than it looks, each said once; any of it waits on a yes.
+    const named = (list) => list.map((c) => `<b>${escapeHtml(c.relay)}</b>`).join(', ');
+    const cautions = [];
+    const throttled = checks.filter((c) => c.rate_limited);
+    if (throttled.length) {
+        cautions.push(`${named(throttled)} slowed down a short burst of test events. A community on a rate-limited relay can drop posts and fall out of sync when it's busy.`);
+    }
+    for (const [net, others, host] of [['Tor', 'clearnet or I2P', /\.onion$/i], ['I2P', 'clearnet or Tor', /\.i2p$/i]]) {
+        const only = checks.filter((c) => c.only_on === net);
+        if (!only.length) continue;
+        const hostOf = (r) => { try { return new URL(r).hostname; } catch { return ''; } };
+        const noOtherWayIn = relays.every((r) => host.test(hostOf(r)));
+        cautions.push(`${named(only)} can only be reached over ${net}. Members using Vector over ${others} won't reach ${only.length === 1 ? 'it' : 'them'}${noOtherWayIn ? ', and with no other relay left they\'d lose this community' : ''}.`);
+    }
+    if (cautions.length) {
+        const go = await popupConfirm('Before this community moves', `${cautions.join('<br><br>')}<br><br>Move anyway?`,
+            false, '', 'vector_warning.svg', '', 'Move Anyway');
+        if (!go) return;
+    }
+    progress = await showRekeyProgressModal('Moving to new relays', 'community_relay_move');
+    let moved;
+    try {
+        moved = await invoke('set_community_relays', { communityId, relays });
+        await progress.finish('Everyone will follow the community to its new relays');
+        VectorSvelte.csCommitted({ relays: moved.relays });
+    } finally {
+        progress.close();
+    }
+    if (moved.warnings?.length) {
+        await popupConfirm('Moved, with a few gaps', moved.warnings.map((w) => escapeHtml(w)).join('<br><br>'), true, '', 'vector_warning.svg');
     }
 }
 

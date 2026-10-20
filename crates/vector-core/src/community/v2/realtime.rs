@@ -323,6 +323,14 @@ fn sort_dedup(pks: &mut Vec<PublicKey>) {
     pks.dedup();
 }
 
+/// Where a community is listened for: its relays, then any it dropped within the grace a member
+/// who hasn't folded the move yet still writes to.
+fn listen_relays(c: &CommunityV2) -> Vec<String> {
+    let mut out = c.relays.clone();
+    out.extend(super::service::retired_relays(&crate::simd::hex::bytes_to_hex_32(&c.id().0)));
+    out
+}
+
 fn subscription_plan(communities: &[CommunityV2]) -> SubPlan {
     let mut authors = Vec::new();
     let mut per_relay: BTreeMap<RelayUrl, Vec<PublicKey>> = BTreeMap::new();
@@ -330,7 +338,7 @@ fn subscription_plan(communities: &[CommunityV2]) -> SubPlan {
     for c in communities {
         let addresses = community_addresses(c);
         let mut placed = false;
-        for r in &c.relays {
+        for r in &listen_relays(c) {
             // Keyed by the parsed url: two spellings of one relay must merge, not overwrite.
             let Ok(url) = RelayUrl::parse(r) else { continue };
             per_relay.entry(url).or_default().extend_from_slice(&addresses);
@@ -548,7 +556,7 @@ pub async fn refresh_subscription(client: &Client) {
     // this stalled every concurrent dispatch/refresh behind one caller's connect.
     {
         let communities = load_held_v2();
-        let mut relays: Vec<String> = communities.iter().flat_map(|c| c.relays.iter().cloned()).collect();
+        let mut relays: Vec<String> = communities.iter().flat_map(listen_relays).collect();
         relays.sort();
         relays.dedup();
         if !relays.is_empty() {
@@ -597,7 +605,7 @@ pub async fn refresh_subscription(client: &Client) {
 
     let communities = load_held_v2();
     let plan = subscription_plan(&communities);
-    let mut relays: Vec<String> = communities.iter().flat_map(|c| c.relays.iter().cloned()).collect();
+    let mut relays: Vec<String> = communities.iter().flat_map(listen_relays).collect();
     relays.sort();
     relays.dedup();
 

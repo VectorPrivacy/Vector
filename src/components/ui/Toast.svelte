@@ -20,7 +20,8 @@
         color: white;
         padding: 12px 24px;
         border-radius: 8px;
-        z-index: 10000;
+        /* Above the modals (10000): a toast is often the only word on what a modal's action did. */
+        z-index: 10100;
         font-size: 14px;
         overflow-wrap: anywhere;
         opacity: 0;
@@ -32,7 +33,7 @@
         top: 0; left: 0; width: 100%; height: 100%;
         background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 50%, rgba(0,0,0,0.8) 100%);
         opacity: 0;
-        z-index: 9999;
+        z-index: 10099;
         pointer-events: none;
         transition: opacity 0.3s ease;
     }

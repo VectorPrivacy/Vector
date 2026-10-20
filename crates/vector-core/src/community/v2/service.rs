@@ -25,6 +25,9 @@ use crate::community::edition::ParsedEdition;
 
 mod audit;
 pub use audit::{audit_log, AuditEntry, AuditLog};
+mod relocate;
+pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
+pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
 mod writing;
 pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
@@ -5699,6 +5702,18 @@ async fn publish_control_edition_at<T: Transport + ?Sized>(
     content: &str,
     at: u64,
 ) -> Result<(), String> {
+    publish_control_edition_wrap_at(transport, community, vsk, entity_id, content, at).await.map(|_| ())
+}
+
+/// [`publish_control_edition_at`], handing back the wrap it published.
+async fn publish_control_edition_wrap_at<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    vsk: &str,
+    entity_id: &[u8; 32],
+    content: &str,
+    at: u64,
+) -> Result<Event, String> {
     crate::db::scoped(async move {
         assert_current_root(community)?;
         let signer = crate::signer::active_signer()?;
@@ -5738,7 +5753,7 @@ async fn publish_control_edition_at<T: Transport + ?Sized>(
         if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
             crate::db::community::set_family_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, &ed.author.to_bytes(), community.root_epoch.0, floor_family(&ed.vsk))?;
         }
-        Ok(())
+        Ok(wrap)
     })
     .await
 }
@@ -10339,9 +10354,13 @@ pub async fn follow_control<T: Transport + ?Sized>(
             u.control_root = Some(cr);
             updated = Some(u);
         }
+        resume_relay_copy(community);
         match updated {
             Some(u) => {
                 crate::db::community::save_community_v2(&u)?;
+                if u.relays != community.relays {
+                    relays_moved(community, &u);
+                }
                 Ok(ControlFollow { updated: Some(u), authority_changed })
             }
             None => Ok(ControlFollow { updated: None, authority_changed }),
@@ -32960,5 +32979,184 @@ mod tests {
         follow_control(&relay, &community).await.unwrap().updated;
         let folded = crate::db::community::get_community_banlist(&cid_hex).unwrap();
         assert!(folded.contains(&spammer_a) && folded.contains(&spammer_b));
+    }
+
+    /// Publishes everywhere but `refusing`, serves nothing from `hollow`, and has `throttled` turn
+    /// away every third publish.
+    struct PickyRelays<'a> {
+        inner: &'a MemoryRelay,
+        refusing: Option<&'static str>,
+        hollow: Option<&'static str>,
+        throttled: Option<&'static str>,
+        sent: std::sync::atomic::AtomicUsize,
+    }
+    impl PickyRelays<'_> {
+        fn only(relays: &[String], which: Option<&str>) -> bool {
+            relays.len() == 1 && which == Some(relays[0].as_str())
+        }
+    }
+    #[async_trait::async_trait]
+    impl Transport for PickyRelays<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            if Self::only(r, self.refusing) {
+                return Err("blocked: not on the allow list".into());
+            }
+            if Self::only(r, self.throttled) && self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 3 == 2 {
+                return Err("rate-limited: slow down".into());
+            }
+            self.inner.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            if Self::only(relays, self.hollow) {
+                return Ok(Vec::new());
+            }
+            self.inner.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            if Self::only(relays, self.hollow) {
+                return Ok(crate::community::transport::PlaneFetch::whole(Vec::new()));
+            }
+            self.inner.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.publish(e, r).await
+        }
+    }
+
+    async fn wraps_by(relay: &MemoryRelay, author: &str, on: &str) -> std::collections::HashSet<nostr_sdk::prelude::EventId> {
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![author.to_string()], ..Default::default() };
+        relay.fetch(&q, &[on.to_string()]).await.unwrap().into_iter().map(|e| e.id).collect()
+    }
+
+    #[tokio::test]
+    async fn a_relay_move_lands_members_on_a_whole_community() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&bed.relay, &community, &general, "before the move").await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite).await.unwrap();
+
+        // The owner leaves every old relay for one of their own.
+        bed.swap_to(&owner);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let new = vec!["wss://new".to_string()];
+        let moved = move_relays(&bed.relay, &held, &new).await.unwrap();
+        assert_eq!((moved.relays.clone(), moved.removed.clone()), (new.clone(), bed.relays.clone()));
+        assert!(moved.copied > 0);
+        assert_eq!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().relays, new);
+
+        // Every Control edition and Guestbook event the old relay held is on the new one.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let control = control::ControlPlane::of(&held).pk_hex();
+        let guestbook = crate::community::v2::derive::guestbook_group_key(&held.community_root, held.id(), held.root_epoch).pk_hex();
+        for plane in [&control, &guestbook] {
+            let old = wraps_by(&bed.relay, plane, "wss://r").await;
+            assert!(!old.is_empty() && old.is_subset(&wraps_by(&bed.relay, plane, "wss://new").await), "the new relay holds the whole plane");
+        }
+
+        // A member still reading only the old relay folds the move from the edition announced there.
+        bed.swap_to(&member);
+        assert_eq!(joined.relays, bed.relays);
+        let followed = follow_control(&bed.relay, &joined).await.unwrap().updated.expect("the move folds");
+        assert_eq!(followed.relays, new);
+        assert_eq!(retired_relays(&cid_hex), bed.relays, "and listens a while longer where members who haven't moved still write");
+
+        // History moved with it: the member reads the old post from the new relay alone.
+        assert_eq!(texts_in(&bed.relay, &followed, &general).await, vec!["before the move"]);
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_wont_hold_the_community_moves_nobody() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let control = control::ControlPlane::of(&community).pk_hex();
+        let before = wraps_by(&bed.relay, &control, "wss://r").await;
+        let unchanged = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap().relays;
+
+        let refusing = PickyRelays { inner: &bed.relay, refusing: Some("wss://new"), hollow: None, throttled: None, sent: Default::default() };
+        let err = move_relays(&refusing, &community, &["wss://new".to_string()]).await.unwrap_err();
+        assert!(err.contains("wss://new") && err.contains("nothing was changed"), "{err}");
+        assert_eq!(unchanged(), bed.relays);
+
+        // A relay that takes the events but doesn't serve them back is no home either.
+        let hollow = PickyRelays { inner: &bed.relay, refusing: None, hollow: Some("wss://new"), throttled: None, sent: Default::default() };
+        let err = move_relays(&hollow, &community, &["wss://r".to_string(), "wss://new".to_string()]).await.unwrap_err();
+        assert!(err.contains("doesn't serve"), "{err}");
+        assert_eq!(unchanged(), bed.relays);
+        assert_eq!(wraps_by(&bed.relay, &control, "wss://r").await, before, "and no move was announced");
+    }
+
+    #[tokio::test]
+    async fn the_check_before_a_move_names_a_relay_that_throttles() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let picky = PickyRelays { inner: &bed.relay, refusing: Some("wss://closed"), hollow: None, throttled: Some("wss://busy"), sent: Default::default() };
+        let checks = check_relays(&picky, &community, &["wss://r".into(), "wss://fine".into(), "wss://busy".into(), "wss://closed".into()]).await.unwrap();
+        let by = |r: &str| checks.iter().find(|c| c.relay == r).unwrap();
+        assert_eq!(checks.len(), 3, "a relay already listed isn't checked");
+        assert!(by("wss://fine").ok && !by("wss://fine").rate_limited);
+        assert!(by("wss://busy").ok && by("wss://busy").rate_limited, "a relay that turns away part of a burst is flagged before anything moves");
+        assert!(!by("wss://closed").ok && by("wss://closed").reason.as_deref().is_some_and(|r| r.contains("blocked")));
+        assert_eq!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().relays, bed.relays, "checking moves nothing");
+    }
+
+    #[tokio::test]
+    async fn dropping_a_relay_tops_up_the_ones_kept() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let both = vec!["wss://r".to_string(), "wss://s".to_string()];
+        let community = create_community(&bed.relay, "Guild", both.clone(), None).await.unwrap();
+        // An edit only the relay being dropped took.
+        let mut only_r = community.clone();
+        only_r.relays = vec!["wss://r".to_string()];
+        let mut meta = community.metadata();
+        meta.description = Some("only on r".into());
+        edit_community_metadata(&bed.relay, &only_r, &meta).await.unwrap();
+        let control = control::ControlPlane::of(&community).pk_hex();
+        assert!(!wraps_by(&bed.relay, &control, "wss://r").await.is_subset(&wraps_by(&bed.relay, &control, "wss://s").await));
+
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        move_relays(&bed.relay, &held, &["wss://s".to_string()]).await.unwrap();
+        assert!(
+            wraps_by(&bed.relay, &control, "wss://r").await.is_subset(&wraps_by(&bed.relay, &control, "wss://s").await),
+            "what only the dropped relay held is on the one kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_move_the_old_relays_wont_hear_moves_nobody() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let control = control::ControlPlane::of(&community).pk_hex();
+        // The old relay still serves reads but takes no writes.
+        let deaf = PickyRelays { inner: &bed.relay, refusing: Some("wss://r"), hollow: None, throttled: None, sent: Default::default() };
+        let err = move_relays(&deaf, &community, &["wss://new".to_string()]).await.unwrap_err();
+        assert!(err.contains("None of the current relays took the announcement"), "{err}");
+        assert_eq!(crate::db::community::load_community_v2(community.id()).unwrap().unwrap().relays, bed.relays, "nothing moved here");
+        assert_eq!(
+            wraps_by(&bed.relay, &control, "wss://new").await,
+            wraps_by(&bed.relay, &control, "wss://r").await,
+            "and the new relay holds no announcement the old one doesn't"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rename_made_during_a_move_survives_it() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let stale = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let mut meta = stale.metadata();
+        meta.name = "Guild Two".into();
+        edit_community_metadata(&bed.relay, &stale, &meta).await.unwrap();
+        move_relays(&bed.relay, &stale, &["wss://r".to_string(), "wss://new".to_string()]).await.unwrap();
+        let held = crate::db::community::load_community_v2(stale.id()).unwrap().unwrap();
+        assert_eq!((held.name.as_str(), held.relays.len()), ("Guild Two", 2), "the move is built on what the community holds now");
     }
 }

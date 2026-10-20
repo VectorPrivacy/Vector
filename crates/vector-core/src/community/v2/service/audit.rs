@@ -647,7 +647,7 @@ pub(crate) fn note_voice_directive(cid_hex: &str, event_id: &str, at_ms: u64, ac
 
 /// `community` as it stood at `epoch`, for reading that epoch's Control Plane: the root it held
 /// then, and the plane address it lived at if this device kept it.
-fn epoch_view(community: &CommunityV2, cid_hex: &str, epoch: Epoch, root: [u8; 32]) -> CommunityV2 {
+pub(super) fn epoch_view(community: &CommunityV2, cid_hex: &str, epoch: Epoch, root: [u8; 32]) -> CommunityV2 {
     let mut view = community.clone();
     view.community_root = root;
     view.root_epoch = epoch;

@@ -219,6 +219,34 @@ pub async fn get_community_banlist(community_id: String) -> Result<Vec<String>, 
         .collect())
 }
 
+/// Check each relay a move to `relays` would add: whether it holds what a Community needs, and
+/// whether it throttles. Changes nothing.
+#[tauri::command]
+pub async fn check_community_relays(community_id: String, relays: Vec<String>) -> Result<Vec<vector_core::community::v2::service::RelayCheck>, String> {
+    vector_core::db::scoped(async move {
+        let checks = vector_core::VectorCore.check_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        if !vector_core::db::session_is_live() {
+            return Err("the account changed while the relays were checked".to_string());
+        }
+        Ok(checks)
+    })
+    .await
+}
+
+/// Move the Community to `relays`: its history is copied onto every added relay before the new
+/// list is announced, on the old relays and the new.
+#[tauri::command]
+pub async fn set_community_relays(community_id: String, relays: Vec<String>) -> Result<vector_core::community::v2::service::RelayMove, String> {
+    vector_core::db::scoped(async move {
+        let moved = vector_core::VectorCore.move_community_relays(&community_id, &relays).await.map_err(|e| e.to_string())?;
+        if !vector_core::db::session_is_live() {
+            return Err("the account changed during the move".to_string());
+        }
+        Ok(moved)
+    })
+    .await
+}
+
 /// The Community's Audit Log, newest first: who changed what, and when.
 #[tauri::command]
 pub async fn get_community_audit_log(community_id: String) -> Result<vector_core::community::v2::service::AuditLog, String> {

@@ -3795,6 +3795,22 @@ impl VectorCore {
         }))
     }
 
+    /// Check each relay `relays` would add to a v2 community before moving it there: whether it
+    /// holds what a community needs, and whether it throttles.
+    pub async fn check_community_relays(&self, community_id: &str, relays: &[String]) -> Result<Vec<crate::community::v2::service::RelayCheck>> {
+        let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        crate::community::v2::service::check_relays(&transport, &v2, relays).await.map_err(VectorError::Other)
+    }
+
+    /// Move a v2 community to `relays`, copying what its members need onto each new relay first
+    /// (see [`crate::community::v2::service::move_relays`]).
+    pub async fn move_community_relays(&self, community_id: &str, relays: &[String]) -> Result<crate::community::v2::service::RelayMove> {
+        let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        crate::community::v2::service::move_relays(&transport, &v2, relays).await.map_err(VectorError::Other)
+    }
+
     /// A v2 community's Audit Log, newest first: who changed what, and when. Any member can read
     /// the chain it comes from; showing it is for the owner and View Audit Log holders.
     pub async fn community_audit_log(&self, community_id: &str) -> Result<crate::community::v2::service::AuditLog> {

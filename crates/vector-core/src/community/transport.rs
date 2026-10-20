@@ -1252,9 +1252,14 @@ impl LiveTransport {
 /// Send to one pooled relay, true on its ACK. Callers verify the event and mark it as ours
 /// once; `Client::send_event` would redo both for every relay, every round.
 async fn send_to_relay(client: &Client, event: &Event, url: &str) -> bool {
-    let Ok(Some(relay)) = client.relay(url).await else { return false };
+    send_to_relay_why(client, event, url).await.is_ok()
+}
+
+/// [`send_to_relay`], with the relay's own reason when it refuses.
+async fn send_to_relay_why(client: &Client, event: &Event, url: &str) -> Result<(), String> {
+    let Ok(Some(relay)) = client.relay(url).await else { return Err("not connected".to_string()) };
     let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
-    relay.send_event(event).ok_timeout(wait).authentication_timeout(wait).await.is_ok()
+    relay.send_event(event).ok_timeout(wait).authentication_timeout(wait).await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Mark our own event as seen before it goes out, so the relays' echoes of it are dropped
@@ -1300,23 +1305,29 @@ impl Transport for LiveTransport {
                 let event = event.clone();
                 // spawn-detached: relay I/O only — no account storage is touched.
                 crate::rt::spawn(async move {
-                    matches!(
-                        crate::rt::time::timeout(timeout, send_to_relay(&client, &event, &r)).await,
-                        Ok(true)
-                    )
+                    match crate::rt::time::timeout(timeout, send_to_relay_why(&client, &event, &r)).await {
+                        Ok(sent) => sent,
+                        Err(_) => Err("timed out".to_string()),
+                    }
                 })
             })
             .collect();
+        let mut why = None;
         while let Some(joined) = sends.next().await {
-            if matches!(joined, Ok(true)) {
-                return Ok(()); // first relay ACKed; the others keep delivering in the background
+            match joined {
+                Ok(Ok(())) => return Ok(()), // first relay ACKed; the others keep delivering in the background
+                Ok(Err(e)) => why = Some(e),
+                Err(_) => {}
             }
         }
         // Every send has finished without an ACK.
         if marked {
             unmark_own(&client, event).await;
         }
-        Err("no relay accepted the event".to_string())
+        Err(match why {
+            Some(why) => format!("no relay accepted the event: {why}"),
+            None => "no relay accepted the event".to_string(),
+        })
     }
 
     async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {

@@ -26150,8 +26150,10 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-relay-scheme { color: #6a6a6a; }
 .cs-relay-remove {
   position: relative;
+  box-sizing: border-box;
   width: 26px;
   height: 26px;
+  padding: 0;
   margin-left: auto;
   flex-shrink: 0;
   border: none;
@@ -26162,6 +26164,22 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-relay-remove .icon { position: absolute; inset: 6px; width: 14px; height: 14px; margin: 0; background-color: #7a7a7a; }
 .cs-relay-remove:hover { background-color: #1c1c1c; }
 .cs-relay-remove:hover .icon { background-color: var(--danger-color); }
+.cs-relay-remove + .cs-relay-remove { margin-left: 0; }
+.cs-relay-edit:hover .icon { background-color: #fff; }
+.cs-relay-field {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  background: #050505;
+  color: #e8e8e8;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.cs-relay-field:focus { border-color: var(--icon-color-primary, #59fcb3); }
 .cs-relay-add { display: flex; gap: 8px; margin-top: 12px; }
 .cs-relay-add .cs-input { flex: 1; min-width: 0; padding: 8px 12px; font-size: 14px; }
 .cs-relay-add .cs-btn-save { height: auto; }

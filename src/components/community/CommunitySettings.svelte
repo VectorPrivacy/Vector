@@ -179,6 +179,50 @@
         return url.slice(schemeOf(url).length).replace(/\/$/, '');
     }
 
+    const RELAYS_MAX = 5;
+    let relayInput = $state('');
+    let relayError = $state('');
+    // The relay being edited in place: its index in the draft, and the text in its field.
+    let relayEdit = $state(null);
+
+    /** `raw` as a relay address the list can hold, or an error message. */
+    function relayAddress(raw, except = -1) {
+        let text = raw.trim();
+        if (!text) return { error: '' };
+        if (!text.includes('://')) text = `wss://${text}`;
+        let url;
+        try { url = new URL(text); } catch { return { error: 'That isn\'t a relay address.' }; }
+        // Plain ws:// only where the network encrypts the link itself.
+        const native = /\.(onion|i2p)$/i.test(url.hostname);
+        if (!url.hostname || !(url.protocol === 'wss:' || (url.protocol === 'ws:' && native))) return { error: 'Use wss://, or ws:// for an .onion or .i2p address.' };
+        const address = text.replace(/\/+$/, '');
+        const same = (a) => a.replace(/\/+$/, '').toLowerCase() === address.toLowerCase();
+        if (st.draft.relays.some((r, i) => i !== except && same(r))) return { error: 'That relay is already listed.' };
+        return { address };
+    }
+    function addRelay() {
+        const { address, error } = relayAddress(relayInput);
+        if (!address) { relayError = error; return; }
+        if (st.draft.relays.length >= RELAYS_MAX) { relayError = `At most ${RELAYS_MAX} relays.`; return; }
+        csSetDraft({ relays: [...st.draft.relays, address] });
+        relayInput = '';
+        relayError = '';
+    }
+    function removeRelay(url) {
+        csSetDraft({ relays: st.draft.relays.filter((r) => r !== url) });
+    }
+    function commitRelayEdit() {
+        if (!relayEdit) return;
+        const { index, text } = relayEdit;
+        const { address, error } = relayAddress(text, index);
+        if (address) {
+            csSetDraft({ relays: st.draft.relays.map((r, i) => (i === index ? address : r)) });
+        } else if (error) {
+            relayError = error;
+        }
+        relayEdit = null;
+    }
+
     const VOICE_RELAYS_MAX = 8;
     let voiceRelayInput = $state('');
     let voiceRelayError = $state('');
@@ -346,15 +390,40 @@
                             <h3 class="cs-heading">Hosting Relays</h3>
                             <p class="cs-lede">Every message, channel and member list in this community lives on these relays.</p>
                             <div class="cs-relays">
-                                {#each st.relays as url (url)}
+                                {#each st.draft.relays as url, i (url)}
                                     <div class="cs-relay">
                                         <span class="cs-relay-icon"><span class="icon icon-globe"></span></span>
-                                        <span class="cs-relay-url cutoff"><span class="cs-relay-scheme">{schemeOf(url)}</span>{addressOf(url)}</span>
+                                        {#if relayEdit?.index === i}
+                                            <!-- svelte-ignore a11y_autofocus -->
+                                            <input class="cs-relay-field" type="text" autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                                   value={relayEdit.text} oninput={(e) => { relayEdit.text = e.currentTarget.value; relayError = ''; }}
+                                                   onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitRelayEdit(); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); relayEdit = null; } }}
+                                                   onblur={commitRelayEdit} />
+                                        {:else}
+                                            <span class="cs-relay-url cutoff"><span class="cs-relay-scheme">{schemeOf(url)}</span>{addressOf(url)}</span>
+                                        {/if}
+                                        {#if st.canEdit && relayEdit?.index !== i}
+                                            <button class="cs-relay-remove cs-relay-edit" title="Edit" onclick={() => { relayEdit = { index: i, text: url }; relayError = ''; }}><span class="icon icon-edit"></span></button>
+                                            {#if st.draft.relays.length > 1}
+                                                <button class="cs-relay-remove" title="Remove" onclick={() => removeRelay(url)}><span class="icon icon-x"></span></button>
+                                            {/if}
+                                        {/if}
                                     </div>
                                 {:else}
                                     <p class="cs-hint">{st.loading ? 'Loading...' : 'No relays recorded for this community.'}</p>
                                 {/each}
                             </div>
+                            {#if st.canEdit}
+                                <form class="cs-relay-add" onsubmit={(e) => { e.preventDefault(); addRelay(); }}>
+                                    <input class="cs-input" type="text" placeholder="wss://relay.example.com" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                           disabled={st.draft.relays.length >= RELAYS_MAX}
+                                           bind:value={relayInput} oninput={() => { relayError = ''; }} />
+                                    <button class="cs-btn-save" type="submit" disabled={!relayInput.trim()}>Add</button>
+                                </form>
+                                {#if relayError}<p class="cs-hint cs-hint-error">{relayError}</p>{/if}
+                                <p class="cs-hint">A new relay is checked and given this community's whole history before anyone moves to it, and the old relays tell members where everyone went.</p>
+                            {/if}
+
                         </section>
 
                         <section class="cs-block" data-anchor="voice-relays">
