@@ -757,9 +757,20 @@ pub async fn build_invite_list_event_signed<S: crate::signer::VectorSigner + ?Si
     my_pk: PublicKey,
     list: &InviteList,
 ) -> Result<Event, InviteError> {
+    build_invite_list_event_at(signer, my_pk, list, Timestamp::now().as_secs()).await
+}
+
+/// [`build_invite_list_event_signed`] dated `at_secs`: a replaceable list must outdate every copy
+/// its writer read.
+pub async fn build_invite_list_event_at<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    my_pk: PublicKey,
+    list: &InviteList,
+    at_secs: u64,
+) -> Result<Event, InviteError> {
     let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
     let content = signer.nip44_encrypt_async(&my_pk, &json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let unsigned = EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content).finalize_unsigned_with_id(my_pk);
+    let unsigned = EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content).custom_created_at(Timestamp::from_secs(at_secs)).finalize_unsigned_with_id(my_pk);
     signer.sign_event_async(unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))
 }
 

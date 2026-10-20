@@ -128,7 +128,7 @@ export { showToast, hideToast } from './lib/toast.svelte.js';
 export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
 export { setRekey } from './lib/rekey.svelte.js';
 export { setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
-export { ceOverlay, openChannelEditor, closeChannelEditor, setChannelEditorBusy, setChannelPerms, channelEditorState, channelEditorDirty, channelEditorNudge, channelEditorSaved, resetChannelEditor, channelOverviewDirty, overwriteDirty } from './lib/channel-editor.svelte.js';
+export { ceOverlay, openChannelEditor, closeChannelEditor, setChannelEditorBusy, setChannelPerms, channelEditorState, channelEditorDirty, channelEditorNudge, channelEditorSaved, setChannelEditorPrivate, resetChannelEditor, channelOverviewDirty, overwriteDirty } from './lib/channel-editor.svelte.js';
 export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelViewer, setModelViewerHandlers } from './lib/modelviewer.svelte.js';

@@ -1148,8 +1148,8 @@ impl Rotation {
 
 /// Group a batch of parsed chunks into rotations by correlation key. Chunks whose
 /// `n` disagrees with their siblings, or that repeat an index, are the caller's
-/// concern to police; here the first-seen `n` per correlation wins and duplicate
-/// indices are ignored (idempotent re-delivery).
+/// concern to police; here the largest `n` any chunk declares sets the total, and a
+/// second chunk at a held index unions its blobs.
 pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
     use std::collections::BTreeMap;
     let mut by_key: BTreeMap<RotationKey, Rotation> = BTreeMap::new();
@@ -1169,6 +1169,8 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
         });
         entry.severed |= c.severed;
         entry.at_ms = entry.at_ms.min(c.at_ms);
+        // An extension declares the larger total: complete only once every index up to it is held.
+        entry.declared_chunks = entry.declared_chunks.max(c.chunk.1);
         // UNION the blobs, even when the index is already held. Treating a second
         // chunk at a known index as pure idempotent re-delivery is safe only while
         // re-delivery is byte-identical; when two chunks genuinely differ (a

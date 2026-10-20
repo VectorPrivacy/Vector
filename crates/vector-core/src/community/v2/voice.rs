@@ -131,6 +131,8 @@ struct Entry {
     heard_at: u64,
     /// When this stay in the call began: the order everyone is listed in.
     since_ms: u64,
+    /// When this device first heard this stay's `joined`, on its own clock.
+    since_heard: u64,
     heard: Heard,
     server_muted: bool,
     server_deafened: bool,
@@ -184,8 +186,28 @@ pub fn note(channel: &str, author: PublicKey, at_ms: u64, heard: Heard, now_ms: 
         _ => (false, false, 0, 0),
     };
     let since_ms = was.as_ref().filter(|_| heard.joined).map_or(at_ms, |e| e.since_ms);
-    room.insert(author, Entry { at_ms, heard_at: now_ms, since_ms, heard, server_muted, server_deafened, muted_at, deafened_at });
+    let since_heard = was.as_ref().filter(|_| heard.joined).map_or(now_ms, |e| e.since_heard);
+    room.insert(author, Entry { at_ms, heard_at: now_ms, since_ms, since_heard, heard, server_muted, server_deafened, muted_at, deafened_at });
     Noted { changed, reached }
+}
+
+/// How far before its target's current stay began a directive may be dated: a moderator's
+/// re-assertion follows the target's `joined`, from a clock a little behind theirs.
+const STAY_SKEW_MS: u64 = 10_000;
+
+/// Whether a directive sent at `at_ms` may act on `target`'s current stay in `channel`'s call:
+/// one replayed from an earlier stay, or from outside the presence clock bounds, acts on nothing.
+pub fn directive_in_window(channel: &str, target: &PublicKey, at_ms: u64, now_ms: u64) -> bool {
+    if at_ms > now_ms.saturating_add(AHEAD_MS) || at_ms.saturating_add(BEHIND_MS) < now_ms {
+        return false;
+    }
+    let store = calls();
+    let all = store.lock().unwrap_or_else(|e| e.into_inner());
+    all.get(&channel.to_ascii_lowercase())
+        .and_then(|r| r.get(target))
+        // Against the earlier of the stay's own date and when this device heard it begin, so a
+        // target whose clock runs fast can't date its stay past a moderator's re-assertion.
+        .is_some_and(|e| e.live(now_ms) && at_ms.saturating_add(STAY_SKEW_MS) >= e.since_ms.min(e.since_heard))
 }
 
 /// Apply a moderator's mute or deafen, sent at `at_ms`, to `target` if they're in the call. Per
@@ -266,6 +288,23 @@ pub fn occupied(now_ms: u64) -> Vec<String> {
 mod tests {
     use super::*;
     use nostr_sdk::prelude::Keys;
+
+    #[test]
+    fn a_directive_acts_only_on_the_stay_it_was_sent_into() {
+        let _db = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (ch, a) = ("ab".repeat(32), Keys::generate().public_key());
+        let joined = Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([2u8; 32]), ..Default::default() };
+        note(&ch, a, 1_000_000, joined, 1_000_000);
+        assert!(directive_in_window(&ch, &a, 1_000_500, 1_001_000));
+        assert!(directive_in_window(&ch, &a, 1_000_000 - STAY_SKEW_MS, 1_001_000), "a moderator's clock a little behind");
+        assert!(!directive_in_window(&ch, &a, 1_000_000 - STAY_SKEW_MS - 1, 1_001_000), "a replay from an earlier stay acts on nothing");
+        assert!(!directive_in_window(&ch, &a, 1_001_000 + AHEAD_MS + 1, 1_001_000), "nor one from the future");
+        assert!(!directive_in_window(&ch, &Keys::generate().public_key(), 1_000_500, 1_001_000), "nor on someone not in the call");
+        // A target dating its joined 50 s ahead of this clock still takes a re-assertion sent now.
+        let (fast, ahead) = (Keys::generate().public_key(), 50_000);
+        note(&ch, fast, 2_000_000 + ahead, Heard { joined: true, transport: Some("iroh".into()), endpoint: Some([3u8; 32]), ..Default::default() }, 2_000_000);
+        assert!(directive_in_window(&ch, &fast, 2_000_100, 2_000_200));
+    }
 
     #[test]
     fn the_latest_presence_per_author_stands_while_fresh() {

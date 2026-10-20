@@ -4426,6 +4426,25 @@ impl VectorCore {
         crate::community::v2::service::edit_channel_details(&Self::short_transport(), &v2, &channel, name, topic, view).await.map_err(VectorError::Other)
     }
 
+    /// Make a Channel private (a key of its own, CORD-03 §2) or public again.
+    pub async fn set_channel_private(&self, community_id: &str, channel_id: &str, private: bool) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let channel = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let transport = Self::short_transport();
+        if private {
+            return crate::community::v2::service::privatize_channel(&transport, &v2, &channel).await.map_err(VectorError::Other);
+        }
+        let mut meta = v2.channel(&channel).ok_or_else(|| VectorError::Other("unknown channel".into()))?.metadata();
+        if !meta.private {
+            return Ok(());
+        }
+        // What only a Private Channel means goes with it.
+        meta.private = false;
+        meta.extra.remove("creator");
+        meta.extra.remove("public_until");
+        crate::community::v2::service::edit_channel_metadata(&transport, &v2, &channel, &meta).await.map_err(VectorError::Other)
+    }
+
     /// Set exactly which Roles a member holds.
     pub async fn set_member_roles(&self, community_id: &str, npub: &str, role_ids: Vec<String>) -> Result<()> {
         let v2 = Self::load_held(community_id)?

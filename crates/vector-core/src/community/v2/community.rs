@@ -52,6 +52,12 @@ pub struct SealedMeta {
 }
 
 impl ChannelV2 {
+    /// When a Private Channel that was public went private (unix ms): what was sent at its root
+    /// planes before then is its history (CORD-03 §2).
+    pub fn public_until(&self) -> Option<u64> {
+        self.meta_extra.get("public_until").and_then(|v| v.as_u64()).filter(|_| self.private)
+    }
+
     /// Whether posts land at a writer address now (CORD-03 §1).
     pub fn restricted(&self) -> bool {
         self.writers.as_ref().is_some_and(|l| l.restricted())

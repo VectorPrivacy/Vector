@@ -97,7 +97,10 @@ function _dmsgPostedTimedOut(msg, currentChat) {
     // Only a device that manages the channel keeps these (CORD-03 §1).
     if (msg.unauthorized) return 'unauthorized';
     // A writer address's post stands on the writer key that signed it (CORD-03 §1).
-    if (!msg.writer && channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
+    // A post from before a Channel went private was a public post (CORD-03 §2).
+    const publicUntil = (getCommunityChannels(communityIdOfChat(currentChat)) || []).find(c => c.id === currentChat?.id)?.publicUntil;
+    const wasPublic = publicUntil && (msg.at || 0) < publicUntil;
+    if (!msg.writer && !wasPublic && channelSendDenied(currentChat?.id)?.has(msg.npub)) return 'nosend';
     const t = communityTimeoutsFor(communityIdOfChat(currentChat))?.[msg.npub];
     if (!t) return '';
     const inside = (ms) => ms / 1000 >= t.from && ms / 1000 < t.until;

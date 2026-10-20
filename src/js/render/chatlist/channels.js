@@ -27,6 +27,7 @@ function visibleChannels(channels) {
             category: c.category_id || null, topic: c.topic || '', view: c.view || 'chat',
             perms: c.my_permissions ?? null,
             restricted: !!c.restricted, writer: c.can_post !== false,
+            publicUntil: c.public_until || null,
         }));
 }
 
@@ -400,6 +401,7 @@ async function saveChannelEditor() {
  * @property {() => void} save
  * @property {() => void} reset
  * @property {(sync: { communityId: string, channelId: string, categoryId: string|null }) => void} setSync
+ * @property {(p: { communityId: string, channelId: string, private: boolean }) => void} setPrivate   a key of its own, or back to the community's
  * @property {(npub: string) => string} name   empty when they have no name of their own
  * @property {(npub: string) => boolean} veiled   Streamer Mode hides the name and key
  * @property {(npub: string) => string} searchName
@@ -418,6 +420,18 @@ VectorSvelte.setScreen('channelEditor', {
                 await invoke('set_channel_sync', { communityId, channelId, categoryId });
                 VectorSvelte.setChannelEditorBusy(false);
                 loadChannelPerms(communityId, channelId);
+            } catch (e) {
+                VectorSvelte.setChannelEditorBusy(false, String(e));
+            }
+        },
+        setPrivate: async ({ communityId, channelId, private: on }) => {
+            VectorSvelte.setChannelEditorBusy(true);
+            try {
+                await invoke('set_community_channel_private', { communityId, channelId, private: on });
+                VectorSvelte.setChannelEditorPrivate(on);
+                VectorSvelte.setChannelEditorBusy(false);
+                loadChannelPerms(communityId, channelId);
+                refreshCommunityChannels();
             } catch (e) {
                 VectorSvelte.setChannelEditorBusy(false, String(e));
             }

@@ -1143,6 +1143,7 @@ pub fn run() {
             commands::community::set_community_voice_relays,
             commands::community::rename_community_channel,
             commands::community::edit_community_channel,
+            commands::community::set_community_channel_private,
             commands::community::move_community_channel,
             commands::community::create_community_category,
             commands::community::rename_community_category,

@@ -2204,7 +2204,8 @@ html, body {
 }
 
 .ccm-card .ccm-private.toggle-container { margin-top: 10px; padding: 12px 0 2px; border-bottom: none; }
-.ccm-private .cs-perm-name .icon {
+.ccm-private .cs-perm-name .icon,
+.ce-private .cs-perm-name .icon {
   position: static;
   display: inline-block;
   width: 13px;
@@ -25510,7 +25511,8 @@ body.profile-switcher-editing .profile-switcher-add {
   background-color: #050505;
   border: 1px solid #2c2e2f;
   border-radius: 18px;
-  overflow: hidden;
+  /* Clip, not hidden: a hidden overflow still scrolls when focus lands near its edge. */
+  overflow: clip;
 }
 
 .cs-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }

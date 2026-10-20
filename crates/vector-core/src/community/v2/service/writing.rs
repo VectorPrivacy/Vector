@@ -1452,7 +1452,7 @@ async fn retract_since_bound<T: Transport + ?Sized>(transport: &T, community: &C
         };
         let missing: Vec<String> = ids.iter().filter(|id| !wraps.contains_key(*id)).cloned().collect();
         for (plane, _) in planes.iter().filter(|_| !missing.is_empty()) {
-            if let ReadPlane::Keyed(group) = plane {
+            if let Some(group) = plane.group() {
                 let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], ids: missing.clone(), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
                 if let Ok(found) = transport.fetch_plane(group.keys(), &q, &community.relays).await {
                     answered |= found.is_complete();

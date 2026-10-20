@@ -645,6 +645,10 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
             return DispatchedV2::Ignored;
         }
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        // A member holding the key can re-wrap a signed directive it once saw (CORD-07 §7).
+        if !super::voice::directive_in_window(&channel_id, &target, at_ms, now) {
+            return DispatchedV2::Ignored;
+        }
         if super::voice::apply_directive(&channel_id, &target, directive, at_ms, now) {
             super::service::yield_voice_directive(&channel_id, &target, directive);
         }

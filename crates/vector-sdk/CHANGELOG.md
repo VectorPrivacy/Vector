@@ -15,6 +15,7 @@ so the transport changes below reach SDK users through `vector_sdk::vector_core`
   code exactly as Vector's picker names it (`love~1`, `love~2` when packs collide);
   `unsubscribe_emoji_pack`, `emoji_packs` and `refresh_emoji_packs` round it out. Equipped packs
   refresh at startup and hourly.
+- `Community::set_channel_private(channel_id, private)`: make a public channel private, or back.
 - **Bots skip every tier.** Any number of emoji packs with every emoji in each, the top tier's
   12 new reactions per message (the message's own ceiling) and the top tier's pinned chats. Re-exports `EmojiPack`, `PackEmoji` and `SendableEmoji`.
 - **I2P, behind the `i2p` feature.** `.i2p()` and `.i2p_with(I2pOptions { .. })` route the bot

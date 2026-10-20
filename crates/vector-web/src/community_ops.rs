@@ -52,6 +52,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
 
             // --- Channels and categories ---
             "edit_community_channel" => edit_channel(a).await,
+            "set_community_channel_private" => set_channel_private(a).await,
             "move_community_channel" => move_channel(a).await,
             "create_community_category" => create_category(a).await,
             "rename_community_category" => rename_category(a).await,
@@ -339,6 +340,19 @@ async fn edit_channel(a: &Args) -> Result<Value, String> {
     let (topic, view) = (a.opt_str("topic"), a.str("view")?);
     db::scoped(async move {
         VectorCore.edit_channel_details(&id, &channel, &name, topic.as_deref(), &view).await.map_err(|e| e.to_string())?;
+        if let Ok(c) = load_v2(&id) {
+            VectorCore.register_v2_chats(&c, &db::current_session()).await;
+        }
+        Ok(Value::Null)
+    })
+    .await
+}
+
+async fn set_channel_private(a: &Args) -> Result<Value, String> {
+    let (id, channel) = (a.str("communityId")?, a.str("channelId")?);
+    let private = a.bool("private").ok_or("missing private")?;
+    db::scoped(async move {
+        VectorCore.set_channel_private(&id, &channel, private).await.map_err(|e| e.to_string())?;
         if let Ok(c) = load_v2(&id) {
             VectorCore.register_v2_chats(&c, &db::current_session()).await;
         }

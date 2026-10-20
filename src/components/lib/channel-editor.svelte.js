@@ -38,6 +38,7 @@ export function setChannelEditorBusy(on, error = '') { s.busy = !!on; s.error = 
 export function setChannelEditorSection(id) { s.section = id; }
 export function setChannelEditorQuery(q) { s.query = q; }
 export function channelEditorNudge() { s.nudged = 'close'; s.nudge++; }
+export function setChannelEditorPrivate(on) { s.private = !!on; }
 
 /** What Save made the channel's name, topic and view. */
 export function channelEditorSaved(saved) { s.saved = { ...saved }; }

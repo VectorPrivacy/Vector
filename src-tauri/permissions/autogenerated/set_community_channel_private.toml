@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-community-channel-private"
+description = "Enables the set_community_channel_private command without any pre-configured scope."
+commands.allow = ["set_community_channel_private"]
+
+[[permission]]
+identifier = "deny-set-community-channel-private"
+description = "Denies the set_community_channel_private command without any pre-configured scope."
+commands.deny = ["set_community_channel_private"]

@@ -108,6 +108,7 @@
     "allow-update-community-metadata",
     "allow-rename-community-channel",
     "allow-edit-community-channel",
+    "allow-set-community-channel-private",
     "allow-move-community-channel",
     "allow-create-community-category",
     "allow-rename-community-category",

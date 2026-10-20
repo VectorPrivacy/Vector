@@ -45,7 +45,6 @@
     ];
     const VIEWS = [
         { id: 'chat', name: 'Text', desc: 'Messages first.' },
-        { id: 'forum', name: 'Forum', desc: 'Opens on its threads.' },
         { id: 'voice', name: 'Voice', desc: 'Opens its call, with the chat beside it.' },
     ];
 
@@ -61,7 +60,8 @@
             anchors: [
                 { id: 'ch-name', label: 'Name', icon: 'edit', keys: 'name rename title' },
                 { id: 'ch-topic', label: 'Topic', icon: 'align-left', keys: 'topic description about' },
-                { id: 'ch-view', label: 'Opens As', icon: 'channel-hash', keys: 'view text forum voice opens' },
+                { id: 'ch-view', label: 'Opens As', icon: 'channel-hash', keys: 'view text voice opens' },
+                ...(st.perms?.activated ? [{ id: 'ch-private', label: 'Privacy', icon: 'locked', keys: 'private privacy public hidden key' }] : []),
             ],
         }]),
         {
@@ -252,6 +252,20 @@
                                 {/each}
                             </div>
                         </section>
+                        {#if st.perms?.activated}
+                            <section class="cs-block" data-anchor="ch-private">
+                                <h3 class="cs-heading">Privacy</h3>
+                                <label class="toggle-container cs-perm ce-private">
+                                    <span class="cs-perm-text">
+                                        <span class="cs-perm-name"><span class="icon icon-locked"></span>Private Channel</span>
+                                        <span class="cs-perm-desc">Only members and roles you let in can {st.saved.view === 'voice' ? 'join it' : 'see it'}.</span>
+                                    </span>
+                                    <input type="checkbox" checked={st.private} disabled={st.busy}
+                                           onchange={(e) => { const want = e.currentTarget.checked; e.currentTarget.checked = st.private; h.setPrivate({ communityId: st.communityId, channelId: st.channelId, private: want }); }}>
+                                    <span class="neon-toggle"></span>
+                                </label>
+                            </section>
+                        {/if}
                     {:else if !st.perms}
                         <section class="cs-block" data-anchor="ch-targets">
                             <h3 class="cs-heading">Roles & Members</h3>

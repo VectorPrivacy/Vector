@@ -52,6 +52,7 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
             "my_permissions": mine.get(&ch.id.0).map(|p| p.to_string()),
             "restricted": ch.restricted(),
             "can_post": vector_core::community::v2::service::can_post(c, &ch.id),
+            "public_until": ch.public_until(),
         })).collect::<Vec<_>>(),
         "categories": VectorCore::categories_json(c),
         "primary_channel": c.primary_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),

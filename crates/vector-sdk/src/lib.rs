@@ -1739,6 +1739,13 @@ impl Community {
         self.core.create_channel(&self.id, name, true).await
     }
 
+    /// Make a channel private (it takes a key of its own, delivered to whoever its rules let in;
+    /// what it said while public stays readable to them) or public again. Needs Manage Channels,
+    /// and the community on the new roles to make one private.
+    pub async fn set_channel_private(&self, channel_id: &str, private: bool) -> Result<()> {
+        self.core.set_channel_private(&self.id, channel_id, private).await
+    }
+
     /// Rename a channel. Its id and history survive.
     pub async fn rename_channel(&self, channel_id: &str, name: &str) -> Result<()> {
         self.core.rename_channel(&self.id, channel_id, name).await

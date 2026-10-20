@@ -65,6 +65,9 @@ pub struct ChannelSummary {
     pub restricted: bool,
     /// This device holds what posting here takes now.
     pub can_post: bool,
+    /// When a Channel made private stopped being public (unix ms): posts before it were public.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_until: Option<u64>,
 }
 
 /// The [`CommunitySummary`] for a **v2** community — the owner is the
@@ -96,6 +99,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
                 my_permissions: mine.get(&ch.id.0).map(|p| p.to_string()),
                 restricted: ch.restricted(),
                 can_post: vector_core::community::v2::service::can_post(c, &ch.id),
+                public_until: ch.public_until(),
             })
             .collect(),
         categories: vector_core::VectorCore::categories_json(c),
@@ -3152,6 +3156,17 @@ pub async fn edit_community_channel(community_id: String, channel_id: String, na
             .edit_channel_details(&community_id, &channel_id, &name, topic.as_deref(), &view)
             .await
             .map_err(|e| e.to_string())?;
+        reregister_channels(&community_id).await;
+        Ok(())
+    })
+    .await
+}
+
+/// Make a channel private (it takes a key of its own) or public again.
+#[tauri::command]
+pub async fn set_community_channel_private(community_id: String, channel_id: String, private: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_channel_private(&community_id, &channel_id, private).await.map_err(|e| e.to_string())?;
         reregister_channels(&community_id).await;
         Ok(())
     })

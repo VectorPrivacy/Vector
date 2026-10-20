@@ -361,6 +361,16 @@ fn assert_caps(count: usize, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The entries of a list's `entries` array, each misshapen one dropped alone (CORD-04 §7). `None`
+/// when it isn't an array, or runs past the entry cap, which reads the whole list as empty.
+fn entries_of(entries: Option<&serde_json::Value>) -> Option<Vec<PinEntry>> {
+    let raw = entries?.as_array()?;
+    if raw.len() > PIN_MAX_ENTRIES {
+        return None;
+    }
+    Some(raw.iter().filter_map(|e| serde_json::from_value::<PinEntry>(e.clone()).ok()).collect())
+}
+
 /// A read list: its entries, or the fact it stayed dark.
 pub struct ReadPinList {
     pub entries: Vec<PinEntry>,
@@ -387,13 +397,10 @@ pub fn read_pin_list(
 
     // Public form: { "entries": [...] }
     if parsed.get("entries").is_some() {
-        let Ok(form) = serde_json::from_value::<PlainForm>(parsed) else {
+        let Some(entries) = entries_of(parsed.get("entries")) else {
             return EMPTY();
         };
-        if form.entries.len() > PIN_MAX_ENTRIES {
-            return EMPTY();
-        }
-        return ReadPinList { entries: form.entries, sealed: false };
+        return ReadPinList { entries, sealed: false };
     }
 
     // Sealed form: { "epoch": "<decimal u64>", "sealed": "<base64>" }
@@ -403,7 +410,8 @@ pub fn read_pin_list(
     ) else {
         return EMPTY();
     };
-    if epoch_str != "0" && (epoch_str.is_empty() || epoch_str.starts_with('0')) {
+    let canonical = !epoch_str.is_empty() && epoch_str.bytes().all(|b| b.is_ascii_digit()) && (epoch_str == "0" || !epoch_str.starts_with('0'));
+    if !canonical {
         return EMPTY();
     }
     let Ok(epoch) = epoch_str.parse::<u64>() else {
@@ -421,13 +429,13 @@ pub fn read_pin_list(
     let Ok(inner) = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv_key, &raw) else {
         return EMPTY();
     };
-    let Ok(form) = serde_json::from_slice::<PlainForm>(&inner) else {
+    let Ok(inner) = serde_json::from_slice::<serde_json::Value>(&inner) else {
         return EMPTY();
     };
-    if form.entries.len() > PIN_MAX_ENTRIES {
+    let Some(entries) = entries_of(inner.get("entries")) else {
         return EMPTY();
-    }
-    ReadPinList { entries: form.entries, sealed: false }
+    };
+    ReadPinList { entries, sealed: false }
 }
 
 // ── Deletion (§7): self-erasure outranks curation ────────────────────────────
@@ -636,12 +644,12 @@ mod tests {
             assert!(read.entries.is_empty(), "{bad}");
             assert!(!read.sealed, "{bad}");
         }
-        // Hostile entries inside a well-formed list: dropped at verify, not a panic.
-        let hostile = r#"{"entries":[null, 42, {"seal": null}, {"keys": "zz"}]}"#;
-        let read = read_pin_list(hostile, |_| None);
-        for e in &read.entries {
-            assert!(verify_pin_entry(e, &chan_hex()).is_none());
-        }
+        // Hostile entries inside a well-formed list drop alone; a good one beside them stands.
+        let (good, _) = entry_for(&Keys::generate(), "kept");
+        let hostile = format!(r#"{{"entries":[null, 42, {{"seal": null}}, {{"keys": "zz"}}, {}]}}"#, serde_json::to_string(&good).unwrap());
+        let read = read_pin_list(&hostile, |_| None);
+        let standing: Vec<_> = read.entries.iter().filter(|e| verify_pin_entry(e, &chan_hex()).is_some()).collect();
+        assert_eq!(standing.len(), 1, "one misshapen entry never empties the list");
     }
 
     #[test]
