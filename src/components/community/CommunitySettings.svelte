@@ -17,7 +17,7 @@
     import SectionNav from '../settings/SectionNav.svelte';
 
     // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
-    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), loadAudit(communityId), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
+    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), loadAudit(communityId), openLink(key), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
     const ov = csOverlay.state();
@@ -388,7 +388,7 @@
                     {:else}
                         <section class="cs-block" data-anchor="relay-list">
                             <h3 class="cs-heading">Hosting Relays</h3>
-                            <p class="cs-lede">Every message, channel and member list in this community lives on these relays.</p>
+                            <p class="cs-lede">Every message, channel and member list in this community lives on these relays, end-to-end encrypted.</p>
                             <div class="cs-relays">
                                 {#each st.draft.relays as url, i (url)}
                                     <div class="cs-relay">
@@ -428,7 +428,7 @@
 
                         <section class="cs-block" data-anchor="voice-relays">
                             <h3 class="cs-heading">Voice Relays</h3>
-                            <p class="cs-lede">Voice channels connect through these relays. A relay sees who is calling from where, never what is said.</p>
+                            <p class="cs-lede">Voice channels connect through these relays, end-to-end encrypted. Each relay sees where callers connect from.</p>
                             <div class="cs-relays">
                                 {#each st.draft.voiceRelays as url (url)}
                                     <div class="cs-relay">
@@ -439,7 +439,11 @@
                                         {/if}
                                     </div>
                                 {:else}
-                                    <p class="cs-hint">{st.loading ? 'Loading...' : 'Using the default relays run by n0.'}</p>
+                                    {#if st.loading}
+                                        <p class="cs-hint">Loading...</p>
+                                    {:else}
+                                        <p class="cs-hint">Using iroh's public relays, run by n0. <button type="button" class="net-link" onclick={() => h.openLink('irohRelays')}>Learn more</button></p>
+                                    {/if}
                                 {/each}
                             </div>
                             {#if st.canEdit}

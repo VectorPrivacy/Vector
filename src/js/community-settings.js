@@ -23,9 +23,15 @@ VectorSvelte.setScreen('communitySettings', {
         avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
         profile: (npub) => getProfile(npub) || null,
         loadAudit: (communityId) => csLoadAudit(communityId),
+        openLink: (key) => openUrl(CS_LINKS[key]),
         ui: { twemojify, showTooltip: showGlobalTooltip, hideTooltip: hideGlobalTooltip },
     },
 });
+
+/** The pages Community Settings links out to, by name: only these ever open. */
+const CS_LINKS = {
+    irohRelays: 'https://docs.iroh.computer/concepts/relays',
+};
 
 /**
  * Whether the caller may change anything the modal holds, or read its Audit Log. The
