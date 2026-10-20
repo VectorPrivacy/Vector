@@ -109,6 +109,10 @@ pub const SERVER_ROOT_SCOPE_HEX: &str =
 /// the secret per epoch.
 pub const CONTROL_ROOT_SCOPE: &str = "control-root";
 
+/// The epoch-key-archive scope for each epoch's Control Plane address, kept so the Audit Log can
+/// read an epoch back after a Refounding has moved the plane on. Non-hex, like the above.
+pub const CONTROL_PK_SCOPE: &str = "control-pk";
+
 /// The bytes behind an id written exactly as [`CommunityId::to_hex`] writes one, so a
 /// byte-keyed cache answers only for strings it would have matched character for character.
 pub(crate) fn id32_from_hex(hex: &str) -> Option<[u8; 32]> {

@@ -22,18 +22,19 @@ VectorSvelte.setScreen('communitySettings', {
         searchName: (npub) => searchName(npub),
         avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
         profile: (npub) => getProfile(npub) || null,
+        loadAudit: (communityId) => csLoadAudit(communityId),
         ui: { twemojify, showTooltip: showGlobalTooltip, hideTooltip: hideGlobalTooltip },
     },
 });
 
 /**
- * Whether the caller may change anything the modal holds. The entry point is shown
- * on this alone, so a member who can only read relays is not handed a page of
- * disabled fields.
+ * Whether the caller may change anything the modal holds, or read its Audit Log. The
+ * entry point is shown on this alone, so a member who can only read relays is not
+ * handed a page of disabled fields.
  * @param {object|null} caps get_community_capabilities
  */
 function communitySettingsWritable(caps) {
-    return !!(caps?.manage_metadata || caps?.ban || caps?.manage_roles);
+    return !!(caps?.manage_metadata || caps?.ban || caps?.manage_roles || caps?.view_audit_log);
 }
 
 /** The chat row that stands for a community: its primary channel, or any of its channels. */
@@ -44,6 +45,7 @@ function csCommunityChats(communityId) {
 async function openCommunitySettings(communityId) {
     if (!communityId) return;
     VectorSvelte.csOpen(communityId);
+    VectorSvelte.auditReset();
     VectorSvelte.csOverlay.open({});
     pushBack('community-settings', closeCommunitySettings);
     try {
@@ -63,6 +65,7 @@ async function openCommunitySettings(communityId) {
             canEdit: !!caps.manage_metadata,
             canBan: !!caps.ban,
             canRoles: !!caps.manage_roles,
+            canAudit: !!caps.view_audit_log,
         });
         resolveCommunityBanner(communityId);
         if (caps.ban) csLoadBans(communityId);
@@ -402,6 +405,35 @@ async function csSetRoleHolders(roleId, add, remove) {
 }
 
 /** The banlist, and the profiles behind it so rows read as people rather than keys. */
+/** Read the community's Audit Log, and the profiles it names that this device hasn't met. */
+async function csLoadAudit(communityId) {
+    if (!communityId) return;
+    VectorSvelte.auditLoading(communityId);
+    let log;
+    try {
+        log = await invoke('get_community_audit_log', { communityId });
+    } catch (e) {
+        VectorSvelte.auditFailed(communityId, String(e));
+        return;
+    }
+    if (VectorSvelte.csState().communityId !== communityId) return;
+    VectorSvelte.auditLoaded(communityId, log);
+    const named = new Set();
+    for (const e of log?.entries || []) {
+        if (e.actor) named.add(e.actor);
+        const t = e.target;
+        if (t?.npub) named.add(t.npub);
+        if (t?.author) named.add(t.author);
+        if (t?.for?.npub) named.add(t.for.npub);
+        for (const c of e.changes || []) for (const m of c.held || []) if (m?.npub) named.add(m.npub);
+    }
+    for (const np of named) {
+        if (getProfile(np) || strangerProfileRequested.has(np)) continue;
+        strangerProfileRequested.add(np);
+        invoke('load_profile', { npub: np }).catch(() => {});
+    }
+}
+
 async function csLoadBans(communityId) {
     let bans = [];
     try { bans = await invoke('get_community_banlist', { communityId }) || []; } catch (_) { return; }

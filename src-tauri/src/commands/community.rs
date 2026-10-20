@@ -219,6 +219,20 @@ pub async fn get_community_banlist(community_id: String) -> Result<Vec<String>, 
         .collect())
 }
 
+/// The Community's Audit Log, newest first: who changed what, and when.
+#[tauri::command]
+pub async fn get_community_audit_log(community_id: String) -> Result<vector_core::community::v2::service::AuditLog, String> {
+    vector_core::db::scoped(async move {
+        let log = vector_core::VectorCore.community_audit_log(&community_id).await.map_err(|e| e.to_string())?;
+        // Bound to the account that asked: a log finished after a swap belongs to no one on screen.
+        if !vector_core::db::session_is_live() {
+            return Err("the account changed while the audit log loaded".to_string());
+        }
+        Ok(log)
+    })
+    .await
+}
+
 /// Grant a member the Community's Admin role: publishes the per-member Grant event, adding them
 /// to the roster at admin rank so they can sign management actions. Owner/admin-only.
 #[tauri::command]

@@ -1170,6 +1170,7 @@ pub fn run() {
             commands::community::get_community_role_graph,
             commands::community::can_manage_community_roles,
             commands::community::get_community_capabilities,
+            commands::community::get_community_audit_log,
             commands::community::pin_community_message,
             commands::community::unpin_community_message,
             commands::community::get_channel_pins,

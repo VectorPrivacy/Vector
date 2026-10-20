@@ -23,6 +23,9 @@ use super::rekey::{self, Continuity, RekeyScope};
 use super::{guestbook, stream, vsk};
 use crate::community::edition::ParsedEdition;
 
+mod audit;
+pub use audit::{audit_log, AuditEntry, AuditLog};
+pub(crate) use audit::{note_moderation_delete, note_voice_directive};
 mod writing;
 pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
 pub(crate) use writing::live_writer as live_writer_of;
@@ -429,8 +432,9 @@ pub async fn send_voice_directive<T: Transport + ?Sized>(
     }
     let at_ms = now_ms();
     let rumor = chat::build_voice_directive_rumor(author_pk, channel_id, epoch, target, directive, to.as_ref(), my_authority_citation(community, &author_pk).as_ref(), at_ms);
-    publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
+    let id = publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await?;
     let channel = crate::simd::hex::bytes_to_hex_32(&channel_id.0);
+    note_voice_directive(&cid, &id, at_ms, &me, &target.to_hex(), &channel, directive, to.as_ref());
     super::voice::apply_directive(&channel, target, directive, at_ms, at_ms);
     let standing = standing_directives();
     let mut held = standing.lock().unwrap_or_else(|e| e.into_inner());
@@ -1517,6 +1521,14 @@ pub(crate) fn record_epoch_minter(cid_hex: &str, epoch: u64, rotator_hex: &str) 
     m.insert(epoch, rotator_hex.to_string());
     if let Ok(v) = serde_json::to_string(&m) {
         let _ = crate::db::settings::set_sql_setting(format!("v2_minter:{cid_hex}"), v);
+    }
+}
+
+/// Keep `epoch`'s Control Plane address, so its history reads back once the plane has moved on.
+pub(crate) fn archive_control_address(cid_hex: &str, epoch: u64, control_pk: Option<&PublicKey>) {
+    let Some(pk) = control_pk else { return };
+    if let Err(e) = crate::db::community::store_epoch_key(cid_hex, crate::community::CONTROL_PK_SCOPE, epoch, &pk.to_bytes()) {
+        crate::log_warn!("v2: control address archive failed (that epoch's audit history may not read back): {e}");
     }
 }
 
@@ -4256,6 +4268,8 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             }
         }
         crate::db::community::save_community_v2(&updated)?;
+        archive_control_address(&cid_hex, community.root_epoch.0, community.control_pk.as_ref());
+        archive_control_address(&cid_hex, new_epoch.0, updated.control_pk.as_ref());
         // Archive the new epoch key + confirm the monotonic base head (the root was already
         // archived by mint_or_reuse, so this is idempotent). Record the carried heads at
         // the NEW epoch; if a crash skips this, the epoch-filtered floors bootstrap the
@@ -13056,7 +13070,9 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                                 &cid_hex[..8.min(cid_hex.len())], next.0
                             );
                         }
+                        archive_control_address(&cid_hex, held_epoch.0, cur.control_pk.as_ref());
                         cur.control_pk = control_pk.and_then(|pk| PublicKey::from_slice(&pk).ok());
+                        archive_control_address(&cid_hex, next.0, cur.control_pk.as_ref());
                         cur.control_root = control_root;
                         // Archive on adopt: without this, a member who lived through TWO
                         // Refoundings loses the middle epoch's public history (only the

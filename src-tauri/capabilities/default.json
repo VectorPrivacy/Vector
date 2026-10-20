@@ -186,6 +186,7 @@
     "allow-delete-community",
     "allow-kick-community-member",
     "allow-get-community-banlist",
+    "allow-get-community-audit-log",
     "allow-hide-community-message",
     "allow-leave-community",
     "allow-open-attachment",

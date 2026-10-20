@@ -102,6 +102,7 @@ export function csOpen(communityId) {
     s.canEdit = false;
     s.canBan = false;
     s.canRoles = false;
+    s.canAudit = false;
     s.bans = [];
     s.banSel = new Set();
     s.unbanning = false;
@@ -112,13 +113,14 @@ export function csOpen(communityId) {
     s.query = '';
 }
 
-export function csLoaded({ name, description, iconSrc, relays, voiceRelays, canEdit, canBan, canRoles }) {
+export function csLoaded({ name, description, iconSrc, relays, voiceRelays, canEdit, canBan, canRoles, canAudit }) {
     s.saved = { name, description, iconSrc, voiceRelays: voiceRelays || [] };
     s.draft = { name, description, iconPath: null, iconPreview: null, iconCrop: null, voiceRelays: [...s.saved.voiceRelays], ...noBanner() };
     s.relays = relays || [];
     s.canEdit = !!canEdit;
     s.canBan = !!canBan;
     s.canRoles = !!canRoles;
+    s.canAudit = !!canAudit;
     s.loading = false;
 }
 

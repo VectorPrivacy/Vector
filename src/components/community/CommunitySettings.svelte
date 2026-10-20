@@ -11,12 +11,13 @@
     import { bannerState } from '../lib/banners.svelte.js';
     import MemberRow from '../people/MemberRow.svelte';
     import RolesSection from './RolesSection.svelte';
+    import AuditLogSection from './AuditLogSection.svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
 
     // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
-    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
+    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), loadAudit(communityId), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
     const ov = csOverlay.state();
@@ -72,6 +73,15 @@
             needs: 'canBan',
             anchors: [
                 { id: 'ban-list', label: 'Banned Members', icon: 'x-user', keys: 'bans banned unban blocked removed' },
+            ],
+        },
+        {
+            id: 'audit',
+            label: 'Audit Log',
+            icon: 'clock',
+            needs: 'canAudit',
+            anchors: [
+                { id: 'audit-list', label: 'Audit Log', icon: 'clock', keys: 'audit log history changes actions who when record' },
             ],
         },
     ]);
@@ -284,6 +294,8 @@
                         </section>
                     {:else if section.id === 'roles'}
                         <RolesSection {h} />
+                    {:else if section.id === 'audit'}
+                        <AuditLogSection {h} />
                     {:else if section.id === 'bans'}
                         <section class="cs-block" data-anchor="ban-list">
                             <h3 class="cs-heading">Banned Members</h3>

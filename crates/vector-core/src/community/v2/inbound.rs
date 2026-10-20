@@ -122,6 +122,17 @@ fn moderation_delete_authorized(
     crate::community::moderation::can_hide_in_channel(Some(&owner_hex), &roster, &deleter_hex, &author.to_hex(), channel_id, private)
 }
 
+/// Note a moderator's delete for the Audit Log, written once the STATE lock is behind us.
+fn note_moderation_delete(channel_id: &str, opened: &stream::OpenedStream, author: &PublicKey) {
+    let Some(id) = opened.rumor.id.map(|i| i.to_hex()) else { return };
+    let (channel, actor, author, at_ms) = (channel_id.to_string(), opened.author.to_hex(), author.to_hex(), opened.at_ms);
+    crate::db::spawn_bound(async move {
+        if let Ok(Some(cid)) = crate::db::community::community_id_for_channel(&channel) {
+            super::service::note_moderation_delete(&cid, &id, at_ms, &actor, &author, &channel);
+        }
+    });
+}
+
 /// What applying a v2 chat event to STATE yielded — the caller persists it (async)
 /// once the STATE lock is dropped. A message row is saved fresh or re-saved (a landed
 /// reaction rides the row), a delete drops it. Persistence is the caller's so the apply
@@ -289,6 +300,9 @@ fn apply_chat_to_state_in(
                 || moderation_delete_authorized(channel_id, &opened.author, &author, &opened.rumor.tags);
             if !authorized {
                 return None;
+            }
+            if author != opened.author {
+                note_moderation_delete(channel_id, opened, &author);
             }
             // A paged-out target isn't in STATE to remove; the caller's persist step
             // drops the stored row either way.
@@ -651,6 +665,9 @@ fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::commun
         }
         if super::voice::apply_directive(&channel_id, &target, directive, at_ms, now) {
             super::service::yield_voice_directive(&channel_id, &target, directive);
+        }
+        if let Some(id) = opened.rumor.id {
+            super::service::note_voice_directive(&cid, &id.to_hex(), at_ms, &actor, &target.to_hex(), &channel_id, directive, to.as_ref());
         }
         #[cfg(feature = "calls")]
         crate::calls::voice::on_directive(&channel_id, &target, directive, to);

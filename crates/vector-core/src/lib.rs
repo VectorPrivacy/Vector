@@ -3770,7 +3770,7 @@ impl VectorCore {
             return Ok(serde_json::json!({
                 "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
                 "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
-                "pin_messages": false, "control_write": false, "moderate_members": false,
+                "pin_messages": false, "control_write": false, "moderate_members": false, "view_audit_log": false,
             }));
         }
         // Actions that land as Control editions additionally need the plane's
@@ -3791,7 +3791,16 @@ impl VectorCore {
             "control_write": control_write,
             // A Timeout rides the Guestbook, so it needs no Control write key.
             "moderate_members": has(Permissions::MODERATE_MEMBERS),
+            "view_audit_log": has(Permissions::VIEW_AUDIT_LOG),
         }))
+    }
+
+    /// A v2 community's Audit Log, newest first: who changed what, and when. Any member can read
+    /// the chain it comes from; showing it is for the owner and View Audit Log holders.
+    pub async fn community_audit_log(&self, community_id: &str) -> Result<crate::community::v2::service::AuditLog> {
+        let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        crate::community::v2::service::audit_log(&transport, &v2).await.map_err(VectorError::Other)
     }
 
     /// Pin a message in a v2 community channel (CORD-04 §7). The proof is

@@ -988,6 +988,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_bans WHERE community_id = ?1"),
         Some("DELETE FROM community_writers WHERE community_id = ?1"),
         Some("DELETE FROM community_held_wraps WHERE community_id = ?1"),
+        Some("DELETE FROM community_audit_local WHERE community_id = ?1"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_postable:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract:' || ?1 || ':%'"),
@@ -4327,6 +4328,7 @@ mod tests {
         replace_invite_link_sets(&cid, &[InviteLinkSetRow { creator_hex: "cd".repeat(32), locators: vec!["l1".into()] }]).unwrap();
         set_guestbook(&cid, &[], 9).unwrap();
         set_community_pins(&cid, &ch, r#"{"pins":["x"]}"#, 1).unwrap();
+        record_audit_local(&cid, "e1", 5, r#"{"action":"message_delete"}"#).unwrap();
 
         // A DM with a link preview and a file, and an unconfirmed send's retained rumor.
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -4388,6 +4390,7 @@ mod tests {
                 (
                     held_epoch_keys(&cid, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap(),
                     held_epoch_keys(&cid, &private).unwrap(),
+                    get_audit_local(&cid).unwrap(),
                 ),
                 rt.block_on(crate::db::events::get_message_views(dm_chat_int, 10, 0)).unwrap()
                     .into_iter().map(|m| (m.content, m.preview_metadata, m.attachments)).collect::<Vec<_>>(),
@@ -4404,7 +4407,10 @@ mod tests {
         assert_eq!(before.0, vec![([0x33; 32], "ab".repeat(32))]);
         assert_eq!(before.2, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
         assert_eq!(before.3, Some(format!("{v2:?}")));
-        assert_eq!(before.4, (vec![(Epoch(0), v2.community_root)], vec![(Epoch(0), [0x62; 32])]));
+        assert_eq!(
+            before.4,
+            (vec![(Epoch(0), v2.community_root)], vec![(Epoch(0), [0x62; 32])], vec![("e1".to_string(), 5, r#"{"action":"message_delete"}"#.to_string())])
+        );
         // File captions are stored but not shown again yet; the view still carries the rest.
         assert_eq!(before.5, vec![(String::new(), dm.preview_metadata.clone(), dm.attachments.clone())]);
         assert_eq!(before.6.as_deref(), Some("still sending"));
@@ -4457,7 +4463,7 @@ mod tests {
         assert_eq!(flag().as_deref(), Some("1"));
         crate::state::ENCRYPTION_KEY.set(K2, &[]);
         at_rest::backfill_at_rest().unwrap();
-        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("5")));
+        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("6")));
         let stored = |id: &str| -> String {
             crate::db::get_db_connection_guard_static().unwrap()
                 .query_row("SELECT content FROM events WHERE id = ?1", [id.repeat(32)], |r| r.get(0)).unwrap()
@@ -4769,6 +4775,32 @@ pub fn hold_wrap(community_id: &str, channel_id: &str, wrap_id: &str, wrap: &str
         conn.execute("DELETE FROM events WHERE wrapper_event_id = ?1 AND instr(tags, '[\"unauthorized\"]') > 0", params![id]).map_err(|e| format!("trim held copy: {e}"))?;
     }
     Ok(!evicted.iter().any(|id| *id == wrap_id))
+}
+
+/// Note an Audit Log act no Control edition records (a moderator's delete, a voice directive),
+/// keyed by the event that carried it so a re-delivery notes nothing twice.
+pub fn record_audit_local(community_id: &str, id: &str, at_ms: u64, entry: &str) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let enc = enc_txt(entry)?;
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO community_audit_local (id, community_id, at_ms, entry) VALUES (?1, ?2, ?3, ?4)",
+        params![id, community_id, at_ms as i64, enc],
+    )
+    .map_err(|e| format!("record audit: {e}"))?;
+    Ok(())
+}
+
+/// Every act [`record_audit_local`] noted for `community_id`: `(id, at_ms, entry)`.
+pub fn get_audit_local(community_id: &str) -> Result<Vec<(String, u64, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT id, at_ms, entry FROM community_audit_local WHERE community_id = ?1 ORDER BY at_ms")
+        .map_err(|e| format!("read audit: {e}"))?;
+    let rows = stmt
+        .query_map(params![community_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, String>(2)?)))
+        .map_err(|e| format!("read audit: {e}"))?;
+    Ok(rows.flatten().map(|(id, at, entry)| (id, at, dec_txt(&entry))).collect())
 }
 
 /// The Channels of `community_id` holding wraps.

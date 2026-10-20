@@ -418,6 +418,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_community_banlist" => Ok(cm::get_community_banlist(&a.str("communityId")?)),
         "get_community_invite_summary" => cm::get_community_invite_summary(&a.str("communityId")?),
         "get_community_capabilities" => core(VectorCore.community_capabilities(&a.str("communityId")?)),
+        "get_community_audit_log" => core(VectorCore.community_audit_log(&a.str("communityId")?).await),
         "get_community_roles_view" => core(VectorCore.community_roles_view(&a.str("communityId")?)),
         "get_community_role_graph" => core(VectorCore.community_role_graph(&a.str("communityId")?)),
         "check_community_raid" => core(VectorCore.check_community_raid(&a.str("communityId")?)),
