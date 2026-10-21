@@ -1629,7 +1629,7 @@ VectorSvelte.setChatHeaderHandlers({
         myNpub: () => strPubkey,
         getChat: (id) => arrChats.find(c => c.id === id),
         getProfile: (npub) => getProfile(npub),
-        getName: (x) => getName(x),
+        getName: (x) => chatName(x),
         streamHidden: (x) => streamHidden(x),
         getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
         twemojify: (el) => twemojify(el),

@@ -82,6 +82,12 @@ export function sentence(entry, ctx) {
             return say(' timed out ', name(t), until ? ` until ${whenFull(until)}` : '');
         }
         case 'member_timeout_remove': return say(' lifted the timeout on ', name(t));
+        case 'member_nick_update': {
+            const nick = field(entry, 'nick')?.new;
+            const own = t?.npub && t.npub === entry.actor;
+            const whose = own ? [' their nickname'] : [' the nickname of ', name(t)];
+            return nick ? say(' set', ...whose, ' to ', { t: nick, b: true }) : say(' removed', ...whose);
+        }
         case 'channel_create': {
             const voice = field(entry, 'view')?.new === 'voice';
             const priv = field(entry, 'private')?.new;
@@ -164,6 +170,10 @@ export function details(entry, ctx) {
                 for (const r of c.added || []) out.push(`Added ${targetName(r, ctx)}`);
                 for (const r of c.removed || []) out.push(`Removed ${targetName(r, ctx)}`);
                 if (c.held) out.push(c.held.length ? `Holds ${c.held.map((r) => targetName(r, ctx)).join(', ')}` : 'Holds no roles');
+                break;
+            case 'nick':
+                if (c.old && c.new) out.push(`Nickname: ${c.old} → ${c.new}`);
+                else if (c.old) out.push(`Was ${c.old}`);
                 break;
             case 'banned':
                 if (c.held) out.push(c.held.length ? `Banned: ${c.held.map((m) => targetName(m, ctx)).join(', ')}` : 'Nobody is banned');

@@ -122,6 +122,8 @@
     "allow-set-channel-sync",
     "allow-get-community-timeouts",
     "allow-timeout-community-member",
+    "allow-get-community-nicknames",
+    "allow-set-community-nickname",
     "allow-get-channel-send-denied",
     "allow-get-community-mentions",
     "allow-create-community-channel",

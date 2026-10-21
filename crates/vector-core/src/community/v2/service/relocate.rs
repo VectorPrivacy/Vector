@@ -5,7 +5,7 @@
 
 use super::*;
 use nostr_sdk::prelude::RelayUrl;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 /// How long a member keeps listening on a relay its Community dropped: a member who hasn't
 /// folded the move yet still writes there.

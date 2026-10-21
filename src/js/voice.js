@@ -922,7 +922,7 @@ const MEDIA_POPOUT_HELPERS = {
     who: (msg, chatId) => {
         const npub = msg.mine ? strPubkey : (msg.npub || chatId);
         const p = getProfile(npub);
-        return { npub, name: getName(p || npub), avatar: getProfileAvatarSrc(p) || 'icons/user-placeholder.svg' };
+        return { npub, name: getName(p || npub, communityIdOfChat(arrChats.find(c => c.id === chatId))), avatar: getProfileAvatarSrc(p) || 'icons/user-placeholder.svg' };
     },
     openAt: async (chatId, msgId) => {
         await openChat(chatId);

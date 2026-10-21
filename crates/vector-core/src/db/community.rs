@@ -2715,33 +2715,35 @@ pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::gu
     Ok((events, cursor.max(0) as u64))
 }
 
-struct TimeoutCache;
-/// Per community: the Guestbook write generation and, once read, the Timeouts at it.
-type TimeoutMap = std::sync::RwLock<std::collections::HashMap<String, (u64, Option<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>>)>>;
+struct StandingCache;
+/// Per community: the Guestbook write generation and, once read, the Timeouts and Nicknames at it.
+type StandingMap = std::sync::RwLock<std::collections::HashMap<String, (u64, Option<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>>)>>;
 
-fn timeout_cache() -> std::sync::Arc<TimeoutMap> {
-    crate::db::current_session().scoped::<TimeoutCache, TimeoutMap>()
+fn standing_cache() -> std::sync::Arc<StandingMap> {
+    crate::db::current_session().scoped::<StandingCache, StandingMap>()
 }
 
-/// The Guestbook's Timeout entries, held so every send doesn't reparse the whole book.
-pub fn get_guestbook_timeouts(community_id: &str) -> Result<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>, String> {
-    let generation = match timeout_cache().read().unwrap_or_else(|e| e.into_inner()).get(community_id) {
+/// The Guestbook's Timeout and Nickname entries, held so every send and paint doesn't reparse
+/// the whole book.
+pub fn get_guestbook_standing(community_id: &str) -> Result<std::sync::Arc<Vec<crate::community::v2::guestbook::GuestbookEvent>>, String> {
+    let generation = match standing_cache().read().unwrap_or_else(|e| e.into_inner()).get(community_id) {
         Some((_, Some(held))) => return Ok(held.clone()),
         Some((generation, None)) => *generation,
         None => 0,
     };
     let (events, _) = get_guestbook(community_id)?;
-    let timeouts: std::sync::Arc<Vec<_>> = std::sync::Arc::new(
-        events.into_iter().filter(|e| matches!(e.entry, crate::community::v2::guestbook::GuestbookEntry::Timeout { .. })).collect(),
+    use crate::community::v2::guestbook::GuestbookEntry;
+    let standing: std::sync::Arc<Vec<_>> = std::sync::Arc::new(
+        events.into_iter().filter(|e| matches!(e.entry, GuestbookEntry::Timeout { .. } | GuestbookEntry::Nickname { .. })).collect(),
     );
     // A write that landed during the read moved the generation on: keep what it left.
-    let map = timeout_cache();
+    let map = standing_cache();
     let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
     let entry = cache.entry(community_id.to_string()).or_insert((0, None));
     if entry.0 == generation {
-        entry.1 = Some(timeouts.clone());
+        entry.1 = Some(standing.clone());
     }
-    Ok(timeouts)
+    Ok(standing)
 }
 
 /// Persist a community's Guestbook events + cursor (encrypted at rest, like the
@@ -2774,7 +2776,7 @@ pub fn set_guestbook(
         params![community_id, enc, cursor_secs as i64],
     )
     .map_err(|e| format!("save guestbook: {e}"))?;
-    let map = timeout_cache();
+    let map = standing_cache();
     let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
     let entry = cache.entry(community_id.to_string()).or_insert((0, None));
     *entry = (entry.0 + 1, None);

@@ -470,14 +470,15 @@ function getMentionCandidates(includeSelf = false) {
                 // Streamer Mode labels each hidden person uniquely, since the label is what
                 // a draft carries until send maps it back to the npub.
                 const hidden = streamHidden(npub);
+                const shown = chatName(npub);
                 return {
                     npub,
                     // Marked, because a moderator picking a subject from a list
                     // of names should not have to recognise their own.
                     name: hidden ? STREAM_DOTS + ' #' + VectorSvelte.streamCode(npub)
-                        : npub === strPubkey ? getName(npub) + ' (you)' : getName(npub),
-                    // The real name, for matching only: what is typed is already on screen.
-                    search: hidden ? searchName(p) : '',
+                        : npub === strPubkey ? shown + ' (you)' : shown,
+                    // The real name, for matching only: a hidden person's, or one a nickname covers.
+                    search: hidden || shown !== getName(npub) ? searchName(p) : '',
                     hidden,
                     avatarSrc: getProfileAvatarSrc(p || (hidden ? { id: npub } : null)),
                     lastActive: lastActive[npub] || 0
@@ -532,7 +533,7 @@ let recorder = null;
 /** The label a picked @mention carries: a hidden person's code, or the name on screen. */
 function mentionLabel(npub, codeLen) {
     if (streamHidden(npub)) return STREAM_DOTS + ' #' + VectorSvelte.streamCode(npub, codeLen);
-    const name = getName(npub);
+    const name = chatName(npub);
     return codeLen > 3 ? name + ' (~' + npub.slice(5, 9) + ')' : name;
 }
 

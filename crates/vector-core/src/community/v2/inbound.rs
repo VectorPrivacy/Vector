@@ -519,6 +519,8 @@ pub enum DispatchedV2 {
     /// raw rumor and the memberlist fold is what applies KICK authority, so the
     /// realtime layer ingests it and re-folds rather than trusting the wrap.
     Kick { target: PublicKey },
+    /// A Guestbook Nickname, unjudged like a Kick: the store keeps it and the fold judges it.
+    Nickname,
     /// A wrap on this community's Control Plane — its metadata/channel set may
     /// have changed. Recognized here (address match) but NOT folded: the fold
     /// needs the whole edition chain, so the realtime layer re-fetches + re-folds
@@ -787,6 +789,7 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
         GuestbookEntry::Kick { target, .. } => DispatchedV2::Kick { target: *target },
         // A Timeout shapes how a member's posts read, not who is a member.
         GuestbookEntry::Snapshot { .. } | GuestbookEntry::Timeout { .. } => DispatchedV2::Ignored,
+        GuestbookEntry::Nickname { .. } => DispatchedV2::Nickname,
     }
 }
 

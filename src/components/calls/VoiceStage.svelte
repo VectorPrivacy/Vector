@@ -66,7 +66,7 @@
         return { destroy() { h.selfPreview?.(kind, null); } };
     }
     // A name follows its profile as it loads.
-    const nameOf = (npub) => (profileVersion(npub), h.getName?.(npub));
+    const nameOf = (npub) => (profileVersion(npub), h.getName?.(npub, stage?.communityId));
     function pathOf(npub) {
         const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
         return p?.rtt_ms ? `${p.rtt_ms} ms, ${p.direct ? 'direct' : 'through a relay'}` : null;

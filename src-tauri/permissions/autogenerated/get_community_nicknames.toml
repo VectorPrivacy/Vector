@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-community-nicknames"
+description = "Enables the get_community_nicknames command without any pre-configured scope."
+commands.allow = ["get_community_nicknames"]
+
+[[permission]]
+identifier = "deny-get-community-nicknames"
+description = "Denies the get_community_nicknames command without any pre-configured scope."
+commands.deny = ["get_community_nicknames"]

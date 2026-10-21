@@ -91,10 +91,36 @@ async function surfaceCommunitySummary(summary) {
  */
 async function loadCommunityRoles(communityId) {
     if (!communityId) return;
+    loadCommunityNicknames(communityId);
     let adminNpubs;
     try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
     await loadCommunityMentions(communityId);
     applyCommunityAdmins(communityId, adminNpubs);
+}
+
+/** Read what members are called in a community; names already painted follow. */
+async function loadCommunityNicknames(communityId) {
+    let named;
+    try { named = await invoke('get_community_nicknames', { communityId }); } catch (_) { return; }
+    if (VectorSvelte.setCommunityNicknames(communityId, named)) paintRenderedNames(null);
+}
+
+/** Ask for `npub`'s nickname in a community (yours, or a member's beneath you) and set it. */
+async function promptCommunityNickname(communityId, npub) {
+    const mine = npub === strPubkey;
+    const p = getProfile(npub);
+    const own = p?.name || p?.display_name || '';
+    const title = mine ? 'Change Nickname' : `Change ${getName(p || npub)}'s Nickname`;
+    const ask = popupConfirm(title, 'Everyone in this community sees it. Leave it empty to go by ' + (mine ? 'your' : 'their') + ' own name.', false, own || 'Nickname', '', '', 'Save');
+    VectorSvelte.popupState().value = VectorSvelte.communityNickname(communityId, npub);
+    const nickname = await ask;
+    if (nickname === false) return;
+    try {
+        await invoke('set_community_nickname', { communityId, npub, nickname: nickname.trim() });
+        await loadCommunityNicknames(communityId);
+    } catch (e) {
+        showToast(String(e));
+    }
 }
 
 /**
@@ -817,12 +843,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 channel: rosterChannel,
                 loading: !hadCache,
                 h: {
-                    invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
-                    attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
+                    showContextMenu, attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     getName, streamHidden, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
-                    dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
-                    memberSectionClosed, setMemberSectionClosed,
-                    memberRolesView, memberRolesOffered, memberRoleItems, copyIdItems,
+                    memberSectionClosed, setMemberSectionClosed, copyIdItems, memberMenuItems,
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);
@@ -1193,7 +1216,7 @@ async function openCommunityInvitePanel(chat) {
         close: () => { if (!busy) dismiss(); },
         cta,
         searchInput,
-        links: { myNpub: strPubkey, name: systemEventName, create: createLink, revoke: revokeLink },
+        links: { myNpub: strPubkey, name: (npub) => getName(npub, communityId), create: createLink, revoke: revokeLink },
         contactProps,
     });
     // Every local read is in: open in one paint.

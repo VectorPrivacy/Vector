@@ -72,6 +72,14 @@ async function setupRustListeners() {
     // panel so an already-open list reflects them without a reopen.
     _on('relay_list_updated', () => renderRelayList());
 
+    // A Nickname landed live: one read per burst, whatever a raid sends.
+    const nicknameReads = new Map();
+    _on('community_nicknames', (evt) => {
+        const cid = evt.payload?.community_id;
+        if (!cid || nicknameReads.has(cid)) return;
+        nicknameReads.set(cid, setTimeout(() => { nicknameReads.delete(cid); loadCommunityNicknames(cid); }, 300));
+    });
+
     // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
     // control-plane subscription). Re-read this community's summary into the chat list + re-render the
     // overview if it's open, so online members see name/role/mode changes live, not just on next open.
@@ -524,7 +532,7 @@ async function setupRustListeners() {
             // Rows and reply quotes derive from the profile signal; mention chips are
             // built by the text pipeline and patched here.
             document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(el => {
-                el.textContent = '@' + newName;
+                el.textContent = '@' + (el.dataset.community ? getName(evt.payload, el.dataset.community) : newName);
             });
         }
         

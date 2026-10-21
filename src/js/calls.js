@@ -243,7 +243,7 @@ function registerVoiceScreen() {
         setMuted: (on) => invoke('voice_set_muted', { on }).catch((e) => VectorSvelte.showToast(String(e))),
         setDeafened: (on) => invoke('voice_set_deafened', { on }).catch((e) => VectorSvelte.showToast(String(e))),
         micAccess: () => promptMicAccess(),
-        getName: (npub) => getName(npub),
+        getName: (npub, communityId) => getName(npub, communityId),
         avatarSrc: (npub) => getProfileAvatarSrc(getProfile(npub)),
         myNpub: () => strPubkey,
         memberMenu: (communityId, channelId, npub, x, y) => openVoiceMemberMenu(communityId, channelId, npub, x, y),

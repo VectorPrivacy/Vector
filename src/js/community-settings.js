@@ -16,7 +16,12 @@ VectorSvelte.setScreen('communitySettings', {
         copyIdItems: (what, id) => copyIdItems(what, id),
         showContextMenu: (menu) => showContextMenu(menu),
         // Empty when they have no name of their own, so the row shows the key once.
-        name: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
+        name: (npub) => {
+            const p = getProfile(npub), cid = VectorSvelte.csState().communityId;
+            return streamHidden(npub) || searchName(p) || VectorSvelte.communityNickname(cid, npub) ? getName(p || npub, cid) : '';
+        },
+        // The Audit Log names people as they are, not as they're nicknamed now: a rename would rewrite its history.
+        realName: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
         // Streamer Mode: neither the name nor the key, while a search still finds them by name.
         veiled: (npub) => streamHidden(npub),
         searchName: (npub) => searchName(npub),

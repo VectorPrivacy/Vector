@@ -7,7 +7,7 @@ export const BIT = {
     VIEW_CHANNEL: 1n << 13n, SEND_MESSAGES: 1n << 14n, SEND_IN_THREADS: 1n << 15n, ATTACH_FILES: 1n << 16n,
     ADD_REACTIONS: 1n << 17n, READ_MESSAGE_HISTORY: 1n << 18n, CONNECT: 1n << 19n, SPEAK: 1n << 20n,
     VIDEO: 1n << 21n, PRIORITY_SPEAKER: 1n << 22n, MUTE_MEMBERS: 1n << 23n, DEAFEN_MEMBERS: 1n << 24n,
-    MOVE_MEMBERS: 1n << 25n, MODERATE_MEMBERS: 1n << 26n,
+    MOVE_MEMBERS: 1n << 25n, MODERATE_MEMBERS: 1n << 26n, MANAGE_NICKNAMES: 1n << 28n, CHANGE_NICKNAME: 1n << 29n,
 };
 // Channel and voice bits exist on Roles v2 only; a legacy roster has no use for them.
 export const V2_GROUPS = [
@@ -54,12 +54,14 @@ export const GROUPS = [
             { bit: BIT.MANAGE_MESSAGES, name: 'Manage Messages', desc: 'Hide messages from members beneath them.' },
             { bit: BIT.PIN_MESSAGES, name: 'Pin Messages', desc: 'Pin messages to a channel for everyone to see.' },
             { bit: BIT.MODERATE_MEMBERS, name: 'Timeout Members', desc: 'Silence members beneath them for a while.', v2: true },
+            { bit: BIT.MANAGE_NICKNAMES, name: 'Manage Nicknames', desc: 'Change the nicknames of members beneath them.' },
         ],
     },
     {
         title: 'Chat',
         perms: [
             { bit: BIT.MENTION_EVERYONE, name: 'Mention @everyone', desc: 'Notify everyone at once, and mention any role.' },
+            { bit: BIT.CHANGE_NICKNAME, name: 'Change Nickname', desc: 'Choose what they go by in this community.', v2: true },
         ],
     },
 ];

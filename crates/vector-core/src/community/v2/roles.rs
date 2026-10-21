@@ -221,7 +221,7 @@ pub struct EveryoneContent {
 /// The most Channels an activating `@everyone` lists.
 pub const MAX_LEGACY_CHANNELS: usize = 256;
 
-/// What `@everyone` starts with (CORD-04 §3): the chat and voice basics.
+/// What `@everyone` starts with (CORD-04 §3): the chat and voice basics, and their own Nickname.
 pub const EVERYONE_DEFAULT: u64 = Permissions::VIEW_CHANNEL
     | Permissions::SEND_MESSAGES
     | Permissions::SEND_IN_THREADS
@@ -230,7 +230,8 @@ pub const EVERYONE_DEFAULT: u64 = Permissions::VIEW_CHANNEL
     | Permissions::READ_MESSAGE_HISTORY
     | Permissions::CONNECT
     | Permissions::SPEAK
-    | Permissions::VIDEO;
+    | Permissions::VIDEO
+    | Permissions::CHANGE_NICKNAME;
 
 /// Parse a vsk-13 Role edition. A live Role needs a well-formed rank key; the position is
 /// assigned at fold time from the keys in play (`rank::dense_ranks`).
@@ -707,7 +708,7 @@ mod spec_vectors {
         assert_eq!(role_v2_content_json(&role).unwrap(), r#"{"role_id":"0505050505050505050505050505050505050505050505050505050505050505","name":"Moderators","rank":"M","permissions":"67108904","color":15158332,"display":true,"mentionable":true}"#);
         assert_eq!(role_v2_deleted_json(&hx(5)), r#"{"deleted":true,"role_id":"0505050505050505050505050505050505050505050505050505050505050505"}"#);
         let legacy: std::collections::BTreeSet<String> = [hx(2)].into_iter().collect();
-        assert_eq!(everyone_content_json_with(EVERYONE_DEFAULT, Some(&legacy)), r#"{"permissions":"4186112","legacy":["0202020202020202020202020202020202020202020202020202020202020202"]}"#);
+        assert_eq!(everyone_content_json_with(EVERYONE_DEFAULT, Some(&legacy)), r#"{"permissions":"541057024","legacy":["0202020202020202020202020202020202020202020202020202020202020202"]}"#);
         assert_eq!(grant_content_json(&MemberGrant { member: pk(3), role_ids: vec![hx(5)] }).unwrap(), r#"{"member":"531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337","role_ids":["0505050505050505050505050505050505050505050505050505050505050505"]}"#);
         assert_eq!(banlist_content_json(&[pk(3)]).unwrap(), r#"["531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"]"#);
         for (i, (t, a, d)) in [(OverwriteTarget::Everyone, 0, P::SEND_MESSAGES), (OverwriteTarget::Role(hx(5)), P::SEND_MESSAGES, 0), (OverwriteTarget::Member(pk(3)), 0, P::ADD_REACTIONS)].into_iter().enumerate() {

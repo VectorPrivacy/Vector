@@ -50,7 +50,7 @@ function modShortNpub(npub) {
 function modDisplayName(npub) {
     if (streamHidden(npub)) return STREAM_DOTS;
     const p = arrProfiles.find(p => p.id === npub);
-    const name = p ? (p.nickname || p.name || p.display_name || '') : '';
+    const name = p?.nickname || VectorSvelte.communityNickname(modCommunityId(), npub) || p?.name || p?.display_name || '';
     return name || modShortNpub(npub);
 }
 

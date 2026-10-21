@@ -101,6 +101,16 @@ pub struct CommunityIdRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CommunityNicknameRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "The member to name: yourself, or a member beneath you")]
+    pub npub: String,
+    #[schemars(description = "The nickname, at most 32 characters; empty clears it")]
+    pub nickname: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RevokePublicInviteRequest {
     #[schemars(description = "Community id (hex)")]
     pub community_id: String,
@@ -747,6 +757,22 @@ impl VectorAgent {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&members).unwrap_or_else(|_| "[]".into())
         )]))
+    }
+
+    #[tool(description = "What members are called in a Community: npub → nickname, for those with one there.")]
+    async fn get_community_nicknames(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.community_nicknames(&req.community_id) {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Set a nickname in a Community: your own (Change Nickname), or a member's beneath you (Manage Nicknames). An empty nickname clears it.")]
+    async fn set_community_nickname(&self, Parameters(req): Parameters<CommunityNicknameRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.set_community_nickname(&req.community_id, &req.npub, &req.nickname).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Nickname set.")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
     }
 
     #[tool(description = "Leave a Community: announces a 'left' presence, then drops the held keys and local channels. A fresh invite is needed to rejoin.")]

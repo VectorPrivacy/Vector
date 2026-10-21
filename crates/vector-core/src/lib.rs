@@ -3771,6 +3771,7 @@ impl VectorCore {
                 "manage_metadata": false, "manage_channels": false, "create_invite": false, "kick": false,
                 "ban": false, "manage_messages": false, "manage_roles": false, "manage_admin_role": false,
                 "pin_messages": false, "control_write": false, "moderate_members": false, "view_audit_log": false,
+                "manage_nicknames": false, "change_nickname": false,
             }));
         }
         // Actions that land as Control editions additionally need the plane's
@@ -3792,6 +3793,9 @@ impl VectorCore {
             // A Timeout rides the Guestbook, so it needs no Control write key.
             "moderate_members": has(Permissions::MODERATE_MEMBERS),
             "view_audit_log": has(Permissions::VIEW_AUDIT_LOG),
+            // Nicknames ride the Guestbook too.
+            "manage_nicknames": has(Permissions::MANAGE_NICKNAMES),
+            "change_nickname": roster.may_name(&me, Some(&owner_hex), &me),
         }))
     }
 
@@ -4380,6 +4384,31 @@ impl VectorCore {
         let v2 = Self::held_v2(community_id)?;
         let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
         crate::community::v2::service::timeout_member(&Self::short_transport(), &v2, &member, seconds).await.map_err(VectorError::Other)
+    }
+
+    /// What members are called in a community, for those with a Nickname there: npub → nickname.
+    pub fn community_nicknames(&self, community_id: &str) -> Result<serde_json::Value> {
+        let v2 = Self::held_v2(community_id)?;
+        let named = crate::community::v2::service::community_nicknames(&v2).map_err(VectorError::Other)?;
+        Ok(named
+            .into_iter()
+            .filter_map(|(pk, nick)| Some((pk.to_bech32().ok()?, serde_json::Value::String(nick))))
+            .collect::<serde_json::Map<_, _>>()
+            .into())
+    }
+
+    /// A member's Nickname in a community, when they have one there.
+    pub fn member_nickname(&self, community_id: &str, npub: &str) -> Option<String> {
+        let v2 = Self::held_v2(community_id).ok()?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).ok()?;
+        crate::community::v2::service::community_nicknames(&v2).ok()?.remove(&member)
+    }
+
+    /// Set a member's Nickname in a community (`""` clears it): your own, or one beneath you.
+    pub async fn set_community_nickname(&self, community_id: &str, npub: &str, nickname: &str) -> Result<()> {
+        let v2 = Self::held_v2(community_id)?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        crate::community::v2::service::set_nickname(&Self::short_transport(), &v2, &member, nickname).await.map_err(VectorError::Other)
     }
 
     /// Delete a Role (Roles v2 only): terminal, it leaves every holder.

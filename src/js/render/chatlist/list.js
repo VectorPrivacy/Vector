@@ -90,7 +90,7 @@ function chatlistSnapshot() {
  * @property {(chat: object) => boolean} chatIsGroup
  * @property {(chat: object) => boolean} chatIsArchived
  * @property {(npub: string) => object|null} getProfile
- * @property {(profileOrNpub: object|string) => string} getName
+ * @property {(profileOrNpub: object|string, communityId?: string) => string} getName
  * @property {(chat: object) => number} computeListRowBadgeCount
  * @property {(chat: object) => number} computeListRowUnreadCount
  * @property {(chat: object) => boolean} listRowPingsMe   a group row holds an unread @mention of me or an @everyone

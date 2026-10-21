@@ -205,7 +205,7 @@
                  onclick={(e) => { e.stopPropagation(); h.showMiniProfile(p.npub, e.currentTarget, communityId); }}
                  oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); voiceCallHandlers().memberMenu?.(communityId, channel.id, p.npub, e.clientX, e.clientY); }}>
                 <Avatar src={h.getProfileAvatarSrc(h.getProfile(p.npub))} size={18} />
-                <span class="cutoff">{h.getName(p.npub)}</span>
+                <span class="cutoff">{h.getName(p.npub, communityId)}</span>
                 <span class="chatlist-voice-flags">
                     {#if p.screen}<span class="chatlist-voice-live" title="Sharing their screen">LIVE</span>{/if}
                     {#if p.camera}<span class="icon icon-video" title="Camera on"></span>{/if}

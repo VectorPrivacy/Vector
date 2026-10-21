@@ -3345,6 +3345,21 @@ pub async fn timeout_community_member(community_id: String, npub: String, second
     .await
 }
 
+/// What members are called in a community: npub → nickname, for those with one.
+#[tauri::command]
+pub async fn get_community_nicknames(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move { vector_core::VectorCore.community_nicknames(&community_id).map_err(|e| e.to_string()) }).await
+}
+
+/// Set a member's nickname in a community; "" clears it.
+#[tauri::command]
+pub async fn set_community_nickname(community_id: String, npub: String, nickname: String) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_community_nickname(&community_id, &npub, &nickname).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Everything the role editor needs, read locally.
 #[tauri::command]
 pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {

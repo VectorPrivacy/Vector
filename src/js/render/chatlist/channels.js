@@ -201,6 +201,8 @@ async function refreshTimeoutLock(chat) {
     try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
     const hadDenied = (channelSendDeniedCache.get(chat.id) || []).join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
+    // A Timeout starting or ending takes down or restores its member's own nickname.
+    if (had !== JSON.stringify(running || {})) loadCommunityNicknames(communityId);
     const changed = had !== JSON.stringify(running || {}) || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
     if (changed && strOpenChat === chat.id) openChat(strOpenChat);
     const mine = running?.[strPubkey];
@@ -334,7 +336,7 @@ function loadChannelPerms(communityId, channelId) {
             if (st.communityId !== communityId || st.channelId !== channelId) return;
             const names = {};
             for (const o of [...(perms.overwrites || []).filter(o => o.kind === 'member'), ...(perms.members || [])]) {
-                names[o.id] = getName(getProfile(o.npub) || o.npub);
+                names[o.id] = getName(getProfile(o.npub) || o.npub, communityId);
             }
             VectorSvelte.setChannelPerms({ ...perms, member_names: names });
         })
@@ -447,7 +449,10 @@ VectorSvelte.setScreen('channelEditor', {
                 VectorSvelte.setChannelEditorBusy(false, String(e));
             }
         },
-        name: (npub) => { const p = getProfile(npub); return streamHidden(npub) || searchName(p) ? getName(p || npub) : ''; },
+        name: (npub) => {
+            const p = getProfile(npub), cid = VectorSvelte.channelEditorState().communityId;
+            return streamHidden(npub) || searchName(p) || VectorSvelte.communityNickname(cid, npub) ? getName(p || npub, cid) : '';
+        },
         veiled: (npub) => streamHidden(npub),
         searchName: (npub) => searchName(npub),
         avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
@@ -682,6 +687,9 @@ async function openCommunityMenu(chat, ev, at) {
             { label: 'Create Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(cf.community_id) },
             { label: 'Create Category', icon: 'plus', onClick: () => promptCreateCategory(cf.community_id) },
         );
+    }
+    if (caps?.change_nickname) {
+        items.push({ label: 'Change Nickname', icon: 'edit', onClick: () => promptCommunityNickname(cf.community_id, strPubkey) });
     }
     if (communitySettingsWritable(caps)) {
         items.push({

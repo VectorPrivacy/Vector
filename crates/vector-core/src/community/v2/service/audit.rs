@@ -537,6 +537,8 @@ fn guestbook_entries(community: &CommunityV2, cid_hex: &str) -> Vec<AuditEntry> 
         let (a, t) = (actor.to_hex(), target.to_hex());
         t != owner && !banned.contains(&a) && roster.can_act_on_member(&a, Some(&owner), &t, bit) && citation_is_synced(cid_hex, &owner, &a, vac)
     };
+    let name_judge = super::nickname_judge(community).ok();
+    let horizon = now_ms().saturating_add(guestbook::MAX_FUTURE_MS);
     let minters = epoch_minters(cid_hex);
     let severed = sever_marks(cid_hex);
     let mut rotated: BTreeMap<u64, (u64, PublicKey)> = BTreeMap::new();
@@ -559,6 +561,24 @@ fn guestbook_entries(community: &CommunityV2, cid_hex: &str) -> Vec<AuditEntry> 
             }
             _ => {}
         }
+    }
+    // A Nickname that changes nothing (one a Refounding carried across) records no act: the
+    // older plane's original goes first, so it names who made the change.
+    let mut named: Vec<&guestbook::GuestbookEvent> = events
+        .iter()
+        .filter(|ev| matches!(&ev.entry, guestbook::GuestbookEntry::Nickname { actor, target, citation, at_ms, .. } if *at_ms <= horizon && name_judge.as_ref().is_some_and(|j| j(actor, target, citation.as_ref()))))
+        .collect();
+    named.sort_by_key(|ev| (ev.entry.at_ms(), ev.epoch.unwrap_or(0), ev.rumor_id));
+    let mut held: HashMap<PublicKey, &str> = HashMap::new();
+    for ev in named {
+        let guestbook::GuestbookEntry::Nickname { actor, target, nick, at_ms, .. } = &ev.entry else { continue };
+        let old = held.get(target).copied().unwrap_or("");
+        if old == nick {
+            continue;
+        }
+        held.insert(*target, nick);
+        let changes = vec![json!({ "field": "nick", "old": (!old.is_empty()).then_some(old), "new": nick })];
+        out.push(AuditEntry { id: hex(&ev.rumor_id), at: *at_ms, actor: Some(npub(actor)), action: "member_nick_update", target: Some(member(&target.to_hex())), changes, partial: false });
     }
     // A Refounding whose seed snapshot never landed still shows, dated when this device adopted it.
     for (epoch, rotator) in &minters {

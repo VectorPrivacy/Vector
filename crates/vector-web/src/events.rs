@@ -39,12 +39,16 @@ async fn refresh_unread(chat_id: &str, marked: bool) {
 /// Ask the page for a system notification; it shows one only while unfocused.
 async fn notify(chat_id: &str, author: Option<&str>, content: &str, community_label: Option<String>) {
     let gate = vector_core::notify::StreamGate::load();
+    let nickname = community_label.as_ref().and_then(|_| {
+        let cid = db::community::community_id_for_channel(chat_id).ok().flatten()?;
+        vector_core::VectorCore.member_nickname(&cid, author?)
+    });
     let (rings, sender, content) = {
         let state = STATE.lock().await;
         let rings = state
             .get_chat(chat_id)
             .is_none_or(|c| vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All);
-        let sender = vector_core::notify::sender(&state, &gate, author.unwrap_or_default(), "New Message");
+        let sender = vector_core::notify::sender_in(&state, &gate, author.unwrap_or_default(), "New Message", nickname);
         (rings, sender, vector_core::notify::resolve_mentions(&vector_core::notify::strip_ansi(content), &state, &gate))
     };
     if !rings {

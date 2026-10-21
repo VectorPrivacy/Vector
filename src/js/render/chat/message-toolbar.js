@@ -494,7 +494,7 @@ function _dmsgSelectReply(targetMsgId, { focus = true } = {}) {
     if (cMsg?.mine) cProfile = getProfile(strPubkey);
     else if (cMsg?.npub) cProfile = getProfile(cMsg.npub);
     else cProfile = getProfile(strOpenChat);
-    const name = cProfile ? getName(cProfile) : 'Unknown';
+    const name = cProfile ? chatName(cProfile) : 'Unknown';
     let snippet = null;
     if (cMsg?.content) snippet = { html: buildReplyPreviewHtml(cMsg.content), emojiTags: cMsg.emoji_tags || [] };
     else if (cMsg?.attachments?.length) {
@@ -613,6 +613,16 @@ function _dmsgResetSwipe(animate, rowEl, spring) {
     _dmsgSwipeHideTimer = setTimeout(() => VectorSvelte.setToolbarSwipe({ visible: false }), animate ? 220 : 0);
 }
 
+/** A name or avatar pressed in chat: in a community, the member's menu; elsewhere, their profile. */
+async function _dmsgOpenAuthorMenu(profileBtn, x, y) {
+    const npub = profileBtn.dataset.npub;
+    const communityId = communityIdOfChat(getChat(strOpenChat));
+    if (!communityId) return showMiniProfile(npub, profileBtn);
+    const items = await memberMenuItems(communityId, npub);
+    items.unshift({ label: 'View Profile', icon: 'user-circle', onClick: () => showMiniProfile(npub, profileBtn, communityId) }, ...(items.length ? [{ divider: true }] : []));
+    showContextMenu({ x, y, items });
+}
+
 function _dmsgInitGestures() {
     // Desktop: right-click a row opens the same menu (mobile uses press-and-hold
     // below). Reaction chips keep their own right-click handler.
@@ -628,7 +638,7 @@ function _dmsgInitGestures() {
         _dmsgRightClickHadSelection = !!(sel && !sel.isCollapsed && sel.toString().trim());
         if (_dmsgRightClickHadSelection) return;
         const row = e.target.closest('.dmsg');
-        if (!row || !domChatMessages.contains(row) || e.target.closest('.reaction, .dmsg-avatar, .dmsg-author')) return;
+        if (!row || !domChatMessages.contains(row) || e.target.closest('.reaction')) return;
         e.preventDefault();
     });
     domChatMessages.addEventListener('contextmenu', (e) => {
@@ -637,13 +647,13 @@ function _dmsgInitGestures() {
         if (!row || !domChatMessages.contains(row)) return;
         if (row.style.opacity === '0') return;
         if (e.target.closest('.reaction')) return;
-        // Avatar / username act like a left-click (open the mini-profile), not
-        // the message menu. The command line's bot avatar/name join here too.
+        // Avatar / username open the person's own menu, not the message's. The command
+        // line's bot avatar/name join here too.
         const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot');
         if (profileBtn) {
             if (profileBtn.dataset.npub) {
                 e.preventDefault();
-                showMiniProfile(profileBtn.dataset.npub, profileBtn);
+                _dmsgOpenAuthorMenu(profileBtn, e.clientX, e.clientY);
             }
             return;
         }
@@ -663,8 +673,7 @@ function _dmsgInitGestures() {
         // Reaction chips own their own long-press (details popup) — yield the
         // whole gesture so we don't stack the message menu on top of it.
         if (e.target.closest('.reaction')) return;
-        // Avatar / username act like a tap (open the mini-profile), never the
-        // message menu — captured here so a hold still resolves to the profile.
+        // Avatar / username: a hold opens the person's own menu, never the message's.
         const profileBtn = e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot');
         _gTouchRow = row;
         const t = e.touches[0];
@@ -678,7 +687,7 @@ function _dmsgInitGestures() {
             // for this gesture so they don't immediately dismiss the menu.
             try { e.preventDefault(); } catch (_e) {}
             if (profileBtn && profileBtn.dataset.npub) {
-                showMiniProfile(profileBtn.dataset.npub, profileBtn);
+                _dmsgOpenAuthorMenu(profileBtn, _gStartX, _gStartY);
             } else {
                 _dmsgOpenMessageMenu(row, _gStartX, _gStartY);
             }

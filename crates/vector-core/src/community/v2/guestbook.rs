@@ -1,18 +1,19 @@
 //! CORD-02 §5 Guestbook Plane — membership motion, coalesced flat.
 //!
 //! One Stream per Community (community_root-keyed,
-//! [`super::derive::guestbook_group_key`]), carrying ONLY membership motion:
+//! [`super::derive::guestbook_group_key`]), carrying membership motion:
 //! self-signed Joins/Leaves (3306), authorized Kicks (3309), and
-//! refounder-signed post-Refounding Snapshots (3312) — never messages, never
-//! authority (a Ban lives on the Control Plane). The plane is *off-consensus*:
+//! refounder-signed post-Refounding Snapshots (3312), beside the Timeouts (3314)
+//! and Nicknames (3315) that shape how a member reads without changing who is
+//! one — never messages, never authority (a Ban lives on the Control Plane). The plane is *off-consensus*:
 //! nothing in Control or Chat depends on it, so it loads last and can lag
 //! without harm.
 //!
 //! Everything here is PURE — no DB, no network, no clock reads. The +1h
-//! forward-clock rule takes `now_ms` as a parameter, and the two authority
+//! forward-clock rule takes `now_ms` as a parameter, and the authority
 //! questions arrive from the caller's Control Plane fold: `can_kick` (the
-//! KICK bit + strict outrank) and `snapshot_authority` (the npub whose
-//! Refounding minted the epoch being folded).
+//! KICK bit + strict outrank), `snapshot_authority` (the npub whose
+//! Refounding minted the epoch being folded), and who may time out or name whom.
 //!
 //! Guestbook seals are ENCRYPTED (20013) by spec: a plaintext seal would make
 //! a member's signed membership record liftable as a standalone public
@@ -44,6 +45,9 @@ const TAG_UNTIL: &str = "until";
 /// The longest a Timeout runs past its own `created_at` (CORD-04 §8).
 pub const MAX_TIMEOUT_SECS: u64 = 28 * 24 * 3600;
 
+/// The most characters (Unicode scalar values) a Nickname holds (CORD-04 §10).
+pub const MAX_NICKNAME_CHARS: usize = 32;
+
 const VERB_JOIN: &str = "join";
 const VERB_LEAVE: &str = "leave";
 
@@ -51,7 +55,7 @@ const VERB_LEAVE: &str = "leave";
 #[derive(Debug)]
 pub enum GuestbookError {
     Stream(StreamError),
-    /// The rumor kind isn't a guestbook kind (3306 / 3309 / 3312).
+    /// The rumor kind isn't a guestbook kind (3306 / 3309 / 3312 / 3314 / 3315).
     NotGuestbook(u16),
     /// A guestbook rumor arrived in a plaintext seal — CORD-02 §5 requires the
     /// encrypted form (a plaintext seal is a liftable, publicly verifiable
@@ -68,6 +72,8 @@ pub enum GuestbookError {
     BadTag(&'static str),
     /// Snapshot content isn't a JSON array.
     BadSnapshotContent,
+    /// A Nickname carries a control character.
+    BadNickname,
 }
 
 impl std::fmt::Display for GuestbookError {
@@ -81,6 +87,7 @@ impl std::fmt::Display for GuestbookError {
             GuestbookError::DuplicateTag(t) => write!(f, "duplicate guestbook tag: {t}"),
             GuestbookError::BadTag(t) => write!(f, "unparseable guestbook tag: {t}"),
             GuestbookError::BadSnapshotContent => write!(f, "snapshot content is not a JSON array"),
+            GuestbookError::BadNickname => write!(f, "a nickname may not carry control characters"),
         }
     }
 }
@@ -130,12 +137,6 @@ pub fn build_kick_rumor(
     stream::build_rumor_ms(kind::KICK, admin, "", tags, at_ms)
 }
 
-/// Refounder-signed snapshot rumors seeding a new epoch's Guestbook: present
-/// members only, chunked at [`SNAPSHOT_CHUNK`], every chunk carrying
-/// `["snap", <id>, <i>, <n>]` (1-based) and ONE shared timestamp — the
-/// one-id-one-time invariant is what lets readers reject torn chunk sets.
-/// No survivors still yields one empty chunk, so the Refounding's guestbook
-/// step is observable either way.
 /// A Timeout of `target` until `until_secs` (unix seconds); one already past lifts it.
 pub fn build_timeout_rumor(actor: PublicKey, target: PublicKey, until_secs: u64, citation: Option<&AuthorityCitation>, at_ms: u64) -> UnsignedEvent {
     let mut tags = vec![Tag::public_key(target), Tag::custom(TAG_UNTIL, [until_secs.to_string()])];
@@ -145,6 +146,21 @@ pub fn build_timeout_rumor(actor: PublicKey, target: PublicKey, until_secs: u64,
     stream::build_rumor_ms(kind::TIMEOUT, actor, "", tags, at_ms)
 }
 
+/// `actor` names `target` in this Community; `""` clears it. Their own needs no citation.
+pub fn build_nickname_rumor(actor: PublicKey, target: PublicKey, nick: &str, citation: Option<&AuthorityCitation>, at_ms: u64) -> UnsignedEvent {
+    let mut tags = vec![Tag::public_key(target)];
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
+    stream::build_rumor_ms(kind::NICKNAME, actor, nick, tags, at_ms)
+}
+
+/// Refounder-signed snapshot rumors seeding a new epoch's Guestbook: present
+/// members only, chunked at [`SNAPSHOT_CHUNK`], every chunk carrying
+/// `["snap", <id>, <i>, <n>]` (1-based) and ONE shared timestamp — the
+/// one-id-one-time invariant is what lets readers reject torn chunk sets.
+/// No survivors still yields one empty chunk, so the Refounding's guestbook
+/// step is observable either way.
 pub fn build_snapshot_rumors(
     refounder: PublicKey,
     members: &[PublicKey],
@@ -266,6 +282,14 @@ pub enum GuestbookEntry {
         citation: Option<AuthorityCitation>,
         at_ms: u64,
     },
+    /// A Nickname (CORD-04 §10): what `target` is called here, `""` when cleared.
+    Nickname {
+        actor: PublicKey,
+        target: PublicKey,
+        nick: String,
+        citation: Option<AuthorityCitation>,
+        at_ms: u64,
+    },
 }
 
 impl GuestbookEntry {
@@ -276,7 +300,8 @@ impl GuestbookEntry {
             | GuestbookEntry::Leave { at_ms, .. }
             | GuestbookEntry::Kick { at_ms, .. }
             | GuestbookEntry::Snapshot { at_ms, .. }
-            | GuestbookEntry::Timeout { at_ms, .. } => *at_ms,
+            | GuestbookEntry::Timeout { at_ms, .. }
+            | GuestbookEntry::Nickname { at_ms, .. } => *at_ms,
         }
     }
 }
@@ -348,6 +373,28 @@ pub fn parse_guestbook_event(opened: &OpenedStream) -> Result<GuestbookEvent, Gu
                 actor: opened.author,
                 target: target.ok_or(GuestbookError::MissingTag(TAG_TARGET))?,
                 until_secs: until.ok_or(GuestbookError::MissingTag(TAG_UNTIL))?,
+                citation: AuthorityCitation::from_tags(&rumor.tags),
+                at_ms,
+            }
+        }
+        kind::NICKNAME => {
+            let mut target: Option<PublicKey> = None;
+            for t in rumor.tags.iter() {
+                let s = t.as_slice();
+                if s.len() >= 2 && s[0] == TAG_TARGET {
+                    if target.is_some() {
+                        return Err(GuestbookError::DuplicateTag(TAG_TARGET));
+                    }
+                    target = Some(PublicKey::from_hex(&s[1]).map_err(|_| GuestbookError::BadTag(TAG_TARGET))?);
+                }
+            }
+            if rumor.content.chars().any(char::is_control) {
+                return Err(GuestbookError::BadNickname);
+            }
+            GuestbookEntry::Nickname {
+                actor: opened.author,
+                target: target.ok_or(GuestbookError::MissingTag(TAG_TARGET))?,
+                nick: rumor.content.chars().take(MAX_NICKNAME_CHARS).collect(),
                 citation: AuthorityCitation::from_tags(&rumor.tags),
                 at_ms,
             }
@@ -612,8 +659,8 @@ pub fn coalesce(
                     );
                 }
             }
-            // Timeouts silence, they don't change who is a member.
-            GuestbookEntry::Timeout { .. } => {}
+            // Timeouts silence and Nicknames name; neither changes who is a member.
+            GuestbookEntry::Timeout { .. } | GuestbookEntry::Nickname { .. } => {}
         }
     }
 
@@ -642,6 +689,43 @@ pub fn active_timeouts(events: &[GuestbookEvent], now_secs: u64, may_time_out: &
         }
     }
     newest.into_iter().filter(|(_, (_, _, until))| *until > now_secs).map(|(t, (at, _, until))| (t, (at / 1000, until))).collect()
+}
+
+/// A member's standing Nickname and the entry it stands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nickname {
+    pub nick: String,
+    pub actor: PublicKey,
+    pub at_ms: u64,
+    pub rumor_id: [u8; 32],
+}
+
+/// The Nicknames standing at `now_ms` (CORD-04 §10): per target, the newest Nickname whose
+/// signer `may_name` that target, the lower rumor id breaking a tie; a cleared one names
+/// nobody. While a Timeout of theirs runs (`silenced`, the running ones by target), a member's
+/// own Nicknames name nobody, whatever date they carry.
+pub fn standing_nicknames(
+    events: &[GuestbookEvent],
+    now_ms: u64,
+    may_name: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
+    silenced: &BTreeMap<PublicKey, (u64, u64)>,
+) -> BTreeMap<PublicKey, Nickname> {
+    let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
+    let mut newest: BTreeMap<PublicKey, Nickname> = BTreeMap::new();
+    for ev in events {
+        let GuestbookEntry::Nickname { actor, target, nick, citation, at_ms } = &ev.entry else { continue };
+        if *at_ms > horizon || !may_name(actor, target, citation.as_ref()) {
+            continue;
+        }
+        if actor == target && silenced.contains_key(target) {
+            continue;
+        }
+        if newest.get(target).is_none_or(|n| n.at_ms < *at_ms || (n.at_ms == *at_ms && ev.rumor_id < n.rumor_id)) {
+            newest.insert(*target, Nickname { nick: nick.clone(), actor: *actor, at_ms: *at_ms, rumor_id: ev.rumor_id });
+        }
+    }
+    newest.retain(|_, n| !n.nick.is_empty());
+    newest
 }
 
 /// A Refounding's guestbook replaces the old one. A local store appends across
@@ -952,6 +1036,50 @@ mod tests {
         assert!(matches!(through_err(&bad, &admin), GuestbookError::BadTag(TAG_UNTIL)));
         let missing = stream::build_rumor_ms(kind::TIMEOUT, admin.public_key(), "", vec![Tag::public_key(target)], 1_000);
         assert!(matches!(through_err(&missing, &admin), GuestbookError::MissingTag(TAG_UNTIL)));
+    }
+
+    #[test]
+    fn a_nickname_round_trips_cut_to_32_characters_and_refuses_control_characters() {
+        let (admin, target) = (Keys::generate(), pk());
+        let cite = AuthorityCitation { entity_id: [0xab; 32], version: 3, edition_hash: [0xcd; 32] };
+        let ev = through(&build_nickname_rumor(admin.public_key(), target, "Moth", Some(&cite), 1_722_410_000_301), &admin);
+        assert_eq!(ev.entry, GuestbookEntry::Nickname { actor: admin.public_key(), target, nick: "Moth".into(), citation: Some(cite), at_ms: 1_722_410_000_301 });
+        let long = "ü".repeat(MAX_NICKNAME_CHARS + 5);
+        let GuestbookEntry::Nickname { nick, .. } = through(&build_nickname_rumor(admin.public_key(), target, &long, None, 1_000), &admin).entry else { panic!() };
+        assert_eq!(nick.chars().count(), MAX_NICKNAME_CHARS, "a reader cuts past 32 characters, never mid-character");
+        assert!(matches!(through_err(&build_nickname_rumor(admin.public_key(), target, "two\nlines", None, 1_000), &admin), GuestbookError::BadNickname));
+        let bare = stream::build_rumor_ms(kind::NICKNAME, admin.public_key(), "x", vec![], 1_000);
+        assert!(matches!(through_err(&bare, &admin), GuestbookError::MissingTag(TAG_TARGET)));
+        let twice = stream::build_rumor_ms(kind::NICKNAME, admin.public_key(), "x", vec![Tag::public_key(target), Tag::public_key(pk())], 1_000);
+        assert!(matches!(through_err(&twice, &admin), GuestbookError::DuplicateTag(TAG_TARGET)));
+    }
+
+    #[test]
+    fn the_newest_nickname_its_signer_may_set_stands() {
+        let (mod_, rogue, m) = (pk(), pk(), pk());
+        let ev = |actor, nick: &str, at_secs: u64, id: u8| GuestbookEvent {
+            rumor_id: [id; 32],
+            entry: GuestbookEntry::Nickname { actor, target: m, nick: nick.into(), citation: None, at_ms: at_secs * 1000 },
+            epoch: None,
+            observed_at: None,
+        };
+        let may = |a: &PublicKey, _: &PublicKey, _: Option<&AuthorityCitation>| *a != rogue;
+        let none = BTreeMap::new();
+        let now = 10_000_000;
+        let named = |evs: &[GuestbookEvent], silenced: &BTreeMap<PublicKey, (u64, u64)>| standing_nicknames(evs, now, &may, silenced).get(&m).map(|n| n.nick.clone());
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(mod_, "Fixed", 1_100, 2)], &none).as_deref(), Some("Fixed"), "newest wins");
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(rogue, "Rude", 1_100, 2)], &none).as_deref(), Some("Moth"), "an unauthorized one names nobody");
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(m, "", 1_100, 2)], &none), None, "a cleared one leaves no name");
+        for order in [[ev(m, "Low", 1_000, 3), ev(m, "High", 1_000, 4)], [ev(m, "High", 1_000, 4), ev(m, "Low", 1_000, 3)]] {
+            assert_eq!(named(&order, &none).as_deref(), Some("Low"), "a same-ms tie goes to the lower rumor id, in any order");
+        }
+        let ahead = now / 1000 + MAX_FUTURE_MS / 1000 + 1;
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(m, "Squat", ahead, 2)], &none).as_deref(), Some("Moth"), "one dated past the horizon is ignored");
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(m, "Soon", ahead - 1, 2)], &none).as_deref(), Some("Soon"), "one inside it counts");
+        let silenced = BTreeMap::from([(m, (1_050, 1_200))]);
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(m, "Taunt", 1_100, 2)], &silenced), None, "while timed out, their own names nobody");
+        assert_eq!(named(&[ev(mod_, "Fixed", 1_000, 1), ev(m, "Backdated", 1_040, 2)], &silenced).as_deref(), Some("Fixed"), "however it is dated, and a moderator's still counts");
+        assert_eq!(named(&[ev(m, "Moth", 1_000, 1), ev(m, "Taunt", 1_100, 2)], &none).as_deref(), Some("Taunt"), "and once it ends, theirs counts again");
     }
 
     #[test]

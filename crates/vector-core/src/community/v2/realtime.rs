@@ -865,6 +865,16 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
+                inbound::DispatchedV2::Nickname => {
+                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+                    let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
+                    let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
+                    remember();
+                    if super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
+                        crate::traits::emit_event_json("community_nicknames", serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
+                    }
+                    return;
+                }
                 inbound::DispatchedV2::Kick { target } => {
                     let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
                     let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
@@ -1318,6 +1328,9 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 surface_presence(&current, &fresh, handler);
                 handler.on_community_refreshed(&community_id);
             }
+            if let Err(e) = super::service::carry_my_nickname(&transport, &current).await {
+                crate::log_debug!("[v2:nickname {}] carry deferred: {e}", &community_id[..8.min(community_id.len())]);
+            }
             // A walk longer than one pass goes on soon, not on whatever next moves the community;
             // one that failed waits for the next trigger.
             if super::service::guestbook_walk_pending(&current) {
@@ -1364,7 +1377,7 @@ fn surface_presence(
         let (member, joined, at_ms, invited_by) = match &ev.entry {
             GuestbookEntry::Join { member, at_ms, invited_by } => (member, true, *at_ms, invited_by.clone()),
             GuestbookEntry::Leave { member, at_ms } => (member, false, *at_ms, None),
-            GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } | GuestbookEntry::Timeout { .. } => continue,
+            GuestbookEntry::Kick { .. } | GuestbookEntry::Snapshot { .. } | GuestbookEntry::Timeout { .. } | GuestbookEntry::Nickname { .. } => continue,
         };
         if banned.contains(&member.to_bytes()) {
             continue;

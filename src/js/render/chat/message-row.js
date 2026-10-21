@@ -180,7 +180,7 @@ function _dmsgPick(obj, keys) { return Object.fromEntries(keys.map((k) => [k, ob
 
 const _dmsgLookups = {
     getProfile: (npub) => getProfile(npub),
-    getName: (x) => getName(x),
+    getName: (x) => chatName(x),
     getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
     myNpub: () => strPubkey,
     twemojify: (el) => twemojify(el),
@@ -351,7 +351,7 @@ const _dmsgRowHelpers = {
     revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
-    systemEventName: (npub) => systemEventName(npub),
+    systemEventName: (npub) => chatName(npub),
     systemEventSuffix: (type) => systemEventSuffix(type),
     // Reactions
     reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
@@ -485,7 +485,7 @@ function _dmsgReplyView(msg, sender) {
     else profile = (chat && !chatIsGroup(chat) ? getProfile(chat.id) : null) || sender;
     const npub = mine ? strPubkey : (msg.replied_to_npub || cMsg?.npub || profile?.id || '');
 
-    const name = profile || npub ? getName(profile || npub) : 'Unknown';
+    const name = profile || npub ? chatName(profile || npub) : 'Unknown';
 
     const content = hasBackendContext ? msg.replied_to_content : cMsg?.content;
     const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
@@ -584,7 +584,7 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     // Bare and nostr:-prefixed npubs (and vectorapp.io profile links) render
     // as mention pills, same treatment as bios.
     const roles = isGroupChat ? standingRoleMentions(msg, currentChat) : [];
-    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true, roles });
+    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true, roles, communityId: communityIdOfChat(currentChat) });
     renderGoLinks(span);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before

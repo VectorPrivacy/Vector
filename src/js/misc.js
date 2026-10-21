@@ -1480,7 +1480,7 @@ async function processInlineImages(element) {
 }
 
 /** Build a clickable @name mention pill for an npub. */
-function _buildMentionPill(npub, queueSync) {
+function _buildMentionPill(npub, queueSync, communityId) {
     const profile = getProfile(npub);
     if (queueSync && !profile) {
         // Uncached tagged profile → fetch it; the profile_update handler refreshes this chip's name.
@@ -1489,13 +1489,14 @@ function _buildMentionPill(npub, queueSync) {
     const span = document.createElement('span');
     span.className = 'mention';
     span.setAttribute('data-npub', npub);
-    span.textContent = '@' + getName(npub);
+    if (communityId) span.setAttribute('data-community', communityId);
+    span.textContent = '@' + getName(npub, communityId);
     span.addEventListener('click', (e) => {
         // Open the mini-profile (same popup as a name/avatar tap), not the full screen.
         // stopPropagation so the opening click doesn't hit the document outside-click
         // dismiss. Works even for an uncached npub — showMiniProfile fetches + placeholders.
         e.stopPropagation();
-        showMiniProfile(npub, span);
+        showMiniProfile(npub, span, communityId || undefined);
     });
     return span;
 }
@@ -1511,7 +1512,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
     // vectorapp.io/profile/<npub> links into tags (that domain only; npubs in any other URL stay put).
     // The vectorapp.io branch is first so the bare branch's `/`-lookbehind can't swallow the npub
     // mid-URL. queueSync: fetch an uncached tagged profile so its name can fill in.
-    const { allowBare = false, queueSync = false, roles = [] } = opts;
+    const { allowBare = false, queueSync = false, roles = [], communityId = null } = opts;
     const mentionPattern = allowBare
         ? /https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})\b|(?<![\w/])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g
         : /@(npub1[a-z0-9]{58})/g;
@@ -1545,7 +1546,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
                 frag.appendChild(document.createTextNode(node.textContent.slice(lastIdx, match.index)));
             }
             const npub = match[1] || match[2];   // group 1 = vectorapp.io link, group 2 = bare npub
-            frag.appendChild(_buildMentionPill(npub, queueSync));
+            frag.appendChild(_buildMentionPill(npub, queueSync, communityId));
             lastIdx = match.index + match[0].length;
         }
         // Remaining text after last match
@@ -1565,7 +1566,7 @@ function renderMentions(element, senderIsAdmin = false, opts = {}) {
             const m = (a.getAttribute('href') || '').match(profileHref);
             if (!m) continue;
             if (!anchorShowsItsDestination(a)) continue;
-            a.replaceWith(_buildMentionPill(m[1].toLowerCase(), queueSync));
+            a.replaceWith(_buildMentionPill(m[1].toLowerCase(), queueSync, communityId));
         }
     }
 

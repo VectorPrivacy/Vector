@@ -11,6 +11,7 @@
     import { untrack } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
+    import { communityNickname } from '../lib/nicknames.svelte.js';
 
     let {
         communityId,
@@ -103,9 +104,10 @@
     function nameOf(profile) {
         return profile ? profile.nickname || profile.name || profile.display_name || '' : '';
     }
+    // What they go by here: your own name for them, then their nickname in this community.
     function displayOf(npub, profile) {
         if (h.streamHidden(npub)) return h.getName(profile || npub);
-        return nameOf(profile) || npub.slice(0, 10) + '...' + npub.slice(-6);
+        return profile?.nickname || communityNickname(communityId, npub) || nameOf(profile) || npub.slice(0, 10) + '...' + npub.slice(-6);
     }
 
     // Outrank, in role-engine positions: the owner outranks everyone; an admin outranks
@@ -121,6 +123,15 @@
     // backend's own gate, read off the graph so the handle shows without a fetch.
     function mayRole(npub) {
         if (!caps.manage_roles || npub === ownerNpub || npub === myNpub) return false;
+        if (iAmOwner) return true;
+        const mine = topBy.get(myNpub)?.position ?? Infinity;
+        return mine < (topBy.get(npub)?.position ?? Infinity);
+    }
+
+    // Their own with Change Nickname; a member's beneath you with Manage Nicknames.
+    function mayNick(npub) {
+        if (npub === myNpub) return !!caps.change_nickname;
+        if (!caps.manage_nicknames || npub === ownerNpub) return false;
         if (iAmOwner) return true;
         const mine = topBy.get(myNpub)?.position ?? Infinity;
         return mine < (topBy.get(npub)?.position ?? Infinity);
@@ -181,7 +192,7 @@
             if (scope && !scope.has(m.npub)) continue;
             const profile = profileFor(m.npub);
             const display = displayOf(m.npub, profile);
-            // The search matches real names: what is typed is already on screen.
+            // The search matches nicknames and real names alike.
             if (f && !(display + ' ' + nameOf(profile) + ' ' + m.npub).toLowerCase().includes(f)) continue;
             const isOwner = m.npub === ownerNpub;
             const isAdmin = adminSet.has(m.npub);
@@ -191,7 +202,7 @@
                 profile,
                 display,
                 veiled,
-                hasName: !veiled && !!nameOf(profile),
+                hasName: !veiled && !!(nameOf(profile) || communityNickname(communityId, m.npub)),
                 src: profile ? h.getProfileAvatarSrc(profile) || null : null,
                 isOwner,
                 isAdmin,
@@ -199,6 +210,7 @@
                 rankLabel: heldBy.get(m.npub)?.name || null,
                 canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban || caps.moderate_members),
                 canRole: mayRole(m.npub),
+                canNick: mayNick(m.npub),
                 tier: tierOf(m.npub),
             });
         }
@@ -295,78 +307,20 @@
         acting = next;
     }
 
-    async function remove(vm, ban) {
-        const confirmed = await h.popupConfirm(
-            ban ? 'Ban member' : 'Kick member',
-            ban
-                ? `Ban <b>${h.escapeHtml(vm.display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`
-                : `Kick <b>${h.escapeHtml(vm.display)}</b>? They'll be removed from the community but can rejoin with a new invite.`,
-            false, '', 'vector_warning.svg');
-        if (!confirmed) return;
-        setActing(vm.npub, true);
-        try {
-            await h.invoke(ban ? 'ban_community_member' : 'kick_community_member', { communityId, npub: vm.npub });
-            memberList = memberList.filter((x) => x.npub !== vm.npub);
-            h.dmsgClearDeleteMetaCache();
-            h.refreshCommunityMemberCount(communityId, true);
-            onChange(getRoster());
-        } catch (err) {
-            // A private-community ban can fail with the (long, important) bunker read-cut
-            // explanation — a persistent notice, not a toast.
-            if (ban) await h.popupConfirm("Couldn't ban", h.escapeHtml(String(err)), true, '', 'vector_warning.svg');
-            else h.showToast(String(err));
-        } finally {
-            setActing(vm.npub, false);
-        }
-    }
-
     // Roles and moderation live on the row menu (right-click / long-press), with a "⋯"
     // handle on hover so it is discoverable without welding destructive buttons onto every row.
-    // A Timeout silences a member for a while, everywhere in the community.
-    const TIMEOUTS = [['60 seconds', 60], ['5 minutes', 300], ['10 minutes', 600], ['1 hour', 3600], ['1 day', 86400], ['1 week', 604800]];
-    async function timeout(vm, seconds) {
-        try {
-            await h.invoke('timeout_community_member', { communityId, npub: vm.npub, seconds });
-            h.showToast(seconds ? `${vm.display} is timed out` : `${vm.display}'s timeout is lifted`);
-        } catch (err) {
-            h.showToast(String(err));
-        }
-    }
-    function menuItems(vm) {
-        const items = [];
-        if (caps.moderate_members) {
-            items.push({
-                label: 'Timeout',
-                icon: 'clock',
-                submenu: () => [
-                    ...TIMEOUTS.map(([label, secs]) => ({ label, onClick: () => timeout(vm, secs) })),
-                    { divider: true },
-                    { label: 'Lift timeout', onClick: () => timeout(vm, 0) },
-                ],
-            });
-        }
-        if (caps.kick) items.push({ label: 'Kick', hint: 'can rejoin with an invite', icon: 'x', onClick: () => remove(vm, false) });
-        if (caps.ban) items.push({ label: 'Ban', hint: 'cannot rejoin', icon: 'x-user', danger: true, onClick: () => remove(vm, true) });
-        return items;
+    // The same menu opens on a member's name in chat (js/member-roles.js).
+    function rowItems(vm) {
+        return h.memberMenuItems(communityId, vm.npub, {
+            onBusy: (npub, on) => setActing(npub, on),
+            onRemoved: (npub) => {
+                memberList = memberList.filter((x) => x.npub !== npub);
+                onChange(getRoster());
+            },
+        });
     }
 
-    // Their roles lead, as a submenu that toggles in place; kick and ban follow. The
-    // submenu is built on entry from the context each toggle refreshes.
-    async function rowItems(vm) {
-        const items = vm.canModerate ? menuItems(vm) : [];
-        if (vm.canRole) {
-            const view = await h.memberRolesView(communityId);
-            if (view && h.memberRolesOffered(view, vm.npub)) {
-                const ctx = { communityId, npub: vm.npub, view, busy: null };
-                items.unshift({ label: 'Roles', submenu: () => h.memberRoleItems(ctx) }, ...(items.length ? [{ divider: true }] : []));
-            }
-        }
-        const copy = h.copyIdItems('User', vm.npub);
-        if (copy.length) items.unshift(...copy, ...(items.length ? [{ divider: true }] : []));
-        return items;
-    }
-
-    const hasMenu = (vm) => vm.canModerate || vm.canRole || adv.on;
+    const hasMenu = (vm) => vm.canModerate || vm.canRole || vm.canNick || adv.on;
 
     async function showRowMenu(vm, x, y) {
         const items = await rowItems(vm);
@@ -440,7 +394,7 @@
                         {ui}
                     >
                         {#snippet trailing()}
-                            {#if vm.canModerate || vm.canRole}
+                            {#if vm.canModerate || vm.canRole || vm.canNick}
                                 <div class="member-pick-actions">
                                     <div class="member-pick-more" title="More" role="button" tabindex="0"
                                         onclick={(e) => openMenu(vm, e)}

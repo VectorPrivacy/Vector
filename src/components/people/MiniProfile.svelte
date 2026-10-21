@@ -6,6 +6,7 @@
     import { flushSync } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { miniProfile, settleMiniProfile, bindMiniProfileEl } from '../lib/miniprofile.svelte.js';
+    import { communityNickname } from '../lib/nicknames.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { h } = $props();   // h: getProfile, getName, streamHidden, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView, onAddRole, onRemoveRole
@@ -21,7 +22,10 @@
         const npub = m.npub;
         // Streamer Mode: the name as dots and nothing that could identify them.
         const veiled = h.streamHidden(npub);
-        const displayName = veiled ? h.getName(npub) : p?.nickname || p?.name || p?.display_name || '';
+        const realName = p?.nickname || p?.name || p?.display_name || '';
+        // Opened within a community: the name they go by there, their own beneath it.
+        const nick = veiled || p?.nickname ? '' : communityNickname(m.communityId, npub);
+        const displayName = veiled ? h.getName(npub) : nick || realName;
         return {
             npub, p,
             bannerSrc: h.getProfileBannerSrc(p),
@@ -29,6 +33,7 @@
             status: veiled ? '' : (p?.status?.title || '').toString().trim(),
             emojiTags: veiled ? [] : p?.status?.emoji_tags || [],
             displayName,
+            aka: nick && realName && realName !== nick ? realName : '',
             // A profile with no name, or a fetch that settled empty: Nostr identities are
             // valid without metadata, so call them what they are.
             nameText: displayName || ((p || m.settled) ? 'Anon' : 'Loading…'),
@@ -141,6 +146,9 @@
                           onmouseenter={(e) => h.showTooltip('Bot', e.currentTarget)} onmouseleave={() => h.hideTooltip()}></span>
                 {/if}
             </div>
+            {#if view.aka}
+                <div class="mini-profile-sub mini-profile-aka" use:textInto={[view.aka, null, false]}></div>
+            {/if}
             <div class="mini-profile-sub">{view.fingerprint}</div>
             {#if view.about}
                 <div class="mini-profile-about" use:textInto={[view.about, null, true]}></div>

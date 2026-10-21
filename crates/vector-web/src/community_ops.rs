@@ -63,6 +63,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "set_channel_sync" => set_sync(a).await,
             "get_community_timeouts" => with_id(a, |id| core(VectorCore.community_timeouts(id))),
             "timeout_community_member" => timeout_member(a).await,
+            "get_community_nicknames" => with_id(a, |id| core(VectorCore.community_nicknames(id))),
+            "set_community_nickname" => set_nickname(a).await,
             "get_channel_send_denied" => send_denied(a),
             "get_community_mentions" => mentions(a),
 
@@ -288,6 +290,11 @@ fn send_denied(a: &Args) -> Result<Value, String> {
 async fn timeout_member(a: &Args) -> Result<Value, String> {
     let (id, npub, seconds) = (a.str("communityId")?, a.str("npub")?, a.de::<u64>("seconds")?);
     db::scoped(async move { core(VectorCore.timeout_member(&id, &npub, seconds).await) }).await
+}
+
+async fn set_nickname(a: &Args) -> Result<Value, String> {
+    let (id, npub, nickname) = (a.str("communityId")?, a.str("npub")?, a.str("nickname")?);
+    db::scoped(async move { core(VectorCore.set_community_nickname(&id, &npub, &nickname).await) }).await
 }
 
 async fn set_sync(a: &Args) -> Result<Value, String> {

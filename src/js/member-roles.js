@@ -81,6 +81,78 @@ async function openMemberRoleMenu(communityId, npub, x, y) {
     return true;
 }
 
+const MEMBER_TIMEOUTS = [['60 seconds', 60], ['5 minutes', 300], ['10 minutes', 600], ['1 hour', 3600], ['1 day', 86400], ['1 week', 604800]];
+
+/**
+ * A member's menu inside a community, wherever they're pressed: the member list's row or
+ * their name and avatar in chat. Their nickname, roles, then moderation, offered only
+ * where the caller outranks them. `onBusy(npub, on)` brackets a kick or ban, and
+ * `onRemoved(npub)` hears one land.
+ */
+async function memberMenuItems(communityId, npub, { onBusy = () => {}, onRemoved = () => {} } = {}) {
+    const [caps, view] = await Promise.all([
+        invoke('get_community_capabilities', { communityId }).catch(() => ({})),
+        memberRolesView(communityId),
+    ]);
+    const mine = npub === strPubkey;
+    const above = !mine && !!view && npub !== view.owner && (view.is_owner || (view.rank != null && view.rank < memberRank(view, npub)));
+    const display = getName(getProfile(npub) || npub, communityId);
+    const items = [];
+    if (mine ? caps.change_nickname : caps.manage_nicknames && above) {
+        items.push({ label: 'Change Nickname', icon: 'edit', onClick: () => promptCommunityNickname(communityId, npub) });
+    }
+    if (view && memberRolesOffered(view, npub)) {
+        const ctx = { communityId, npub, view, busy: null };
+        items.push({ label: 'Roles', submenu: () => memberRoleItems(ctx) });
+    }
+    const timeout = async (seconds) => {
+        try {
+            await invoke('timeout_community_member', { communityId, npub, seconds });
+            showToast(seconds ? `${display} is timed out` : `${display}'s timeout is lifted`);
+        } catch (e) {
+            showToast(String(e));
+        }
+    };
+    const remove = async (ban) => {
+        const confirmed = await popupConfirm(ban ? 'Ban member' : 'Kick member', ban
+            ? `Ban <b>${escapeHtml(display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`
+            : `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`,
+            false, '', 'vector_warning.svg');
+        if (!confirmed) return;
+        onBusy(npub, true);
+        try {
+            await invoke(ban ? 'ban_community_member' : 'kick_community_member', { communityId, npub });
+            dmsgClearDeleteMetaCache();
+            refreshCommunityMemberCount(communityId, true);
+            onRemoved(npub);
+        } catch (err) {
+            // A private-community ban can fail with the long bunker read-cut explanation: a notice, not a toast.
+            if (ban) await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
+            else showToast(String(err));
+        } finally {
+            onBusy(npub, false);
+        }
+    };
+    const moderation = [];
+    if (above && caps.moderate_members) {
+        moderation.push({
+            label: 'Timeout',
+            icon: 'clock',
+            submenu: () => [
+                ...MEMBER_TIMEOUTS.map(([label, secs]) => ({ label, onClick: () => timeout(secs) })),
+                { divider: true },
+                { label: 'Lift timeout', onClick: () => timeout(0) },
+            ],
+        });
+    }
+    if (above && caps.kick) moderation.push({ label: 'Kick', hint: 'can rejoin with an invite', icon: 'x', onClick: () => remove(false) });
+    if (above && caps.ban) moderation.push({ label: 'Ban', hint: 'cannot rejoin', icon: 'x-user', danger: true, onClick: () => remove(true) });
+    if (moderation.length) items.push(...(items.length ? [{ divider: true }] : []), ...moderation);
+    const copy = copyIdItems('User', npub);
+    if (copy.length) items.unshift(...copy, ...(items.length ? [{ divider: true }] : []));
+    return items;
+}
+
 /**
  * Give (`on`) or take one role from a member. A Grant replaces their whole set, so the
  * set is re-read right before the write, and the menu takes one change at a time.

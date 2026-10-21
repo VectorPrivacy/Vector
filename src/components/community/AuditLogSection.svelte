@@ -8,7 +8,7 @@
     import Avatar from '../ui/Avatar.svelte';
     import Select from '../ui/Select.svelte';
 
-    // h: name(npub), avatarSrc(npub), loadAudit(communityId)
+    // h: realName(npub), avatarSrc(npub), loadAudit(communityId)
     let { h } = $props();
 
     const st = csState();
@@ -24,7 +24,7 @@
         member: (npub) => {
             if (!npub) return 'someone';
             profileVersion(npub);
-            return h.name(npub) || shortNpub(npub);
+            return h.realName(npub) || shortNpub(npub);
         },
     };
 

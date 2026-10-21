@@ -666,6 +666,16 @@ pub fn sender(state: &crate::state::ChatState, gate: &StreamGate, npub: &str, fa
     }
 }
 
+/// [`sender`] inside a community: the `nickname` they go by there, unless you named them yourself.
+pub fn sender_in(state: &crate::state::ChatState, gate: &StreamGate, npub: &str, fallback: &str, nickname: Option<String>) -> Sender {
+    let shown = sender(state, gate, npub, fallback);
+    let profile = state.get_profile(npub);
+    match nickname {
+        Some(name) if !gate.hides(npub, profile) && profile.is_none_or(|p| p.nickname().is_empty()) => Sender { name, ..shown },
+        _ => shown,
+    }
+}
+
 fn display_name(p: &crate::profile::Profile) -> Option<&str> {
     [p.nickname(), p.name(), p.display_name()].into_iter().find(|n| !n.is_empty())
 }

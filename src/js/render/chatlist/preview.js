@@ -30,16 +30,16 @@ function generateTypingText(chat) {
 
     // Groups show names
     if (activeTypers.length === 1) {
-        const name = getName(getProfile(activeTypers[0]));
+        const name = getName(getProfile(activeTypers[0]) || activeTypers[0], communityIdOfChat(chat));
         return `${name} is typing...`;
     } else if (activeTypers.length === 2) {
-        const name1 = getName(getProfile(activeTypers[0]));
-        const name2 = getName(getProfile(activeTypers[1]));
+        const name1 = getName(getProfile(activeTypers[0]) || activeTypers[0], communityIdOfChat(chat));
+        const name2 = getName(getProfile(activeTypers[1]) || activeTypers[1], communityIdOfChat(chat));
         return `${name1} and ${name2} are typing...`;
     } else if (activeTypers.length === 3) {
-        const name1 = getName(getProfile(activeTypers[0]));
-        const name2 = getName(getProfile(activeTypers[1]));
-        const name3 = getName(getProfile(activeTypers[2]));
+        const name1 = getName(getProfile(activeTypers[0]) || activeTypers[0], communityIdOfChat(chat));
+        const name2 = getName(getProfile(activeTypers[1]) || activeTypers[1], communityIdOfChat(chat));
+        const name3 = getName(getProfile(activeTypers[2]) || activeTypers[2], communityIdOfChat(chat));
         return `${name1}, ${name2}, and ${name3} are typing...`;
     } else {
         return 'Several people are typing...';
@@ -112,7 +112,7 @@ function generateChatPreviewText(chat) {
             // until the profile loads; profile_update re-renders the list, upgrading it to the name.
             const sysEv = latestPreviewSystemEvent(chat);
             if (sysEv) {
-                return { text: systemEventContent(sysEv.event_type, sysEv.member_npub), isTyping: false, needsTwemoji: true };
+                return { text: systemEventContent(sysEv.event_type, sysEv.member_npub, communityIdOfChat(chat)), isTyping: false, needsTwemoji: true };
             }
             const memberCount = chat.metadata?.custom_fields?.member_count ? parseInt(chat.metadata.custom_fields.member_count) : null;
             return {
@@ -135,7 +135,7 @@ function generateChatPreviewText(chat) {
     if (cLastMsg.mine) {
         senderPrefix = 'You: ';
     } else if (isGroup && cLastMsg.npub) {
-        const senderName = getName(cLastMsg.npub);
+        const senderName = getName(cLastMsg.npub, communityIdOfChat(chat));
         senderPrefix = `${senderName}: `;
     }
 
@@ -165,5 +165,5 @@ function generateChatPreviewText(chat) {
     // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
             previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
     previewSource = replaceNostrEmbedRefsForPreview(previewSource);
-    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource, communityIdOfChat(chat))), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
 }

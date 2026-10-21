@@ -100,7 +100,7 @@ function registerReactionPopups() {
                 return null;
             },
             getProfile,
-            getName,
+            getName: chatName,
             getProfileAvatarSrc,
             twemojify,
             bindCachedImg: (img, url, onUnavailable) => bindCachedEmojiImg(img, url, 'emoji', onUnavailable),
@@ -145,7 +145,7 @@ function showReactionHoverTip(reactionEl) {
     if (!msg) return;
     const matching = msg.reactions.filter(r => r.emoji === emoji);
     if (!matching.length) return;
-    VectorSvelte.openReactionTip({ emoji, url: _reactionCustomUrl(msg, emoji), names: matching.map(r => getName(r.author_id)), anchor: reactionEl });
+    VectorSvelte.openReactionTip({ emoji, url: _reactionCustomUrl(msg, emoji), names: matching.map(r => chatName(r.author_id)), anchor: reactionEl });
     _startReactionTipWatchdog(reactionEl);
 }
 

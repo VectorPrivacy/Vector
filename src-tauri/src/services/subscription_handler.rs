@@ -232,10 +232,11 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let is_file = !msg.attachments.is_empty();
     let gate = vector_core::notify::StreamGate::load();
+    let nickname = community_id.as_deref().and_then(|cid| vector_core::VectorCore.member_nickname(cid, sender_npub));
     let (sender_name, community_name, avatar, content) = {
         let state = crate::STATE.lock().await;
         let vector_core::notify::Sender { name: sender, avatar: av } =
-            vector_core::notify::sender(&state, &gate, sender_npub, "Someone");
+            vector_core::notify::sender_in(&state, &gate, sender_npub, "Someone", nickname);
         let community_name = state.get_chat(chat_id)
             .and_then(|c| c.metadata.get_name().map(|n| n.to_string()))
             .unwrap_or_else(|| "Community".to_string());

@@ -2546,21 +2546,26 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
 /// The Timeouts running now (CORD-04 §8), by target: judged against the Roster as it
 /// stands, like every authority action. Returns target → (from, until), unix seconds.
 pub fn community_timeouts(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, (u64, u64)>, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let events = crate::db::community::get_guestbook_standing(&cid_hex)?;
+    Ok(guestbook::active_timeouts(&events, now_ms() / 1000, &timeout_judge(community)?))
+}
+
+/// Who a Timeout may silence: MODERATE_MEMBERS, unbanned, a strict outrank and the Grant it cites.
+fn timeout_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
     use crate::community::roles::Permissions;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let events = crate::db::community::get_guestbook_timeouts(&cid_hex)?;
     let roster = crate::db::community::get_community_roles(&cid_hex)?;
     let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
     let owner = community.owner()?.to_hex();
-    let may = |actor: &PublicKey, target: &PublicKey, vac: Option<&crate::community::edition::AuthorityCitation>| {
+    Ok(move |actor: &PublicKey, target: &PublicKey, vac: Option<&crate::community::edition::AuthorityCitation>| {
         let (a, t) = (actor.to_hex(), target.to_hex());
         // The roster check first: it is in memory, the citation's is a database read.
         t != owner
             && !banned.contains(&a)
             && roster.can_act_on_member(&a, Some(&owner), &t, Permissions::MODERATE_MEMBERS)
             && citation_is_synced(&cid_hex, &owner, &a, vac)
-    };
-    Ok(guestbook::active_timeouts(&events, now_ms() / 1000, &may))
+    })
 }
 
 /// Silence `target` for `seconds` (at most 28 days; 0 lifts a running Timeout). Every
@@ -2575,13 +2580,14 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
         if !authority.roles.can_act_on_member(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::MODERATE_MEMBERS) {
             return Err("you can only time out members beneath you, with Timeout Members".to_string());
         }
-        // Strictly after every Timeout this device holds for them, so a lift outranks the one it
-        // lifts even when a co-moderator's clock runs ahead.
+        // Strictly after every Timeout that counts for them, so a lift outranks the one it lifts
+        // even when a co-moderator's clock runs ahead.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let newest_held = crate::db::community::get_guestbook_timeouts(&cid_hex)?
+        let judge = timeout_judge(community)?;
+        let newest_held = crate::db::community::get_guestbook_standing(&cid_hex)?
             .iter()
             .filter_map(|e| match &e.entry {
-                guestbook::GuestbookEntry::Timeout { target: t, at_ms, .. } if t == target => Some(*at_ms),
+                guestbook::GuestbookEntry::Timeout { actor, target: t, citation, at_ms, .. } if t == target && judge(actor, t, citation.as_ref()) => Some(*at_ms),
                 _ => None,
             })
             .max()
@@ -2609,6 +2615,131 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
             crate::db::community::set_guestbook(&cid_hex, &events, cursor)?;
         }
         Ok(())
+    })
+    .await
+}
+
+/// Whom a Nickname may name (CORD-04 §10), judged against the Roster as it stands: their own
+/// takes `CHANGE_NICKNAME` and no citation; anyone else's takes `MANAGE_NICKNAMES`, a strict
+/// outrank and the Grant it cites.
+fn nickname_judge(community: &CommunityV2) -> Result<impl Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+    let owner = community.owner()?.to_hex();
+    Ok(move |actor: &PublicKey, target: &PublicKey, vac: Option<&crate::community::edition::AuthorityCitation>| {
+        let (a, t) = (actor.to_hex(), target.to_hex());
+        !banned.contains(&a) && roster.may_name(&a, Some(&owner), &t) && (a == t || citation_is_synced(&cid_hex, &owner, &a, vac))
+    })
+}
+
+/// Every Nickname standing in a community, with the entry each stands on. A Refounding starts a
+/// fresh Guestbook, so only the live epoch's count: what is carried across stands, for every reader.
+pub fn standing_nicknames(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, guestbook::Nickname>, String> {
+    nicknames_on(community, Some(community.root_epoch.0))
+}
+
+/// The Nicknames standing over `epoch`'s Guestbook, or over every one this device holds.
+fn nicknames_on(community: &CommunityV2, epoch: Option<u64>) -> Result<std::collections::BTreeMap<PublicKey, guestbook::Nickname>, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let held = crate::db::community::get_guestbook_standing(&cid_hex)?;
+    let events: Vec<guestbook::GuestbookEvent> = held.iter().filter(|e| epoch.is_none() || e.epoch == epoch).cloned().collect();
+    let judge = nickname_judge(community)?;
+    let silenced = community_timeouts(community)?;
+    Ok(guestbook::standing_nicknames(&events, now_ms(), &judge, &silenced))
+}
+
+/// What each member is called in a community, for those who have a Nickname there.
+pub fn community_nicknames(community: &CommunityV2) -> Result<std::collections::BTreeMap<PublicKey, String>, String> {
+    Ok(standing_nicknames(community)?.into_iter().map(|(pk, n)| (pk, n.nick)).collect())
+}
+
+/// A Nickname as a writer sends it: trimmed, at most [`guestbook::MAX_NICKNAME_CHARS`], no
+/// control characters. `""` clears.
+pub fn clean_nickname(nick: &str) -> Result<String, String> {
+    let nick = nick.trim();
+    if nick.chars().any(char::is_control) {
+        return Err("a nickname can't hold line breaks or control characters".to_string());
+    }
+    if nick.chars().count() > guestbook::MAX_NICKNAME_CHARS {
+        return Err(format!("a nickname is at most {} characters", guestbook::MAX_NICKNAME_CHARS));
+    }
+    Ok(nick.to_string())
+}
+
+/// Seal and publish one Nickname, then hold it, so this device shows it before the follow
+/// reads it back.
+async fn publish_nickname<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, rumor: nostr_sdk::prelude::UnsignedEvent, entry: guestbook::GuestbookEntry) -> Result<(), String> {
+    let signer = crate::signer::active_signer()?;
+    let my_pk = me_pk()?;
+    let at_ms = entry.at_ms();
+    let rumor_id = rumor.id.map(|id| id.to_bytes()).unwrap_or_default();
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let (wrap, _) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(now_ms() / 1000)).await.map_err(|e| e.to_string())?;
+    transport.publish(&wrap, &community.relays).await?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let gate = guestbook_write_gate();
+    let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    // A member's own carried Nickname is the very rumor they first sent, now on this epoch too.
+    match events.iter_mut().find(|e| e.rumor_id == rumor_id) {
+        Some(held) if held.epoch == Some(community.root_epoch.0) => return Ok(()),
+        Some(held) => held.epoch = Some(community.root_epoch.0),
+        None => events.push(guestbook::GuestbookEvent { rumor_id, entry, epoch: Some(community.root_epoch.0), observed_at: Some(at_ms / 1000) }),
+    }
+    crate::db::community::set_guestbook(&cid_hex, &events, cursor)
+}
+
+/// Name `target` in this community (`""` clears it): your own with Change Nickname, a member
+/// beneath you with Manage Nicknames.
+pub async fn set_nickname<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, target: &PublicKey, nick: &str) -> Result<(), String> {
+    crate::db::scoped(async move {
+        assert_current_root(community)?;
+        let nick = clean_nickname(nick)?;
+        let my_pk = me_pk()?;
+        let authority = fetch_authority(transport, community).await;
+        let owner_hex = community.owner()?.to_hex();
+        let mine = *target == my_pk;
+        if !authority.roles.may_name(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex()) {
+            return Err(if mine { "you can't change your nickname here".to_string() } else { "you can only change the nicknames of members beneath you, with Manage Nicknames".to_string() });
+        }
+        if mine {
+            refuse_while_timed_out(community, &my_pk)?;
+        }
+        // Strictly after every Nickname that counts for them, so this one stands even when a
+        // co-moderator's clock runs ahead.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let judge = nickname_judge(community)?;
+        let newest_held = crate::db::community::get_guestbook_standing(&cid_hex)?
+            .iter()
+            .filter_map(|e| match &e.entry {
+                guestbook::GuestbookEntry::Nickname { actor, target: t, citation, at_ms, .. } if t == target && judge(actor, t, citation.as_ref()) => Some(*at_ms),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let at_ms = next_send_ms().max(newest_held.saturating_add(1).min(now_ms() + guestbook::MAX_FUTURE_MS));
+        let citation = if mine { None } else { required_authority_citation(community, &my_pk)? };
+        let rumor = guestbook::build_nickname_rumor(my_pk, *target, &nick, citation.as_ref(), at_ms);
+        let entry = guestbook::GuestbookEntry::Nickname { actor: my_pk, target: *target, nick, citation, at_ms };
+        publish_nickname(transport, community, rumor, entry).await
+    })
+    .await
+}
+
+/// Carry my own Nickname onto the Guestbook a Refounding began, dated as first issued, when the
+/// Refounder didn't. Best-effort; a later sync tries again.
+pub async fn carry_my_nickname<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
+    crate::db::scoped(async move {
+        let my_pk = me_pk()?;
+        let Some(mine) = nicknames_on(community, None)?.remove(&my_pk) else { return Ok(()) };
+        let carried = standing_nicknames(community)?.remove(&my_pk);
+        if carried.is_some_and(|c| c.nick == mine.nick || c.at_ms > mine.at_ms) || !nickname_judge(community)?(&my_pk, &my_pk, None) {
+            return Ok(());
+        }
+        let rumor = guestbook::build_nickname_rumor(my_pk, my_pk, &mine.nick, None, mine.at_ms);
+        let entry = guestbook::GuestbookEntry::Nickname { actor: my_pk, target: my_pk, nick: mine.nick, citation: None, at_ms: mine.at_ms };
+        publish_nickname(transport, community, rumor, entry).await
     })
     .await
 }
@@ -3373,7 +3504,9 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
             ev.epoch = live;
             match by_id.get(&ev.rumor_id) {
                 Some(&i) => {
-                    if events[i].epoch.is_none() {
+                    // A member's carried Nickname is the very rumor they first sent, now on this plane.
+                    let carried = matches!(events[i].entry, guestbook::GuestbookEntry::Nickname { .. }) && events[i].epoch < live;
+                    if events[i].epoch.is_none() || carried {
                         events[i].epoch = live;
                         restamped = true;
                     }
@@ -3489,11 +3622,17 @@ pub fn ingest_guestbook_event(community: &CommunityV2, mut ev: guestbook::Guestb
     let gate = guestbook_write_gate();
     let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
     let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
-    if events.iter().any(|e| e.rumor_id == ev.rumor_id) {
-        return Ok(false);
+    let live = Some(community.root_epoch.0);
+    if let Some(held) = events.iter_mut().find(|e| e.rumor_id == ev.rumor_id) {
+        // A member's carried Nickname is the very rumor they first sent, now on this plane.
+        if !matches!(held.entry, guestbook::GuestbookEntry::Nickname { .. }) || held.epoch >= live {
+            return Ok(false);
+        }
+        held.epoch = live;
+    } else {
+        ev.epoch = live;
+        events.push(ev);
     }
-    ev.epoch = Some(community.root_epoch.0);
-    events.push(ev);
     crate::db::community::set_guestbook(&cid_hex, &events, cursor.max(wrap_secs))?;
     drop(_gate);
     owe_new_departures(community);
@@ -3970,6 +4109,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         // hasn't seen yet isn't undone.
         let _ = sync_guestbook(transport, community).await;
         let running_timeouts = community_timeouts(community).unwrap_or_default();
+        let nicknames = standing_nicknames(community).unwrap_or_default();
 
         // Recipients: the current members minus `removed`, plus me (multi-device).
         //
@@ -4247,6 +4387,17 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                 continue;
             }
             let rumor = guestbook::build_timeout_rumor(my_pk, target, until, citation.as_ref(), from * 1000);
+            if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
+                let _ = transport.publish_durable(&wrap, &community.relays).await;
+            }
+        }
+        // Nicknames someone set for another member, each it could set itself, to the
+        // millisecond. A member's own stands on their own word, so their client carries it.
+        for (target, n) in nicknames {
+            if n.actor == target || target == my_pk || !recipients.contains(&target) || !decided_authority.roles.may_name(&my_pk.to_hex(), Some(&owner_hex), &target.to_hex()) {
+                continue;
+            }
+            let rumor = guestbook::build_nickname_rumor(my_pk, target, &n.nick, citation.as_ref(), n.at_ms);
             if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
                 let _ = transport.publish_durable(&wrap, &community.relays).await;
             }
@@ -29086,6 +29237,312 @@ mod tests {
         });
         crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
         assert!(community_timeouts(&held()).unwrap().contains_key(&m), "an uncited lift lifts nothing");
+    }
+
+    fn nick_of(community: &CommunityV2, who: &PublicKey) -> Option<String> {
+        community_nicknames(community).unwrap().remove(who)
+    }
+
+    /// Forget the local Guestbook and read it back from the relays, as a device that never saw it.
+    async fn reread_guestbook(relay: &MemoryRelay, community: &CommunityV2) {
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_guestbook(&cid_hex, &[], 0).unwrap();
+        sync_guestbook(relay, community).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_member_names_themselves_and_a_moderator_renames_those_beneath() {
+        let (bed, owner, x, community) = v2_bed_with_admin("Names").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_NICKNAMES).await.unwrap();
+        let (y, m) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "  Moth  ").await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Moth"), "a member names themselves, trimmed");
+        assert!(set_nickname(&bed.relay, &held(), &y.public_key(), "Boss").await.is_err(), "and nobody else");
+        assert!(set_nickname(&bed.relay, &held(), &m.public_key(), &"x".repeat(33)).await.is_err(), "in at most 32 characters");
+        act_as(&y);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Moderated").await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Moderated"), "a moderator renames a member beneath them");
+        assert!(set_nickname(&bed.relay, &held(), &x.public_key(), "Demoted").await.is_err(), "never one above");
+        assert!(set_nickname(&bed.relay, &held(), &owner.keys.public_key(), "Nobody").await.is_err(), "nor the owner");
+        act_as(&x);
+        assert!(set_nickname(&bed.relay, &held(), &m.public_key(), "Nope").await.is_err(), "outranking takes Manage Nicknames too");
+        act_as(&owner.keys);
+        let log = audit_log(&bed.relay, &held()).await.unwrap();
+        let renames: Vec<_> = log.entries.iter().filter(|e| e.action == "member_nick_update").collect();
+        assert_eq!(renames.len(), 2, "each change is one entry");
+        assert_eq!(renames[0].actor.as_deref(), Some(nostr_sdk::prelude::ToBech32::to_bech32(&y.public_key()).unwrap().as_str()));
+        assert_eq!(renames[0].changes, vec![serde_json::json!({ "field": "nick", "old": "Moth", "new": "Moderated" })]);
+        reread_guestbook(&bed.relay, &held()).await;
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Moderated"), "a device reading the relays agrees");
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "").await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()), None, "clearing leaves their own name");
+        act_as(&owner.keys);
+    }
+
+    #[tokio::test]
+    async fn on_the_legacy_roster_anyone_names_themselves() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Legacy", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, n) = (Keys::generate(), Keys::generate().public_key());
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Moth").await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Moth"));
+        assert!(set_nickname(&bed.relay, &held(), &n, "Them").await.is_err(), "but only themselves");
+        act_as(&owner.keys);
+    }
+
+    #[tokio::test]
+    async fn a_banned_members_nickname_names_nobody() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("BannedName").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let m = Keys::generate();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Admin").await.unwrap();
+        act_as(&owner.keys);
+        set_members_banned(&bed.relay, community.id(), &[m.public_key()], true).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()), None);
+    }
+
+    #[tokio::test]
+    async fn turning_off_change_nickname_takes_down_the_ones_members_set() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("NoNames").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, n) = (Keys::generate(), Keys::generate().public_key());
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Mine").await.unwrap();
+        act_as(&owner.keys);
+        set_nickname(&bed.relay, &held(), &n, "Given").await.unwrap();
+        set_everyone(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT & !Permissions::CHANGE_NICKNAME).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()), None, "a member's own Nickname stands only while they may set it");
+        assert_eq!(nick_of(&held(), &n).as_deref(), Some("Given"), "one the owner gave stays");
+        act_as(&m);
+        assert!(set_nickname(&bed.relay, &held(), &m.public_key(), "Again").await.is_err());
+        act_as(&owner.keys);
+    }
+
+    #[tokio::test]
+    async fn renaming_someone_else_counts_only_with_the_grant_it_cites() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("NameCited").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_NICKNAMES).await.unwrap();
+        let (y, m) = (Keys::generate(), Keys::generate().public_key());
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&y);
+        set_nickname(&bed.relay, &held(), &m, "Cited").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        events.push(guestbook::GuestbookEvent {
+            rumor_id: [9; 32],
+            entry: guestbook::GuestbookEntry::Nickname { actor: y.public_key(), target: m, nick: "Uncited".into(), citation: None, at_ms: now_ms() + 1_000 },
+            epoch: Some(held().root_epoch.0),
+            observed_at: None,
+        });
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        assert_eq!(nick_of(&held(), &m).as_deref(), Some("Cited"), "an uncited one names nobody");
+        // A co-moderator's clock runs ahead: the next rename still lands after theirs.
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        events.push(guestbook::GuestbookEvent {
+            rumor_id: [10; 32],
+            entry: guestbook::GuestbookEntry::Nickname { actor: _owner.keys.public_key(), target: m, nick: "Ahead".into(), citation: None, at_ms: now_ms() + 600_000 },
+            epoch: Some(held().root_epoch.0),
+            observed_at: None,
+        });
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        assert_eq!(nick_of(&held(), &m).as_deref(), Some("Ahead"));
+        set_nickname(&bed.relay, &held(), &m, "Latest").await.unwrap();
+        assert_eq!(nick_of(&held(), &m).as_deref(), Some("Latest"));
+        // A member nobody lets name m plants one an hour ahead: it moves nobody's next rename.
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        events.push(guestbook::GuestbookEvent {
+            rumor_id: [11; 32],
+            entry: guestbook::GuestbookEntry::Nickname { actor: Keys::generate().public_key(), target: m, nick: "Junk".into(), citation: None, at_ms: now_ms() + 3_500_000 },
+            epoch: Some(held().root_epoch.0),
+            observed_at: None,
+        });
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        set_nickname(&bed.relay, &held(), &m, "Prompt").await.unwrap();
+        let w = &standing_nicknames(&held()).unwrap()[&m];
+        assert_eq!(w.nick, "Prompt");
+        assert!(w.at_ms < now_ms() + 1_000_000, "dated after what counts, not after junk");
+    }
+
+    #[tokio::test]
+    async fn nicknames_cross_a_refounding() {
+        let (bed, owner, x, community) = v2_bed_with_admin("NameCarry").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (m, gone) = (Keys::generate(), Keys::generate().public_key());
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Moth").await.unwrap();
+        let first = standing_nicknames(&held()).unwrap()[&m.public_key()].at_ms;
+        act_as(&owner.keys);
+        set_nickname(&bed.relay, &held(), &x.public_key(), "Given").await.unwrap();
+        set_nickname(&bed.relay, &held(), &gone, "Former").await.unwrap();
+        refound_community(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_ne!(held().root_epoch, community.root_epoch);
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        let named = standing_nicknames(&held()).unwrap();
+        assert_eq!(named.get(&x.public_key()).map(|w| w.nick.as_str()), Some("Given"), "the refounder carried the one it gave");
+        assert!(!named.contains_key(&gone), "but only for a member it re-keyed");
+        assert!(!named.contains_key(&m.public_key()), "a member's own waits for their own client, even on a device that held it");
+        act_as(&m);
+        carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        act_as(&owner.keys);
+        let log = audit_log(&bed.relay, &held()).await.unwrap();
+        let renames: Vec<_> = log.entries.iter().filter(|e| e.action == "member_nick_update").collect();
+        assert_eq!(renames.len(), 3, "what a Refounding carried is no new act");
+        reread_guestbook(&bed.relay, &held()).await;
+        let named = standing_nicknames(&held()).unwrap();
+        assert_eq!(named.get(&m.public_key()).map(|w| (w.nick.as_str(), w.at_ms)), Some(("Moth", first)), "carried, dated as first issued");
+        assert_eq!(named.get(&x.public_key()).map(|w| w.nick.as_str()), Some("Given"));
+    }
+
+    #[tokio::test]
+    async fn a_carried_nickname_reads_the_same_on_every_device_and_goes_out_once() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("CarryOnce").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mods = create_role_v2(&bed.relay, &held(), "Mods", 0, Permissions::MANAGE_NICKNAMES).await.unwrap();
+        let bans = create_role_v2(&bed.relay, &held(), "Bans", 0, Permissions::BAN).await.unwrap();
+        let (y, z, m, t) = (Keys::generate(), Keys::generate(), Keys::generate(), Keys::generate().public_key());
+        set_member_roles(&bed.relay, &held(), &y.public_key(), vec![mods]).await.unwrap();
+        set_member_roles(&bed.relay, &held(), &z.public_key(), vec![bans]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Moth").await.unwrap();
+        act_as(&y);
+        set_nickname(&bed.relay, &held(), &t, "Given").await.unwrap();
+        act_as(&owner.keys);
+        set_everyone(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT & !Permissions::CHANGE_NICKNAME).await.unwrap();
+        set_everyone(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&z);
+        refound_community(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        // Nobody could carry what y gave t: a device that held it and one that never did agree.
+        assert_eq!(nick_of(&held(), &t), None, "a device that held the old Guestbook");
+        act_as(&m);
+        carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        // m's other device holds the first copy, and reads the carried one off the new plane.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        for e in events.iter_mut().filter(|e| matches!(e.entry, guestbook::GuestbookEntry::Nickname { .. })) {
+            e.epoch = Some(community.root_epoch.0);
+        }
+        crate::db::community::set_guestbook(&cid_hex, &events, cursor).unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        let gb = super::super::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch).pk().to_hex();
+        let q = Query { kinds: vec![1059], authors: vec![gb], ..Default::default() };
+        let published = bed.relay.fetch(&q, &held().relays).await.unwrap().len();
+        for _ in 0..2 {
+            carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        }
+        assert_eq!(bed.relay.fetch(&q, &held().relays).await.unwrap().len(), published, "the other device doesn't send it again");
+        act_as(&owner.keys);
+        reread_guestbook(&bed.relay, &held()).await;
+        assert_eq!(nick_of(&held(), &t), None, "a device that never held it");
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Moth"));
+    }
+
+    #[tokio::test]
+    async fn a_carried_nickname_still_stands_on_its_members_own_word() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("CarryWord").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        // A Role with no bits makes m someone the Refounding re-keys, naming themselves on @everyone's bit alone.
+        let plain = create_role_v2(&bed.relay, &held(), "Plain", 0, 0).await.unwrap();
+        let m = Keys::generate();
+        set_member_roles(&bed.relay, &held(), &m.public_key(), vec![plain]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Mine").await.unwrap();
+        act_as(&owner.keys);
+        refound_community(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        sync_guestbook(&bed.relay, &held()).await.unwrap();
+        act_as(&m);
+        carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Mine"));
+        act_as(&owner.keys);
+        set_everyone(&bed.relay, &held(), crate::community::v2::roles::EVERYONE_DEFAULT & !Permissions::CHANGE_NICKNAME).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()), None, "turning Change Nickname off takes it down after a Refounding too");
+    }
+
+    #[tokio::test]
+    async fn a_carried_nickname_heard_live_moves_to_the_new_epoch() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "LiveCarry", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let row = |id: u8, entry: guestbook::GuestbookEntry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(0), observed_at: None };
+        let me = owner.public_key();
+        let nick = guestbook::GuestbookEntry::Nickname { actor: me, target: me, nick: "Boss".into(), citation: None, at_ms: now_ms() - 1_000 };
+        let join = guestbook::GuestbookEntry::Join { member: me, invited_by: None, at_ms: now_ms() - 2_000 };
+        crate::db::community::set_guestbook(&cid_hex, &[row(1, nick.clone()), row(2, join.clone())], 0).unwrap();
+        let mut moved = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        moved.root_epoch = Epoch(1);
+        assert!(ingest_guestbook_event(&moved, row(1, nick.clone()), now_ms() / 1000).unwrap(), "the same Nickname on the new plane");
+        assert!(!ingest_guestbook_event(&moved, row(1, nick), now_ms() / 1000).unwrap(), "once");
+        assert!(!ingest_guestbook_event(&moved, row(2, join), now_ms() / 1000).unwrap(), "a Join keeps the plane it was first read on");
+        let (events, _) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        assert_eq!(events.iter().map(|e| e.epoch).collect::<Vec<_>>(), vec![Some(1), Some(0)]);
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_member_cant_rename_themselves() {
+        let (bed, owner, _x, community) = v2_bed_with_admin("NameTimeout").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let m = Keys::generate();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Before").await.unwrap();
+        act_as(&owner.keys);
+        timeout_member(&bed.relay, &held(), &m.public_key(), 600).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()), None, "their own names nobody while it runs");
+        act_as(&m);
+        let err = set_nickname(&bed.relay, &held(), &m.public_key(), "Taunt").await.unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        act_as(&owner.keys);
+        timeout_member(&bed.relay, &held(), &m.public_key(), 0).await.unwrap();
+        assert_eq!(nick_of(&held(), &m.public_key()).as_deref(), Some("Before"), "and stands again once it's lifted");
+    }
+
+    #[tokio::test]
+    async fn a_member_carries_their_own_nickname_when_the_refounder_cant() {
+        let (bed, _owner, _x, community) = v2_bed_with_admin("SelfCarry").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bans = create_role_v2(&bed.relay, &held(), "Bans", 0, Permissions::BAN).await.unwrap();
+        let (z, m) = (Keys::generate(), Keys::generate());
+        set_member_roles(&bed.relay, &held(), &z.public_key(), vec![bans]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        act_as(&m);
+        set_nickname(&bed.relay, &held(), &m.public_key(), "Moth").await.unwrap();
+        let first = standing_nicknames(&held()).unwrap()[&m.public_key()].at_ms;
+        act_as(&z);
+        refound_community(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_ne!(held().root_epoch, community.root_epoch);
+        act_as(&m);
+        // The Refounder holds no Manage Nicknames: m's own device carries it.
+        carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        let gb = super::super::derive::guestbook_group_key(&held().community_root, community.id(), held().root_epoch).pk().to_hex();
+        let q = Query { kinds: vec![1059], authors: vec![gb], ..Default::default() };
+        let published = bed.relay.fetch(&q, &held().relays).await.unwrap().len();
+        carry_my_nickname(&bed.relay, &held()).await.unwrap();
+        assert_eq!(bed.relay.fetch(&q, &held().relays).await.unwrap().len(), published, "carried once");
+        reread_guestbook(&bed.relay, &held()).await;
+        let named = standing_nicknames(&held()).unwrap();
+        assert_eq!(named.get(&m.public_key()).map(|w| (w.nick.as_str(), w.at_ms)), Some(("Moth", first)), "dated as first issued");
     }
 
     async fn invites_to(relay: &MemoryRelay, community: &CommunityV2, pk: &PublicKey) -> usize {

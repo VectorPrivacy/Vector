@@ -53,8 +53,11 @@ impl Permissions {
     pub const MOVE_MEMBERS: u64 = 1 << 25;
     /// Timeouts (CORD-04 §6).
     pub const MODERATE_MEMBERS: u64 = 1 << 26;
-    // 1 << 27 ..= 1 << 31 reserved: BYPASS_SLOWMODE, MANAGE_NICKNAMES, CHANGE_NICKNAME,
-    // CREATE_PRIVATE_THREADS, MANAGE_THREADS.
+    /// Name members beneath them (CORD-04 §10).
+    pub const MANAGE_NICKNAMES: u64 = 1 << 28;
+    /// Name themselves (CORD-04 §10).
+    pub const CHANGE_NICKNAME: u64 = 1 << 29;
+    // 1 << 27, 1 << 30 and 1 << 31 reserved: BYPASS_SLOWMODE, CREATE_PRIVATE_THREADS, MANAGE_THREADS.
     // Reserved / retired (claim the bit so it's never reassigned):
     // `1 << 7` was MANAGE_INVITES — RETIRED (per-creator ownership: no one can manage another's
     // links, so there is nothing to grant; `CREATE_INVITE` mints your own, `BAN` owns the revoking rekey).
@@ -460,6 +463,16 @@ impl CommunityRoles {
         }
         let target_position = self.highest_position(target_hex).unwrap_or(u32::MAX);
         self.can_act_on_position(actor_hex, owner_hex, target_position, permission)
+    }
+
+    /// May `actor_hex` set `target_hex`'s Nickname (CORD-04 §10)? Their own takes `CHANGE_NICKNAME`,
+    /// `@everyone`'s included, and a legacy Roster restricts nobody's; anyone else's takes
+    /// `MANAGE_NICKNAMES` and a strict outrank.
+    pub fn may_name(&self, actor_hex: &str, owner_hex: Option<&str>, target_hex: &str) -> bool {
+        if actor_hex != target_hex {
+            return self.can_act_on_member(actor_hex, owner_hex, target_hex, Permissions::MANAGE_NICKNAMES);
+        }
+        owner_hex == Some(actor_hex) || self.everyone.is_none() || self.has_permission(actor_hex, Permissions::CHANGE_NICKNAME)
     }
 
     // ── Private-Channel entitlement (CORD-03/04/06) ──────────────────────────

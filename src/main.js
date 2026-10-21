@@ -30,12 +30,18 @@ function streamHidden(profileOrId) {
 }
 
 /** The one true display-name resolver. Accepts a profile object or an npub/id string.
- *  Order: local nickname → Nostr name → Nostr display_name → shortened npub. */
-function getName(profileOrId) {
+ *  Order: local nickname → their nickname in `communityId` → Nostr name → Nostr display_name
+ *  → shortened npub. */
+function getName(profileOrId, communityId = null) {
     if (streamHidden(profileOrId)) return STREAM_DOTS;
     const p = typeof profileOrId === 'string' ? getProfile(profileOrId) : profileOrId;
     const id = typeof profileOrId === 'string' ? profileOrId : p?.id;
-    return p?.nickname || p?.name || p?.display_name || (id ? id.substring(0, 12) + '…' : 'Someone');
+    return p?.nickname || VectorSvelte.communityNickname(communityId, id) || p?.name || p?.display_name || (id ? id.substring(0, 12) + '…' : 'Someone');
+}
+
+/** A name as the open chat shows it: a community channel uses that community's nicknames. */
+function chatName(profileOrId) {
+    return getName(profileOrId, communityIdOfChat(getChat(strOpenChat)));
 }
 
 /** The real name for a search filter to match, '' when there is none. Never displayed:
@@ -113,11 +119,6 @@ function nprofileNpub(nprofile) {
     return '';
 }
 
-/** Resolve a system-event actor's display name from cached profiles; npub-prefix fallback. */
-function systemEventName(npub) {
-    return getName(npub);
-}
-
 /** The non-name part of a system-event line (" has joined", etc.). Split from the name so the
  * in-chat render can make the name a clickable profile affordance while keeping the rest plain. */
 function systemEventSuffix(eventType) {
@@ -135,8 +136,8 @@ function systemEventSuffix(eventType) {
 /** Build a system-event line, resolving the actor's CURRENT cached name (the stored content
  * was baked with the raw npub at receive time, before the profile was known). Plain-string form
  * for notifications and chatlist previews; the in-chat row renders the clickable name. */
-function systemEventContent(eventType, npub) {
-    return systemEventName(npub) + systemEventSuffix(eventType);
+function systemEventContent(eventType, npub, communityId = null) {
+    return getName(npub, communityId) + systemEventSuffix(eventType);
 }
 
 /**
@@ -955,14 +956,17 @@ function paintRenderedNames(npub) {
     for (const el of document.querySelectorAll(
         [sel('.dmsg-author'), sel('.dmsg-command-author'), sel('.dmsg-command-bot')].join(', ')
     )) {
-        el.textContent = getName(el.dataset.npub);
+        el.textContent = chatName(el.dataset.npub);
         twemojify(el);
     }
     // System-event lines phrase the name their own way ("X has joined"), so
     // they take the same treatment through their own formatter.
     for (const el of document.querySelectorAll(sel('.system-event-name'))) {
-        el.textContent = systemEventName(el.dataset.npub);
+        el.textContent = chatName(el.dataset.npub);
         twemojify(el);
+    }
+    for (const el of document.querySelectorAll(sel('.mention'))) {
+        el.textContent = '@' + getName(el.dataset.npub, el.dataset.community || null);
     }
 }
 
@@ -973,9 +977,6 @@ function paintRenderedNames(npub) {
  */
 function streamerChanged() {
     paintRenderedNames(null);
-    for (const el of document.querySelectorAll('.mention[data-npub]')) {
-        el.textContent = '@' + getName(el.dataset.npub);
-    }
     for (const chat of arrChats) {
         for (const m of chat.messages || []) {
             if (m.system_event?.member_npub) m.content = systemEventContent(m.system_event.event_type, m.system_event.member_npub);
@@ -1521,14 +1522,14 @@ async function fetchProfiles() {
  * @param {string} text
  * @returns {string}
  */
-function resolveMentionText(text) {
+function resolveMentionText(text, communityId = null) {
     if (!text) return text;
     // Same shapes renderMentions pills: @-, nostr:-prefixed, or bare npubs.
     return text.replace(/(?<![\w/=?&#%.-])(?:@|nostr:)?(npub1[a-z0-9]{58})\b/g, (full, npub) => {
         if (streamHidden(npub)) return '@' + STREAM_DOTS;
         const profile = getProfile(npub);
         if (profile) {
-            return '@' + getName(npub);
+            return '@' + getName(npub, communityId);
         }
         return full;
     });
