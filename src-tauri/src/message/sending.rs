@@ -184,9 +184,8 @@ impl SendCallback for TauriSendCallback {
 pub struct MessageDeleteOptions {
     /// User's own message — always shown a trash icon.
     pub mine: bool,
-    /// Retained ephemeral wrap key exists, so we can do a true
-    /// relay-level nuke (Layer 1). False on older messages or
-    /// messages sent from a different device.
+    /// The delete is whole: always for a DM (our own copies with our own key, a hide request for
+    /// the recipient's); for a Community message, only with its retained key.
     pub has_retained_keys: bool,
     /// Message has at least one Blossom-uploaded attachment we can
     /// delete from the storage server even without retained wrap keys.
@@ -311,13 +310,9 @@ async fn resolve_delete_options(
         };
 
         let has_retained_keys = if ctx.mine {
-            // A malformed hex id can't be a retained DM rumor: confident false, not an error.
-            let dm_keys = || -> Result<bool, String> {
-                match EventId::from_hex(&id) {
-                    Ok(rid) => vector_core::db::nip17_keys::has_wrap_keys_for_rumor(&rid),
-                    Err(_) => Ok(false),
-                }
-            };
+            // Every DM delete takes the same path, retained key or not. A malformed hex id
+            // can't be a DM rumor: confident false, not an error.
+            let dm_keys = || -> Result<bool, String> { Ok(EventId::from_hex(&id).is_ok()) };
             // Community channels retain a per-message ephemeral key on send; its presence
             // is exactly "can we do a real NIP-09 network delete" (full vs limited).
             let community_keys =

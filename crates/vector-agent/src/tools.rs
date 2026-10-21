@@ -25,6 +25,12 @@ pub struct SendDmRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MessageIdRequest {
+    #[schemars(description = "The message id (hex)")]
+    pub message_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendFileRequest {
     #[schemars(description = "Recipient's npub")]
     pub to_npub: String,
@@ -428,9 +434,18 @@ impl VectorAgent {
     #[tool(description = "Send an encrypted direct message (NIP-17 gift-wrapped DM) to a Nostr user")]
     async fn send_dm(&self, Parameters(req): Parameters<SendDmRequest>) -> Result<CallToolResult, McpError> {
         match self.core.send_dm(&req.to_npub, &req.content).await {
-            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
-                format!("DM sent to {}", &req.to_npub[..20.min(req.to_npub.len())])
-            )])),
+            Ok(sent) => Ok(CallToolResult::success(vec![Content::text(match sent.event_id {
+                Some(id) => format!("DM sent to {} (message id {id})", &req.to_npub[..20.min(req.to_npub.len())]),
+                None => format!("DM sent to {}", &req.to_npub[..20.min(req.to_npub.len())]),
+            })])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Delete a DM you sent, from the network: your own copies at once, and a hide request that asks the recipient's Vector clients to drop it and delete theirs.")]
+    async fn delete_dm(&self, Parameters(req): Parameters<MessageIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.delete_dm(&req.message_id).await {
+            Ok(outcome) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&outcome).unwrap_or_default())])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }

@@ -676,6 +676,46 @@ pub fn add_message_tombstone(event_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The most hide requests held for messages not met yet.
+const MAX_PENDING_DELETIONS: i64 = 10_000;
+
+/// Hold a hide request from `requester` (hex) for `target`, a message this device hasn't met,
+/// until `expires_at` (unix secs). Only the oldest beyond the cap are let go.
+pub fn park_pending_deletion(target: &str, requester: &str, expires_at: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    conn.execute(
+        "INSERT OR REPLACE INTO pending_deletions (target, requester, expires_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![target, requester, expires_at as i64],
+    )
+    .map_err(|e| format!("Failed to hold a pending deletion: {}", e))?;
+    conn.execute(
+        "DELETE FROM pending_deletions WHERE expires_at <= ?1 OR target NOT IN \
+         (SELECT target FROM pending_deletions ORDER BY expires_at DESC LIMIT ?2)",
+        rusqlite::params![now, MAX_PENDING_DELETIONS],
+    )
+    .map_err(|e| format!("Failed to prune pending deletions: {}", e))?;
+    Ok(())
+}
+
+/// Who asked, while it still stands, for `target` to be deleted before it arrived. Taken: it
+/// answers once.
+pub fn take_pending_deletion(target: &str) -> Option<String> {
+    // Read first: every message a sync brings asks, and almost none is held.
+    let (requester, expires_at) = super::get_db_connection_guard_static()
+        .ok()?
+        .prepare_cached("SELECT requester, expires_at FROM pending_deletions WHERE target = ?1")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![target], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))))
+        .optional()
+        .ok()
+        .flatten()?;
+    if let Ok(conn) = super::get_write_connection_guard_static() {
+        let _ = conn.execute("DELETE FROM pending_deletions WHERE target = ?1", rusqlite::params![target]);
+    }
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    (expires_at > now).then_some(requester)
+}
+
 /// Every recorded delete tombstone, for seeding the in-session set at account init.
 pub fn load_message_tombstones() -> Result<Vec<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
@@ -779,6 +819,16 @@ pub fn wrapper_event_exists(wrapper_event_id: &str) -> Result<bool, String> {
     conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM events WHERE wrapper_event_id = ?1)")
         .and_then(|mut stmt| stmt.query_row(rusqlite::params![wrapper_event_id], |row| row.get(0)))
         .map_err(|e| format!("Failed to check wrapper event existence: {}", e))
+}
+
+/// The gift wrap that carried event `event_id` to this account, when it was read off a relay.
+pub fn wrapper_event_id_of(event_id: &str) -> Option<nostr_sdk::prelude::EventId> {
+    let conn = super::get_db_connection_guard_static().ok()?;
+    let hex: Option<String> = conn
+        .prepare_cached("SELECT wrapper_event_id FROM events WHERE id = ?1")
+        .and_then(|mut stmt| stmt.query_row(rusqlite::params![event_id], |row| row.get(0)))
+        .ok()?;
+    nostr_sdk::prelude::EventId::from_hex(&hex?).ok()
 }
 
 /// The community wraps among `wrapper_event_ids` whose message is stored with nothing left to

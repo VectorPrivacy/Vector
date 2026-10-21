@@ -422,12 +422,12 @@ async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     }
 
     // Three flows behind one button:
-    //   delete (full)    = own message + retained keys: real
-    //                      delete-from-network (NIP-09 against retained
-    //                      wraps + cooperative-hide + Blossom blob delete)
-    //   delete (partial) = own message, no retained keys: cooperative-hide
-    //                      + Blossom blob delete + local hide. The relay
-    //                      copy of the encrypted wrapper persists. Popup
+    //   delete (full)    = own DM: our copies leave the relays, a hide request
+    //                      asks the recipient's Vector clients to drop theirs,
+    //                      attachments leave Blossom. Own Community message
+    //                      with its retained key: a real network delete.
+    //   delete (partial) = own Community message without that key: a hide
+    //                      request + Blossom delete + local hide. Popup
     //                      explains why.
 
     // delete branch

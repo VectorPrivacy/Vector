@@ -286,10 +286,8 @@ async fn resolve_delete_options(message_ids: &[String]) -> HashMap<String, Messa
         };
 
         let has_retained_keys = if ctx.mine {
-            let dm_keys = || match EventId::from_hex(&id) {
-                Ok(rid) => db::nip17_keys::has_wrap_keys_for_rumor(&rid),
-                Err(_) => Ok(false),
-            };
+            // Every DM delete takes the same path, retained key or not.
+            let dm_keys = || -> Result<bool, String> { Ok(EventId::from_hex(&id).is_ok()) };
             let community_keys = || db::community::get_message_key(&id).map(|k| k.is_some());
             let checked = match ctx.chat_type {
                 Some(ChatType::DirectMessage) => dm_keys(),

@@ -1161,7 +1161,7 @@ impl VectorCore {
         .await
     }
 
-    /// Delete a DM you sent (NIP-09 over the retained gift-wrap keys).
+    /// Delete a DM you sent from the network (see [`deletion::delete_own_dm`]).
     pub async fn delete_dm(&self, message_id: &str) -> Result<deletion::DeleteOutcome> {
         use nostr_sdk::prelude::*;
         let rumor_id = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;

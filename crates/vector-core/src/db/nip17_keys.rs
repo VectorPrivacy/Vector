@@ -1,10 +1,10 @@
 //! NIP-17 ephemeral wrap-key vault.
 //!
 //! NIP-59 gift-wraps each DM with a fresh ephemeral keypair whose secret
-//! is normally discarded immediately after signing. We retain it so the
-//! user can later publish an author-signed NIP-09 deletion against the
-//! kind-1059 wrap event — actually removing the message from inbox
-//! relays rather than relying on "throw the keys away and hope".
+//! is normally discarded immediately after signing. We retain it so a delete
+//! can also send an author-signed NIP-09 deletion for the recipient's copies:
+//! best-effort, since a relay following NIP-59 honours only the `p`-tagged
+//! owner (see `deletion`).
 //!
 //! With Local Encryption on, the retained rumor of an unconfirmed send (the
 //! message itself) is sealed at rest. The ephemeral secrets are not: they open
@@ -45,8 +45,7 @@ pub struct StoredWrapKey {
     pub recipient_pubkey: PublicKey,
     pub role: WrapRole,
     pub secret: SecretKey,
-    /// Relay URLs we attempted at send time. Deletion publishes the
-    /// author-signed NIP-09 back to this same set.
+    /// Relay URLs we attempted at send time.
     pub relay_urls: Vec<String>,
 }
 

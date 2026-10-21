@@ -713,6 +713,8 @@ mod revoked_reaction_tests {
 
     #[tokio::test]
     async fn a_revoked_reaction_is_refused_under_any_wrapper() {
+        // The deleted set lives on the session, which a test switching accounts would move.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let id = "7".repeat(64);
         let reaction = crate::types::Reaction {
             id: id.clone(),
@@ -722,7 +724,137 @@ mod revoked_reaction_tests {
             emoji_url: None,
         };
         crate::state::note_message_deleted(&id);
-        assert!(!commit_reaction(reaction, "contact", false, "any-wrapper", &NoOpEventHandler).await);
+        let wrap = EventId::from_byte_array([8; 32]);
+        assert!(!commit_reaction(reaction, "contact", false, &wrap.to_hex(), &NoOpEventHandler).await);
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "and that wrap leaves the relays");
+    }
+}
+
+#[cfg(test)]
+mod received_wrap_deletion_tests {
+    use super::*;
+
+    fn fresh_account() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        std::fs::create_dir_all(crate::db::shared_test_data_dir().join(&account)).unwrap();
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        guard
+    }
+
+    #[tokio::test]
+    async fn an_honoured_hide_request_deletes_the_wrap_that_brought_the_message() {
+        let _guard = fresh_account();
+        let (peer, stranger) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let contact = peer.to_bech32().unwrap();
+        let wrap = EventId::from_byte_array([5; 32]);
+        let msg = crate::types::Message {
+            id: "a".repeat(64),
+            content: "hi".into(),
+            at: 1_700_000_000_000,
+            wrapper_event_id: Some(wrap.to_hex()),
+            ..Default::default()
+        };
+        crate::db::events::save_message(&contact, &msg).await.unwrap();
+        crate::state::STATE.lock().await.add_message_to_participant(&contact, &msg);
+        assert!(!commit_deletion(&msg.id, &contact, &stranger, &NoOpEventHandler).await, "only its author asks");
+        assert!(!crate::deletion::pending_received_wrap_deletions().contains(&wrap));
+        assert!(commit_deletion(&msg.id, &contact, &peer, &NoOpEventHandler).await);
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "our copy leaves the relays too");
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn an_honoured_reaction_revocation_deletes_the_wrap_that_brought_it() {
+        let _guard = fresh_account();
+        let peer = Keys::generate().public_key();
+        let contact = peer.to_bech32().unwrap();
+        let msg = crate::types::Message { id: "c".repeat(64), content: "hi".into(), at: 1_700_000_000_000, mine: true, ..Default::default() };
+        crate::db::events::save_message(&contact, &msg).await.unwrap();
+        let reaction = crate::types::Reaction { id: "d".repeat(64), reference_id: msg.id.clone(), author_id: contact.clone(), emoji: "+".into(), emoji_url: None };
+        let wrap = EventId::from_byte_array([4; 32]);
+        let chat_id = crate::db::id_cache::get_or_create_chat_id(&contact).unwrap();
+        crate::db::events::save_reaction_event(&reaction, chat_id, None, false, Some(wrap.to_hex())).await.unwrap();
+        {
+            let mut state = crate::state::STATE.lock().await;
+            state.add_message_to_participant(&contact, &msg);
+            state.add_reaction_to_message(&msg.id, reaction.clone());
+        }
+        assert!(commit_reaction_deletion(&reaction.id, &peer).await);
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn a_hide_request_reaches_a_message_no_longer_in_memory() {
+        let _guard = fresh_account();
+        let peer = Keys::generate().public_key();
+        let contact = peer.to_bech32().unwrap();
+        let wrap = EventId::from_byte_array([2; 32]);
+        let msg = crate::types::Message { id: "e".repeat(64), content: "old".into(), at: 1_600_000_000_000, wrapper_event_id: Some(wrap.to_hex()), ..Default::default() };
+        crate::db::events::save_message(&contact, &msg).await.unwrap();
+        assert!(commit_deletion(&msg.id, &contact, &peer, &NoOpEventHandler).await, "stored, if not in memory");
+        assert!(!crate::db::events::event_exists(&msg.id).unwrap());
+        assert!(crate::state::was_message_deleted(&msg.id));
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn a_hide_request_that_comes_first_waits_for_its_message() {
+        let _guard = fresh_account();
+        let (peer, stranger) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let contact = peer.to_bech32().unwrap();
+        let (early, forged) = ("1".repeat(64), "2".repeat(64));
+        hold_deletion_until_met(&early, &peer).await;
+        hold_deletion_until_met(&forged, &stranger).await;
+        let wrap = [3u8; 32];
+        let msg = |id: &str| crate::types::Message { id: id.into(), content: "x".into(), at: 1_700_000_000_000, ..Default::default() };
+        assert!(!commit_dm_message(msg(&early), &contact, false, true, &crate::simd::hex::bytes_to_hex_32(&wrap), wrap, 1_700_000_000, &NoOpEventHandler, false).await, "its author asked first");
+        assert!(crate::state::was_message_deleted(&early));
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&EventId::from_byte_array(wrap)));
+        let other = [4u8; 32];
+        assert!(commit_dm_message(msg(&forged), &contact, false, true, &crate::simd::hex::bytes_to_hex_32(&other), other, 1_700_000_000, &NoOpEventHandler, false).await, "nobody else's request takes it down");
+        // One left waiting past its hide request's life is let go.
+        crate::db::get_write_connection_guard_static().unwrap()
+            .execute("INSERT INTO pending_deletions (target, requester, expires_at) VALUES (?1, ?2, 1)", rusqlite::params!["7".repeat(64), peer.to_hex()])
+            .unwrap();
+        assert!(crate::db::events::take_pending_deletion(&"7".repeat(64)).is_none());
+        // A target already here is the live path's, never held.
+        let held = "5".repeat(64);
+        crate::db::events::save_message(&contact, &msg(&held)).await.unwrap();
+        hold_deletion_until_met(&held, &stranger).await;
+        assert!(crate::db::events::take_pending_deletion(&held).is_none());
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn a_reaction_revoked_before_it_arrived_never_lands() {
+        let _guard = fresh_account();
+        let author = Keys::generate().public_key();
+        let reaction = crate::types::Reaction { id: "6".repeat(64), reference_id: "m".into(), author_id: author.to_bech32().unwrap(), emoji: "+".into(), emoji_url: None };
+        hold_deletion_until_met(&reaction.id, &author).await;
+        let wrap = EventId::from_byte_array([1; 32]);
+        assert!(!commit_reaction(reaction.clone(), "contact", false, &wrap.to_hex(), &NoOpEventHandler).await);
+        assert!(crate::state::was_message_deleted(&reaction.id));
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap));
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn a_deleted_message_met_again_takes_that_wrap_down_too() {
+        let _guard = fresh_account();
+        let contact = Keys::generate().public_key().to_bech32().unwrap();
+        let msg = crate::types::Message { id: "b".repeat(64), content: "gone".into(), at: 1_700_000_000_000, ..Default::default() };
+        crate::state::note_message_deleted(&msg.id);
+        let another = [6u8; 32];
+        assert!(!commit_dm_message(msg, &contact, false, true, &crate::simd::hex::bytes_to_hex_32(&another), another, 1_700_000_000, &NoOpEventHandler, false).await);
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&EventId::from_byte_array(another)));
+        crate::db::close_database();
     }
 }
 
@@ -918,10 +1050,13 @@ pub async fn commit_prepared_event(
                     // A deletion targets a message OR a reaction (both event ids,
                     // never colliding). Try the message path; if it's not a known
                     // message, treat it as a reaction revocation.
-                    if commit_deletion(&target_event_id, &contact, &sender, handler).await {
+                    if commit_deletion(&target_event_id, &contact, &sender, handler).await
+                        || commit_reaction_deletion(&target_event_id, &sender).await
+                    {
                         true
                     } else {
-                        commit_reaction_deletion(&target_event_id, &sender).await
+                        hold_deletion_until_met(&target_event_id, &sender).await;
+                        false
                     }
                 }
                 RumorProcessingResult::Ignored => false,
@@ -1037,7 +1172,21 @@ async fn commit_dm_message(
     // the deleted rumor. Ledger the wrap so it stops re-delivering.
     if crate::state::was_message_deleted(&msg.id) {
         ledger_wrapper();
+        crate::deletion::delete_received_wrap(nostr_sdk::prelude::EventId::from_byte_array(wrapper_event_id_bytes));
         return false;
+    }
+    // Its author asked for it gone before it got here: it lands deleted.
+    if let Some(requester) = crate::db::events::take_pending_deletion(&msg.id) {
+        let author = if msg.mine { crate::state::my_public_key() } else { PublicKey::from_bech32(contact).ok() };
+        if author.is_some_and(|a| a.to_hex() == requester) {
+            crate::state::note_message_deleted(&msg.id);
+            if let Err(e) = crate::db::events::add_message_tombstone(&msg.id) {
+                crate::log_warn!("[NIP-17 cooperative-delete] tombstone write failed: {}", e);
+            }
+            ledger_wrapper();
+            crate::deletion::delete_received_wrap(nostr_sdk::prelude::EventId::from_byte_array(wrapper_event_id_bytes));
+            return false;
+        }
     }
 
     // Dedup: check if message already in DB
@@ -1122,7 +1271,19 @@ async fn commit_reaction(
     handler: &dyn InboundEventHandler,
 ) -> bool {
     // A revoked reaction can come back under a new wrapper id; its own id is the stable key.
-    if crate::state::was_message_deleted(&reaction.id) {
+    let revoked_early = || {
+        let requester = crate::db::events::take_pending_deletion(&reaction.id)?;
+        let author = PublicKey::parse(&reaction.author_id).ok()?;
+        (author.to_hex() == requester).then_some(())
+    };
+    if crate::state::was_message_deleted(&reaction.id) || revoked_early().is_some() {
+        crate::state::note_message_deleted(&reaction.id);
+        if let Err(e) = crate::db::events::add_message_tombstone(&reaction.id) {
+            crate::log_warn!("[reaction-delete] tombstone write failed: {}", e);
+        }
+        if let Ok(wrap) = nostr_sdk::prelude::EventId::from_hex(wrapper_event_id) {
+            crate::deletion::delete_received_wrap(wrap);
+        }
         return false;
     }
 
@@ -1220,12 +1381,17 @@ async fn commit_deletion(
     // is between two parties, so the author is implicit from `mine`
     // (me if true, chat counterpart if false). We derive the original
     // author from that, since the rumor pubkey isn't stored.
-    let (mine, chat_id) = {
+    let in_memory = {
         let state = crate::state::STATE.lock().await;
-        match state.find_message(target_event_id) {
-            Some((chat, msg)) => (msg.mine, chat.id.clone()),
+        state.find_message(target_event_id).map(|(chat, msg)| (msg.mine, chat.id.clone()))
+    };
+    // Memory holds only recent messages; an older one is still ours to drop.
+    let (mine, chat_id, stored) = match in_memory {
+        Some((mine, chat_id)) => (mine, chat_id, None),
+        None => match crate::db::events::get_message_by_id(target_event_id).await.ok().flatten() {
+            Some((chat_id, msg)) => (msg.mine, chat_id, Some(msg)),
             None => return false,
-        }
+        },
     };
 
     // Authorization: deletion sender must match the original author.
@@ -1257,14 +1423,17 @@ async fn commit_deletion(
         return false;
     }
 
+    // The wrap that brought it here is ours to delete: it is addressed to us.
+    let carried = crate::db::events::wrapper_event_id_of(target_event_id);
+
     // Drop from in-memory state.
     let removed = {
         let mut state = crate::state::STATE.lock().await;
         state.remove_message(target_event_id)
     };
-    let removed_msg = match removed {
-        Some((_chat_id, msg)) => msg,
-        None => return false,
+    let removed_msg = match (removed, stored) {
+        (Some((_, msg)), _) | (None, Some(msg)) => msg,
+        (None, None) => return false,
     };
     // Tombstone BEFORE the row delete: the target may sit unflushed in a sync batch buffer
     // (delete_event below would no-op) — the flush consults this and drops it. The durable
@@ -1297,6 +1466,9 @@ async fn commit_deletion(
             target_event_id, e
         );
     }
+    if let Some(wrap) = carried {
+        crate::deletion::delete_received_wrap(wrap);
+    }
 
     // Tell the frontend to fade the row out. Reuses the existing
     // message_removed event handled in main.js, so no new wiring.
@@ -1312,6 +1484,33 @@ async fn commit_deletion(
     handler.on_message_deleted(&chat_id, target_event_id);
     let _ = contact;
     true
+}
+
+/// Hold a hide request for a target this device hasn't met: wraps are backdated, so a sync
+/// can bring it before what it names. It only ever takes down something `sender` wrote.
+async fn hold_deletion_until_met(target: &str, sender: &PublicKey) {
+    if deletion_target_known(target).await {
+        return;
+    }
+    let expires = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_add(crate::deletion::COOPERATIVE_HIDE_EXPIRY_SECS);
+    if let Err(e) = crate::db::events::park_pending_deletion(target, &sender.to_hex(), expires) {
+        crate::log_warn!("[NIP-17 cooperative-delete] {}", e);
+    }
+}
+
+/// Whether this device holds `target`, as a message or a reaction, in memory or stored.
+async fn deletion_target_known(target: &str) -> bool {
+    {
+        let state = crate::state::STATE.lock().await;
+        if state.find_message(target).is_some() || state.find_reaction(target).is_some() {
+            return true;
+        }
+    }
+    crate::db::events::event_exists(target).unwrap_or(true)
 }
 
 /// Apply a cooperative reaction revocation (NIP-09 k=7) from the reaction's
@@ -1356,8 +1555,12 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
 
     // save_message is additive for reactions, so the kind-7 row must be
     // dropped explicitly or it resurrects on reload.
+    let carried = crate::db::events::wrapper_event_id_of(target_reaction_id);
     if let Err(e) = crate::db::events::delete_event(target_reaction_id).await {
         eprintln!("[reaction-delete] DB delete failed for {}: {}", target_reaction_id, e);
+    }
+    if let Some(wrap) = carried {
+        crate::deletion::delete_received_wrap(wrap);
     }
 
     crate::traits::emit_message_update(&chat_id, &message_id, &mut message).await;

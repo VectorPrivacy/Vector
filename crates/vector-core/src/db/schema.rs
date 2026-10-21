@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 111;
+pub const HIGHEST_MIGRATION_ID: u32 = 112;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1546,6 +1546,20 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_audit_local_community ON community_audit_local(community_id, at_ms);",
         )
         .map_err(|e| format!("migration 111: {e}"))?;
+        Ok(())
+    })?;
+
+    // A hide request for a message this device hasn't met yet: gift wraps are backdated, so a
+    // sync can bring it before the message it names. Held until that message arrives.
+    run_atomic_migration(conn, 112, "Pending DM deletions", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_deletions (
+                target     TEXT PRIMARY KEY,
+                requester  TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| format!("migration 112: {e}"))?;
         Ok(())
     })?;
 

@@ -1,33 +1,41 @@
-//! Message deletion — Vector's "delete from network" capability.
+//! Message deletion: Vector's "delete from network" for DMs.
 //!
-//! NIP-17 DMs are wrapped in kind-1059 gift-wrap events signed by an
-//! ephemeral key. The standard NIP-59 implementation discards that key
-//! after signing, making the wrap permanently un-deletable: privacy by
-//! obscurity, since the wrap continues to sit on inbox relays
-//! decryptable by anyone with the recipient key.
+//! A NIP-17 DM travels as kind-1059 gift wraps, each signed by a single-use key and `p`-tagged
+//! to the one person who can open it. A relay honours a deletion of a wrap only from that
+//! `p`-tagged owner (NIP-59; CORD-01 §Deletions). A Concord plane shares one wrap key among all
+//! its members, so a deletion signed by a wrap's author would let any of them wipe the plane:
+//! Vector's relay refuses those, as every relay serving Concord should. A relay also refuses a
+//! vanish request (NIP-62) from a key that has written wraps, for the same reason.
 //!
-//! Vector retains the ephemeral key (see `db::nip17_keys`) so that on
-//! user request we can publish an author-signed NIP-09 deletion against
-//! every wrap and have relays drop it. Privacy by control.
+//! So each side deletes the copies addressed to itself:
+//! - The sender deletes its own self-copies with its own key, at once.
+//! - A hide request (a kind-5 rumor gift-wrapped to the recipient and to self, its wrap
+//!   expiring after 30 days) asks every other device to drop the message and delete the copy
+//!   it was sent the same way. A client that ignores it keeps the message.
+//! - A device that later meets any other wrap of a deleted message deletes that one too, and
+//!   one whose hide request came before the message holds it until the message arrives.
 //!
-//! Scope: this module deletes the user's **own** outbound messages. It
-//! does not (and cannot) delete messages sent by others — those wraps
-//! were signed by ephemeral keys we never held.
+//! Every wrap whose single-use key we kept (`db::nip17_keys`) also gets an author-signed
+//! deletion, best-effort: a relay still honouring those drops the recipient's copy even when
+//! their client never will, and our own on a relay that ignores the owner. On a relay that
+//! follows the spec it changes nothing.
 
 use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
-use crate::inbox_relays::{get_publish_tracker, send_gift_wrap};
+use crate::inbox_relays::{get_publish_tracker, resolve_gift_wrap_targets, send_gift_wrap, teardown_gift_wrap_targets};
 use crate::state::{my_public_key, nostr_client};
 
-/// Cooperative-hide notice expiry: 30 days. After this window relays
-/// drop the gift-wrap (NIP-40) and clients that come online later won't
-/// see the deletion notice — but they also won't see the original wrap
-/// (it was nuked from relays in Layer 1), so there's nothing to delete
-/// on their side anyway. Recipients who already fetched and decrypted
-/// the original need the notice to drop their local copy; 30 days is
-/// generous coverage for "live" use.
-const COOPERATIVE_HIDE_EXPIRY_SECS: u64 = 60 * 60 * 24 * 30;
+/// Hide-request expiry: 30 days, on the rumor and on its wrap, so relays drop it. A device
+/// first online after that no longer holds the message: every wrap it could fetch is gone.
+pub(crate) const COOPERATIVE_HIDE_EXPIRY_SECS: u64 = 60 * 60 * 24 * 30;
+
+/// Wrap-deletion expiry: the deletion outlives any honest re-broadcast of what it deletes,
+/// then leaves rather than sit on relays forever.
+const WRAP_DELETION_EXPIRY_SECS: u64 = 60 * 60 * 24 * 90;
+
+/// The most wraps one deletion names.
+const WRAPS_PER_DELETION: usize = 100;
 
 /// Outcome of a delete-own-* operation.
 ///
@@ -38,16 +46,13 @@ const COOPERATIVE_HIDE_EXPIRY_SECS: u64 = 60 * 60 * 24 * 30;
 /// honest post-action summary.
 #[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct DeleteOutcome {
-    /// Number of retained wraps for which we dispatched a NIP-09
-    /// deletion task (Layer 1 — relay-level nuke). Zero when the
-    /// message predates retention or was sent from a different device.
+    /// Wrap deletions dispatched: our own copies signed by our key, and best-effort ones
+    /// signed by each retained single-use key.
     pub wraps_dispatched: usize,
-    /// Total wraps we had keys for at delete time (= wraps_dispatched
-    /// for now; reserved for future "skipped due to error" reporting).
+    /// Wraps of the message this device knows of.
     pub wraps_total: usize,
-    /// Whether we sent a cooperative-hide notice (Layer 2). Always true
-    /// for own deletions in groups/DMs that succeed; tells live Vector
-    /// clients to drop the row from local UI.
+    /// Whether the hide request went out: live Vector clients drop the message and delete
+    /// their own copies of it.
     pub cooperative_hide_sent: bool,
     /// Number of Blossom blobs we asked the upload server to delete.
     /// Best-effort: actual server response is logged, not surfaced.
@@ -59,31 +64,13 @@ pub struct DeleteOutcome {
     pub any_network_action: bool,
 }
 
-/// Delete an outbound DM from the network by publishing NIP-09
-/// deletions against every retained gift-wrap for `rumor_id`.
-///
-/// Per-relay event-driven dispatch: the publish/delete race is closed
-/// by listening to each wrap's `WrapPublishTracker` (registered at
-/// send time). NIP-09 fires at each relay only **after** that relay
-/// has confirmed receiving the wrap — relays that haven't received it
-/// yet wait until they do, relays that already have it get NIP-09
-/// immediately, relays where the publish failed get nothing (no event
-/// there to delete).
-///
-/// Each per-wrap deletion runs as a background tokio task so the API
-/// returns immediately. Local UI removal happens synchronously; the
-/// caller's UX never blocks on relay roundtrips.
-///
-/// Returns `Err` if no retained keys exist for the rumor (predates
-/// the retention feature, sent from a different device, etc).
+/// Delete an outbound DM from the network: our own copies of it with our key, the hide
+/// request for the recipient's, its attachments from Blossom. Every relay round trip runs
+/// in the background; the call returns once the local state is gone.
 pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> {
     let client = nostr_client().ok_or("Not logged in")?;
-    // Session captured for the relay-nuke loop — without this, an
-    // account-A wrap-key purge could land in account B's nip17_keys.
-    // Durable tombstone FIRST: NIP-09 is best-effort and relays ignore it
-    // freely — without this, a surviving wrap re-served after a restart
-    // re-ingests cleanly (the events row is gone, the session set is empty)
-    // and the message resurrects, now key-less and only Limited-deletable.
+    // Durable tombstone FIRST: a wrap some relay keeps re-serves after a restart, and without
+    // it the message would re-ingest and resurrect.
     let rumor_hex = rumor_id.to_hex();
     if let Err(e) = crate::db::events::add_message_tombstone(&rumor_hex) {
         crate::log_warn!("[NIP-17 delete] tombstone write failed: {}", e);
@@ -91,21 +78,19 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     crate::state::note_message_deleted(&rumor_hex);
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(rumor_id)
         .unwrap_or_default();
+    let received = crate::db::events::wrapper_event_id_of(&rumor_hex);
 
     // Snapshot the message + recipient BEFORE any state/DB cleanup.
     // Attachment URLs feed Blossom DELETE; the attachments themselves
     // feed local-cache file removal; recipient pubkey feeds the
-    // cooperative-hide gift wrap. We try to recover all three even when
-    // no retained keys exist (older messages, pre-retention sends).
+    // hide request. We try to recover all three even when no retained
+    // keys exist (older messages, pre-retention sends).
     //
     // INVARIANT: `chat.id` for a DM is the counterpart's npub. The
     // `find_message` lookup here is unscoped, but `delete_own_dm` is
-    // only ever called from the DM branch of the Tauri command — the
-    // group branch routes to `delete_own_group_message` instead.
+    // only ever called from the DM branch of the Tauri command.
     // `from_bech32` silently yields `None` if the invariant ever
-    // breaks; that just disables Layer 2 cooperative-hide for the
-    // call. Layer 1 (retained-key relay nuke) and Layer 3 (Blossom)
-    // remain functional.
+    // breaks; that just disables the hide request for the call.
     let (all_attachments, recipient_from_state) = {
         let state = crate::state::STATE.lock().await;
         match state.find_message(&rumor_id.to_hex()) {
@@ -140,31 +125,10 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // against the DB ledger: a smart-forwarded blob backs OTHER messages too.
     let attachment_urls: Vec<String> = scrub_safe_urls(&unique_attachments, &rumor_id.to_hex());
 
-    let wraps_total = keys.len();
-    let mut wraps_dispatched = 0usize;
+    let (wraps_dispatched, wraps_total) = dispatch_wrap_deletions(&client, &keys, received).await;
 
-    // Layer 1 — relay-level nuke. Only possible when we still hold
-    // retained wrap keys for this rumor.
-    for stored in keys.iter() {
-        let client = client.clone();
-        let wrap_event_id = stored.wrap_event_id;
-        let secret = stored.secret.clone();
-        let relay_urls = stored.relay_urls.clone();
-        crate::db::spawn_bound(async move {
-            delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
-                crate::log_warn!("[NIP-17 delete] failed to purge wrap key: {}", e);
-            }
-        });
-        wraps_dispatched += 1;
-    }
-
-    // Layer 2 — cooperative hide. Always send a notice if we know the
-    // recipient: tells live Vector clients to drop their local copy.
-    // Prefer the recipient pubkey from a retained wrap key if we have
-    // one (recipient role); fall back to the chat counterpart from
-    // STATE. The notice itself is signed by our main key, so this
-    // works even when retained wrap keys are missing.
+    // The hide request, when we know the recipient: their live clients drop the message and
+    // delete their own copies. Signed by our main key, so it needs no retained wrap key.
     let cooperative_recipient = keys
         .iter()
         .find(|k| {
@@ -206,13 +170,9 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     })
 }
 
-/// Revoke one of OUR OWN DM reactions. Mirrors `delete_own_dm` but the
-/// target is a kind-7 reaction rumor: Layer 1 nukes each retained gift-wrap
-/// from its relays via the stored ephemeral key; Layer 2 sends a cooperative
-/// hide (k=7) to the counterpart + self so live clients drop the chip. No
-/// Blossom layer — reactions carry no attachments. `recipient` is the DM
-/// counterpart, used for the cooperative hide when no recipient-role wrap key
-/// is retained (e.g. only the self-wrap survived).
+/// Revoke one of OUR OWN DM reactions, as [`delete_own_dm`] deletes a message: our copies
+/// with our key, a hide request (k=7) so the counterpart's clients drop the chip and delete
+/// theirs. `recipient` is the DM counterpart, for when no recipient-role wrap key is retained.
 pub async fn delete_own_reaction(
     reaction_id: &EventId,
     recipient: PublicKey,
@@ -227,30 +187,11 @@ pub async fn delete_own_reaction(
     crate::state::note_message_deleted(&reaction_hex);
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(reaction_id)
         .unwrap_or_default();
+    let received = crate::db::events::wrapper_event_id_of(&reaction_hex);
+    let (wraps_dispatched, wraps_total) = dispatch_wrap_deletions(&client, &keys, received).await;
 
-    let wraps_total = keys.len();
-    let mut wraps_dispatched = 0usize;
-
-    // Layer 1 — relay-level nuke per retained wrap key.
-    for stored in keys.iter() {
-        let client = client.clone();
-        let wrap_event_id = stored.wrap_event_id;
-        let secret = stored.secret.clone();
-        let relay_urls = stored.relay_urls.clone();
-        crate::db::spawn_bound(async move {
-            delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
-                crate::log_warn!("[reaction delete] failed to purge wrap key: {}", e);
-            }
-        });
-        wraps_dispatched += 1;
-    }
-
-    // Layer 2 — cooperative hide (k=7). Prefer a recipient pulled from a
-    // retained recipient/retry wrap key; fall back to the passed-in
-    // counterpart. The notice is signed by our main key, so it works even
-    // when no wrap keys survive (pre-retention reactions stay undeletable at
-    // the relay layer, but a live counterpart still drops the chip).
+    // The hide request (k=7), to a recipient from a retained recipient/retry wrap key or the
+    // passed-in counterpart. Signed by our main key, so it needs no retained wrap key.
     let cooperative_recipient = keys
         .iter()
         .find(|k| {
@@ -276,74 +217,154 @@ pub async fn delete_own_reaction(
     })
 }
 
-/// Per-relay deletion for a single wrap. Subscribes to the wrap's
-/// publish tracker and fires NIP-09 to each relay as soon as that
-/// relay confirms receiving the wrap. Relays where the publish failed
-/// don't get NIP-09 (no event there to delete).
-///
-/// If no live tracker exists (cross-restart: the original publishes
-/// completed in a previous session), falls back to a best-effort
-/// broadcast against every targeted relay. Relays that don't have
-/// the wrap will no-op the deletion; that's safe.
-async fn delete_wrap_per_relay(
-    client: &Client,
-    wrap_event_id: EventId,
-    secret: SecretKey,
-    targeted_relays: Vec<String>,
-) {
-    let ephemeral_keys = Keys::new(secret);
-    let deletion = match EventBuilder::new(Kind::EventDeletion, "")
-        .tag(Tag::event(wrap_event_id))
+/// A deletion of gift wraps: `k` names their kind, and it expires once nothing could
+/// still re-broadcast them.
+fn wrap_deletion(wrap_ids: &[EventId]) -> EventBuilder {
+    let expires = Timestamp::now().as_secs().saturating_add(WRAP_DELETION_EXPIRY_SECS);
+    wrap_ids
+        .iter()
+        .fold(EventBuilder::new(Kind::EventDeletion, ""), |b, id| b.tag(Tag::event(*id)))
         .tag(Tag::custom("k", ["1059"]))
-        .finalize(&ephemeral_keys)
-    {
-        Ok(ev) => ev,
-        Err(e) => {
-            eprintln!(
-                "[NIP-17 delete] failed to sign deletion for wrap {}: {}",
-                wrap_event_id.to_hex(),
-                e
-            );
+        .tag(Tag::expiration(Timestamp::from(expires)))
+}
+
+/// [`wrap_deletion`] signed by our own key, the `p`-tagged owner of the wraps it names: the
+/// one signer every relay honours. Refused when the session's identity moved meanwhile.
+async fn owner_deletion(wrap_ids: &[EventId], owner: &PublicKey) -> Result<Event, String> {
+    let deletion = crate::sign_builder(wrap_deletion(wrap_ids)).await?;
+    if deletion.pubkey != *owner {
+        return Err("the account changed before the deletion was signed".to_string());
+    }
+    Ok(deletion)
+}
+
+/// Take a message's wraps off the relays: our own copies with our own key, and every wrap whose
+/// single-use key we kept with that key too, best-effort, for relays still honouring an author's
+/// deletion. Returns (dispatched, known).
+async fn dispatch_wrap_deletions(
+    client: &Client,
+    keys: &[crate::db::nip17_keys::StoredWrapKey],
+    received: Option<EventId>,
+) -> (usize, usize) {
+    let Some(me) = my_public_key() else { return (0, keys.len()) };
+    let own = own_wraps(keys, received);
+    let known = own.len() + keys.iter().filter(|k| !own.contains(&k.wrap_event_id)).count();
+    let mut dispatched = 0usize;
+    for wrap_id in own {
+        // Signed now, while the account it belongs to is the one in use.
+        match owner_deletion(&[wrap_id], &me).await {
+            Ok(deletion) => {
+                let client = client.clone();
+                crate::db::spawn_bound(async move {
+                    delete_wrap_per_relay(&client, wrap_id, &deletion, &me, true).await;
+                });
+                dispatched += 1;
+            }
+            Err(e) => crate::log_warn!("[NIP-17 delete] our own copy {} stays: {}", wrap_id.to_hex(), e),
+        }
+    }
+    for stored in keys {
+        let deletion = match wrap_deletion(&[stored.wrap_event_id]).finalize(&Keys::new(stored.secret.clone())) {
+            Ok(ev) => ev,
+            Err(e) => {
+                crate::log_warn!("[NIP-17 delete] failed to sign deletion for wrap {}: {}", stored.wrap_event_id.to_hex(), e);
+                continue;
+            }
+        };
+        let (client, wrap_id, owner) = (client.clone(), stored.wrap_event_id, stored.recipient_pubkey);
+        crate::db::spawn_bound(async move {
+            delete_wrap_per_relay(&client, wrap_id, &deletion, &owner, false).await;
+        });
+        dispatched += 1;
+    }
+    let wraps: Vec<EventId> = keys.iter().map(|k| k.wrap_event_id).collect();
+    if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&wraps) {
+        crate::log_warn!("[NIP-17 delete] failed to purge wrap keys: {}", e);
+    }
+    (dispatched, known)
+}
+
+/// A message's wraps addressed to us, which our own key deletes: our self-copies, and the one
+/// that brought it to this device, when one did.
+fn own_wraps(keys: &[crate::db::nip17_keys::StoredWrapKey], received: Option<EventId>) -> Vec<EventId> {
+    use crate::db::nip17_keys::WrapRole;
+    let mut own: Vec<EventId> = keys.iter().filter(|k| k.role == WrapRole::SelfSend).map(|k| k.wrap_event_id).collect();
+    if let Some(w) = received.filter(|w| !own.contains(w)) {
+        own.push(w);
+    }
+    own
+}
+
+/// Pending deletions of wraps addressed to us, gathered so a sync that meets many deleted
+/// messages signs one deletion, not one per wrap (a remote signer asks for each).
+struct ReceivedWrapDeletions;
+
+fn received_wrap_deletions() -> std::sync::Arc<std::sync::Mutex<Vec<EventId>>> {
+    crate::db::current_session().scoped::<ReceivedWrapDeletions, _>()
+}
+
+/// Delete a wrap addressed to us that carried a message since deleted, with our own key: the
+/// copy a hide request asks us to take down, or one more copy of a message already gone.
+pub(crate) fn delete_received_wrap(wrap_id: EventId) {
+    let pending = received_wrap_deletions();
+    let first = {
+        let mut q = pending.lock().unwrap_or_else(|e| e.into_inner());
+        if q.contains(&wrap_id) {
             return;
         }
+        q.push(wrap_id);
+        q.len() == 1
     };
-
-    if let Some(tracker) = get_publish_tracker(&wrap_event_id) {
-        // Live tracker: walk the success stream as relays settle.
-        let mut delivered = 0usize;
-        let mut cursor = 0usize;
-        while let Some(url) = tracker.next_success(&mut cursor).await {
-            if send_to_one_relay(client, &url, &deletion).await {
-                delivered += 1;
-            }
-        }
-        crate::log_info!(
-            "[NIP-17 delete] wrap {} — NIP-09 delivered to {} relay(s) via tracker",
-            wrap_event_id.to_hex(),
-            delivered
-        );
-    } else {
-        // No tracker (cross-restart or already-GC'd). Best-effort
-        // broadcast: fire NIP-09 at every targeted relay; relays
-        // that lack the wrap silently no-op.
-        let urls: Vec<RelayUrl> = targeted_relays
-            .iter()
-            .filter_map(|s| RelayUrl::parse(s).ok())
-            .collect();
-        let total = urls.len();
-        let mut delivered = 0usize;
-        for url in urls {
-            if send_to_one_relay(client, &url, &deletion).await {
-                delivered += 1;
-            }
-        }
-        crate::log_info!(
-            "[NIP-17 delete] wrap {} — fallback broadcast: NIP-09 delivered to {}/{} relay(s)",
-            wrap_event_id.to_hex(),
-            delivered,
-            total
-        );
+    if !first {
+        return;
     }
+    crate::db::spawn_bound(async move {
+        crate::rt::time::sleep(std::time::Duration::from_secs(2)).await;
+        let wraps = std::mem::take(&mut *pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let (Some(client), Some(me)) = (nostr_client(), my_public_key()) else { return };
+        for batch in wraps.chunks(WRAPS_PER_DELETION) {
+            match owner_deletion(batch, &me).await {
+                Ok(deletion) => publish_to_inbox(&client, &me, &deletion, true).await,
+                Err(e) => crate::log_warn!("[NIP-17 delete] {} received wrap(s) stay: {}", batch.len(), e),
+            }
+        }
+    });
+}
+
+/// Send `deletion` for `wrap_event_id` to each relay that holds it. A wrap published this
+/// session gets it from each relay as that relay confirms the wrap, so it never outruns the
+/// wrap; any other goes to `owner`'s inbox relays, where wraps addressed to them sit.
+/// `verify` asks each relay that acknowledges whether the wrap is really gone.
+async fn delete_wrap_per_relay(client: &Client, wrap_event_id: EventId, deletion: &Event, owner: &PublicKey, verify: bool) {
+    let Some(tracker) = get_publish_tracker(&wrap_event_id) else {
+        publish_to_inbox(client, owner, deletion, verify).await;
+        return;
+    };
+    let mut delivered = 0usize;
+    let mut cursor = 0usize;
+    while let Some(url) = tracker.next_success(&mut cursor).await {
+        let relay = client.relays().await.get(&url).cloned();
+        match relay {
+            Some(relay) if send_to_one_relay(client, &url, &relay, deletion, verify).await => delivered += 1,
+            Some(_) => {}
+            None => crate::log_warn!("[delete] relay {} not in pool — deletion not delivered", url),
+        }
+    }
+    crate::log_info!("[NIP-17 delete] wrap {} — deletion delivered to {} relay(s) via tracker", wrap_event_id.to_hex(), delivered);
+}
+
+/// Send `deletion` to every inbox relay of `owner`, connecting any not pooled for the call.
+async fn publish_to_inbox(client: &Client, owner: &PublicKey, deletion: &Event, verify: bool) {
+    let targets = resolve_gift_wrap_targets(client, owner).await;
+    let total = targets.resolved.len();
+    let mut delivered = 0usize;
+    for (url, relay) in &targets.resolved {
+        if send_to_one_relay(client, url, relay, deletion, verify).await {
+            delivered += 1;
+        }
+    }
+    teardown_gift_wrap_targets(client, &targets).await;
+    crate::log_info!("[NIP-17 delete] deletion {} delivered to {}/{} inbox relay(s)", deletion.id.to_hex(), delivered, total);
 }
 
 /// Best-effort delete of every cached attachment file for a message.
@@ -490,9 +511,8 @@ fn delete_cached_attachment_files_native(attachments: &[crate::types::Attachment
 }
 
 /// Direct publish to a single relay handle. Returns true if the relay
-/// acknowledged. Returns false if the relay isn't in our pool, the
-/// publish hit a non-rate-limit error, or rate-limit retries were
-/// exhausted.
+/// acknowledged. Returns false if the publish hit a non-rate-limit
+/// error, or rate-limit retries were exhausted.
 ///
 /// Per-URL outcome is logged so the user can pinpoint which relay is
 /// keeping a wrap alive after deletion — relays that ACK a NIP-09 but
@@ -509,11 +529,10 @@ fn delete_cached_attachment_files_native(attachments: &[crate::types::Attachment
 /// the user's UX is unaffected; the wrap stays on the relay only
 /// until we get through.
 ///
-/// On successful ACK, schedules a verification probe (~2s later) that
-/// re-queries the relay for the original wrap event id and reports
-/// whether the relay actually honored the deletion. Catches relays
-/// that lie about NIP-09 compliance.
-async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bool {
+/// With `verify`, an ACK schedules a probe (~2s later) asking the relay whether the wraps
+/// are really gone. Off for a best-effort author deletion, which a relay that follows the
+/// spec acknowledges and ignores.
+async fn send_to_one_relay(client: &Client, url: &RelayUrl, relay: &Relay, event: &Event, verify: bool) -> bool {
     /// Max attempts to push past a rate-limit. With 30s between
     /// attempts that's a 10-minute window — generous for any sane
     /// per-IP rate limit. If the relay is still rate-limiting us
@@ -522,17 +541,6 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
     const MAX_RATELIMIT_RETRIES: u32 = 20;
     /// Pause between rate-limit retries.
     const RATELIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-
-    let pool = client;
-    let relays = pool.relays().await;
-    let relay = match relays.get(url) {
-        Some(r) => r.clone(),
-        None => {
-            crate::log_warn!("[delete] relay {} not in pool — NIP-09 not delivered", url);
-            return false;
-        }
-    };
-    drop(relays);
 
     let mut retries = 0u32;
     let wait = crate::relay_request_timeout(std::time::Duration::from_secs(10));
@@ -549,13 +557,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                         if retries == 1 { "y" } else { "ies" }
                     );
                 }
-                if let Some(wrap_id) = extract_target_event_id(event) {
-                    let url_clone = url.clone();
-                    let client_clone = client.clone();
-                    crate::db::spawn_bound(async move {
-                        verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
-                    });
-                }
+                schedule_verify(client, url, event, verify);
                 return true;
             }
             Err(e) => {
@@ -599,13 +601,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                     // (timeouts often mean "ACK lost on the way back").
                     // Schedule a verify probe so we still log whether the
                     // wrap is gone.
-                    if let Some(wrap_id) = extract_target_event_id(event) {
-                        let url_clone = url.clone();
-                        let client_clone = client.clone();
-                        crate::db::spawn_bound(async move {
-                            verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
-                        });
-                    }
+                    schedule_verify(client, url, event, verify);
                 } else {
                     crate::log_warn!("[delete] relay {} rejected NIP-09: {}", url, err_str);
                 }
@@ -615,34 +611,35 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
     }
 }
 
-/// Pull the target event id from a NIP-09 deletion event's first
-/// `["e", ...]` tag. Used by the verification probe to know which
-/// wrap to look for after asking the relay to delete it.
-fn extract_target_event_id(deletion: &Event) -> Option<EventId> {
-    deletion.tags.iter().find_map(|tag| {
-        let s = tag.as_slice();
-        if s.len() >= 2 && s[0] == "e" {
-            EventId::from_hex(&s[1]).ok()
-        } else {
-            None
-        }
-    })
+/// The wraps a deletion names, from its `e` tags.
+fn deletion_targets(deletion: &Event) -> Vec<EventId> {
+    deletion
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let s = tag.as_slice();
+            (s.len() >= 2 && s[0] == "e").then(|| EventId::from_hex(&s[1]).ok()).flatten()
+        })
+        .collect()
 }
 
-/// 2s after a relay ACKs our NIP-09, ask it whether the target wrap
-/// is actually gone. Logs a clear "GONE" or "STILL PRESENT" so we can
-/// identify non-compliant relays without bisecting via external tools.
-async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &EventId) {
+fn schedule_verify(client: &Client, url: &RelayUrl, deletion: &Event, verify: bool) {
+    let wraps = deletion_targets(deletion);
+    if !verify || wraps.is_empty() {
+        return;
+    }
+    let (client, url) = (client.clone(), url.clone());
+    crate::db::spawn_bound(async move {
+        verify_relay_dropped(&client, &url, &wraps).await;
+    });
+}
+
+/// 2s after a relay ACKs a deletion, ask it whether the wraps are actually gone. Logs a clear
+/// "GONE" or "STILL PRESENT" so a relay that acknowledges and keeps them is easy to name.
+async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wraps: &[EventId]) {
     crate::rt::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let pool = client;
-    let relays = pool.relays().await;
-    let relay = match relays.get(url) {
-        Some(r) => r.clone(),
-        None => return,
-    };
-
-    let filter = Filter::new().id(*wrap_event_id);
+    let Some(relay) = client.relays().await.get(url).cloned() else { return };
+    let filter = Filter::new().ids(wraps.iter().copied());
     match relay
         .fetch_events(filter)
         .timeout(std::time::Duration::from_secs(5))
@@ -650,36 +647,19 @@ async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &E
         .await
     {
         Ok(events) => {
-            let still_present = events.into_iter().next().is_some();
-            if still_present {
-                crate::log_warn!(
-                    "[delete-verify] relay {} STILL HAS wrap {} (non-compliant — relay ACK'd NIP-09 but did not drop the event)",
-                    url,
-                    wrap_event_id.to_hex()
-                );
+            let kept = events.len();
+            if kept > 0 {
+                crate::log_warn!("[delete-verify] relay {} STILL HAS {}/{} wrap(s) after acknowledging their deletion", url, kept, wraps.len());
             } else {
-                crate::log_info!(
-                    "[delete-verify] relay {} confirmed wrap {} is GONE",
-                    url,
-                    wrap_event_id.to_hex()
-                );
+                crate::log_info!("[delete-verify] relay {} confirmed {} wrap(s) GONE", url, wraps.len());
             }
         }
-        Err(e) => {
-            crate::log_warn!(
-                "[delete-verify] relay {} probe failed for wrap {}: {}",
-                url,
-                wrap_event_id.to_hex(),
-                e
-            );
-        }
+        Err(e) => crate::log_warn!("[delete-verify] relay {} probe failed: {}", url, e),
     }
 }
 
-/// Publish the Layer-2 cooperative-hide notice — a kind-5 NIP-09 rumor
-/// signed by the user's main key, gift-wrapped to the recipient and to
-/// self. Carries a NIP-40 expiration tag (30 days) so relays drop the
-/// wrap once the live-client window has passed.
+/// Publish the hide request: a kind-5 rumor signed by the user's main key, gift-wrapped to
+/// the recipient and to self. Rumor and wrap both expire after 30 days, so relays drop it.
 async fn publish_cooperative_hide(
     client: &Client,
     target_rumor_id: &EventId,
@@ -706,11 +686,71 @@ async fn publish_cooperative_hide(
     // Wrap and send to recipient. Also wrap and send to self so other
     // devices belonging to the user drop the message from their local
     // view too. Best-effort, fire-and-forget.
-    let r1 = send_gift_wrap(client, recipient, rumor.clone(), []).await;
-    let r2 = send_gift_wrap(client, &my_pk, rumor, []).await;
+    let expires = || [Tag::expiration(Timestamp::from(expiration_ts))];
+    let r1 = send_gift_wrap(client, recipient, rumor.clone(), expires()).await;
+    let r2 = send_gift_wrap(client, &my_pk, rumor, expires()).await;
 
     if r1.is_err() && r2.is_err() {
         return Err("both cooperative-hide deliveries failed".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn pending_received_wrap_deletions() -> Vec<EventId> {
+    received_wrap_deletions().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::nip17_keys::{StoredWrapKey, WrapRole};
+
+    fn stored(role: WrapRole) -> StoredWrapKey {
+        let k = Keys::generate();
+        StoredWrapKey {
+            wrap_event_id: EventBuilder::new(Kind::GiftWrap, "").finalize(&k).unwrap().id,
+            rumor_id: EventId::from_byte_array([0; 32]),
+            recipient_pubkey: Keys::generate().public_key(),
+            role,
+            secret: k.secret_key().clone(),
+            relay_urls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_wrap_deletion_names_its_wraps_and_expires() {
+        let wraps = [EventId::from_byte_array([0; 32]), EventId::from_byte_array([7; 32])];
+        let ev = wrap_deletion(&wraps).finalize(&Keys::generate()).unwrap();
+        assert_eq!(ev.kind, Kind::EventDeletion);
+        let tag = |name: &str| ev.tags.iter().filter(|t| t.as_slice()[0] == name).map(|t| t.as_slice()[1].clone()).collect::<Vec<_>>();
+        assert_eq!(tag("e"), wraps.iter().map(|w| w.to_hex()).collect::<Vec<_>>());
+        assert_eq!(tag("k"), vec!["1059".to_string()]);
+        let expires: u64 = tag("expiration")[0].parse().unwrap();
+        let now = Timestamp::now().as_secs();
+        assert!(expires > now + WRAP_DELETION_EXPIRY_SECS - 60 && expires <= now + WRAP_DELETION_EXPIRY_SECS, "it leaves the relays in time");
+    }
+
+    #[test]
+    fn our_own_key_deletes_the_copies_addressed_to_us() {
+        let (mine, theirs, retry) = (stored(WrapRole::SelfSend), stored(WrapRole::Recipient), stored(WrapRole::Retry));
+        let keys = [mine.clone(), theirs, retry];
+        let received = EventId::from_byte_array([9; 32]);
+        assert_eq!(own_wraps(&keys, Some(received)), vec![mine.wrap_event_id, received], "our self-copy and the wrap that reached us");
+        assert_eq!(own_wraps(&keys, Some(mine.wrap_event_id)), vec![mine.wrap_event_id], "named once");
+        assert_eq!(own_wraps(&keys, None), vec![mine.wrap_event_id]);
+    }
+
+    #[tokio::test]
+    async fn an_owner_deletion_is_signed_by_us_and_never_for_someone_else() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+        let wraps = [EventId::from_byte_array([3; 32])];
+        let deletion = owner_deletion(&wraps, &me.public_key()).await.unwrap();
+        assert_eq!(deletion.pubkey, me.public_key());
+        assert!(deletion.verify().is_ok());
+        assert!(owner_deletion(&wraps, &Keys::generate().public_key()).await.is_err(), "a swapped account signs nothing for the last one");
+    }
 }
