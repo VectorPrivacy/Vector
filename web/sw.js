@@ -176,7 +176,6 @@ self.addEventListener('notificationclick', (event) => {
     event.notification.close();
     const chat = event.notification.data?.chat || null;
     event.waitUntil((async () => {
-        try { await (await caches.open(PUSH_CACHE)).delete(PUSH_BADGE); } catch {}
         const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
         if (wins.length) {
             const win = wins.find((w) => w.focused) || wins[0];

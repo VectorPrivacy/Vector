@@ -27,13 +27,15 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
 async fn refresh_unread(chat_id: &str, marked: bool) {
     if marked {
         STATE.lock().await.unread_clear(chat_id);
-        return;
+    } else {
+        let count = db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
+        let mut state = STATE.lock().await;
+        if state.unread_seeded {
+            state.unread_set(chat_id, count);
+        }
     }
-    let count = db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
-    let mut state = STATE.lock().await;
-    if state.unread_seeded {
-        state.unread_set(chat_id, count);
-    }
+    // The app badge is the page's (web/push.js), so the page recounts it, as desktop's handler does.
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
 }
 
 /// Ask the page for a system notification; it shows one only while unfocused.

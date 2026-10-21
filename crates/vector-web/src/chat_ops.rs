@@ -107,10 +107,13 @@ async fn edit_message(a: &Args) -> Result<Value, String> {
 
 async fn reconcile_unread(chat_id: &str) {
     let count = db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
-    let mut state = STATE.lock().await;
-    if state.unread_seeded {
-        state.unread_set(chat_id, count);
+    {
+        let mut state = STATE.lock().await;
+        if state.unread_seeded {
+            state.unread_set(chat_id, count);
+        }
     }
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
 }
 
 async fn delete_own_message(message_id: String) -> Result<Value, String> {

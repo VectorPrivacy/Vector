@@ -173,6 +173,8 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
         db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
     };
     let _ = db::chats::save_slim_chat(&slim);
+    // The page recounts the app badge (web/push.js), as desktop's mark_as_read does itself.
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [chat_id] }));
     true
 }
 

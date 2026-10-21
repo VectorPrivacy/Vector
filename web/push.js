@@ -9,6 +9,7 @@
     const KEY = 'vector-push-device';
     const CACHE = 'vector-push';
     const STATE_URL = '/__vector/push/state';
+    const BADGE_URL = '/__vector/push/badge';
 
     const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
     const ios = /iP(hone|ad|od)/.test(navigator.platform) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -151,7 +152,16 @@
     addEventListener('pagehide', () => { if (signedIn) refresh(); });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden' && signedIn) refresh();
-        if (document.visibilityState === 'visible') navigator.clearAppBadge?.().catch(() => {});
+        if (document.visibilityState === 'visible' && signedIn) window.__TAURI__.core.invoke('update_unread_counter').catch(() => {});
+    });
+
+    // The Home Screen badge is the unread total, as desktop's dock badge is; /sw.js adds each
+    // push it shows to the last total, until Vector counts again.
+    register('update_unread_counter', async () => {
+        const n = Number(await backend('update_unread_counter')) || 0;
+        (n > 0 ? navigator.setAppBadge?.(n) : navigator.clearAppBadge?.())?.catch?.(() => {});
+        try { await (await caches.open(CACHE)).put(BADGE_URL, new Response(String(n))); } catch {}
+        return n;
     });
 
     // The chat on screen holds its contact's pushes at the pusher, on a lease renewed while it
