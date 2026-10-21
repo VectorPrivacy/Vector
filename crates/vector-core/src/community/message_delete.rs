@@ -67,7 +67,8 @@ pub(crate) fn heal_own_wrap(event: &ChatEvent, wrap: &Event, plane: Option<&Keys
 pub struct Scrubbed {
     /// Its owner's deletion went out, which every relay following CORD-01 honours.
     pub by_owner: bool,
-    /// Its plane key's deletion went out, which a relay judging by author honours.
+    /// Its plane key's deletion was sent: a relay judging by author honours it, and one following
+    /// CORD-01 refuses it, which is why its answer counts for nothing.
     pub by_plane: bool,
 }
 
@@ -80,8 +81,8 @@ impl Scrubbed {
 
 /// Delete my own `message_id` from relays, with its stored edits (they carry its text), by
 /// every key kept for their wraps: one deletion per wrap, so none ties wraps together for a
-/// relay. `relays` is where its Community lives now: a relay move copies wraps over. A key is
-/// dropped once its deletion went out.
+/// relay. `relays` is where its Community lives now: a relay move copies wraps over. An owner
+/// key is dropped once its deletion went out, a plane key once its deletion was sent.
 pub async fn scrub_own<T: Transport + ?Sized>(transport: &T, relays: &[String], message_id: &str) -> Result<Scrubbed, String> {
     crate::db::scoped(async move {
         if !crate::db::current_session().is_live() {
@@ -93,23 +94,31 @@ pub async fn scrub_own<T: Transport + ?Sized>(transport: &T, relays: &[String], 
         let mut scrubbed = Scrubbed::default();
         for target in &targets {
             let owners = crate::db::community::wrap_owners(target)?;
-            let plane = crate::db::community::get_message_key(target)?;
-            let mut deletions = Vec::with_capacity(owners.len() + 1);
-            for (keys, outer, sent_to) in owners.iter().chain(plane.iter()) {
-                let wrap = EventId::from_hex(outer).map_err(|e| e.to_string())?;
-                let deletion = crate::deletion::wrap_deletion(&[wrap]).finalize(keys).map_err(|e| e.to_string())?;
-                deletions.push((deletion, union(relays, sent_to)));
+            let by_owner = owners.iter().map(|k| deletion_by(k, relays)).collect::<Result<Vec<_>, _>>()?;
+            let by_plane = crate::db::community::get_message_key(target)?.map(|k| deletion_by(&k, relays)).transpose()?;
+            // The owner's deletion must land. The plane key's is a single best-effort send: a relay
+            // following CORD-01 refuses it, and a durable publish would wait out that refusal.
+            let (owner_sent, plane_sent) = futures_util::future::join(
+                futures_util::future::join_all(by_owner.iter().map(|(d, to)| transport.publish_durable(d, to))),
+                async {
+                    match &by_plane {
+                        Some((d, to)) => Some(transport.publish(d, to).await),
+                        None => None,
+                    }
+                },
+            )
+            .await;
+            if let Some(e) = owner_sent.iter().find_map(|r| r.as_ref().err()) {
+                crate::log_warn!("[Community] an owner's deletion of {target} failed: {e}");
             }
-            let sent = futures_util::future::join_all(deletions.iter().map(|(d, to)| transport.publish_durable(d, to))).await;
-            let (by_owners, by_plane) = sent.split_at(owners.len());
-            if let Some(e) = sent.iter().find_map(|r| r.as_ref().err()) {
-                crate::log_warn!("[Community] a deletion of {target} failed: {e}");
-            }
-            if !owners.is_empty() && by_owners.iter().all(Result::is_ok) {
+            if !owners.is_empty() && owner_sent.iter().all(Result::is_ok) {
                 crate::db::community::forget_wrap_owners(target)?;
                 scrubbed.by_owner |= target == message_id;
             }
-            if plane.is_some() && by_plane.iter().all(Result::is_ok) {
+            if let Some(sent) = plane_sent {
+                if let Err(e) = sent {
+                    crate::log_debug!("[Community] the plane key's deletion of {target} was not taken: {e}");
+                }
                 crate::db::community::delete_message_key(target)?;
                 scrubbed.by_plane |= target == message_id;
             }
@@ -129,6 +138,13 @@ pub async fn in_plane_delete_expiry(message_id: &str, scrubbed: Scrubbed) -> Opt
     let until = Timestamp::now().as_secs().saturating_add(OWNED_DELETE_EXPIRY_SECS);
     let message = crate::self_destruct::edit_expiry(message_id).await.ok().flatten();
     Some(message.map_or(until, |m| m.min(until)))
+}
+
+/// The deletion of one wrap by the key kept for it, and the relays it goes to.
+fn deletion_by((keys, outer, sent_to): &(Keys, String, Vec<String>), relays: &[String]) -> Result<(Event, Vec<String>), String> {
+    let wrap = EventId::from_hex(outer).map_err(|e| e.to_string())?;
+    let deletion = crate::deletion::wrap_deletion(&[wrap]).finalize(keys).map_err(|e| e.to_string())?;
+    Ok((deletion, union(relays, sent_to)))
 }
 
 fn union(a: &[String], b: &[String]) -> Vec<String> {
@@ -239,14 +255,62 @@ mod tests {
             crate::db::community::store_message_key(&message_id, &wrap.id.to_hex(), &plane, &relays()).unwrap();
             crate::db::community::store_wrap_owner(&message_id, &wrap.id.to_hex(), &owner, &relays()).unwrap();
 
-            assert_eq!(scrub_own(&FailingRelay, &relays(), &message_id).await.unwrap(), Scrubbed::default());
-            assert!(crate::db::community::has_wrap_owner(&message_id).unwrap(), "a failed deletion keeps its key");
-
             assert_eq!(scrub_own(relay, &relays(), &message_id).await.unwrap(), Scrubbed { by_owner: true, by_plane: true });
             assert!(!still_there(relay, wrap.id).await, "the owner deletes it where CORD-01 holds, the plane key elsewhere");
             assert!(!crate::db::community::has_wrap_owner(&message_id).unwrap());
             assert!(!crate::db::community::has_message_key(&message_id).unwrap());
         }
+    }
+
+    /// Records which publish each event went through, accepting everything.
+    #[derive(Default)]
+    struct Recording {
+        durable: std::sync::Mutex<Vec<PublicKey>>,
+        once: std::sync::Mutex<Vec<PublicKey>>,
+    }
+    #[async_trait::async_trait]
+    impl Transport for Recording {
+        async fn fetch_plane(&self, _plane: &Keys, _query: &Query, _relays: &[String]) -> Result<PlaneFetch, String> {
+            Ok(PlaneFetch::whole(Vec::new()))
+        }
+        async fn publish(&self, event: &Event, _relays: &[String]) -> Result<(), String> {
+            self.once.lock().unwrap().push(event.pubkey);
+            Ok(())
+        }
+        async fn publish_durable(&self, event: &Event, _relays: &[String]) -> Result<(), String> {
+            self.durable.lock().unwrap().push(event.pubkey);
+            Ok(())
+        }
+        async fn fetch(&self, _query: &Query, _relays: &[String]) -> Result<Vec<Event>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_owners_deletion_waits_to_land() {
+        let (_tmp, _guard) = init_test_db();
+        let (plane, owner) = (Keys::generate(), Keys::generate());
+        let message_id = "66".repeat(32);
+        crate::db::community::store_message_key(&message_id, &"77".repeat(32), &plane, &relays()).unwrap();
+        crate::db::community::store_wrap_owner(&message_id, &"77".repeat(32), &owner, &relays()).unwrap();
+        let relay = Recording::default();
+        scrub_own(&relay, &relays(), &message_id).await.unwrap();
+        assert_eq!(*relay.durable.lock().unwrap(), vec![owner.public_key()]);
+        assert_eq!(*relay.once.lock().unwrap(), vec![plane.public_key()], "a CORD-01 relay refuses it, so nothing waits on it");
+    }
+
+    #[tokio::test]
+    async fn an_owner_deletion_no_relay_took_keeps_its_key_and_expires_nothing() {
+        let (_tmp, _guard) = init_test_db();
+        let message_id = "44".repeat(32);
+        crate::db::community::store_message_key(&message_id, &"55".repeat(32), &Keys::generate(), &relays()).unwrap();
+        crate::db::community::store_wrap_owner(&message_id, &"55".repeat(32), &Keys::generate(), &relays()).unwrap();
+
+        let scrubbed = scrub_own(&FailingRelay, &relays(), &message_id).await.unwrap();
+        assert_eq!(scrubbed, Scrubbed { by_owner: false, by_plane: true }, "a refused plane deletion still counts as sent");
+        assert!(crate::db::community::has_wrap_owner(&message_id).unwrap(), "the owner key stays for another try");
+        assert!(!crate::db::community::has_message_key(&message_id).unwrap());
+        assert_eq!(in_plane_delete_expiry(&message_id, scrubbed).await, None);
     }
 
     #[tokio::test]
