@@ -578,6 +578,85 @@ pub fn forget_wrap_owners(message_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Queue my own `message_ids` of `community_id` to leave the relays, a wrap at a time.
+pub fn queue_wrap_scrubs(community_id: &str, message_ids: &[String]) -> Result<(), String> {
+    let mut conn = super::get_write_connection_guard_static()?;
+    let tx = conn.transaction().map_err(|e| format!("queue wrap scrubs: {e}"))?;
+    for id in message_ids {
+        tx.execute(
+            "INSERT OR IGNORE INTO community_wrap_scrubs (message_id, community_id, queued_at) VALUES (?1, ?2, ?3)",
+            params![id, community_id, now_secs()],
+        )
+        .map_err(|e| format!("queue wrap scrubs: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("queue wrap scrubs: {e}"))
+}
+
+/// The longest-waiting queued scrub: `(message_id, community_id)`.
+pub fn next_wrap_scrub() -> Result<Option<(String, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT message_id, community_id FROM community_wrap_scrubs ORDER BY queued_at, rowid LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("next wrap scrub: {e}"))
+}
+
+/// Settle a queued scrub: `retry` sends it to the back of the queue, otherwise it is done.
+pub fn settle_wrap_scrub(message_id: &str, retry: bool) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let sql = if retry {
+        "UPDATE community_wrap_scrubs SET queued_at = ?2 WHERE message_id = ?1"
+    } else {
+        "DELETE FROM community_wrap_scrubs WHERE message_id = ?1"
+    };
+    let n = if retry { conn.execute(sql, params![message_id, now_secs()]) } else { conn.execute(sql, params![message_id]) };
+    n.map(|_| ()).map_err(|e| format!("settle wrap scrub: {e}"))
+}
+
+/// Drop what this device holds of a deleted Channel's Chat Plane: its chat, events and their
+/// attachment rows, and wraps held for a later judgment. Its keys stay (CORD-03 §2).
+/// Returns whether it held anything.
+pub fn forget_channel_chat(community_id: &str, channel_id: &str) -> Result<bool, String> {
+    let held = {
+        let conn = super::get_write_connection_guard_static()?;
+        let files = conn
+            .execute(
+                "DELETE FROM attachments WHERE event_id IN (SELECT e.id FROM events e JOIN chats c ON c.id = e.chat_id WHERE c.chat_identifier = ?1)",
+                params![channel_id],
+            )
+            .map_err(|e| format!("forget channel attachments: {e}"))?;
+        let wraps = conn
+            .execute("DELETE FROM community_held_wraps WHERE community_id = ?1 AND channel_id = ?2", params![community_id, channel_id])
+            .map_err(|e| format!("forget channel held wraps: {e}"))?;
+        let chat: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM chats WHERE chat_identifier = ?1)", params![channel_id], |r| r.get(0))
+            .map_err(|e| format!("forget channel chat: {e}"))?;
+        files + wraps > 0 || chat
+    };
+    if held {
+        super::chats::delete_chat(channel_id)?;
+    }
+    Ok(held)
+}
+
+/// Every event this device stores in `channel_id`'s chat, and whether it carries files.
+pub fn channel_events(channel_id: &str) -> Result<Vec<(String, bool)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, EXISTS(SELECT 1 FROM attachments a WHERE a.event_id = e.id)
+               FROM events e JOIN chats c ON c.id = e.chat_id WHERE c.chat_identifier = ?1",
+        )
+        .map_err(|e| format!("channel events: {e}"))?;
+    let rows = stmt
+        .query_map(params![channel_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
+        .map_err(|e| format!("channel events: {e}"))?;
+    rows.collect::<Result<_, _>>().map_err(|e| format!("channel events: {e}"))
+}
+
 /// The hex id of the Community that owns `channel_id`, if any is stored locally. Used to
 /// resolve a channel-addressed chat back to its Community for sending.
 // ── Channel → community cache ────────────────────────────────────────────────

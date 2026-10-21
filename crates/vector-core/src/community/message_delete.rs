@@ -128,6 +128,73 @@ pub async fn scrub_own<T: Transport + ?Sized>(transport: &T, relays: &[String], 
     .await
 }
 
+/// One wrap a second: a deleted Channel's history leaves the relays without flooding them, or
+/// this device, however much of it there was.
+const SCRUB_PACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct ScrubbingWraps;
+
+fn scrubbing() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    crate::db::current_session().scoped::<ScrubbingWraps, _>()
+}
+
+/// Queue my own `message_ids` in `community_id` to leave the relays, one at a time
+/// ([`SCRUB_PACE`]), resuming across restarts.
+pub(crate) fn queue_scrubs(community_id: &str, message_ids: &[String]) {
+    if message_ids.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::db::community::queue_wrap_scrubs(community_id, message_ids) {
+        crate::log_warn!("[Community] queueing {} wrap deletion(s) failed: {e}", message_ids.len());
+        return;
+    }
+    resume_scrubs();
+}
+
+/// Work through the queued scrubs until none is left. One that can't go out stays queued, at
+/// the back, and the next resume tries again.
+pub(crate) fn resume_scrubs() {
+    if crate::state::nostr_client().is_none() || !matches!(crate::db::community::next_wrap_scrub(), Ok(Some(_))) {
+        return;
+    }
+    let running = scrubbing();
+    if running.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    crate::db::spawn_bound(async move {
+        struct Release(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _release = Release(running);
+        let transport = super::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        drain_scrubs(&transport, SCRUB_PACE).await;
+    });
+}
+
+/// Scrub the queue in order, `pace` apart, until it is empty or one can't go out. Returns how
+/// many left the queue.
+pub(crate) async fn drain_scrubs<T: Transport + ?Sized>(transport: &T, pace: std::time::Duration) -> usize {
+    let mut done = 0;
+    while let Ok(Some((message_id, community_id))) = crate::db::community::next_wrap_scrub() {
+        let relays = crate::community::id32_from_hex(&community_id)
+            .and_then(|id| crate::db::community::load_community_v2(&crate::community::CommunityId(id)).ok().flatten())
+            .map(|c| c.relays)
+            .unwrap_or_default();
+        let gone = scrub_own(transport, &relays, &message_id).await.is_ok() && matches!(crate::db::community::has_wrap_owner(&message_id), Ok(false));
+        if crate::db::community::settle_wrap_scrub(&message_id, !gone).is_err() || !gone {
+            break;
+        }
+        done += 1;
+        if !pace.is_zero() {
+            crate::rt::time::sleep(pace).await;
+        }
+    }
+    done
+}
+
 /// When the in-plane delete of `message_id` may leave relays, given what its scrub reached:
 /// once the wrap was deleted [`Scrubbed::everywhere`], 30 days on, or with the message when
 /// that comes sooner. Otherwise never, since it alone hides a wrap a relay still holds.

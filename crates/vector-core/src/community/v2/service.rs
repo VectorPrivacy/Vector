@@ -29,6 +29,7 @@ mod relocate;
 pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
 pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
+mod purge;
 mod writing;
 pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
 pub(crate) use writing::live_writer as live_writer_of;
@@ -5917,7 +5918,12 @@ async fn publish_control_edition_wrap_at<T: Transport + ?Sized>(
         let rumor = control::build_edition_rumor_bound(my_pk, vsk, entity_id, version, prev.as_ref(), content, at, citation.as_ref(), binding);
         // Readers judge the edition's own time; relays refuse a wrap dated ahead.
         let (wrap, _) = control::seal_control_edition_signed(&signer, my_pk, &rumor, &control, Timestamp::from_secs(at.min(now_ms() / 1000))).await.map_err(|e| e.to_string())?;
-        transport.publish(&wrap, &community.relays).await?;
+        // A Tenure is what keeps a removed member's decisions standing, so it goes to every relay.
+        if vsk == super::vsk::TENURE {
+            transport.publish_durable(&wrap, &community.relays).await?;
+        } else {
+            transport.publish(&wrap, &community.relays).await?;
+        }
         // Advance our own floor so a follow-up edit chains from this head and refuse-
         // downgrade holds; open our own wrap to recover the self_hash + inner_id.
         // Re-check the session AFTER the publish await: a swap mid-publish means the
@@ -7571,6 +7577,23 @@ pub async fn activate_roles_v2<T: Transport + ?Sized>(transport: &T, community: 
     .await
 }
 
+/// The heads a Tenure seals for a member, in the order a budget keeps them: their deletions,
+/// which are terminal, then their authority heads, then the rest of what they decided.
+fn seal_order(authority: &[FoldedHead], control: &[FoldedHead], theirs: impl Fn(&FoldedHead) -> bool, deletes: impl Fn(&FoldedHead) -> bool) -> Vec<[u8; 32]> {
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    let ordered = control
+        .iter()
+        .filter(|h| theirs(h) && deletes(h))
+        .chain(authority.iter().filter(|h| theirs(h)))
+        .chain(control.iter().filter(|h| theirs(h) && !deletes(h)));
+    for h in ordered {
+        if !out.contains(&h.self_hash) {
+            out.push(h.self_hash);
+        }
+    }
+    out
+}
+
 /// How a reduction treats a member whose standing its writer can't seal whole.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Seal {
@@ -7612,7 +7635,7 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
         let is_owner = me == community.owner()?;
         for member in members {
             let member_hex = member.to_hex();
-            // Authority heads first: a budget cut drops a channel edit before a Grant. A Tenure
+            // Then authority heads: a budget cut drops a channel edit before a Grant. A Tenure
             // of theirs listing an edition nobody has seen is left out: sealing it would let
             // whoever signed that edition publish it later on this standing.
             // A decided head's predecessor was seen too, served or compacted away.
@@ -7629,12 +7652,14 @@ async fn seal_standing<T: Transport + ?Sized>(transport: &T, community: &Communi
                     .and_then(|e| super::roles::parse_tenure_content(&e.content))
                     .is_none_or(|t| t.sealed.iter().flat_map(|x| x.heads.iter()).all(|x| crate::simd::hex::hex_to_bytes_32_checked(x).is_some_and(|b| served.contains(&b))))
             };
-            let mut mine: Vec<[u8; 32]> = Vec::new();
-            for h in authority.heads.iter().chain(control.heads.iter()).filter(|h| h.author == member.to_bytes() && vouches_only_for_served(h)) {
-                if !mine.contains(&h.self_hash) {
-                    mine.push(h.self_hash);
-                }
-            }
+            // Deletions first of all: they are terminal, so a budget cut must never take one.
+            let deletes = |h: &FoldedHead| {
+                editions.iter().find(|e| e.inner_id == h.inner_id).is_some_and(|e| {
+                    (e.vsk == vsk::CHANNEL_METADATA || e.vsk == vsk::CATEGORY) && deletes_entity(e.vsk == vsk::CATEGORY, &e.content)
+                })
+            };
+            let theirs = |h: &FoldedHead| h.author == member.to_bytes() && vouches_only_for_served(h);
+            let mut mine = seal_order(&authority.heads, &control.heads, theirs, deletes);
             if mine.is_empty() {
                 continue;
             }
@@ -10009,6 +10034,7 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
         let mut updated = community.clone();
         updated.channels.retain(|c| c.id.0 != channel_id.0);
         crate::db::community::save_community_v2(&updated)?;
+        purge::purge_deleted_channel(community, channel_id).await;
         Ok(())
     })
     .await
@@ -10093,7 +10119,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new() };
+    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new(), deleted_channels: Vec::new() };
     let mut authority = AuthoritySet::owner_only();
     // Whether this round gave up with editions still unread. The follow is
     // procedural by design — process what arrives, converge with everyone else —
@@ -10528,16 +10554,21 @@ pub async fn follow_control<T: Transport + ?Sized>(
             updated = Some(u);
         }
         resume_relay_copy(community);
-        match updated {
+        crate::community::message_delete::resume_scrubs();
+        let follow = match updated {
             Some(u) => {
                 crate::db::community::save_community_v2(&u)?;
                 if u.relays != community.relays {
                     relays_moved(community, &u);
                 }
-                Ok(ControlFollow { updated: Some(u), authority_changed })
+                ControlFollow { updated: Some(u), authority_changed }
             }
-            None => Ok(ControlFollow { updated: None, authority_changed }),
+            None => ControlFollow { updated: None, authority_changed },
+        };
+        for channel_id in &fold.deleted_channels {
+            purge::purge_deleted_channel(community, channel_id).await;
         }
+        Ok(follow)
     })
     .await
 }
@@ -10632,6 +10663,8 @@ struct ControlFold {
     pins_persist: Vec<(String, String, u64, String, u64)>,
     /// Folded Writers ledger heads to persist: `(channel_hex, raw content, version, rebased)`.
     writers_persist: Vec<(String, String, u64, bool)>,
+    /// Channels a standing deletion took out, whose history every device drops.
+    deleted_channels: Vec<ChannelId>,
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id, author)` of the committed head. The id and
@@ -10730,6 +10763,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut heads = Vec::new();
     let mut gapped = false;
     let mut pins_persist = Vec::new();
+    let mut deleted_channels = Vec::new();
     let mut writers_persist = Vec::new();
     // Pin List eids are one-way HKDF locators, so attribution runs the other
     // direction: precompute every known channel's locator. An eid matching no
@@ -10870,17 +10904,13 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         let (linked, entity_gapped) = fold_head_among(&fold_eds, floor, &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)), &|i| ok[i]);
         gapped |= entity_gapped;
         // A Channel's or Category's deletion is terminal over every authorized edition, not the head alone.
-        let deleted = |c: &str| {
-            if is_category {
-                serde_json::from_str::<control::CategoryMetadata>(c).is_ok_and(|m| m.deleted == Some(true))
-            } else {
-                control::parse_sealed_channel_meta(c).map(|s| s.deleted).or_else(|| serde_json::from_str::<control::ChannelMetadata>(c).ok().map(|m| m.deleted == Some(true))).unwrap_or(false)
-            }
-        };
         let deletion = (0..group.len())
             .filter(|&i| (is_category || is_channel) && ok[i])
-            .filter(|&i| deleted(&group[i].content))
+            .filter(|&i| deletes_entity(is_category, &group[i].content))
             .max_by_key(|&i| (group[i].version, std::cmp::Reverse(group[i].inner_id)));
+        if is_channel && deletion.is_some() {
+            deleted_channels.push(ChannelId(*eid));
+        }
         let (hi, rebased) = match deletion.or(linked) {
             Some(hi) => (hi, false),
             // A ledger records what already happened: a head its Roster now refuses is kept, not
@@ -10935,7 +10965,19 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         }
     }
     changed |= unseal_held(&mut out);
-    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist, writers_persist }
+    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist, writers_persist, deleted_channels }
+}
+
+/// Whether a Channel (or, with `category`, a Category) edition's content deletes it.
+fn deletes_entity(category: bool, content: &str) -> bool {
+    if category {
+        serde_json::from_str::<control::CategoryMetadata>(content).is_ok_and(|m| m.deleted == Some(true))
+    } else {
+        control::parse_sealed_channel_meta(content)
+            .map(|s| s.deleted)
+            .or_else(|| serde_json::from_str::<control::ChannelMetadata>(content).ok().map(|m| m.deleted == Some(true)))
+            .unwrap_or(false)
+    }
 }
 
 /// Where a folded `@everyone` Role keeps the Channels that stood before the switch.
@@ -22505,6 +22547,53 @@ mod tests {
         assert!(f.roles.role(&"d6".repeat(32)).is_some(), "what they made stands on the seal");
     }
 
+    #[test]
+    fn a_seal_keeps_a_members_deletions_ahead_of_everything_else() {
+        let head = |n: u8, author: u8| FoldedHead { entity_hex: String::new(), version: 1, self_hash: [n; 32], inner_id: [n; 32], author: [author; 32], rebased: false };
+        let (grant, edit, deletion, theirs_not) = (head(1, 9), head(2, 9), head(3, 9), head(4, 8));
+        let order = seal_order(&[grant.clone()], &[edit.clone(), deletion.clone(), theirs_not], |h| h.author == [9; 32], |h| h.self_hash == [3; 32]);
+        assert_eq!(order, vec![[3; 32], [1; 32], [2; 32]], "a budget cut takes a channel edit, never a deletion");
+    }
+
+    #[tokio::test]
+    async fn a_tenure_goes_to_every_relay() {
+        struct Counting<'a> {
+            inner: &'a MemoryRelay,
+            durable: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl Transport for Counting<'_> {
+            async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+                self.inner.fetch_plane(plane, query, relays).await
+            }
+            async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+                self.inner.publish(event, relays).await
+            }
+            async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+                self.durable.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner.publish_durable(event, relays).await
+            }
+            async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+                self.inner.fetch(query, relays).await
+            }
+        }
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Durable", bed.relays.clone(), None).await.unwrap();
+        activate_roles_v2(&bed.relay, &community, 0).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = Keys::generate();
+        let ra = "e5".repeat(32);
+        publish_role_v2(&bed.relay, &held(), &owner.keys, &role_v2(&ra, "Admin", "C", Permissions::MANAGE_ROLES), 1).await;
+        publish_grant(&bed.relay, &held(), &owner.keys, &a.public_key(), vec![ra], 1).await;
+        publish_role_v2(&bed.relay, &held(), &a, &role_v2(&"e6".repeat(32), "by A", "z", 0), 1).await;
+        let counting = Counting { inner: &bed.relay, durable: Default::default() };
+        grant_roles(&counting, &held(), &a.public_key(), vec![]).await.unwrap();
+        assert_eq!(fetch_control(&bed.relay, &held()).await.iter().filter(|e| e.vsk == vsk::TENURE).count(), 1);
+        assert_eq!(counting.durable.load(std::sync::atomic::Ordering::Relaxed), 1, "the Tenure, and only it, went out durably");
+    }
+
     #[tokio::test]
     async fn every_reduction_seals_what_the_member_decided() {
         // The writer side: a strip, a deletion, a bit dropped, a move down and a ban each
@@ -24031,6 +24120,66 @@ mod tests {
         let updated = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
         assert!(updated.channel(&extra).is_none(), "a deleted channel folds out");
         assert_eq!(updated.channels.len(), 1, "only #general remains");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_channel_leaves_every_device_with_its_files_and_in_time_my_wraps() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        relay.follow_cord01(&["wss://r".to_string()]);
+        let community = create_community(&relay, "Purge", vec!["wss://r".into()], None).await.unwrap();
+        let doomed = ChannelId([0x7a; 32]);
+        publish_channel_edition(&relay, &community, &owner, &doomed, "doomed", false, 1, false).await;
+        let held = follow_control(&relay, &community).await.unwrap().updated.expect("added");
+        let doomed_hex = crate::simd::hex::bytes_to_hex_32(&doomed.0);
+
+        // Mine, sent for real; someone else's; and two of my uploads, one also forwarded into a DM.
+        let sent = send_message(&relay, &held, &doomed, "bye").await.unwrap();
+        let file = |hash: &str, url: &str| crate::types::Attachment { id: hash.into(), url: url.into(), ..Default::default() };
+        let (kept_url, gone_url) = ("https://cdn.example/shared", "https://cdn.example/only-here");
+        let with_files = crate::types::Message {
+            id: "f1".repeat(32), content: "files".into(), at: 1_700_000_000_000, mine: true,
+            attachments: vec![file(&"a1".repeat(32), kept_url), file(&"b2".repeat(32), gone_url)], ..Default::default()
+        };
+        let theirs = crate::types::Message { id: "f2".repeat(32), content: "theirs".into(), at: 1_700_000_001_000, ..Default::default() };
+        for msg in [&with_files, &theirs] {
+            crate::db::events::save_message(&doomed_hex, msg).await.unwrap();
+        }
+        let elsewhere = crate::types::Message {
+            id: "f3".repeat(32), content: "forwarded".into(), at: 1_700_000_002_000, mine: true,
+            attachments: vec![file(&"a1".repeat(32), kept_url)], ..Default::default()
+        };
+        crate::db::events::save_message(&nostr_sdk::prelude::ToBech32::to_bech32(&Keys::generate().public_key()).unwrap(), &elsewhere).await.unwrap();
+
+        let purged = purge::purge_deleted_channel(&held, &doomed).await.expect("it held the channel");
+        assert_eq!(purged, purge::Purged { uploads: vec![gone_url.to_string()], scrubs: 1 }, "only my upload nothing else uses");
+        assert!(crate::db::community::channel_events(&doomed_hex).unwrap().is_empty(), "its history is gone");
+        assert!(!crate::state::STATE.lock().await.chats.iter().any(|c| c.id == doomed_hex));
+        assert!(crate::db::events::event_exists(&elsewhere.id).unwrap(), "the forwarded copy stays");
+        assert_eq!(purge::purge_deleted_channel(&held, &doomed).await, None, "a second run finds nothing");
+
+        // My wrap leaves the relays from the queue, one at a time.
+        assert_eq!(crate::db::community::next_wrap_scrub().unwrap().map(|(id, _)| id), Some(sent.clone()));
+        let wrap_id = crate::db::community::wrap_owners(&sent).unwrap()[0].1.clone();
+        assert_eq!(crate::community::message_delete::drain_scrubs(&relay, std::time::Duration::ZERO).await, 1);
+        assert!(relay.fetch(&Query { ids: vec![wrap_id], ..Default::default() }, &["wss://r".to_string()]).await.unwrap().is_empty());
+        assert_eq!(crate::db::community::next_wrap_scrub().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_folded_deletion_purges_the_channel_on_a_device_that_did_not_delete_it() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Seen", vec!["wss://r".into()], None).await.unwrap();
+        let doomed = ChannelId([0x7b; 32]);
+        publish_channel_edition(&relay, &community, &owner, &doomed, "doomed", false, 1, false).await;
+        let held = follow_control(&relay, &community).await.unwrap().updated.expect("added");
+        let sent = send_message(&relay, &held, &doomed, "seen elsewhere").await.unwrap();
+
+        publish_channel_edition(&relay, &community, &owner, &doomed, "doomed", false, 2, true).await;
+        follow_control(&relay, &held).await.unwrap();
+        assert!(crate::db::community::channel_events(&crate::simd::hex::bytes_to_hex_32(&doomed.0)).unwrap().is_empty());
+        assert_eq!(crate::db::community::next_wrap_scrub().unwrap().map(|(id, _)| id), Some(sent), "queued to leave the relays");
     }
 
     #[tokio::test]

@@ -840,7 +840,7 @@ VectorSvelte.setScreen('createChannel', { h: { submit: () => submitCreateModal()
 /** Whether the channel was deleted. */
 async function promptDeleteChannel(communityId, channel) {
     const ok = await popupConfirm('Delete channel',
-        `Delete <b>${channel.view === 'voice' ? '' : '#'}${escapeHtml(channel.name)}</b>? Everyone loses access to it. Messages already on this device are kept.`,
+        `Delete <b>${channel.view === 'voice' ? '' : '#'}${escapeHtml(channel.name)}</b>? It's deleted for everyone, with all its messages and files.`,
         false, '', 'vector_warning.svg');
     if (!ok) return false;
     try {

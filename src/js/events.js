@@ -80,6 +80,15 @@ async function setupRustListeners() {
         nicknameReads.set(cid, setTimeout(() => { nicknameReads.delete(cid); loadCommunityNicknames(cid); }, 300));
     });
 
+    // A deleted Channel left this device: drop its chat and anything painted from it.
+    _on('channel_purged', (evt) => {
+        const { community_id: communityId, channel_id: channelId } = evt.payload || {};
+        if (!channelId) return;
+        arrChats = arrChats.filter(c => c.id !== channelId);
+        purgeCommunityMessageCache(communityId);
+        listChanged();
+    });
+
     // A control change (banlist / roles / metadata / invite-mode) landed in REALTIME (via the 3308
     // control-plane subscription). Re-read this community's summary into the chat list + re-render the
     // overview if it's open, so online members see name/role/mode changes live, not just on next open.
