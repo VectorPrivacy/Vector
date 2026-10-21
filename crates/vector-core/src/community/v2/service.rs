@@ -50,10 +50,7 @@ fn me_pk() -> Result<PublicKey, String> {
 }
 
 pub(crate) fn now_ms() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    crate::clock::now_ms()
 }
 
 /// `now_ms`, but never twice the same value in this process.
@@ -673,6 +670,19 @@ pub(crate) fn plane_key_of(community: &CommunityV2, channel_id: &ChannelId, wrap
     writing::writer_keys_at(community, ch, wepoch, &wrap.pubkey)
 }
 
+/// The most pages holding messages dated ahead one history read steps past for free.
+const MAX_EARLY_PAGES: usize = 20;
+
+/// Whether `event` is a message dated ahead of this device, now held for its time
+/// ([`crate::early`]) instead of joining the page.
+fn early_message(event: &ChatEvent, wrap: &nostr_sdk::prelude::Event) -> bool {
+    let early = matches!(event, ChatEvent::Message { .. }) && crate::early::is_early(event.opened().at_ms);
+    if early {
+        crate::early::hold(wrap.clone(), crate::early::Via::Community, event.opened().at_ms);
+    }
+    early
+}
+
 /// One epoch a channel read covers: keyed, or a past epoch held read-only (CORD-03 §5).
 enum ReadPlane {
     Keyed(GroupKey),
@@ -900,7 +910,10 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
         let mut out: Vec<(u64, FetchedEvent)> = Vec::new();
         let mut until: Option<u64> = start_until;
         let mut ended = false;
-        for _ in 0..max_pages {
+        let (mut pages_left, mut early_pages) = (max_pages, 0usize);
+        while pages_left > 0 {
+            pages_left -= 1;
+            let mut early = 0usize;
             // Each address pages on its own: the next page starts below the newest bottom of the
             // ones that came back full, so a busy address never pushes a quiet one past a gap.
             let mut full_oldest: Option<u64> = None;
@@ -977,6 +990,10 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     let opened = planes.iter().find_map(|(plane, epoch)| {
                         chat::open_writer_chat_event(wrap, address, *wepoch, plane.conv(), channel_id, *epoch).ok().filter(|ev| plane.holds(ev.opened().at_ms)).map(|ev| (ev, *epoch))
                     });
+                    if opened.as_ref().is_some_and(|(ev, _)| early_message(ev, wrap)) {
+                        early += 1;
+                        continue;
+                    }
                     if let Some((event, epoch)) = opened.and_then(|(ev, e)| writing::judge_arrival(judge.as_ref(), &community.id().0, channel_id, wrap, ev, Some(*wepoch)).map(|ev| (ev, e))) {
                         if seen_rumors.insert(event.opened().rumor_id) {
                             if crate::state::my_public_key() == Some(event.opened().author) {
@@ -993,7 +1010,12 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     if wrap.pubkey != plane.address() {
                         continue;
                     }
-                    let opened = plane.open(wrap, channel_id, *epoch).and_then(|ev| writing::judge_arrival(judge.as_ref(), &community.id().0, channel_id, wrap, ev, None));
+                    let opened = plane.open(wrap, channel_id, *epoch);
+                    if opened.as_ref().is_some_and(|ev| early_message(ev, wrap)) {
+                        early += 1;
+                        break;
+                    }
+                    let opened = opened.and_then(|ev| writing::judge_arrival(judge.as_ref(), &community.id().0, channel_id, wrap, ev, None));
                     if let Some(event) = opened {
                         let id = event.opened().rumor_id;
                         if seen_rumors.insert(id) {
@@ -1003,6 +1025,13 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     }
                     break;
                 }
+            }
+            // Messages dated ahead took page slots without joining the page, and their place in
+            // it bounds what an older address may show: page again for free, or the caller could
+            // read the end of history. Bounded, so a flood of them can't page forever.
+            if early > 0 && early_pages < MAX_EARLY_PAGES {
+                early_pages += 1;
+                pages_left += 1;
             }
             if fresh == 0 {
                 // A full page of already-seen wraps: a same-second WALL. Step past it;
@@ -24123,6 +24152,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_flood_dated_ahead_never_buries_the_history_beneath_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Flood", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let (member, spammer) = (Keys::generate(), Keys::generate());
+        let now = crate::clock::now_ms();
+        let post = |keys: &Keys, text: &str, at: u64| {
+            let rumor = chat::build_message_rumor(keys.public_key(), &general, community.root_epoch, text, None, &[], vec![], at);
+            chat::seal_chat_rumor(&rumor, &group, keys, Timestamp::from_secs(at / 1000), false).unwrap().0
+        };
+        relay.publish(&post(&member, "real", now - 60_000), &community.relays).await.unwrap();
+        for i in 0..30u64 {
+            relay.publish(&post(&spammer, "ahead", now + 60_000 + i * 1_000), &community.relays).await.unwrap();
+        }
+        let page = fetch_channel_history(&relay, &community, &general, 10, 1, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        let texts: Vec<_> = page.iter().map(|f| f.event.opened().rumor.content.clone()).collect();
+        assert_eq!(texts, vec!["real".to_string()], "pages of messages dated ahead are stepped past, not shown");
+    }
+
+    #[tokio::test]
+    async fn a_history_read_holds_a_message_dated_ahead() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ahead", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = channel_group_key(&community.community_root, &general, community.root_epoch);
+        let member = Keys::generate();
+        let now = crate::clock::now_ms();
+        let mut ids = Vec::new();
+        for (text, at) in [("on time", now), ("minutes fast", now + 3 * 60 * 1000)] {
+            let rumor = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, text, None, &[], vec![], at);
+            ids.push(rumor.id.unwrap());
+            let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(at / 1000), false).unwrap();
+            relay.publish(&wrap, &community.relays).await.unwrap();
+        }
+        let page: Vec<_> = fetch_channel(&relay, &community, &general, 50).await.unwrap().iter().map(|f| f.event.opened().rumor_id).collect();
+        assert!(page.contains(&ids[0]));
+        assert!(!page.contains(&ids[1]), "it waits for its time instead of joining the page");
+    }
+
+    #[tokio::test]
     async fn a_deleted_channel_leaves_every_device_with_its_files_and_in_time_my_wraps() {
         let (_tmp, _guard, owner) = init_test_db();
         let relay = MemoryRelay::new();
@@ -25904,9 +25976,7 @@ mod tests {
         let p = Keys::generate();
         post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "from the future", now_ms() + 5 * 60_000).await;
         let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
-        let copy = page.into_iter().find(|f| f.event.opened().rumor.content == "from the future").unwrap();
-        let chan_hex = crate::simd::hex::bytes_to_hex_32(&general.0);
-        crate::community::v2::inbound::persist_routed_chat_event(&copy.event, &chan_hex, &community.id().0, &owner.keys.public_key()).await.expect("kept marked");
+        assert!(!page.iter().any(|f| f.event.opened().rumor.content == "from the future"), "it waits for its time, before the writers' rules judge it");
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, 0).await.unwrap();
         let at = held().channel(&general).unwrap().writers.as_ref().unwrap().entries.last().unwrap().at;
         assert!(at < now_ms() + 60_000, "the reopen is dated now, not by a post the rules held");
@@ -26453,12 +26523,15 @@ mod tests {
         let p = Keys::generate();
         post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "soon", now_ms() + 30 * 60_000).await;
         post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "far", now_ms() + 2 * 60 * 60_000).await;
+        // Shown once their time came, read here as a device whose clock has reached them.
+        crate::clock::shift_for_test(3 * 60 * 60_000);
         let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         let mut ids = std::collections::HashMap::new();
         for f in page.iter().filter(|f| ["soon", "far"].contains(&f.event.opened().rumor.content.as_str())) {
             crate::community::v2::inbound::persist_routed_chat_event(&f.event, &chan_hex, &community.id().0, &member.keys.public_key()).await.expect("stood while open");
             ids.insert(f.event.opened().rumor.content.clone(), f.event.opened().rumor_id.to_hex());
         }
+        crate::clock::shift_for_test(0);
         assert_eq!(ids.len(), 2);
         bed.swap_to(&owner);
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
@@ -26879,9 +26952,12 @@ mod tests {
         follow_control(&bed.relay, &held()).await.unwrap();
         let p = Keys::generate();
         post_raw(&bed.relay, &held(), &p, &general, &read, community.root_epoch, None, "far", now_ms() + 2 * 60 * 60_000).await;
+        // Shown once its time came, read here as a device whose clock has reached it.
+        crate::clock::shift_for_test(3 * 60 * 60_000);
         let page = fetch_channel_history(&bed.relay, &held(), &general, 50, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         let far = page.iter().find(|f| f.event.opened().rumor.content == "far").unwrap();
         crate::community::v2::inbound::persist_routed_chat_event(&far.event, &chan_hex, &community.id().0, &member.keys.public_key()).await.expect("stood while open");
+        crate::clock::shift_for_test(0);
         let id = far.event.opened().rumor_id.to_hex();
         bed.swap_to(&owner);
         set_overwrite(&bed.relay, &held(), general.0, OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
@@ -28079,9 +28155,12 @@ mod tests {
             let (wrap, _) = chat::seal_chat_rumor(&rumor, &read, &spammer, Timestamp::from_secs(at / 1000), false).unwrap();
             bed.relay.publish(&wrap, &community.relays).await.unwrap();
         }
+        // Read once the flood is due, so it is paged rather than held.
+        crate::clock::shift_for_test(3 * 60_000);
         let (got, cursor) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 2, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
         assert!(!got.iter().any(|f| f.event.opened().rumor.content == "a writer's post") && cursor.is_some_and(|c| c > (now + 1_000) / 1000), "nothing below where the relay walk stopped");
         let (got, _) = fetch_channel_history_paged(&bed.relay, &held(), &general, 10, 4, None, cursor, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default()).await.unwrap();
+        crate::clock::shift_for_test(0);
         assert!(got.iter().any(|f| f.event.opened().rumor.content == "a writer's post"), "paging on from the cursor reaches it");
     }
 
@@ -28348,6 +28427,8 @@ mod tests {
         for i in 0..15u64 {
             send_chat_message_at(&bed.relay, &held(), &general, &format!("writer {i}"), None, &[], vec![], opened + i * 1_000 + 1_000).await.unwrap();
         }
+        // The writers' posts are dated just ahead; read once they are due.
+        crate::clock::shift_for_test(60_000);
         let mut seen = std::collections::HashSet::new();
         let mut until = None;
         for _ in 0..12 {
@@ -28359,6 +28440,7 @@ mod tests {
             }
             until = Some(oldest / 1000);
         }
+        crate::clock::shift_for_test(0);
         assert_eq!(seen.len(), 30, "one page at a time from its oldest row, every post comes");
     }
 

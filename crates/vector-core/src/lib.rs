@@ -47,6 +47,7 @@ pub mod tags;
 pub mod types;
 pub mod profile;
 pub mod chat;
+pub mod clock;
 pub mod boot_payload;
 pub mod compact;
 
@@ -429,6 +430,7 @@ pub mod wallpaper;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===
 pub mod deletion;
+pub mod early;
 pub mod self_destruct;
 pub mod transfer;
 
@@ -5342,6 +5344,7 @@ impl VectorCore {
         // Spawn the single per-community follow worker for this session; the v2
         // follow queue (fed by dispatch, catch-up, and sync) drains through it.
         community::v2::realtime::spawn_follow_worker(handler.clone());
+        early::start(handler.clone());
 
         // DMs go live BEFORE the catch-up: the subscription only carries what is
         // published after it starts, so a wrap sent mid-catch-up reaches us by one

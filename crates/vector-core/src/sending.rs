@@ -680,9 +680,9 @@ pub async fn send_dm(
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH).unwrap();
-    let pending_id = format!("pending-{}", now.as_nanos());
+    let pending_id = format!("pending-{}", web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos());
+    // Stamped by the corrected clock, so a fast device never dates a message ahead of everyone.
+    let now = std::time::Duration::from_millis(crate::clock::now_ms());
 
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
@@ -724,6 +724,7 @@ pub async fn send_dm(
     let milliseconds = now.as_millis() % 1000;
     // NIP-17 rumor: kind 14 + recipient p-tag (upstream's `make_rumor` is private).
     let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, content)
+        .custom_created_at(Timestamp::from_secs(now.as_secs()))
         .tag(Tag::public_key(receiver));
 
     if let Some(reply_id) = reply_to {
@@ -1080,9 +1081,8 @@ pub async fn send_file_dm_from(
     let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
 
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH).unwrap();
-    let pending_id = format!("pending-{}", now.as_nanos());
+    let pending_id = format!("pending-{}", web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_nanos());
+    let now = std::time::Duration::from_millis(crate::clock::now_ms());
     let milliseconds = now.as_millis() % 1000;
 
     let receiver = PublicKey::from_bech32(receiver_npub)
@@ -1276,6 +1276,7 @@ pub async fn send_file_dm_from(
 
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
+        .custom_created_at(Timestamp::from_secs(now.as_secs()))
         .tag(Tag::public_key(receiver))
         .tag(Tag::custom("file-type", [mime_type]))
         .tag(Tag::custom("size", [encrypted_size.to_string()]))

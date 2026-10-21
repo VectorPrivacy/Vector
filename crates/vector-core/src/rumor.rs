@@ -1082,7 +1082,7 @@ fn extract_millisecond_timestamp(rumor: &RumorEvent) -> u64 {
 /// - The inner event escapes relay far-future clamping (DM rumors and Concord inners are both
 ///   encrypted and never published bare), so a hostile sender could stamp `created_at` year-9999 to
 ///   pin a message to the top forever. Clamp an implausible-future result back to receipt time; a few
-///   minutes' grace absorbs clock skew.
+///   minutes' grace absorbs clock skew, and a message inside it waits for its time ([`crate::early`]).
 pub fn resolve_message_timestamp(created_at_secs: u64, ms_tag: Option<&str>) -> u64 {
     const FUTURE_GRACE_MS: u64 = 5 * 60 * 1000;
     let base = created_at_secs.saturating_mul(1000);
@@ -1090,10 +1090,7 @@ pub fn resolve_message_timestamp(created_at_secs: u64, ms_tag: Option<&str>) -> 
         Some(offset) if offset <= 999 => base.saturating_add(offset),
         _ => base,
     };
-    let now_ms = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(u64::MAX);
+    let now_ms = crate::clock::now_ms();
     if at > now_ms.saturating_add(FUTURE_GRACE_MS) { now_ms } else { at }
 }
 

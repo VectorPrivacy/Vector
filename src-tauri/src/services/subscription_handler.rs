@@ -389,6 +389,8 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     vector_core::community::v2::realtime::spawn_follow_worker(std::sync::Arc::new(
         super::event_handler::TauriEventHandler,
     ));
+    // Messages dated ahead of this device are released through the same handler.
+    vector_core::early::start(std::sync::Arc::new(super::event_handler::TauriEventHandler));
 
     // GiftWrap subscription via vector-core (DMs, files)
     let core = vector_core::VectorCore;

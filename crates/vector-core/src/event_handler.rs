@@ -418,6 +418,12 @@ pub enum PreparedEvent {
         /// Sender-declared NIP-40 expiry (unix secs); 0 = none, so permanent.
         expires_at: u64,
     },
+    /// A message dated ahead of this device's clock: its wrap waits for its time
+    /// ([`crate::early`]), unmarked, so it comes back if this session ends first.
+    Early {
+        wrap: Event,
+        at_ms: u64,
+    },
     /// Duplicate event — just persist wrapper for negentropy.
     DedupSkip {
         wrapper_id_bytes: [u8; 32],
@@ -598,6 +604,9 @@ fn finish_prepare(
     let parse_start = web_time::Instant::now();
     let download_dir = crate::db::get_download_dir();
     match process_rumor(rumor_event, rumor_context, &download_dir) {
+        Ok(RumorProcessingResult::TextMessage(msg) | RumorProcessingResult::FileAttachment(msg)) if crate::early::is_early(msg.at) => {
+            PreparedEvent::Early { wrap: event.clone(), at_ms: msg.at }
+        }
         Ok(result) => {
             let parse_ns = parse_start.elapsed().as_nanos() as u64;
             PreparedEvent::Processed {
@@ -1152,6 +1161,10 @@ pub async fn commit_prepared_event(
             let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
             false
         }
+        PreparedEvent::Early { wrap, at_ms } => {
+            crate::early::hold(wrap, crate::early::Via::Dm, at_ms);
+            false
+        }
         PreparedEvent::DedupSkip { wrapper_id_bytes, wrapper_created_at } => {
             // Persist wrapper timestamp for negentropy backfill (skip no-op writes).
             // Guarded: a cache-hit skip can name a wrapper whose message is still sitting in
@@ -1591,6 +1604,28 @@ pub async fn process_event(
         .ok_or_else(|| "Public key not initialized".to_string())?;
     let prepared = prepare_event(event, &client, my_pk).await;
     Ok(commit_prepared_event(prepared, is_new, handler).await)
+}
+
+#[cfg(test)]
+mod early_dm_tests {
+    use super::*;
+    use crate::event_ext::FinalizeUnsignedWithId;
+
+    #[test]
+    fn a_dm_dated_ahead_of_this_device_waits_for_its_time() {
+        let (me, them) = (Keys::generate(), Keys::generate());
+        let wrap = EventBuilder::new(Kind::GiftWrap, "").finalize(&Keys::generate()).unwrap();
+        let prepared = |ahead_secs: u64| {
+            let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hi")
+                .tag(Tag::public_key(me.public_key()))
+                .custom_created_at(Timestamp::from_secs(crate::clock::now_secs() + ahead_secs))
+                .finalize_unsigned_with_id(them.public_key());
+            finish_prepare(&wrap, Ok(UnwrappedGift { rumor, sender: them.public_key() }), 0, me.public_key())
+        };
+        assert!(matches!(prepared(120), PreparedEvent::Early { .. }), "two minutes ahead waits");
+        assert!(matches!(prepared(0), PreparedEvent::Processed { .. }), "on time shows at once");
+        assert!(matches!(prepared(3), PreparedEvent::Processed { .. }), "a few seconds fast too");
+    }
 }
 
 #[cfg(test)]

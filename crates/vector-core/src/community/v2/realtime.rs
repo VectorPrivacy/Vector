@@ -87,6 +87,13 @@ impl SeenWraps {
         self.cur.insert(key);
         true
     }
+
+    /// Let `id` be offered again: a wrap held for its time comes back through here.
+    fn forget(&mut self, id: &[u8; 32]) {
+        let key = u64::from_le_bytes([id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]]);
+        self.cur.remove(&key);
+        self.prev.remove(&key);
+    }
 }
 
 struct SeenWrapsKey;
@@ -801,6 +808,12 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // can re-seal a signed rumor into a fresh 1059), the relay echo of our
                 // own send, or a forged edit/delete yields no outcome and re-fires
                 // nothing.
+                // Dated ahead of this device: back through here once its time comes.
+                inbound::DispatchedV2::Early { at_ms } => {
+                    seen_wraps().lock().unwrap_or_else(|e| e.into_inner()).forget(wrap.id.as_bytes());
+                    crate::early::hold(wrap.clone(), crate::early::Via::Community, at_ms);
+                    return;
+                }
                 inbound::DispatchedV2::Chat { channel_id, event } => {
                     if event.opened().author == my_pk {
                         let plane = crate::community::id32_from_hex(&channel_id)
@@ -1507,6 +1520,70 @@ mod tests {
         assert_eq!(two.len(), one.len() * 2);
         // Order-independent: reversing the input yields the identical sorted set.
         assert_eq!(plane_authors(&[b, a]), two);
+    }
+
+    #[tokio::test]
+    async fn a_message_dated_ahead_waits_for_its_time_then_arrives() {
+        use super::super::stream::{self, SealForm};
+        use crate::community::transport::memory::MemoryRelay;
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 17 + 11) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+        crate::early::start(Arc::new(crate::event_handler::NoOpEventHandler));
+
+        let relay = MemoryRelay::new();
+        let community = super::super::service::create_community(&relay, "Clock", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let member = Keys::generate();
+        let post = |text: &str, at_ms: u64| {
+            let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, text, None, &[], vec![], at_ms);
+            let seal = stream::build_seal(&rumor, SealForm::Encrypted, &group, &member).unwrap();
+            let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, nostr_sdk::prelude::Timestamp::from_secs(at_ms / 1000)).unwrap();
+            (rumor.id.unwrap().to_hex(), wrap)
+        };
+        let now = crate::clock::now_ms();
+        let (late_id, late) = post("from a clock minutes fast", now + 4 * 60 * 1000);
+        let (soon_id, soon) = post("from a clock a little fast", now + crate::early::TOLERANCE_MS + 1_500);
+        let (fine_id, fine) = post("from a clock a hair fast", now + 2_000);
+
+        crate::community::v2::realtime::clear().await;
+        for wrap in [late.clone(), soon, fine] {
+            dispatch_event(wrap, Arc::new(crate::event_handler::NoOpEventHandler)).await;
+        }
+        let stored = |id: &str| crate::db::events::event_exists(id).unwrap();
+        assert!(stored(&fine_id), "a few seconds fast shows at once");
+        assert!(!stored(&late_id) && !stored(&soon_id), "ahead of the clock, they wait");
+        assert!(crate::early::held(&late.id));
+        assert!(!crate::db::wrappers::processed_wrapper_exists(&late.id.to_bytes()), "never marked handled, so a restart can't lose it");
+
+        // Due, the one a little fast arrives through the normal path.
+        for _ in 0..40 {
+            if stored(&soon_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(stored(&soon_id), "released once its time came");
+        assert!(!stored(&late_id), "the other still waits");
     }
 
     #[tokio::test]

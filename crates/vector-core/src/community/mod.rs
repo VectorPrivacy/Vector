@@ -33,11 +33,7 @@ pub const REALTIME_FRESH_WINDOW_MS: u64 = 300_000;
 /// the "new" surfaces (`is_new`, bot events, pings); folding and persistence
 /// are NEVER gated on freshness.
 pub fn is_realtime_fresh(at_ms: u64) -> bool {
-    let now_ms = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    at_ms.saturating_add(REALTIME_FRESH_WINDOW_MS) >= now_ms
+    at_ms.saturating_add(REALTIME_FRESH_WINDOW_MS) >= crate::clock::now_ms()
 }
 
 /// Route an inbound Community event, live or a slow relay's straggler.

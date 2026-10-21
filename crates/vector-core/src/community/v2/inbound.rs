@@ -537,6 +537,9 @@ pub enum DispatchedV2 {
     /// holds the wrap for a later judgment, and keeps `marked`, the copy a reader who manages the
     /// Channel sees, without ringing anything.
     Held { channel_id: String, author: PublicKey, at_ms: u64, marked: Option<Box<ChatEvent>> },
+    /// A message dated ahead of this device's clock, to be held until `at_ms` ([`crate::early`]),
+    /// before any rule judges it.
+    Early { at_ms: u64 },
     /// The wrap opened on a v2 plane but carries nothing the handler renders
     /// (e.g. a WebXDC signal, or a kick we don't surface in the first cut).
     Ignored,
@@ -630,6 +633,9 @@ pub fn dispatch_wrap(
 fn dispatch_judged(event: ChatEvent, community: &CommunityV2, ch: &super::community::ChannelV2, wepoch: Option<crate::community::Epoch>, my_pubkey: &PublicKey, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     let channel_id = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
     let (at_ms, author) = (event.opened().at_ms, event.opened().author);
+    if matches!(event, ChatEvent::Message { .. }) && crate::early::is_early(at_ms) {
+        return DispatchedV2::Early { at_ms };
+    }
     // Being in a call is CONNECT, not SEND: a Channel's writers' rules don't judge it.
     if let ChatEvent::VoicePresence { opened, heard } = event {
         if author_is_banned_here(&channel_id, Some(&community.id().0), &opened.author) {
