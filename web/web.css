@@ -50,6 +50,9 @@ body.mobile .publish-app-overlay,
 body.mobile .lg-net-modal,
 body.mobile .marketplace-panel { bottom: var(--kb, 0px); }
 body.mobile .file-preview-overlay { height: var(--app-h, 100%); }
+/* Any other dialog holding the focused field (web/chrome.js), its card scrolling in what's left. */
+body.mobile [data-kb-fit] { top: 0 !important; bottom: var(--kb, 0px) !important; height: auto !important; }
+body.mobile [data-kb-fit] > * { max-height: 100%; overflow-y: auto; }
 /* Cards sized in vh would outgrow what the keyboard leaves. */
 body.mobile .modal-box,
 body.mobile .publish-app-container { max-height: min(85vh, calc(var(--app-h, 100vh) - 40px)); }

@@ -48,6 +48,7 @@
             } else {
                 root.style.removeProperty('--app-h');
                 root.style.removeProperty('--kb');
+                for (const el of document.querySelectorAll('[data-kb-fit]')) delete el.dataset.kbFit;
             }
             if (list?.clientHeight) list.scrollTop = list.scrollHeight - list.clientHeight - fromBottom;
             if (keyboard) reveal();
@@ -59,9 +60,23 @@
             const field = document.activeElement;
             if (!applied || !field?.matches('input, textarea, [contenteditable="true"]')) return;
             if (field.closest('#chat-box, #chat-new-box')) return;   // the composer sits on the keyboard already
+            fitDialog(field);
             field.scrollIntoView({ block: 'nearest' });
             if (scrollY) scrollTo(0, 0);
         });
+    }
+    // A dialog's backdrop covers the full-height layout viewport, so the card it centres can sit
+    // behind the keyboard. Whichever backdrop holds the focused field ends where the keyboard
+    // begins (`[data-kb-fit]`, web.css); one already ending there is left alone.
+    function fitDialog(field) {
+        for (let el = field.parentElement; el && el !== document.body; el = el.parentElement) {
+            if (getComputedStyle(el).position !== 'fixed') continue;
+            const box = el.getBoundingClientRect();
+            if (box.top <= 1 && box.bottom > window.visualViewport.height + 1) {
+                el.dataset.kbFit = '';
+                return;
+            }
+        }
     }
     fit();
     addEventListener('focusin', reveal);
