@@ -54,6 +54,7 @@ const LABEL_WRITER_SCOPE: &[u8] = b"concord/writer-scope";
 const LABEL_CERTIFIER_SCOPE: &[u8] = b"concord/certifier-scope";
 const LABEL_EDITION_BINDING: &str = "concord/edition-binding";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
+const LABEL_WRAP_OWNER: &str = "concord/wrap-owner";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
 const LABEL_COMMUNITY: &str = "concord/community";
 /// A.5 epoch-key commitment prefix — plain SHA-256.
@@ -391,6 +392,20 @@ pub fn invite_bundle_key(token: &[u8; TOKEN_LEN]) -> [u8; 32] {
     hkdf32(token, &build_info(LABEL_INVITE_KEY, &ZERO32, None))
 }
 
+// ── CORD-01 §Deletions: the owner of an author's own wrap ────────────────────
+
+/// The `p` key of an author's own wrap at `address`, whose holder may delete the wrap
+/// (CORD-01 §Deletions): `hkdf(author_secret, "concord/wrap-owner", sha256(address || rumor_id))`.
+/// Every client holding the author's key derives it again, so any of them can delete any of
+/// the author's wraps; without that key it links the wrap to nobody.
+pub fn wrap_owner_key(author_secret: &[u8; 32], address: &PublicKey, rumor_id: &[u8; 32]) -> Keys {
+    let mut h = Sha256::new();
+    h.update(address.to_bytes());
+    h.update(rumor_id);
+    let id: [u8; 32] = h.finalize().into();
+    Keys::new(hkdf_to_secret_key(author_secret, &build_info(LABEL_WRAP_OWNER, &id, None)))
+}
+
 // ── A.4: the self-certifying community_id ────────────────────────────────────
 
 /// `community_id = sha256("concord/community" || owner_xonly || owner_salt)` —
@@ -450,6 +465,24 @@ mod tests {
         ] {
             assert_eq!(h(acl_locator(&cid, &ch.0, &overwrite_target_bytes(&cid, &target).unwrap())), acl);
         }
+    }
+
+    #[test]
+    fn a_wrap_owner_key_is_the_authors_alone_and_one_per_wrap() {
+        let address = Keys::new(SecretKey::from_slice(&[9; 32]).unwrap()).public_key();
+        let other_address = Keys::new(SecretKey::from_slice(&[10; 32]).unwrap()).public_key();
+        let owner = wrap_owner_key(&[7; 32], &address, &[8; 32]);
+        assert_eq!(owner.public_key().to_hex(), "decf171297dc66aa114a80471fb2a4b43c54f66ccd0f089545f68fe2ec08a2fd");
+        assert_eq!(wrap_owner_key(&[7; 32], &address, &[8; 32]).public_key(), owner.public_key(), "every client of the author derives the same key");
+        assert_ne!(wrap_owner_key(&[7; 32], &address, &[11; 32]).public_key(), owner.public_key(), "each message has its own");
+        assert_ne!(wrap_owner_key(&[7; 32], &other_address, &[8; 32]).public_key(), owner.public_key(), "each plane has its own");
+        assert_ne!(wrap_owner_key(&[12; 32], &address, &[8; 32]).public_key(), owner.public_key(), "another author derives another key");
+
+        // The spec's vector: the Appendix A secret as the author, its `channel` pk as the address.
+        let secret: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let id: [u8; 32] = std::array::from_fn(|i| 0xff - i as u8);
+        let channel = channel_group_key(&secret, &ChannelId(id), Epoch(0)).pk();
+        assert_eq!(wrap_owner_key(&secret, &channel, &[0x11; 32]).public_key().to_hex(), "5beb1665f03b5bdbd02dcb3e644a9c7ebca0e0c86b26767c7588470e4603f5dc");
     }
 
     #[test]

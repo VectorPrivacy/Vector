@@ -2162,85 +2162,20 @@ fn respawn_community_sync() {
     });
 }
 
-/// Delete one of the local user's own Community messages. NIP-09-deletes the outer
-/// event via its retained ephemeral key, then drops it locally (STATE + DB) and tells the
-/// UI to remove the row. Errors if no key is retained for `message_id` (not ours, or
-/// already deleted) — only the original sender can delete their own message.
+/// Delete one of the local user's own Community messages: off the relays by the keys kept for
+/// its wraps, then the in-plane delete for peers, its attachments, and the local row.
 #[tauri::command]
 pub async fn delete_community_message(message_id: String) -> Result<(), String> {
     vector_core::db::scoped(async move {
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-
-        // Snapshot the owning channel + attachment URLs BEFORE the cooperative echo removes the
-        // row (the publish below locally applies its own delete, dropping the message from STATE).
-        let (channel_id, attachment_urls) = {
-            let state = vector_core::state::STATE.lock().await;
-            match state.find_message(&message_id) {
-                Some((chat, msg)) => (
-                    chat.id.clone(),
-                    msg.attachments
-                        .iter()
-                        .flat_map(|a| a.all_urls().map(str::to_string))
-                        .collect::<Vec<_>>(),
-                ),
-                None => return Err("message not found (already deleted?)".to_string()),
-            }
-        };
-
-        // Layer 1 — relay nuke: a real NIP-09 against the retained per-message ephemeral key,
-        // erasing the wrapper from relays. Only possible when we hold that key (own send, this
-        // device, post-retention). Best-effort: a relay failure still falls through to the
-        // cooperative tombstone, and the key stays retained for a later retry.
-        let has_key = vector_core::db::community::get_message_key(&message_id)
-            .map(|k| k.is_some())
-            .unwrap_or(false);
-        if has_key {
-            if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &message_id).await {
-                log_error!("Community relay delete failed, using cooperative tombstone only: {e}");
-            }
-        }
-
-        // Layer 2 — the in-plane delete so peers hide it in-app even when we lack the original
-        // signing key (the "Limited Delete" path). Author-gated on the peer side.
-        community_target_op(&channel_id, &message_id, TargetOp::Delete).await?;
-
-        // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
-        // identity so bunker accounts authorize correctly). Smart-forward gate:
-        // only urls no OTHER message still references may be scrubbed.
-        let attachment_urls =
-            vector_core::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, &message_id)
-                .unwrap_or_default();
-        if !attachment_urls.is_empty() {
-            if let Some(_client) = vector_core::state::nostr_client() {
-                if let Ok(signer) = vector_core::signer::active_signer() {
-                    vector_core::blossom::delete_blobs_best_effort(signer, attachment_urls);
-                }
-            }
-        }
-
-        // Drop locally + tell the UI to remove the row (idempotent — the cooperative echo may
-        let removed_chat = {
-            let mut state = vector_core::state::STATE.lock().await;
-            state.remove_message(&message_id).map(|(cid, _)| cid)
-        };
-        let _ = crate::db::delete_event(&message_id).await;
-        vector_core::emit_event(
-            "message_removed",
-            &serde_json::json!({
-                "id": &message_id,
-                "chat_id": removed_chat.as_deref().unwrap_or(&channel_id),
-                "reason": "deleted"
-            }),
-        );
-        Ok(())
+        vector_core::VectorCore.delete_community_message(&message_id).await.map_err(|e| e.to_string())
     })
     .await
 }
 
 /// Revoke ONE of your own reactions (DM or Community). Author-gated: only the reactor can revoke,
-/// re-verified on the peer side. Mirrors message deletion: a relay nuke via the retained per-reaction
-/// ephemeral key, then a cooperative tombstone so live peers drop the chip. Pre-retention reactions
-/// hold no key (can't be relay-nuked), but the cooperative notice still reaches live peers.
+/// re-verified on the peer side. Mirrors message deletion: off the relays by the keys kept for it,
+/// then a cooperative tombstone so live peers drop the chip. A reaction with no key kept can't
+/// leave the relays, but the cooperative notice still reaches live peers.
 #[tauri::command]
 pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
     vector_core::db::scoped(async move {
@@ -2273,17 +2208,7 @@ pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
 
         // Network propagation.
         if is_community {
-            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-            // Layer 1 — relay nuke via the retained per-reaction ephemeral key (own send, post-retention).
-            let has_key = vector_core::db::community::get_message_key(&reaction_id)
-                .map(|k| k.is_some())
-                .unwrap_or(false);
-            if has_key {
-                if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &reaction_id).await {
-                    log_error!("Community reaction relay delete failed, tombstone only: {e}");
-                }
-            }
-            // Layer 2 — the in-plane delete targeting the reaction id (author-gated peer-side).
+            // Off the relays, then the in-plane delete targeting the reaction id (author-gated peer-side).
             community_target_op(&chat_id, &reaction_id, TargetOp::Delete).await?;
         } else {
             use nostr_sdk::prelude::{EventId, PublicKey};

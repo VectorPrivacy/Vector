@@ -246,7 +246,25 @@ pub fn build_delete_rumor(
     at_ms: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> UnsignedEvent {
+    build_delete_rumor_until(author, channel_id, epoch, target_rumor_id_hex, target_kind, at_ms, citation, None)
+}
+
+/// [`build_delete_rumor`] that relays drop at `expiration` (unix seconds).
+#[allow(clippy::too_many_arguments)]
+pub fn build_delete_rumor_until(
+    author: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    target_rumor_id_hex: &str,
+    target_kind: u16,
+    at_ms: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+    expiration: Option<u64>,
+) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
+    if let Some(exp) = expiration {
+        tags.push(Tag::expiration(Timestamp::from_secs(exp)));
+    }
     tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
     tags.push(Tag::custom(
         "k",
@@ -412,7 +430,8 @@ pub fn seal_chat_rumor(
 
 /// Signer-driven twin of [`seal_chat_rumor`] for bunker / NIP-55 accounts: the
 /// author seal signs through a [`VectorSigner`]; the group-key wrap is unchanged.
-/// `author` is the identity the signer signs as (must equal `my_public_key()`).
+/// `author` is the identity the signer signs as (must equal `my_public_key()`); the wrap is
+/// `p`-tagged to `owner`, the key that may delete it.
 pub async fn seal_chat_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: nostr_sdk::prelude::PublicKey,
@@ -420,7 +439,8 @@ pub async fn seal_chat_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
     group: &GroupKey,
     wrap_at: Timestamp,
     ephemeral: bool,
-) -> Result<(Event, Keys), ChatError> {
+    owner: &nostr_sdk::prelude::PublicKey,
+) -> Result<Event, ChatError> {
     let k = rumor.kind.as_u16();
     if !is_chat_kind(k) {
         return Err(ChatError::UnknownKind(k));
@@ -432,7 +452,7 @@ pub async fn seal_chat_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
         .filter(|t| t.as_slice().first().map(|k| k.as_str() == "expiration").unwrap_or(false))
         .cloned()
         .collect();
-    Ok(stream::seal_and_wrap_signed(signer, author, rumor, SealForm::Encrypted, group, wrap_kind, wrap_at, &wrap_extra).await?)
+    Ok(stream::seal_and_wrap_signed_for(signer, author, rumor, SealForm::Encrypted, group, wrap_kind, wrap_at, &wrap_extra, owner).await?)
 }
 
 /// A parsed reply reference — the NIP-C7 `q` tag's parent rumor id and (when

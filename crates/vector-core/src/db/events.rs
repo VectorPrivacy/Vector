@@ -831,6 +831,18 @@ pub fn wrapper_event_id_of(event_id: &str) -> Option<nostr_sdk::prelude::EventId
     nostr_sdk::prelude::EventId::from_hex(&hex?).ok()
 }
 
+/// The ids of the stored edits of `message_id`, which only its author can have made.
+pub fn edits_of(message_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare_cached("SELECT id FROM events WHERE reference_id = ?1 AND kind = ?2")
+        .map_err(|e| format!("edits of: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![message_id, event_kind::MESSAGE_EDIT], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("edits of: {e}"))?;
+    rows.collect::<Result<_, _>>().map_err(|e| format!("edits of: {e}"))
+}
+
 /// The community wraps among `wrapper_event_ids` whose message is stored with nothing left to
 /// learn from opening it again: someone else's, or mine with its delete key kept.
 pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections::HashSet<String> {
@@ -838,7 +850,8 @@ pub fn community_wraps_settled(wrapper_event_ids: &[String]) -> std::collections
     let Ok(ids) = serde_json::to_string(wrapper_event_ids) else { return Default::default() };
     let Ok(mut stmt) = conn.prepare_cached(
         "SELECT DISTINCT e.wrapper_event_id FROM json_each(?1) j JOIN events e ON e.wrapper_event_id = j.value \
-         WHERE e.mine = 0 OR EXISTS(SELECT 1 FROM community_message_keys k WHERE k.message_id = e.id)",
+         WHERE e.mine = 0 OR EXISTS(SELECT 1 FROM community_message_keys k WHERE k.message_id = e.id) \
+         OR EXISTS(SELECT 1 FROM community_wrap_owners o WHERE o.message_id = e.id)",
     ) else {
         return Default::default();
     };

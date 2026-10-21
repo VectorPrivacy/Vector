@@ -313,10 +313,9 @@ async fn resolve_delete_options(
             // Every DM delete takes the same path, retained key or not. A malformed hex id
             // can't be a DM rumor: confident false, not an error.
             let dm_keys = || -> Result<bool, String> { Ok(EventId::from_hex(&id).is_ok()) };
-            // Community channels retain a per-message ephemeral key on send; its presence
-            // is exactly "can we do a real NIP-09 network delete" (full vs limited).
-            let community_keys =
-                || vector_core::db::community::get_message_key(&id).map(|k| k.is_some());
+            // A Community message deletes fully where its wrap's owner key is kept: that is the
+            // deletion a relay following CORD-01 honours.
+            let community_keys = || vector_core::db::community::has_wrap_owner(&id);
             let checked = match ctx.chat_type {
                 Some(ChatType::DirectMessage) => dm_keys(),
                 Some(ChatType::Community) => community_keys(),

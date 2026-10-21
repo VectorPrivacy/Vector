@@ -35,7 +35,7 @@ pub(crate) const COOPERATIVE_HIDE_EXPIRY_SECS: u64 = 60 * 60 * 24 * 30;
 const WRAP_DELETION_EXPIRY_SECS: u64 = 60 * 60 * 24 * 90;
 
 /// The most wraps one deletion names.
-const WRAPS_PER_DELETION: usize = 100;
+pub(crate) const WRAPS_PER_DELETION: usize = 100;
 
 /// Outcome of a delete-own-* operation.
 ///
@@ -219,7 +219,7 @@ pub async fn delete_own_reaction(
 
 /// A deletion of gift wraps: `k` names their kind, and it expires once nothing could
 /// still re-broadcast them.
-fn wrap_deletion(wrap_ids: &[EventId]) -> EventBuilder {
+pub(crate) fn wrap_deletion(wrap_ids: &[EventId]) -> EventBuilder {
     let expires = Timestamp::now().as_secs().saturating_add(WRAP_DELETION_EXPIRY_SECS);
     wrap_ids
         .iter()

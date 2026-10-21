@@ -298,14 +298,28 @@ pub fn wrap_seal_with_tags(
     wrap_at: Timestamp,
     extra_tags: &[Tag],
 ) -> Result<(Event, Keys), StreamError> {
+    let ephemeral = Keys::generate();
+    let wrap = wrap_seal_for(seal, group, wrap_kind, wrap_at, extra_tags, &ephemeral.public_key())?;
+    Ok((wrap, ephemeral))
+}
+
+/// [`wrap_seal_with_tags`] `p`-tagged to `owner`, the key that may later delete the wrap
+/// (CORD-01 §Deletions).
+pub fn wrap_seal_for(
+    seal: &Event,
+    group: &GroupKey,
+    wrap_kind: u16,
+    wrap_at: Timestamp,
+    extra_tags: &[Tag],
+    owner: &PublicKey,
+) -> Result<Event, StreamError> {
     if wrap_kind != KIND_WRAP && wrap_kind != KIND_WRAP_EPHEMERAL {
         return Err(StreamError::BadWrapKind(wrap_kind));
     }
     let seal_json = seal.as_json();
     cap(seal_json.len())?;
     let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
-    let ephemeral = Keys::generate();
-    let mut tags = vec![Tag::public_key(ephemeral.public_key())];
+    let mut tags = vec![Tag::public_key(*owner)];
     tags.extend_from_slice(extra_tags);
     let wrap = EventBuilder::new(Kind::Custom(wrap_kind), crate::simd::base64::STANDARD.encode_to_string(&ct))
         .tags(tags)
@@ -316,7 +330,15 @@ pub fn wrap_seal_with_tags(
     if len > crate::event_size::MAX_EVENT_BYTES {
         return Err(StreamError::TooLarge(len));
     }
-    Ok((wrap, ephemeral))
+    Ok(wrap)
+}
+
+/// The `p` key a wrap names: whoever holds its secret may delete the wrap.
+pub fn wrap_owner(wrap: &Event) -> Option<PublicKey> {
+    wrap.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.len() >= 2 && s[0] == "p").then(|| PublicKey::from_hex(&s[1]).ok()).flatten()
+    })
 }
 
 /// Signer-driven twin of [`build_seal`] + [`wrap_seal_with_tags`]: seal a rumor
@@ -335,15 +357,42 @@ pub async fn seal_and_wrap_signed<S: crate::signer::VectorSigner + ?Sized>(
     wrap_at: Timestamp,
     extra_tags: &[Tag],
 ) -> Result<(Event, Keys), StreamError> {
+    let seal = sign_seal(signer, author, rumor, form, group).await?;
+    wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, extra_tags)
+}
+
+async fn sign_seal<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    form: SealForm,
+    group: &GroupKey,
+) -> Result<Event, StreamError> {
     let content = seal_content(rumor, form, group)?;
     let unsigned = EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
         .finalize_unsigned_with_id(author);
-    let seal = signer
+    signer
         .sign_event_async(unsigned)
         .await
-        .map_err(|e| StreamError::Sign(e.to_string()))?;
-    wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, extra_tags)
+        .map_err(|e| StreamError::Sign(e.to_string()))
+}
+
+/// [`seal_and_wrap_signed`] `p`-tagged to `owner` (see [`wrap_seal_for`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn seal_and_wrap_signed_for<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    author: PublicKey,
+    rumor: &UnsignedEvent,
+    form: SealForm,
+    group: &GroupKey,
+    wrap_kind: u16,
+    wrap_at: Timestamp,
+    extra_tags: &[Tag],
+    owner: &PublicKey,
+) -> Result<Event, StreamError> {
+    let seal = sign_seal(signer, author, rumor, form, group).await?;
+    wrap_seal_for(&seal, group, wrap_kind, wrap_at, extra_tags, owner)
 }
 
 /// Re-wrap an already-verified PLAINTEXT seal into another stream (a compaction

@@ -196,12 +196,6 @@ async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
     }
 
     if is_community {
-        if db::community::get_message_key(&reaction_id).is_ok_and(|k| k.is_some()) {
-            let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            if let Err(e) = vector_core::community::message_delete::delete_message(&transport, &reaction_id).await {
-                vector_core::log_warn!("[Web] community reaction relay delete failed, tombstone only: {e}");
-            }
-        }
         cm::community_control(&chat_id, &reaction_id, ControlOp::Delete).await
     } else {
         let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
@@ -288,7 +282,8 @@ async fn resolve_delete_options(message_ids: &[String]) -> HashMap<String, Messa
         let has_retained_keys = if ctx.mine {
             // Every DM delete takes the same path, retained key or not.
             let dm_keys = || -> Result<bool, String> { Ok(EventId::from_hex(&id).is_ok()) };
-            let community_keys = || db::community::get_message_key(&id).map(|k| k.is_some());
+            // Full where its wrap's owner key is kept: the deletion CORD-01 relays honour.
+            let community_keys = || db::community::has_wrap_owner(&id);
             let checked = match ctx.chat_type {
                 Some(ChatType::DirectMessage) => dm_keys(),
                 Some(ChatType::Community) => community_keys(),

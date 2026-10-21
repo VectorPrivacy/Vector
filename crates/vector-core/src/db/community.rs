@@ -496,6 +496,14 @@ pub fn get_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<Str
     Ok(Some((Keys::new(secret), outer_event_id, relays)))
 }
 
+/// Whether the plane key of a wrap of `message_id` is kept.
+pub fn has_message_key(message_id: &str) -> Result<bool, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM community_message_keys WHERE message_id = ?1)")
+        .and_then(|mut stmt| stmt.query_row(params![message_id], |r| r.get(0)))
+        .map_err(|e| format!("has message key: {e}"))
+}
+
 /// Remove a retained message key (after a successful deletion publish).
 pub fn delete_message_key(message_id: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
@@ -515,6 +523,59 @@ pub fn take_message_key(message_id: &str) -> Result<Option<(Keys, String, Vec<St
         delete_message_key(message_id)?;
     }
     Ok(r)
+}
+
+/// Keep the `p` key of a wrap I published or met: its holder may delete the wrap (CORD-01
+/// §Deletions) on every relay that refuses the plane key's deletions.
+pub fn store_wrap_owner(message_id: &str, outer_event_id: &str, owner: &Keys, relays: &[String]) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let relays_json = serde_json::to_string(relays).map_err(|e| e.to_string())?;
+    let enc_secret = enc_key(&to_32(owner.secret_key().as_secret_bytes())?)?;
+    let enc_relays = enc_txt(&relays_json)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO community_wrap_owners (outer_event_id, message_id, owner_secret, relays, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![outer_event_id, message_id, &enc_secret[..], enc_relays, now_secs()],
+    )
+    .map_err(|e| format!("store wrap owner: {e}"))?;
+    Ok(())
+}
+
+/// Every wrap of `message_id` whose `p` key is kept: the key, the wrap's id, and the relays
+/// it was sent to.
+pub fn wrap_owners(message_id: &str) -> Result<Vec<(Keys, String, Vec<String>)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare_cached("SELECT owner_secret, outer_event_id, relays FROM community_wrap_owners WHERE message_id = ?1")
+        .map_err(|e| format!("wrap owners: {e}"))?;
+    let rows = stmt
+        .query_map(params![message_id], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+        .map_err(|e| format!("wrap owners: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (secret_blob, outer_event_id, relays_json) = row.map_err(|e| format!("wrap owners: {e}"))?;
+        let secret = SecretKey::from_slice(&dec_key(&secret_blob)?).map_err(|e| format!("wrap owner secret: {e}"))?;
+        let relays: Vec<String> = serde_json::from_str(&dec_txt(&relays_json)).map_err(|e| e.to_string())?;
+        out.push((Keys::new(secret), outer_event_id, relays));
+    }
+    Ok(out)
+}
+
+/// Whether a wrap of `message_id` can be deleted by its owner from here.
+pub fn has_wrap_owner(message_id: &str) -> Result<bool, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM community_wrap_owners WHERE message_id = ?1)")
+        .and_then(|mut stmt| stmt.query_row(params![message_id], |r| r.get(0)))
+        .map_err(|e| format!("has wrap owner: {e}"))
+}
+
+/// Drop the kept `p` keys of `message_id`'s wraps, once their deletions went out.
+pub fn forget_wrap_owners(message_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM community_wrap_owners WHERE message_id = ?1", params![message_id])
+        .map_err(|e| format!("forget wrap owners: {e}"))?;
+    Ok(())
 }
 
 /// The hex id of the Community that owns `channel_id`, if any is stored locally. Used to
@@ -1006,7 +1067,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         banlist_cache().write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
     }
     forget_community_channels(community_id);
-    // `community_message_keys` is INTENTIONALLY left intact: those are our OWN ephemeral signing keys for
+    // `community_message_keys` and `community_wrap_owners` are INTENTIONALLY left intact: those are our OWN keys for
     // NIP-09-deleting our own messages. The right to erase our own content from relays outlives membership
     // — even after a ban or leave we must keep the ability to purge what we sent — so they survive a
     // community delete. (Keyed by message_id, no community_id; there is nothing community-scoped to drop.)
@@ -4321,6 +4382,8 @@ mod tests {
         store_epoch_key(&cid, &private, 0, &[0x62; 32]).unwrap();
         park_channel_key(&cid, &private, 3, &[0x33; 32], &"ab".repeat(32)).unwrap();
         store_message_key("m1", "o1", &nostr_sdk::prelude::Keys::generate(), &["wss://r".into()]).unwrap();
+        let owner = nostr_sdk::prelude::Keys::generate();
+        store_wrap_owner("m1", "o1", &owner, &["wss://r".into()]).unwrap();
         save_pending_invite(&"de".repeat(32), r#"{"bundle":1}"#, "npub1inviter", now_secs() + 3600).unwrap();
         save_public_invite(&"ab".repeat(32), &cid, "https://vectorapp.io/invite#x", None, Some("Label")).unwrap();
         set_community_policy(&cid, "p1", r#"{"format":1}"#, "hh", true, 0).unwrap();
@@ -4403,9 +4466,11 @@ mod tests {
                     rt.block_on(crate::db::events::unread_count_for_chat(&ch)).unwrap(),
                     rt.block_on(crate::db::events::unread_counts()).unwrap().get(&ch).copied(),
                 ),
+                wrap_owners("m1").unwrap().into_iter().map(|(k, outer, relays)| (k.public_key(), outer, relays)).collect::<Vec<_>>(),
             )
         };
         let before = read();
+        assert_eq!(before.8, vec![(owner.public_key(), "o1".to_string(), vec!["wss://r".to_string()])]);
         assert_eq!(before.0, vec![([0x33; 32], "ab".repeat(32))]);
         assert_eq!(before.2, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
         assert_eq!(before.3, Some(format!("{v2:?}")));

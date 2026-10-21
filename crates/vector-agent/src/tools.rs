@@ -201,6 +201,14 @@ pub struct SendCommunityMessageRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CommunityMessageRequest {
+    #[schemars(description = "Channel id (the hex chat id of a Community channel)")]
+    pub channel_id: String,
+    #[schemars(description = "The message id (hex)")]
+    pub message_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SyncCommunityChannelRequest {
     #[schemars(description = "Channel id to sync the latest page of")]
     pub channel_id: String,
@@ -710,6 +718,14 @@ impl VectorAgent {
     async fn send_community_message(&self, Parameters(req): Parameters<SendCommunityMessageRequest>) -> Result<CallToolResult, McpError> {
         match self.core.send_community_message(&req.channel_id, &req.content, req.replied_to.as_deref()).await {
             Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!("Sent (message id {id})"))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Delete a message you sent to a Community channel: off its relays by the keys kept for it, then an in-channel delete so members' clients drop it.")]
+    async fn delete_community_message(&self, Parameters(req): Parameters<CommunityMessageRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.delete_community_message_in(&req.channel_id, &req.message_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("Deleted {}", req.message_id))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }

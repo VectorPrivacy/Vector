@@ -588,6 +588,7 @@ mod xform_tests {
              CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT, meta_extra TEXT);
              CREATE TABLE community_epoch_keys (key BLOB);
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
+             CREATE TABLE community_wrap_owners (outer_event_id TEXT, owner_secret BLOB, relays TEXT);
              CREATE TABLE pending_channel_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_key BLOB, sender TEXT);
              CREATE TABLE pending_community_invites (community_id TEXT, bundle_json TEXT, inviter_npub TEXT);
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
@@ -917,6 +918,7 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_channels", &["channel_key", "name", "meta_extra"]),
     ("community_epoch_keys", &["key"]),
     ("community_message_keys", &["ephemeral_secret", "relays"]),
+    ("community_wrap_owners", &["owner_secret", "relays"]),
     ("pending_channel_keys", &["channel_key", "sender"]),
     ("pending_community_invites", &["bundle_json", "inviter_npub"]),
     ("community_guestbook", &["events"]),

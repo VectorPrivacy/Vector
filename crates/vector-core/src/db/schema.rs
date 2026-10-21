@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 112;
+pub const HIGHEST_MIGRATION_ID: u32 = 113;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1560,6 +1560,22 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             );",
         )
         .map_err(|e| format!("migration 112: {e}"))?;
+        Ok(())
+    })?;
+
+    run_atomic_migration(conn, 113, "Community wrap owner keys", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_wrap_owners (
+                outer_event_id TEXT PRIMARY KEY,
+                message_id     TEXT NOT NULL,
+                owner_secret   BLOB NOT NULL,
+                relays         TEXT NOT NULL,
+                created_at     INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cwo_message_id
+                ON community_wrap_owners(message_id);",
+        )
+        .map_err(|e| format!("migration 113: {e}"))?;
         Ok(())
     })?;
 

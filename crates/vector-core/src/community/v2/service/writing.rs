@@ -86,6 +86,16 @@ pub(crate) fn live_writer(community: &CommunityV2, ch: &ChannelV2) -> Option<(Ep
     })
 }
 
+/// The writer key that signs at `address` in writer epoch `wepoch` of `ch`, when held.
+pub(crate) fn writer_keys_at(community: &CommunityV2, ch: &ChannelV2, wepoch: Epoch, address: &nostr_sdk::prelude::PublicKey) -> Option<nostr_sdk::prelude::Keys> {
+    let cid_hex = hex(&community.id().0);
+    [writers::secret_scope(&ch.id), writers::minted_scope(&ch.id)].iter().find_map(|scope| {
+        let secret = crate::db::community::held_epoch_key(&cid_hex, scope, wepoch.0).ok()??;
+        let group = channel_writer_group_key(&secret, &ch.id, wepoch);
+        (group.pk() == *address).then(|| group.keys().clone())
+    })
+}
+
 /// The live writer key, when the stored Roster lets this device post and it holds the epoch's
 /// certificate: a key a manager minted or a cut writer kept is no licence, and a post without
 /// its proof would never stand.

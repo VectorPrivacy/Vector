@@ -1541,6 +1541,8 @@ pub(crate) mod memory {
     pub struct MemoryRelay {
         per_relay: Mutex<HashMap<String, Vec<Event>>>,
         subscribers: Mutex<Vec<(Query, tokio::sync::mpsc::UnboundedSender<Event>)>>,
+        /// Relays that judge a wrap's deletion by its `p`-tagged owner, as CORD-01 asks.
+        owner_rule: Mutex<HashSet<String>>,
     }
 
     /// NIP-01 ephemeral range: relays stream these to live subscriptions but never store
@@ -1554,7 +1556,14 @@ pub(crate) mod memory {
             MemoryRelay {
                 per_relay: Mutex::new(HashMap::new()),
                 subscribers: Mutex::new(Vec::new()),
+                owner_rule: Mutex::new(HashSet::new()),
             }
+        }
+
+        /// Have `relays` follow CORD-01 §Deletions: a wrap goes only by its `p`-tagged owner's
+        /// deletion, never its author's.
+        pub fn follow_cord01(&self, relays: &[String]) {
+            self.owner_rule.lock().unwrap().extend(relays.iter().cloned());
         }
 
         /// Total stored events across every relay url — lets a test assert that a
@@ -1620,8 +1629,10 @@ pub(crate) mod memory {
         /// Apply a NIP-09 deletion: drop any stored event matched by the deletion's `e`
         /// tags (by id) OR `a` tags (addressable coordinate `kind:pubkey:d`), AND whose
         /// author matches the deletion's author (a deleter can only delete their own
-        /// events — same rule strfry enforces).
+        /// events — same rule strfry enforces). A relay following CORD-01 takes a wrap's
+        /// `p`-tagged owner in place of its author.
         fn apply_deletion(&self, deletion: &Event, relays: &[String]) {
+            let owner_rule = self.owner_rule.lock().unwrap().clone();
             let mut id_targets: HashSet<String> = HashSet::new();
             let mut coord_targets: HashSet<String> = HashSet::new();
             for t in deletion.tags.iter() {
@@ -1634,9 +1645,15 @@ pub(crate) mod memory {
             }
             let mut map = self.per_relay.lock().unwrap();
             for r in relays {
+                let by_owner = owner_rule.contains(r);
                 if let Some(events) = map.get_mut(r) {
                     events.retain(|e| {
-                        if e.pubkey != deletion.pubkey {
+                        let deleter = if by_owner && e.kind.as_u16() == 1059 {
+                            crate::community::v2::stream::wrap_owner(e)
+                        } else {
+                            Some(e.pubkey)
+                        };
+                        if deleter != Some(deletion.pubkey) {
                             return true;
                         }
                         if id_targets.contains(&e.id.to_hex()) {

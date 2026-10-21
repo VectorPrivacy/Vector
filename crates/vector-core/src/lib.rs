@@ -2323,7 +2323,8 @@ impl VectorCore {
         self.delete_community_message_in(&channel_id, message_id).await
     }
 
-    /// Delete one of your own Community messages in `channel_id`: the in-plane kind-5, plus
+    /// Delete one of your own Community messages (or reactions) in `channel_id`: its wraps off
+    /// the relays by every key kept for them, then the in-plane kind-5 so peers drop it, plus
     /// best-effort attachment cleanup.
     pub async fn delete_community_message_in(&self, channel_id: &str, message_id: &str) -> Result<()> {
         use crate::community::transport::LiveTransport;
@@ -2341,8 +2342,6 @@ impl VectorCore {
         let attachment_urls =
             crate::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, message_id).unwrap_or_default();
 
-        // The cooperative in-plane kind-5 (the wrap-ciphertext scrub needs the ephemeral
-        // wrap key, not retained in this cut).
         let id = self
             .v2_community_for_channel(channel_id)?
             .ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
@@ -2350,11 +2349,9 @@ impl VectorCore {
             .map_err(VectorError::Other)?
             .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
         let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
-        crate::community::v2::service::send_delete(
-            &transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE,
-        )
-        .await
-        .map_err(VectorError::Other)?;
+        crate::community::v2::service::delete_own(&transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE)
+            .await
+            .map_err(VectorError::Other)?;
         // Best-effort attachment blob delete.
         if !attachment_urls.is_empty() {
             if let Some(_client) = state::nostr_client() {

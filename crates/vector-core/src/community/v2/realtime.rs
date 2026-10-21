@@ -770,6 +770,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
             return;
         };
         {
+            let wrap = &event;
             match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
                 inbound::DispatchedV2::NotOurs => return,
                 // A control OR a rekey wrap: just enqueue a follow for this community.
@@ -801,6 +802,11 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // own send, or a forged edit/delete yields no outcome and re-fires
                 // nothing.
                 inbound::DispatchedV2::Chat { channel_id, event } => {
+                    if event.opened().author == my_pk {
+                        let plane = crate::community::id32_from_hex(&channel_id)
+                            .and_then(|ch| super::service::plane_key_of(c, &crate::community::ChannelId(ch), wrap));
+                        super::service::heal_own_wrap_key(&event, wrap, plane.as_ref(), &c.relays);
+                    }
                     let outcome = inbound::persist_routed_chat_event(&event, &channel_id, &c.id().0, &my_pk).await;
                     // A reaction or edit whose message hasn't arrived stays retryable.
                     if outcome.is_some() || !inbound::awaits_target(&event).await {
@@ -1501,6 +1507,62 @@ mod tests {
         assert_eq!(two.len(), one.len() * 2);
         // Order-independent: reversing the input yields the identical sorted set.
         assert_eq!(plane_authors(&[b, a]), two);
+    }
+
+    #[tokio::test]
+    async fn a_live_message_from_my_other_device_arrives_fully_deletable() {
+        use super::super::stream::{self, SealForm};
+        use crate::community::message_delete::own_wrap_owner;
+        use crate::community::transport::memory::MemoryRelay;
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 13 + 9) % 32] as char);
+            }
+            s
+        };
+        std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = MemoryRelay::new();
+        let community = super::super::service::create_community(&relay, "Twin", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let group = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let mine = |text: &str, at_ms: u64, derived: bool| {
+            let rumor = super::super::chat::build_message_rumor(me.public_key(), &general, community.root_epoch, text, None, &[], vec![], at_ms);
+            let rumor_id = rumor.id.unwrap();
+            let owner = if derived { own_wrap_owner(&me.public_key(), &group.pk(), &rumor_id).public_key() } else { Keys::generate().public_key() };
+            let seal = stream::build_seal(&rumor, SealForm::Encrypted, &group, &me).unwrap();
+            let wrap = stream::wrap_seal_for(&seal, &group, stream::KIND_WRAP, nostr_sdk::prelude::Timestamp::from_secs(at_ms / 1000), &[], &owner).unwrap();
+            (rumor_id.to_hex(), wrap)
+        };
+        let (twin, twin_wrap) = mine("from my phone", 5_000, true);
+        let (older, older_wrap) = mine("from an older build", 6_000, false);
+
+        crate::community::v2::realtime::clear().await;
+        dispatch_event(twin_wrap, Arc::new(crate::event_handler::NoOpEventHandler)).await;
+        dispatch_event(older_wrap, Arc::new(crate::event_handler::NoOpEventHandler)).await;
+
+        let has = |id: &str| (crate::db::community::has_wrap_owner(id).unwrap(), crate::db::community::has_message_key(id).unwrap());
+        assert_eq!(has(&twin), (true, true), "the owner this identity derives, and the plane key");
+        assert_eq!(has(&older), (false, true), "a random owner is no one's here");
+
+        // Either key kept settles it for a catch-up: there is nothing left to heal.
+        let twin_wrap_hex = crate::db::community::wrap_owners(&twin).unwrap().pop().unwrap().1;
+        crate::db::community::delete_message_key(&twin).unwrap();
+        assert!(crate::db::events::community_wraps_settled(std::slice::from_ref(&twin_wrap_hex)).contains(&twin_wrap_hex));
     }
 
     #[tokio::test]
