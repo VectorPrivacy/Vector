@@ -1601,10 +1601,11 @@ fn built_in_twins() {
     assert_eq!(route::route_i2p(&d, 443, &ctx), Route::Twin { host: "jskitty.com".into(), via: b32.into(), port: 443 }, "I2P-Only too");
     assert!(aliases::AliasTable::default().twin("jskitty.com", Kind::Tor).is_some(), "before any account loads");
     let mag = "mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion";
+    let mag_b32 = "hr4zsnf7jpgayicqxmhxyrmhufftfix4ru373wujs6s53kzi5ijq.b32.i2p";
     for host in ["magnitude.vectorapp.io", "magnitude.jskitty.com"] {
         let d = Dest::parse(host).unwrap();
         assert_eq!(route::route_tor(&d, 443, &ctx), Route::Twin { host: host.into(), via: mag.into(), port: 443 });
-        assert_eq!(t.twin(host, Kind::I2p), None, "no I2P twin for Magnitude");
+        assert_eq!(route::route_i2p(&d, 443, &ctx), Route::Twin { host: host.into(), via: mag_b32.into(), port: 443 }, "Magnitude's I2P twin");
     }
 
     // A check is held for the session, never saved.

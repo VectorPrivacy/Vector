@@ -23,7 +23,9 @@ pub const BUILT_IN: &[(&str, Kind, &str)] = &[
     ("jskitty.com", Kind::Tor, "jskittynoz22rnwlzyg2akvixkyqp243dd4iq7rs2imry5d6imv4uoyd.onion"),
     ("jskitty.com", Kind::I2p, "nk7ghqbv2nwrleccnq5yz5nsvbkkufhwvcya5gqskxv37bnbfaea.b32.i2p"),
     ("magnitude.vectorapp.io", Kind::Tor, "mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion"),
+    ("magnitude.vectorapp.io", Kind::I2p, "hr4zsnf7jpgayicqxmhxyrmhufftfix4ru373wujs6s53kzi5ijq.b32.i2p"),
     ("magnitude.jskitty.com", Kind::Tor, "mag2izmzc7nlzx3iixzi7kdppr7hm2p7kcwnqg6j7kluhp2htcrfphqd.onion"),
+    ("magnitude.jskitty.com", Kind::I2p, "hr4zsnf7jpgayicqxmhxyrmhufftfix4ru373wujs6s53kzi5ijq.b32.i2p"),
 ];
 
 #[cfg(test)]
