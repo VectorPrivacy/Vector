@@ -207,7 +207,7 @@
             {/snippet}
             {#snippet footer()}
                 {#if h.canDelete()}
-                    <button class="cs-section danger" disabled={st.busy} onclick={() => h.remove()}>
+                    <button class="cs-section danger" disabled={st.busy} aria-label="Delete {st.isCategory ? 'Category' : 'Channel'}" onclick={() => h.remove()}>
                         <span class="cs-section-icon"><span class="icon icon-trash"></span></span>
                         <span class="cutoff">Delete {st.isCategory ? 'Category' : 'Channel'}</span>
                     </button>

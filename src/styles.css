@@ -27125,7 +27125,14 @@ body.profile-switcher-editing .profile-switcher-add {
   .cs-nav { width: auto; border-right: none; border-bottom: 1px solid #262626; }
   .cs-search, .cs-nav-head, .cs-anchors, .cs-nav-empty { display: none; }
   .cs-nav-scroll { display: flex; gap: 6px; padding: 10px 12px; overflow-x: auto; overflow-y: hidden; }
+  /* A tab keeps its width (its fold clips, so would shrink to nothing), and the strip scrolls. */
+  .cs-nav-scroll > * { flex-shrink: 0; }
   .cs-section { width: auto; white-space: nowrap; }
+  .cs-nav-scroll { scrollbar-width: none; }
+  /* The strip's last tab, its icon alone, so the tabs fit a phone's width. */
+  .cs-nav-foot { margin: 0 0 0 auto; padding: 0; border-top: none; }
+  .cs-nav-foot .cs-section.danger .cutoff { display: none; }
+  .cs-main { min-height: 0; }
   .cs-content { padding: 4px 18px 140px; }
   .cs-identity { flex-direction: column; }
 }
