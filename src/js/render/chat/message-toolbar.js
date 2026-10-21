@@ -624,6 +624,12 @@ async function _dmsgOpenAuthorMenu(profileBtn, x, y) {
     showContextMenu({ x, y, items });
 }
 
+/** The name in a system event line ("X has joined") under `target`: its person's menu, as their name in a message opens. */
+function _dmsgSystemEventActor(target) {
+    const text = target.closest('.system-event-text');
+    return text && domChatMessages.contains(text) ? text.querySelector('.system-event-name[data-npub]') : null;
+}
+
 function _dmsgInitGestures() {
     // Desktop: right-click a row opens the same menu (mobile uses press-and-hold
     // below). Reaction chips keep their own right-click handler.
@@ -638,12 +644,18 @@ function _dmsgInitGestures() {
         const sel = window.getSelection();
         _dmsgRightClickHadSelection = !!(sel && !sel.isCollapsed && sel.toString().trim());
         if (_dmsgRightClickHadSelection) return;
-        const row = e.target.closest('.dmsg');
+        const row = e.target.closest('.dmsg, .system-event-text');
         if (!row || !domChatMessages.contains(row) || e.target.closest('.reaction')) return;
         e.preventDefault();
     });
     domChatMessages.addEventListener('contextmenu', (e) => {
         if (platformFeatures?.is_mobile) return;
+        const actor = _dmsgSystemEventActor(e.target);
+        if (actor) {
+            e.preventDefault();
+            _dmsgOpenAuthorMenu(actor, e.clientX, e.clientY);
+            return;
+        }
         const row = e.target.closest('.dmsg');
         if (!row || !domChatMessages.contains(row)) return;
         if (row.style.opacity === '0') return;
@@ -668,6 +680,20 @@ function _dmsgInitGestures() {
     domChatMessages.addEventListener('touchstart', (e) => {
         if (!platformFeatures?.is_mobile) return;
         if (e.touches.length !== 1) return;           // ignore pinch/multi-touch
+        // A system event's person: a hold opens their menu; the line has no swipe.
+        const actor = _dmsgSystemEventActor(e.target);
+        if (actor) {
+            _gTouchRow = null;
+            _gStartX = e.touches[0].clientX; _gStartY = e.touches[0].clientY;
+            _gLongFired = false;
+            _dmsgClearLongTimer();
+            _gLongTimer = setTimeout(() => {
+                _gLongTimer = null;
+                _gLongFired = true;
+                _dmsgOpenAuthorMenu(actor, _gStartX, _gStartY);
+            }, _G_LONGPRESS_MS);
+            return;
+        }
         const row = e.target.closest('.dmsg');
         if (!row || !domChatMessages.contains(row)) return;
         if (row.style.opacity === '0') return;        // mid fade-out
@@ -696,10 +722,15 @@ function _dmsgInitGestures() {
     }, { passive: false });
 
     domChatMessages.addEventListener('touchmove', (e) => {
-        if (!_gTouchRow || _gLongFired) return;
+        if (_gLongFired) return;
         const t = e.touches[0];
         const dx = t.clientX - _gStartX;
         const dy = t.clientY - _gStartY;
+        // A hold on a system event ends at a drag (a scroll).
+        if (!_gTouchRow) {
+            if (Math.abs(dx) >= _G_MOVE_TOL || Math.abs(dy) >= _G_MOVE_TOL) _dmsgClearLongTimer();
+            return;
+        }
         if (_gAxis === null) {
             if (Math.abs(dx) < _G_MOVE_TOL && Math.abs(dy) < _G_MOVE_TOL) return;
             // Past tap tolerance: it's a drag, not a press. Lock the axis.
