@@ -12,7 +12,7 @@
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, getCategories, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
     //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelChat, openChannelMenu,
-    //    openCategoryMenu, attachLongPressContextMenu, createChannel, deleteChannel, moveChannel, moveCategory
+    //    openCategoryMenu, attachLongPressContextMenu, createChannel, moveChannel, moveCategory
 
     const state = $derived.by(() => {
         communityVersion(communityId);
@@ -183,13 +183,6 @@
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div class="chatlist-channel-action btn" title="Open Chat" onclick={(e) => { e.stopPropagation(); h.openChannelChat(communityId, channel); }}>
                 <span class="icon icon-chat-bubble"></span>
-            </div>
-        {/if}
-        <!-- The primary channel anchors the community's row and history; the backend refuses to tombstone it. -->
-        {#if canManage && !h.isPrimaryChannelId(channel.id)}
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div class="chatlist-channel-delete btn" title="Delete channel" onclick={(e) => { e.stopPropagation(); h.deleteChannel(communityId, channel); }}>
-                <span class="icon icon-x"></span>
             </div>
         {/if}
     </div>

@@ -127,7 +127,6 @@ function chatlistSnapshot() {
  * @property {(communityId: string, channelId: string, categoryId: string|null, index: number) => void} moveChannel
  * @property {(communityId: string, categoryId: string, index: number) => void} moveCategory
  * @property {(communityId: string, category: object, x: number, y: number) => void} openCategoryMenu
- * @property {(chatId: string) => void} deleteChannel
  * @property {(image: string) => Promise<string|null>} cacheInviteLogo
  * @property {(invite: object) => void} acceptInvite
  * @property {(invite: object) => void} declineInvite
@@ -192,7 +191,6 @@ function chatlistHelpers() {
             openChat(vm.chat.id);
         },
         createChannel: promptCreateChannel,
-        deleteChannel: promptDeleteChannel,
         getCategories: getCommunityCategories,
         moveChannel: moveCommunityChannel,
         moveCategory: moveCommunityCategory,
