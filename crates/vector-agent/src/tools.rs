@@ -450,7 +450,7 @@ impl VectorAgent {
         }
     }
 
-    #[tool(description = "Delete a DM you sent, from the network: your own copies at once, and a hide request that asks the recipient's Vector clients to drop it and delete theirs.")]
+    #[tool(description = "Delete a DM from the network. One you sent: your own copies at once, and a hide request that asks the recipient's Vector clients to drop it and delete theirs. One you received: your copy, by your own key.")]
     async fn delete_dm(&self, Parameters(req): Parameters<MessageIdRequest>) -> Result<CallToolResult, McpError> {
         match self.core.delete_dm(&req.message_id).await {
             Ok(outcome) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&outcome).unwrap_or_default())])),

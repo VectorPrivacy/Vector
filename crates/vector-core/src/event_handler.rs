@@ -769,6 +769,41 @@ mod received_wrap_deletion_tests {
     }
 
     #[tokio::test]
+    async fn our_own_hide_request_takes_a_received_message_off_our_other_devices() {
+        let _guard = fresh_account();
+        let (me, peer) = (Keys::generate().public_key(), Keys::generate().public_key());
+        crate::state::set_my_public_key(me);
+        let contact = peer.to_bech32().unwrap();
+        let (wrap, ours_wrap) = (EventId::from_byte_array([8; 32]), EventId::from_byte_array([9; 32]));
+        let theirs = crate::types::Message { id: "c".repeat(64), content: "from them".into(), at: 1_700_000_000_000, wrapper_event_id: Some(wrap.to_hex()), ..Default::default() };
+        let ours = crate::types::Message { id: "d".repeat(64), content: "from us".into(), at: 1_700_000_000_000, mine: true, wrapper_event_id: Some(ours_wrap.to_hex()), ..Default::default() };
+        for msg in [&theirs, &ours] {
+            crate::db::events::save_message(&contact, msg).await.unwrap();
+        }
+        assert!(!commit_deletion(&ours.id, &contact, &peer, &NoOpEventHandler).await, "what we sent is never theirs to take down");
+        assert!(commit_deletion(&theirs.id, &contact, &me, &NoOpEventHandler).await);
+        assert!(!crate::db::events::event_exists(&theirs.id).unwrap() && crate::state::was_message_deleted(&theirs.id));
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&wrap), "this device's copy leaves the relays too");
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
+    async fn our_own_early_hide_request_waits_for_a_message_we_received() {
+        let _guard = fresh_account();
+        let (me, peer) = (Keys::generate().public_key(), Keys::generate().public_key());
+        crate::state::set_my_public_key(me);
+        let contact = peer.to_bech32().unwrap();
+        let early = "3".repeat(64);
+        hold_deletion_until_met(&early, &me).await;
+        let wrap = [6u8; 32];
+        let msg = crate::types::Message { id: early.clone(), content: "x".into(), at: 1_700_000_000_000, ..Default::default() };
+        assert!(!commit_dm_message(msg, &contact, false, true, &crate::simd::hex::bytes_to_hex_32(&wrap), wrap, 1_700_000_000, &NoOpEventHandler, false).await, "we asked first, on another device");
+        assert!(crate::state::was_message_deleted(&early));
+        assert!(crate::deletion::pending_received_wrap_deletions().contains(&EventId::from_byte_array(wrap)));
+        crate::db::close_database();
+    }
+
+    #[tokio::test]
     async fn an_honoured_reaction_revocation_deletes_the_wrap_that_brought_it() {
         let _guard = fresh_account();
         let peer = Keys::generate().public_key();
@@ -1175,10 +1210,11 @@ async fn commit_dm_message(
         crate::deletion::delete_received_wrap(nostr_sdk::prelude::EventId::from_byte_array(wrapper_event_id_bytes));
         return false;
     }
-    // Its author asked for it gone before it got here: it lands deleted.
+    // Its author, or we from another device, asked for it gone before it got here: it lands deleted.
     if let Some(requester) = crate::db::events::take_pending_deletion(&msg.id) {
-        let author = if msg.mine { crate::state::my_public_key() } else { PublicKey::from_bech32(contact).ok() };
-        if author.is_some_and(|a| a.to_hex() == requester) {
+        let me = crate::state::my_public_key();
+        let author = if msg.mine { me } else { PublicKey::from_bech32(contact).ok() };
+        if author.is_some_and(|a| a.to_hex() == requester) || me.is_some_and(|m| m.to_hex() == requester) {
             crate::state::note_message_deleted(&msg.id);
             if let Err(e) = crate::db::events::add_message_tombstone(&msg.id) {
                 crate::log_warn!("[NIP-17 cooperative-delete] tombstone write failed: {}", e);
@@ -1364,23 +1400,9 @@ async fn commit_deletion(
     sender: &PublicKey,
     handler: &dyn InboundEventHandler,
 ) -> bool {
-    // Look up the original. If not present locally there's nothing to
-    // delete — the deletion notice arrived before the original (rare),
-    // or we never had it. Either way, no-op.
-    //
-    // KNOWN LIMITATION: late-binding deletions are not handled. If
-    // the deletion arrives BEFORE the original (cold sync, out-of-order
-    // relay delivery), we drop the deletion silently here, and when the
-    // original arrives later it shows up unhidden. A future enhancement
-    // would persist a `pending_deletions` table keyed by target id and
-    // apply queued deletions when the target is committed in
-    // commit_dm_message. The common case (deletion arrives after the
-    // original) works correctly today.
-    //
-    // For DM rumors the `npub` field is intentionally empty: the chat
-    // is between two parties, so the author is implicit from `mine`
-    // (me if true, chat counterpart if false). We derive the original
-    // author from that, since the rumor pubkey isn't stored.
+    // Not held here: the caller parks the request until its message arrives
+    // ([`hold_deletion_until_met`]). A DM row stores no author: it is us when `mine`,
+    // else the counterpart, whose npub is the chat id.
     let in_memory = {
         let state = crate::state::STATE.lock().await;
         state.find_message(target_event_id).map(|(chat, msg)| (msg.mine, chat.id.clone()))
@@ -1394,27 +1416,10 @@ async fn commit_deletion(
         },
     };
 
-    // Authorization: deletion sender must match the original author.
-    // For DMs:
-    //   - mine == true:  original author == us (MY_PUBLIC_KEY).
-    //                    Authorized if the deletion sender is also us
-    //                    (i.e. came in via our own self-wrap from
-    //                    another device, multi-device sync).
-    //   - mine == false: original author == chat counterpart. Chat id
-    //                    for a DM is the counterpart's npub, so we
-    //                    parse it and compare against the deletion
-    //                    sender.
-    let authorized = if mine {
-        match crate::state::my_public_key() {
-            Some(my_pk) => *sender == my_pk,
-            None => false,
-        }
-    } else {
-        match nostr_sdk::prelude::PublicKey::from_bech32(&chat_id) {
-            Ok(counterpart) => sender == &counterpart,
-            Err(_) => false, // chat id wasn't an npub (shouldn't happen for DMs)
-        }
-    };
+    // Its author may take it down, and so may we, from another of our devices: we may delete
+    // anything we hold, so a message we received goes from all of them.
+    let authorized = crate::state::my_public_key() == Some(*sender)
+        || (!mine && nostr_sdk::prelude::PublicKey::from_bech32(&chat_id).is_ok_and(|counterpart| *sender == counterpart));
     if !authorized {
         eprintln!(
             "[NIP-17 cooperative-delete] unauthorized: sender {} not the author of target {} (mine={}, chat={})",
@@ -1477,7 +1482,7 @@ async fn commit_deletion(
         &serde_json::json!({
             "id": target_event_id,
             "chat_id": &chat_id,
-            "reason": "deleted-by-sender",
+            "reason": if crate::state::my_public_key() == Some(*sender) { "deleted" } else { "deleted-by-sender" },
         }),
     );
 

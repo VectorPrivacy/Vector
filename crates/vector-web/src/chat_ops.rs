@@ -115,14 +115,11 @@ async fn reconcile_unread(chat_id: &str) {
 
 async fn delete_own_message(message_id: String) -> Result<Value, String> {
     let (chat_id, msg) = VectorCore.get_message(&message_id).await.ok_or_else(|| format!("Message not found (id: {message_id})"))?;
-    if !msg.mine {
-        return Err("Cannot delete a message that isn't yours".into());
-    }
     if !is_dm(&chat_id) {
         return Err("Community channel messages are deleted via the Community service, not this path".into());
     }
     let rumor_id = EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?;
-    let outcome = vector_core::delete_own_dm(&rumor_id).await?;
+    let outcome = if msg.mine { vector_core::delete_own_dm(&rumor_id).await? } else { vector_core::delete_received_dm(&rumor_id).await? };
 
     STATE.lock().await.remove_message(&message_id);
     // Before the row delete: an unflushed self-echo consults this and drops itself.

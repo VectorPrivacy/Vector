@@ -489,7 +489,7 @@ pub enum DownloadStep {
 pub use traits::{EventEmitter, NoOpEmitter, set_event_emitter, emit_event};
 pub use db::{set_app_data_dir, get_app_data_dir};
 pub use sending::{SendCallback, NoOpSendCallback, SendConfig, SendResult};
-pub use deletion::{delete_own_dm, DeleteOutcome};
+pub use deletion::{delete_own_dm, delete_received_dm, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
@@ -1161,11 +1161,21 @@ impl VectorCore {
         .await
     }
 
-    /// Delete a DM you sent from the network (see [`deletion::delete_own_dm`]).
+    /// Delete a DM from the network: one you sent ([`deletion::delete_own_dm`]), or your copy of
+    /// one you received ([`deletion::delete_received_dm`]). Drops it here too.
     pub async fn delete_dm(&self, message_id: &str) -> Result<deletion::DeleteOutcome> {
         use nostr_sdk::prelude::*;
         let rumor_id = EventId::from_hex(message_id).map_err(|e| VectorError::Nostr(e.to_string()))?;
-        deletion::delete_own_dm(&rumor_id).await.map_err(VectorError::Other)
+        let (chat_id, msg) = self.get_message(message_id).await.ok_or_else(|| VectorError::Other("message not found".into()))?;
+        if !chat_id.starts_with("npub1") {
+            return Err(VectorError::Other("not a DM".into()));
+        }
+        let outcome = if msg.mine { deletion::delete_own_dm(&rumor_id).await } else { deletion::delete_received_dm(&rumor_id).await }
+            .map_err(VectorError::Other)?;
+        state::STATE.lock().await.remove_message(message_id);
+        let _ = crate::db::events::delete_event(message_id).await;
+        traits::emit_event_json("message_removed", serde_json::json!({ "id": message_id, "chat_id": chat_id, "reason": "deleted" }));
+        Ok(outcome)
     }
 
     /// Get chats from the in-memory state.

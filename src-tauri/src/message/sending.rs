@@ -398,15 +398,9 @@ pub async fn get_message_delete_meta_bulk(
         .collect())
 }
 
-/// Delete an outbound DM from the network *and* locally.
-///
-/// DM: NIP-17 path — NIP-09 against every retained gift-wrap.
-///
-/// Only allows deletion of the user's own outbound messages
-/// (`mine == true`). Messages without retained wrap keys (predate the
-/// retention feature, sent from a different device) get a
-/// distinguishable `NOT_DELETABLE` error so the frontend shows a clear
-/// explanatory popup.
+/// Delete a DM from the network *and* locally: one we sent, by our copies' key and a hide
+/// request for theirs, or our copy of one we received, by our key (NIP-59). Community
+/// messages take their own path.
 #[tauri::command]
 pub async fn delete_own_message(message_id: String) -> Result<vector_core::DeleteOutcome, String> {
     use nostr_sdk::prelude::EventId;
@@ -426,19 +420,16 @@ pub async fn delete_own_message(message_id: String) -> Result<vector_core::Delet
             })?;
         (chat.id.clone(), chat.chat_type.clone(), msg.mine)
     };
-    if !is_mine {
-        return Err("Cannot delete a message that isn't yours".to_string());
-    }
-
-    // Branch on chat type. The backend always does what it can —
-    // retained-key relay nuke when available, cooperative-hide notice,
-    // Blossom blob delete on attachments. The returned outcome tells
-    // the frontend exactly which layers fired.
+    // The returned outcome tells the frontend exactly which layers fired.
     let outcome = match chat_type {
         ChatType::DirectMessage => {
             let rumor_id = EventId::from_hex(&message_id)
                 .map_err(|e| format!("Invalid message id: {}", e))?;
-            vector_core::delete_own_dm(&rumor_id).await?
+            if is_mine {
+                vector_core::delete_own_dm(&rumor_id).await?
+            } else {
+                vector_core::delete_received_dm(&rumor_id).await?
+            }
         }
         ChatType::Community => {
             return Err("Community channel messages are deleted via the Community service, not this path".to_string());

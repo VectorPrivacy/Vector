@@ -9,6 +9,8 @@
 //!
 //! So each side deletes the copies addressed to itself:
 //! - The sender deletes its own self-copies with its own key, at once.
+//! - Either side deletes a message it received the same way: its copy by its own key, and a
+//!   hide request to itself for its other devices.
 //! - A hide request (a kind-5 rumor gift-wrapped to the recipient and to self, its wrap
 //!   expiring after 30 days) asks every other device to drop the message and delete the copy
 //!   it was sent the same way. A client that ignores it keeps the message.
@@ -140,7 +142,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
 
     let mut cooperative_hide_sent = false;
     if let Some(recipient) = cooperative_recipient {
-        match publish_cooperative_hide(&client, rumor_id, &recipient, 14).await {
+        match publish_cooperative_hide(&client, rumor_id, Some(&recipient), 14).await {
             Ok(()) => cooperative_hide_sent = true,
             Err(e) => crate::log_warn!("[NIP-17 delete] cooperative-hide notice failed: {}", e),
         }
@@ -202,7 +204,7 @@ pub async fn delete_own_reaction(
         .unwrap_or(recipient);
 
     let mut cooperative_hide_sent = false;
-    match publish_cooperative_hide(&client, reaction_id, &cooperative_recipient, 7).await {
+    match publish_cooperative_hide(&client, reaction_id, Some(&cooperative_recipient), 7).await {
         Ok(()) => cooperative_hide_sent = true,
         Err(e) => crate::log_warn!("[reaction delete] cooperative-hide failed: {}", e),
     }
@@ -214,6 +216,43 @@ pub async fn delete_own_reaction(
         cooperative_hide_sent,
         blobs_dispatched: 0,
         any_network_action,
+    })
+}
+
+/// Delete a DM someone sent us. Its gift wrap is addressed to us, so our key deletes our copy
+/// from relays (NIP-59), and a hide request to ourselves takes it off our other devices. The
+/// sender's copies are theirs to delete.
+pub async fn delete_received_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> {
+    let client = nostr_client().ok_or("Not logged in")?;
+    let rumor_hex = rumor_id.to_hex();
+    // Tombstone first, as for our own: another wrap of it re-served later must not bring it back.
+    if let Err(e) = crate::db::events::add_message_tombstone(&rumor_hex) {
+        crate::log_warn!("[NIP-17 delete] tombstone write failed: {}", e);
+    }
+    crate::state::note_message_deleted(&rumor_hex);
+    let received = crate::db::events::wrapper_event_id_of(&rumor_hex);
+
+    // A downloaded file goes with it; the sender's upload is theirs, so Blossom is left alone.
+    let attachments = {
+        let state = crate::state::STATE.lock().await;
+        state.find_message(&rumor_hex).map(|(_, msg)| msg.attachments.clone()).unwrap_or_default()
+    };
+    delete_cached_attachment_files(&filter_unreferenced_attachments(&rumor_hex, attachments).await);
+
+    let (wraps_dispatched, wraps_total) = dispatch_wrap_deletions(&client, &[], received).await;
+    let cooperative_hide_sent = match publish_cooperative_hide(&client, rumor_id, None, 14).await {
+        Ok(()) => true,
+        Err(e) => {
+            crate::log_warn!("[NIP-17 delete] hide request to our devices failed: {}", e);
+            false
+        }
+    };
+    Ok(DeleteOutcome {
+        wraps_total,
+        wraps_dispatched,
+        cooperative_hide_sent,
+        blobs_dispatched: 0,
+        any_network_action: wraps_dispatched > 0 || cooperative_hide_sent,
     })
 }
 
@@ -663,7 +702,7 @@ async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wraps: &[EventId]
 async fn publish_cooperative_hide(
     client: &Client,
     target_rumor_id: &EventId,
-    recipient: &PublicKey,
+    recipient: Option<&PublicKey>,
     original_kind: u16,
 ) -> Result<(), String> {
     let my_pk = my_public_key().ok_or("Public key not set")?;
@@ -683,15 +722,16 @@ async fn publish_cooperative_hide(
         .tag(Tag::expiration(Timestamp::from(expiration_ts)))
         .finalize_unsigned_with_id(my_pk);
 
-    // Wrap and send to recipient. Also wrap and send to self so other
-    // devices belonging to the user drop the message from their local
-    // view too. Best-effort, fire-and-forget.
+    // Wrap and send to the recipient, when there is one, and to self so the user's other
+    // devices drop it too. Best-effort.
     let expires = || [Tag::expiration(Timestamp::from(expiration_ts))];
-    let r1 = send_gift_wrap(client, recipient, rumor.clone(), expires()).await;
-    let r2 = send_gift_wrap(client, &my_pk, rumor, expires()).await;
-
-    if r1.is_err() && r2.is_err() {
-        return Err("both cooperative-hide deliveries failed".to_string());
+    let to_them = match recipient {
+        Some(recipient) => send_gift_wrap(client, recipient, rumor.clone(), expires()).await.is_ok(),
+        None => false,
+    };
+    let to_me = send_gift_wrap(client, &my_pk, rumor, expires()).await.is_ok();
+    if !to_them && !to_me {
+        return Err("no cooperative-hide delivery went out".to_string());
     }
     Ok(())
 }

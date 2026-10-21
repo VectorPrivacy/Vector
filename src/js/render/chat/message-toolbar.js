@@ -5,7 +5,7 @@
  * Repositioned via getBoundingClientRect on row hover. Saves ~25k DOM nodes on a
  * 5k-message chat compared to per-row button columns.
  *
- * Buttons: 😀 react, ↩ reply, ✎ edit (mine + text only), 📁 reveal-file (mine + downloaded attachment), 🗑 delete (mine).
+ * Buttons: 😀 react, ↩ reply, ✎ edit (mine + text only), 📁 reveal-file (mine + downloaded attachment), 🗑 delete (mine, or received in a DM).
  *
  * Wiring:
  *   - mouseover/mouseleave delegated on .chat-messages
@@ -256,9 +256,10 @@ function _dmsgToolbarView(rowEl) {
     };
 
     // Delete / Hide: own messages always (relay nuke with retained keys, else a limited
-    // cooperative hide); others' community messages only with admin-hide authority. The
-    // two backend flags come from a cache; a miss queues a coalesced fetch that re-shows
-    // this toolbar when it lands. Until then own rows render optimistically full-delete.
+    // cooperative hide); a DM we received, whose wrap our key deletes; others' community
+    // messages only with admin-hide authority. The two backend flags come from a cache; a
+    // miss queues a coalesced fetch that re-shows this toolbar when it lands. Until then own
+    // rows render optimistically full-delete.
     const hasDeletableAttachment = !!(msg && msg.attachments && msg.attachments.some(a => a.url));
     const meta = _dmsgDeleteMeta.get(rowEl.id);
     const inCommunity = arrChats.find(c => c.id === strOpenChat)?.chat_type === 'Community';
@@ -268,6 +269,8 @@ function _dmsgToolbarView(rowEl) {
     if (mine) {
         const fullyDeletable = meta ? meta.has_retained_keys : true;
         del = { mode: 'delete', label: fullyDeletable ? 'Delete message' : 'Delete message (limited)', partial: !fullyDeletable, hasAttachments: hasDeletableAttachment };
+    } else if (!inCommunity && msg && !msg.system_event) {
+        del = { mode: 'delete', label: 'Delete message', partial: false, hasAttachments: false };
     } else if (meta && meta.can_admin_hide) {
         del = { mode: 'hide', label: 'Hide message' };
     }
@@ -399,11 +402,8 @@ function _dmsgHandleToolbarClick(e) {
  * `message_removed` to fade the row out — same handler as cancel-upload
  * and delete-failed, so no extra DOM work needed here.
  *
- * Honest framing: we promise removal from inbox relays, not from
- * recipients who already received the message. If the message predates
- * the retention feature (no ephemeral keys held) we refuse outright and
- * explain — silently local-deleting would mislead the user into
- * thinking the message is gone when it's still sitting on relays.
+ * A message whose wraps can't all be deleted from here asks first with a "Limited Delete"
+ * popup saying what still happens.
  */
 async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     opts = opts || {};
@@ -424,7 +424,8 @@ async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     // Three flows behind one button:
     //   delete (full)    = own DM: our copies leave the relays, a hide request
     //                      asks the recipient's Vector clients to drop theirs,
-    //                      attachments leave Blossom. Own Community message
+    //                      attachments leave Blossom. A DM we received: our copy
+    //                      leaves the relays by our key. Own Community message
     //                      with its retained key: a real network delete.
     //   delete (partial) = own Community message without that key: a hide
     //                      request + Blossom delete + local hide. Popup
@@ -872,6 +873,11 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                 label: partial ? 'Delete (limited)' : 'Delete',
                 icon: 'trash', danger: true,
                 onClick: () => _dmsgConfirmAndDelete(targetId, 'delete', { partial, hasAttachments: !!opts.has_attachments }),
+            };
+        } else if (arrChats.find(c => c.id === strOpenChat)?.chat_type !== 'Community' && msg && !msg.system_event) {
+            deleteItem = {
+                label: 'Delete', icon: 'trash', danger: true,
+                onClick: () => _dmsgConfirmAndDelete(targetId, 'delete', {}),
             };
         } else if (opts.can_admin_hide && !dissolved) {
             // Moderation-hide is a new authority action the backend drops once dissolved — don't offer it.
