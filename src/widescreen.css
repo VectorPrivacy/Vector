@@ -1860,9 +1860,12 @@ body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
 .ws-rail-folder .ws-rail-item {
   margin: 0 4px;
 }
-/* Open, the folder is a band of its colour holding its communities. */
+/* Open, the folder is a band of its colour holding its communities, reaching into the gap
+   above so it clears the head by as much as it clears the sides, and their corners match. */
 .ws-rail-folder.is-open {
   background-color: color-mix(in srgb, var(--folder-tint) 9%, transparent);
+  margin-top: -4px;
+  padding-top: 4px;
 }
 .ws-rail-folder-body {
   display: grid;
@@ -1931,6 +1934,8 @@ body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
   width: 60%;
   height: 60%;
   background-color: var(--folder-tint);
+  /* The folder's weight is its body, below the tab: centred by its box it reads low. */
+  transform: translateY(-6%);
 }
 .ws-rail-folder-tile.is-open {
   background-color: transparent;
@@ -1945,7 +1950,8 @@ body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
 }
 
 body.ws.ws-rail-collapsed .ws-rail-folder {
-  margin: 0 auto;
+  margin-left: auto;
+  margin-right: auto;
   width: 53px;
   flex-shrink: 0;
 }
