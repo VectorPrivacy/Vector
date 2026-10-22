@@ -137,8 +137,10 @@ async function bumpBadge() {
         const res = await cache.match(PUSH_BADGE);
         const n = (res ? Number(await res.text()) || 0 : 0) + 1;
         await cache.put(PUSH_BADGE, new Response(String(n)));
-        // Never awaited: during a declarative push WebKit leaves this promise pending.
-        self.navigator.setAppBadge?.(n)?.catch?.(() => {});
+        // During a declarative push WebKit can leave this promise pending: the event gives it
+        // half a second, since a closed app's worker ends with the event.
+        const set = self.navigator.setAppBadge?.(n)?.catch?.(() => {});
+        await Promise.race([set, new Promise((resolve) => setTimeout(resolve, 500))]);
     } catch {}
 }
 
@@ -166,8 +168,8 @@ async function onPush(event) {
         data: { chat: shown?.chat || null },
         navigate: shown?.chat ? `${origin}/#chat=${shown.chat}` : `${origin}/`,
     };
-    await self.registration.showNotification(title, options);
-    bumpBadge();
+    // Both inside the push event, which a closed app's worker doesn't outlive.
+    await Promise.all([self.registration.showNotification(title, options), bumpBadge()]);
 }
 
 self.addEventListener('push', (event) => event.waitUntil(onPush(event)));
