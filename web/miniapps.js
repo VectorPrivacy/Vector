@@ -23,14 +23,54 @@
 
     const appOrigin = (partition) => `${location.protocol}//${partition}.xdc.${location.host}`;
 
+    // Each app's localStorage, kept in this page's own storage (partition -> { key: value }):
+    // Safari keeps an app frame's storage only for the session, its origin being another
+    // than this page's however same-site, so the app's origin can come up empty.
+    const KEPT_MAX = 10_000_000;
+    let keptDb = null;
+    function keptStore(mode, fn) {
+        keptDb ||= new Promise((resolve, reject) => {
+            const req = indexedDB.open('vector-xdc-kept', 1);
+            req.onupgradeneeded = () => req.result.createObjectStore('local');
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+        return keptDb.then((db) => new Promise((resolve, reject) => {
+            const tx = db.transaction('local', mode);
+            const req = fn(tx.objectStore('local'));
+            tx.oncomplete = () => resolve(req.result);
+            tx.onerror = () => reject(tx.error);
+        }));
+    }
+    const keptGet = (partition) => keptStore('readonly', (s) => s.get(partition)).catch(() => null);
+    function keep(partition, data) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return Promise.resolve();
+        let size = 0;
+        for (const [k, v] of Object.entries(data)) {
+            if (typeof v !== 'string') return Promise.resolve();
+            size += k.length + v.length;
+        }
+        if (size > KEPT_MAX) return Promise.resolve();
+        return keptStore('readwrite', (s) => s.put(data, partition)).catch(() => {});
+    }
+
     function focus(w) {
         w.el.style.zIndex = String(++zTop);
     }
 
-    function close(label) {
+    async function close(label) {
         const w = windows.get(label);
         if (!w) return;
         windows.delete(label);
+        // Gone from sight at once; the frame stays a moment to hand over its last save.
+        w.el.style.visibility = 'hidden';
+        w.el.style.pointerEvents = 'none';
+        if (w.port) {
+            await Promise.race([
+                new Promise((resolve) => { w.flushed = resolve; w.port.postMessage({ t: 'ls-flush' }); }),
+                new Promise((resolve) => setTimeout(resolve, 500)),
+            ]);
+        }
         try { w.port?.close(); } catch { /* already closed */ }
         w.el.remove();
         backend('miniapp_closed', { label }).catch(() => {});
@@ -286,7 +326,8 @@
             return close(w.info.label);
         }
         const meta = { selfAddr: w.info.self_addr, selfName: w.info.self_name, policy: w.info.policy };
-        w.frame.contentWindow.postMessage({ t: 'xdc-load', bytes, meta, href: w.href }, w.origin, [bytes]);
+        const local = await keptGet(w.info.partition);
+        w.frame.contentWindow.postMessage({ t: 'xdc-load', bytes, meta, href: w.href, local }, w.origin, [bytes]);
     }
 
     // The app page asked for its bridge: a fresh port per page load.
@@ -306,6 +347,9 @@
                     break;
                 case 'rt-leave':
                     backend('miniapp_rt_leave', { label: w.info.label }).catch(() => {});
+                    break;
+                case 'ls-save':
+                    keep(w.info.partition, data.data).then(() => w.flushed?.());
                     break;
             }
         };

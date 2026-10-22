@@ -27,7 +27,7 @@
 
     addEventListener('message', async (e) => {
         if (e.source !== window.parent || e.origin !== vector || e.data?.t !== 'xdc-load') return;
-        const { bytes, meta, href } = e.data;
+        const { bytes, meta, href, local } = e.data;
         const sw = reg.active || navigator.serviceWorker.controller;
         if (!sw) return fail('service worker unavailable');
         // The worker stores and parses the package itself, so its storage is the one it reads.
@@ -38,6 +38,12 @@
             setTimeout(() => resolve({ ok: false, error: 'service worker did not answer' }), 30000);
         });
         if (!result?.ok) return fail(result?.error || 'unknown error');
+        // What Vector kept of this app's localStorage, put back when the origin lost its own.
+        if (local && typeof local === 'object') {
+            try {
+                if (localStorage.length === 0) for (const [k, v] of Object.entries(local)) localStorage.setItem(k, String(v));
+            } catch { /* full or blocked: the app starts as it would have */ }
+        }
         location.replace(typeof href === 'string' && href.startsWith('/') ? href : '/index.html');
     });
     window.parent.postMessage({ t: 'xdc-host-ready' }, vector);

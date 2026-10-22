@@ -165,11 +165,42 @@
     });
     window.parent.postMessage({ t: 'xdc-hello' }, META.parent);
 
+    // Safari keeps a frame's storage only for the session when the frame is another origin
+    // than the page, however same-site, so Vector keeps a copy of this app's localStorage in
+    // its own storage: sent after every change, as the page hides, and when Vector asks.
+    let store = null;
+    try { store = window.localStorage; } catch { /* blocked */ }
+    let saveTimer = 0;
+    function save() {
+        clearTimeout(saveTimer);
+        saveTimer = 0;
+        if (!store) return;
+        const data = {};
+        for (let i = 0; i < store.length; i++) {
+            const key = store.key(i);
+            data[key] = store.getItem(key);
+        }
+        portReady.then((p) => p.postMessage({ t: 'ls-save', data }));
+    }
+    if (store) {
+        for (const name of ['setItem', 'removeItem', 'clear']) {
+            const orig = Storage.prototype[name];
+            Storage.prototype[name] = function (...args) {
+                const result = orig.apply(this, args);
+                if (this === store && !saveTimer) saveTimer = setTimeout(save, 250);
+                return result;
+            };
+        }
+        addEventListener('pagehide', save);
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
+    }
+
     let channel = null;
     let listener = null;
     const queued = [];
 
     function onPort({ data }) {
+        if (data?.t === 'ls-flush') return save();
         if (data?.t !== 'rt-data' || !channel) return;
         if (listener) listener(data.data);
         else if (queued.length < 256) queued.push(data.data);
