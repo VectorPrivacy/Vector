@@ -521,6 +521,8 @@ pub enum DispatchedV2 {
     Kick { target: PublicKey },
     /// A Guestbook Nickname, unjudged like a Kick: the store keeps it and the fold judges it.
     Nickname,
+    /// A Guestbook Timeout, unjudged the same way.
+    Timeout,
     /// A wrap on this community's Control Plane — its metadata/channel set may
     /// have changed. Recognized here (address match) but NOT folded: the fold
     /// needs the whole edition chain, so the realtime layer re-fetches + re-folds
@@ -793,9 +795,10 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
         // A Kick shapes the memberlist, not the feed — so no presence line, but it
         // MUST reach the store or the target never leaves anyone's roster.
         GuestbookEntry::Kick { target, .. } => DispatchedV2::Kick { target: *target },
-        // A Timeout shapes how a member's posts read, not who is a member.
-        GuestbookEntry::Snapshot { .. } | GuestbookEntry::Timeout { .. } => DispatchedV2::Ignored,
+        GuestbookEntry::Snapshot { .. } => DispatchedV2::Ignored,
         GuestbookEntry::Nickname { .. } => DispatchedV2::Nickname,
+        // A Timeout shapes how a member's posts read, not who is a member: no presence line.
+        GuestbookEntry::Timeout { .. } => DispatchedV2::Timeout,
     }
 }
 

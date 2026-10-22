@@ -884,13 +884,14 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
-                inbound::DispatchedV2::Nickname => {
+                ruling @ (inbound::DispatchedV2::Nickname | inbound::DispatchedV2::Timeout) => {
+                    let changed = if matches!(ruling, inbound::DispatchedV2::Nickname) { "community_nicknames" } else { "community_timeouts" };
                     let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
                     let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
                     let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
                     remember();
                     if super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
-                        crate::traits::emit_event_json("community_nicknames", serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
+                        crate::traits::emit_event_json(changed, serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
                     }
                     return;
                 }
@@ -1520,6 +1521,55 @@ mod tests {
         assert_eq!(two.len(), one.len() * 2);
         // Order-independent: reversing the input yields the identical sorted set.
         assert_eq!(plane_authors(&[b, a]), two);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_heard_live_counts_at_once() {
+        use crate::community::transport::memory::MemoryRelay;
+        use crate::community::transport::{Query, Transport};
+
+        struct Quiet;
+        impl InboundEventHandler for Quiet {}
+
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 19 + 5) % 32] as char);
+            }
+            s
+        };
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let _ = crate::state::take_nostr_client();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = MemoryRelay::new();
+        let community = super::super::service::create_community(&relay, "LiveTimeout", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let member = Keys::generate().public_key();
+        // Another of the owner's devices sets it: only the wrap reaches this one.
+        let (before, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap();
+        super::super::service::timeout_member(&relay, &held(), &member, 600).await.unwrap();
+        crate::db::community::set_guestbook(&cid_hex, &before, cursor).unwrap();
+        assert!(!super::super::service::community_timeouts(&held()).unwrap().contains_key(&member));
+
+        let gb = derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        crate::community::v2::realtime::clear().await;
+        for wrap in wraps {
+            dispatch_event(wrap, Arc::new(Quiet)).await;
+        }
+        let running = super::super::service::community_timeouts(&held()).unwrap();
+        assert!(running.get(&member).is_some_and(|(_, until)| *until > crate::clock::now_secs()), "it runs without waiting for a guestbook read");
     }
 
     #[tokio::test]
