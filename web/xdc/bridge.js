@@ -194,9 +194,13 @@
     }
 
     // IndexedDB: every database whole (version, stores, indexes, records), a second after the
-    // last write lands and at least every five seconds while writes keep coming.
-    const idb = window.indexedDB && typeof window.indexedDB.databases === 'function' ? window.indexedDB : null;
+    // last write lands and at least every five seconds while writes keep coming. Safari lists
+    // no databases to a frame like this one, so the ones this page opens are tracked too, and
+    // Vector keeps any database the app left alone as it last had it.
+    const idb = window.indexedDB || null;
     const openTx = window.IDBDatabase && IDBDatabase.prototype.transaction;
+    const opened = new Set();
+    const deleted = new Set();
     let idbTimer = 0;
     let idbDue = 0;
     let idbRunning = null;
@@ -239,13 +243,14 @@
         if (!idb) return Promise.resolve();
         // One at a time; a write during one is taken by the next.
         idbRunning = (idbRunning || Promise.resolve()).then(async () => {
+            const names = new Set(opened);
+            try { for (const info of await idb.databases()) if (info.name) names.add(info.name); } catch { /* unlisted */ }
             const dbs = [];
-            for (const info of await idb.databases()) {
-                if (!info.name) continue;
-                try { dbs.push(await snapshotDb(info.name)); } catch { /* deleted or blocked meanwhile */ }
+            for (const name of names) {
+                try { dbs.push(await snapshotDb(name)); } catch { /* deleted or blocked meanwhile */ }
             }
             const p = await portReady;
-            p.postMessage({ t: 'idb-save', data: { v: 1, dbs } });
+            p.postMessage({ t: 'idb-save', data: { v: 1, dbs, deleted: [...deleted] } });
         }).catch(() => {});
         return idbRunning;
     }
@@ -261,10 +266,16 @@
             if (mode === 'readwrite') tx.addEventListener('complete', idbChanged);
             return tx;
         };
+        const openDb = IDBFactory.prototype.open;
+        IDBFactory.prototype.open = function (name, ...rest) {
+            const req = openDb.call(this, name, ...rest);
+            req.addEventListener('success', () => { opened.add(String(name)); deleted.delete(String(name)); });
+            return req;
+        };
         const deleteDb = IDBFactory.prototype.deleteDatabase;
-        IDBFactory.prototype.deleteDatabase = function (...args) {
-            const req = deleteDb.apply(this, args);
-            req.addEventListener('success', idbChanged);
+        IDBFactory.prototype.deleteDatabase = function (name, ...rest) {
+            const req = deleteDb.call(this, name, ...rest);
+            req.addEventListener('success', () => { opened.delete(String(name)); deleted.add(String(name)); idbChanged(); });
             return req;
         };
     }

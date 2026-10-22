@@ -20,11 +20,13 @@
     }
     await navigator.serviceWorker.ready;
 
-    // One database as Vector kept it: its stores and indexes made in the upgrade, which then
-    // writes every record back under its own key.
-    const rebuild = (db) => new Promise((resolve, reject) => {
+    // One database as Vector kept it, made only where it doesn't exist (Safari lists no
+    // databases to this frame, so the open itself is the test): its stores and indexes made in
+    // the upgrade, which then writes every record back under its own key.
+    const rebuild = (db) => new Promise((resolve) => {
         const req = indexedDB.open(db.name, db.version);
-        req.onupgradeneeded = () => {
+        req.onupgradeneeded = (e) => {
+            if (e.oldVersion !== 0) return req.transaction.abort();
             for (const s of db.stores) {
                 const store = req.result.createObjectStore(s.name, { keyPath: s.keyPath, autoIncrement: s.autoIncrement });
                 for (const i of s.indexes) store.createIndex(i.name, i.keyPath, { unique: i.unique, multiEntry: i.multiEntry });
@@ -35,8 +37,9 @@
             }
         };
         req.onsuccess = () => { req.result.close(); resolve(); };
-        req.onerror = () => reject(req.error);
-        req.onblocked = () => reject(new Error('blocked'));
+        // Newer here than the copy, or left as it is: either way the app's own stands.
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
     });
 
     const fail = (why) => {
@@ -63,11 +66,11 @@
                 if (localStorage.length === 0) for (const [k, v] of Object.entries(local)) localStorage.setItem(k, String(v));
             } catch { /* full or blocked: the app starts as it would have */ }
         }
-        // And its IndexedDB, rebuilt whole when the origin holds no database at all.
-        if (idb?.v === 1 && Array.isArray(idb.dbs) && idb.dbs.length && typeof indexedDB?.databases === 'function') {
-            try {
-                if ((await indexedDB.databases()).length === 0) for (const db of idb.dbs) await rebuild(db);
-            } catch { /* full or blocked: the app starts as it would have */ }
+        // And each IndexedDB database it no longer has.
+        if (idb?.v === 1 && Array.isArray(idb.dbs)) {
+            for (const db of idb.dbs) {
+                try { await rebuild(db); } catch { /* full or malformed: the app starts without it */ }
+            }
         }
         location.replace(typeof href === 'string' && href.startsWith('/') ? href : '/index.html');
     });

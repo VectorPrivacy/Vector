@@ -70,9 +70,18 @@
         local: (d) => d && typeof d === 'object' && !Array.isArray(d) && Object.values(d).every((v) => typeof v === 'string'),
         idb: (d) => d?.v === 1 && Array.isArray(d.dbs),
     };
-    function keep(name, partition, data) {
-        if (!keepable[name](data) || sizeOf(data, KEPT_MAX[name]) > KEPT_MAX[name]) return Promise.resolve();
-        return keptStore(name, 'readwrite', (s) => s.put(data, partition)).catch(() => {});
+    async function keep(name, partition, data) {
+        if (!keepable[name](data)) return;
+        // A database the app didn't open this time is as Vector last kept it, unless deleted.
+        if (name === 'idb') {
+            const fresh = new Set(data.dbs.map((d) => d.name));
+            const gone = new Set(Array.isArray(data.deleted) ? data.deleted : []);
+            const prev = await keptGet('idb', partition);
+            const kept = (prev?.dbs || []).filter((d) => !fresh.has(d.name) && !gone.has(d.name));
+            data = { v: 1, dbs: [...data.dbs, ...kept] };
+        }
+        if (sizeOf(data, KEPT_MAX[name]) > KEPT_MAX[name]) return;
+        await keptStore(name, 'readwrite', (s) => s.put(data, partition)).catch(() => {});
     }
 
     function focus(w) {
