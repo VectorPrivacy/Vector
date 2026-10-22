@@ -90,10 +90,12 @@ const MEMBER_TIMEOUTS = [['60 seconds', 60], ['5 minutes', 300], ['10 minutes', 
  * `onRemoved(npub)` hears one land.
  */
 async function memberMenuItems(communityId, npub, { onBusy = () => {}, onRemoved = () => {} } = {}) {
-    const [caps, view] = await Promise.all([
+    const [caps, view, timeouts] = await Promise.all([
         invoke('get_community_capabilities', { communityId }).catch(() => ({})),
         memberRolesView(communityId),
+        invoke('get_community_timeouts', { communityId }).catch(() => ({})),
     ]);
+    const timedOut = (timeouts?.[npub]?.until || 0) * 1000 > Date.now();
     const mine = npub === strPubkey;
     const above = !mine && !!view && npub !== view.owner && (view.is_owner || (view.rank != null && view.rank < memberRank(view, npub)));
     const display = getName(getProfile(npub) || npub, communityId);
@@ -140,8 +142,7 @@ async function memberMenuItems(communityId, npub, { onBusy = () => {}, onRemoved
             icon: 'clock',
             submenu: () => [
                 ...MEMBER_TIMEOUTS.map(([label, secs]) => ({ label, onClick: () => timeout(secs) })),
-                { divider: true },
-                { label: 'Lift timeout', onClick: () => timeout(0) },
+                ...(timedOut ? [{ divider: true }, { label: 'Lift timeout', onClick: () => timeout(0) }] : []),
             ],
         });
     }
