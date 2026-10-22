@@ -166,8 +166,8 @@
     window.parent.postMessage({ t: 'xdc-hello' }, META.parent);
 
     // Safari keeps a frame's storage only for the session when the frame is another origin
-    // than the page, however same-site, so Vector keeps a copy of this app's localStorage in
-    // its own storage: sent after every change, as the page hides, and when Vector asks.
+    // than the page, however same-site, so Vector keeps a copy of this app's localStorage and
+    // IndexedDB in its own storage: sent after changes, as the page hides, and when Vector asks.
     let store = null;
     try { store = window.localStorage; } catch { /* blocked */ }
     let saveTimer = 0;
@@ -191,16 +191,99 @@
                 return result;
             };
         }
-        addEventListener('pagehide', save);
-        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
     }
+
+    // IndexedDB: every database whole (version, stores, indexes, records), a second after the
+    // last write lands and at least every five seconds while writes keep coming.
+    const idb = window.indexedDB && typeof window.indexedDB.databases === 'function' ? window.indexedDB : null;
+    const openTx = window.IDBDatabase && IDBDatabase.prototype.transaction;
+    let idbTimer = 0;
+    let idbDue = 0;
+    let idbRunning = null;
+    const settle = (req) => new Promise((resolve, reject) => {
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+    async function snapshotDb(name) {
+        const db = await new Promise((resolve, reject) => {
+            const req = idb.open(name);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+            // A database that didn't exist a moment ago: nothing to keep.
+            req.onupgradeneeded = () => { req.transaction.abort(); };
+        });
+        db.onversionchange = () => db.close();
+        try {
+            const names = [...db.objectStoreNames];
+            // Every read is asked for at once, so the transaction can't commit between them.
+            const tx = names.length ? openTx.call(db, names, 'readonly') : null;
+            const stores = await Promise.all(names.map((storeName) => {
+                const s = tx.objectStore(storeName);
+                const shape = {
+                    name: storeName,
+                    keyPath: s.keyPath,
+                    autoIncrement: s.autoIncrement,
+                    indexes: [...s.indexNames].map((n) => { const i = s.index(n); return { name: n, keyPath: i.keyPath, unique: i.unique, multiEntry: i.multiEntry }; }),
+                };
+                return Promise.all([settle(s.getAllKeys()), settle(s.getAll())]).then(([keys, values]) => ({ ...shape, keys, values }));
+            }));
+            return { name, version: db.version, stores };
+        } finally {
+            db.close();
+        }
+    }
+    function saveIdb() {
+        clearTimeout(idbTimer);
+        idbTimer = 0;
+        idbDue = 0;
+        if (!idb) return Promise.resolve();
+        // One at a time; a write during one is taken by the next.
+        idbRunning = (idbRunning || Promise.resolve()).then(async () => {
+            const dbs = [];
+            for (const info of await idb.databases()) {
+                if (!info.name) continue;
+                try { dbs.push(await snapshotDb(info.name)); } catch { /* deleted or blocked meanwhile */ }
+            }
+            const p = await portReady;
+            p.postMessage({ t: 'idb-save', data: { v: 1, dbs } });
+        }).catch(() => {});
+        return idbRunning;
+    }
+    function idbChanged() {
+        const now = Date.now();
+        if (!idbDue) idbDue = now + 5000;
+        clearTimeout(idbTimer);
+        idbTimer = setTimeout(saveIdb, Math.max(0, Math.min(1000, idbDue - now)));
+    }
+    if (idb && openTx) {
+        IDBDatabase.prototype.transaction = function (stores, mode, ...rest) {
+            const tx = openTx.call(this, stores, mode, ...rest);
+            if (mode === 'readwrite') tx.addEventListener('complete', idbChanged);
+            return tx;
+        };
+        const deleteDb = IDBFactory.prototype.deleteDatabase;
+        IDBFactory.prototype.deleteDatabase = function (...args) {
+            const req = deleteDb.apply(this, args);
+            req.addEventListener('success', idbChanged);
+            return req;
+        };
+    }
+
+    addEventListener('pagehide', () => { save(); saveIdb(); });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') { save(); saveIdb(); }
+    });
 
     let channel = null;
     let listener = null;
     const queued = [];
 
     function onPort({ data }) {
-        if (data?.t === 'ls-flush') return save();
+        if (data?.t === 'flush') {
+            save();
+            saveIdb().then(() => port.postMessage({ t: 'flushed' }));
+            return;
+        }
         if (data?.t !== 'rt-data' || !channel) return;
         if (listener) listener(data.data);
         else if (queued.length < 256) queued.push(data.data);

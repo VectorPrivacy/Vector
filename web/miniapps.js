@@ -23,35 +23,56 @@
 
     const appOrigin = (partition) => `${location.protocol}//${partition}.xdc.${location.host}`;
 
-    // Each app's localStorage, kept in this page's own storage (partition -> { key: value }):
+    // Each app's localStorage and IndexedDB, kept in this page's own storage by partition:
     // Safari keeps an app frame's storage only for the session, its origin being another
     // than this page's however same-site, so the app's origin can come up empty.
-    const KEPT_MAX = 10_000_000;
+    const KEPT_MAX = { local: 10_000_000, idb: 32_000_000 };
     let keptDb = null;
-    function keptStore(mode, fn) {
+    function keptStore(name, mode, fn) {
         keptDb ||= new Promise((resolve, reject) => {
-            const req = indexedDB.open('vector-xdc-kept', 1);
-            req.onupgradeneeded = () => req.result.createObjectStore('local');
+            const req = indexedDB.open('vector-xdc-kept', 2);
+            req.onupgradeneeded = () => {
+                for (const s of ['local', 'idb']) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s);
+            };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
         return keptDb.then((db) => new Promise((resolve, reject) => {
-            const tx = db.transaction('local', mode);
-            const req = fn(tx.objectStore('local'));
+            const tx = db.transaction(name, mode);
+            const req = fn(tx.objectStore(name));
             tx.oncomplete = () => resolve(req.result);
             tx.onerror = () => reject(tx.error);
         }));
     }
-    const keptGet = (partition) => keptStore('readonly', (s) => s.get(partition)).catch(() => null);
-    function keep(partition, data) {
-        if (!data || typeof data !== 'object' || Array.isArray(data)) return Promise.resolve();
+    const keptGet = (name, partition) => keptStore(name, 'readonly', (s) => s.get(partition)).catch(() => null);
+
+    // Roughly how many bytes a kept value holds, stopping once past `limit`.
+    function sizeOf(value, limit) {
         let size = 0;
-        for (const [k, v] of Object.entries(data)) {
-            if (typeof v !== 'string') return Promise.resolve();
-            size += k.length + v.length;
-        }
-        if (size > KEPT_MAX) return Promise.resolve();
-        return keptStore('readwrite', (s) => s.put(data, partition)).catch(() => {});
+        const seen = new Set();
+        const walk = (v) => {
+            if (size > limit) return;
+            if (typeof v === 'string') size += v.length * 2;
+            else if (v === null || typeof v !== 'object') size += 8;
+            else if (seen.has(v)) return;
+            else if (v instanceof Blob) size += v.size;
+            else if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) size += v.byteLength;
+            else {
+                seen.add(v);
+                const items = v instanceof Map ? [...v.keys(), ...v.values()] : v instanceof Set ? [...v] : Object.values(v);
+                for (const item of items) walk(item);
+            }
+        };
+        walk(value);
+        return size;
+    }
+    const keepable = {
+        local: (d) => d && typeof d === 'object' && !Array.isArray(d) && Object.values(d).every((v) => typeof v === 'string'),
+        idb: (d) => d?.v === 1 && Array.isArray(d.dbs),
+    };
+    function keep(name, partition, data) {
+        if (!keepable[name](data) || sizeOf(data, KEPT_MAX[name]) > KEPT_MAX[name]) return Promise.resolve();
+        return keptStore(name, 'readwrite', (s) => s.put(data, partition)).catch(() => {});
     }
 
     function focus(w) {
@@ -62,13 +83,13 @@
         const w = windows.get(label);
         if (!w) return;
         windows.delete(label);
-        // Gone from sight at once; the frame stays a moment to hand over its last save.
+        // Gone from sight at once; the frame stays a moment to hand over its last saves.
         w.el.style.visibility = 'hidden';
         w.el.style.pointerEvents = 'none';
         if (w.port) {
             await Promise.race([
-                new Promise((resolve) => { w.flushed = resolve; w.port.postMessage({ t: 'ls-flush' }); }),
-                new Promise((resolve) => setTimeout(resolve, 500)),
+                new Promise((resolve) => { w.flushed = resolve; w.port.postMessage({ t: 'flush' }); }),
+                new Promise((resolve) => setTimeout(resolve, 2000)),
             ]);
         }
         try { w.port?.close(); } catch { /* already closed */ }
@@ -326,8 +347,8 @@
             return close(w.info.label);
         }
         const meta = { selfAddr: w.info.self_addr, selfName: w.info.self_name, policy: w.info.policy };
-        const local = await keptGet(w.info.partition);
-        w.frame.contentWindow.postMessage({ t: 'xdc-load', bytes, meta, href: w.href, local }, w.origin, [bytes]);
+        const [local, idb] = await Promise.all([keptGet('local', w.info.partition), keptGet('idb', w.info.partition)]);
+        w.frame.contentWindow.postMessage({ t: 'xdc-load', bytes, meta, href: w.href, local, idb }, w.origin, [bytes]);
     }
 
     // The app page asked for its bridge: a fresh port per page load.
@@ -348,8 +369,13 @@
                 case 'rt-leave':
                     backend('miniapp_rt_leave', { label: w.info.label }).catch(() => {});
                     break;
+                // Saves are written in arrival order; `flushed` follows the app's last one.
                 case 'ls-save':
-                    keep(w.info.partition, data.data).then(() => w.flushed?.());
+                case 'idb-save':
+                    w.saving = (w.saving || Promise.resolve()).then(() => keep(data.t === 'ls-save' ? 'local' : 'idb', w.info.partition, data.data));
+                    break;
+                case 'flushed':
+                    (w.saving || Promise.resolve()).then(() => w.flushed?.());
                     break;
             }
         };

@@ -20,6 +20,25 @@
     }
     await navigator.serviceWorker.ready;
 
+    // One database as Vector kept it: its stores and indexes made in the upgrade, which then
+    // writes every record back under its own key.
+    const rebuild = (db) => new Promise((resolve, reject) => {
+        const req = indexedDB.open(db.name, db.version);
+        req.onupgradeneeded = () => {
+            for (const s of db.stores) {
+                const store = req.result.createObjectStore(s.name, { keyPath: s.keyPath, autoIncrement: s.autoIncrement });
+                for (const i of s.indexes) store.createIndex(i.name, i.keyPath, { unique: i.unique, multiEntry: i.multiEntry });
+                for (let n = 0; n < s.values.length; n++) {
+                    if (s.keyPath === null) store.put(s.values[n], s.keys[n]);
+                    else store.put(s.values[n]);
+                }
+            }
+        };
+        req.onsuccess = () => { req.result.close(); resolve(); };
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error('blocked'));
+    });
+
     const fail = (why) => {
         document.body.textContent = `This mini app could not start: ${why}`;
         document.body.style.cssText = 'color:#ccc;font:14px system-ui;padding:24px';
@@ -27,7 +46,7 @@
 
     addEventListener('message', async (e) => {
         if (e.source !== window.parent || e.origin !== vector || e.data?.t !== 'xdc-load') return;
-        const { bytes, meta, href, local } = e.data;
+        const { bytes, meta, href, local, idb } = e.data;
         const sw = reg.active || navigator.serviceWorker.controller;
         if (!sw) return fail('service worker unavailable');
         // The worker stores and parses the package itself, so its storage is the one it reads.
@@ -42,6 +61,12 @@
         if (local && typeof local === 'object') {
             try {
                 if (localStorage.length === 0) for (const [k, v] of Object.entries(local)) localStorage.setItem(k, String(v));
+            } catch { /* full or blocked: the app starts as it would have */ }
+        }
+        // And its IndexedDB, rebuilt whole when the origin holds no database at all.
+        if (idb?.v === 1 && Array.isArray(idb.dbs) && idb.dbs.length && typeof indexedDB?.databases === 'function') {
+            try {
+                if ((await indexedDB.databases()).length === 0) for (const db of idb.dbs) await rebuild(db);
             } catch { /* full or blocked: the app starts as it would have */ }
         }
         location.replace(typeof href === 'string' && href.startsWith('/') ? href : '/index.html');
