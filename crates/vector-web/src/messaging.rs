@@ -178,6 +178,8 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     true
 }
 
+/// The app badge's count, as desktop's: only chats that ring for everything, never a blocked one.
 pub async fn unread_total() -> u32 {
-    db::events::unread_counts().await.map(|m| m.values().sum()).unwrap_or(0)
+    let counts = db::events::unread_counts().await.unwrap_or_default();
+    STATE.lock().await.sum_unread_from(&counts)
 }

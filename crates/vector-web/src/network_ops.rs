@@ -1029,6 +1029,8 @@ async fn reconcile() {
     reconcile_mirror().await;
     let counts = db::events::unread_counts().await.unwrap_or_default();
     STATE.lock().await.unread_seed(counts);
+    // A chat that stops or starts ringing leaves or joins the app badge, which the page counts.
+    vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));
     arm_expiry_timer();
     publish_projection(Pref::Notify);
     publish_projection(Pref::Mutes);
