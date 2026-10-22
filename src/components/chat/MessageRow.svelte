@@ -22,6 +22,8 @@
     import PivxBubble from './PivxBubble.svelte';
     import { avatarFallback } from '../lib/avatar.js';
     import { watchProfile } from '../lib/profilewatch.js';
+    import { timedOutUntil } from '../lib/timeouts.svelte.js';
+    import { countdownTip, fmtCountdown } from '../lib/countdown.js';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -62,6 +64,8 @@
     const shortSender = (msg.mine ? ctx.myNpub : (sender?.id || msg.npub || '')).substring(0, 8);
     // svelte-ignore state_referenced_locally
     const communityId = ctx.currentChat?.metadata?.custom_fields?.community_id || null;
+    const timeoutUntil = $derived(communityId ? timedOutUntil(communityId, authorFullId) : 0);
+    const timeoutTip = { label: (left) => (left > 0 ? 'Timeout ends in ' + fmtCountdown(left) : 'Timeout ending'), ui: { showTooltip: (text, el) => h.showTooltip(text, el), hideTooltip: () => h.hideTooltip() } };
     // The quoted parent: resolved from the parent message (its version moves when it
     // arrives or is edited) and the quoted author's profile. Null until context exists;
     // the row then carries the parent id so a late arrival can be compensated for.
@@ -204,6 +208,7 @@
                 {/if}
                 {#if rank.admin}<span class="dmsg-author-badge admin">admin</span>{/if}
                 {#if rank.owner}<span class="dmsg-author-badge owner">Owner</span>{/if}
+                {#if timeoutUntil}<span class="icon icon-clock-snooze dmsg-author-timeout" role="img" aria-label="Timed out" use:countdownTip={{ ...timeoutTip, until: timeoutUntil }}></span>{/if}
                 <time class="dmsg-time">{hourMinute}</time>
             </div>
             <div class="dmsg-content">
@@ -233,6 +238,9 @@
             {/if}
             {#if rank.owner}
                 <span class="dmsg-author-badge owner">Owner</span>
+            {/if}
+            {#if timeoutUntil}
+                <span class="icon icon-clock-snooze dmsg-author-timeout" role="img" aria-label="Timed out" use:countdownTip={{ ...timeoutTip, until: timeoutUntil }}></span>
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>

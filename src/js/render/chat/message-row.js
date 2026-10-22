@@ -250,7 +250,7 @@ const _dmsgContentHelpers = {
     linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
     playerUrl: (video) => invoke('player_url', { provider: video.provider || 'youtube', id: video.id, start: video.start || null })
         .catch((e) => { showToast(String(e)); return null; }),
-    fmtCountdown: (secs) => _fmtCountdown(secs),
+    fmtCountdown: (secs) => VectorSvelte.fmtCountdown(secs),
     selfDestructTooltip: (el) => _selfDestructTooltip(el),
     selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
     armExpiry: (at) => armExpiry(at),
@@ -443,7 +443,7 @@ function _selfDestructTooltip(el) {
     const tick = () => {
         const remaining = exp - Math.floor(Date.now() / 1000);
         showGlobalTooltip(remaining > 0
-            ? 'Message dissolves in ' + _fmtCountdown(remaining)
+            ? 'Message dissolves in ' + VectorSvelte.fmtCountdown(remaining)
             : 'Dissolving...', el);
     };
     tick();
@@ -455,13 +455,6 @@ function _selfDestructTooltipEnd() {
     hideGlobalTooltip();
 }
 
-/** Format a countdown: mm:ss under an hour, else Hh Mm / Dd Hh. */
-function _fmtCountdown(secs) {
-    if (secs >= 86400) { const d = Math.floor(secs / 86400); const h = Math.floor((secs % 86400) / 3600); return d + 'd ' + h + 'h'; }
-    if (secs >= 3600)  { const h = Math.floor(secs / 3600);  const m = Math.floor((secs % 3600) / 60);   return h + 'h ' + m + 'm'; }
-    const m = Math.floor(secs / 60), s = secs % 60;
-    return m + ':' + String(s).padStart(2, '0');
-}
 
 /**
  * The quoted parent of a reply as data for the row's ReplyQuote, or null when nothing

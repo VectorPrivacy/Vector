@@ -120,8 +120,6 @@ function setCommunityChannels(communityId, channels, categories) {
     leaveHiddenChannel(communityId);
 }
 
-/** communityId → the Timeouts running there, npub → { from, until }, as last read. */
-const communityTimeoutsCache = new Map();
 /** channelId → the authors who can't send there, as last read. */
 const channelSendDeniedCache = new Map();
 function channelSendDenied(channelId) {
@@ -179,10 +177,36 @@ function mentionableRoles(chat) {
 }
 
 function communityTimeoutsFor(communityId) {
-    return communityId ? communityTimeoutsCache.get(communityId) : null;
+    return VectorSvelte.communityTimeouts(communityId);
 }
 
-let timeoutLockTimer = 0;
+/** communityId → the timer that reads its Timeouts again as the soonest one ends. */
+const timeoutExpiryTimers = new Map();
+
+/**
+ * Read a community's running Timeouts into the store; whether they changed. A Timeout
+ * starting or ending also takes down or restores its member's own nickname.
+ */
+async function loadCommunityTimeouts(communityId) {
+    let running = null;
+    try { running = await invoke('get_community_timeouts', { communityId }); } catch { return false; }
+    const changed = VectorSvelte.setCommunityTimeouts(communityId, running);
+    if (changed) loadCommunityNicknames(communityId);
+    // A timer can't wait past ~24.8 days.
+    clearTimeout(timeoutExpiryTimers.get(communityId));
+    const soonest = Math.min(...Object.values(running || {}).map(t => t.until * 1000));
+    if (Number.isFinite(soonest)) {
+        timeoutExpiryTimers.set(communityId, setTimeout(() => refreshCommunityTimeouts(communityId), Math.min(Math.max(soonest - Date.now(), 0) + 1000, 2 ** 31 - 1)));
+    }
+    return changed;
+}
+
+/** A community's Timeouts may have moved: read them again, through the open chat when it's there. */
+function refreshCommunityTimeouts(communityId) {
+    const chat = getChat(strOpenChat);
+    if (chat && communityIdOfChat(chat) === communityId) refreshTimeoutLock(chat);
+    else loadCommunityTimeouts(communityId);
+}
 
 /**
  * Read the open chat's community's Timeouts: the rows of what a timed-out member posted
@@ -191,28 +215,20 @@ let timeoutLockTimer = 0;
 async function refreshTimeoutLock(chat) {
     const communityId = communityIdOfChat(chat);
     if (!communityId) return;
-    let running = null;
-    try { running = await invoke('get_community_timeouts', { communityId }); } catch { return; }
-    const had = JSON.stringify(communityTimeoutsCache.get(communityId) || {});
-    communityTimeoutsCache.set(communityId, running || {});
+    const timeoutsChanged = await loadCommunityTimeouts(communityId);
     // In an open channel a post whose author can't send there collapses too.
     const authors = [...new Set((chat.messages || []).filter(m => !m.mine && m.npub).map(m => m.npub))];
     let denied = [];
     try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
     const hadDenied = (channelSendDeniedCache.get(chat.id) || []).join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
-    // A Timeout starting or ending takes down or restores its member's own nickname.
-    if (had !== JSON.stringify(running || {})) loadCommunityNicknames(communityId);
-    const changed = had !== JSON.stringify(running || {}) || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
+    const changed = timeoutsChanged || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
     if (changed && strOpenChat === chat.id) openChat(strOpenChat);
-    const mine = running?.[strPubkey];
+    const mine = communityTimeoutsFor(communityId)?.[strPubkey];
     if (!mine || strOpenChat !== chat.id) return;
     const until = new Date(mine.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
     VectorSvelte.setLock('timeout', `You're timed out until ${until}`);
     VectorSvelte.flushSync();
-    // Read again as it ends, which reopens the composer; a timer can't wait past ~24.8 days.
-    clearTimeout(timeoutLockTimer);
-    timeoutLockTimer = setTimeout(() => { if (strOpenChat === chat.id) refreshTimeoutLock(chat); }, Math.min(mine.until * 1000 - Date.now() + 1000, 2 ** 31 - 1));
 }
 
 /** The open channel's topic, '' when it has none. */

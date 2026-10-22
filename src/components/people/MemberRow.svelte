@@ -20,6 +20,7 @@
         withStatus = false,       // rosters show the person's status line; pickers stay name-only
         veiled = false,           // Streamer Mode hides this person: no status either
         keyHint = '',             // see MemberName
+        timeoutUntil = 0,         // see MemberName
         onactivate = null,        // (event) => void — row click / Enter / Space
         gutter = null,            // snippet: the left control slot
         trailing = null,          // snippet: the right control slot
@@ -56,6 +57,7 @@
         {rankLabel}
         bot={!!profile?.bot}
         {keyHint}
+        {timeoutUntil}
         status={withStatus && !veiled && profile?.status?.title ? { title: profile.status.title, emojiTags: profile.status.emoji_tags || [] } : null}
         style={dim ? 'opacity:0.6;' : ''}
         {ui}

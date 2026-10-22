@@ -12,6 +12,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { communityNickname } from '../lib/nicknames.svelte.js';
+    import { timedOutUntil } from '../lib/timeouts.svelte.js';
 
     let {
         communityId,
@@ -208,6 +209,7 @@
                 isAdmin,
                 rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
                 rankLabel: heldBy.get(m.npub)?.name || null,
+                timeoutUntil: timedOutUntil(communityId, m.npub),
                 canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban || caps.moderate_members),
                 canRole: mayRole(m.npub),
                 canNick: mayNick(m.npub),
@@ -388,6 +390,7 @@
                         veiled={vm.veiled}
                         rank={vm.rank}
                         rankLabel={vm.rankLabel}
+                        timeoutUntil={vm.timeoutUntil}
                         {hoverBg}
                         acting={acting.has(vm.npub)}
                         onactivate={(e) => openProfile(vm.npub, e)}

@@ -80,6 +80,14 @@ async function setupRustListeners() {
         nicknameReads.set(cid, setTimeout(() => { nicknameReads.delete(cid); loadCommunityNicknames(cid); }, 300));
     });
 
+    // A Timeout landed live: one read per burst.
+    const timeoutReads = new Map();
+    _on('community_timeouts', (evt) => {
+        const cid = evt.payload?.community_id;
+        if (!cid || timeoutReads.has(cid)) return;
+        timeoutReads.set(cid, setTimeout(() => { timeoutReads.delete(cid); refreshCommunityTimeouts(cid); }, 300));
+    });
+
     // A deleted Channel left this device: drop its chat and anything painted from it.
     _on('channel_purged', (evt) => {
         const { community_id: communityId, channel_id: channelId } = evt.payload || {};

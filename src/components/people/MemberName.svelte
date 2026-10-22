@@ -1,6 +1,9 @@
 <script>
-    // The identity cell of a member-style row: display name plus its marks (rank, bot) on
-    // one line. Same DOM as the vanilla buildMemberNameCell so the global styles cascade.
+    // The identity cell of a member-style row: display name plus its marks (rank, bot, a
+    // running Timeout) on one line. Same DOM as the vanilla buildMemberNameCell so the global
+    // styles cascade.
+    import { countdownTip, fmtCountdown } from '../lib/countdown.js';
+
     let {
         display = '',
         hasName = false,          // real name → twemojify; a truncated npub has nothing to render
@@ -9,6 +12,7 @@
         bot = false,
         status = null,            // { title, emojiTags } — the person's NIP-38 status line
         keyHint = '',             // a shortened npub beside the name, so a copied name can't pass as its owner
+        timeoutUntil = 0,         // unix seconds a running Timeout ends, 0 for none
         style = '',
         ui,                       // { twemojify, renderCustomEmojiShortcodes, showTooltip, hideTooltip }
     } = $props();
@@ -45,6 +49,7 @@
     }
 
     const rankWord = $derived(rank === 'owner' ? 'Owner' : (rankLabel || 'Admin'));
+    const timeoutLabel = (left) => (left > 0 ? 'Timeout ends in ' + fmtCountdown(left) : 'Timeout ending');
 </script>
 
 <div class="member-pick-identity" {style}>
@@ -68,6 +73,10 @@
                 onmouseenter={(e) => ui.showTooltip('Bot', e.currentTarget)}
                 onmouseleave={() => ui.hideTooltip()}
             ></span>
+        {/if}
+        {#if timeoutUntil}
+            <span class="icon icon-clock-snooze member-timeout" role="img" aria-label="Timed out"
+                  use:countdownTip={{ until: timeoutUntil, label: timeoutLabel, ui }}></span>
         {/if}
     </div>
     {#if status?.title}

@@ -327,6 +327,10 @@
   mask-image: url("./icons/clock.svg");
 }
 
+.icon-clock-snooze {
+  mask-image: url("./icons/clock-snooze.svg");
+}
+
 .icon-star {
   mask-image: url("./icons/star.svg");
 }
@@ -22206,6 +22210,18 @@ textarea.command-part-input {
   flex-shrink: 0;
   display: inline-block;
   background-color: var(--icon-color-primary, #59fcb3);
+}
+
+/* A running Timeout beside a member's name, in chat and the member list. */
+.dmsg-author-timeout,
+.member-timeout {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  display: inline-block;
+  background-color: var(--danger-color);
 }
 
 .dmsg-author-badge {

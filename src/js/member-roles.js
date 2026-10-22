@@ -111,6 +111,7 @@ async function memberMenuItems(communityId, npub, { onBusy = () => {}, onRemoved
         try {
             await invoke('timeout_community_member', { communityId, npub, seconds });
             showToast(seconds ? `${display} is timed out` : `${display}'s timeout is lifted`);
+            refreshCommunityTimeouts(communityId);
         } catch (e) {
             showToast(String(e));
         }

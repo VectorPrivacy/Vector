@@ -880,6 +880,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // Cache admins onto this community's channel chats so message rendering can chip
         // @everyone from admin senders (owner is handled separately via owner_npub).
         await loadCommunityMentions(communityId);
+        loadCommunityTimeouts(communityId);
         applyCommunityAdmins(communityId, adminNpubs);
         // The banlist (for the unban list), shown to anyone who can BAN.
         if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
