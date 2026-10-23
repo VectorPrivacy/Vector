@@ -670,6 +670,22 @@ async fn finalize_gift_wrap_sent(
 ///
 /// Flow: pending msg → callback.on_pending → build Kind 14 rumor →
 /// gift-wrap with retry → finalize → callback.on_sent → optional self-send.
+/// Our pending message into its chat. A send answers a DM request, so the pictures and
+/// wallpaper held while it waited come down now.
+async fn add_pending(receiver_npub: &str, msg: &Message) {
+    let answered = {
+        let mut state = STATE.lock().await;
+        let unanswered = crate::requests::shielded() && state.dm_unanswered(receiver_npub);
+        state.add_message_to_participant(receiver_npub, msg);
+        unanswered
+    };
+    if answered {
+        let npub = receiver_npub.to_string();
+        crate::db::spawn_bound(async move { crate::wallpaper::release_held(&npub).await });
+        crate::profile::sync::queue_profile_sync(receiver_npub.to_string(), crate::profile::sync::SyncPriority::Critical, true);
+    }
+}
+
 pub async fn send_dm(
     receiver_npub: &str,
     content: &str,
@@ -713,10 +729,7 @@ pub async fn send_dm(
     // The quote rides the message itself: the parent may be nowhere in the UI's memory.
     let _ = crate::db::events::populate_reply_context(&mut msg).await;
 
-    {
-        let mut state = STATE.lock().await;
-        state.add_message_to_participant(receiver_npub, &msg);
-    }
+    add_pending(receiver_npub, &msg).await;
 
     callback.on_pending(receiver_npub, &msg);
 
@@ -1148,10 +1161,7 @@ pub async fn send_file_dm_from(
         ..Default::default()
     };
     let _ = crate::db::events::populate_reply_context(&mut msg).await;
-    {
-        let mut state = STATE.lock().await;
-        state.add_message_to_participant(receiver_npub, &msg);
-    }
+    add_pending(receiver_npub, &msg).await;
     callback.on_pending(receiver_npub, &msg);
     let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 

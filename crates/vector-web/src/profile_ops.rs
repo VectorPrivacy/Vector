@@ -36,6 +36,10 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "set_nickname" => set_nickname(a).await,
             "block_user" => set_blocked(a, true).await,
             "unblock_user" => set_blocked(a, false).await,
+            "accept_chat" => match a.str("npub") {
+                Ok(npub) => profile_sync::accept_chat(npub).await.map(|_| Value::Null),
+                Err(e) => Err(e),
+            },
             "get_blocked_users" => to_value(profile_sync::get_blocked_users().await),
 
             // --- Accounts ---

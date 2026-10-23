@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::{Chat, ChatType, ChatMetadata};
 use crate::compact::{encode_message_id, decode_message_id, NpubInterner};
+use rusqlite::OptionalExtension;
 
 /// Slim version of Chat for database storage.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -29,6 +30,9 @@ pub struct SlimChatDB {
     pub wallpaper_url: String,
     #[serde(default)]
     pub wallpaper_uploader: String,
+    /// Read-only: derived from the events at load, never written by a save.
+    #[serde(default)]
+    pub replied: bool,
 }
 
 fn default_wallpaper_dim_slim() -> u8 { 50 }
@@ -61,6 +65,7 @@ impl SlimChatDB {
             wallpaper_dim: chat.wallpaper_dim,
             wallpaper_url: chat.wallpaper_url.clone(),
             wallpaper_uploader: chat.wallpaper_uploader.clone(),
+            replied: chat.replied,
         }
     }
 
@@ -95,6 +100,7 @@ impl SlimChatDB {
         chat.wallpaper_dim = self.wallpaper_dim;
         chat.wallpaper_url = self.wallpaper_url.clone();
         chat.wallpaper_uploader = self.wallpaper_uploader.clone();
+        chat.replied = self.replied;
         chat
     }
 }
@@ -107,11 +113,19 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
     let mut stmt = conn.prepare(
         "SELECT chat_identifier, chat_type, participants, last_read, created_at, metadata, muted, \
                 wallpaper_path, wallpaper_ts, wallpaper_blur, wallpaper_dim, \
-                wallpaper_url, wallpaper_uploader, unread_from \
+                wallpaper_url, wallpaper_uploader, unread_from, \
+                CASE WHEN chat_type = 0 THEN EXISTS( \
+                    SELECT 1 FROM events e WHERE e.chat_id = chats.id AND e.kind IN (?1, ?2, ?3) AND e.mine = 1 \
+                ) ELSE 0 END \
          FROM chats WHERE chat_type != 1 ORDER BY created_at DESC"
     ).map_err(|e| format!("Failed to prepare statement: {}", e))?;
 
-    let rows = stmt.query_map([], |row| {
+    let kinds = rusqlite::params![
+        crate::stored_event::event_kind::CHAT_MESSAGE as i32,
+        crate::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+        crate::stored_event::event_kind::FILE_ATTACHMENT as i32,
+    ];
+    let rows = stmt.query_map(kinds, |row| {
         let participants_json: String = row.get(2)?;
         let participants: Vec<String> = serde_json::from_str(&participants_json).unwrap_or_default();
 
@@ -136,11 +150,61 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
             wallpaper_dim: row.get::<_, i32>(10)?.clamp(0, 100) as u8,
             wallpaper_url: row.get(11)?,
             wallpaper_uploader: row.get(12)?,
+            replied: row.get::<_, i32>(14)? != 0,
         })
     }).map_err(|e| format!("Failed to query chats: {}", e))?;
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to collect chats: {}", e))
+}
+
+/// Keep a wallpaper rumor (sealed at rest) until its chat's request is accepted; only a
+/// newer one replaces it. Whether it was kept.
+pub fn hold_wallpaper(chat_identifier: &str, created_at: u64, payload: &str) -> Result<bool, String> {
+    /// Each row is one stranger's, so fabricated npubs could otherwise grow it without end.
+    const MAX_HELD: i64 = 200;
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let sealed = crate::crypto::maybe_encrypt_text(payload)?;
+    let n = conn.execute(
+        "INSERT INTO dm_held_wallpapers (chat_id, created_at, payload) VALUES (?1, ?2, ?3)
+         ON CONFLICT(chat_id) DO UPDATE SET created_at = excluded.created_at, payload = excluded.payload
+         WHERE excluded.created_at > dm_held_wallpapers.created_at",
+        rusqlite::params![chat_identifier, created_at as i64, sealed],
+    )
+    .map_err(|e| format!("hold_wallpaper: {e}"))?;
+    conn.execute(
+        "DELETE FROM dm_held_wallpapers WHERE chat_id NOT IN
+            (SELECT chat_id FROM dm_held_wallpapers ORDER BY created_at DESC LIMIT ?1)",
+        rusqlite::params![MAX_HELD],
+    )
+    .map_err(|e| format!("hold_wallpaper cap: {e}"))?;
+    Ok(n > 0)
+}
+
+/// The wallpaper held for this chat, removed as it's handed over.
+pub fn take_held_wallpaper(chat_identifier: &str) -> Result<Option<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let payload: Option<String> = conn
+        .query_row(
+            "DELETE FROM dm_held_wallpapers WHERE chat_id = ?1 RETURNING payload",
+            rusqlite::params![chat_identifier],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("take_held_wallpaper: {e}"))?;
+    Ok(payload.map(|p| crate::crypto::maybe_decrypt_text(&p)))
+}
+
+/// Withdraw a held wallpaper older than `created_at` (its sender since removed it).
+pub fn drop_held_wallpaper_before(chat_identifier: &str, created_at: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM dm_held_wallpapers WHERE chat_id = ?1 AND created_at < ?2",
+        rusqlite::params![chat_identifier, created_at as i64],
+    )
+    .map_err(|e| format!("drop_held_wallpaper_before: {e}"))?;
+    Ok(())
 }
 
 /// Upsert a chat to the database.
@@ -282,6 +346,7 @@ mod tests {
             wallpaper_dim: 50,
             wallpaper_url: String::new(),
             wallpaper_uploader: String::new(),
+            replied: false,
         };
         super::save_slim_chat(&slim).unwrap();
 
@@ -298,6 +363,50 @@ mod tests {
         let chats = super::get_all_chats().unwrap();
         let chat = chats.iter().find(|c| c.id == chat_id).expect("chat saved");
         assert_eq!(chat.last_read, "bb".repeat(32), "non-empty marker advances normally");
+    }
+
+    // A DM is a request until we send in it; their messages alone, however many, don't
+    // answer it, and the flag comes from the events rather than the page we boot with.
+    #[tokio::test]
+    async fn a_dm_counts_as_replied_once_we_send_in_it() {
+        let (_tmp, _guard) = init_test_db();
+        let chat_id = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let msg = |seed: u8, mine: bool| crate::types::Message {
+            id: format!("{:02x}", seed).repeat(32),
+            content: "hi".into(),
+            at: 1_700_000_000_000 + seed as u64,
+            mine,
+            npub: Some(chat_id.clone()),
+            ..Default::default()
+        };
+        let replied = || super::get_all_chats().unwrap().into_iter().find(|c| c.id == chat_id).expect("chat saved").replied;
+
+        for seed in 1..=3 {
+            crate::db::events::save_message(&chat_id, &msg(seed, false)).await.unwrap();
+        }
+        assert!(!replied(), "only their messages: still a request");
+
+        crate::db::events::save_message(&chat_id, &msg(4, true)).await.unwrap();
+        assert!(replied(), "one of ours answers it");
+    }
+
+    // Only a newer wallpaper replaces a held one, a removal withdraws an older one, and
+    // handing it over empties the slot.
+    #[test]
+    fn a_held_wallpaper_keeps_the_newest_until_taken() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        assert!(super::hold_wallpaper(&chat, 10, "ten").unwrap());
+        assert!(!super::hold_wallpaper(&chat, 5, "five").unwrap(), "an older one never replaces it");
+        assert!(super::hold_wallpaper(&chat, 20, "twenty").unwrap());
+
+        super::drop_held_wallpaper_before(&chat, 15).unwrap();
+        assert_eq!(super::take_held_wallpaper(&chat).unwrap().as_deref(), Some("twenty"), "a removal older than it leaves it");
+        assert_eq!(super::take_held_wallpaper(&chat).unwrap(), None, "taken once");
+
+        super::hold_wallpaper(&chat, 30, "thirty").unwrap();
+        super::drop_held_wallpaper_before(&chat, 40).unwrap();
+        assert_eq!(super::take_held_wallpaper(&chat).unwrap(), None, "a newer removal withdraws it");
     }
 
     // Regression: a non-npub id stub-created via get_or_create_chat_id must use the
@@ -349,6 +458,7 @@ mod tests {
             wallpaper_dim: 50,
             wallpaper_url: String::new(),
             wallpaper_uploader: String::new(),
+            replied: false,
         };
         let mut interner = crate::compact::NpubInterner::new();
         let chat = slim.to_chat(&mut interner);

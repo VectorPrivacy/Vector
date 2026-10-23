@@ -25,7 +25,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
         None => return,
     };
 
-    if is_blocked(npub).await {
+    if withheld(npub).await {
         return;
     }
 
@@ -92,8 +92,10 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
     }
 }
 
-async fn is_blocked(npub: &str) -> bool {
-    STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked())
+/// Blocked, or waiting on us to accept their DM request: their pictures aren't fetched.
+async fn withheld(npub: &str) -> bool {
+    let state = STATE.lock().await;
+    state.get_profile(npub).is_some_and(|p| p.flags.is_blocked()) || state.profile_held(npub)
 }
 
 /// Cache images for all profiles that have avatar/banner URLs but no cached paths
@@ -108,6 +110,7 @@ pub async fn cache_all_profile_images() {
     // Get all profiles that need caching (resolve npub from interner)
     let profiles_to_cache: Vec<(String, String, String)> = {
         let state = STATE.lock().await;
+        let held = state.held_profiles();
         state.profiles.iter()
             .filter(|p| {
                 (!p.avatar().is_empty() && !p.has_avatar_cached()) ||
@@ -115,6 +118,7 @@ pub async fn cache_all_profile_images() {
             })
             .filter_map(|p| {
                 state.interner.resolve(p.id)
+                    .filter(|npub| !held.contains(npub))
                     .map(|npub| (npub.to_string(), p.avatar().to_string(), p.banner().to_string()))
             })
             .collect()
@@ -371,6 +375,12 @@ pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: St
         crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
     }
     ok
+}
+
+/// Accept a DM request without answering it: its media and the sender's pictures may load.
+#[tauri::command]
+pub async fn accept_chat(npub: String) -> Result<(), String> {
+    vector_core::profile::sync::accept_chat(npub).await
 }
 
 /// Unblock a user by npub.

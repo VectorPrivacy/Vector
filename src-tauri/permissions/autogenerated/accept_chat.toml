@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accept-chat"
+description = "Enables the accept_chat command without any pre-configured scope."
+commands.allow = ["accept_chat"]
+
+[[permission]]
+identifier = "deny-accept-chat"
+description = "Denies the accept_chat command without any pre-configured scope."
+commands.deny = ["accept_chat"]

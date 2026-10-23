@@ -29,6 +29,7 @@
     "allow-set-nickname",
     "allow-block-user",
     "allow-unblock-user",
+    "allow-accept-chat",
     "allow-get-blocked-users",
     "allow-mark-as-read",
     "allow-mark-as-unread",

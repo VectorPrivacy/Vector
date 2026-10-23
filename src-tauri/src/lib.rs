@@ -568,6 +568,7 @@ pub fn run() {
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
+            vector_core::requests::enable_shield();
             // Relays revive the moment the account's network becomes ready.
             commands::transport::spawn_ready_listener();
             // Route vector-core's failure-class logs (log_net_fail!/log_net_info!)
@@ -694,6 +695,7 @@ pub fn run() {
             profile::set_nickname,
             profile::block_user,
             profile::unblock_user,
+            profile::accept_chat,
             profile::get_blocked_users,
             message::message,
             message::delete_failed_message,

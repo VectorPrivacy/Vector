@@ -485,7 +485,12 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                                 .as_secs()
                         );
 
-                        (status_changed || metadata_changed,
+                        // A GUI's picture with no local copy goes to the cache too: one held
+                        // while a request waited, or one an earlier download lost.
+                        let uncached = crate::requests::shielded()
+                            && ((!profile.avatar().is_empty() && !profile.has_avatar_cached())
+                                || (!profile.banner().is_empty() && !profile.has_banner_cached()));
+                        (status_changed || metadata_changed || uncached,
                          profile.avatar().to_string(),
                          profile.banner().to_string())
                     };
@@ -865,6 +870,10 @@ pub async fn block_user(npub: String, handler: &dyn ProfileSyncHandler) -> bool 
         handler.on_profile_fetched(&slim, "", "");
         handler.forget_images(images);
         crate::push::controls_changed();
+        // Their invites go unanswered with them.
+        if crate::requests::shielded() && crate::db::community::delete_pending_invites_from(&npub).unwrap_or(0) > 0 {
+            emit_event("community_invites_purged", &());
+        }
         true
     } else {
         false
@@ -894,6 +903,30 @@ pub async fn unblock_user(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     } else {
         false
     }
+}
+
+/// Accept a DM request without answering it: what its sender sent, and their
+/// pictures, may load from now on.
+pub async fn accept_chat(npub: String) -> Result<(), String> {
+    crate::db::scoped(async move {
+        let slim = {
+            let mut guard = STATE.lock().await;
+            let state = &mut *guard;
+            let chat = state.chats.iter_mut()
+                .find(|c| c.id == npub && c.chat_type == crate::ChatType::DirectMessage)
+                .ok_or_else(|| "no chat with that npub".to_string())?;
+            if !chat.is_request() {
+                return Ok(());
+            }
+            chat.metadata.insert(crate::chat::ACCEPTED_KEY, "true".into());
+            crate::db::chats::SlimChatDB::from_chat(chat, &state.interner)
+        };
+        crate::db::chats::save_slim_chat(&slim)?;
+        // Their pictures and wallpaper were held while the request waited.
+        crate::wallpaper::release_held(&npub).await;
+        queue_profile_sync(npub, SyncPriority::Critical, true);
+        Ok(())
+    }).await
 }
 
 /// Persist what `ChatState::forget_blocked_imagery` dropped and delete the files.
@@ -1580,5 +1613,51 @@ mod processor_bench {
                 waits[waits.len() - 1]
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use crate::chat::Chat;
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn theirs(seed: u8) -> crate::types::Message {
+        crate::types::Message { id: format!("{:02x}", seed).repeat(32), content: "hi".into(), at: 1_700_000_000_000 + seed as u64, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn accepting_a_request_releases_its_sender_and_survives_a_reload() {
+        let (_tmp, _guard) = init_test_db();
+        let peer = Keys::generate().public_key().to_bech32().unwrap();
+        {
+            let mut guard = STATE.lock().await;
+            let state = &mut *guard;
+            let mut chat = Chat::new_dm(peer.clone(), &mut state.interner);
+            chat.add_message(theirs(1), &mut state.interner);
+            state.chats.push(chat);
+            assert!(state.profile_held(&peer), "a stranger's pictures wait");
+        }
+
+        accept_chat(peer.clone()).await.unwrap();
+        assert!(!STATE.lock().await.profile_held(&peer), "accepted: their pictures may load");
+
+        let row = crate::db::chats::get_all_chats().unwrap().into_iter().find(|c| c.id == peer).expect("chat saved");
+        let mut interner = crate::compact::NpubInterner::new();
+        let mut reloaded = row.to_chat(&mut interner);
+        reloaded.add_message(theirs(2), &mut interner);
+        assert!(!reloaded.is_request(), "the acceptance outlives a reload");
     }
 }

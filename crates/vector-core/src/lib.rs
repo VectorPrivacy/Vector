@@ -427,6 +427,7 @@ pub mod synced_prefs;
 pub mod notify;
 pub mod push;
 pub mod wallpaper;
+pub mod requests;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===
 pub mod deletion;

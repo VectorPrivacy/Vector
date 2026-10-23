@@ -67,6 +67,7 @@ pub async fn start(version: String, level: String) -> Result<(), JsValue> {
 
     signers::install();
     calls::install();
+    vector_core::requests::enable_shield();
     vector_core::db::set_app_version(version);
     vector_core::db::set_download_dir(PathBuf::from("/downloads"));
     vector_core::VectorCore::init(vector_core::CoreConfig {

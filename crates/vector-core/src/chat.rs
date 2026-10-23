@@ -15,6 +15,9 @@ use crate::types::Message;
 // Chat (Internal Storage)
 // ============================================================================
 
+/// Metadata key a DM carries once its request was accepted without a reply.
+pub const ACCEPTED_KEY: &str = "accepted";
+
 #[derive(Clone, Debug)]
 pub struct Chat {
     pub id: String,
@@ -52,6 +55,8 @@ pub struct Chat {
     /// Gate on this before issuing the Blossom DELETE — only the original
     /// uploader's signature satisfies the server's auth challenge.
     pub wallpaper_uploader: String,
+    /// Whether we have ever sent a message here. A DM we never answered is a request.
+    pub replied: bool,
 }
 
 impl Chat {
@@ -76,6 +81,7 @@ impl Chat {
             wallpaper_dim: 50,
             wallpaper_url: String::new(),
             wallpaper_uploader: String::new(),
+            replied: false,
         }
     }
 
@@ -95,6 +101,19 @@ impl Chat {
     // ========================================================================
     // Message Access
     // ========================================================================
+
+    /// A DM nobody here has answered or accepted, whether or not anything is in it yet.
+    pub fn is_unanswered(&self) -> bool {
+        self.chat_type == ChatType::DirectMessage
+            && !self.replied
+            && !self.metadata.contains_key(ACCEPTED_KEY)
+    }
+
+    /// An unanswered DM with something in it: what its sender sends, and their pictures,
+    /// stay unloaded until it's answered or accepted.
+    pub fn is_request(&self) -> bool {
+        self.is_unanswered() && !self.messages.is_empty()
+    }
 
     #[inline]
     pub fn message_count(&self) -> usize { self.messages.len() }
@@ -143,11 +162,12 @@ impl Chat {
 
     pub fn add_message(&mut self, message: Message, interner: &mut NpubInterner) -> bool {
         let compact = CompactMessage::from_message_owned(message, interner);
-        self.messages.insert(compact)
+        self.add_compact_message(compact)
     }
 
     #[inline]
     pub fn add_compact_message(&mut self, message: CompactMessage) -> bool {
+        self.replied |= message.flags.is_mine();
         self.messages.insert(message)
     }
 
@@ -207,6 +227,7 @@ impl Chat {
             wallpaper_dim: self.wallpaper_dim,
             wallpaper_url: self.wallpaper_url.clone(),
             wallpaper_uploader: self.wallpaper_uploader.clone(),
+            replied: self.replied,
         }
     }
 
@@ -231,6 +252,7 @@ impl Chat {
             wallpaper_dim: self.wallpaper_dim,
             wallpaper_url: self.wallpaper_url.clone(),
             wallpaper_uploader: self.wallpaper_uploader.clone(),
+            replied: self.replied,
         }
     }
 
@@ -353,6 +375,9 @@ pub struct SerializableChat {
     pub wallpaper_url: String,
     #[serde(default)]
     pub wallpaper_uploader: String,
+    /// See [`Chat::replied`].
+    #[serde(default)]
+    pub replied: bool,
 }
 
 fn default_wallpaper_dim() -> u8 { 50 }
@@ -373,6 +398,7 @@ impl SerializableChat {
         chat.wallpaper_dim = self.wallpaper_dim;
         chat.wallpaper_url = self.wallpaper_url;
         chat.wallpaper_uploader = self.wallpaper_uploader;
+        chat.replied = self.replied;
         for msg in self.messages {
             chat.add_message(msg, interner);
         }
@@ -872,6 +898,30 @@ mod tests {
     // ========================================================================
     // Chat Construction
     // ========================================================================
+
+    #[test]
+    fn a_dm_is_a_request_until_answered_or_accepted() {
+        let mut interner = NpubInterner::new();
+        let mut chat = Chat::new_dm("npub1stranger".to_string(), &mut interner);
+        assert!(!chat.is_request(), "nothing in it yet");
+        chat.add_message(make_message(1, "hey", 1700000000000, false), &mut interner);
+        assert!(chat.is_request(), "only their message");
+
+        let mut accepted = chat.clone();
+        accepted.metadata.insert(ACCEPTED_KEY, "true".into());
+        assert!(!accepted.is_request(), "accepted without a reply");
+
+        chat.add_message(make_message(2, "hi back", 1700000001000, true), &mut interner);
+        assert!(!chat.is_request(), "answered");
+
+        let mut channel = Chat::new_community_channel("ab".repeat(32), vec![], &mut interner);
+        channel.add_message(make_message(3, "gm", 1700000002000, false), &mut interner);
+        assert!(!channel.is_request(), "a channel is never a request");
+        assert!(!channel.is_unanswered(), "nor waits on an answer");
+
+        let empty = Chat::new_dm("npub1wallpaperfirst".to_string(), &mut interner);
+        assert!(empty.is_unanswered() && !empty.is_request(), "nothing in it yet, still unanswered");
+    }
 
     #[test]
     fn new_dm_creates_correct_type() {

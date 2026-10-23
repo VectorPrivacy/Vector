@@ -252,13 +252,15 @@ pub async fn forget(images: Vec<vector_core::profile::CachedImage>) {
     }
 }
 
-async fn is_blocked(npub: &str) -> bool {
-    STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked())
+/// Blocked, or waiting on us to accept their DM request: their pictures aren't fetched.
+async fn withheld(npub: &str) -> bool {
+    let state = STATE.lock().await;
+    state.get_profile(npub).is_some_and(|p| p.flags.is_blocked()) || state.profile_held(npub)
 }
 
 /// Cache a profile's pictures and repaint it when either landed.
 pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str) {
-    if is_blocked(npub).await {
+    if withheld(npub).await {
         return;
     }
     let avatar = if avatar_url.is_empty() { None } else { cache(avatar_url, Kind::Avatar).await.ok() };

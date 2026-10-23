@@ -914,6 +914,19 @@ pub fn delete_pending_invite(community_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop every invite this person parked (they were blocked); the count dropped. The
+/// inviter is sealed at rest, so the rows are read to match it.
+pub fn delete_pending_invites_from(inviter_npub: &str) -> Result<usize, String> {
+    let mut dropped = 0;
+    for invite in list_pending_invites()? {
+        if invite.inviter_npub == inviter_npub {
+            delete_pending_invite(&invite.community_id)?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
 /// Whether an invite for this id is already parked (inbound dedup).
 /// When a parked invite ARRIVED (unix secs), or `None` if none is parked. The
 /// supersession key for the purge: an invite that arrived AFTER a removal is a genuine
@@ -3717,6 +3730,17 @@ mod tests {
     }
 
     #[test]
+    fn a_block_drops_only_that_persons_parked_invites() {
+        let (_tmp, _guard) = init_test_db();
+        let (spam, friend) = ("cd".repeat(32), "ef".repeat(32));
+        save_pending_invite(&spam, &v2_bundle("Spam"), "npub1spammer", 0).unwrap();
+        save_pending_invite(&friend, &v2_bundle("Friends"), "npub1friend", 0).unwrap();
+        assert_eq!(delete_pending_invites_from("npub1spammer").unwrap(), 1);
+        let left: Vec<String> = list_pending_invites().unwrap().into_iter().map(|i| i.community_id).collect();
+        assert_eq!(left, vec![friend], "the friend's invite stays");
+    }
+
+    #[test]
     fn pending_invite_first_wins_and_round_trips() {
         let (_tmp, _guard) = init_test_db();
         let cid = "ab".repeat(32);
@@ -4512,6 +4536,8 @@ mod tests {
             (wrap, rumor)
         };
         crate::db::nip17_keys::stash_resend_payload(&wrap.id, "pending-1", &wrap, &rumor).unwrap();
+        // A stranger's wallpaper, held until their request is accepted.
+        crate::db::chats::hold_wallpaper(&dm_chat, 5, r#"{"url":"https://blossom.example/held-wallpaper"}"#).unwrap();
 
         // A ban set while sealed still hides its author from the channel and its unread count.
         let (banned, allowed) = {
@@ -4569,6 +4595,9 @@ mod tests {
             assert!(!sealed.0.contains(plain), "{plain} is sealed on disk");
         }
         assert!(!sealed.1.contains("still sending") && sealed.2 != "c3".repeat(32), "unconfirmed sends and file keys are sealed");
+        let held: String = crate::db::get_db_connection_guard_static().unwrap()
+            .query_row("SELECT payload FROM dm_held_wallpapers", [], |r| r.get(0)).unwrap();
+        assert!(!held.contains("held-wallpaper"), "a held wallpaper is sealed on disk");
 
         {
             let conn = crate::db::get_write_connection_guard_static().unwrap();
@@ -4585,6 +4614,11 @@ mod tests {
         at_rest::rekey(&K, &K2, &crate::crypto::Kdf::fresh(), "pin", None, &|_| {}).unwrap();
         crate::state::ENCRYPTION_KEY.set(K2, &[]);
         assert_eq!(read(), before, "every value reads back after a PIN change");
+        assert_eq!(
+            crate::db::chats::take_held_wallpaper(&dm_chat).unwrap().as_deref(),
+            Some(r#"{"url":"https://blossom.example/held-wallpaper"}"#),
+            "a held wallpaper moves with the key"
+        );
 
         let mode = || crate::db::get_sql_setting("security_type".to_string()).unwrap();
         at_rest::rekey(&K2, &K2, &crate::crypto::Kdf::of_account().unwrap(), "password", None, &|_| {}).unwrap();
@@ -4609,7 +4643,7 @@ mod tests {
         assert_eq!(flag().as_deref(), Some("1"));
         crate::state::ENCRYPTION_KEY.set(K2, &[]);
         at_rest::backfill_at_rest().unwrap();
-        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("6")));
+        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("7")));
         let stored = |id: &str| -> String {
             crate::db::get_db_connection_guard_static().unwrap()
                 .query_row("SELECT content FROM events WHERE id = ?1", [id.repeat(32)], |r| r.get(0)).unwrap()

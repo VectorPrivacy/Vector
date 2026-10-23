@@ -602,7 +602,8 @@ mod xform_tests {
              CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
              CREATE TABLE community_bans (community_id TEXT, npub TEXT);
              CREATE TABLE community_held_wraps (wrap_id TEXT PRIMARY KEY, wrap TEXT);
-             CREATE TABLE community_audit_local (id TEXT PRIMARY KEY, entry TEXT);",
+             CREATE TABLE community_audit_local (id TEXT PRIMARY KEY, entry TEXT);
+             CREATE TABLE dm_held_wallpapers (chat_id TEXT, payload TEXT);",
         ).unwrap();
     }
 
@@ -930,6 +931,7 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("community_bans", &["npub"]),
     ("community_held_wraps", &["wrap"]),
     ("community_audit_local", &["entry"]),
+    ("dm_held_wallpapers", &["payload"]),
 ];
 
 fn sweep_columns_in_tx(
@@ -1202,7 +1204,7 @@ pub(crate) fn rekey_columns_in_tx(tx: &rusqlite::Transaction, old_key: &[u8; 32]
 /// encryption on before then may still hold that data in plaintext, and the backfill runs once
 /// more to wrap it.
 /// The flag row keeps its first name, `community_at_rest_encrypted`.
-const BACKFILL_VERSION: &str = "6";
+const BACKFILL_VERSION: &str = "7";
 
 /// One-time backfill for an account whose Local Encryption predates some of what it now covers:
 /// any swept column, message text, seed or bunker URL still in plaintext is sealed once, gated by a

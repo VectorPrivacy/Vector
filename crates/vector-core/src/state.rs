@@ -907,6 +907,22 @@ impl ChatState {
         }
     }
 
+    /// The people whose pictures wait for us to accept their DM request.
+    pub fn held_profiles(&self) -> std::collections::HashSet<&str> {
+        self.chats.iter().filter(|c| c.is_request()).map(|c| c.id.as_str()).collect()
+    }
+
+    /// Whether this person's pictures wait for us to accept their DM request.
+    pub fn profile_held(&self, npub: &str) -> bool {
+        self.chats.iter().any(|c| c.id == npub && c.is_request())
+    }
+
+    /// Whether what this person sends waits for an answer or an accept: someone we've
+    /// never written to, including someone with no chat here yet.
+    pub fn dm_unanswered(&self, npub: &str) -> bool {
+        self.chats.iter().find(|c| c.id == npub).is_none_or(|c| c.is_unanswered())
+    }
+
     pub fn get_profile(&self, npub: &str) -> Option<&Profile> {
         self.interner.lookup(npub).and_then(|id| self.get_profile_by_id(id))
     }
@@ -1076,6 +1092,7 @@ impl ChatState {
         };
 
         let old_last_time = self.chats[chat_idx].messages.last_timestamp();
+        self.chats[chat_idx].replied |= compact_messages.iter().any(|m| m.flags.is_mine());
         let added = self.chats[chat_idx].messages.insert_batch(compact_messages);
 
         if added > 0 && self.chats[chat_idx].messages.last_timestamp() != old_last_time && chat_idx > 0 {

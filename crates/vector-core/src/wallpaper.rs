@@ -563,6 +563,44 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     Ok(())
 }
 
+/// A wallpaper rumor from someone whose DM request waits, kept unfetched until it's
+/// answered or accepted.
+#[derive(Serialize, Deserialize)]
+struct HeldWallpaper {
+    sender: String,
+    created_at: u64,
+    url: String,
+    key: String,
+    nonce: String,
+    hash: Option<String>,
+    mime: Option<String>,
+    blur: Option<u8>,
+    dim: Option<u8>,
+    event_id: String,
+}
+
+/// Whether a wallpaper from `sender` in this chat must wait: they wrote to us first and
+/// we've neither answered nor accepted. Ours, from any device, never waits.
+async fn held_back(chat_npub: &str, sender_npub: &str) -> bool {
+    if !crate::requests::shielded() {
+        return false;
+    }
+    let me = crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok()).unwrap_or_default();
+    sender_npub != me && crate::state::STATE.lock().await.dm_unanswered(chat_npub)
+}
+
+/// The wallpaper a request held, applied now that it's answered or accepted.
+pub async fn release_held(chat_npub: &str) {
+    let Ok(Some(json)) = crate::db::chats::take_held_wallpaper(chat_npub) else { return };
+    let Ok(h) = serde_json::from_str::<HeldWallpaper>(&json) else { return };
+    if let Err(e) = apply_received_wallpaper(
+        chat_npub, &h.sender, h.created_at, &h.url, &h.key, &h.nonce,
+        h.hash.as_deref(), h.mime.as_deref(), h.blur, h.dim, &h.event_id,
+    ).await {
+        log_warn!("[Wallpaper] held wallpaper for {chat_npub} failed to apply: {e}");
+    }
+}
+
 /// Apply a received wallpaper rumor. Drops the rumor if its timestamp is
 /// not newer than the chat's current `wallpaper_ts` (latest-write-wins).
 /// On a fresh rumor: downloads + decrypts the Blossom blob, caches it
@@ -602,6 +640,8 @@ pub async fn apply_received_wallpaper(
     // Removal tombstone — sender cleared their wallpaper. No blob to fetch;
     // wipe the local active file + STATE/DB so the default theme returns.
     if url.is_empty() {
+        // One held from before the removal is withdrawn with it.
+        let _ = crate::db::chats::drop_held_wallpaper_before(chat_npub, created_at);
         clean_chat_files(chat_npub, FileKind::Active, None).await?;
         let (slim, prev_url, prev_uploader) = {
             let mut state = crate::state::STATE.lock().await;
@@ -627,6 +667,19 @@ pub async fn apply_received_wallpaper(
         }
         delete_prior_blob_if_ours(&prev_url, &prev_uploader).await;
         emit_wallpaper_removed(chat_npub, sender_npub, created_at, rumor_event_id).await;
+        return Ok(());
+    }
+
+    // Nothing a stranger points at is fetched before their request is accepted.
+    if held_back(chat_npub, sender_npub).await {
+        let held = HeldWallpaper {
+            sender: sender_npub.to_string(), created_at, url: url.to_string(),
+            key: decryption_key.to_string(), nonce: decryption_nonce.to_string(),
+            hash: plaintext_hash.map(str::to_string), mime: mime.map(str::to_string),
+            blur: Some(blur), dim: Some(dim), event_id: rumor_event_id.to_string(),
+        };
+        let json = serde_json::to_string(&held).map_err(|e| format!("hold wallpaper: {e}"))?;
+        crate::db::chats::hold_wallpaper(chat_npub, created_at, &json)?;
         return Ok(());
     }
 

@@ -993,7 +993,11 @@ pub async fn commit_prepared_event(
                     // dead server can't stall the inbound rumor pipeline. If
                     // the probe times out, we ship size=0 and the frontend
                     // falls back to a manual "Click to Download" affordance.
-                    if !is_mine {
+                    // Nor for someone whose request waits: the probe would reach a server
+                    // they chose before we've said yes to anything.
+                    let probe = !is_mine
+                        && !(crate::requests::shielded() && crate::state::STATE.lock().await.dm_unanswered(&contact));
+                    if probe {
                         for att in &mut msg.attachments {
                             if att.size == 0
                                 && (att.url.starts_with("https://") || att.url.starts_with("http://"))
@@ -1138,6 +1142,12 @@ pub async fn commit_prepared_event(
                 return false;
             }
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
+                return false;
+            }
+            // From someone we blocked: declined on arrival, never shown or announced.
+            if crate::requests::shielded()
+                && crate::state::STATE.lock().await.get_profile(&inviter).is_some_and(|p| p.flags.is_blocked())
+            {
                 return false;
             }
             // Supersession: a decline/leave tombstone suppresses a re-wrapped invite no newer
