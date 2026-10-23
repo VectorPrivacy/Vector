@@ -2154,8 +2154,9 @@ function isEmojiOnly(str) {
     return segments.every(segment => {
         // Test for emoji property (Unicode regex — may miss newer emojis on older engines)
         if (/\p{Emoji_Presentation}/u.test(segment)) return true;
-        // Handle basic emojis that need variation selectors
-        if (/\p{Emoji}/u.test(segment) && !/\p{Number}|\p{Letter}/u.test(segment)) return true;
+        // Handle basic emojis that need variation selectors. A bare `#` or `*` is only a
+        // keycap's base, so plain ASCII never counts.
+        if (/\p{Emoji}/u.test(segment) && !/\p{Number}|\p{Letter}/u.test(segment) && !/^[\x00-\x7F]+$/.test(segment)) return true;
         // Fallback: check against our own emoji dataset (covers newer emojis on older Android WebViews)
         return emojiDataSet.has(segment);
     });

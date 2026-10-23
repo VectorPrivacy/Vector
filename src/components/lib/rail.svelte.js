@@ -1,9 +1,12 @@
-// The widescreen rail: its scroller element, and the community arrangement it paints.
+// The community rail, widescreen's or the slim layout's: its scroller element, and the
+// community arrangement it paints.
 import { SvelteSet } from 'svelte/reactivity';
 
 const els = { spacesRows: null };
 export function railEls() { return els; }
-export function bindRailEl(name) { return (node) => { els[name] = node; return { destroy() { els[name] = null; } }; }; }
+// The strip moves between the widescreen rail and the slim one, so the outgoing copy
+// may unmount after the incoming one bound.
+export function bindRailEl(name) { return (node) => { els[name] = node; return { destroy() { if (els[name] === node) els[name] = null; } }; }; }
 
 // The stored arrangement (order + folders) as the backend last reported it. Keys it
 // holds for communities this device has not synced are kept and simply not painted.

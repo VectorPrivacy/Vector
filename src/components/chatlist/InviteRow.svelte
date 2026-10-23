@@ -3,11 +3,12 @@
     // The bundled icon is decrypted once per invite and swaps in over the placeholder.
     import Avatar from '../ui/Avatar.svelte';
 
-    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite
+    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, npubIsKnown, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite
 
+    // Only from someone known: a stranger's icon is theirs to choose, so it stays unloaded.
     let src = $state(null);
     $effect(() => {
-        const icon = invite.icon;
+        const icon = h.npubIsKnown(invite.inviter_npub) ? invite.icon : null;
         src = null;
         if (!icon) return;
         let live = true;

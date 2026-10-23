@@ -31,7 +31,7 @@
     }
 
     // Send state is mutated in place; the message's version is what moves.
-    const live = $derived.by(() => { messageVersion(msg.id); return !msg.pending && !msg.failed && !ctx.revealedBlocked; });
+    const live = $derived.by(() => { messageVersion(msg.id); return !msg.pending && !msg.failed && !ctx.revealedBlocked && !ctx.held; });
     const xdcUrl = $derived(live ? h.xdcUrl(msg) : null);
     // A vectorapp.io profile link is already a mention pill; an OpenGraph card would repeat it.
     const showLinkPreview = $derived(live && h.webPreviewsEnabled() && !xdcUrl
@@ -59,7 +59,7 @@
     {#if coin}
         <CryptoAddress {coin} {h} />
     {/if}
-    {#if msg.content}
+    {#if msg.content && !ctx.held}
         <span style="display:contents" use:packPreviews={msg.content}></span>
         <InvitePreviews text={msg.content} {h} />
         {#if h.nostrEmbedsOn(ctx)}

@@ -21,7 +21,7 @@
 <div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]}>
     <!-- Unread DMs over communities; the strip renders once rail.js registers its bag. -->
     <div id="ws-rail-shortcuts">
-        {#if screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}
+        {#if st.ws && screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="profile-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'profile-btn'} onclick={() => h().openProfile?.()}>

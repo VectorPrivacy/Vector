@@ -9,10 +9,14 @@
     // chat re-derives the DM selection (a cheap scan) and patches one item; a rename
     // or avatar touches one item; nothing rebuilds the strip.
     import { tick } from 'svelte';
-    import { listVersion, chatVersion, markedChatId } from '../lib/signals.svelte.js';
+    import { listVersion, chatVersion, markedChatId, paneState } from '../lib/signals.svelte.js';
+    import { shellState } from '../lib/shell.svelte.js';
     import RailItem from './RailItem.svelte';
+    const shell = shellState();
+    const pane = paneState();
 
-    let { h, snapshot } = $props();   // h: RailHelpers (js/render/rail.js)
+    // tail: what follows the last community in the scroller (the slim rail's + tile).
+    let { h, snapshot, tail = null } = $props();   // h: RailHelpers (js/render/rail.js)
 
     /** How many unread DMs the rail surfaces. The Chat tab's badge carries the total. */
     const DM_COUNT = 3;
@@ -45,7 +49,13 @@
     // The shortcut that REPRESENTS the open chat: a community has one, built from its
     // primary channel, and any of its channels lights it. Follows the list's mark, which
     // moves after the opened chat renders, so the bar animates rather than snaps.
+    // The slim rail marks the community its pane shows, which stays put while you read a channel.
     const activeId = $derived.by(() => {
+        if (!shell.ws) {
+            if (!pane.communityId) return null;
+            const { chats } = snapshot();
+            return chats.find((c) => h.communityIdOfChat(c) === pane.communityId && h.isPrimaryChannelChat(c))?.id || null;
+        }
         const open = markedChatId();
         if (!open) return null;
         const { chats } = snapshot();
@@ -278,11 +288,14 @@
 <!-- The door to the DMs, always first; unread DMs list under it. -->
 <div id="ws-rail-messages" class="ws-rail-group">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="ws-rail-messages btn" title="Messages" onclick={() => h.openDmHome()}>
+    <div class="ws-rail-messages btn" class:is-home={!pane.communityId} title="Messages" onclick={() => h.openDmHome()}>
         <svg viewBox="0 0 62 51" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <path d="M58.5502 43.125L39.2858 25.5M22.7145 25.5L3.45033 43.125M2.00024 10.8125L25.6785 27.6015C27.5959 28.9613 28.5547 29.641 29.5975 29.9042C30.5186 30.1368 31.4819 30.1368 32.403 29.9042C33.4458 29.641 34.4046 28.9613 36.322 27.6015L60.0002 10.8125M15.9202 49H46.0802C50.9528 49 53.3888 49 55.25 48.0394C56.8871 47.1946 58.2179 45.8466 59.0519 44.1884C60.0002 42.3031 60.0002 39.8356 60.0002 34.9V16.1C60.0002 11.1645 60.0002 8.6968 59.0519 6.81171C58.2179 5.15352 56.8871 3.80539 55.25 2.9605C53.3888 2 50.9528 2 46.0802 2H15.9202C11.0478 2 8.61155 2 6.75053 2.9605C5.11351 3.80539 3.78258 5.15352 2.94849 6.81171C2.00024 8.6968 2.00024 11.1645 2.00024 16.1V34.9C2.00024 39.8356 2.00024 42.3031 2.94849 44.1884C3.78258 45.8466 5.11351 47.1946 6.75053 48.0394C8.61155 49 11.0478 49 15.9202 49Z" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span class="ws-rail-messages-label">Messages</span>
+        {#if !shell.ws && groups.unreadDms}
+            <span class="ws-rail-item-badge">{groups.unreadDms > 99 ? '99+' : groups.unreadDms}</span>
+        {/if}
     </div>
 </div>
 <div id="ws-rail-dms" class="ws-rail-group" hidden={dmShown.length === 0}>
@@ -293,7 +306,7 @@
         {/each}
     </div>
 </div>
-<div id="ws-rail-spaces" class="ws-rail-group" hidden={groups.spaces.length === 0}>
+<div id="ws-rail-spaces" class="ws-rail-group" hidden={groups.spaces.length === 0 && !tail}>
     <div class="ws-rail-group-label">Communities</div>
     <div class="ws-rail-rows" use:bindSpacesRows use:fade use:fitHost>
         {#each rows as row (row.type === 'folder' ? `f:${row.id}` : `i:${row.key}`)}
@@ -313,6 +326,7 @@
                 />
             {/if}
         {/each}
+        {@render tail?.()}
     </div>
 </div>
 

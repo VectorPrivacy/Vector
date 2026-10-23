@@ -174,9 +174,12 @@ function _showContextMenuFrame(items) {
  * @param {HTMLElement} el — trigger element (e.g. pack tab, section header)
  * @param {(x: number, y: number) => void} fireMenu — called with the
  *   trigger coords when the user right-clicks or long-presses.
+ * @param {(target: Element) => boolean} [accepts] — whether a press on this
+ *   descendant is the element's own (a surface whose children have menus of their own).
  */
-function attachLongPressContextMenu(el, fireMenu) {
+function attachLongPressContextMenu(el, fireMenu, accepts = null) {
     el.addEventListener('contextmenu', (e) => {
+        if (accepts && !accepts(e.target)) return;
         e.preventDefault();
         e.stopPropagation();
         fireMenu(e.clientX, e.clientY);
@@ -188,7 +191,7 @@ function attachLongPressContextMenu(el, fireMenu) {
 
     el.addEventListener('touchstart', (e) => {
         const t = e.touches && e.touches[0];
-        if (!t) return;
+        if (!t || (accepts && !accepts(e.target))) return;
         startX = t.clientX;
         startY = t.clientY;
         cancel();

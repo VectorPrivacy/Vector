@@ -75,14 +75,7 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             label: 'Block',
             icon: 'x-user',
             danger: true,
-            onClick: async () => {
-                if (blockedBySync()) return;
-                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
-                if (!confirmed) return;
-                await invoke('block_user', { npub: chat.id });
-                showToast('User Blocked');
-                profileChanged(chat.id);
-            },
+            onClick: () => confirmBlockUser(chat.id),
         });
     } else if (chat.metadata?.custom_fields?.is_owner !== 'true' && chat.metadata?.custom_fields?.community_id) {
         // Owners get Delete (in Group Overview, type-to-confirm); everyone else
@@ -97,3 +90,48 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
     }
     showContextMenu({ x, y, items });
 }
+
+/** Block someone once they confirm; whether they were. */
+async function confirmBlockUser(npub) {
+    if (blockedBySync()) return false;
+    const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
+    if (!confirmed) return false;
+    await invoke('block_user', { npub });
+    showToast('User Blocked');
+    profileChanged(npub);
+    return true;
+}
+
+/**
+ * Let a DM request in without answering it: what it holds loads as the settings allow,
+ * their pictures come down, and the chat moves to Messages.
+ */
+async function acceptChatRequest(chatId) {
+    const chat = getChat(chatId);
+    if (!chatIsRequest(chat)) return;
+    try {
+        await invoke('accept_chat', { npub: chatId });
+    } catch (e) {
+        showToast('Failed to accept');
+        return;
+    }
+    chat.metadata = { ...chat.metadata, custom_fields: { ...chat.metadata?.custom_fields, accepted: 'true' } };
+    requestLifted(chat);
+}
+
+/** The open chat stopped being a request (a reply, or Accept): its bar goes and its media loads. */
+function answeredRequest(chat) {
+    if (VectorSvelte.requestState().chatId === chat.id && !chatIsRequest(chat)) requestLifted(chat);
+}
+
+function requestLifted(chat) {
+    listChanged();
+    profileChanged(chat.id);
+    if (strOpenChat === chat.id) openChat(chat.id);
+    syncRequestBar();
+}
+
+VectorSvelte.setRequestHandlers({
+    accept: (chatId) => acceptChatRequest(chatId),
+    block: async (chatId) => { if (await confirmBlockUser(chatId) && strOpenChat === chatId) closeChat(); },
+});

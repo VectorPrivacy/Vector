@@ -73,8 +73,6 @@ const communityChannelsCache = new Map();
 const communityCategoriesCache = new Map();
 /** Per community, the private channels it lists that we hold no key for: named, never opened. */
 const communityLockedChannels = new Map();
-/** communityIds whose channel list is expanded in the chat list. */
-const expandedCommunities = new Set();
 /** Guards the shared load so a render pass can't stampede the backend. */
 let communityChannelsLoading = false;
 
@@ -220,7 +218,7 @@ async function refreshTimeoutLock(chat) {
     const authors = [...new Set((chat.messages || []).filter(m => !m.mine && m.npub).map(m => m.npub))];
     let denied = [];
     try { denied = await invoke('get_channel_send_denied', { communityId, channelId: chat.id, npubs: authors }); } catch { /* the legacy roster: nothing */ }
-    const hadDenied = (channelSendDeniedCache.get(chat.id) || []).join();
+    const hadDenied = [...(channelSendDeniedCache.get(chat.id) || [])].join();
     channelSendDeniedCache.set(chat.id, new Set(denied));
     const changed = timeoutsChanged || hadDenied !== [...channelSendDeniedCache.get(chat.id)].join();
     if (changed && strOpenChat === chat.id) openChat(strOpenChat);
@@ -500,48 +498,9 @@ function communityIdOfChat(chat) {
     return chat?.metadata?.custom_fields?.community_id || null;
 }
 
-
-/**
- * Whether the community's row gets a channel expander. More than one channel is the
- * obvious case; a community you can manage also qualifies with a single channel, or
- * "Add channel" would be unreachable on every community that has never had a second one.
- */
-function communityHasChannelList(communityId) {
-    const channels = communityChannelsCache.get(communityId);
-    if (!channels || !channels.length) return false;
-    return channels.length > 1 || communityCanAddChannels(communityId);
-}
-
 /** MANAGE_CHANNELS: the condition for creating or deleting a channel. */
 function communityCanAddChannels(communityId) {
     return communityCanManageChannels(communityId);
-}
-
-function toggleCommunityExpanded(communityId) {
-    if (expandedCommunities.has(communityId)) expandedCommunities.delete(communityId);
-    else expandedCommunities.add(communityId);
-    communityChanged(communityId);
-}
-
-/** Whether a community's channel list is currently showing. */
-function communityChannelsShown(communityId) {
-    return expandedCommunities.has(communityId);
-}
-
-/**
- * Expand the open chat's community so the list shows where you are. Returns true when
- * that changed something, i.e. when the caller owes a re-render — opening a chat is not
- * otherwise a reason to rebuild every row.
- */
-function ensureOpenChannelVisible() {
-    const communityId = communityIdOfChat(arrChats.find(c => c.id === strOpenChat));
-    if (!communityId || expandedCommunities.has(communityId)) return false;
-    const channels = communityChannelsCache.get(communityId);
-    // Only auto-expand a real list; a lone channel plus an "Add channel" row is a
-    // management affordance, not something to unfold every time you open a chat.
-    if (!channels || channels.length < 2) return false;
-    expandedCommunities.add(communityId);
-    return true;
 }
 
 /** communityId → whether this user may add/remove its channels (lazy, cached). */
@@ -629,10 +588,16 @@ async function refreshCommunityRaidAlert(communityId) {
 }
 
 const _bannerResolving = new Set();
+// The banners of the communities shown last, kept decoded so going back paints at once.
+const _bannersKept = new Map();
+const BANNERS_KEPT = 4;
+let _bannersWarming = false;
 
 /**
- * A community's banner, resolved once when its pane first shows and again (`force`)
- * whenever its metadata refreshes. A download that fails leaves it bannerless until then.
+ * A community's banner, resolved once (ahead of its first visit, by warmCommunityBanners)
+ * and again (`force`) whenever its metadata refreshes. It is set only once decoded, so it
+ * never paints a frame after the room it takes. A download that fails leaves it bannerless
+ * until then.
  */
 async function resolveCommunityBanner(communityId, force = false) {
     if (!communityId || _bannerResolving.has(communityId)) return;
@@ -640,13 +605,42 @@ async function resolveCommunityBanner(communityId, force = false) {
     _bannerResolving.add(communityId);
     try {
         const path = await invoke('cache_community_image', { communityId, isBanner: true });
-        VectorSvelte.setCommunityBanner(communityId, path ? convertFileSrc(path) : null);
+        const src = path ? convertFileSrc(path) : null;
+        VectorSvelte.setCommunityBanner(communityId, src && await decodedImage(src) ? src : null);
     } catch (e) {
         console.warn('[Banner] could not load the banner:', e);
         VectorSvelte.setCommunityBanner(communityId, null);
     } finally {
         _bannerResolving.delete(communityId);
     }
+}
+
+/** Every community's banner, resolved in turn so each is ready before its first visit. */
+async function warmCommunityBanners() {
+    if (_bannersWarming) return;
+    _bannersWarming = true;
+    try {
+        const known = VectorSvelte.bannerState().src;
+        const ids = new Set(arrChats.map(communityIdOfChat).filter((id) => id && !(id in known)));
+        for (const id of ids) await resolveCommunityBanner(id);
+    } finally {
+        _bannersWarming = false;
+    }
+}
+
+/** Keep the shown community's banner decoded among the last few shown. */
+function keepCommunityBanner(communityId) {
+    const src = VectorSvelte.bannerState().src[communityId];
+    if (!src) return;
+    let img = _bannersKept.get(src);
+    _bannersKept.delete(src);
+    if (!img) {
+        img = new Image();
+        img.src = src;
+        img.decode().catch(() => {});
+    }
+    _bannersKept.set(src, img);
+    while (_bannersKept.size > BANNERS_KEPT) _bannersKept.delete(_bannersKept.keys().next().value);
 }
 
 /** The account's hidden banners, from the local mirror; edits elsewhere stream in after. */
@@ -844,7 +838,6 @@ async function submitCreateModal() {
         const channelId = await invoke('create_community_channel', { communityId: s.communityId, name, private: s.isPrivate, categoryId: s.categoryId, voice });
         closeCreateModal();
         refreshCommunityChannels();
-        expandedCommunities.add(s.communityId);
         openCommunityChannel(s.communityId, { id: channelId, name, view: voice ? 'voice' : 'chat' });
     } catch (e) {
         modal.patch({ busy: false, error: String(e) });

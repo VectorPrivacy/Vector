@@ -1,0 +1,697 @@
+/* ============================================================================
+   Vector Centre Console: the slim layout, below widescreen
+   ----------------------------------------------------------------------------
+   The list pane becomes a header over a community rail and the pane beside it.
+   `body.cc` is js/widescreen.js's (slim and signed in), with `cc-community` while
+   the pane is a community's; the rail slides by `--cc-rail-p` (ChatListPane).
+   The rail's tiles and the community pane are widescreen.css's collapsed rail
+   and channel pane, shared through `body:is(.ws, .cc)`; this file lays them out.
+   ========================================================================= */
+
+body.cc {
+  --cc-surface: #171717;
+  --cc-edge: #474747;
+  --cc-rail-w: 68px;
+  --cc-header-h: 52px;
+  --cc-nav-h: 65px;
+  --cc-gutter: 16px;
+}
+
+/* Chrome, not content: nothing here selects. The search field is left alone, since
+   iOS won't type into a field under an unselectable parent. */
+.cc-header button,
+.cc-rail,
+.cc-tabs,
+.cc-rail-pull,
+.cc-empty {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Out of the way wherever the console isn't the layout. */
+.cc-body,
+.cc-pane {
+  display: contents;
+}
+
+/* ============================== The frame ================================ */
+
+body.cc #chats {
+  position: fixed;
+  top: var(--chrome-h);
+  left: 0;
+  right: 0;
+  bottom: var(--cc-nav-h);
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+body.cc .cc-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+body.cc .cc-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The line runs along the header's foot rather than pushing the panes down. */
+body.cc #sync-line {
+  position: absolute;
+  top: var(--cc-header-h);
+  left: 0;
+  right: 0;
+  margin: 0;
+  z-index: 3;
+}
+
+body.cc .navbar {
+  background-color: #131313;
+}
+
+/* ============================== The header =============================== */
+
+.cc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  height: var(--cc-header-h);
+  padding: 0 10px 0 12px;
+  background-color: var(--cc-surface);
+}
+
+.cc-header button {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cc-header .cc-account {
+  gap: 5px;
+  height: 40px;
+  padding-right: 2px;
+}
+
+/* The picture is the button's face: never highlighted, dragged or long-pressed as an image. */
+.cc-account img,
+.cc-account .placeholder-avatar {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;
+}
+
+.cc-account-caret {
+  width: 9px;
+  height: 6px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.cc-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 36px;
+  margin-left: 4px;
+  padding: 0 6px 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: text;
+  transition: border-color 0.15s ease;
+}
+
+.cc-search:focus-within {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.cc-search > svg {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.cc-search input {
+  all: unset;
+  flex: 1;
+  text-align: left;
+  min-width: 0;
+  height: 100%;
+  font-size: 15px;
+  color: #fff;
+}
+
+.cc-search input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.cc-header .cc-search-clear {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cc-search-clear svg {
+  width: 16px;
+  height: 16px;
+}
+
+.cc-header .cc-header-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+
+/* Scan and New sit as a pair, which leaves the search the room. */
+.cc-header .cc-header-btn + .cc-header-btn {
+  margin-left: -4px;
+}
+
+/* Even, so the glyph lands on whole pixels in its 36px box. */
+.cc-header-btn svg {
+  width: 24px;
+  height: 24px;
+}
+
+@media (hover: hover) {
+  .cc-header button:hover {
+    color: #fff;
+  }
+  .cc-header .cc-header-btn:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.cc-header button:active {
+  opacity: 0.7;
+}
+
+/* The switcher hangs from the avatar: a menu, not a takeover of the list. */
+.profile-switcher-panel.cc-dropdown {
+  left: 8px;
+  right: auto;
+  width: min(320px, calc(100vw - 16px));
+  max-height: min(60vh, 440px);
+  margin: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--cc-surface, #171717);
+}
+
+.profile-switcher-backdrop.cc-dropdown {
+  top: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ============================== The rail ================================= */
+
+/* A card rising out of the header: the same surface, one rounded corner, and an
+   edge where it meets the list. */
+.cc-rail {
+  --ws-rail-w: calc(var(--cc-rail-w) - 1.5px);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: var(--cc-rail-w);
+  padding-bottom: 4px;
+  background-color: var(--cc-surface);
+  border-top: 1.5px solid var(--cc-edge);
+  border-right: 1.5px solid var(--cc-edge);
+  border-top-right-radius: 14px;
+}
+
+/* The strip keeps to its content and scrolls past the rail's height, so the + tile
+   follows the last community instead of the rail's foot. */
+#cc-rail-shortcuts {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+  padding-top: 10px;
+}
+
+body.cc #cc-rail #ws-rail-dms {
+  display: none;
+}
+
+body.cc #cc-rail #ws-rail-messages {
+  height: auto;
+  padding: 0;
+  border-bottom: none;
+}
+
+body.cc #cc-rail #ws-rail-spaces {
+  flex: 0 1 auto;
+}
+
+/* A scroller restarts touch-action for what's inside it: without this, a sideways
+   swipe here is the browser's, which cancels the pull part-way. */
+body.cc #cc-rail #ws-rail-spaces .ws-rail-rows {
+  flex: 0 1 auto;
+  touch-action: pan-y;
+}
+
+/* The DMs and the communities, parted by a short rule as on Discord. */
+body.cc #cc-rail #ws-rail-messages ~ #ws-rail-spaces::before {
+  content: "";
+  flex-shrink: 0;
+  height: 1.5px;
+  margin: 10px 14px 4px;
+  background: var(--cc-edge);
+}
+
+/* Widescreen plates a logo in its own rail's colour; this rail is lighter, so a logo with
+   transparency shows the rail itself. */
+body.cc #cc-rail #ws-rail-spaces .ws-rail-item-avatar,
+body.cc .ws-rail-ghost .ws-rail-item-avatar {
+  background-color: transparent;
+}
+
+body.cc .ws-rail-messages {
+  position: relative;
+  overflow: visible;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+body.cc .ws-rail-messages.is-home {
+  color: #fff;
+}
+
+/* Lit the way the open community is: a bar on the rail's edge. */
+body.cc .ws-rail-messages::before {
+  content: '';
+  position: absolute;
+  left: calc((45px - var(--ws-rail-w)) / 2);
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--icon-color-primary, #59fcb3);
+  opacity: 0;
+  transform: scaleY(0.35);
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+}
+
+body.cc .ws-rail-messages.is-home::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+body.cc .ws-rail-messages .ws-rail-item-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  box-shadow: 0 0 0 2px var(--cc-surface);
+}
+
+.cc-rail button {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cc-rail .cc-rail-add {
+  width: 45px;
+  height: 45px;
+  margin: 3px auto 0;
+  border-radius: calc(45px * 8.5 / 45);
+  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--icon-color-primary, #59fcb3);
+  transition: background-color 0.12s ease;
+}
+
+.cc-rail-add svg {
+  width: 22px;
+  height: 22px;
+}
+
+.cc-rail .cc-rail-fold {
+  position: relative;
+  width: 45px;
+  height: 36px;
+  margin: 0 auto;
+}
+
+.cc-rail-fold .icon {
+  width: 20px;
+  height: 20px;
+  background-color: rgba(255, 255, 255, 0.45);
+}
+
+/* The rail's room grows with how far out it is, and the rail rides in from the left
+   with that edge, so a pull reveals it under the finger. Sideways moves are the
+   pull's; up and down still scroll it. */
+body.cc .cc-rail-slot {
+  display: flex;
+  flex: none;
+  width: calc(var(--cc-rail-p, 1) * var(--cc-rail-w));
+  overflow: hidden;
+  touch-action: pan-y;
+}
+
+body.cc .cc-rail-slot > .cc-rail {
+  flex: none;
+  transform: translateX(calc((var(--cc-rail-p, 1) - 1) * var(--cc-rail-w)));
+}
+
+/* Folded, a tab at the filters' left edge pulls the rail back out. */
+.cc-tabs-row {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.cc-tabs-row .cc-tabs {
+  flex: 1;
+  min-width: 0;
+}
+
+body.cc .cc-tabs-row .cc-rail-pull + .cc-tabs {
+  margin-left: 0;
+}
+
+/* The grab area: the tab's height and then some, and as wide as the gap to the
+   filters, so a press anywhere on or beside the tab takes hold of it. With the rail
+   out it narrows to the filters' own gutter, and the tab slides into the rail. */
+.cc-tabs-row .cc-rail-pull {
+  all: unset;
+  display: flex;
+  align-items: center;
+  flex: none;
+  box-sizing: border-box;
+  width: calc(var(--cc-gutter) + (26px - var(--cc-gutter)) * (1 - var(--cc-rail-p, 0)));
+  height: 44px;
+  overflow: hidden;
+  margin-top: 2px;
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cc-tabs-row .cc-rail-pull:active {
+  cursor: grabbing;
+}
+
+.cc-rail-pull-tab {
+  position: relative;
+  box-sizing: border-box;
+  width: 16px;
+  height: 32px;
+  background-color: var(--cc-surface);
+  border: 1.5px solid var(--cc-edge);
+  border-left: none;
+  border-radius: 0 9px 9px 0;
+  pointer-events: none;
+  transform: translateX(calc(var(--cc-rail-p, 0) * -100%));
+}
+
+.cc-rail-pull .icon {
+  width: 12px;
+  height: 12px;
+  background-color: rgba(255, 255, 255, 0.55);
+}
+
+@media (hover: hover) {
+  .cc-rail .cc-rail-add:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+  }
+  .cc-rail-fold:hover .icon,
+  .cc-rail-pull:hover .icon {
+    background-color: #fff;
+  }
+}
+
+/* ============================== The tabs ================================= */
+
+.cc-tabs {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  height: 46px;
+  margin: 2px var(--cc-gutter) 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.cc-tabs .cc-tab {
+  all: unset;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.38);
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.15s ease;
+}
+
+/* Four tabs take their words' width and share what's left, so none clips at phone width. */
+.cc-tabs.is-many .cc-tab {
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-size: 14px;
+}
+
+.cc-tabs .cc-tab.active {
+  color: #fff;
+  font-weight: 700;
+}
+
+@media (hover: hover) {
+  .cc-tabs .cc-tab:hover {
+    color: rgba(255, 255, 255, 0.75);
+  }
+  .cc-tabs .cc-tab.active:hover {
+    color: #fff;
+  }
+}
+
+.cc-tab-label {
+  position: relative;
+  white-space: nowrap;
+}
+
+.cc-tab-dot {
+  position: absolute;
+  top: -1px;
+  right: -9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--accent-color, #59fcb3);
+}
+
+.cc-tab-bar {
+  position: absolute;
+  bottom: -1px;
+  height: 2px;
+  background-color: var(--primary-color, #33db98);
+}
+
+/* Slides from tab to tab, never in from the edge on the first paint. */
+.cc-tab-bar.ready {
+  transition: left 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-tab-bar { transition: none; }
+}
+
+/* Widescreen's DM list wears the same two tabs, sized to its narrower column. */
+body.ws .cc-tabs {
+  height: 40px;
+  margin: 0 12px 6px;
+}
+
+body.ws .cc-tabs .cc-tab {
+  font-size: 14px;
+}
+
+/* ============================== The list ================================= */
+
+body.cc #chat-list {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 8px 8px 16px;
+  --ws-list-fade: 0px;
+  --ws-list-fade-top: 0px;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--ws-list-fade-top),
+    #000 calc(100% - var(--ws-list-fade)),
+    transparent 100%
+  );
+  mask-repeat: no-repeat;
+}
+
+body.cc #chat-list > :last-child {
+  margin-bottom: 0;
+}
+
+body.cc .chatlist-contact {
+  height: 54px;
+  padding: 7px 8px;
+  margin-bottom: 2px;
+  border-radius: 14px;
+  align-items: center;
+  contain-intrinsic-size: 70px;
+}
+
+body.cc .chatlist-contact > div:first-child > img,
+body.cc .chatlist-contact > div:first-child > .placeholder-avatar {
+  width: 52px !important;
+  height: 52px !important;
+  min-width: 52px !important;
+  min-height: 52px !important;
+  max-width: 52px !important;
+  max-height: 52px !important;
+}
+
+body.cc .chatlist-contact-header {
+  margin-bottom: 3px;
+}
+
+body.cc .chatlist-contact-preview h4 {
+  padding-left: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 20px;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+body.cc .chatlist-contact.has-unread .chatlist-contact-header h4 {
+  color: #fff;
+  font-weight: 700;
+}
+
+body.cc .chatlist-contact-preview p {
+  margin-left: 12px;
+  font-size: 14px;
+  line-height: 19px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+body.cc .chatlist-contact.has-unread .chatlist-contact-preview p {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* The square avatar already says community. */
+body.cc .chatlist-contact.is-group .chatlist-type-icon.icon-users-multi {
+  display: none;
+}
+
+body.cc .chatlist-contact-flags {
+  gap: 7px;
+}
+
+body.cc .chatlist-contact-at {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+body.cc .chatlist-contact-count {
+  min-width: 22px;
+  padding: 3px 7px;
+  font-size: 12px;
+  line-height: 13px;
+}
+
+body.cc .chatlist-contact-time {
+  font-size: 12px;
+}
+
+/* The welcome and Get Started share widescreen's narrow-column sizing (widescreen.css). */
+body.cc .chatlist-intro {
+  left: 16px;
+  right: 16px;
+}
+
+body.cc .cc-empty {
+  margin: 28px 24px;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* ========================= A community's pane ============================ */
+
+body.cc.cc-community .cc-pane {
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+body.cc.cc-community #chat-list {
+  padding: 0 0 16px;
+}
+
+body.cc .chatlist-community-head {
+  height: 60px;
+  padding: 10px 10px 10px var(--ws-pane-gutter);
+  background-color: transparent;
+}
+
+body.cc .chatlist-community-head-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+body.cc .chatlist-community-head .chatlist-community-head-back {
+  all: unset;
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 36px;
+  margin-left: -4px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chatlist-community-head-back .icon {
+  background-color: rgba(255, 255, 255, 0.75);
+}
+
+body.cc .chatlist-community-head-avatar {
+  width: 40px !important;
+  height: 40px !important;
+}

@@ -1,7 +1,7 @@
 <script>
     // Multi-account: the My Profile drop-down. From the Profile header it drops down over a
-    // blurred backdrop; from the widescreen rail's chip it drops UP behind a plain
-    // click-catcher, anchored by pixel to the chip.
+    // blurred backdrop; from the widescreen rail's chip it drops UP, and from the slim
+    // header's avatar down, each behind a plain click-catcher anchored by pixel.
     import { switcherState, switcherHandlers } from '../lib/switcher.svelte.js';
     import AccountRows from '../people/AccountRows.svelte';
     const sw = switcherState();
@@ -9,9 +9,9 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="profile-switcher-backdrop" class:visible={sw.open} class:ws-dropup={sw.dropup} onclick={() => h().close?.()}></div>
-<div class="profile-switcher-panel" class:open={sw.open} class:ws-dropup={sw.dropup} role="dialog" aria-label="My Profile"
-     style:bottom={sw.bottomPx == null ? null : `${sw.bottomPx}px`}>
+<div class="profile-switcher-backdrop" class:visible={sw.open} class:ws-dropup={sw.dropup} class:cc-dropdown={sw.topPx != null} onclick={() => h().close?.()}></div>
+<div class="profile-switcher-panel" class:open={sw.open} class:ws-dropup={sw.dropup} class:cc-dropdown={sw.topPx != null} role="dialog" aria-label="My Profile"
+     style:bottom={sw.bottomPx == null ? null : `${sw.bottomPx}px`} style:top={sw.topPx == null ? null : `${sw.topPx}px`}>
     <div class="profile-switcher-list">
         {#if sw.open}
             <AccountRows accounts={sw.accounts} activeNpub={sw.activeNpub} h={h().rowHelpers}

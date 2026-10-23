@@ -10,13 +10,15 @@
     import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, auto, h } = $props();
-    // h: thumbhash(chatId, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), openChat(), and FileBox's
+    // h: thumbhash(chatId, msgId), onThumbLoad(), formatBytes, isDownloading(att), startDownload(att, msg, sender), openChat(), and FileBox's
 
     // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
     // author: an own message's author is not a participant of its DM.
     // svelte-ignore state_referenced_locally
     const chatId = h.openChat();
-    const downloading = $derived.by(() => { messageVersion(msg.id); return !!att.downloading || auto || started; });
+    // The app's record, not just the flag: a message replaced mid-download (a reaction, a
+    // sync) arrives as a fresh copy without it.
+    const downloading = $derived.by(() => { messageVersion(msg.id); return h.isDownloading(att) || auto || started; });
     let started = $state(false);
     let blur = $state(null);
     let blurFailed = $state(false);
@@ -63,8 +65,8 @@
     function download(e) {
         e.stopPropagation();
         if (started) return;
-        started = true;
-        h.startDownload(att, msg, sender);
+        // A DM request refuses until it's accepted, and the box stays as it was.
+        started = h.startDownload(att, msg, sender) !== false;
     }
 </script>
 
@@ -80,7 +82,7 @@
              bind:clientWidth={boxW} bind:clientHeight={boxH}
              style="max-width: min(100%, 450px); max-height: 350px; height: auto; border-radius: 8px;"
              style:aspect-ratio={fit?.ratio ?? null}
-             style:opacity={downloading ? (att.downloading ? '0.7' : '0.8') : '0.6'}
+             style:opacity={downloading ? (h.isDownloading(att) ? '0.7' : '0.8') : '0.6'}
              onload={() => h.onThumbLoad()}
              onerror={() => { blurFailed = true; }}>
         {#if downloading}

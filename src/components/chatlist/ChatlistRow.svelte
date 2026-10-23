@@ -11,7 +11,6 @@
     // itself alive across updates.
     let { h, chat, pinned, tick } = $props();   // h: ChatlistHelpers (js/render/chatlist/list.js)
 
-    import ChannelList from './ChannelList.svelte';
     import Avatar from '../ui/Avatar.svelte';
     import { watchProfile } from '../lib/profilewatch.js';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
@@ -47,7 +46,6 @@
                 ? (chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`)
                 : h.getName(profile || chat.id),
             preview: h.generateChatPreviewText(chat),
-            presence: isGroup ? null : presenceOf(chat),
             pinned,
             joining: !!chat._joining,
         };
@@ -61,20 +59,8 @@
     });
     const preview = $derived(sendPct == null ? vm.preview : { ...vm.preview, text: `Sending (${sendPct}%)` });
 
-    // Emulated presence: last incoming message <5m online, <30m away (row.js).
-    function presenceOf(chat) {
-        let last = null;
-        for (let i = chat.messages.length - 1; i >= 0; i--) {
-            if (!chat.messages[i].mine) { last = chat.messages[i]; break; }
-        }
-        if (!last) return null;
-        if (last.at > Date.now() - 300000) return 'online';
-        if (last.at > Date.now() - 1800000) return 'away';
-        return null;
-    }
-
     function countText(vm) {
-        if (vm.nUnread >= 99) return '99';
+        if (vm.nUnread > 99) return '99+';
         if (vm.chat.chat_type === 'Community' && vm.nUnread >= UNREAD_PLUS_THRESHOLD) return `${vm.nUnread}+`;
         return String(vm.nUnread);
     }
@@ -125,6 +111,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
     class="chatlist-contact"
+    class:is-group={vm.isGroup}
     class:has-unread={vm.nMark}
     class:chatlist-joining={vm.joining}
     class:ws-active={shellState().ws && markedChatId() === vm.chat.id}
@@ -138,12 +125,6 @@
             <Avatar src={vm.chat.metadata?.avatar_cached ? h.convertFileSrc(avatarThumb(vm.chat.metadata.avatar_cached)) : null} size={50} group />
         {:else}
             <Avatar src={h.getProfileAvatarSrc(vm.profile)} size={50} />
-        {/if}
-        {#if vm.presence}
-            <div
-                class="avatar-status-icon"
-                style:background-color={vm.presence === 'online' ? '#59fcb3' : '#fce459'}
-            ></div>
         {/if}
     </div>
     <div class="chatlist-contact-preview">
@@ -176,7 +157,7 @@
             {#if vm.pinged || vm.nUnread}
                 <span class="chatlist-contact-flags">
                     {#if vm.pinged}<span class="chatlist-contact-at">@</span>{/if}
-                    {#if vm.nUnread}<span class="chatlist-contact-count">{countText(vm)}</span>{/if}
+                    {#if vm.nUnread}<span class="chatlist-contact-count" class:muted={vm.chat.muted}>{countText(vm)}</span>{/if}
                 </span>
             {/if}
         </div>
@@ -187,20 +168,6 @@
             {/if}
         </div>
     </div>
-    {#if vm.isGroup && vm.communityId && h.communityHasChannelList(vm.communityId)}
-        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-        <div
-            class="chatlist-expander btn"
-            class:expanded={h.channelsShown(vm.communityId)}
-            title="Channels"
-            onclick={(e) => { e.stopPropagation(); h.toggleCommunityExpanded(vm.communityId); }}
-        >
-            <span class="icon icon-chevron-down"></span>
-        </div>
-    {/if}
 </div>
-{#if vm.isGroup && vm.communityId}
-    <ChannelList communityId={vm.communityId} {h} />
-{/if}
 
 <!-- No <style>: global styles.css cascades -->

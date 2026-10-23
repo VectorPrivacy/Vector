@@ -63,6 +63,36 @@ function chatIsVisibleInList(chat) {
 }
 
 /**
+ * A DM we have neither answered nor accepted: it waits under Requests, and what its
+ * sender sent stays unloaded until then. The core reports `replied` from the whole
+ * history; a send seen here answers it too.
+ */
+function chatIsRequest(chat) {
+    if (!chat || chatIsGroup(chat) || chat.id === strPubkey || chat.replied) return false;
+    if (chat.metadata?.custom_fields?.accepted || !chat.messages.length) return false;
+    if (!chat.messages.some(m => m.mine)) return true;
+    chat.replied = true;
+    return false;
+}
+
+/** Someone we've talked with or let in: their invites show in full. */
+function npubIsKnown(npub) {
+    const chat = getChat(npub);
+    return !!chat?.messages.length && !chatIsRequest(chat);
+}
+
+/** The open chat's request bar follows whether it is still one. */
+function syncRequestBar() {
+    VectorSvelte.setChatRequest(strOpenChat && chatIsRequest(getChat(strOpenChat)) ? strOpenChat : null);
+}
+
+/** Whether a search (already lowercased) finds this chat: by its name, or an npub it starts. */
+function chatMatchesQuery(chat, query) {
+    const name = chatIsGroup(chat) ? (chat.metadata?.custom_fields?.name || '') : getName(getProfile(chat.id) || chat.id);
+    return name.toLowerCase().includes(query) || chat.id.toLowerCase().startsWith(query);
+}
+
+/**
  * The raw page state the island re-derives from. The bundle is an IIFE with its own
  * scope, so it can't see the classic scripts' global lexical bindings (arrChats is
  * REASSIGNED wholesale on init/hot-reload) — it re-pulls through this closure on every
@@ -72,8 +102,9 @@ function chatlistSnapshot() {
     return {
         chats: arrChats,
         // Copy: invites are spliced in place, and an {#each} source needs a fresh
-        // reference per invalidation or additions/removals never re-diff.
-        invites: [...arrCommunityInvites],
+        // reference per invalidation or additions/removals never re-diff. One from
+        // someone blocked never shows.
+        invites: arrCommunityInvites.filter(i => !getProfile(i.inviter_npub)?.is_blocked),
         pinned: arrPinnedChats,
     };
 }
@@ -89,6 +120,8 @@ function chatlistSnapshot() {
  * @property {(chat: object) => boolean} chatIsVisibleInList
  * @property {(chat: object) => boolean} chatIsGroup
  * @property {(chat: object) => boolean} chatIsArchived
+ * @property {(chat: object) => boolean} chatIsRequest   a DM neither answered nor accepted
+ * @property {(chat: object, query: string) => boolean} chatMatchesQuery   query lowercased
  * @property {(npub: string) => object|null} getProfile
  * @property {(profileOrNpub: object|string, communityId?: string) => string} getName
  * @property {(chat: object) => number} computeListRowBadgeCount
@@ -109,10 +142,7 @@ function chatlistSnapshot() {
  * @property {(npub: string, el: Element, communityId?: string) => void} showMiniProfile
  * @property {(communityId: string) => string} communityMemberSubtext
  * @property {(communityId: string) => object[]|null} getChannels
- * @property {(communityId: string) => boolean} communityHasChannelList
- * @property {(communityId: string) => boolean} channelsShown
  * @property {(communityId: string) => boolean} canAddChannels
- * @property {(communityId: string) => void} toggleCommunityExpanded
  * @property {(sectionId: string) => boolean} sectionClosed
  * @property {(sectionId: string) => void} toggleSection
  * @property {(id: string) => object|null} chatById
@@ -128,6 +158,7 @@ function chatlistSnapshot() {
  * @property {(communityId: string, categoryId: string, index: number) => void} moveCategory
  * @property {(communityId: string, category: object, x: number, y: number) => void} openCategoryMenu
  * @property {(image: string) => Promise<string|null>} cacheInviteLogo
+ * @property {(npub: string) => boolean} npubIsKnown   their invites show their icon
  * @property {(invite: object) => void} acceptInvite
  * @property {(invite: object) => void} declineInvite
  * @property {() => void} newChat
@@ -142,6 +173,8 @@ function chatlistHelpers() {
         chatIsVisibleInList,
         chatIsGroup,
         chatIsArchived,
+        chatIsRequest,
+        chatMatchesQuery,
         getProfile,
         getName,
         computeListRowBadgeCount,
@@ -165,10 +198,7 @@ function chatlistHelpers() {
         // community channel lists
         communityMemberSubtext,
         getChannels: getCommunityChannels,
-        communityHasChannelList,
-        channelsShown: communityChannelsShown,
         canAddChannels: communityCanAddChannels,
-        toggleCommunityExpanded,
         sectionClosed: channelSectionClosed,
         toggleSection: toggleChannelSection,
         chatById: (id) => arrChats.find(c => c.id === id) || null,
@@ -187,7 +217,10 @@ function chatlistHelpers() {
         rowClick: (vm) => {
             if (wasContextMenuJustDismissed()) return;
             if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
-            if (vm.joining || chatOnScreen(vm.chat.id)) return;
+            if (vm.joining) return;
+            // Slim: a community opens on its channels, as a rail tap would.
+            if (vm.isGroup && ccActive()) return ccShowSpace(vm.communityId);
+            if (chatOnScreen(vm.chat.id)) return;
             openChat(vm.chat.id);
         },
         createChannel: promptCreateChannel,
@@ -197,6 +230,7 @@ function chatlistHelpers() {
         openCategoryMenu,
         // invite rows
         cacheInviteLogo: (image) => invoke('cache_invite_logo', { image }).then(path => path ? convertFileSrc(path) : null),
+        npubIsKnown,
         acceptInvite: acceptCommunityInvite,
         declineInvite: declineCommunityInvite,
         // empty state
@@ -262,6 +296,7 @@ function mountChatlist() {
     paneChanged();
     VectorSvelte.setOpenChat(strOpenChat);
     renderRailShortcuts();
+    warmCommunityBanners();
 }
 
 // ── mutators: the app names WHAT changed ──
@@ -276,6 +311,7 @@ function chatChanged(chatOrId) {
     if (!chat) return;
     touchChatRow(chat);
     reorderChatlist();
+    if (chat.id === strOpenChat) answeredRequest(chat);
 }
 
 /** A community's identity, channels, caps or expansion changed: its row and every channel row. */
@@ -307,6 +343,8 @@ function profileChanged(npub) {
     if (!npub) return;
     VectorSvelte.touchProfile(npub);
     communitiesChanged();
+    // A block hides their invites.
+    if (arrCommunityInvites.some(i => i.inviter_npub === npub)) invitesChanged();
 }
 
 /** Chats were added, removed, pinned or unpinned: the list's shape re-diffs unconditionally. */
@@ -316,6 +354,9 @@ function listChanged() {
     sortChats();
     VectorSvelte.reorderChatlist();
     renderRailShortcuts();
+    warmCommunityBanners();
+    // The slim pane's community may be one just left.
+    if (!wsActive()) paneChanged();
 }
 
 /** Pending community invites arrived, were accepted, declined or purged. */
@@ -329,12 +370,12 @@ function openChatChanged() {
     paneChanged();
 }
 
-/** The list pane's mode changed (widescreen entered/left, or the open community changed). */
+/** The list pane's mode changed: the layout, the open community (widescreen) or the rail's pick (slim). */
 function paneChanged() {
-    const communityId = wsListCommunityId();
-    const dmsOnly = !communityId && wsActive();
-    VectorSvelte.setPane(communityId, dmsOnly);
-    if (communityId) resolveCommunityBanner(communityId);
+    const communityId = wsActive() ? wsListCommunityId() : ccSpace();
+    VectorSvelte.setPane(communityId, wsActive() && !communityId);
+    ccSyncBody();
+    if (communityId) resolveCommunityBanner(communityId).then(() => keepCommunityBanner(communityId));
 }
 
 /**
@@ -395,8 +436,9 @@ function ensureListSignals() {
 /** The list's order and membership as one string — what a reorder can change. */
 function listShapeKey() {
     let key = '';
-    // Archive state too: a chat already at the top changes no order when a reply brings it back.
-    for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + (chatIsArchived(c) ? '~,' : ',');
+    // Archive and request state too: a chat already at the top changes no order when a reply
+    // brings it back or answers it.
+    for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + (chatIsArchived(c) ? '~' : '') + (chatIsRequest(c) ? '?,' : ',');
     return key;
 }
 
@@ -677,8 +719,8 @@ function countPingMessages(chat) {
 }
 
 /**
- * Periodic tick for relative timestamps ("5m ago") and presence-dot recency, which
- * drift with wall time instead of data. Bumps the clock store the island's rows
+ * Periodic tick for relative timestamps ("5m ago"), which drift with wall time
+ * instead of data. Bumps the clock store the island's rows
  * already depend on — only strings that actually changed patch the DOM.
  */
 function updateChatlistTimestamps() {

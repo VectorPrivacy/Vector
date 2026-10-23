@@ -666,7 +666,7 @@ async function setTheme(theme = 'vector', mode = 'dark') {
 /** Confirm, then erase the local database and keys. */
 async function logoutAccount() {
     // Prompt for confirmation
-    const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br><b>You will permanently lose access to your Group Chats after logging out!</b><br><br>That said, would you like to continue?', false, '', 'vector_warning.svg');
+    const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?', false, '', 'vector_warning.svg');
     if (!fConfirm) return;
 
     // Begin the logout sequence. The backend now returns `Result<(), String>`

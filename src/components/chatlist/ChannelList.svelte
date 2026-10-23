@@ -1,6 +1,6 @@
 <script>
-    // A community's channels: nested under its chat-list row as a flat disclosure, or as
-    // the widescreen pane in its Categories, channels in none first without a heading.
+    // A community's channels, as the pane beside the rail: in its Categories, channels in
+    // none first without a heading.
     // A manager drags channels between and within them, and Categories among themselves.
     // Each row derives its own weight (muted, unread, pings) from its chat's signal, so a
     // message repaints one row.
@@ -9,8 +9,8 @@
     import { voicePresent, voiceLevel, voiceCallHandlers, voiceSession, voiceJoining, SPEAKING } from '../lib/voice.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { communityId, pane = false, h, onShown = () => {} } = $props();
-    // h: getChannels, getCategories, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
+    let { communityId, h } = $props();
+    // h: getChannels, getCategories, canAddChannels, sectionClosed, toggleSection, chatById,
     //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelChat, openChannelMenu,
     //    openCategoryMenu, attachLongPressContextMenu, createChannel, moveChannel, moveCategory
 
@@ -19,14 +19,8 @@
         const channels = h.getChannels(communityId);
         if (!channels) return null;
         const canManage = h.canAddChannels(communityId);
-        // Nested, the list is optional: hidden when collapsed, and a lone channel is not
-        // worth unfolding. As the pane it IS the navigation, so a single channel still shows.
-        if (!pane && (!h.channelsShown(communityId) || (channels.length < 2 && !canManage))) return null;
         return { channels, canManage };
     });
-
-    // The pane's owner dims its bottom fadeout when nothing rendered.
-    $effect(() => { onShown(!!state); });
 
     const categories = $derived.by(() => { communityVersion(communityId); return h.getCategories(communityId); });
 
@@ -116,7 +110,7 @@
     function channelGesture(node, channel) {
         let cur = channel;
         const menu = (x, y) => h.openChannelMenu(communityId, cur, x, y);
-        if (pane && state?.canManage) {
+        if (state?.canManage) {
             const r = reorderable(node, gestures('channel', cur.id, menu));
             return { update(next) { cur = next; r.update(gestures('channel', next.id, menu)); }, destroy: r.destroy };
         }
@@ -211,71 +205,56 @@
 {/snippet}
 
 {#if state}
-    {#if !pane}
-        <div class="chatlist-channels">
-            {#each state.channels as channel (channel.id)}
-                {@render row(channel, state.canManage)}
-            {/each}
-            {#if state.canManage}
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <div class="chatlist-channel chatlist-channel-add" onclick={() => h.createChannel(communityId, false)}>
-                    <span class="chatlist-channel-hash">+</span>
-                    <span class="chatlist-channel-name">Add channel</span>
-                </div>
-            {/if}
-        </div>
-    {:else}
-        {#key state.canManage}
-        <div class="chatlist-channels chatlist-channels-pane" class:is-organising={!!dragging}>
-            {#each sections as section (section.id)}
-                {#if section.headless}
-                    <div class="chatlist-channel-section chatlist-channel-section-loose">
-                        <div class="chatlist-channel-section-body">
-                            {#each section.channels as channel (channel.id)}
-                                {@render row(channel, state.canManage)}
-                            {/each}
-                        </div>
-                    </div>
-                {:else}
-                {@const catDrop = dragging?.kind === 'category' && drop?.key === `cat:${section.id}`}
-                <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)} class:is-dragging={dragging?.id === section.id}
-                     class:drop-above={catDrop && drop.before} class:drop-below={catDrop && !drop.before} use:sectionEl={section.id}>
-                    <!-- A Category's heading is its handle: dragged among the others, or the top
-                         of the Category a dragged channel lands in. -->
-                    {#snippet head()}
-                        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                        <div class="chatlist-channel-section-toggle btn" onclick={() => toggle(section.id)}>
-                            <span class="chatlist-channel-section-label">{section.label}</span>
-                            <span class="chatlist-channel-section-caret"><span class="icon icon-chevron-down"></span></span>
-                        </div>
-                        {#if section.canAdd}
-                            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                            <div class="chatlist-channel-section-add btn" title={`Add a channel to ${section.label}`}
-                                 onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, false, section.category?.id || null); }}>
-                                <span class="icon icon-plus"></span>
-                            </div>
-                        {/if}
-                    {/snippet}
-                    {#if section.category && state.canManage}
-                        <div class="chatlist-channel-section-head"
-                             class:drop-above={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && drop.before}
-                             class:drop-below={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && !drop.before}
-                             use:headEl={section.id} use:categoryGesture={section.category}>
-                            {@render head()}
-                        </div>
-                    {:else}
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <div class="chatlist-channel-section-head" oncontextmenu={(e) => e.preventDefault()}>{@render head()}</div>
-                    {/if}
+    {#key state.canManage}
+    <div class="chatlist-channels chatlist-channels-pane" class:is-organising={!!dragging}>
+        {#each sections as section (section.id)}
+            {#if section.headless}
+                <div class="chatlist-channel-section chatlist-channel-section-loose">
                     <div class="chatlist-channel-section-body">
                         {#each section.channels as channel (channel.id)}
-                            {@render row(channel, section.canAdd)}
+                            {@render row(channel, state.canManage)}
                         {/each}
                     </div>
                 </div>
+            {:else}
+            {@const catDrop = dragging?.kind === 'category' && drop?.key === `cat:${section.id}`}
+            <div class="chatlist-channel-section" class:is-closed={isClosed(section.id)} class:is-dragging={dragging?.id === section.id}
+                 class:drop-above={catDrop && drop.before} class:drop-below={catDrop && !drop.before} use:sectionEl={section.id}>
+                <!-- A Category's heading is its handle: dragged among the others, or the top
+                     of the Category a dragged channel lands in. -->
+                {#snippet head()}
+                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                    <div class="chatlist-channel-section-toggle btn" onclick={() => toggle(section.id)}>
+                        <span class="chatlist-channel-section-label">{section.label}</span>
+                        <span class="chatlist-channel-section-caret"><span class="icon icon-chevron-down"></span></span>
+                    </div>
+                    {#if section.canAdd}
+                        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                        <div class="chatlist-channel-section-add btn" title={`Add a channel to ${section.label}`}
+                             onclick={(e) => { e.stopPropagation(); h.createChannel(communityId, false, section.category?.id || null); }}>
+                            <span class="icon icon-plus"></span>
+                        </div>
+                    {/if}
+                {/snippet}
+                {#if section.category && state.canManage}
+                    <div class="chatlist-channel-section-head"
+                         class:drop-above={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && drop.before}
+                         class:drop-below={dragging?.kind === 'channel' && drop?.key === `cat:${section.id}` && !drop.before}
+                         use:headEl={section.id} use:categoryGesture={section.category}>
+                        {@render head()}
+                    </div>
+                {:else}
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div class="chatlist-channel-section-head" oncontextmenu={(e) => e.preventDefault()}>{@render head()}</div>
                 {/if}
-            {/each}
-        </div>
-        {/key}
-    {/if}
+                <div class="chatlist-channel-section-body">
+                    {#each section.channels as channel (channel.id)}
+                        {@render row(channel, section.canAdd)}
+                    {/each}
+                </div>
+            </div>
+            {/if}
+        {/each}
+    </div>
+    {/key}
 {/if}

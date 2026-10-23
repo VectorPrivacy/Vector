@@ -59,9 +59,9 @@
         return { update: render };
     }
 
-    // A community's shortcut returns you to the channel you left it in, not its primary.
-    function open(e) {
-        h.openChat(isCommunity ? (h.wsChannelForCommunity(vm.communityId) || chat.id) : chat.id);
+    function open() {
+        if (isCommunity) h.openCommunity(vm.communityId, chat.id);
+        else h.openChat(chat.id);
     }
 
     // A rearrangeable row hands every press to the drag arbiter; the rest keep the plain

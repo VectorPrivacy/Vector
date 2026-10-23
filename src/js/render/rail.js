@@ -1,6 +1,6 @@
 /**
- * Widescreen rail shortcuts: unread DMs over communities, sitting between the
- * logo and the nav tabs.
+ * Rail shortcuts: unread DMs over communities, in the widescreen rail between the
+ * logo and the nav tabs, and in the slim layout's rail beside the list.
  *
  * The strip itself is a Svelte island (src/components/shell/RailShortcuts.svelte); this module mounts it,
  * keeps the scroll fade and the Chat tab's badge (chrome outside the island's target),
@@ -45,10 +45,10 @@ let railIsland = false;
  * the chat list's signals; the legacy callers of this function are no-ops.
  */
 function renderRailShortcuts() {
-    if (railIsland || !wsActive()) return;
+    if (railIsland || fInit) return;
     railIsland = true;
     /**
-     * RailHelpers: the widescreen rail's shortcut strip and its items.
+     * RailHelpers: the rail's shortcut strip and its items.
      * @typedef {Object} RailHelpers
      * @property {(chat: object) => boolean} chatIsGroup
      * @property {(chat: object) => boolean} isPrimaryChannelChat
@@ -64,6 +64,7 @@ function renderRailShortcuts() {
      * @property {(chat: object) => number} computeListRowUnreadCount
      * @property {(chat: object) => number} computeCommunityPingCount
      * @property {(chatId: string) => void} openChat
+     * @property {(communityId: string, fallbackChatId: string) => void} openCommunity   widescreen opens a channel; the slim pane shows the community
      * @property {() => void} openDmHome
      * @property {(communityId: string) => string|null} wsChannelForCommunity
      * @property {(communityId: string) => string[]} voiceChannelIds
@@ -92,7 +93,13 @@ function renderRailShortcuts() {
             computeListRowUnreadCount,
             computeCommunityPingCount,
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
-            openDmHome: wsOpenDmHome,
+            // Widescreen returns you to the channel you left the community in, not its primary.
+            openCommunity: (communityId, fallbackChatId) => {
+                if (!wsActive()) return ccShowSpace(communityId);
+                const id = wsChannelForCommunity(communityId) || fallbackChatId;
+                if (!chatOnScreen(id)) openChat(id);
+            },
+            openDmHome: () => (wsActive() ? wsOpenDmHome() : ccShowSpace(null)),
             wsChannelForCommunity,
             voiceChannelIds: (communityId) => (getCommunityChannels(communityId) || []).filter((c) => c.view === 'voice').map((c) => c.id),
             attachLongPressContextMenu,

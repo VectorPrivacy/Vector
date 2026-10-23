@@ -425,6 +425,34 @@ const TC_ATOMIC = /!?\[[^[\]\n]{0,512}\]\([^()\n]{0,2048}\)|<[^<>\s]{1,2048}>|(?
 const TC_RULE = /^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /**
+ * Indented code blocks in `text`, as [start, end) offsets: runs of lines four columns
+ * in that open after a blank line, a heading or the start. Inside a list such a run may
+ * be a paragraph instead; counting it as code only keeps span edges off it.
+ */
+function tcIndentedCode(text) {
+    const out = [];
+    let open = -1;
+    let opens = true;
+    for (let at = 0; at <= text.length;) {
+        const nl = text.indexOf('\n', at);
+        const line = text.slice(at, nl < 0 ? text.length : nl);
+        // Within a quote or a list item too: a marker takes one space at most, so `>` or
+        // `-` then a tab is code, and a marker starts a block of its own.
+        const marker = /^(?: {0,3}(?:> ?|(?:[-*+]|\d{1,9}[.)])(?: |(?=\t))))+/.exec(line);
+        const body = line.slice(marker ? marker[0].length : 0);
+        const blank = !body.trim();
+        const deep = !blank && /^(?: {4}| {0,3}\t)/.test(body);
+        if (open < 0 && deep && (opens || marker)) open = at;
+        else if (open >= 0 && !deep && !blank) { out.push([open, at]); open = -1; }
+        opens = blank || (open < 0 && /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line));
+        if (nl < 0) break;
+        at = nl + 1;
+    }
+    if (open >= 0) out.push([open, text.length]);
+    return out;
+}
+
+/**
  * `text` with a sentinel at each span edge, or null when there is nothing to mark or
  * the text already holds sentinel code points (it then renders uncoloured). Edges
  * move off anything a sentinel would break: a start passes a line's block prefix, an
@@ -441,7 +469,8 @@ function tcMarkSpans(text, spans) {
     const index = new Array(n + 1);
     for (let i = 0, at = 0; i <= n; i++) { index[i] = at; if (i < n) at += points[i].length; }
     const pointOf = new Map(index.map((at, i) => [at, i]));
-    const fences = tcCodeRanges(text).filter(([s]) => /^ {0,3}```/.test(text.slice(s, s + 8)));
+    const fences = tcCodeRanges(text).filter(([s]) => /^ {0,3}```/.test(text.slice(s, s + 8)))
+        .concat(tcIndentedCode(text));
     // A time's text is replaced by its chip later, so it must reach the DOM in one piece.
     const atomic = [...text.matchAll(TC_ATOMIC)].map((m) => [m.index, m.index + m[0].length])
         .concat(times.filter((t) => t.to <= n).map((t) => [index[t.from], index[t.to]]));
@@ -459,10 +488,45 @@ function tcMarkSpans(text, spans) {
     // delimiter opens or closes; it is harmless only with a word character on its
     // other side (`**|bold`, `it|_`). After a backslash it breaks the escape.
     const SIGNIFICANT = /[*_~|\\`\[\]()<>!#]/;
-    const word = (c) => c !== undefined && !/\s/.test(c) && !SIGNIFICANT.test(c);
-    const wedged = (at) => text[at - 1] === '\\'
-        || (SIGNIFICANT.test(text[at - 1] ?? '') && !word(text[at]))
-        || (SIGNIFICANT.test(text[at] ?? '') && !word(text[at - 1]));
+    // Markdown's flanking rules tell punctuation from letters, and a sentinel reads as a
+    // letter: in place of `.` beside a `_` it can stop the run closing.
+    const PUNCT = /[\p{P}\p{S}]/u;
+    const word = (c) => c !== undefined && !/\s/.test(c) && !PUNCT.test(c);
+    // A closing `*`/`_` run with only a blank (or nothing) after it reads the same with
+    // a sentinel between it and the punctuation it closes on (`**wow!**`). An opening run
+    // does not: marked treats one followed by punctuation differently.
+    const emphasis = (c) => c === '*' || c === '_';
+    const beyondRun = (i, step) => { const c = text[i]; while (text[i] === c) i += step; return text[i]; };
+    const free = (c) => c === undefined || /\s/.test(c);
+    // What can follow `<` to open HTML.
+    const HTML_OPEN = /[A-Za-z/!?]/;
+    // Some of these are syntax only in one setting (`![`, `<!`, `](…)`, a heading's `#` run,
+    // a `<` that opens HTML and a `>` that closes it or marks a quote);
+    // elsewhere a sentinel beside one changes nothing, though its neighbours still see
+    // it as punctuation.
+    const syntax = (at) => {
+        const c = text[at];
+        if (c === undefined || !SIGNIFICANT.test(c)) return false;
+        if (c === '!') return text[at + 1] === '[' || text[at - 1] === '<';
+        if (c === '(') return text[at - 1] === ']';
+        if (c === ')') return text.lastIndexOf('](', at) > text.lastIndexOf('\n', at);
+        if (c === '#') return (at === 0 || /[\s#-]/.test(text[at - 1])) && (at + 1 >= text.length || /[\s#]/.test(text[at + 1]));
+        if (c === '<') return HTML_OPEN.test(text[at + 1] ?? '');
+        if (c === '>') {
+            const before = text.slice(text.lastIndexOf('\n', at - 1) + 1, at);
+            return /^[ \t>]*$/.test(before) || /<[A-Za-z/!?][^<>]*$/.test(before);
+        }
+        return true;
+    };
+    const wedged = (at) => {
+        const prev = text[at - 1];
+        const next = text[at];
+        // Nor straight after an opening `<` or `<!`: the next character decides that it opens.
+        if (prev === '\\' || (prev === '<' && syntax(at - 1)) || (prev === '!' && text[at - 2] === '<')) return true;
+        if (syntax(at - 1) && !word(next)) return true;
+        return syntax(at) && !word(prev)
+            && !(emphasis(next) && PUNCT.test(prev ?? '') && free(beyondRun(at, 1)));
+    };
     // Where on its line a sentinel can't go: a block prefix (`#`, `>`, list marker),
     // or the whole line for a rule or a table row, whose shape a stray code point breaks.
     const zoneOf = (at) => {
@@ -472,8 +536,13 @@ function tcMarkSpans(text, spans) {
         const m = /^[ \t]{0,3}(?:(?:#{1,6}|-#|>|[-*]|\d{1,9}\.)[ \t]+|>[ \t]?)*/.exec(line.slice(0, 64));
         return { s, e: s + (m ? m[0].length : 0), whole: false };
     };
+    // From `at`, only blanks to the end of its line: markdown trims those, unless a
+    // sentinel among them keeps them.
+    const restBlank = (at) => { while (blank(text[at])) at++; return at === text.length || text[at] === '\n' ? at : -1; };
     const startRules = (at) => {
         for (const [s, e] of fences) if (at >= s && at < e) at = e;
+        const eol = restBlank(at);
+        if (eol >= 0) at = Math.min(eol + 1, text.length);
         // Past every blank, rule or table line in a row: alone on a blank line a
         // sentinel would be its only content, and the others can't hold one.
         for (;;) {
@@ -503,6 +572,7 @@ function tcMarkSpans(text, spans) {
             while (at > 0 && !/\s/.test(text[at - 1])) at--;
             while (at > 0 && blank(text[at - 1])) at--;
         }
+        if (restBlank(at) >= 0) while (at > 0 && blank(text[at - 1])) at--;
         while (at > 0 && wedged(at)) at--;
         return at;
     };

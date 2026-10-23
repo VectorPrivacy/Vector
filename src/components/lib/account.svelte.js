@@ -1,5 +1,5 @@
-// The signed-in account's row: what the chat list (narrow) or the rail footer
-// (widescreen) shows for you, and the bookmarks button that reveals with it.
+// The signed-in account: the widescreen rail footer's row and the slim header's
+// avatar, and the reveal that fades them in.
 // profile.js writes it whenever your own profile renders; the row derives from it.
 const s = $state({
     visible: false, bookmarks: false, revealTick: 0,

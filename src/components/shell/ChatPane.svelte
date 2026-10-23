@@ -1,6 +1,6 @@
 <script>
-    // The conversation pane: header, pins drawer, message list host, wallpaper controls
-    // and the composer, each rendering from its store.
+    // The conversation pane: header, a DM request's bar, pins drawer, message list host,
+    // wallpaper controls and the composer, each rendering from its store.
     import { shellPanes, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import { chatPaneHandlers } from '../lib/chatpane.svelte.js';
     import { pinsState } from '../lib/pins.svelte.js';
@@ -11,6 +11,9 @@
     import WallpaperLayer from '../chat/WallpaperLayer.svelte';
     import WallpaperPreviewBar from '../chat/WallpaperPreviewBar.svelte';
     import ComposerBox from '../composer/ComposerBox.svelte';
+    import RequestBar from '../chat/RequestBar.svelte';
+    import { requestState } from '../lib/request.svelte.js';
+    const req = requestState();
     const panes = shellPanes();
     const reveals = shellReveals();
     const bindChat = bindShellEl('chat');
@@ -43,10 +46,11 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} use:bindChat use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
+<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} class:has-request={!!req.chatId} use:bindChat use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
      data-wallpaper={wallpaperShown() ? 'true' : undefined} data-wallpaper-previewing={wp.previewing ? 'true' : undefined}>
     <WallpaperLayer />
     <ChatHeader />
+    <RequestBar />
     <PinsDrawer />
     <VoiceStage />
     <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>

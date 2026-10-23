@@ -127,18 +127,12 @@ export function setPane(communityId, dmsOnly) {
     pane.dmsOnly = !!dmsOnly;
 }
 
-// The coarse clock for relative timestamps ("5m ago") and presence-dot recency, which drift
-// with wall time instead of data. Rows re-derive their strings on tick; only changed strings
+// The coarse clock for relative timestamps ("5m ago"), which drift with wall time
+// instead of data. Rows re-derive their strings on tick; only changed strings
 // patch the DOM.
 const clock = $state({ tick: 0 });
 export function clockTick() { return clock.tick; }
 export function bumpClockTick() { clock.tick++; }
-
-// Whether the chat list rendered any row: the pane's bottom fadeout softens a scrolling
-// list, and over the empty state it would just wash out the intro.
-const chatlist = $state({ hasRows: false });
-export function listHasRows() { return chatlist.hasRows; }
-export function setListHasRows(on) { chatlist.hasRows = !!on; }
 
 // The expanded profile view: which npub it shows, and whether our own profile is
 // in Edit Mode (the reconciler leaves the screen alone while it is).

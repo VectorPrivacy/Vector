@@ -421,6 +421,7 @@ const WALLPAPER_DEFAULT_DIM = 50;
  *  changes the key and forces a fresh fetch even when the on-disk
  *  filename is identical (deterministic `<chat_npub>.<ext>` path). */
 let _lastAppliedWallpaperKey = null;
+const _wallpapersKept = new Map();
 
 /** Apply a wallpaper file path + visual settings to the open chat. The
  *  image URL is only re-set when the path actually changes — slider
@@ -433,19 +434,26 @@ function applyChatWallpaper(chatId, path, blur, dim, ts) {
     // A live preview still renders (the user may be setting it for their
     // chat partner and needs to see what they're picking).
     const bgDisabled = document.body.classList.contains('chat-bg-disabled');
-    const newPath = (bgDisabled && !wp.previewing) ? '' : (path || '');
+    // A request's wallpaper is the stranger's, and waits for it to be accepted.
+    const held = chatIsRequest(getChat(chatId));
+    const newPath = ((bgDisabled || held) && !wp.previewing) ? '' : (path || '');
     // The on-disk filename is deterministic per chat, so an inbound rumor
     // overwrites bytes at the same path. Include `ts` in the cache key
     // so a new wallpaper forces a re-fetch even when the path is unchanged.
     const newKey = newPath + '|' + (ts || 0);
     let image = wp.image;
+    let pending = null;
     if (newKey !== _lastAppliedWallpaperKey) {
+        image = '';
         if (newPath) {
             const url = convertFileSrc(newPath);
             const busted = url + (url.includes('?') ? '&' : '?') + 't=' + (ts || Date.now());
-            image = `url("${busted}")`;
-        } else {
-            image = '';
+            if (_wallpapersKept.has(busted)) {
+                keepWallpaper(busted, _wallpapersKept.get(busted));
+                image = `url("${busted}")`;
+            } else {
+                pending = busted;
+            }
         }
         _lastAppliedWallpaperKey = newKey;
     }
@@ -457,6 +465,21 @@ function applyChatWallpaper(chatId, path, blur, dim, ts) {
         ? `blur(${blurPx}px) brightness(${brightness})`
         : `brightness(${brightness})`;
     VectorSvelte.setWallpaperLayer(image, filter);
+    // Decoded before it lands, so the chat never shows a frame of it half there.
+    if (pending) {
+        decodedImage(pending).then((img) => {
+            if (_lastAppliedWallpaperKey !== newKey) return;
+            if (img) keepWallpaper(pending, img);
+            VectorSvelte.setWallpaperLayer(`url("${pending}")`, VectorSvelte.wallpaperState().filter);
+        });
+    }
+}
+
+/** The open wallpaper and the one before it stay decoded: going back paints at once. */
+function keepWallpaper(url, img) {
+    _wallpapersKept.delete(url);
+    _wallpapersKept.set(url, img);
+    while (_wallpapersKept.size > 2) _wallpapersKept.delete(_wallpapersKept.keys().next().value);
 }
 
 /** Refresh the wallpaper layer from the open chat's persisted state. */
@@ -1723,9 +1746,9 @@ function resetChatInputSize() {
 function adjustSize() {
     // Chat List: resize the list to fit within the screen after the upper Account area
     // Note: no idea why the `- 50px` is needed below, magic numbers, I guess.
-    // Widescreen sizes the list by flex instead: this math treats the list as the
-    // viewport, and would read the full-height rail as a viewport-tall navbar.
-    if (!wsActive()) {
+    // Widescreen and the slim layout size the list by flex instead: this math treats the
+    // list as the viewport, and would read the full-height rail as a viewport-tall navbar.
+    if (!wsActive() && !ccActive()) {
         const els = VectorSvelte.shellElements();
         const nNewChatBtnHeight = els.newChat?.getBoundingClientRect().height || 0;
         const nNavbarHeight = els.navbar?.getBoundingClientRect().height || 0;

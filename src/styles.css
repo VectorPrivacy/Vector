@@ -3121,6 +3121,13 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 .context-menu-lead { flex-shrink: 0; }
 
+/* A menu of places to go: each icon leads its label, like a launcher's. */
+.context-menu-item.is-lead {
+  justify-content: flex-start;
+  gap: 12px;
+  padding-right: 22px;
+}
+
 /* A colour choice: the swatch leads and any tick sits at the far edge. */
 .context-menu-swatch {
   flex-shrink: 0;
@@ -3785,24 +3792,17 @@ body.mobile [contenteditable] * {
   margin-bottom: auto;
 }
 
+/* A room is not a person: communities read as rounded squares, as on the rail.
+   ui/Avatar.svelte writes its radius inline, hence !important. */
+.chatlist-contact:is(.is-group, .chatlist-invite) > div:first-child > :is(img, .placeholder-avatar) {
+  border-radius: var(--ws-community-radius) !important;
+}
+
 .placeholder-avatar {
   border-radius: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.avatar-status-icon {
-  position: absolute;
-  bottom: 0px;
-  right: 0px;
-  width: 12px;
-  height: 12px;
-  /* Use "background-color" to explicitly set the Status Icon color */
-  border-radius: 100%;
-  border-width: 4px;
-  border-style: solid;
-  border-color: black;
 }
 
 /* Header row inside the preview column: name + type icon + (inline
@@ -4017,6 +4017,7 @@ body.ws #chat-list .chatlist-archive-icon .icon {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* The Archived Chats row's fold chevron. */
 .chatlist-expander {
   display: flex;
   align-items: center;
@@ -4620,7 +4621,8 @@ body:not(.ws) .voice-tile {
   align-items: center;
   justify-content: center;
   width: 100%;
-  z-index: 100;
+  /* Over everything the message list floats (its hover toolbar sits at 102). */
+  z-index: 103;
 }
 
 .chat-header #chat-contact,
@@ -5785,11 +5787,12 @@ button.mini-profile-role-dot:disabled { cursor: default; }
   border-radius: 10px;
 }
 
-/* Chat box specific: allow container to grow with textarea */
+/* Chat box specific: allow container to grow with textarea. The buttons keep to
+   its last line, where the thumb and the caret are, as the text grows upward. */
 #chat-box .chat-input-container {
   height: auto;
   min-height: 45px;
-  align-items: flex-start;
+  align-items: flex-end;
   /* An unwrapped command-param's intrinsic width must never become this
      row's minimum (percentage max-widths don't count in min-content math) —
      without this the row overflows its side margins over the themed border. */
@@ -12219,6 +12222,15 @@ select {
   width: auto;
   padding: 8px 22px;
 }
+/* Why a toggle above can't be used yet: quieter than the rows, tucked under its own. */
+.notif-note {
+  display: block;
+  margin: -4px 0 14px;
+  color: #8a8a8a;
+  font-size: 13px;
+  line-height: 17px;
+  text-align: left;
+}
 #notif-privacy-group {
   display: flex;
   align-items: center;
@@ -12605,9 +12617,9 @@ select:disabled:hover {
   top: calc(60px + var(--chrome-h));
   left: 0;
   right: 0;
-  /* Above the chat's own chrome (msg-top-fade sits at 100) but below every
-     real overlay (popups/menus live at 10000+). */
-  z-index: 101;
+  /* Above the chat's own chrome (msg-top-fade at 100, the hover toolbar at 102) but
+     below every real overlay (popups/menus live at 10000+). */
+  z-index: 103;
   background-color: #0d0d0d;
   /* Gray chrome (not accent) with rounded bottom corners, sheet-style. */
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -12615,6 +12627,91 @@ select:disabled:hover {
   border-radius: 0 0 12px 12px;
   transform-origin: top;
   animation: pins-drawer-open 0.18s ease-out;
+}
+
+/* A DM request's bar, sheeted under the header like the pins drawer. */
+.request-bar {
+  position: fixed;
+  top: calc(60px + var(--chrome-h));
+  left: 0;
+  right: 0;
+  z-index: 103;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 56px;
+  padding: 0 10px 0 12px;
+  background-color: #0d0d0d;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.request-bar-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  color: var(--icon-color-primary, #59fcb3);
+}
+
+.request-bar-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.request-bar-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 17px;
+  color: #fff;
+}
+
+.request-bar-sub {
+  font-size: 13px;
+  line-height: 16px;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-bar .request-bar-btn {
+  flex-shrink: 0;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  backdrop-filter: none;
+}
+
+.request-bar .request-bar-btn.is-block {
+  background-color: transparent;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 60%, transparent);
+  color: var(--danger-color);
+}
+
+.request-bar .request-bar-btn.is-accept {
+  background-color: var(--primary-color, #33db98);
+  border: 1px solid transparent;
+  color: #000;
+}
+
+/* The smallest phones give the icon's room to the words. */
+@media (max-width: 379px) {
+  .request-bar-icon {
+    display: none;
+  }
+}
+
+/* The list clears the bar as it clears the header. */
+#chat.has-request .chat-messages {
+  padding-top: calc(75px + 56px);
 }
 
 /* Android lays this sheet out at a fractional width (412.19 CSS px on a 412 px
@@ -22133,10 +22230,10 @@ textarea.command-part-input {
 /* "Temporary send" badge: a small accent clock at the top-right corner of the
    Send / voice button while the chat has an active Self-Destruct Timer. Drawn
    as an inline SVG (not an .icon) so the composer's icon-sizing rules can't
-   inflate it, and the button is made position:relative to anchor it. */
+   inflate it. It is placed on the row, measured from its foot, where the button sits. */
 .self-destruct-badge {
   position: absolute;
-  top: 7px;
+  bottom: 27px;
   right: 6px;
   width: 11px;
   height: 11px;
@@ -26328,6 +26425,246 @@ body.profile-switcher-editing .profile-switcher-add {
   text-align: left;
 }
 .cs-heading + .st-group { margin-top: 0; }
+
+/* ============================ Settings, phone ============================ */
+/* The categories as one card of rows, each folding its settings open beneath it in the
+   widescreen page's grammar (.st-page). A search opens what it matches. */
+.sm {
+  padding: 6px 16px 28px;
+  text-align: left;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.sm-title {
+  margin: 14px 0 20px;
+  font-size: 30px;
+  line-height: 36px;
+  font-weight: 700;
+  text-align: center;
+  color: #fff;
+}
+
+.sm-search {
+  position: relative;
+  margin-bottom: 14px;
+}
+.sm-search .icon {
+  position: absolute;
+  inset: auto;
+  left: 13px;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  transform: translateY(-50%);
+  background-color: #8a8a8a;
+  pointer-events: none;
+}
+.sm-search input {
+  width: 100%;
+  height: 46px;
+  padding: 0 14px 0 45px;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background-color: #0e0e0e;
+  color: #fff;
+  font-family: inherit;
+  font-size: 17px;
+  outline: none;
+  box-sizing: border-box;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.sm-search input::placeholder { color: #6f6f6f; }
+.sm-search input:focus { border-color: #4a4a4a; }
+.sm-search.has-query input { padding-right: 46px; }
+.sm-search-clear {
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  display: flex;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  color: #8a8a8a;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+.sm-search-clear svg { width: 22px; height: 22px; }
+
+/* No overflow clip on the card: a dropdown in an open category spills past its edge. */
+.sm-list,
+.sm-update {
+  border-radius: 10px;
+  background-color: #0e0e0e;
+}
+.sm-update {
+  margin-bottom: 14px;
+  border: 1.5px solid var(--icon-color-primary);
+}
+
+/* A category folds shut (a search passed it by) and its body folds open, both as rows
+   that grow, clipped only while they move. */
+.sm-cat {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sm-cat.shut { grid-template-rows: 0fr; }
+.sm-cat-inner { min-height: 0; }
+.sm-cat.clip > .sm-cat-inner,
+.sm-cat.clip .sm-body-inner { overflow: hidden; }
+
+.sm-row {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 54px;
+  padding: 0 16px;
+  scroll-margin-top: 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  /* The divider rides the row, so a category folded away by a search takes its line with it. */
+  box-shadow: inset 0 1px 0 #222;
+}
+.sm-cat.first .sm-row,
+.sm-update .sm-row { box-shadow: none; }
+.sm-row:focus-visible { box-shadow: inset 0 0 0 2px #3a3a3a !important; border-radius: 10px; }
+.sm-row-icon {
+  display: flex;
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+.sm-row-icon .icon {
+  position: relative;
+  inset: auto;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  background-color: #cfcfcf;
+}
+.sm-row-label {
+  flex: 1;
+  min-width: 0;
+  color: #fff;
+  font-size: 17px;
+  line-height: 22px;
+}
+.sm-row-note {
+  margin-left: 8px;
+  color: #8a8a8a;
+  font-size: 13px;
+}
+.sm-chevron {
+  display: flex;
+  flex: none;
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sm-chevron .icon {
+  position: relative;
+  inset: auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  background-color: #cfcfcf;
+}
+.sm-cat.open > .sm-cat-inner > .sm-row .sm-chevron { transform: rotate(90deg); }
+.sm-cat.danger .sm-row-label { color: var(--danger-color); }
+.sm-cat.danger .sm-row-icon .icon { background-color: var(--danger-color); }
+.sm-update .sm-row-label { color: var(--icon-color-primary); }
+.sm-update .sm-row-icon .icon { background-color: var(--icon-color-primary); }
+.sm-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  background-color: var(--icon-color-primary);
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sm-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sm-cat.open > .sm-cat-inner > .sm-body { grid-template-rows: 1fr; }
+.sm-body-inner { min-height: 0; }
+.sm-page {
+  padding: 2px 16px 12px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.sm-cat.open .sm-page { opacity: 1; transform: none; }
+.sm-block { padding: 12px 0 4px; }
+.sm-block:not(.off) ~ .sm-block:not(.off) { border-top: 1px solid #222; }
+.sm-block.off { display: none; }
+/* Aggroboi keeps watch over the Dangerzone. */
+.sm-danger-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0 2px;
+}
+.sm-danger-head .danger-subtitle { margin: 4px 0 0; }
+.sm-heading {
+  margin: 0 0 12px;
+  font-size: 18px;
+  line-height: 22px;
+  font-weight: 700;
+  color: #fff;
+}
+/* The page's 230px controls fit a widescreen column; here they share a phone's width. */
+.sm-page .theme-picker,
+.sm-page select {
+  width: min(230px, 56%);
+}
+/* The Whisper model stacks: its picker's long names need the whole width. */
+.sm-page .form-group:has(> .model-select-container) { grid-template-columns: minmax(0, 1fr); }
+.sm-page .model-select-container,
+.sm-page .model-select-container .vselect { width: 100%; }
+/* Storage stacks too: the chart over its legend. */
+.sm-page .form-group:has(> #storage-donut-wrap) { flex-direction: column; gap: 18px; }
+.sm-page #storage-donut-wrap { width: min(220px, 70%); margin: 0 auto; }
+.sm-page #storage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 22px;
+}
+
+.sm-empty {
+  display: none;
+  margin: 18px 0 0;
+  color: #6f6f6f;
+  font-size: 15px;
+  text-align: center;
+}
+.sm-empty.shown { display: block; }
+.sm-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 24px;
+  margin-top: 22px;
+}
+.sm-footer span { font-size: 15px; }
 
 
 /* Network: flat rows, a pill for where each came from, the state in words. */

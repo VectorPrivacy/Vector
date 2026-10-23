@@ -131,13 +131,12 @@ function wsSyncPaneMode() {
 function wsSyncOpenChat() {
     document.body.classList.toggle('ws-chat-open', !!strOpenChat);
     wsRememberOpenChat();
+    ccFollowOpenChat();
+    syncRequestBar();
     wsSyncPaneMode();
     // The pane's mode follows the open chat (widescreen), and the active row and rail
-    // shortcut derive from it. Narrow: entering a multi-channel community unfolds it
-    // under its row.
-    const unfolded = !wsActive() && ensureOpenChannelVisible();
+    // shortcut derive from it.
     openChatChanged();
-    if (unfolded) communityChanged(communityIdOfChat(arrChats.find(c => c.id === strOpenChat)));
     wsSyncMembersPane();
     wsMarkActiveRow();
 }
@@ -151,6 +150,8 @@ function wsMarkActiveRow() {
 function wsUpdate() {
     const want = wsShouldApply();
     const have = wsActive();
+    // Login lands here in the slim layout as well, with nothing to switch.
+    if (!want) ccSyncBody();
 
     if (want) {
         wsApplyRailState();
@@ -161,6 +162,7 @@ function wsUpdate() {
     document.body.classList.toggle('ws', want);
     // The account row renders in the rail or the list from this flag.
     VectorSvelte.setShellFlag('ws', want);
+    ccSyncBody();
     paneChanged();
     wsSyncPaneMode();
     if (want) {
@@ -339,7 +341,114 @@ function wsInitRail() {
     });
 }
 
+/* ---- The slim layout: the Centre Console --------------------------------------
+ * Below widescreen the list pane is a header over a community rail and the pane
+ * beside it: the DMs (Messages | Requests) or the community the rail picked. Folding
+ * the rail away puts communities back in the list, behind All | Messages |
+ * Communities | Requests.
+ */
+
+const CC_KEY_RAIL = 'cc_rail_open';
+
+function ccActive() {
+    return !wsActive() && !fInit;
+}
+
+/** The community whose channels the pane shows (beside the rail, or in the list's place
+ *  while it's folded), or null. One since left reads as none, rather than a pane with
+ *  nothing in it. */
+function ccSpace() {
+    const cc = VectorSvelte.consoleState();
+    if (!ccActive() || !cc.space) return null;
+    return arrChats.some(c => communityIdOfChat(c) === cc.space) ? cc.space : null;
+}
+
+function ccSyncBody() {
+    const on = ccActive();
+    // adjustSize may have clamped the list before login; here flex sizes it.
+    if (on && !document.body.classList.contains('cc')) {
+        const list = VectorSvelte.shellElements().chatList;
+        if (list) list.style.maxHeight = '';
+    }
+    document.body.classList.toggle('cc', on);
+    VectorSvelte.setConsoleActive(on);
+    document.body.classList.toggle('cc-community', on && !!ccSpace());
+}
+
+function ccScrollTop() {
+    VectorSvelte.shellElements().chatList?.scrollTo({ top: 0 });
+}
+
+/** A community was picked (or the Messages door, null): the pane follows it. Folded,
+ *  its channels stand in for the list, and Back returns to it. */
+function ccShowSpace(communityId) {
+    VectorSvelte.setConsoleSpace(communityId);
+    VectorSvelte.setConsoleQuery('');
+    paneChanged();
+    ccSyncBack();
+    ccScrollTop();
+}
+
+function ccSyncBack() {
+    if (ccSpace() && !VectorSvelte.consoleState().railOpen) pushBack('cc-space', () => ccShowSpace(null));
+    else popBack('cc-space');
+}
+
+function ccSetRail(open) {
+    try { localStorage.setItem(CC_KEY_RAIL, String(open)); } catch (_) { /* per-device nicety only */ }
+    VectorSvelte.setConsoleRail(open);
+    paneChanged();
+    ccSyncBack();
+    ccScrollTop();
+}
+
+/** Whatever opened a chat, Back lands on the pane that holds it: its community's
+ *  channels, or the DMs. A search has done its job once something opens from it. */
+function ccFollowOpenChat() {
+    if (!ccActive()) return;
+    // Back to the channels a chat was opened from, and from them to the list.
+    if (!strOpenChat) return ccSyncBack();
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat || chat.id === strPubkey) return;
+    VectorSvelte.setConsoleSpace(communityIdOfChat(chat) || null);
+    VectorSvelte.setConsoleQuery('');
+}
+
+/** The header's New menu, hung from the + under its right edge. */
+function ccOpenNewMenu(anchor) {
+    const r = anchor.getBoundingClientRect();
+    const items = [
+        { label: 'New Chat', icon: 'mail', lead: true, onClick: () => openNewChat() },
+        { label: 'Add Friend', icon: 'add-user', lead: true, onClick: () => openQrOverlay(`https://vectorapp.io/profile/${strPubkey}`) },
+        { label: 'Bookmark', icon: 'bookmark', lead: true, onClick: () => openChat(strPubkey) },
+    ];
+    // The rail's own + tile is folded away with it.
+    if (!VectorSvelte.consoleState().railOpen) items.push({ label: 'New Community', icon: 'users-multi', lead: true, onClick: () => openCreateGroup() });
+    showContextMenu({ x: r.right, y: r.bottom + 6, items });
+}
+
+function ccInit() {
+    let open = true;
+    try { open = localStorage.getItem(CC_KEY_RAIL) !== 'false'; } catch (_) { /* default stands */ }
+    VectorSvelte.setConsoleRail(open);
+    VectorSvelte.mergeShellHandlers({
+        consoleSwitchAccount: (el) => profileSwitcher.toggle('header', el),
+        consoleScan: () => openQrScanner(),
+        consoleNewMenu: ccOpenNewMenu,
+        consoleSetRail: ccSetRail,
+        consoleBack: () => ccShowSpace(null),
+        // The rail's own surface (its background, the Messages door, its buttons) folds it;
+        // a community or folder keeps its own menu.
+        consoleRailMenu: (node) => attachLongPressContextMenu(
+            node,
+            (x, y) => showContextMenu({ x, y, items: [{ label: 'Collapse', icon: 'chevron-double-left', onClick: () => ccSetRail(false) }] }),
+            (target) => !target.closest('.ws-rail-item, .ws-rail-folder'),
+        ),
+    });
+}
+
 window.addEventListener('DOMContentLoaded', () => {
+    ccInit();
     wsInitResizer();
     wsInitRail();
     wsInitDetailsPane();

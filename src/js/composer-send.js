@@ -684,12 +684,13 @@ async function handleComposerInput(e) {
 
         // Send a Typing Indicator only when content actually changes and setting is enabled.
         // Don't send while editing (not a new message), while the draft is a `/` command
-        // (an instruction to a bot, not conversation), or on a DELETION — removing text,
+        // (an instruction to a bot, not conversation), on a DELETION — removing text,
         // including backspacing a leading `/`, isn't composing and must not slip past the
-        // slash exclusion.
+        // slash exclusion — or to someone whose request is still waiting.
         const isDeletion = e?.inputType?.startsWith('delete');
         if (fSendTypingIndicators && !strCurrentEditMessageId && !isDeletion
             && !domChatMessageInput.value.startsWith('/')
+            && !chatIsRequest(getChat(strOpenChat))
             && nLastTypingIndicator + 30000 < Date.now()) {
             nLastTypingIndicator = Date.now();
             await invoke("start_typing", { receiver: strOpenChat });

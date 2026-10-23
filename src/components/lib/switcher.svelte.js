@@ -1,10 +1,11 @@
-// The My Profile switcher: open state, where it hangs from (the Profile header, or the
-// widescreen rail's chip as a drop-up anchored by pixel), the rows and the Add gate.
+// The My Profile switcher: open state, where it hangs from (the Profile header, the
+// widescreen rail's chip as a drop-up, or the slim header's avatar as a drop-down, both
+// anchored by pixel), the rows and the Add gate.
 // accounts.js drives it and answers the row and Add clicks through `handlers`.
 import { flushSync } from 'svelte';
 
 const sw = $state({
-    open: false, dropup: false, bottomPx: null,
+    open: false, dropup: false, bottomPx: null, topPx: null,
     accounts: [], activeNpub: '',
     addDisabled: false, addLabel: 'Add Profile',
 });
@@ -15,8 +16,9 @@ export function switcherHandlers() { return handlers; }
 export function setSwitcherHandlers(h) { handlers = h || {}; }
 export function setSwitcherRows(accounts, activeNpub) { sw.accounts = accounts; sw.activeNpub = activeNpub || ''; }
 export function setSwitcherAdd(disabled, label) { sw.addDisabled = !!disabled; sw.addLabel = label; }
-export function openSwitcher(dropup, bottomPx) {
-    sw.dropup = !!dropup; sw.bottomPx = Number.isFinite(bottomPx) ? bottomPx : null; sw.open = true;
+export function openSwitcher(dropup, bottomPx, topPx) {
+    sw.dropup = !!dropup; sw.bottomPx = Number.isFinite(bottomPx) ? bottomPx : null;
+    sw.topPx = Number.isFinite(topPx) ? topPx : null; sw.open = true;
     flushSync();
 }
 // The anchor outlives the close: the backdrop fades out in the shape it opened with.

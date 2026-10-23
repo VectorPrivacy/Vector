@@ -4,7 +4,9 @@
 async function openChatlist() {
     // Chatlist is the root — clearing the back stack means the next back
     // press exits to the home screen instead of replaying old open fns.
+    // A community's channels standing in for it still step back to it.
     clearBack();
+    ccSyncBack();
     navbarSelect('chat-btn');
     VectorSvelte.showPane('navbar', true);
     if (fProfileEditMode) exitProfileEditMode(true);

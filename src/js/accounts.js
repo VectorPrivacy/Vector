@@ -103,10 +103,10 @@ const profileSwitcher = {
     },
 
     /** `anchor` is where the panel hangs from: the Profile tab header ('profile',
-     *  the default) or the widescreen rail's account chip ('rail'), which drops
-     *  UP and trades the blur for a plain click-catcher — it's a menu, not a
-     *  takeover of the pane you're looking at. `anchorEl` pins the drop-up to the
-     *  chip itself, whatever the chip's height or the rail's footer padding become. */
+     *  the default), the widescreen rail's account chip ('rail'), which drops UP,
+     *  or the slim header's avatar ('header'), which drops down from it. The last
+     *  two trade the blur for a plain click-catcher — a menu, not a takeover of
+     *  the pane you're looking at — and `anchorEl` pins them to the avatar itself. */
     async open(anchor = 'profile', anchorEl = null) {
         if (this.isOpening) return;
         this.isOpening = true;
@@ -114,10 +114,12 @@ const profileSwitcher = {
             const accounts = await multiAccount.list();
             this.render(accounts);
             const dropup = anchor === 'rail';
-            const bottomPx = dropup && anchorEl ? window.innerHeight - anchorEl.getBoundingClientRect().top + 6 : null;
-            VectorSvelte.openSwitcher(dropup, bottomPx);
+            const rect = anchorEl?.getBoundingClientRect();
+            const bottomPx = dropup && rect ? window.innerHeight - rect.top + 6 : null;
+            const topPx = anchor === 'header' && rect ? rect.bottom + 6 : null;
+            VectorSvelte.openSwitcher(dropup, bottomPx, topPx);
             // The Profile header's chevron and trash follow only the panel hung from it.
-            VectorSvelte.setProfileSwitcherOpen(!dropup);
+            VectorSvelte.setProfileSwitcherOpen(anchor === 'profile');
             this.isOpen = true;
             // Android back closes the account list instead of navigating the profile screen away.
             pushBack('profile-switcher', () => profileSwitcher.close());

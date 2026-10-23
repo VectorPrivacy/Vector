@@ -359,15 +359,6 @@ body.ws #chat {
   min-height: 0;
 }
 
-/* The message list's top fade shares z-index 100 with the header and paints
-   after it, washing the header's own seam roughly halfway to black — which is
-   why this one line read fainter than every other seam in the app. The header
-   is nearly opaque and hides what scrolls under it anyway, so it belongs above
-   the fade. */
-body.ws #chat > .chat-header {
-  z-index: 101;
-}
-
 body.ws #chat > .chat-header {
   position: relative;
   backdrop-filter: none;
@@ -408,6 +399,7 @@ body.ws #chat-list {
     #000 calc(100% - var(--ws-list-fade)),
     transparent 100%
   );
+  mask-repeat: no-repeat;
 }
 
 /* The narrow layout's bottom chrome is what the last row clears; there is none here. */
@@ -446,8 +438,14 @@ body.ws.ws-details #settings {
 /* The pins drawer sheets down from under the conversation header, so it takes the
    same inset. Unlike Settings its details-pane variant is the COMMON case: pins
    are a Community affordance, and a Community is what docks that column. */
-body.ws .pins-drawer {
+body.ws .pins-drawer,
+body.ws .request-bar {
   left: var(--ws-main-left);
+}
+
+/* The header sits in the flow here, so the list starts under it already. */
+body.ws #chat.has-request .chat-messages {
+  padding-top: calc(12px + 56px);
 }
 
 /* The attachment panel rises out of the composer, so it belongs to the composer's
@@ -491,7 +489,7 @@ body.ws.ws-details .attachment-panel {
    against #chat-list rather than fixed to the viewport: the list's slide-in transform
    makes it the containing block mid-animation anyway, and viewport offsets measured
    against a 240px box squeezed the welcome to a word per line. */
-body.ws .chatlist-intro {
+body:is(.ws, .cc) .chatlist-intro {
   position: absolute;
   left: 18px;
   right: 18px;
@@ -500,33 +498,33 @@ body.ws .chatlist-intro {
 
 /* Get Started, sized for a 200-300px pane: a list row's height and a single line. The
    subtitle only comes back once the card can hold it on one line beside the watermark. */
-body.ws .chatlist-get-started {
+body:is(.ws, .cc) .chatlist-get-started {
   container-type: inline-size;
   height: 48px;
   gap: 10px;
   margin: 0 0 12px;
 }
-body.ws .chatlist-get-started-badge {
+body:is(.ws, .cc) .chatlist-get-started-badge {
   width: 36px;
   height: 36px;
   margin-left: 5px;
 }
-body.ws .chatlist-get-started-badge .icon {
+body:is(.ws, .cc) .chatlist-get-started-badge .icon {
   transform: scale(0.72);
 }
-body.ws .chatlist-get-started-text {
+body:is(.ws, .cc) .chatlist-get-started-text {
   flex: 1;
   min-width: 0;
   padding-right: 44px;
 }
-body.ws .chatlist-get-started-text h4 {
+body:is(.ws, .cc) .chatlist-get-started-text h4 {
   font-size: 15px;
   line-height: 18px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-body.ws .chatlist-get-started-text p {
+body:is(.ws, .cc) .chatlist-get-started-text p {
   display: none;
   margin-top: 1px;
   font-size: 12px;
@@ -535,9 +533,9 @@ body.ws .chatlist-get-started-text p {
   color: rgba(255, 255, 255, 0.7);
 }
 @container (min-width: 290px) {
-  body.ws .chatlist-get-started-text p { display: block; }
+  body:is(.ws, .cc) .chatlist-get-started-text p { display: block; }
 }
-body.ws .chatlist-get-started-watermark {
+body:is(.ws, .cc) .chatlist-get-started-watermark {
   top: 2px;
   right: -8px;
   width: 44px;
@@ -733,13 +731,13 @@ body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
    and a var() its element can't see makes the whole `padding` shorthand invalid —
    which is a silent collapse to zero, not a fallback to the pane's edge. Same trap
    as --ws-main-left above. */
-body.ws {
+body:is(.ws, .cc) {
   --ws-pane-gutter: 12px;
 }
 
 /* The community's identity heads its own pane, hosted above the scroller so the
    channels scroll under it rather than carrying it away. */
-body.ws .chatlist-community-head {
+body:is(.ws, .cc) .chatlist-community-head {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -759,12 +757,12 @@ body.ws .chatlist-community-head {
   height: 61px;
 }
 
-body.ws .chatlist-community-head:hover {
+body:is(.ws, .cc) .chatlist-community-head:hover {
   background-color: var(--ws-hover);
 }
 
 /* Inline-sized by ui/Avatar.svelte, hence !important (as everywhere it's re-used). */
-body.ws .chatlist-community-head-avatar {
+body:is(.ws, .cc) .chatlist-community-head-avatar {
   width: 36px !important;
   height: 36px !important;
   border-radius: 11px !important;
@@ -774,7 +772,7 @@ body.ws .chatlist-community-head-avatar {
 
 /* flex + min-width:0 is what lets the name ellipsis at the pane's width instead
    of sizing itself to some intrinsic guess. */
-body.ws .chatlist-community-head-meta {
+body:is(.ws, .cc) .chatlist-community-head-meta {
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -783,7 +781,7 @@ body.ws .chatlist-community-head-meta {
   gap: 2px;
 }
 
-body.ws .chatlist-community-head-name {
+body:is(.ws, .cc) .chatlist-community-head-name {
   font-size: 15px;
   font-weight: 600;
   line-height: 18px;
@@ -794,14 +792,14 @@ body.ws .chatlist-community-head-name {
 }
 
 /* Unsized, a twemoji image renders at its natural 72px and shoves the name out of the head. */
-body.ws .chatlist-community-head-name .emoji {
+body:is(.ws, .cc) .chatlist-community-head-name .emoji {
   width: 15px;
   height: 15px;
   vertical-align: -3px;
   margin: 0;
 }
 
-body.ws .chatlist-community-head-members {
+body:is(.ws, .cc) .chatlist-community-head-members {
   display: flex;
   align-items: center;
   gap: 2.5px;
@@ -812,12 +810,12 @@ body.ws .chatlist-community-head-members {
   overflow: hidden;
 }
 
-body.ws .chatlist-community-head-members > span:last-child {
+body:is(.ws, .cc) .chatlist-community-head-members > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-body.ws .chatlist-community-head-members-icon {
+body:is(.ws, .cc) .chatlist-community-head-members-icon {
   position: relative;
   flex-shrink: 0;
   width: 13px;
@@ -835,7 +833,7 @@ body.ws .chatlist-community-head-members-icon {
 /* Raid pip on the community header. Sits before the caret so it reads as part of the
    community's status, not as a second control. It pulses because a raid is the one
    state in this app where noticing late costs you the community. */
-body.ws .chatlist-community-head-alert {
+body:is(.ws, .cc) .chatlist-community-head-alert {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -846,22 +844,22 @@ body.ws .chatlist-community-head-alert {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body.ws .chatlist-community-head-alert { animation: none; }
+  body:is(.ws, .cc) .chatlist-community-head-alert { animation: none; }
 }
 
-body.ws .chatlist-community-head-caret {
+body:is(.ws, .cc) .chatlist-community-head-caret {
   position: relative;
   flex-shrink: 0;
   width: 30px;
   height: 30px;
 }
 
-body.ws .chatlist-community-head-caret .icon {
+body:is(.ws, .cc) .chatlist-community-head-caret .icon {
   background-color: rgba(255, 255, 255, 0.4);
   transition: background-color 0.12s ease;
 }
 
-body.ws .chatlist-community-head:hover .chatlist-community-head-caret .icon {
+body:is(.ws, .cc) .chatlist-community-head:hover .chatlist-community-head-caret .icon {
   background-color: rgba(255, 255, 255, 0.85);
 }
 
@@ -871,7 +869,7 @@ body.ws .chatlist-community-head:hover .chatlist-community-head-caret .icon {
 /* The nested list hangs off its community row on a 34px indent behind a guide
    line. As the pane there's no row to hang from — and that 1px border was also
    what put every channel a pixel right of the icon above them. */
-body.ws .chatlist-channels-pane {
+body:is(.ws, .cc) .chatlist-channels-pane {
   margin: 0 0 50px;
   padding-left: 0;
   border-left: none;
@@ -879,7 +877,7 @@ body.ws .chatlist-channels-pane {
 
 /* The sections name themselves now, so a blanket "CHANNELS" heading over them
    labelled a list that already has labels. */
-body.ws .chatlist-channels-pane::before {
+body:is(.ws, .cc) .chatlist-channels-pane::before {
   content: none;
 }
 
@@ -889,7 +887,7 @@ body.ws .chatlist-channels-pane::before {
    subtract its own margin back out, and lands a subpixel off. */
 /* Floating rows, like the rail's: an inset pill rather than a band that runs
    wall to wall, so the selection reads as an object you picked. */
-body.ws .chatlist-channels-pane .chatlist-channel {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel {
   height: 34px;
   margin: 0 8px;
   padding: 0 8px;
@@ -900,23 +898,23 @@ body.ws .chatlist-channels-pane .chatlist-channel {
 
 /* ── Sections ──────────────────────────────────────────────────────────── */
 
-body.ws .chatlist-channel-section + .chatlist-channel-section {
+body:is(.ws, .cc) .chatlist-channel-section + .chatlist-channel-section {
   margin-top: 14px;
 }
 
 /* Channels in no Category head the list, spaced as a heading would space them. */
-body.ws .chatlist-channel-section-loose {
+body:is(.ws, .cc) .chatlist-channel-section-loose {
   padding-top: 10px;
 }
 
-body.ws .chatlist-channel-section-head {
+body:is(.ws, .cc) .chatlist-channel-section-head {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 10px 12px 4px;
 }
 
-body.ws .chatlist-channel-section-toggle {
+body:is(.ws, .cc) .chatlist-channel-section-toggle {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -927,7 +925,7 @@ body.ws .chatlist-channel-section-toggle {
   opacity: 1;
 }
 
-body.ws .chatlist-channel-section-label {
+body:is(.ws, .cc) .chatlist-channel-section-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -938,36 +936,36 @@ body.ws .chatlist-channel-section-label {
   transition: color 0.12s ease;
 }
 
-body.ws .chatlist-channel-section-toggle:hover .chatlist-channel-section-label {
+body:is(.ws, .cc) .chatlist-channel-section-toggle:hover .chatlist-channel-section-label {
   color: rgba(255, 255, 255, 0.7);
 }
 
-body.ws .chatlist-channel-section-caret {
+body:is(.ws, .cc) .chatlist-channel-section-caret {
   position: relative;
   flex-shrink: 0;
   width: 18px;
   height: 18px;
 }
 
-body.ws .chatlist-channel-section-caret .icon {
+body:is(.ws, .cc) .chatlist-channel-section-caret .icon {
   background-color: rgba(255, 255, 255, 0.38);
   transition: background-color 0.12s ease, transform 0.15s ease;
 }
 
-body.ws .chatlist-channel-section-toggle:hover .chatlist-channel-section-caret .icon {
+body:is(.ws, .cc) .chatlist-channel-section-toggle:hover .chatlist-channel-section-caret .icon {
   background-color: rgba(255, 255, 255, 0.7);
 }
 
 /* Closed points the way it will go, not the way it came from. */
-body.ws .chatlist-channel-section.is-closed .chatlist-channel-section-caret .icon {
+body:is(.ws, .cc) .chatlist-channel-section.is-closed .chatlist-channel-section-caret .icon {
   transform: rotate(-90deg);
 }
 
-body.ws .chatlist-channel-section.is-closed .chatlist-channel-section-body {
+body:is(.ws, .cc) .chatlist-channel-section.is-closed .chatlist-channel-section-body {
   display: none;
 }
 
-body.ws .chatlist-channel-section-add {
+body:is(.ws, .cc) .chatlist-channel-section-add {
   position: relative;
   flex-shrink: 0;
   width: 22px;
@@ -977,42 +975,42 @@ body.ws .chatlist-channel-section-add {
   transition: background-color 0.12s ease;
 }
 
-body.ws .chatlist-channel-section-add .icon {
+body:is(.ws, .cc) .chatlist-channel-section-add .icon {
   background-color: rgba(255, 255, 255, 0.38);
   transition: background-color 0.12s ease;
 }
 
-body.ws .chatlist-channel-section-add:hover {
+body:is(.ws, .cc) .chatlist-channel-section-add:hover {
   background-color: var(--ws-hover);
 }
 
-body.ws .chatlist-channel-section-add:hover .icon {
+body:is(.ws, .cc) .chatlist-channel-section-add:hover .icon {
   background-color: #fff;
 }
 
 /* ── Row tiers ─────────────────────────────────────────────────────────── */
 
-body.ws .chatlist-channels-pane .chatlist-channel-hash {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel-hash {
   opacity: 1;
 }
 
-body.ws .chatlist-channels-pane .chatlist-channel.has-unread {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.has-unread {
   color: #fff;
   font-weight: 500;
 }
 
-body.ws .chatlist-channels-pane .chatlist-channel.is-read {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.is-read {
   color: rgba(255, 255, 255, 0.55);
   font-weight: 400;
 }
 
-body.ws .chatlist-channels-pane .chatlist-channel.is-muted {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.is-muted {
   color: rgba(255, 255, 255, 0.3);
   font-weight: 400;
 }
 
-body.ws .chatlist-channels-pane .chatlist-channel:hover,
-body.ws .chatlist-channels-pane .chatlist-channel.active {
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel:hover,
+body:is(.ws, .cc) .chatlist-channels-pane .chatlist-channel.active {
   color: #fff;
 }
 
@@ -1059,7 +1057,7 @@ body.ws.ws-community-pane #chat-list {
    and the elastic overscroll moves the scrollport — so scrolling up past the top
    carried the header down with it. Out here no scroll position can reach it. Empty
    and zero-height whenever the pane isn't a community's. */
-body.ws #ws-community-head {
+body:is(.ws, .cc) #ws-community-head {
   flex-shrink: 0;
 }
 
@@ -1363,18 +1361,18 @@ body.ws #ws-rail-shortcuts {
 
 /* New Messages holds its size: at most three rows, and it must not be the thing
    that gives way when the rail runs short. */
-body.ws #ws-rail-dms {
+body:is(.ws, .cc) #ws-rail-dms {
   flex-shrink: 0;
 }
 
 /* The Messages tile: a labelled door to the DMs, lit while the DM list is the
    pane on screen the way a chosen community's shortcut lights. It stands as far
    under the header seam as it does above the divider. */
-body.ws #ws-rail-messages {
+body:is(.ws, .cc) #ws-rail-messages {
   padding-top: 10px;
 }
 
-body.ws .ws-rail-messages {
+body:is(.ws, .cc) .ws-rail-messages {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1392,7 +1390,7 @@ body.ws .ws-rail-messages {
 }
 
 /* The same three states as a tab below it: bare at rest, one fill for hover and lit. */
-body.ws .ws-rail-messages:hover {
+body:is(.ws, .cc) .ws-rail-messages:hover {
   opacity: 1;
   background-color: var(--ws-hover);
   color: #fff;
@@ -1403,7 +1401,7 @@ body.ws:not(.ws-community-pane) .ws-rail-messages {
   color: #fff;
 }
 
-body.ws .ws-rail-messages svg {
+body:is(.ws, .cc) .ws-rail-messages svg {
   width: 25px;
   height: 20.5px;
   flex-shrink: 0;
@@ -1415,7 +1413,7 @@ body.ws.ws-rail-collapsed #ws-rail-shortcuts {
   padding-top: 0;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-messages {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-messages {
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -1425,7 +1423,7 @@ body.ws.ws-rail-collapsed #ws-rail-messages {
   border-bottom: 1px solid var(--ws-seam);
 }
 
-body.ws.ws-rail-collapsed .ws-rail-messages {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages {
   justify-content: center;
   gap: 0;
   width: 45px;
@@ -1436,24 +1434,24 @@ body.ws.ws-rail-collapsed .ws-rail-messages {
 }
 
 /* The design's 62x51 glyph at its frame's 1.876 units to the pixel. */
-body.ws.ws-rail-collapsed .ws-rail-messages svg {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages svg {
   width: 33px;
   height: 27px;
 }
 
-body.ws.ws-rail-collapsed .ws-rail-messages-label {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-messages-label {
   display: none;
 }
 
 /* Communities takes what's left, and scrolls inside it. */
-body.ws #ws-rail-spaces {
+body:is(.ws, .cc) #ws-rail-spaces {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-body.ws #ws-rail-spaces .ws-rail-rows {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-rows {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -1472,16 +1470,19 @@ body.ws #ws-rail-spaces .ws-rail-rows {
     #000 calc(100% - var(--ws-rail-fade)),
     transparent 100%
   );
+  /* WebKit can size the mask a pixel short of the box; a repeat fills that pixel
+     with the mask's top, which is opaque at the top of the list. */
+  mask-repeat: no-repeat;
 }
 
 /* No scrollbar in either state: a thumb shrinks the content box and pushes every
    avatar off the nav tabs' axis. The bottom fade says there is more; the wheel
    still scrolls it. */
-body.ws #ws-rail-spaces .ws-rail-rows {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-rows {
   scrollbar-width: none;
 }
 
-body.ws #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
   width: 0;
 }
 
@@ -1489,17 +1490,17 @@ body.ws #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
    The label carries its own rule, so a hidden group takes its heading and its
    hairline with it — one box to hide rather than three siblings to keep in
    step. `hidden` is set by js/render/rail.js when a group has no rows. */
-body.ws .ws-rail-group[hidden] {
+body:is(.ws, .cc) .ws-rail-group[hidden] {
   display: none;
 }
 
 /* A hidden group is still a sibling: the gap belongs between two SHOWN groups,
    whichever they are. */
-body.ws .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
+body:is(.ws, .cc) .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
   margin-top: 10px;
 }
 
-body.ws .ws-rail-group-label {
+body:is(.ws, .cc) .ws-rail-group-label {
   /* The rail is the mobile tab bar restyled, and that centres its text. */
   text-align: left;
   margin: 0 16px;
@@ -1513,7 +1514,7 @@ body.ws .ws-rail-group-label {
 
 /* One rule above Communities, not one under each label. It belongs to the seam
    BETWEEN the groups, so it only exists while something shows above. */
-body.ws .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
+body:is(.ws, .cc) .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
   content: "";
   flex-shrink: 0;
   height: 1px;
@@ -1522,20 +1523,20 @@ body.ws .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
 }
 
 /* Collapsed: the words go, the divider between the groups carries the rhythm. */
-body.ws.ws-rail-collapsed .ws-rail-group-label {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-group-label {
   display: none;
 }
 
 /* The Messages band's own seam closes it, so a rule is drawn only under the DMs. */
-body.ws.ws-rail-collapsed .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
   margin-top: 6px;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-messages ~ #ws-rail-spaces::before {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-messages ~ #ws-rail-spaces::before {
   content: none;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-dms:not([hidden]) ~ #ws-rail-spaces::before {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-dms:not([hidden]) ~ #ws-rail-spaces::before {
   content: "";
   margin: 6px 16px 0;
 }
@@ -1564,7 +1565,7 @@ body.ws #ws-rail-shortcuts {
    brighter name, so the fade is a second, contradictory signal — invisible on a
    photo avatar and obvious on a flat placeholder glyph. */
 .ws-rail-item:hover,
-body.ws .chatlist-community-head:hover {
+body:is(.ws, .cc) .chatlist-community-head:hover {
   opacity: 1;
 }
 
@@ -1673,7 +1674,7 @@ body.ws .chatlist-community-head:hover {
    SQUARE centred on the rail's own axis — a text row's rectangle reads as a
    mis-sized pill once the label is gone, and the nav tabs below are centred on
    that axis. */
-body.ws.ws-rail-collapsed .ws-rail-item {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item {
   justify-content: center;
   gap: 0;
   position: relative;
@@ -1687,16 +1688,16 @@ body.ws.ws-rail-collapsed .ws-rail-item {
 /* At icon-only size the avatar IS the affordance, so it fills its square.
    ui/Avatar.svelte writes width/height inline alongside the radius, hence
    !important here too. */
-body.ws.ws-rail-collapsed .ws-rail-item-avatar {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item-avatar {
   width: 32px !important;
   height: 32px !important;
 }
 
-body.ws.ws-rail-collapsed .ws-rail-item-name {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item-name {
   display: none;
 }
 
-body.ws.ws-rail-collapsed .ws-rail-item-badge {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item-badge {
   position: absolute;
   /* Centred on the avatar's corner (the avatar sits 4px inside the square row),
      cut out from it by a ring in the rail's own colour. */
@@ -1716,52 +1717,55 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge {
 }
 
 /* With no name beside it, the quiet dot has to carry the whole signal itself. */
-body.ws.ws-rail-collapsed .ws-rail-item-badge.is-dot {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item-badge.is-dot {
   background-color: rgba(255, 255, 255, 0.9);
 }
 
-body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-item-badge.muted {
   background-color: rgba(255, 255, 255, 0.45);
 }
 
 /* Collapsed communities: the icon is the whole tile, on a dark plate for logos
    with transparency. Hover and the open community ring the tile from outside.
-   The strip's padding keeps the ring and the badge clear of its clipping edge. */
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-rows {
+   The strip's padding keeps the ring and the badge clear of its clipping edge, and
+   tiles stand two rings and a hair apart, so neighbouring rings never meet. */
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-rows {
+  --ws-rail-ring: 3px;
+  --ws-rail-gap: calc(2 * var(--ws-rail-ring) + 2px);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--ws-rail-gap);
   padding: 6px 0;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item,
-body.ws.ws-rail-collapsed .ws-rail-ghost {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item,
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-ghost {
   width: 45px;
   height: 45px;
   border-radius: var(--ws-community-radius);
   flex-shrink: 0;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item:hover {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item:hover {
   background-color: transparent;
-  box-shadow: 0 0 0 3px var(--ws-hover);
+  box-shadow: 0 0 0 var(--ws-rail-ring) var(--ws-hover);
 }
 
 /* The open community is marked as the open chat is: a bar on the rail's edge, in
    both rail states. Every row stands 8px in from the edge when open. */
-body.ws #ws-rail-spaces .ws-rail-item.active {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.active {
   background-color: transparent;
 }
 
-body.ws #ws-rail-spaces .ws-rail-item.active:hover {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.active:hover {
   background-color: var(--ws-hover);
 }
 
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item.active:hover {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item.active:hover {
   background-color: transparent;
 }
 
-body.ws #ws-rail-spaces .ws-rail-item::before {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item::before {
   content: '';
   position: absolute;
   left: -8px;
@@ -1776,26 +1780,31 @@ body.ws #ws-rail-spaces .ws-rail-item::before {
   transition: opacity 130ms ease-out, transform 130ms ease-out;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item::before {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item::before {
   left: calc((45px - var(--ws-rail-w)) / 2);
 }
 
-body.ws #ws-rail-spaces .ws-rail-item.active::before {
+body:is(.ws, .cc) #ws-rail-spaces .ws-rail-item.active::before {
   opacity: 1;
   transform: scaleY(1);
 }
 
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-avatar,
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item.is-community .ws-rail-item-avatar,
-body.ws.ws-rail-collapsed .ws-rail-ghost .ws-rail-item-avatar {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item-avatar,
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item.is-community .ws-rail-item-avatar,
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-ghost .ws-rail-item-avatar {
   width: 45px !important;
   height: 45px !important;
+  /* The placeholder is sized by min/max instead. */
+  min-width: 45px !important;
+  min-height: 45px !important;
+  max-width: 45px !important;
+  max-height: 45px !important;
   border-radius: var(--ws-community-radius) !important;
   background-color: rgba(9, 9, 9, 0.9);
 }
 
 /* Centred just inside the tile's corner. */
-body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
+body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item-badge {
   top: -4px;
   right: -4px;
 }
@@ -1949,38 +1958,38 @@ body.ws.ws-rail-collapsed #ws-rail-spaces .ws-rail-item-badge {
   transform: none;
 }
 
-body.ws.ws-rail-collapsed .ws-rail-folder {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder {
   margin-left: auto;
   margin-right: auto;
   width: 53px;
   flex-shrink: 0;
 }
-body.ws.ws-rail-collapsed .ws-rail-folder .ws-rail-item {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder .ws-rail-item {
   margin: 0 auto;
 }
 /* Clipped vertically only, for the fold: the open community's bar reaches out to
    the rail's edge, past the folder's band. */
-body.ws .ws-rail-folder-inner {
+body:is(.ws, .cc) .ws-rail-folder-inner {
   overflow-x: visible;
   overflow-y: clip;
   /* Visible overflow brings back a grid item's min-content floor, which let a long
      name widen the folder past the rail. */
   min-width: 0;
 }
-body.ws.ws-rail-collapsed .ws-rail-folder-inner {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder-inner {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--ws-rail-gap);
 }
-body.ws.ws-rail-collapsed .ws-rail-folder.is-open .ws-rail-folder-inner {
-  padding: 5px 0 4px;
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder.is-open .ws-rail-folder-inner {
+  padding: var(--ws-rail-gap) 0 4px;
 }
-body.ws.ws-rail-collapsed .ws-rail-folder-tile {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder-tile {
   width: 45px;
   height: 45px;
   border-radius: var(--ws-community-radius);
 }
-body.ws.ws-rail-collapsed .ws-rail-folder-grid {
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder-grid {
   inset: 6px;
   gap: 3px;
 }

@@ -77,9 +77,9 @@
             <span class="neon-toggle"></span>
         </label>
         {#if n.push === 'install'}
-            <span class="notif-privacy-label">Add Vector to your Home Screen to turn this on.</span>
+            <span class="notif-note">Add Vector to your Home Screen to turn this on.</span>
         {:else if n.push === 'denied'}
-            <span class="notif-privacy-label">Notifications are blocked for this site in your browser settings.</span>
+            <span class="notif-note">Notifications are blocked for this site in your browser settings.</span>
         {/if}
     </div>
 {/if}

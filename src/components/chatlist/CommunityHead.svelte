@@ -7,7 +7,8 @@
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: CommunityHeadHelpers (js/render/chatlist/list.js)
+    // onBack: the slim layout's way back to the list while the rail is folded away.
+    let { h, onBack = null } = $props();   // h: CommunityHeadHelpers (js/render/chatlist/list.js)
 
     const vm = $derived.by(() => {
         const id = paneState().communityId;
@@ -58,6 +59,11 @@
         onclick={(e) => h.openCommunityMenu(vm.primary, e)}
         oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); h.openCommunityMenu(vm.primary, e); }}
     >
+        {#if onBack}
+            <button class="chatlist-community-head-back" aria-label="Back to chats" onclick={(e) => { e.stopPropagation(); onBack(); }}>
+                <span class="icon icon-chevron-left"></span>
+            </button>
+        {/if}
         <Avatar src={vm.avatarSrc} size={36} group class="chatlist-community-head-avatar" />
         <div class="chatlist-community-head-meta">
             <span class="chatlist-community-head-name cutoff" use:name={vm.name}></span>

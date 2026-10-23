@@ -1,11 +1,11 @@
 <script>
-    // The Settings screen. On a phone it is one scroll, a section per concern; in
-    // widescreen it takes the list column for a SectionNav (the same nav as Community
-    // Settings) and shows one category at a time. Both layouts render the same section
-    // bodies. Toggle values live in the screen store; the sections whose owners register
-    // later (updates, network, voice) render once their handler bag exists.
-    import { tick } from 'svelte';
-    import { settingsScreen, settingsHandlers } from '../lib/settings.svelte.js';
+    // The Settings screen. In widescreen it takes the list column for a SectionNav (the
+    // same nav as Community Settings) and shows one category at a time; on a phone the same
+    // categories are an accordion, one open at a time, under the same search. Both layouts
+    // render the same section bodies. Toggle values live in the screen store; the sections
+    // whose owners register later (updates, network, voice) render once their handler bag exists.
+    import { tick, untrack } from 'svelte';
+    import { settingsScreen, settingsHandlers, updatesState } from '../lib/settings.svelte.js';
     import { transportState, viewedKind, routingOffered } from '../lib/transport.svelte.js';
     import { advancedState } from '../lib/advanced.svelte.js';
     import { playersState } from '../lib/players.svelte.js';
@@ -61,11 +61,6 @@
         { value: 'monero', label: 'XMR', swatch: '#ed702d' },
         { value: 'cyberpunk', label: 'Neon', swatch: 'linear-gradient(#8bf2f0, #e46aad)' },
     ];
-
-    let blockedOpen = $state(false);
-    let updatesEl = $state(null);
-    let routingEl = $state(null);
-    let networkEl = $state(null);
 
     // ── widescreen: categories of anchored blocks ──
     // An anchor is one headed block; `keys` are what the nav search matches beyond its label.
@@ -155,6 +150,74 @@
         anchors.jump(anchorId);
     }
 
+    // ── phone: the categories as an accordion ──
+    // A search opens every category it matches, showing only the blocks it matched, as the
+    // widescreen nav does; a category's body mounts the first time it opens and then stays.
+    const updates = updatesState();
+    let openCat = $state(null);
+    let searchShut = $state([]);
+    let kept = $state({});
+    let phoneEl = $state(null);
+    let searchEl = $state(null);
+    const rows = {};
+    const q = $derived(query.trim().toLowerCase());
+    const phoneNav = $derived(CATEGORIES.map((sec) => {
+        const hits = sec.anchors.map((a) => !q || `${sec.label} ${a.label} ${a.keys || ''}`.toLowerCase().includes(q));
+        const shown = hits.includes(true);
+        return {
+            ...sec,
+            shown,
+            open: q ? shown && !searchShut.includes(sec.id) : sec.id === openCat,
+            anchors: sec.anchors.map((a, i) => ({ ...a, shown: hits[i] })),
+        };
+    }));
+    // A waiting update leaves the list for a card of its own above it.
+    const pending = $derived(['available', 'downloading', 'ready'].includes(updates.phase)
+        ? phoneNav.find((sec) => sec.id === 'updates') : null);
+    const listed = $derived(phoneNav.filter((sec) => sec !== pending));
+    const empty = $derived(!phoneNav.some((sec) => sec.shown));
+    $effect(() => {
+        for (const sec of phoneNav) if (sec.open && !kept[sec.id]) kept[sec.id] = true;
+    });
+    // A category clips its body only while it folds: open and still, a dropdown inside it
+    // has to spill past its edge. It settles when its fold ends; the timer covers a fold
+    // with no transition to end (reduced motion).
+    let settled = $state({});
+    const openIds = $derived(phoneNav.filter((sec) => sec.open).map((sec) => sec.id).join());
+    $effect(() => {
+        const ids = openIds.split(',').filter(Boolean);
+        untrack(() => { for (const id of Object.keys(settled)) if (!ids.includes(id)) settled[id] = false; });
+        const t = setTimeout(() => { for (const id of ids) settled[id] = true; }, 800);
+        return () => clearTimeout(t);
+    });
+    function foldEnd(e, sec) {
+        if (e.target === e.currentTarget && e.propertyName === 'grid-template-rows' && sec.open) settled[sec.id] = true;
+    }
+    // The card's top edge draws no divider, whichever row a search leaves first.
+    const firstListed = $derived(listed.find((sec) => sec.shown)?.id);
+
+    function setQuery(v) {
+        query = v;
+        searchShut = [];
+    }
+
+    function toggle(id) {
+        if (q) {
+            searchShut = searchShut.includes(id) ? searchShut.filter((x) => x !== id) : [...searchShut, id];
+            return;
+        }
+        openCat = openCat === id ? null : id;
+        if (openCat) reveal(id);
+    }
+
+    // Once the category that was open has folded, so the row is aimed at where it settles.
+    function reveal(id, anchorId = null) {
+        setTimeout(() => {
+            const el = anchorId ? phoneEl?.querySelector(`[data-anchor="${anchorId}"]`) : rows[id];
+            el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 300);
+    }
+
     // A requested scroll (an update is waiting, the network needs attention) lands after the
     // screen has been shown.
     $effect(() => {
@@ -166,12 +229,10 @@
             else goAnchor('privacy', 'routing');
             return;
         }
-        const t = setTimeout(async () => {
-            await tick();
-            const el = { updates: updatesEl, routing: routingEl, relays: networkEl }[target];
-            el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 100);
-        return () => clearTimeout(t);
+        const cat = { updates: 'updates', relays: 'network', routing: 'privacy' }[target];
+        setQuery('');
+        openCat = cat;
+        reveal(cat, target);
     });
 </script>
 
@@ -333,6 +394,30 @@
     <span onclick={() => h.openLink('privacy')}>Privacy Policy</span>
 {/snippet}
 
+<!-- A phone category's body: its blocks, headed when there are several, folding open under its row. -->
+{#snippet catBody(sec)}
+    <div class="sm-body" ontransitionend={(e) => foldEnd(e, sec)}>
+        <div class="sm-body-inner">
+            {#if kept[sec.id]}
+                <div class="st-page sm-page">
+                    {#if sec.danger}
+                        <div class="sm-danger-head">
+                            <img class="aggro-glitch-img" alt="">
+                            <p class="danger-subtitle">Irreversible Actions</p>
+                        </div>
+                    {/if}
+                    {#each sec.anchors as a (a.id)}
+                        <section class="sm-block" class:off={!a.shown} data-anchor={a.id}>
+                            {#if sec.anchors.length > 1}<h3 class="sm-heading">{a.label}</h3>{/if}
+                            {@render block(a.id)}
+                        </section>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    </div>
+{/snippet}
+
 <!-- One anchored block's body, by anchor id. -->
 {#snippet block(id)}
     {#if id === 'theme'}
@@ -390,119 +475,52 @@
         </div>
     </main>
 {:else}
-    <h2 style="margin-top: 40px">Choose Theme</h2>
-    {@render themeBody()}
-
-    {#if sc.platform.voice && hs.voice}
-        <div class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Voice Settings</h2>
-            <div><Voice h={hs.voice} /></div>
+    <div class="sm" bind:this={phoneEl}>
+        <h1 class="sm-title">Settings</h1>
+        <div class="sm-search" class:has-query={!!query}>
+            <span class="icon icon-search"></span>
+            <input placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                   value={query} oninput={(e) => setQuery(e.currentTarget.value)} bind:this={searchEl}>
+            {#if query}
+                <button class="sm-search-clear" type="button" aria-label="Clear search" onclick={() => { setQuery(''); searchEl?.focus(); }}>
+                    <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M11.1002 6.29922L6.3002 11.0992M6.3002 6.29922L11.1002 11.0992M16.7002 8.69922C16.7002 13.1175 13.1184 16.6992 8.7002 16.6992C4.28192 16.6992 0.700195 13.1175 0.700195 8.69922C0.700195 4.28094 4.28192 0.699219 8.7002 0.699219C13.1184 0.699219 16.7002 4.28094 16.7002 8.69922Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            {/if}
         </div>
-    {/if}
 
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <h2>Privacy</h2>
-
-        {@render privacyBody()}
-
-        <StreamerCard h={h.streamer} />
-
-        {#if routingOffered()}
-            <div class="st-routing" bind:this={routingEl}>
-                <h3 class="st-routing-head">Routing</h3>
-                {@render routingBody()}
+        {#if pending}
+            <div class="sm-cat sm-update" class:open={pending.open} class:shut={!pending.shown} class:clip={!(pending.open && settled.updates)}>
+                <div class="sm-cat-inner">
+                    <button class="sm-row" aria-expanded={pending.open} bind:this={rows.updates} onclick={() => toggle('updates')}>
+                        <span class="sm-row-icon"><span class="icon icon-refresh"></span></span>
+                        <span class="sm-row-label cutoff">Update Pending{#if updates.newVersion}<span class="sm-row-note">– {updates.newVersion}</span>{/if}</span>
+                        <span class="sm-badge">1</span>
+                        <span class="sm-chevron"><span class="icon icon-chevron-right"></span></span>
+                    </button>
+                    {@render catBody(pending)}
+                </div>
             </div>
         {/if}
 
-        <div style="margin-top: 25px;">
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <h3 class="btn" style="font-size: 14px; color: #b2b2b2; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; -webkit-user-select: none; user-select: none;"
-                onclick={() => { blockedOpen = !blockedOpen; }}>
-                <span class="icon icon-chevron-down" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: #b2b2b2; transition: transform 0.2s; {blockedOpen ? 'transform: rotate(180deg);' : ''}"></span>
-                Blocked Users
-            </h3>
-            {#if blockedOpen}
-                <div style="overflow: hidden; animation: blockedFadeIn 0.2s ease;">
-                    <div><BlockedUsers h={h.blocked} /></div>
+        <div class="sm-list">
+            {#each listed as sec (sec.id)}
+                <div class="sm-cat" class:open={sec.open} class:shut={!sec.shown} class:danger={sec.danger}
+                     class:clip={!(sec.open && settled[sec.id])} class:first={sec.id === firstListed}>
+                    <div class="sm-cat-inner">
+                        <button class="sm-row" aria-expanded={sec.open} bind:this={rows[sec.id]} onclick={() => toggle(sec.id)}>
+                            <span class="sm-row-icon"><span class="icon icon-{sec.icon}"></span></span>
+                            <span class="sm-row-label cutoff">{sec.label}</span>
+                            <span class="sm-chevron"><span class="icon icon-chevron-right"></span></span>
+                        </button>
+                        {@render catBody(sec)}
+                    </div>
                 </div>
-            {/if}
+            {/each}
         </div>
-    </div>
+        <p class="sm-empty" class:shown={empty}>No matches</p>
 
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <h2>Display</h2>
-        <div><Display h={h.display} /></div>
-    </div>
-
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <h2>Notifications</h2>
-        <div><Notifications h={h.notif} /></div>
-    </div>
-
-    {#if h.calls}
-        <div class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Calls</h2>
-            <div><Calls h={h.calls} /></div>
-        </div>
-    {/if}
-
-    {#if sc.battery.shown}
-        <div class="settings-section">
-            <hr class="divider settings-divider">
-            <h2>Battery</h2>
-            {@render batteryBody()}
-        </div>
-    {/if}
-
-    <div class="settings-section" bind:this={networkEl}>
-        <hr class="divider settings-divider">
-        <h2>Network</h2>
-        <div id="network-list" class="network-list">
-            {#if hs.network}<NetworkList h={hs.network} />{/if}
-        </div>
-    </div>
-
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <h2>Storage</h2>
-        {@render storageBody()}
-    </div>
-
-    {#if sc.platform.updates}
-        <div class="settings-section" bind:this={updatesEl}>
-            <hr class="divider settings-divider">
-            <h2>Updates</h2>
-            <div>{#if hs.updates}<Updates h={hs.updates} />{/if}</div>
-        </div>
-    {/if}
-
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <h2>Security</h2>
-        <SecurityCard h={h.security} />
-    </div>
-
-    <div class="settings-section">
-        <hr class="divider settings-divider">
-        <img class="aggro-glitch-img" alt="">
-        <h2 class="danger-title" style="margin-bottom: 0; margin-top: 0;">Dangerzone</h2>
-        <p class="danger-subtitle">Irreversible Actions</p>
-        <div class="danger-buttons">
-            {@render advancedBody()}
-            {@render logsRow()}
-            {@render logoutRow()}
-        </div>
-    </div>
-
-    <div class="settings-section">
-        <hr class="divider settings-divider" style="background-color: #171717;">
-        <div class="settings-footer" style="text-align: center; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
-            {@render links()}
-        </div>
+        <div class="settings-footer sm-footer">{@render links()}</div>
     </div>
 {/if}

@@ -1,7 +1,7 @@
 <script>
-    // Your own row. Ids stay: styles.css and widescreen.css select the row and its
-    // parts by id in both homes. The caret is a widescreen-only affordance: the name
-    // and status already have their own meanings, so switching gets its own target.
+    // Your own row, in the widescreen rail's footer. Ids stay: styles.css and
+    // widescreen.css select the row and its parts by id. The caret is the switcher's
+    // own target: the name and status already have their own meanings.
     import Avatar from '../ui/Avatar.svelte';
     import { accountState, accountHandlers } from '../lib/account.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';

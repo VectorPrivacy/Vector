@@ -1338,10 +1338,24 @@ function getProfile(npub) {
 function getProfileAvatarSrc(profile, full = false) {
     if (!profile) return null;
     if (streamHidden(profile)) return VectorSvelte.streamTint(profile.id);
-    if (profile.avatar_cached) {
+    // Someone whose DM request waits shows no pictures until it's accepted.
+    if (profile.avatar_cached && !chatIsRequest(getChat(profile.id))) {
         return convertFileSrc(full ? profile.avatar_cached : avatarThumbPath(profile.avatar_cached));
     }
     return null;
+}
+
+/** `src` loaded and decoded, or null when it won't decode: what shows once this settles
+ *  paints in the same frame as its box, not a frame or more after it. */
+async function decodedImage(src) {
+    const img = new Image();
+    img.src = src;
+    try {
+        await img.decode();
+        return img;
+    } catch {
+        return null;
+    }
 }
 
 /** `.../avatars/<file>` → `.../avatars/thumbs/<file>`, whichever separator the platform uses. */
@@ -1358,7 +1372,7 @@ function avatarThumbPath(path) {
  */
 function getProfileBannerSrc(profile) {
     if (!profile || streamHidden(profile)) return null;
-    if (profile.banner_cached) {
+    if (profile.banner_cached && !chatIsRequest(getChat(profile.id))) {
         return convertFileSrc(profile.banner_cached);
     }
     return null;

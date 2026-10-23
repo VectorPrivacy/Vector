@@ -66,14 +66,16 @@ const _dmsgListHelpers = {
     // not 80 scans. A changed message is a new object and gets a fresh context.
     ctxFor: (msg) => {
         const ctx = _dmsgRowCtxCache.get(msg);
-        // Two inputs change under a mounted row: the author's block state and a reveal.
+        // Three inputs change under a mounted row: the author's block state, a reveal, and
+        // a request being accepted.
         // Everything else in the context is fixed per message and chat.
         if (ctx && ctx.currentChat?.id === strOpenChat) {
             const revealed = revealedBlockedMessages.has(msg.id);
             const isBlocked = _dmsgAuthorBlocked(msg, ctx.currentChat, ctx.isGroupChat);
             const timedOut = _dmsgPostedTimedOut(msg, ctx.currentChat);
             if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)
-                && ctx.timedOut === (!isBlocked && !revealed ? timedOut : '')) return ctx;
+                && ctx.timedOut === (!isBlocked && !revealed ? timedOut : '')
+                && ctx.held === chatIsRequest(ctx.currentChat)) return ctx;
         }
         const fresh = _dmsgRowCtx(msg);
         _dmsgRowCtxCache.set(msg, fresh);
@@ -125,6 +127,8 @@ function _dmsgRowCtx(msg) {
             revealedBlocked: (blocked || unauthorized) && revealed,
             // A reader collapses, never drops, what a timed-out member posted.
             timedOut,
+            // A DM request: nothing its sender sent loads until it's accepted.
+            held: chatIsRequest(currentChat),
         };
     }
 }
@@ -245,7 +249,7 @@ const _dmsgContentHelpers = {
     xdcUrl: (msg) => findXdcUrl(msg.content),
     renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
     webPreviewsEnabled: () => !!fWebPreviewsEnabled,
-    nostrEmbedsOn: (ctx) => !!fWebPreviewsEnabled && !ctx.revealedBlocked,
+    nostrEmbedsOn: (ctx) => !!fWebPreviewsEnabled && !ctx.revealedBlocked && !ctx.held,
     get embeds() { return NOSTR_EMBED_HELPERS; },
     linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
     playerUrl: (video) => invoke('player_url', { provider: video.provider || 'youtube', id: video.id, start: video.start || null })
@@ -264,7 +268,7 @@ const _dmsgContentHelpers = {
  *   isDownloading: (att: object) => boolean,
  *   willAutoDownload: (att: object, ctx: object) => boolean,
  *   autoDownload: (att: object, msg: object, sender: object|null) => void,
- *   startDownload: (att: object, msg: object, sender: object|null) => void,
+ *   startDownload: (att: object, msg: object, sender: object|null) => boolean,
  *   cancelDownload: (att: object, msg: object) => void,
  *   audio: object,
  *   fileTypeInfo: (ext: string) => object,
@@ -291,11 +295,19 @@ const _dmsgMediaHelpers = {
     isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
     isDownloading: (att) => !!att.downloading || downloadingAttachmentIds.has(att.id),
     pausedAt: (att) => pausedDownloads.get(att.id) || null,
-    willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && att.size > 0
+    willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && !ctx.held && att.size > 0
         && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed && !att.download_cancelled,
     // Once per attachment id across renders, or every repaint would re-fire the download.
     autoDownload: (att, msg) => _dmsgStartDownload(att, msg),
-    startDownload: (att, msg) => _dmsgStartDownload(att, msg),
+    // False when refused: a DM request's files wait until it's accepted.
+    startDownload: (att, msg) => {
+        if (chatIsRequest(getChat(strOpenChat))) {
+            showToast('Accept the request to download files');
+            return false;
+        }
+        _dmsgStartDownload(att, msg);
+        return true;
+    },
     cancelDownload: (att, msg) => _dmsgCancelDownload(att, msg),
     get audio() { return AUDIO_PLAYER_HELPERS; },
     fileTypeInfo: (ext) => getFileTypeInfo(ext),
@@ -398,12 +410,9 @@ function _dmsgTextLeaf(msg, ctx) {
         ? new Set(msg.emoji_tags.map(t => t.shortcode))
         : null;
     let customEmojiCount = 0;
-    // A heading mark is not content: `# :emoji:` is still an emoji on its own, and
-    // the jumbo size is bigger than any heading would make it.
-    const unheaded = safeContent.replace(/^[ \t]*(?:#{1,6}|-#)[ \t]+/gm, '');
-    let strippedContent = unheaded;
+    let strippedContent = safeContent;
     if (emojiTagSet) {
-        strippedContent = unheaded.replace(/:([a-zA-Z0-9_~-]+):/g, (m, code) => {
+        strippedContent = safeContent.replace(/:([a-zA-Z0-9_~-]+):/g, (m, code) => {
             if (emojiTagSet.has(code)) {
                 customEmojiCount++;
                 return '';
@@ -421,9 +430,12 @@ function _dmsgTextLeaf(msg, ctx) {
         }
     }
     const remainderIsEmojiOnly = !strEmojiCleaned || isEmojiOnly(strEmojiCleaned);
-    const fEmojiOnly = graphemeCount > 0 && graphemeCount <= 6 && remainderIsEmojiOnly;
+    // A heading or subtext sets its emoji's size as it does its text's: no jumbo. (`#` alone
+    // would pass as an emoji, a keycap base.)
+    const headed = /^[ \t]*(?:#{1,6}|-#)[ \t]+/m.test(safeContent);
+    const fEmojiOnly = !headed && graphemeCount > 0 && graphemeCount <= 6 && remainderIsEmojiOnly;
 
-    const textSpan = _dmsgBuildText(msg, fEmojiOnly ? unheaded : safeContent, fEmojiOnly, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked);
+    const textSpan = _dmsgBuildText(msg, safeContent, fEmojiOnly, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked || ctx.held);
     if (!(textSpan && (textSpan.textContent || textSpan.querySelector('img,video,hr')))) return null;
     twemojify(textSpan);
     return textSpan;
@@ -534,6 +546,7 @@ function _dmsgCommandInfo(msg) {
     return { name: m[1], botNpub: tagged ? msg.addressed_bots[0] : null };
 }
 
+/** `isRevealedBlockedMsg`: a blocked author's post shown anyway, or a DM request's; neither loads anything. */
 function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg) {
     const span = document.createElement('span');
     span.classList.add('dmsg-text');
@@ -545,7 +558,7 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
         // Custom-emoji shortcodes still need swapping to <img>; the jumbo
         // sizing rule (.dmsg-emoji-only .custom-emoji-inline) takes it from
         // there.
-        if (msg.emoji_tags && msg.emoji_tags.length) {
+        if (!isRevealedBlockedMsg && msg.emoji_tags && msg.emoji_tags.length) {
             renderCustomEmojiShortcodes(span, msg.emoji_tags);
         }
         return span;
@@ -577,7 +590,7 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     // Bare and nostr:-prefixed npubs (and vectorapp.io profile links) render
     // as mention pills, same treatment as bios.
     const roles = isGroupChat ? standingRoleMentions(msg, currentChat) : [];
-    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: true, roles, communityId: communityIdOfChat(currentChat) });
+    renderMentions(span, senderIsAdmin, { allowBare: true, queueSync: !isRevealedBlockedMsg, roles, communityId: communityIdOfChat(currentChat) });
     renderGoLinks(span);
 
     // NIP-30 custom emojis ride along on the rumor; resolve them before

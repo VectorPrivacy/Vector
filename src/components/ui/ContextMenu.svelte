@@ -33,10 +33,11 @@
                        oninput={(e) => { const v = Number(e.currentTarget.value); item.slider.value = v; item.slider.onInput(v); }}>
             </div>
         {:else}
-            <div class="context-menu-item" class:is-danger={item.danger} class:is-back={item.back}
+            <div class="context-menu-item" class:is-danger={item.danger} class:is-back={item.back} class:is-lead={item.lead}
                  class:is-disabled={item.disabled} role="menuitem" tabindex="-1"
                  onclick={(e) => { e.stopPropagation(); h().activate?.(item); }}>
                 {#if item.back}<span class="icon icon-chevron-left context-menu-lead"></span>{/if}
+                {#if item.lead && item.icon}<span class="icon icon-{item.icon} context-menu-lead"></span>{/if}
                 {#if item.swatch}<span class="context-menu-swatch" style:background={item.swatch}></span>{/if}
                 <span class="context-menu-label">{item.label}{#if item.hint}<span class="context-menu-item-hint">{item.hint}</span>{/if}</span>
                 {#if item.submenu}
@@ -45,7 +46,7 @@
                     <span class="icon icon-loading spin"></span>
                 {:else if item.checked}
                     <span class="icon icon-check"></span>
-                {:else if item.icon}
+                {:else if item.icon && !item.lead}
                     <span class="icon icon-{item.icon}"></span>
                 {/if}
             </div>
