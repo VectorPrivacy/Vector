@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-marketplace-edit-listing"
+description = "Enables the marketplace_edit_listing command without any pre-configured scope."
+commands.allow = ["marketplace_edit_listing"]
+
+[[permission]]
+identifier = "deny-marketplace-edit-listing"
+description = "Denies the marketplace_edit_listing command without any pre-configured scope."
+commands.deny = ["marketplace_edit_listing"]

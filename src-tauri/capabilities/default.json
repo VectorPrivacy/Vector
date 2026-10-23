@@ -368,6 +368,7 @@
     "allow-marketplace-uninstall-app",
     "allow-marketplace-update-app",
     "allow-marketplace-publish-app",
+    "allow-marketplace-edit-listing",
     "allow-marketplace-get-trusted-publisher",
     "allow-miniapp-get-available-permissions",
     "allow-miniapp-get-granted-permissions",

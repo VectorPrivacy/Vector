@@ -1,12 +1,12 @@
 <script>
-    // Both Nexus panels mount once marketplace.js has registered the bag.
+    // The Nexus and its Play with Friends picker mount once marketplace.js has registered the bag.
     import { mktHandlers } from '../lib/marketplace.svelte.js';
-    import MarketplacePanel from './MarketplacePanel.svelte';
-    import AppDetailsPanel from './AppDetailsPanel.svelte';
+    import Nexus from './Nexus.svelte';
+    import PlayWith from './PlayWith.svelte';
     const h = $derived(mktHandlers());
 </script>
 
 {#if h}
-    <MarketplacePanel {h} />
-    <AppDetailsPanel {h} />
+    <Nexus {h} />
+    <PlayWith />
 {/if}

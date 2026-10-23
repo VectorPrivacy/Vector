@@ -865,6 +865,7 @@ pub fn run() {
             miniapps::commands::marketplace_uninstall_app,
             miniapps::commands::marketplace_update_app,
             miniapps::commands::marketplace_publish_app,
+            miniapps::commands::marketplace_edit_listing,
             miniapps::commands::marketplace_get_trusted_publisher,
             // Mini App permissions commands
             miniapps::commands::miniapp_get_available_permissions,

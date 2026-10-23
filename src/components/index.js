@@ -67,8 +67,9 @@ export { communityTimeouts, setCommunityTimeouts } from './lib/timeouts.svelte.j
 export { fmtCountdown } from './lib/countdown.js';
 export { setChrome } from './lib/chrome.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
-export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktAddFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
+export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetLoading, mktSetError, mktSetAction, mktSetProgress, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, mktSetPlayed, mktShow, mktReset, mktOpenPicker, mktClosePicker, setMarketplaceHandlers, mktOpenPanel, mktClosePanel, mktSetDevice, mktSetFitOnly } from './lib/marketplace.svelte.js';
 export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';
+export { splitControlTags, controlTags } from './lib/nexus.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls } from './lib/pins.svelte.js';

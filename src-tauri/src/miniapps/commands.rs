@@ -1994,10 +1994,58 @@ pub async fn marketplace_publish_app(
         developer: developer.as_deref(),
         source_url: source_url.as_deref(),
         permissions: permissions.as_deref(),
+        released_at: None,
     };
     super::marketplace::publish_to_marketplace(signer, &file_path, &listing, blossom_servers)
     .await
     .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
+}
+
+/// Edit a listing you published: its text, tags and permissions, over the package it
+/// already names. Nothing is uploaded; the version and release date stay.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn marketplace_edit_listing(
+    app_id: String,
+    name: String,
+    description: String,
+    categories: Vec<String>,
+    changelog: Option<String>,
+    developer: Option<String>,
+    source_url: Option<String>,
+    permissions: Option<String>,
+) -> Result<(), Error> {
+    use super::marketplace::MARKETPLACE_STATE;
+    let fail = |e: String| Error::Anyhow(anyhow::anyhow!(e));
+    let session = vector_core::db::current_session();
+    let current = MARKETPLACE_STATE.read().await.get_app(&app_id).cloned()
+        .ok_or_else(|| fail("Listing not found".into()))?;
+    let listing = super::marketplace::MarketplaceListing {
+        app_id: &app_id,
+        name: &name,
+        description: &description,
+        version: &current.version,
+        categories: categories.iter().map(String::as_str).collect(),
+        changelog: changelog.as_deref(),
+        developer: developer.as_deref(),
+        source_url: source_url.as_deref(),
+        permissions: permissions.as_deref(),
+        released_at: None,
+    };
+    let edited = vector_core::webxdc::edit_marketplace_listing(&current, &listing).await.map_err(fail)?;
+    if !session.is_live() {
+        return Err(fail("Account changed during the edit".into()));
+    }
+    let apps = {
+        let mut state = MARKETPLACE_STATE.write().await;
+        state.upsert_app(edited);
+        state.get_apps()
+    };
+    if let Err(e) = crate::db::save_marketplace_cache(&apps) {
+        log_warn!("[Marketplace] Failed to cache the edited listing: {}", e);
+    }
+    vector_core::traits::emit_event("marketplace_apps_updated", &apps);
+    Ok(())
 }
 
 /// Get the trusted publisher npub for the marketplace

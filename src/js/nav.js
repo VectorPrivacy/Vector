@@ -146,7 +146,8 @@ async function openInvites() {
     // Note: MLS invites are now shown in the Chat tab, not here
 }
 
-/** Light one navbar tab; the Navbar component dims the rest. */
+/** Light one navbar tab; the Navbar component dims the rest. Leaving the Mini Apps tab closes the Nexus. */
 function navbarSelect(strSelectionID = '') {
     VectorSvelte.setTab(strSelectionID);
+    if (strSelectionID !== 'miniapps-btn') leaveNexus();
 }

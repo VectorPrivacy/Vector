@@ -274,12 +274,18 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     {
         let mut state = MARKETPLACE_STATE.write().await;
 
-        // Relays can hold several releases of one app: only the newest is the app.
+        // Relays can hold several copies of one app: only the newest signed is the app (an
+        // edit keeps its release date, so that can't tell them apart).
         let mut releases: Vec<MarketplaceApp> = events.iter().filter_map(parse_marketplace_event).collect();
-        releases.sort_unstable_by(|a, b| a.id.cmp(&b.id).then(b.published_at.cmp(&a.published_at)));
+        releases.sort_unstable_by(|a, b| a.id.cmp(&b.id).then(b.signed_at.cmp(&a.signed_at)));
         releases.dedup_by(|older, newest| older.id == newest.id);
         for mut app in releases {
             if let Some(existing) = state.get_app(&app.id) {
+                // A relay behind on an edit made here doesn't undo it.
+                if existing.signed_at > app.signed_at {
+                    apps.push(existing.clone());
+                    continue;
+                }
                 app.installed = existing.installed;
                 app.local_path = existing.local_path.clone();
                 if app.icon_cached.is_none() {

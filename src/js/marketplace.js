@@ -26,25 +26,14 @@
  * @property {string|null} local_path - Local file path if installed
  * @property {string|null} installed_version - Version currently installed (if installed)
  * @property {boolean} update_available - Whether an update is available
- */
-
-/**
- * @typedef {Object} InstallStatus
- * @property {string} type - 'NotInstalled' | 'Downloading' | 'Installed' | 'Failed'
- * @property {number} [progress] - Download progress (0-100) for Downloading status
- * @property {string} [path] - Local path for Installed status
- * @property {string} [error] - Error message for Failed status
+ * @property {string|null} icon_cached - Local copy of the icon, once fetched
+ * @property {string|null} requested_permissions - Comma-separated permission ids it asks for
  */
 
 // Note: 'invoke' is already declared in main.js, so we use it directly
 
 // Marketplace state
 let marketplaceApps = [];
-let isMarketplaceLoading = false;
-let marketplaceError = null;
-let marketplaceSearchQuery = '';
-let marketplaceActiveFilters = []; // Array of category strings
-let marketplaceShouldAnimate = false; // Only animate after initial load from loading state
 let _marketplaceFetchPromise = null; // Dedup guard: shared promise for concurrent fetch calls
 let _marketplaceInitInProgress = false; // Dedup guard: prevent concurrent initMarketplace calls
 
@@ -59,17 +48,13 @@ async function fetchMarketplaceApps(trustedOnly = true) {
 
     _marketplaceFetchPromise = (async () => {
         try {
-            isMarketplaceLoading = true;
-            marketplaceError = null;
             const apps = await invoke('marketplace_fetch_apps', { trustedOnly });
             syncMarketplaceApps(apps);
             return apps;
         } catch (error) {
             console.error('Failed to fetch marketplace apps:', error);
-            marketplaceError = error.toString();
             throw error;
         } finally {
-            isMarketplaceLoading = false;
             _marketplaceFetchPromise = null;
         }
     })();
@@ -88,34 +73,6 @@ async function getCachedMarketplaceApps() {
         return apps;
     } catch (error) {
         console.error('Failed to get cached marketplace apps:', error);
-        throw error;
-    }
-}
-
-/**
- * Get a specific marketplace app by ID
- * @param {string} appId - The app ID
- * @returns {Promise<MarketplaceApp|null>}
- */
-async function getMarketplaceApp(appId) {
-    try {
-        return await invoke('marketplace_get_app', { appId });
-    } catch (error) {
-        console.error('Failed to get marketplace app:', error);
-        throw error;
-    }
-}
-
-/**
- * Get the installation status of an app
- * @param {string} appId - The app ID
- * @returns {Promise<InstallStatus>}
- */
-async function getInstallStatus(appId) {
-    try {
-        return await invoke('marketplace_get_install_status', { appId });
-    } catch (error) {
-        console.error('Failed to get install status:', error);
         throw error;
     }
 }
@@ -301,11 +258,6 @@ function formatSourceUrl(url) {
 }
 
 /**
- * Create a marketplace app card element
- * @param {MarketplaceApp} app - The app data
- * @returns {HTMLElement}
- */
-/**
  * Check if an app is a game (has "game" category but not "app" category)
  * @param {MarketplaceApp} app - The app to check
  * @returns {boolean} True if the app is a game
@@ -337,10 +289,12 @@ function getAppLaunchingText(app) {
     return isGameApp(app) ? 'Launching...' : 'Opening...';
 }
 
-// The catalogue and the details panel are Svelte islands over lib/marketplace.svelte.js.
+// The Nexus is a Svelte island over lib/marketplace.svelte.js.
 // `marketplaceApps` stays the plain array other modules read; the store mirrors it.
 const iconWaiters = new Map();
 function syncMarketplaceApps(apps) {
+    // Tags are relay data: one spelling of each, so every page and count agrees.
+    for (const app of apps) app.categories = [...new Set((app.categories || []).map(c => String(c).trim().toLowerCase()).filter(Boolean))];
     marketplaceApps = apps;
     VectorSvelte.mktSetApps(apps);
     for (const app of apps) resolveMarketplaceIcon(app);
@@ -370,27 +324,33 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
 });
 
 /**
- * MarketplaceHelpers: the Nexus panel, its cards and the details pane.
+ * MarketplaceHelpers: the Nexus, its pages, one app in full and the Play with Friends picker.
  * @typedef {Object} MarketplaceHelpers
- * @property {(app: object) => string} iconKey
- * @property {(app: object) => string} actionText
+ * @property {(app: object) => string|null} iconKey   null for a listing without an icon
+ * @property {(app: object) => string} actionText   "Play" for a game, "Open" for an app
  * @property {(bytes: number) => string} fileSize
- * @property {(ts: number) => string} publishDate
+ * @property {(ts: number) => string} publishDate   unix seconds
+ * @property {(ms: number) => string} playedAgo   "2d ago", "just now"
  * @property {(url: string) => string} sourceUrl
- * @property {(text: string, el: Element) => void} showTip
- * @property {() => void} hideTip
+ * @property {(view: string, category?: string) => void} show   a page: discover, library, updates, all, category
  * @property {(app: object) => void} showDetails
  * @property {() => void} closeDetails
  * @property {() => void} retry
- * @property {(app: object) => void} cardAction
- * @property {(app: object) => void} install
- * @property {(app: object) => void} update
- * @property {(app: object) => void} play
+ * @property {(app: object) => void} cardAction   update, play or install, whichever comes next
  * @property {(app: object) => void} uninstall
- * @property {(app: object, permissionId: string, on: boolean) => void} setPermission
+ * @property {() => void} updateAll
+ * @property {(app: object) => void} playWith   pick a chat to send it to
+ * @property {() => void} closePicker
+ * @property {() => object[]} pickChats   [{ id, name, sub, avatar, group }], newest first
+ * @property {(app: object, chatId: string) => void} sendTo
+ * @property {(app: object) => void} loadPerms   the open app's permission toggles
+ * @property {(app: object, permissionId: string, on: boolean) => Promise<boolean>} setPermission   false when it didn't save
  * @property {(app: object) => void} resetPermissions
- * @property {(npub: string) => object|null} publisher
+ * @property {(npub: string) => { name: string, avatar: string|null, veiled?: boolean }|null} publisher
  * @property {(npub: string) => void} openPublisher
+ * @property {(app: object) => boolean} isMine   published by this account, so it can edit the listing
+ * @property {(on: boolean) => void} setFitOnly   only what fits this device, remembered on it
+ * @property {(app: object) => void} editListing
  * @property {(url: string) => void} openUrl
  * @property {() => void} back
  */
@@ -400,21 +360,27 @@ function registerMarketplaceHandlers() {
         actionText: getAppActionText,
         fileSize: (n) => formatBytes(n, 1),
         publishDate: formatPublishDate,
+        playedAgo: formatPlayedAgo,
         sourceUrl: formatSourceUrl,
-        showTip: showGlobalTooltip,
-        hideTip: hideGlobalTooltip,
+        show: (view, category) => { popBack('app-details'); VectorSvelte.mktShow(view, category); },
         showDetails: showAppDetails,
         closeDetails: closeAppDetailsPanel,
         retry: () => initMarketplace(),
         cardAction: handleAppInstallOrPlay,
-        install: installFromDetails,
-        update: updateFromDetails,
-        play: playFromDetails,
         uninstall: uninstallFromDetails,
+        updateAll: updateAllApps,
+        playWith: openPlayWith,
+        closePicker: () => { popBack('nexus-picker'); VectorSvelte.mktClosePicker(); },
+        pickChats: nexusChatChoices,
+        sendTo: sendAppToChat,
+        loadPerms: loadAppPermissions,
         setPermission: setAppPermission,
         resetPermissions: resetAppPermissions,
         publisher: publisherProfile,
         openPublisher: openPublisherProfile,
+        isMine: (app) => app.publisher === strPubkey,
+        setFitOnly: setNexusFitOnly,
+        editListing: (app) => showEditListingDialog(current(app)),
         openUrl: (url) => confirmAndOpenUrl(url),   // a listing's source URL is relay data
         back: () => { hideMarketplacePanel(); },
     };
@@ -423,7 +389,17 @@ function registerMarketplaceHandlers() {
 // Registered once every script is in: the bag calls helpers from files that load later.
 document.addEventListener('DOMContentLoaded', registerMarketplaceHandlers, { once: true });
 
-/** Run one action on an app with the button showing it, and a 2s "Failed" if it throws. */
+/** How long ago something was played, said briefly: "just now", "5m ago", "2d ago", "3 Oct". */
+function formatPlayedAgo(ms) {
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    if (s < 86400 * 7) return `${Math.floor(s / 86400)}d ago`;
+    return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
+/** Run one action on an app with its button showing it, and a 2s "Failed" if it throws. */
 async function runAppAction(app, kind, label, failedLabel, fn) {
     VectorSvelte.mktSetAction(app.id, { kind, label });
     try {
@@ -440,55 +416,71 @@ async function runAppAction(app, kind, label, failedLabel, fn) {
     }
 }
 
+function current(app) { return marketplaceApps.find(a => a.id === app.id) || app; }
+
+/** Mirror a patch onto the plain array other modules read as well as the store. */
+function patchMarketplaceApp(id, fields) {
+    marketplaceApps = marketplaceApps.map(a => a.id === id ? { ...a, ...fields } : a);
+    VectorSvelte.mktPatchApp(id, fields);
+}
+
 async function installApp(app) {
     return runAppAction(app, 'installing', 'Installing', 'Failed', async () => {
-        await installMarketplaceApp(app.id);
-        VectorSvelte.mktPatchApp(app.id, { installed: true, installed_version: app.version });
+        const path = await installMarketplaceApp(app.id);
+        patchMarketplaceApp(app.id, { installed: true, installed_version: app.version, local_path: path || null, update_available: false });
     });
 }
 
 async function updateApp(app) {
     return runAppAction(app, 'updating', 'Updating', 'Failed', async () => {
-        await updateMarketplaceApp(app.id);
-        VectorSvelte.mktPatchApp(app.id, { installed_version: app.version, update_available: false });
+        const path = await updateMarketplaceApp(app.id);
+        patchMarketplaceApp(app.id, { installed_version: app.version, update_available: false, ...(path ? { local_path: path } : {}) });
     });
 }
 
 async function launchApp(app) {
-    return runAppAction(app, 'launching', getAppLaunchingText(app), getAppActionText(app), () => openMarketplaceApp(app.id, app));
+    const done = await runAppAction(app, 'launching', getAppLaunchingText(app), getAppActionText(app), () => openMarketplaceApp(app.id, app));
+    if (done) loadNexusPlays();
+    return done;
 }
 
-/** The card button: update if one is waiting, play if installed, otherwise install. */
+/** The one-tap action: update if one is waiting, play if installed, otherwise install. */
 async function handleAppInstallOrPlay(app) {
+    app = current(app);
     if (app.update_available) await updateApp(app);
     else if (app.installed || app.local_path) await launchApp(app);
     else await installApp(app);
 }
 
-/**
- * Close the app details panel with fade out animation
- * @returns {Promise<void>} Resolves when the animation completes
- */
-function closeAppDetailsPanel() {
-    if (!VectorSvelte.mktState().detailsOpen) return Promise.resolve();
-    popBack('app-details');
-    return VectorSvelte.mktClosePanel('details').then(() => VectorSvelte.mktCloseDetails());
+/** Every waiting update, one at a time: they share the connection and the disk. */
+async function updateAllApps() {
+    for (const app of marketplaceApps.filter(a => a.update_available)) {
+        if (!VectorSvelte.mktActions().get(app.id)) await updateApp(app);
+    }
 }
 
-/** Open the details panel on one app. */
+function closeAppDetailsPanel() {
+    popBack('app-details');
+    if (VectorSvelte.mktState().detailsId) VectorSvelte.mktCloseDetails();
+}
+
+/** Open one app in full (its page loads its own permissions), fetching its publisher's
+ *  profile if this is the first we've seen of them. */
 function showAppDetails(app) {
-    if (!VectorSvelte.mktState().detailsOpen) pushBack('app-details', () => { closeAppDetailsPanel(); });
+    if (!VectorSvelte.mktState().detailsId) pushBack('app-details', closeAppDetailsPanel);
+    VectorSvelte.ensureSignals({ profiles: [app.publisher] });
     VectorSvelte.mktOpenDetails(app.id);
-    VectorSvelte.mktOpenDetailsPanel();
-    if (app.requested_permissions && app.requested_permissions.length > 0 && (app.installed || app.local_path)) {
-        loadAppPermissions(app);
+    if (app.publisher && !getProfile(app.publisher) && !strangerProfileRequested.has(app.publisher)) {
+        strangerProfileRequested.add(app.publisher);
+        invoke('load_profile', { npub: app.publisher }).catch(() => {});
     }
 }
 
 /** Permission toggles keyed by the bundle hash: content-based, so a re-upload asks again. */
 async function loadAppPermissions(app) {
     const fileHash = app.blossom_hash;
-    if (!fileHash) { VectorSvelte.mktSetPerms({ error: 'No permissions available' }); return; }
+    const shown = () => VectorSvelte.mktState().detailsId === app.id;
+    if (!fileHash) { if (shown()) VectorSvelte.mktSetPerms({ error: 'No permissions available' }); return; }
     try {
         const available = await invoke('miniapp_get_available_permissions');
         const grantedStr = await invoke('miniapp_get_granted_permissions', { fileHash });
@@ -497,10 +489,10 @@ async function loadAppPermissions(app) {
             const info = available.find(p => p.id === id);
             return info ? { id, label: info.label, description: info.description, granted: granted.has(id) } : null;
         }).filter(Boolean);
-        if (VectorSvelte.mktState().detailsId === app.id) VectorSvelte.mktSetPerms({ items });
+        if (shown()) VectorSvelte.mktSetPerms({ items });
     } catch (error) {
         console.error('Failed to load app permissions:', error);
-        VectorSvelte.mktSetPerms({ error: 'Failed to load permissions' });
+        if (shown()) VectorSvelte.mktSetPerms({ error: 'Failed to load permissions' });
     }
 }
 
@@ -508,10 +500,14 @@ async function setAppPermission(app, permission, granted) {
     try {
         await invoke('miniapp_set_permission', { fileHash: app.blossom_hash, permission, granted });
         const perms = VectorSvelte.mktPerms();
-        if (perms?.items) VectorSvelte.mktSetPerms({ items: perms.items.map(p => p.id === permission ? { ...p, granted } : p) });
+        if (perms?.items && VectorSvelte.mktState().detailsId === app.id) {
+            VectorSvelte.mktSetPerms({ items: perms.items.map(p => p.id === permission ? { ...p, granted } : p) });
+        }
+        return true;
     } catch (error) {
         console.error('Failed to update permission:', error);
         loadAppPermissions(app);
+        return false;
     }
 }
 
@@ -524,14 +520,6 @@ async function resetAppPermissions(app) {
     }
 }
 
-function current(app) { return marketplaceApps.find(a => a.id === app.id) || app; }
-
-async function installFromDetails(app) {
-    if (await installApp(app)) loadAppPermissions(current(app));
-}
-async function updateFromDetails(app) { await updateApp(app); }
-async function playFromDetails(app) { await launchApp(app); }
-
 async function uninstallFromDetails(app) {
     const confirmed = await popupConfirm(
         `Uninstall ${app.name}?`,
@@ -541,10 +529,76 @@ async function uninstallFromDetails(app) {
         'vector_warning.svg'
     );
     if (!confirmed) return;
-    await runAppAction(app, 'uninstalling', 'Uninstalling...', 'Failed', async () => {
-        await uninstallMarketplaceApp(app.id, app.name);
-        VectorSvelte.mktPatchApp(app.id, { installed: false, local_path: null });
-    });
+    if (await runAppAction(app, 'uninstalling', 'Uninstalling', 'Failed', () => uninstallMarketplaceApp(app.id, app.name))) {
+        patchMarketplaceApp(app.id, { installed: false, local_path: null, installed_version: null, update_available: false });
+        if (VectorSvelte.mktState().detailsId === app.id) VectorSvelte.mktSetPerms(null);
+        loadNexusPlays();
+    }
+}
+
+/** What you've played from the Nexus, newest first, one entry per app. */
+async function loadNexusPlays() {
+    try {
+        const history = await invoke('miniapp_get_history', { limit: null });
+        const seen = new Map();
+        for (const e of history || []) {
+            if (!e.marketplace_id) continue;
+            const at = e.last_opened_at * 1000;
+            const had = seen.get(e.marketplace_id);
+            if (!had || had.at < at) seen.set(e.marketplace_id, { id: e.marketplace_id, at, count: e.open_count + (had?.count || 0) });
+            else had.count += e.open_count;
+        }
+        VectorSvelte.mktSetPlayed([...seen.values()].sort((a, b) => b.at - a.at));
+    } catch (error) {
+        console.error('Failed to load Mini App history:', error);
+    }
+}
+
+/** Play with Friends: install it if needed, then choose who to play with. */
+async function openPlayWith(app) {
+    app = current(app);
+    if (!(app.installed || app.local_path) && !(await installApp(app))) return;
+    // The download outlived the visit: no picker over wherever they went.
+    const st = VectorSvelte.mktState();
+    if (!st.panelOpen || st.panelClosing) return;
+    pushBack('nexus-picker', () => VectorSvelte.mktClosePicker());
+    VectorSvelte.mktOpenPicker(app.id);
+}
+
+/** The chats a game can go to, newest first: DMs you're talking in, and the channels you can post in. */
+function nexusChatChoices() {
+    const out = [];
+    const icons = new Map();
+    for (const chat of arrChats) {
+        const communityId = communityIdOfChat(chat);
+        if (communityId && chat.metadata?.avatar_cached && !icons.has(communityId)) icons.set(communityId, convertFileSrc(chat.metadata.avatar_cached));
+    }
+    for (const chat of arrChats) {
+        if (chat.id === strPubkey || chat._joining) continue;
+        const communityId = communityIdOfChat(chat);
+        if (communityId) {
+            const channel = communityChannelsCache.get(communityId)?.find(c => c.id === chat.id);
+            if (channel?.view === 'voice' || !channelAllowsSend(chat) || channelAwaitsWriterKey(chat)) continue;
+            const cf = chat.metadata?.custom_fields || {};
+            out.push({ id: chat.id, name: cf.name || 'Community', sub: `#${channel?.name || cf.channel_name || 'general'}`, avatar: icons.get(communityId) || null, group: true });
+        } else if (!chatIsGroup(chat) && chat.messages.length && !chatIsRequest(chat) && !getProfile(chat.id)?.is_blocked) {
+            const profile = getProfile(chat.id);
+            out.push({ id: chat.id, name: getName(profile || chat.id), sub: 'Direct message', avatar: getProfileAvatarSrc(profile), group: false });
+        }
+    }
+    return out;
+}
+
+/** Send an installed app to a chat as an invite, open that chat, and start playing. */
+async function sendAppToChat(app, chatId) {
+    popBack('nexus-picker');
+    VectorSvelte.mktClosePicker();
+    app = current(app);
+    const path = app.local_path || await checkAppInstalled(app.id).catch(() => null);
+    if (!path) return;
+    await openChat(chatId);
+    await inviteMiniAppToChat({ src_url: path, name: app.name, marketplace_id: app.id, categories: (app.categories || []).join(',') }, chatId);
+    loadNexusPlays();
 }
 
 /** The publisher as the profile list knows them, or null for a bare npub. */
@@ -562,49 +616,33 @@ function publisherProfile(npub) {
 
 async function openPublisherProfile(npub) {
     if (!npub) return;
-    await Promise.all([closeAppDetailsPanel(), hideMarketplacePanel()]);
+    await hideMarketplacePanel();
+    // Reopened while it closed: the Nexus stays, the profile doesn't open over it.
+    if (VectorSvelte.mktState().panelOpen) return;
     openProfile((getProfile(npub)) || { id: npub });
 }
-
-function addMarketplaceFilter(category) { VectorSvelte.mktAddFilter(category); }
-function clearMarketplaceFilters() { VectorSvelte.mktClearFilters(); }
 
 /** Open the Nexus: cached apps at once, then a fresh fetch with install status. */
 async function initMarketplace() {
     if (_marketplaceInitInProgress) return;
     _marketplaceInitInProgress = true;
-    clearMarketplaceFilters();
-    VectorSvelte.mktSetAnimate(false);
-
+    detectNexusDevice();
+    loadNexusPlays();
+    // Loading lasts until the network answers; the cache, when there is one, shows meanwhile.
     VectorSvelte.mktSetLoading(true);
     try {
-        const cachedApps = await getCachedMarketplaceApps();
-        if (cachedApps.length > 0) {
-            VectorSvelte.mktSetLoading(false);
-        } else {
-            // Nothing cached: the first paint comes from the network, so it fades in.
-            VectorSvelte.mktSetAnimate(true);
-        }
+        await getCachedMarketplaceApps();
         await fetchMarketplaceApps(true);
         await syncInstallStatus();
         await getCachedMarketplaceApps();
         VectorSvelte.mktSetLoading(false);
-        VectorSvelte.flushSync();
-        VectorSvelte.mktSetAnimate(false);
     } catch (error) {
         console.error('Failed to initialize marketplace:', error);
         VectorSvelte.mktSetError(error.toString());
+        if (marketplaceApps.length) showToast("Couldn't refresh the Nexus");
     } finally {
         _marketplaceInitInProgress = false;
     }
-}
-
-/**
- * Refresh the marketplace (fetch new data)
- * @param {HTMLElement} container - The marketplace container element
- */
-async function refreshMarketplace() {
-    await initMarketplace();
 }
 
 // ============================================================================
@@ -713,7 +751,8 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
         if (existingApp.developer) f.developer = existingApp.developer;
         if (existingApp.source_url) f.source = existingApp.source_url;
         if (existingApp.categories?.length) {
-            f.categories = existingApp.categories.filter(c => c !== 'game' && c !== 'app').join(', ');
+            const tags = VectorSvelte.splitControlTags(existingApp.categories.filter(c => c !== 'game' && c !== 'app'));
+            Object.assign(f, { categories: tags.rest.join(', '), touch: tags.touch, pad: tags.pad, keys: tags.keys });
             f.isGame = existingApp.categories.includes('game');
         }
         if (existingApp.version) f.version = existingApp.version;
@@ -730,7 +769,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
         VectorSvelte.openPublishDialog({
             id: defaultAppId, name: miniAppInfo?.name || '', description: miniAppInfo?.description || '',
             version: miniAppInfo?.version || '1.0.0', isGame: true, categories: '', developer: '',
-            source: miniAppInfo?.source_code_url || '', changelog: '',
+            source: miniAppInfo?.source_code_url || '', changelog: '', touch: false, pad: false, keys: false,
         }, miniAppIconSrc(miniAppInfo) || '', {
             cancel: () => { close(); resolve(false); },
             idInput: () => {
@@ -748,10 +787,9 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
                 const selected = st.perms.filter(p => p.checked).map(p => p.id);
                 const permissionsStr = selected.length > 0 ? selected.join(',') : null;
                 // Parse categories and add the game or app tag at the beginning.
-                const categories = f.categories.trim()
-                    ? f.categories.toLowerCase().split(',').map(c => c.trim()).filter(c => c)
-                    : [];
-                categories.unshift(f.isGame ? 'game' : 'app');
+                const categories = [...new Set([f.isGame ? 'game' : 'app',
+                    ...f.categories.toLowerCase().split(',').map(c => c.trim()).filter(Boolean),
+                    ...VectorSvelte.controlTags(f)])];
                 VectorSvelte.setPublishBusy(true);
                 try {
                     const eventId = await publishMarketplaceApp(
@@ -781,6 +819,94 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
     });
 }
 
+/**
+ * Edit a listing you published, over the package it already has: everything but the App
+ * ID and version, which name that package. Resolves true once it's live.
+ * @param {MarketplaceApp} app
+ */
+function showEditListingDialog(app) {
+    const st = VectorSvelte.publishState();
+    const close = () => {
+        VectorSvelte.closePublishDialog();
+        setTimeout(() => VectorSvelte.unmountPublishDialog(), 300);
+    };
+    const requested = (app.requested_permissions || '').split(',').map(p => p.trim()).filter(Boolean);
+    const tags = VectorSvelte.splitControlTags((app.categories || []).filter(c => c !== 'game' && c !== 'app'));
+    return new Promise((resolve) => {
+        VectorSvelte.openPublishDialog({
+            id: app.id, name: app.name, description: app.description || '', version: app.version,
+            isGame: isGameApp(app), categories: tags.rest.join(', '), touch: tags.touch, pad: tags.pad, keys: tags.keys,
+            developer: app.developer || '', source: app.source_url || '', changelog: app.changelog || '',
+        }, VectorSvelte.mktIcons().get(marketplaceIconKey(app)) || '', {
+            cancel: () => { close(); resolve(false); },
+            submit: async () => {
+                const f = st.form;
+                const name = f.name.trim();
+                if (!name) { showToast('A listing needs a name'); return; }
+                const categories = [f.isGame ? 'game' : 'app',
+                    ...f.categories.toLowerCase().split(',').map(c => c.trim()).filter(Boolean),
+                    ...VectorSvelte.controlTags(f)];
+                const permissions = st.perms.filter(p => p.checked).map(p => p.id).join(',') || null;
+                VectorSvelte.setPublishBusy(true);
+                try {
+                    await invoke('marketplace_edit_listing', {
+                        appId: app.id, name, description: f.description.trim(), categories: [...new Set(categories)],
+                        changelog: f.changelog.trim() || null, developer: f.developer.trim() || null,
+                        sourceUrl: f.source.trim() || null, permissions,
+                    });
+                    close();
+                    showToast('Listing Updated');
+                    resolve(true);
+                } catch (error) {
+                    console.error('Failed to edit listing:', error);
+                    VectorSvelte.setPublishBusy(false);
+                    showToast(String(error));
+                }
+            },
+        }, 'edit');
+        setTimeout(() => VectorSvelte.activatePublishDialog(), 10);
+        invoke('miniapp_get_available_permissions').then((available) => {
+            VectorSvelte.setPublishPerms(available);
+            for (const perm of st.perms) perm.checked = requested.includes(perm.id);
+        }).catch(() => VectorSvelte.setPublishPermsError('Failed to load permissions'));
+    });
+}
+
+// ============================================================================
+// This device's controls
+// ============================================================================
+
+const NEXUS_FIT_KEY = 'nexus_fit_only';
+
+/** What this device plays with, as the Nexus fits apps to it: touch, a keyboard and mouse
+ *  (a fine pointer stands in for both), and any controller the browser has been shown. */
+function detectNexusDevice() {
+    const pads = [...(navigator.getGamepads?.() || [])].filter(Boolean);
+    const keys = matchMedia('(any-pointer: fine)').matches;
+    VectorSvelte.mktSetDevice({
+        touch: matchMedia('(any-pointer: coarse)').matches || navigator.maxTouchPoints > 0,
+        keys,
+        pad: pads.length > 0,
+        phone: !keys && matchMedia('(pointer: coarse)').matches,
+    });
+}
+
+function setNexusFitOnly(on) {
+    VectorSvelte.mktSetFitOnly(on);
+    try { localStorage.setItem(NEXUS_FIT_KEY, String(on)); } catch (_) { /* this session only */ }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    let fitOnly = true;
+    try { fitOnly = localStorage.getItem(NEXUS_FIT_KEY) !== 'false'; } catch (_) { /* the default stands */ }
+    VectorSvelte.mktSetFitOnly(fitOnly);
+    detectNexusDevice();
+}, { once: true });
+// A controller shows itself on its first button press; a pointer can come and go (a tablet's keyboard).
+window.addEventListener('gamepadconnected', detectNexusDevice);
+window.addEventListener('gamepaddisconnected', detectNexusDevice);
+for (const q of ['(any-pointer: coarse)', '(any-pointer: fine)']) matchMedia(q).addEventListener?.('change', detectNexusDevice);
+
 // ============================================================================
 // Install Progress Listener
 // ============================================================================
@@ -792,14 +918,8 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
 function setupMarketplaceProgressListener() {
     window.__TAURI__.event.listen('marketplace_install_progress', (event) => {
         const { app_id, progress } = event.payload;
-
-        // Find all progress spinners for this app
-        const spinners = document.querySelectorAll(`.marketplace-progress-spinner[data-app-id="${CSS.escape(app_id)}"]`);
+        VectorSvelte.mktSetProgress(app_id, progress);
         const displayProgress = Math.max(5, progress);
-
-        for (const spinner of spinners) {
-            spinner.style.setProperty('--progress', `${displayProgress}%`);
-        }
 
         // Also update any Mini Apps panel downloading spinners
         const miniappSpinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-app-id="${CSS.escape(app_id)}"]`);

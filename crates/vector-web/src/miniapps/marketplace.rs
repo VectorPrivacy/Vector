@@ -110,6 +110,10 @@ async fn fetch_apps(trusted_only: bool) -> Result<Vec<MarketplaceApp>, String> {
         for event in events.iter() {
             let Some(mut app) = parse_marketplace_event(event) else { continue };
             if let Some(old) = m.apps.get(&app.id) {
+                // Of an app's copies the newest signed is the app, whichever relay answers last.
+                if old.signed_at > app.signed_at {
+                    continue;
+                }
                 app.installed = old.installed;
                 app.local_path = old.local_path.clone();
                 app.icon_cached = app.icon_cached.or_else(|| old.icon_cached.clone());
@@ -305,6 +309,38 @@ fn install_status(id: &str) -> Value {
     }
 }
 
+/// A listing you published, its text, tags and permissions re-signed over the same package.
+async fn edit_listing(a: &Args) -> Result<(), String> {
+    let id = a.str("appId")?;
+    let current = listing(&id)?;
+    let (name, description) = (a.str("name")?, a.str("description")?);
+    let categories: Vec<String> = a.de("categories")?;
+    let opt = |k: &str| a.str(k).ok().filter(|s| !s.is_empty());
+    let (changelog, developer, source_url, permissions) = (opt("changelog"), opt("developer"), opt("sourceUrl"), opt("permissions"));
+    let session = vector_core::db::current_session();
+    let edited = vector_core::webxdc::edit_marketplace_listing(&current, &vector_core::webxdc::MarketplaceListing {
+        app_id: &id,
+        name: &name,
+        description: &description,
+        version: &current.version,
+        categories: categories.iter().map(String::as_str).collect(),
+        changelog: changelog.as_deref(),
+        developer: developer.as_deref(),
+        source_url: source_url.as_deref(),
+        permissions: permissions.as_deref(),
+        released_at: None,
+    })
+    .await?;
+    if !session.is_live() {
+        return Err("Account changed during the edit".into());
+    }
+    market(|m| m.upsert(edited));
+    let list = apps();
+    let _ = db::miniapps::save_marketplace_cache(&list);
+    emitter::emit("marketplace_apps_updated", &list);
+    Ok(())
+}
+
 pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Result<Value, String>>> + 'a>> {
     Box::pin(async move {
         let id = || a.str("appId");
@@ -351,6 +387,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> std::pin::Pin<Box<dyn std::fut
                 Value::Null
             }),
             "marketplace_get_trusted_publisher" => Ok(json!(TRUSTED_PUBLISHER)),
+            "marketplace_edit_listing" => edit_listing(a).await.map(|_| Value::Null),
             _ => return None,
         })
     })

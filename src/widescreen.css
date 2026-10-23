@@ -618,6 +618,33 @@ body.ws #settings > .cs-nav {
   border-right: 1px solid var(--ws-seam);
 }
 
+/* The Nexus docks the same way: its column at the list's width beside the rail, its
+   page the rest. It opens and closes at once, as every pane here does; its pages
+   still rise in. 0s, not none: the close settles on animationend. Above Settings (40),
+   which may stay shown beneath it; below the list's resize handle (45). */
+body.ws .nx {
+  inset: var(--chrome-h) 0 0 var(--ws-rail-w);
+  z-index: 42;
+  animation-duration: 0s;
+}
+
+body.ws .nx > .nx-nav {
+  width: var(--ws-list-w);
+  background-color: var(--ws-list-bg);
+  border-right: 1px solid var(--ws-seam);
+}
+
+/* Level with Settings' bar beside it. */
+body.ws .nx-top {
+  height: 50px;
+  padding: 0 14px 0 28px;
+  border-bottom-color: #171717;
+}
+
+body.ws .nx-top:has(.nx-top-back) {
+  padding-left: 12px;
+}
+
 /* The account row moves into the rail footer (see widescreen.js), so its
    in-list incarnation must not also reserve 60px at the top of the list. */
 body.ws #ws-rail-account #account {

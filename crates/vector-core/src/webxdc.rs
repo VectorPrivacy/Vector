@@ -230,8 +230,10 @@ pub struct MarketplaceApp {
     pub source_url: Option<String>,
     /// Publisher's public key (npub)
     pub publisher: String,
-    /// Event creation timestamp
+    /// When it was released: the event's time, or the date an edit of it carries
     pub published_at: u64,
+    /// When this copy was signed: of an app's copies, the newest is the app
+    pub signed_at: u64,
     /// Whether this app is installed locally
     pub installed: bool,
     /// Local file path if installed
@@ -291,6 +293,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
     let mut developer = None;
     let mut source_url = None;
     let mut requested_permissions = String::new();
+    let mut released_at: Option<u64> = None;
 
     for tag in event.tags.iter() {
         let tag_vec: Vec<String> = tag.clone().to_vec();
@@ -319,6 +322,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
                 // Permissions tag format: ["permissions", "microphone,camera,fullscreen"]
                 requested_permissions = tag_vec[1].clone();
             }
+            "published_at" => released_at = tag_vec[1].parse().ok(),
             "t" => {
                 // Skip the generic "miniapp" and "webxdc" tags for categories
                 let tag_value = &tag_vec[1];
@@ -341,6 +345,9 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
     let download_url = download_url?;
 
     let publisher = event.pubkey.to_bech32().unwrap_or_else(|_| event.pubkey.to_hex());
+    // An edited listing keeps the release date it carries; one claimed after the event itself isn't believed.
+    let created = event.created_at.as_secs();
+    let published_at = released_at.filter(|t| *t <= created).unwrap_or(created);
 
     Some(MarketplaceApp {
         id,
@@ -358,7 +365,8 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
         developer,
         source_url,
         publisher,
-        published_at: event.created_at.as_secs(),
+        published_at,
+        signed_at: created,
         installed: false,
         local_path: None,
         installed_version: None,
@@ -379,6 +387,8 @@ pub struct MarketplaceListing<'a> {
     pub source_url: Option<&'a str>,
     /// Comma-separated permissions string
     pub permissions: Option<&'a str>,
+    /// The release date an edit keeps (`published_at` tag); None for a new release, dated by the event.
+    pub released_at: Option<u64>,
 }
 
 /// Build a Nostr event for publishing a Mini App to the marketplace
@@ -390,16 +400,33 @@ pub async fn build_marketplace_event<T: crate::signer::VectorSigner>(
     size: u64,
     icon_info: Option<(&str, &str)>, // (url, mime_type)
 ) -> Result<Event, String> {
+    let tags = marketplace_tags(listing, blossom_hash, download_url, size, icon_info);
+    EventBuilder::new(Kind::from(MINIAPP_MARKETPLACE_KIND), listing.changelog.unwrap_or(""))
+        .tags(tags)
+        .finalize_async(signer)
+        .await
+        .map_err(|e| format!("Failed to sign marketplace event: {}", e))
+}
+
+/// A listing's tags; an icon without a known MIME type is written without one.
+fn marketplace_tags(
+    listing: &MarketplaceListing<'_>,
+    blossom_hash: &str,
+    download_url: &str,
+    size: u64,
+    icon_info: Option<(&str, &str)>,
+) -> Vec<Tag> {
     let MarketplaceListing {
         app_id,
         name,
         description,
         version,
         ref categories,
-        changelog,
         developer,
         source_url,
         permissions,
+        released_at,
+        changelog: _,
     } = *listing;
     let mut tags = vec![
         Tag::custom("d", vec![app_id.to_string()]),
@@ -415,10 +442,15 @@ pub async fn build_marketplace_event<T: crate::signer::VectorSigner>(
 
     // Add optional icon with MIME type: ["icon", "<url>", "<mime-type>"]
     if let Some((icon_url, mime_type)) = icon_info {
-        tags.push(Tag::custom(
-            "icon",
-            vec![icon_url.to_string(), mime_type.to_string()]
-        ));
+        let mut icon = vec![icon_url.to_string()];
+        if !mime_type.is_empty() {
+            icon.push(mime_type.to_string());
+        }
+        tags.push(Tag::custom("icon", icon));
+    }
+
+    if let Some(at) = released_at {
+        tags.push(Tag::custom("published_at", vec![at.to_string()]));
     }
 
     // Add optional developer name
@@ -456,15 +488,100 @@ pub async fn build_marketplace_event<T: crate::signer::VectorSigner>(
         }
     }
 
-    let content = changelog.unwrap_or("");
+    tags
+}
 
-    let event_builder = EventBuilder::new(Kind::from(MINIAPP_MARKETPLACE_KIND), content)
-        .tags(tags);
-
-    event_builder
-        .finalize_async(signer)
+/// Re-sign a listing's metadata over the package it already names: its text, tags and
+/// permissions change, its download and release date don't. Only its publisher can, as
+/// the replacement is keyed by their pubkey. The version stays the package's.
+pub async fn edit_marketplace_listing(
+    current: &MarketplaceApp,
+    listing: &MarketplaceListing<'_>,
+) -> Result<MarketplaceApp, String> {
+    if listing.app_id != current.id {
+        return Err("A listing keeps its App ID".into());
+    }
+    let me = crate::state::my_public_key().ok_or("Not signed in")?;
+    if PublicKey::parse(&current.publisher).ok() != Some(me) {
+        return Err("Only its publisher can edit this listing".into());
+    }
+    let signer = crate::signer::active_signer()?;
+    let listing = MarketplaceListing {
+        version: &current.version,
+        categories: listing.categories.clone(),
+        released_at: Some(current.published_at),
+        ..*listing
+    };
+    let icon = current.icon_url.as_deref().map(|url| (url, current.icon_mime.as_deref().unwrap_or("")));
+    let event = build_marketplace_event(&signer, &listing, &current.blossom_hash, &current.download_url, current.size, icon).await?;
+    let client = crate::state::nostr_client().ok_or("Not connected")?;
+    crate::inbox_relays::send_event_pool_first_ok(&client, &event)
         .await
-        .map_err(|e| format!("Failed to sign marketplace event: {}", e))
+        .map_err(|e| format!("Failed to publish the listing: {e}"))?;
+    let mut app = parse_marketplace_event(&event).ok_or("The edited listing didn't parse")?;
+    app.icon_cached = current.icon_cached.clone();
+    app.installed = current.installed;
+    app.local_path = current.local_path.clone();
+    app.installed_version = current.installed_version.clone();
+    app.update_available = current.update_available;
+    Ok(app)
+}
+
+#[cfg(test)]
+mod listing_date_tests {
+    use super::*;
+
+    fn listing(created: u64, released: Option<&str>) -> Event {
+        let mut tags = vec![
+            Tag::custom("d", vec!["app".to_string()]),
+            Tag::custom("name", vec!["App".to_string()]),
+            Tag::custom("x", vec!["ab".repeat(32)]),
+            Tag::custom("url", vec!["https://example.com/x".to_string()]),
+        ];
+        if let Some(at) = released {
+            tags.push(Tag::custom("published_at", vec![at.to_string()]));
+        }
+        EventBuilder::new(Kind::from(MINIAPP_MARKETPLACE_KIND), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created))
+            .finalize(&Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn an_edit_keeps_its_release_date() {
+        assert_eq!(parse_marketplace_event(&listing(2_000, Some("1000"))).unwrap().published_at, 1_000);
+    }
+
+    #[test]
+    fn an_edit_names_the_same_package_and_keeps_its_date() {
+        let listing = MarketplaceListing {
+            app_id: "app", name: "App", description: "New words", version: "1.2.0",
+            categories: vec!["game", "mobile"], changelog: Some("Fixes"), developer: None,
+            source_url: None, permissions: None, released_at: Some(1_000),
+        };
+        let hash = "cd".repeat(32);
+        let tags = marketplace_tags(&listing, &hash, "https://example.com/pkg", 42, Some(("https://example.com/i.png", "")));
+        let event = EventBuilder::new(Kind::from(MINIAPP_MARKETPLACE_KIND), "Fixes")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(5_000))
+            .finalize(&Keys::generate())
+            .unwrap();
+        let app = parse_marketplace_event(&event).unwrap();
+        assert_eq!((app.blossom_hash.as_str(), app.download_url.as_str(), app.size), (hash.as_str(), "https://example.com/pkg", 42));
+        assert_eq!((app.published_at, app.signed_at), (1_000, 5_000));
+        assert_eq!(app.categories, vec!["game", "mobile"]);
+        assert_eq!(app.icon_url.as_deref(), Some("https://example.com/i.png"));
+        assert_eq!(app.icon_mime, None, "no MIME type is written as none, not as empty");
+    }
+
+    #[test]
+    fn a_release_is_dated_by_its_event() {
+        assert_eq!(parse_marketplace_event(&listing(2_000, None)).unwrap().published_at, 2_000);
+        // A release date after the event, or one that isn't a number, isn't believed.
+        assert_eq!(parse_marketplace_event(&listing(2_000, Some("3000"))).unwrap().published_at, 2_000);
+        assert_eq!(parse_marketplace_event(&listing(2_000, Some("soon"))).unwrap().published_at, 2_000);
+    }
 }
 
 #[cfg(test)]

@@ -1,9 +1,11 @@
 // The Nexus publish dialog (trusted publishers): the form's fields, the permission list,
 // the App ID hint, and the submit lock. marketplace.js opens it, prefills from an existing
-// app, and publishes; the component answers through `handlers`.
+// app, and publishes; the component answers through `handlers`. `mode` 'edit' re-signs a
+// listing you published over the package it has: its App ID and version stay.
 const s = $state({
-    open: false, active: false, icon: '', busy: false,
-    form: { id: '', name: '', description: '', version: '1.0.0', isGame: true, categories: '', developer: '', source: '', changelog: '' },
+    open: false, active: false, icon: '', busy: false, mode: 'publish',
+    form: { id: '', name: '', description: '', version: '1.0.0', isGame: true, categories: '', developer: '', source: '', changelog: '',
+        touch: false, pad: false, keys: false },
     perms: [], permsError: '',
     hint: { text: 'Unique identifier (lowercase, no spaces)', accent: false },
 });
@@ -11,8 +13,8 @@ let handlers = $state.raw(null);   // { cancel(), submit(), idInput() }
 
 export function publishState() { return s; }
 export function publishHandlers() { return handlers; }
-export function openPublishDialog(form, icon, h) {
-    Object.assign(s.form, form); s.icon = icon || ''; s.perms = []; s.permsError = ''; s.busy = false;
+export function openPublishDialog(form, icon, h, mode = 'publish') {
+    Object.assign(s.form, form); s.icon = icon || ''; s.perms = []; s.permsError = ''; s.busy = false; s.mode = mode;
     s.hint = { text: 'Unique identifier (lowercase, no spaces)', accent: false };
     s.open = true; s.active = false; handlers = h;
 }

@@ -47,16 +47,14 @@ body.mobile .mod-overlay,
 body.mobile .pivx-dialog-overlay,
 body.mobile .pop-dialog-overlay,
 body.mobile .modal-overlay,
-body.mobile .publish-app-overlay,
 body.mobile .lg-net-modal,
-body.mobile .marketplace-panel { bottom: var(--kb, 0px); }
+body.mobile .nx { bottom: var(--kb, 0px); }
 body.mobile .file-preview-overlay { height: var(--app-h, 100%); }
 /* Any other dialog holding the focused field (web/chrome.js), its card scrolling in what's left. */
 body.mobile [data-kb-fit] { top: 0 !important; bottom: var(--kb, 0px) !important; height: auto !important; }
 body.mobile [data-kb-fit] > * { max-height: 100%; overflow-y: auto; }
 /* Cards sized in vh would outgrow what the keyboard leaves. */
-body.mobile .modal-box,
-body.mobile .publish-app-container { max-height: min(85vh, calc(var(--app-h, 100vh) - 40px)); }
+body.mobile .modal-box { max-height: min(85vh, calc(var(--app-h, 100vh) - 40px)); }
 body.mobile .pivx-dialog { max-height: calc(var(--app-h, 100vh) - 40px); overflow-y: auto; }
 body.mobile .file-preview-container { height: min(650px, calc(var(--app-h, 100dvh) - 40px)); }
 /* The prompt popup is fixed itself, so it centres in what's visible rather than in its container. */

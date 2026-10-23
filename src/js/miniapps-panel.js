@@ -38,23 +38,46 @@ async function showAttachmentPanelMiniApps() {
 /** The tab lit before the marketplace took over, so closing hands it back. */
 let strMarketplacePrevTab = '';
 
+/** Open the Nexus on its front page; opened again, it goes back there. */
 function showMarketplacePanel() {
+    const st = VectorSvelte.mktState();
+    if (st.panelOpen && !st.panelClosing) {
+        popBack('app-details');
+        VectorSvelte.mktShow('discover');
+        return;
+    }
     pushBack('marketplace', () => { hideMarketplacePanel(); });
     strMarketplacePrevTab = VectorSvelte.shellState().tab;
     navbarSelect('miniapps-btn');
+    VectorSvelte.mktReset();
     VectorSvelte.mktOpenPanel();
     initMarketplace();
 }
 
 /**
- * Hides the marketplace panel with fade out animation
- * @returns {Promise<void>} Resolves when the animation completes
+ * Close the Nexus, handing the tab back to whatever was lit before it.
+ * @returns {Promise<void>} Resolves when the closing animation completes
  */
 function hideMarketplacePanel() {
     if (!VectorSvelte.mktState().panelOpen) return Promise.resolve();
+    const closed = closeNexus();
+    navbarSelect(strMarketplacePrevTab === 'miniapps-btn' ? 'chat-btn' : strMarketplacePrevTab);
+    return closed;
+}
+
+/** Another tab took over: the Nexus closes behind it. */
+function leaveNexus() {
+    const st = VectorSvelte.mktState();
+    if (st.panelOpen && !st.panelClosing) closeNexus();
+}
+
+/** Close the Nexus with whatever it had open over it. */
+function closeNexus() {
     popBack('marketplace');
-    navbarSelect(strMarketplacePrevTab);
-    return VectorSvelte.mktClosePanel('panel');
+    popBack('app-details');
+    popBack('nexus-picker');
+    VectorSvelte.mktClosePicker();
+    return VectorSvelte.mktClosePanel();
 }
 
 // The grid is a Svelte island over lib/miniappsgrid.svelte.js; this side reads
@@ -473,17 +496,28 @@ async function playMiniAppAndInvite() {
         return;
     }
 
+    await inviteMiniAppToChat(app, targetChatId, (sent) => {
+        closeMiniAppLaunchDialog();
+        if (sent) closeAttachmentPanel();
+    });
+}
+
+/**
+ * Send a Mini App to a chat as an invite and open it from the new message. `leave(sent)`
+ * runs once it's decided: declined (permissions or network), or on its way.
+ */
+async function inviteMiniAppToChat(app, targetChatId, leave = () => {}) {
     // Check permissions for marketplace apps before doing anything
     const shouldContinue = await checkMiniAppPermissions(app);
     if (!shouldContinue) {
-        closeMiniAppLaunchDialog();
+        leave(false);
         return; // User cancelled
     }
 
     // Network consent BEFORE the file is sent to the chat: declining after the invite already
     // landed would strand a dead lobby message.
     if (!(await confirmMiniAppNetwork(app.src_url))) {
-        closeMiniAppLaunchDialog();
+        leave(false);
         return; // User declined launching multiplayer over clearnet
     }
 
@@ -515,8 +549,7 @@ async function playMiniAppAndInvite() {
             nameOverride: '',
         });
 
-    closeMiniAppLaunchDialog();
-    closeAttachmentPanel();
+    leave(true);
 
     try {
         // The pending bubble (carrying the minted topic) lands in local state

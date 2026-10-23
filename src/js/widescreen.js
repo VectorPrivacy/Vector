@@ -442,6 +442,8 @@ function ccOpenNewMenu(anchor) {
     ];
     // The rail's own + tile is folded away with it.
     if (!VectorSvelte.consoleState().railOpen) items.push({ label: 'New Community', icon: 'users-multi', lead: true, onClick: () => openCreateGroup() });
+    // The phone's tab bar has no Mini Apps tab: the Nexus is reached from here and the composer.
+    items.push({ label: 'Nexus', icon: 'nexus', lead: true, onClick: () => showMarketplacePanel() });
     showContextMenu({ x: r.right, y: r.bottom + 6, items });
 }
 
