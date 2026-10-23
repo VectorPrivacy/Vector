@@ -83,23 +83,41 @@ function wsListCommunityId() {
     return communityIdOfChat(arrChats.find(c => c.id === strOpenChat)) || null;
 }
 
-/** Where you were last, per community, and your last DM. Discord returns you to
- *  the channel you left rather than dumping you in the default one. */
-const wsLastChannel = new Map();
+/** Where you were last, per community (kept across restarts, per account), and your
+ *  last DM. Discord returns you to the channel you left rather than dumping you in
+ *  the default one. Loaded on first use: the account is known only after login. */
+let wsLastChannel = null;
 let wsLastDm = null;
+
+function wsLastChannels() {
+    if (wsLastChannel) return wsLastChannel;
+    try { wsLastChannel = new Map(Object.entries(JSON.parse(localStorage.getItem(`ws_last_channel:${strPubkey}`)) || {})); }
+    catch (_) { wsLastChannel = new Map(); }
+    return wsLastChannel;
+}
 
 function wsRememberOpenChat() {
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat) return;
     const communityId = communityIdOfChat(chat);
-    if (communityId) wsLastChannel.set(communityId, chat.id);
-    else if (chat.chat_type !== 'Community') wsLastDm = chat.id;
+    if (!communityId) {
+        if (chat.chat_type !== 'Community') wsLastDm = chat.id;
+        return;
+    }
+    const last = wsLastChannels();
+    if (last.get(communityId) === chat.id) return;
+    last.set(communityId, chat.id);
+    // Communities since left go with the write.
+    for (const id of last.keys()) if (!arrChats.some(c => communityIdOfChat(c) === id)) last.delete(id);
+    try { localStorage.setItem(`ws_last_channel:${strPubkey}`, JSON.stringify(Object.fromEntries(last))); } catch (_) { /* this session only */ }
+    // Its list row previews the channel you were last in.
+    VectorSvelte.touchCommunity(communityId);
 }
 
-/** The channel a community's rail shortcut opens: where you left it, else its
- *  primary — which is also the fallback when that channel has since gone. */
+/** The channel a community's rail shortcut and list row open: where you left it, else
+ *  its primary — which is also the fallback when that channel has since gone. */
 function wsChannelForCommunity(communityId) {
-    const last = wsLastChannel.get(communityId);
+    const last = wsLastChannels().get(communityId);
     // Only a channel still visible: the one left in may since have been revoked.
     const visible = communityChannelsCache.get(communityId);
     if (last && arrChats.some(c => c.id === last) && (!visible || visible.some(c => c.id === last))) return last;

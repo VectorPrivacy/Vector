@@ -31,6 +31,8 @@
         if (isGroup && communityId) communityVersion(communityId);
         else profileVersion(chat.id);
         const profile = !isGroup ? h.getProfile(chat.id) : null;
+        // A community's channels all touch its community, so `shown` re-derives with them.
+        const shown = isGroup ? h.listRowPreviewChat(chat) : chat;
         return {
             chat,
             isGroup,
@@ -41,11 +43,11 @@
             nMark: h.computeListRowUnreadCount(chat),
             nUnread: h.computeListRowBadgeCount(chat),
             pinged: isGroup && h.listRowPingsMe(chat),
-            last: chat.messages[chat.messages.length - 1] || null,
+            last: shown.messages[shown.messages.length - 1] || null,
             name: isGroup
                 ? (chat.metadata?.custom_fields?.name || `Group ${chat.id.substring(0, 8)}...`)
                 : h.getName(profile || chat.id),
-            preview: h.generateChatPreviewText(chat),
+            preview: h.generateChatPreviewText(shown),
             pinned,
             joining: !!chat._joining,
         };

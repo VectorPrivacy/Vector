@@ -592,12 +592,13 @@ body.cc .chatlist-contact-header {
   margin-bottom: 3px;
 }
 
+/* A read row steps back: its name in weight and colour, its preview in colour. */
 body.cc .chatlist-contact-preview h4 {
   padding-left: 12px;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 400;
   line-height: 20px;
-  color: rgba(255, 255, 255, 0.88);
+  color: #b2b2b2;
 }
 
 body.cc .chatlist-contact.has-unread .chatlist-contact-header h4 {
@@ -609,11 +610,11 @@ body.cc .chatlist-contact-preview p {
   margin-left: 12px;
   font-size: 14px;
   line-height: 19px;
-  color: rgba(255, 255, 255, 0.5);
+  color: #737373;
 }
 
 body.cc .chatlist-contact.has-unread .chatlist-contact-preview p {
-  color: rgba(255, 255, 255, 0.72);
+  color: #b2b2b2;
 }
 
 /* The square avatar already says community. */

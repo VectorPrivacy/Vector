@@ -4,8 +4,8 @@
  * - `generateTypingText` — produces "Typing..." / "X is typing..." for active typers.
  * - `generateChatPreviewText` — last-message preview (text, attachment, payment,
  *   system event, etc.) with sender prefix in groups and mention resolution.
- *
- * Both consumed by row.js (full render) and list.js (partial preview update).
+ * - `listRowPreviewChat` — the chat a row previews: a community's is the channel you
+ *   were last in.
  */
 
 /**
@@ -60,12 +60,31 @@ function latestPreviewSystemEvent(chat) {
     return chat.lastSystemEvent || null;
 }
 
+/** The chat a list row previews: a community row speaks for the channel you were last
+ *  in, else its primary (the row's own chat). */
+function listRowPreviewChat(chat) {
+    const communityId = communityIdOfChat(chat);
+    if (!communityId) return chat;
+    const id = wsChannelForCommunity(communityId);
+    return (id && arrChats.find(c => c.id === id)) || chat;
+}
+
 /**
- * Generate chat preview text for the chatlist
+ * Generate chat preview text for the chatlist. A channel's message or typing line is
+ * led by its channel, as a community row can preview any of them.
  * @param {Chat} chat - The chat object
  * @returns {{ text: string, isTyping: boolean, needsTwemoji: boolean }}
  */
 function generateChatPreviewText(chat) {
+    const preview = chatPreviewText(chat);
+    const channel = chat.metadata?.custom_fields?.channel_name;
+    if (!channel || !preview.said) return preview;
+    const tag = `#${channel}: `;
+    return { ...preview, text: preview.isHtml ? escapeHtml(tag) + preview.text : tag + preview.text, needsTwemoji: true };
+}
+
+/** `said`: the line is something said (a message, a send, a typer), not the chat's state. */
+function chatPreviewText(chat) {
     const isGroup = chatIsGroup(chat);
 
     // Optimistic join in flight: "Joining…" is authoritative over everything (typing, messages, member
@@ -101,7 +120,7 @@ function generateChatPreviewText(chat) {
     // Handle typing indicators
     const typingText = generateTypingText(chat);
     if (typingText) {
-        return { text: typingText, isTyping: true, needsTwemoji: false };
+        return { text: typingText, isTyping: true, needsTwemoji: false, said: true };
     }
 
     // No messages
@@ -127,7 +146,7 @@ function generateChatPreviewText(chat) {
 
     // Pending message
     if (cLastMsg.pending) {
-        return { text: 'Sending...', isTyping: false, needsTwemoji: false, pendingId: cLastMsg.id };
+        return { text: 'Sending...', isTyping: false, needsTwemoji: false, pendingId: cLastMsg.id, said: true };
     }
 
     // Build sender prefix for groups
@@ -144,13 +163,14 @@ function generateChatPreviewText(chat) {
         return {
             text: senderPrefix + 'Sent a ' + getFileTypeInfo(cLastMsg.attachments[0].extension).description,
             isTyping: false,
-            needsTwemoji: false
+            needsTwemoji: false,
+            said: true,
         };
     }
 
     // PIVX payment message
     if (cLastMsg.pivx_payment) {
-        return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false };
+        return { text: senderPrefix + 'Sent a PIVX Payment', isTyping: false, needsTwemoji: false, said: true };
     }
 
     // System event (member joined/left, etc.)
@@ -163,7 +183,7 @@ function generateChatPreviewText(chat) {
     // Times read in the viewer's own zone, as they do in the chat.
     let previewSource = ttLocalize(cLastMsg.content, cLastMsg.text_spans);
     // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
-            previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
+    previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
     previewSource = replaceNostrEmbedRefsForPreview(previewSource);
-    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource, communityIdOfChat(chat))), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
+    return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource, communityIdOfChat(chat))), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags, said: true };
 }

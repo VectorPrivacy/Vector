@@ -130,6 +130,7 @@ function chatlistSnapshot() {
  * @property {(chat: object) => number} computeRowBadgeCount
  * @property {(chat: object) => number} computeRowUnreadCount
  * @property {(chat: object) => { text: string, isHtml: boolean, isTyping: boolean, needsTwemoji: boolean, emojiTags: object[]|null }} generateChatPreviewText   isHtml picks innerHTML over textContent: text is then contentToPreviewHtml's output
+ * @property {(chat: object) => object} listRowPreviewChat   a community row's last-opened channel, else the row's own chat
  * @property {(path: string) => string} convertFileSrc
  * @property {(profile: object|null) => string|null} getProfileAvatarSrc
  * @property {(el: Element) => void} twemojify
@@ -183,6 +184,7 @@ function chatlistHelpers() {
         computeRowBadgeCount,
         computeRowUnreadCount,
         generateChatPreviewText,
+        listRowPreviewChat,
         // avatars + text finishing
         convertFileSrc,
         getProfileAvatarSrc,
@@ -218,10 +220,10 @@ function chatlistHelpers() {
             if (wasContextMenuJustDismissed()) return;
             if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
             if (vm.joining) return;
-            // Slim: a community opens on its channels, as a rail tap would.
-            if (vm.isGroup && ccActive()) return ccShowSpace(vm.communityId);
-            if (chatOnScreen(vm.chat.id)) return;
-            openChat(vm.chat.id);
+            // A community opens on the channel you were last in.
+            const target = (vm.isGroup && wsChannelForCommunity(vm.communityId)) || vm.chat.id;
+            if (chatOnScreen(target)) return;
+            openChat(target);
         },
         createChannel: promptCreateChannel,
         getCategories: getCommunityCategories,
