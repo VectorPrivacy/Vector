@@ -46,6 +46,8 @@
         switch (data.t) {
             case 'ready':
                 ready = true;
+                clearTimeout(slowStart);
+                window.__vectorUnhint?.();
                 storage = data.level || 'persistent';
                 applyCapabilities();
                 // Ahead of the queue: the backend decides what to warm up by it.
@@ -53,11 +55,7 @@
                 for (const msg of queued.splice(0)) worker.postMessage(msg);
                 break;
             case 'fatal':
-                fatal = data.error;
-                console.error('[web] backend stopped:', fatal);
-                for (const msg of queued.splice(0)) settle(msg.id, false, fatal);
-                for (const id of [...pending.keys()]) settle(id, false, fatal);
-                overlay('Vector hit an error and needs to restart.', 'Reload', () => location.reload());
+                stopped(data.error);
                 break;
             case 'file-changed':
                 forget(data.path);
@@ -82,9 +80,38 @@
     const channel = new BroadcastChannel('vector-web');
     let holdLock = null;
 
+    // A worker that never loaded (no module workers, a syntax this engine can't parse, the
+    // network) reports nothing of its own: its error event is the only word.
     function startWorker() {
         worker = new Worker('/web/worker.js', { type: 'module' });
         worker.onmessage = onWorkerMessage;
+        worker.onerror = (e) => { if (!ready) stopped(e?.message || 'The engine did not load'); };
+        // Vanadium and Chrome run WebAssembly without their optimizer when JIT is off for the
+        // site: it works, slowly, and a long load is the only sign.
+        const env = window.__vectorEnv;
+        if (env?.android && env.chromium) {
+            slowStart = setTimeout(() => {
+                if (!ready && !fatal) window.__vectorHint?.('Still loading? Allowing JavaScript JIT for this site (icon left of the address > Permissions) makes Vector much faster.');
+            }, 10000);
+        }
+    }
+    let slowStart = 0;
+
+    // The engine stopped: before it was up, the reason decides what to say; after, it crashed.
+    function stopped(error) {
+        if (fatal) return;
+        fatal = String(error);
+        clearTimeout(slowStart);
+        window.__vectorUnhint?.();
+        console.error('[web] backend stopped:', fatal);
+        for (const msg of queued.splice(0)) settle(msg.id, false, fatal);
+        for (const id of [...pending.keys()]) settle(id, false, fatal);
+        notice(ready ? {
+            title: 'Vector needs to restart',
+            body: 'It hit an error it can\'t recover from. Reloading starts it fresh.',
+            detail: fatal,
+            action: { label: 'Reload', run: () => location.reload() },
+        } : window.__vectorDiagnoseBoot?.(fatal) ?? { title: 'Vector couldn\'t start', detail: fatal, action: { label: 'Reload', run: () => location.reload() } });
     }
 
     function claim() {
@@ -102,7 +129,7 @@
         ready = false;
         dispatchEvent(new Event('vector-web-step-aside'));
         holdLock?.();
-        overlay('Vector is open in another tab.', 'Use here', () => { takeOver(); });
+        notice({ title: 'Vector moved to another tab', body: 'One tab at a time holds your account. Bring it back here whenever you like.', action: { label: 'Use here', run: takeOver } });
     };
 
     // Ask the owner to step aside, then reload once its lock is actually free.
@@ -112,32 +139,15 @@
     }
 
     function blocked() {
-        overlay('Vector is already open in another tab.', 'Use here', () => {
-            takeOver();
-        });
+        notice({ title: 'Vector is open in another tab', body: 'One tab at a time holds your account. Use it here and the other tab steps aside.', action: { label: 'Use here', run: takeOver } });
     }
 
-    function overlay(text, action, onAction) {
-        const show = () => {
-            const el = document.createElement('div');
-            el.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#030303;color:#e5e5e5;font:16px system-ui,sans-serif';
-            const p = document.createElement('p');
-            p.textContent = text;
-            const b = document.createElement('button');
-            b.textContent = action;
-            b.style.cssText = 'padding:10px 22px;border-radius:8px;border:0;background:#59fcb3;color:#030303;font-weight:600;cursor:pointer';
-            b.onclick = onAction;
-            el.append(p, b);
-            document.body.appendChild(el);
-        };
-        if (document.body) show(); else addEventListener('DOMContentLoaded', show);
-    }
+    // Every full-screen word goes through preflight.js's notice, in Vector's own design.
+    const notice = (o) => (window.__vectorNotice ? window.__vectorNotice(o) : console.error('[web]', o.title, o.detail || ''));
 
-    // Tor Browser's Safer and Safest levels turn WebAssembly off, and Vector's core is WebAssembly.
-    if (typeof WebAssembly !== 'object') {
-        fatal = 'WebAssembly is turned off';
-        overlay('Vector needs WebAssembly, which this browser has turned off. In Tor Browser, open the shield menu, set the security level to Standard, then reload.', 'Reload', () => location.reload());
-    } else if (navigator.locks) claim(); else startWorker();
+    // preflight.js already said why this browser can't run Vector, and how to fix it.
+    if (window.__vectorBlocked) fatal = window.__vectorBlocked.title;
+    else if (navigator.locks) claim(); else startWorker();
 
     function settle(id, ok, value) {
         const p = pending.get(id);

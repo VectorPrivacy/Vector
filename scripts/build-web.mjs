@@ -56,7 +56,7 @@ await buildSvelte({ dev: !release });
 
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
-for (const f of ['tauri-shim.js', 'chrome.js', 'media.js', 'push.js', 'whisper.js', 'signer.js', 'miniapps.js', 'calls.js', 'calls-media.js', 'calls-worklet.js', 'worker.js', 'storage.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+for (const f of ['preflight.js', 'tauri-shim.js', 'chrome.js', 'media.js', 'push.js', 'whisper.js', 'signer.js', 'miniapps.js', 'calls.js', 'calls-media.js', 'calls-worklet.js', 'worker.js', 'storage.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
 // Whisper's worker and its two builds (scripts/whisper-web/build.sh); the models are served apart.
 cpSync(join(ROOT, 'web', 'whisper'), join(OUT, 'web', 'whisper'), { recursive: true });
 cpSync(join(ROOT, 'src-tauri', 'src', 'calls', 'ended.wav'), join(OUT, 'web', 'ended.wav'));
@@ -161,6 +161,13 @@ const META = [
     `<meta name="twitter:image" content="${SITE}/og.png">`,
 ].map((m) => `    ${m}\n`).join('');
 
+// With JavaScript off (Tor Browser's Safest level) no script can explain, so the page itself does.
+const NOSCRIPT = '<noscript><div style="position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:28px 22px;box-sizing:border-box;background:#030303;text-align:center;font-family:Rubik,system-ui,sans-serif">'
+    + '<div style="max-width:400px"><img src="/icons/vector_warning.svg" alt="" style="width:76px;height:76px;margin-bottom:14px">'
+    + '<h2 style="margin:0 0 8px;color:#fff;font-size:21px;font-weight:600">Turn on JavaScript for Vector</h2>'
+    + '<p style="margin:0;color:#9a9a9a;font-size:15px;line-height:1.5">Vector runs in your browser on JavaScript. In Tor Browser, open the shield menu and set the Security Level to Standard.</p>'
+    + '</div></div></noscript>';
+
 const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
@@ -168,13 +175,13 @@ writeFileSync(indexPath, html
     // Link previews (Discord's embed stripe) take the first theme-color; media="print"
     // keeps it off the browser chrome, which falls through to the page's dark one.
     .replace('<meta name="theme-color"', '<meta name="theme-color" content="#59fcb3" media="print">\n    <meta name="theme-color"')
-    .replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/push.js"></script>\n    <script src="/web/whisper.js"></script>\n    <script src="/web/calls.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
+    .replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/preflight.js"></script>\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/push.js"></script>\n    <script src="/web/whisper.js"></script>\n    <script src="/web/calls.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
-    .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n  '));
+    .replace('<body>', `<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n    ${NOSCRIPT}\n  `));
 
 // Every injection hangs off a marker in index.html; a missed one must not ship a page without its policy.
 const built = readFileSync(indexPath, 'utf8');
-for (const needed of ['Content-Security-Policy', '/web/tauri-shim.js', '/web/web.css', 'og:image', 'edge-cap']) {
+for (const needed of ['Content-Security-Policy', '/web/preflight.js', '<noscript>', '/web/tauri-shim.js', '/web/web.css', 'og:image', 'edge-cap']) {
     if (!built.includes(needed)) {
         console.error(`[build-web] index.html is missing ${needed}: an injection marker moved`);
         process.exit(1);
