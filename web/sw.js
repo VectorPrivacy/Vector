@@ -42,13 +42,31 @@ async function cachedAsset(request) {
     return res;
 }
 
+// Directory handles by path: a burst of files from one folder (a chat's avatars) walks
+// OPFS once. A folder removed since is found stale on use, and walked again.
+const dirs = new Map();
+
+async function dirOf(parts) {
+    const key = parts.join('/');
+    let dir = dirs.get(key);
+    if (!dir) {
+        dir = parts.length
+            ? await (await dirOf(parts.slice(0, -1))).getDirectoryHandle(parts[parts.length - 1])
+            : await (await navigator.storage.getDirectory()).getDirectoryHandle('files');
+        dirs.set(key, dir);
+    }
+    return dir;
+}
+
 async function openFile(path) {
-    let dir = await navigator.storage.getDirectory();
-    dir = await dir.getDirectoryHandle('files');
     const parts = path.split('/').filter(Boolean);
     const name = parts.pop();
-    for (const p of parts) dir = await dir.getDirectoryHandle(p);
-    return (await dir.getFileHandle(name)).getFile();
+    try {
+        return await (await (await dirOf(parts)).getFileHandle(name)).getFile();
+    } catch {
+        dirs.clear();
+        return (await (await dirOf(parts)).getFileHandle(name)).getFile();
+    }
 }
 
 async function serve(request, path) {

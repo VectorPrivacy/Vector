@@ -72,7 +72,9 @@
 
     async function analyse(id, url) {
         try {
-            decodeCtx ??= new AudioContext();
+            // Offline: decoding needs no audio session. A live context would keep one, and on
+            // iOS that pauses other apps' audio whenever the page comes to the front.
+            decodeCtx ??= new OfflineAudioContext(1, 1, 44100);
             const buffer = await decodeCtx.decodeAudioData(await (await fetch(url)).arrayBuffer());
             emit('audio_duration', { id, duration_ms: Math.round(buffer.duration * 1000) });
             emit('audio_waveform', { id, waveform: waveform(buffer), waveform_fps: FPS, bins: BINS });
