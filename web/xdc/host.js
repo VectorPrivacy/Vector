@@ -42,10 +42,7 @@
         req.onblocked = () => resolve();
     });
 
-    const fail = (why) => {
-        document.body.textContent = `This mini app could not start: ${why}`;
-        document.body.style.cssText = 'color:#ccc;font:14px system-ui;padding:24px';
-    };
+    const fail = (why) => failed(vector, why);
 
     addEventListener('message', async (e) => {
         if (e.source !== window.parent || e.origin !== vector || e.data?.t !== 'xdc-load') return;
@@ -76,6 +73,22 @@
     });
     window.parent.postMessage({ t: 'xdc-host-ready' }, vector);
 })().catch((e) => {
-    document.body.textContent = `This mini app could not start: host: ${e?.name || 'Error'}: ${e?.message || e}`;
-    document.body.style.cssText = 'color:#ccc;font:14px system-ui;padding:24px';
+    failed(`${location.protocol}//${location.host.replace(/^[a-z0-9-]+\.xdc\./, '')}`, `host: ${e?.name || 'Error'}: ${e?.message || e}`);
 });
+
+// Vector says it in the app's window, in its own design; this card is for when it can't.
+function failed(vector, why) {
+    try { window.parent.postMessage({ t: 'xdc-error', kind: 'start', detail: String(why) }, vector); } catch { /* no parent to tell */ }
+    const body = document.body;
+    body.replaceChildren();
+    body.style.cssText = 'margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;font-family:Rubik,system-ui,-apple-system,sans-serif;text-align:center';
+    const title = document.createElement('div');
+    title.textContent = "This mini app couldn't start";
+    title.style.cssText = 'color:#fff;font-size:18px;font-weight:600;margin-bottom:8px';
+    const line = document.createElement('div');
+    line.textContent = String(why);
+    line.style.cssText = 'color:#7a7a7a;font-size:12px;line-height:1.45;max-width:320px;word-break:break-word';
+    const card = document.createElement('div');
+    card.append(title, line);
+    body.append(card);
+}

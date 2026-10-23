@@ -152,6 +152,35 @@ body.mobile .create-group-container { height: calc(var(--app-h, 100vh) - var(--c
 .xdc-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 .xdc-close:hover { background: #c0392b; }
 .xdc-frame { flex: 1; width: 100%; border: 0; background: #0a0a0a; }
+
+/* Why an app can't run, in place of the app: the popup's icon, title and line. */
+.xdc-failure {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 28px 24px;
+    background: #0a0a0a;
+    text-align: center;
+    overflow-y: auto;
+}
+.xdc-failure img { width: 76px; height: 76px; margin-bottom: 6px; }
+.xdc-failure h2 { margin: 0; font-size: 20px; line-height: 26px; }
+.xdc-failure p {
+    margin: 0;
+    max-width: 320px;
+    color: #9a9a9a;
+    font-size: 14px;
+    line-height: 1.45;
+}
+.xdc-failure .xdc-failure-detail {
+    color: #5f5f5f;
+    font-size: 12px;
+    word-break: break-word;
+}
+.xdc-failure-close { margin-top: 14px; }
 /* Full screen on touch devices and narrow screens: no frame, a floating exit chip. */
 .xdc-window.xdc-immersive {
     inset: 0 !important;

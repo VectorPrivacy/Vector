@@ -346,6 +346,42 @@
         frame.src = `${origin}/__vector/host.html`;
     }
 
+    // An app that can't run says why where it would have shown, in the popup's design.
+    const FAILURES = {
+        browser: { title: 'Your browser needs an update', line: 'Mini apps run in the latest Firefox, Chrome and Safari.' },
+        start: { title: "This mini app couldn't start", line: 'Close it and open it again.' },
+    };
+    function showFailure(w, { kind, detail }) {
+        const copy = FAILURES[kind] || FAILURES.start;
+        w.failure?.remove();
+        const el = document.createElement('div');
+        el.className = 'xdc-failure';
+        el.setAttribute('role', 'alert');
+        const icon = document.createElement('img');
+        icon.src = '/icons/vector_warning.svg';
+        icon.alt = '';
+        const title = document.createElement('h2');
+        title.textContent = copy.title;
+        const line = document.createElement('p');
+        line.textContent = copy.line;
+        el.append(icon, title, line);
+        if (detail) {
+            const why = document.createElement('p');
+            why.className = 'xdc-failure-detail';
+            why.textContent = String(detail).slice(0, 300);
+            el.append(why);
+        }
+        const done = document.createElement('button');
+        done.type = 'button';
+        done.className = 'xdc-failure-close';
+        done.textContent = 'Close';
+        done.onclick = () => close(w.info.label);
+        el.append(done);
+        w.frame.hidden = true;
+        w.frame.after(el);
+        w.failure = el;
+    }
+
     // The package goes over once the origin's host page is ready for it.
     async function deliver(w) {
         let bytes;
@@ -396,6 +432,7 @@
             if (e.source !== w.frame.contentWindow || e.origin !== w.origin) continue;
             if (e.data?.t === 'xdc-host-ready') deliver(w);
             else if (e.data?.t === 'xdc-hello') connect(w);
+            else if (e.data?.t === 'xdc-error') showFailure(w, e.data);
             return;
         }
     });

@@ -13,10 +13,28 @@
 (() => {
     'use strict';
 
-    // Without Trusted Types the string paths can't be closed; refuse to run at all.
+    // Without Trusted Types the string paths can't be closed; refuse to run at all. Vector
+    // says why in the app's window; the card drawn here is for when it can't.
     if (!window.trustedTypes || typeof window.trustedTypes.createPolicy !== 'function') {
         window.stop();
-        const say = () => { document.documentElement.textContent = 'This browser is too old to run mini apps safely. Please update it.'; };
+        const vector = `${location.protocol}//${location.host.replace(/^[a-z0-9-]+\.xdc\./, '')}`;
+        try { window.parent.postMessage({ t: 'xdc-error', kind: 'browser' }, vector); } catch { /* no parent to tell */ }
+        const say = () => {
+            const root = document.documentElement;
+            root.replaceChildren();
+            const body = document.createElement('body');
+            body.style.cssText = 'margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;background:#0a0a0a;font-family:Rubik,system-ui,-apple-system,sans-serif;text-align:center';
+            const title = document.createElement('div');
+            title.textContent = 'Your browser needs an update';
+            title.style.cssText = 'color:#fff;font-size:18px;font-weight:600;margin-bottom:8px';
+            const line = document.createElement('div');
+            line.textContent = 'Mini apps run in the latest Firefox, Chrome and Safari.';
+            line.style.cssText = 'color:#9a9a9a;font-size:14px;line-height:1.45;max-width:320px';
+            const card = document.createElement('div');
+            card.append(title, line);
+            body.append(card);
+            root.append(body);
+        };
         if (document.documentElement) say(); else addEventListener('DOMContentLoaded', say);
         throw new Error('Trusted Types unavailable: mini app halted');
     }
