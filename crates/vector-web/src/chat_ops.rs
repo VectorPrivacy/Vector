@@ -29,6 +29,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
             Value::Null
         }
         "retry_failed_dm" => Value::Bool(retry_failed_dm(a.str("receiver")?, a.str("messageId")?).await?),
+        "retry_failed_community_message" => Value::Bool(retry_failed_community_message(a.str("messageId")?).await?),
         "revoke_reaction" => {
             db::scoped(revoke_reaction(a.str("reactionId")?)).await?;
             Value::Null
@@ -170,7 +171,23 @@ async fn delete_failed_message(message_id: String, keep_files: bool) -> Result<(
     }
     let _ = db::events::delete_event(&message_id).await;
     emit_removed(&message_id, &chat_id);
+    // A Community message that went unconfirmed may have landed anyway: take it back.
+    db::spawn_bound(async move {
+        vector_core::community::v2::service::discard_unconfirmed(&chat_id, &message_id).await;
+    });
     Ok(())
+}
+
+/// Retry a failed Community message as the same signed wrap, so one that landed unseen
+/// can't post twice. `false` when nothing was kept: the caller sends it fresh.
+async fn retry_failed_community_message(message_id: String) -> Result<bool, String> {
+    db::scoped(async move {
+        if !STATE.lock().await.find_message(&message_id).is_some_and(|(_, m)| m.failed) {
+            return Err("Message is not failed or does not exist".into());
+        }
+        Ok(vector_core::community::v2::service::retry_unconfirmed(&message_id).await)
+    })
+    .await
 }
 
 async fn retry_failed_dm(receiver: String, message_id: String) -> Result<bool, String> {

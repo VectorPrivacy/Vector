@@ -45,6 +45,7 @@
     "allow-cancel-upload",
     "allow-delete-failed-message",
     "allow-retry-failed-dm",
+    "allow-retry-failed-community-message",
     "allow-delete-own-message",
     "allow-is-message-deletable",
     "allow-get-message-delete-options",

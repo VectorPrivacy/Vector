@@ -581,6 +581,16 @@ async fn retry_send_gift_wrap(
         }
     }
 
+    // No OK is no proof it didn't land: a relay seen holding the wrap is proof it did.
+    if let (Some(wrap), Some(t), Some(entry)) = (built.as_ref(), targets.as_ref(), confirm.as_ref()) {
+        if wrap_on_relays(client, &wrap.event, receiver, t).await {
+            return Ok(finalize_gift_wrap_sent(
+                client, my_pk, receiver_npub, pending_id, event_id,
+                &rumor, config, &callback, entry, t,
+            ).await);
+        }
+    }
+
     // Exhausted every attempt with no OK observed. Mark failed, but leave
     // the confirmation entry armed: a straggler OK can still rescue this
     // message to Sent (see note_relay_ok).
@@ -615,6 +625,30 @@ async fn retry_send_gift_wrap(
             max_attempts
         )),
     }
+}
+
+/// Whether any targeted relay holds `wrap`. One that serves gift wraps only to their
+/// recipient can't say, so silence here is no verdict.
+async fn wrap_on_relays(
+    client: &Client,
+    wrap: &Event,
+    receiver: &PublicKey,
+    targets: &crate::inbox_relays::GiftWrapTargets,
+) -> bool {
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+    let filter = Filter::new().id(wrap.id).kind(Kind::GiftWrap).pubkey(*receiver);
+    let budget = crate::relay_request_timeout(std::time::Duration::from_secs(8));
+    let mut checks: FuturesUnordered<_> = targets
+        .resolved
+        .iter()
+        .map(|(url, _)| crate::community::transport::fetch_relay_eose_filters(client, url.as_str(), vec![filter.clone()], budget))
+        .collect();
+    while let Some(found) = checks.next().await {
+        if found.is_ok_and(|events| events.iter().any(|e| e.id == wrap.id)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Success epilogue shared by every confirmed path in the retry loop:

@@ -788,6 +788,20 @@ pub async fn send_community_message(
     .await
 }
 
+/// Retry a failed Community message as the same signed wrap, so one that landed unseen
+/// can't post twice. `false` when nothing was kept: the caller sends it fresh.
+#[tauri::command]
+pub async fn retry_failed_community_message(message_id: String) -> Result<bool, String> {
+    vector_core::db::scoped(async move {
+        let failed = vector_core::state::STATE.lock().await.find_message(&message_id).is_some_and(|(_, m)| m.failed);
+        if !failed {
+            return Err("Message is not failed or does not exist".to_string());
+        }
+        Ok(vector_core::community::v2::service::retry_unconfirmed(&message_id).await)
+    })
+    .await
+}
+
 /// A Community attachment that's been encrypted and previewed locally but NOT yet uploaded.
 /// The upload is deferred into [`dispatch_community_attachment_message`] so the optimistic
 /// bubble (with the progress ring + cancel button) shows BEFORE the bytes hit the network —

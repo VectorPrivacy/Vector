@@ -689,49 +689,50 @@ async function retryFailedMessage(msg) {
     const chat = arrChats.find(c => c.id === chatId);
     const isCommunity = chat && chat.chat_type === 'Community';
 
-    // DMs: republish the EXACT retained gift wrap first, so a first send that
-    // silently landed can't double-post (same outer id → relays no-op the dup).
-    // Only when nothing was retained (old/pruned msg, or an upload that failed
+    // Republish the EXACT retained wrap first, so a first send that silently
+    // landed can't double-post (same outer id → relays no-op the dup). Only
+    // when nothing was retained (old/pruned msg, or an upload that failed
     // before a wrap existed) do we fall through to a fresh send.
-    if (!isCommunity) {
-        // Optimistic feedback: flip the red row straight back to the gray "pending"
-        // look the instant Retry is tapped, so it's visibly in-flight and the user
-        // doesn't keep re-tapping. on_pending's message_new is deduped for the
-        // existing row, so nudge it here; the backend's on_sent/on_failed corrects
-        // it when the resend resolves.
-        const setSendState = (failed, pending) => {
-            const local = chat?.messages?.find(m => m.id === msg.id);
-            if (!local) return;
-            local.failed = failed;
-            local.pending = pending;
-            if (eventCache.has(chatId)) {
-                const cached = eventCache.getEvents(chatId);
-                const idx = cached ? cached.findIndex(m => m.id === msg.id) : -1;
-                if (idx !== -1) cached[idx] = local;
-            }
-            if (strOpenChat === chatId) updateMessageRow(local, msg.id);
-        };
-        setSendState(false, true);
-        try {
-            const resent = await invoke('retry_failed_dm', { receiver: chatId, messageId: msg.id });
-            if (resent) return;
-            // Nothing retained → fall through to a fresh send (the delete below
-            // removes this row and message() re-creates it as a new pending).
-        } catch (e) {
-            // Ambiguous state (e.g. a retained wrap we couldn't read) — do NOT
-            // fall back to a fresh wrap, or we might double-post. Revert to red;
-            // the user can tap Retry again.
-            console.error('Idempotent retry failed:', e);
-            setSendState(true, false);
-            if (String(e).includes('no longer on this device')) {
-                popupConfirm('Cannot retry', String(e), true, '', 'vector_warning.svg');
-            }
-            return;
+
+    // Optimistic feedback: flip the red row straight back to the gray "pending"
+    // look the instant Retry is tapped, so it's visibly in-flight and the user
+    // doesn't keep re-tapping. on_pending's message_new is deduped for the
+    // existing row, so nudge it here; the backend's on_sent/on_failed corrects
+    // it when the resend resolves.
+    const setSendState = (failed, pending) => {
+        const local = chat?.messages?.find(m => m.id === msg.id);
+        if (!local) return;
+        local.failed = failed;
+        local.pending = pending;
+        if (eventCache.has(chatId)) {
+            const cached = eventCache.getEvents(chatId);
+            const idx = cached ? cached.findIndex(m => m.id === msg.id) : -1;
+            if (idx !== -1) cached[idx] = local;
         }
+        if (strOpenChat === chatId) updateMessageRow(local, msg.id);
+    };
+    setSendState(false, true);
+    try {
+        const resent = isCommunity
+            ? await invoke('retry_failed_community_message', { messageId: msg.id })
+            : await invoke('retry_failed_dm', { receiver: chatId, messageId: msg.id });
+        if (resent) return;
+        // Nothing retained → fall through to a fresh send (the delete below
+        // removes this row and message() re-creates it as a new pending).
+    } catch (e) {
+        // Ambiguous state (e.g. a retained wrap we couldn't read) — do NOT
+        // fall back to a fresh wrap, or we might double-post. Revert to red;
+        // the user can tap Retry again.
+        console.error('Idempotent retry failed:', e);
+        setSendState(true, false);
+        if (String(e).includes('no longer on this device')) {
+            popupConfirm('Cannot retry', String(e), true, '', 'vector_warning.svg');
+        }
+        return;
     }
 
-    // Fallback (community always; DM only when nothing was retained): drop the
-    // failed row and send fresh. Its saved files stay: they are what gets sent.
+    // Fallback, only when nothing was retained: drop the failed row and send
+    // fresh. Its saved files stay: they are what gets sent.
     try {
         await invoke('delete_failed_message', { messageId: msg.id, keepFiles: !!msg.attachments?.length });
     } catch (e) {

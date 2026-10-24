@@ -188,6 +188,10 @@ fn apply_chat_to_state_in(
     match event {
         ChatEvent::Message { opened, reply_to, emoji } => {
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
+            // Our own failed message, read back from a relay, landed after all.
+            if msg.mine && state.find_message(&msg.id).is_some_and(|(_, m)| m.failed) {
+                super::service::confirm_in(state, &msg.id);
+            }
             // DB dedup: a known inner id is already stored — don't re-ingest/re-emit (a
             // catch-up sweep re-fetches the whole page; in-memory STATE holds only a window).
             // A deleted one has no row left to find, so its tombstone answers instead.

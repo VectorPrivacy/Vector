@@ -1093,6 +1093,7 @@ pub fn run() {
             commands::community::get_community_banlist,
             commands::community::hide_community_message,
             commands::community::leave_community,
+            commands::community::retry_failed_community_message,
             commands::community::create_community,
             commands::community::send_community_message,
             commands::community::send_community_files,

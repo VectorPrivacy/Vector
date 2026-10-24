@@ -29,6 +29,8 @@ mod relocate;
 pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
 pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
+mod outbox;
+pub use outbox::{confirm_in, discard_unconfirmed, retry_unconfirmed};
 mod purge;
 mod writing;
 pub use writing::{can_post, collect_writers, outbound_rumor, WriterDuty};
@@ -603,12 +605,30 @@ async fn publish_chat<T: Transport + ?Sized>(
         let signer = crate::signer::active_signer()?;
         let wrap = chat::seal_chat_rumor_signed(&signer, author_pk, &rumor, group, Timestamp::from_secs(at_ms / 1000), ephemeral, &owner.public_key()).await
             .map_err(|e| e.to_string())?;
-        transport.publish(&wrap, &community.relays).await?;
         // Both keys that can delete this wrap, frozen per message so a later rekey can't
         // strand them: its owner for relays following CORD-01, the plane key for the rest.
+        // Kept before the publish: an unconfirmed send may still have landed.
         if !ephemeral {
             crate::db::community::store_wrap_owner(&rumor_id, &wrap.id.to_hex(), &owner, &community.relays)?;
             crate::db::community::store_message_key(&rumor_id, &wrap.id.to_hex(), group.keys(), &community.relays)?;
+        }
+        // Reactions are left out: one that lands long after the user moved on surprises.
+        let kept = !ephemeral
+            && matches!(rumor.kind.as_u16(), super::kind::MESSAGE | super::kind::COMMENT | super::kind::EDIT | super::kind::DELETE);
+        if kept {
+            outbox::keep(&rumor_id, &wrap);
+        }
+        if let Err(e) = transport.publish(&wrap, &community.relays).await {
+            // No relay answered, which is not the same as none taking it: ask before failing.
+            if !outbox::on_relays(transport, group.keys(), &wrap, &community.relays).await {
+                if kept {
+                    outbox::resend_later(rumor_id.clone());
+                }
+                return Err(e);
+            }
+        }
+        if kept {
+            outbox::release(&rumor_id);
         }
         // Local echo: open our OWN wrap through the exact inbound path so
         // send-then-read works with no listen loop, and the relay's re-delivery dedups
@@ -14399,6 +14419,99 @@ mod tests {
 
         // The genesis control editions + the owner Join landed on the relay.
         assert!(relay.count_on("wss://r") >= 3, "2 genesis editions + 1 guestbook join");
+    }
+
+    /// The relay stores the event but its OK never arrives.
+    struct LostAck<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for LostAck<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await?;
+            Err("timed out".into())
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    /// Nothing reaches the relay.
+    struct Unreachable<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for Unreachable<'_> {
+        async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Err("no relay accepted the event".into())
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            Err("no relay accepted the event".into())
+        }
+    }
+
+    /// A message sent through `transport` that fails to publish, and its rumor id.
+    async fn unconfirmed_send(relay: &MemoryRelay) -> (CommunityV2, ChannelId, String) {
+        let community = create_community(relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let ms = now_ms();
+        let (author, _, epoch) = chat_send_context(&community, &general).unwrap();
+        let rumor = outbound_rumor(&community, &general, chat::build_message_rumor(author, &general, epoch, "lost", None, &[], vec![], ms));
+        let id = rumor.id.unwrap().to_hex();
+        assert!(send_chat_message_at(&Unreachable(relay), &community, &general, "lost", None, &[], vec![], ms).await.is_err());
+        (community, general, id)
+    }
+
+    #[tokio::test]
+    async fn a_send_whose_ok_was_lost_counts_as_sent() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let id = send_message(&LostAck(&relay), &community, &general, "landed").await.expect("read back from the relay");
+        assert!(outbox::kept(&id).is_none(), "nothing left to resend");
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_is_kept_to_go_again_as_itself() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, general, id) = unconfirmed_send(&relay).await;
+        let wrap = outbox::kept(&id).expect("kept until a relay confirms it");
+        assert!(crate::db::community::get_message_key(&id).unwrap().is_some(), "deletable even though no relay confirmed it");
+        relay.publish(&wrap, &community.relays).await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        assert_eq!(page.iter().filter(|f| f.event.opened().rumor_id.to_hex() == id).count(), 1, "the kept wrap is the message itself");
+    }
+
+    #[tokio::test]
+    async fn our_failed_message_read_back_shows_as_sent() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, general, id) = unconfirmed_send(&relay).await;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.ensure_community_chat(&channel);
+            st.add_message_to_chat(&channel, &crate::types::Message { id: id.clone(), mine: true, failed: true, ..Default::default() });
+        }
+        relay.publish(&outbox::kept(&id).unwrap(), &community.relays).await.unwrap();
+        let me = crate::my_public_key().unwrap();
+        for f in fetch_channel(&relay, &community, &general, 100).await.unwrap() {
+            crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &f.event, &channel, &me);
+        }
+        let st = crate::state::STATE.lock().await;
+        let (_, row) = st.find_message(&id).expect("still one row");
+        assert!(!row.failed && !row.pending, "a relay holding it proves it sent");
+        assert!(outbox::kept(&id).is_none(), "and nothing is resent");
     }
 
     #[tokio::test]

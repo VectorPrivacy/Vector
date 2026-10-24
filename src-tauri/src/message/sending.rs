@@ -545,6 +545,12 @@ async fn remove_failed_message(message_id: &str, drop_files: bool) -> Result<(),
                 "reason": "deleted"
             })).ok();
         }
+
+        // A Community message that went unconfirmed may have landed anyway: take it back.
+        let id = message_id.clone();
+        vector_core::db::spawn_bound(async move {
+            vector_core::community::v2::service::discard_unconfirmed(&chat_id, &id).await;
+        });
     } else {
         return Err("Message is not failed or does not exist".to_string());
     }

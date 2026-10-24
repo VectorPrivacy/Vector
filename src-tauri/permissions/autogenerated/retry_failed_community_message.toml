@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-retry-failed-community-message"
+description = "Enables the retry_failed_community_message command without any pre-configured scope."
+commands.allow = ["retry_failed_community_message"]
+
+[[permission]]
+identifier = "deny-retry-failed-community-message"
+description = "Denies the retry_failed_community_message command without any pre-configured scope."
+commands.deny = ["retry_failed_community_message"]
