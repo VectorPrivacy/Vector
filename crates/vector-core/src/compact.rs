@@ -660,6 +660,7 @@ impl AttachmentFlags {
     /// Held verbatim in the cold box
     const PATH_CUSTOM: u8 = 0b1_1000;
     const ORIGINAL_IS_ID: u8 = 0b10_0000;
+    const VERIFIED: u8 = 0b100_0000;
 
     #[inline]
     pub fn is_downloading(self) -> bool { self.0 & Self::DOWNLOADING != 0 }
@@ -667,6 +668,8 @@ impl AttachmentFlags {
     pub fn is_downloaded(self) -> bool { self.0 & Self::DOWNLOADED != 0 }
     #[inline]
     pub fn is_short_nonce(self) -> bool { self.0 & Self::SHORT_NONCE != 0 }
+    #[inline]
+    pub fn is_verified(self) -> bool { self.0 & Self::VERIFIED != 0 }
 
     #[inline]
     pub fn set_downloading(&mut self, value: bool) {
@@ -679,6 +682,10 @@ impl AttachmentFlags {
     #[inline]
     pub fn set_short_nonce(&mut self, value: bool) {
         if value { self.0 |= Self::SHORT_NONCE; } else { self.0 &= !Self::SHORT_NONCE; }
+    }
+    #[inline]
+    pub fn set_verified(&mut self, value: bool) {
+        if value { self.0 |= Self::VERIFIED; } else { self.0 &= !Self::VERIFIED; }
     }
 
     #[inline]
@@ -813,6 +820,10 @@ impl CompactAttachment {
     pub fn set_downloaded(&mut self, value: bool) { self.flags.set_downloaded(value); }
     #[inline]
     pub fn set_downloading(&mut self, value: bool) { self.flags.set_downloading(value); }
+    #[inline]
+    pub fn verified(&self) -> bool { self.flags.is_verified() }
+    #[inline]
+    pub fn set_verified(&mut self, value: bool) { self.flags.set_verified(value); }
 
     /// Check if this attachment's ID matches a hex string
     #[inline]
@@ -1035,6 +1046,7 @@ impl CompactAttachment {
         let id = hex_to_bytes_32(&att.id);
         let ext = extension_code(&att.extension);
         let mut flags = AttachmentFlags::from_bools(att.downloading, att.downloaded);
+        flags.set_verified(att.verified);
         // Detect short nonce (12 bytes = 24 hex chars) for legacy attachments
         flags.set_short_nonce(att.nonce.len() == 24);
         let path_kind = classify_path(&att.path, &id, &att.extension, &name);
@@ -1081,6 +1093,7 @@ impl CompactAttachment {
             img_meta: self.img_meta(),
             downloading: self.flags.is_downloading(),
             downloaded: self.flags.is_downloaded(),
+            verified: self.flags.is_verified(),
             webxdc_topic: self.webxdc_topic().map(str::to_string),
             group_id: self.group_id().map(|b| bytes_to_hex_32(&b)),
             original_hash: self.original_hash().map(|b| bytes_to_hex_32(&b)),
@@ -3864,7 +3877,7 @@ mod tests {
                     height: 600,
                 }),
                 downloading: false,
-                downloaded: true,
+                downloaded: true, verified: false,
                 webxdc_topic: None,
                 group_id: None,
                 original_hash: None,
@@ -4310,7 +4323,7 @@ mod tests {
             size: 99999,
             img_meta: None,
             downloading: false,
-            downloaded: true,
+            downloaded: true, verified: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
@@ -4330,6 +4343,15 @@ mod tests {
         assert_eq!(restored.size, att.size, "size mismatch");
         assert_eq!(restored.downloading, att.downloading, "downloading mismatch");
         assert_eq!(restored.downloaded, att.downloaded, "downloaded mismatch");
+        assert!(!restored.verified);
+
+        let proven = Attachment { verified: true, ..att.clone() };
+        let restored = CompactAttachment::from_attachment(&proven).to_attachment();
+        assert!(restored.verified, "verified survives the compact form");
+        assert_eq!(restored.path, att.path, "and leaves the path kind alone");
+        let mut compact = CompactAttachment::from_attachment(&proven);
+        compact.set_verified(false);
+        assert!(!compact.verified() && compact.downloaded());
     }
 
     #[test]
@@ -4345,7 +4367,7 @@ mod tests {
             size: 1024,
             img_meta: None,
             downloading: false,
-            downloaded: false,
+            downloaded: false, verified: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
@@ -4456,7 +4478,7 @@ mod tests {
                 height: 1080,
             }),
             downloading: false,
-            downloaded: true,
+            downloaded: true, verified: false,
             webxdc_topic: Some("game-state".into()),
             group_id: Some("cccc000000000000000000000000000000000000000000000000000000000000".into()),
             original_hash: Some("dddd000000000000000000000000000000000000000000000000000000000000".into()),
@@ -4701,7 +4723,7 @@ mod tests {
             size: 4242,
             img_meta: None,
             downloading: false,
-            downloaded: true,
+            downloaded: true, verified: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: Some(id.into()),

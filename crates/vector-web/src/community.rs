@@ -438,7 +438,7 @@ pub async fn send_community_file(
             id: hash.clone(), key: params.key, nonce: params.nonce,
             extension: extension.clone(), name, url: String::new(),
             path: local.to_string_lossy().to_string(), size: bytes.len() as u64 + 16,
-            img_meta, downloading: false, downloaded: true,
+            img_meta, downloading: false, downloaded: true, verified: true,
             ..Default::default()
         };
 
@@ -535,6 +535,7 @@ pub async fn send_community_file(
             let path = attachment.path.clone();
             state.update_attachment(&channel_id, &real_id, &attachment.id, |a| {
                 a.set_downloaded(true);
+                a.set_verified(true);
                 a.set_downloading(false);
                 a.set_path(path.clone());
             });

@@ -146,6 +146,7 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
         let att = &mut message.attachments[idx];
         att.id = hash.clone();
         att.downloaded = true;
+        att.verified = true;
         att.downloading = false;
         att.path = path_str.clone();
     }
@@ -155,6 +156,7 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
             att.set_id(vector_core::simd::hex::hex_to_bytes_32(&hash));
             att.set_downloading(false);
             att.set_downloaded(true);
+            att.set_verified(true);
             att.set_path(path_str.clone());
         });
     }

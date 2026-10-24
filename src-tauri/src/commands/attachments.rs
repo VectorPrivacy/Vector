@@ -887,6 +887,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 }
                 att.set_downloading(false);
                 att.set_downloaded(true);
+                att.set_verified(true);
                 att.set_path(path_str.clone());
             });
 

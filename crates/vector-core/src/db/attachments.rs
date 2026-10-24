@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::types::Attachment;
 
 const SELECT_COLS: &str = "event_id, att_index, hash, key, nonce, extension, name, url, \
-    path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls";
+    path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls, verified";
 
 /// Rebuild `(event_id, Attachment)` from a row selecting `SELECT_COLS`. `downloading` is transient
 /// runtime state and is never persisted (always false on load).
@@ -42,6 +42,7 @@ fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpe
             .split_whitespace()
             .map(|s| s.to_string())
             .collect(),
+        verified: row.get::<_, i64>(16)? != 0,
     };
     Ok((event_id, att))
 }
@@ -49,10 +50,10 @@ fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpe
 /// Upsert a message's attachment rows onto the given connection or transaction, so `save_message`
 /// can commit them ATOMICALLY with the event row (an event + no attachments would render as a broken
 /// file message with no fallback). Upserts on `(event_id, att_index)`. The mutable local state is
-/// handled so a re-save never regresses a completed download: `downloaded` is MONOTONIC
-/// (`MAX(existing, incoming)`), and `hash`/`path` only take the incoming values when the incoming
-/// carries a completed download (`downloaded=1`) — the nonce→content-hash rewrite the download path
-/// performs. So a relay re-delivery (downloaded=0) preserves the downloaded file, its content-hash
+/// handled so a re-save never regresses a completed download: `downloaded` and `verified` are
+/// MONOTONIC (`MAX(existing, incoming)`), and `hash`/`path` only take the incoming values when the
+/// incoming carries a completed download (`downloaded=1`) — the nonce→content-hash rewrite the
+/// download path performs. A proven blob (`verified=1`) also takes the incoming `hash`. So a relay re-delivery (downloaded=0) preserves the downloaded file, its content-hash
 /// key, and its path; a completed download persists all three in one pass. Explicit un-download goes
 /// through `clear_attachment_download`, never here. Sealed with the caller's sealer, inside its
 /// at-rest ticket.
@@ -69,8 +70,8 @@ pub fn insert_attachment_rows(
     // so bulk-sync batches don't re-parse the SQL per message.
     let mut stmt = conn.prepare_cached(
         "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
-         path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) \
+         path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls, verified) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17) \
          ON CONFLICT(event_id, att_index) DO UPDATE SET \
             key=excluded.key, nonce=excluded.nonce, extension=excluded.extension, \
             name=excluded.name, url=excluded.url, size=excluded.size, img_meta=excluded.img_meta, \
@@ -78,7 +79,8 @@ pub fn insert_attachment_rows(
             original_hash=excluded.original_hash, \
             fallback_urls=CASE WHEN excluded.fallback_urls='' THEN fallback_urls ELSE excluded.fallback_urls END, \
             downloaded=MAX(downloaded, excluded.downloaded), \
-            hash=CASE WHEN excluded.downloaded=1 THEN excluded.hash ELSE hash END, \
+            verified=MAX(verified, excluded.verified), \
+            hash=CASE WHEN excluded.downloaded=1 OR excluded.verified=1 THEN excluded.hash ELSE hash END, \
             path=CASE WHEN excluded.downloaded=1 THEN excluded.path ELSE path END",
     ).map_err(|e| format!("prepare insert attachment: {e}"))?;
     for (i, a) in attachments.iter().enumerate() {
@@ -89,7 +91,7 @@ pub fn insert_attachment_rows(
                 seal.seal_set(&a.name)?, seal.seal_set(&a.url)?, a.path, a.size as i64,
                 img_meta_json.as_deref().map(|j| seal.seal(j)).transpose()?, a.downloaded as i64,
                 a.webxdc_topic, a.group_id, a.original_hash,
-                seal.seal_set(&a.fallback_urls.join(" "))?,
+                seal.seal_set(&a.fallback_urls.join(" "))?, a.verified as i64,
             ],
         ).map_err(|e| format!("insert attachment: {e}"))?;
     }
@@ -269,14 +271,6 @@ pub struct ReusableUpload {
     pub mine: bool,
 }
 
-/// The smart-forward ledger read: has this exact plaintext (by SHA-256) ever
-/// crossed this account with a decryptable blob behind it?
-///
-/// `downloaded = 1` is the trust gate: the download path hash-verifies the
-/// decrypted bytes against `hash` before setting it, so a row that merely
-/// CLAIMS this hash (a hostile sender's fabricated imeta) never qualifies —
-/// our own sends set it by construction. Own uploads win the ordering:
-/// their blobs live on our servers under our delete authority.
 /// The verified on-disk copy of a claimed attachment, if any: candidates are
 /// the ledger's recorded paths for the hash plus the download dir under the
 /// wire name, size-gated cheaply (wire size is ciphertext length, 16 AES-GCM
@@ -378,6 +372,14 @@ pub fn downloaded_paths_by_hash(hash: &str) -> Result<Vec<String>, String> {
     Ok(rows)
 }
 
+/// The smart-forward ledger read: has this exact plaintext (by SHA-256) ever
+/// crossed this account with a decryptable blob behind it?
+///
+/// `verified = 1` is the trust gate: only a download that opened THIS row's blob
+/// with its key, or our own send, sets it. `downloaded` is no proof: a local file
+/// matching a sender's claimed hash sets it, with that sender's url and key on the
+/// row. Own uploads win the ordering: their blobs live on our servers under our
+/// delete authority.
 pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, String> {
     if hash.is_empty() {
         return Ok(None);
@@ -387,7 +389,7 @@ pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, Strin
         .prepare(
             "SELECT a.url, a.key, a.nonce, a.size, COALESCE(e.mine, 0)
              FROM attachments a JOIN events e ON e.id = a.event_id
-             WHERE a.hash = ?1 AND a.url <> '' AND a.key <> '' AND a.nonce <> '' AND a.downloaded = 1
+             WHERE a.hash = ?1 AND a.url <> '' AND a.key <> '' AND a.nonce <> '' AND a.verified = 1
              ORDER BY COALESCE(e.mine, 0) DESC, a.id DESC LIMIT 1",
         )
         .map_err(|e| format!("find_reusable_by_hash prepare: {e}"))?;
@@ -493,6 +495,7 @@ mod tests {
         (tmp, guard)
     }
 
+    /// A row as a real download leaves it: `downloaded` rows opened their own blob.
     fn att(hash: &str, url: &str, keyed: bool, downloaded: bool) -> Attachment {
         Attachment {
             id: hash.to_string(),
@@ -501,6 +504,7 @@ mod tests {
             url: url.to_string(),
             size: 42,
             downloaded,
+            verified: downloaded,
             ..Default::default()
         }
     }
@@ -562,6 +566,43 @@ mod tests {
         assert!(find_reusable_by_hash("H2").unwrap().is_none(), "unverified rows never qualify");
         assert!(find_reusable_by_hash("H3").unwrap().is_none(), "keyless rows never qualify");
         assert!(find_reusable_by_hash("H9").unwrap().is_none());
+    }
+
+    /// A local file that matches a sender's claimed hash marks their row downloaded, but
+    /// their url and key were never opened: the forward must take the proven blob, and a
+    /// re-delivery must not unprove it.
+    #[tokio::test]
+    async fn a_claim_matched_by_a_local_file_never_lends_its_blob_to_a_forward() {
+        let (_tmp, _guard) = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::write(&file, b"a photo we really hold").unwrap();
+        let hash = crate::crypto::sha256_hex(b"a photo we really hold");
+
+        let mut honest = att(&hash, "https://b.example/honest", true, true);
+        honest.path = file.to_string_lossy().to_string();
+        save("chat_a", "evt_honest", false, honest.clone()).await;
+
+        let mut claim = att(&hash, "https://evil.example/other", true, false);
+        claim.key = "attacker".into();
+        claim.size = b"a photo we really hold".len() as u64 + 16;
+        let mut msg = Message {
+            id: "evt_claim".into(), content: String::new(), at: 2_000_000,
+            attachments: vec![claim], ..Default::default()
+        };
+        verify_message_attachments(&mut msg, None).await;
+        assert!(msg.attachments[0].downloaded, "the local file still renders for the claim");
+        crate::db::events::save_message("chat_b", &msg).await.unwrap();
+
+        let stored = get_attachments_for_event("evt_claim").unwrap();
+        assert!(stored[0].downloaded && !stored[0].verified, "matched, never proven");
+        let hit = find_reusable_by_hash(&hash).unwrap().expect("the honest blob is reusable");
+        assert_eq!(hit.url, "https://b.example/honest", "the newer, unproven claim never wins");
+
+        honest.verified = false;
+        honest.downloaded = false;
+        save("chat_a", "evt_honest", false, honest).await;
+        assert!(get_attachments_for_event("evt_honest").unwrap()[0].verified, "proof survives a re-delivery");
     }
 
     /// A re-received file must resolve to the copy already on disk, wherever

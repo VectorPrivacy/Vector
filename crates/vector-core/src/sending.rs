@@ -1181,7 +1181,7 @@ pub async fn send_file_dm_from(
         id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
         url: String::new(), path: local_path_str.clone(), size: plain_len + 16,
-        img_meta: img_meta.clone(), downloading: false, downloaded: true,
+        img_meta: img_meta.clone(), downloading: false, downloaded: true, verified: true,
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };

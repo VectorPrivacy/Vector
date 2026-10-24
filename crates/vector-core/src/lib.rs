@@ -2203,6 +2203,7 @@ impl VectorCore {
                 img_meta,
                 downloading: false,
                 downloaded: true,
+                verified: true,
                 // Mini Apps: one topic minted at send, so every member joins the same session.
                 webxdc_topic: extension
                     .eq_ignore_ascii_case("xdc")

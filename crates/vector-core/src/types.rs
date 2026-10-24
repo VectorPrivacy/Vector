@@ -293,6 +293,10 @@ pub struct Attachment {
     pub img_meta: Option<ImageMetadata>,
     pub downloading: bool,
     pub downloaded: bool,
+    /// This attachment's own url and key were proven to open to `id`. Only that makes its
+    /// blob safe to reuse: `downloaded` can come from matching a local file to a sender's claim.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webxdc_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,6 +323,7 @@ impl Default for Attachment {
             img_meta: None,
             downloading: false,
             downloaded: true,
+            verified: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
@@ -808,7 +813,7 @@ mod tests {
                 height: 600,
             }),
             downloading: false,
-            downloaded: true,
+            downloaded: true, verified: false,
             webxdc_topic: Some("game".to_string()),
             group_id: Some("g1".to_string()),
             original_hash: Some("sha256hash".to_string()),

@@ -950,6 +950,7 @@ fn stage_community_attachment(
         img_meta,
         downloading: false,
         downloaded: true, // plaintext already on disk for the sender
+        verified: true,
         webxdc_topic,
         group_id: None,
         original_hash: Some(plaintext_hash),
@@ -1393,6 +1394,7 @@ async fn dispatch_community_attachment_message(
                         let path = local.path.clone();
                         state.update_attachment(&channel_id, &real_id, &local.id, |a| {
                             a.set_downloaded(true);
+                            a.set_verified(local.verified);
                             a.set_downloading(false);
                             a.set_path(path.clone());
                         });

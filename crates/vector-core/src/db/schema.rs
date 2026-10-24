@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 115;
+pub const HIGHEST_MIGRATION_ID: u32 = 116;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1601,6 +1601,18 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             );",
         )
         .map_err(|e| format!("migration 115: {e}"))?;
+        Ok(())
+    })?;
+
+    // `downloaded` only says a local file matches the row's claimed hash, which a sender can
+    // claim for a file they never sent. Reuse needs the row's own blob and key proven, so every
+    // existing row starts unproven: an old file's next forward uploads it once more.
+    run_atomic_migration(conn, 116, "Attachment blobs proven to open", |tx| {
+        tx.execute(
+            "ALTER TABLE attachments ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("migration 116: {e}"))?;
         Ok(())
     })?;
 
