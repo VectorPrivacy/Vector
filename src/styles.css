@@ -20466,6 +20466,11 @@ textarea.command-part-input {
 .dmsg-text {
   display: inline;
 }
+/* Holding a block, inline text gets split into anonymous blocks, and WebKit's
+   relayout can then land the block's top margin above the first line. */
+.dmsg-text:has(> :is(ul, ol, blockquote, pre, table, details, div, hr, h1, h2, h3, h4, h5, h6)) {
+  display: block;
+}
 .dmsg-text p:first-child { margin-top: 0; }
 .dmsg-text p:last-child  { margin-bottom: 0; }
 .dmsg-text a,
