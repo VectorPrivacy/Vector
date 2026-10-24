@@ -417,14 +417,16 @@ pub async fn get_community(community_id: String) -> Result<CommunitySummary, Str
 pub async fn leave_community(community_id: String) -> Result<(), String> {
     vector_core::db::scoped(async move {
         hex_to_id32(&community_id)?;
-        // Guestbook Leave announce (facade) + shared local teardown.
         let channel_ids = community_channel_ids(&community_id);
-        // Never silent: no announce means no list tombstone, and the community
-        // comes back on the next boot.
-        if let Err(e) = vector_core::VectorCore.leave_community(&community_id).await {
-            vector_core::log_net_fail!("[Leave] {} announced nothing ({})", &community_id[..8], e);
+        // Gone here at once; the Guestbook Leave and the List tombstone publish behind it.
+        match vector_core::VectorCore.leave_community_now(&community_id).await {
+            Ok(()) => forget_channel_rows(&community_id, &channel_ids).await,
+            // Never silent: no tombstone means the community comes back on the next boot.
+            Err(e) => {
+                vector_core::log_net_fail!("[Leave] {} announced nothing ({})", &community_id[..8], e);
+                teardown_community_local(&community_id, &channel_ids).await;
+            }
         }
-        teardown_community_local(&community_id, &channel_ids).await;
         crate::commands::rail::forget_community(&community_id).await;
         Ok(())
     })
@@ -468,28 +470,31 @@ pub(crate) async fn teardown_community_local(community_id: &str, channel_ids: &[
 pub(crate) async fn teardown_community_records(community_id: &str, channel_ids: &[String]) {
     // Captured BEFORE deletion so the prune below can drop relays no remaining community needs.
     let left_relays: Vec<String> = community_relays_of(community_id);
-    // A row deleted before teardown takes its channel rows with it; the rooms still name it.
-    let mut channel_ids = channel_ids.to_vec();
-    for chat in vector_core::state::STATE.lock().await.chats.iter() {
-        if chat.metadata.community_id() == Some(community_id)
-            && !channel_ids.contains(&chat.id)
-        {
-            channel_ids.push(chat.id.clone());
-        }
-    }
-
     let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     crate::services::subscription_handler::refresh_community_subscription().await;
+    forget_channel_rows(community_id, channel_ids).await;
+
+    // Drop the left community's now-orphaned relays from the pool (bounds growth).
+    prune_orphaned_community_relays(&left_relays).await;
+}
+
+/// Drop a community's channel chats from STATE and the DB, including any the rooms
+/// still name after its row is gone. Run once the community is no longer held, so
+/// nothing can route a message back into them.
+async fn forget_channel_rows(community_id: &str, channel_ids: &[String]) {
+    let mut channel_ids = channel_ids.to_vec();
     {
         let mut state = vector_core::state::STATE.lock().await;
+        for chat in state.chats.iter() {
+            if chat.metadata.community_id() == Some(community_id) && !channel_ids.contains(&chat.id) {
+                channel_ids.push(chat.id.clone());
+            }
+        }
         state.chats.retain(|c| !channel_ids.contains(&c.id));
     }
     for cid in &channel_ids {
         let _ = vector_core::db::chats::delete_chat(cid);
     }
-
-    // Drop the left community's now-orphaned relays from the pool (bounds growth).
-    prune_orphaned_community_relays(&left_relays).await;
 }
 
 /// Disconnect + remove relays that belonged to a just-left community, but ONLY the ones nothing

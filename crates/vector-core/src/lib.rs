@@ -4960,6 +4960,31 @@ impl VectorCore {
         .await
     }
 
+    /// [`Self::leave_community`] for a caller that repaints at once: the community is gone
+    /// here when this returns, and the announcements publish behind it. The List
+    /// tombstone is kept pending first, so a leave survives a restart before it lands.
+    pub async fn leave_community_now(&self, community_id: &str) -> Result<()> {
+        crate::db::scoped(async move {
+            use crate::community::v2::service;
+            let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
+            let channel_ids: Vec<String> =
+                v2.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
+            let at_ms = service::leave_locally(&v2).map_err(VectorError::Other)?;
+            state::STATE.lock().await.chats.retain(|c| !channel_ids.contains(&c.id));
+            crate::db::spawn_bound(async move {
+                let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                service::announce_leave(&transport, &v2, at_ms).await;
+                if let Some(client) = state::nostr_client() {
+                    crate::community::v2::realtime::refresh_subscription(&client).await;
+                }
+                // After the announcements, which still need these relays.
+                crate::community::transport::prune_unneeded_community_relays(&v2.relays).await;
+            });
+            Ok(())
+        })
+        .await
+    }
+
     /// Sync DM history from relays using NIP-77 negentropy set reconciliation.
     ///
     /// Reconciles local wrapper history with relay state, fetches missing events,

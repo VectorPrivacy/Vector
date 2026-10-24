@@ -478,7 +478,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "revoke_public_invite" => core(VectorCore.revoke_public_invite(&a.str("communityId")?, &a.str("token")?).await),
         "invite_to_community" => core(VectorCore.invite_to_community(&a.str("communityId")?, &a.str("inviteeNpub")?).await),
-        "leave_community" => core(VectorCore.leave_community(&a.str("communityId")?).await),
+        "leave_community" => core(VectorCore.leave_community_now(&a.str("communityId")?).await),
         "get_channel_pins" => core(VectorCore.get_channel_pins(&a.str("communityId")?, &a.str("channelId")?)),
         "pin_community_message" => {
             core(VectorCore.pin_community_message(&a.str("communityId")?, &a.str("channelId")?, &a.str("messageId")?).await)

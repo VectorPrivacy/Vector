@@ -2519,14 +2519,8 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
 /// Leave a community: publish a Guestbook Leave and tear down the local hold.
 pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     crate::db::scoped(async move {
-        let signer = crate::signer::active_signer()?;
-        let my_pk = me_pk()?;
         let at_ms = now_ms();
-        let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
-        let leave_rumor = guestbook::build_leave_rumor(my_pk, at_ms);
-        if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &leave_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
-            let _ = transport.publish(&wrap, &community.relays).await;
-        }
+        publish_leave(transport, community, at_ms).await?;
         // Tombstone the membership across devices (CORD-02 §8) BEFORE the local delete.
         // Best-effort, but never silent: an unpublished tombstone is what lets a stale
         // copy of the list rejoin this community on a later boot.
@@ -2535,6 +2529,41 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
         Ok(())
     })
     .await
+}
+
+/// The local half of a leave, for a caller that repaints at once: the List tombstone
+/// kept pending (it outlives a restart), then the community dropped here, its epoch
+/// keys kept for scrubbing our own past messages. Returns the leave's time for
+/// [`announce_leave`].
+pub fn leave_locally(community: &CommunityV2) -> Result<u64, String> {
+    let at_ms = now_ms();
+    add_pending_tombstone(community.id(), at_ms);
+    crate::db::community::delete_community_retain_keys(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+    Ok(at_ms)
+}
+
+/// The network half of [`leave_locally`]: the Guestbook Leave, then the List
+/// tombstone, which retries from its pending record until it lands.
+pub async fn announce_leave<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, at_ms: u64) {
+    crate::db::scoped(async move {
+        if let Err(e) = publish_leave(transport, community, at_ms).await {
+            crate::log_net_fail!("[Leave] no Guestbook Leave for {} ({})", &crate::simd::hex::bytes_to_hex_32(&community.id().0)[..8], e);
+        }
+        record_leave(transport, community.id(), &community.relays, at_ms).await;
+    })
+    .await
+}
+
+/// The Guestbook Leave, best-effort once sealed: the List tombstone is what makes a leave stick.
+async fn publish_leave<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, at_ms: u64) -> Result<(), String> {
+    let signer = crate::signer::active_signer()?;
+    let my_pk = me_pk()?;
+    let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+    let leave_rumor = guestbook::build_leave_rumor(my_pk, at_ms);
+    if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &leave_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
+        let _ = transport.publish(&wrap, &community.relays).await;
+    }
+    Ok(())
 }
 
 /// Cooperative Kick (CORD-04 §6, Guestbook plane): name the target; every reader
@@ -15053,6 +15082,33 @@ mod tests {
         assert!(neg_ever_confirmed(url));
         record_neg_support(url, false);
         assert!(!neg_ever_confirmed(url), "a refusal unlearns it");
+    }
+
+    #[tokio::test]
+    async fn a_local_leave_is_gone_at_once_and_announced_after() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Leaving", bed.relays.clone(), None).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let invite_wrap = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite_wrap).await.unwrap();
+        crate::rt::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let at_ms = leave_locally(&joined).unwrap();
+        let id_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(crate::db::community::load_community_v2(joined.id()).unwrap().is_none(), "gone here before any publish");
+        assert!(tombstone_suppresses(&id_hex, at_ms / 1000), "the tombstone is kept before it publishes");
+        assert!(load_pending().tombstones.iter().any(|t| t.community_id == id_hex), "pending until it lands");
+
+        bed.swap_to(&owner);
+        assert!(memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()), "nothing published yet");
+
+        bed.swap_to(&member);
+        announce_leave(&bed.relay, &joined, at_ms).await;
+        bed.swap_to(&owner);
+        assert!(!memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()), "the Leave lands after");
     }
 
     #[tokio::test]
