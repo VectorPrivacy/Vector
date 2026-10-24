@@ -27,16 +27,17 @@
         render([html, tags]);
         return { update: render };
     }
-    function openProfile(e) {
+    function openProfile(e, anchor = e.currentTarget) {
         if (!view.npub) return;
         e.stopPropagation();
-        h.showMiniProfile(view.npub, e.currentTarget);
+        h.showMiniProfile(view.npub, anchor);
     }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="dmsg-reply btn" class:dmsg-reply-them={!view.mine} id="r-{view.parentId}" onclick={() => h.jumpToMessage(view.parentId)}>
-    <span class="dmsg-reply-avatar-host" style="display:contents" onclick={openProfile}>
+    <!-- display:contents has no box to anchor the card to: the avatar inside does. -->
+    <span class="dmsg-reply-avatar-host" style="display:contents" onclick={(e) => openProfile(e, e.currentTarget.firstElementChild)}>
         <Avatar src={view.avatarSrc} size={16} class="dmsg-reply-avatar" />
     </span>
     <span class="dmsg-reply-name" style="color: rgba(255, 255, 255, 0.7);" data-npub={view.npub || undefined} use:nameInto={view.name} onclick={openProfile}></span>
