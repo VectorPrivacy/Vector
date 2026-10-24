@@ -22,8 +22,9 @@ use nostr_sdk::prelude::*;
 
 const NEG_CAP_TTL_SECS: u64 = 24 * 3600;
 
+// `neg_cap2`: a `neg_cap:` row can hold a no verdict a capable relay earned by one slow answer.
 fn cap_key(relay_url: &str) -> String {
-    format!("neg_cap:{}", relay_url.trim_end_matches('/'))
+    format!("neg_cap2:{}", relay_url.trim_end_matches('/'))
 }
 
 fn now_secs() -> u64 {
@@ -39,6 +40,16 @@ pub fn neg_supported_cached(relay_url: &str) -> Option<bool> {
     let raw = crate::db::get_sql_setting(cap_key(relay_url)).ok()??;
     let (supported, checked_at) = parse_cap_entry(&raw)?;
     (now_secs().saturating_sub(checked_at) < NEG_CAP_TTL_SECS).then_some(supported)
+}
+
+/// Has this relay ever reconciled for us? Read past the TTL: a relay that has spoken
+/// NIP-77 and then goes quiet is slow, not unable, and only a refusal unlearns it.
+pub fn neg_ever_confirmed(relay_url: &str) -> bool {
+    crate::db::get_sql_setting(cap_key(relay_url))
+        .ok()
+        .flatten()
+        .and_then(|raw| parse_cap_entry(&raw))
+        .is_some_and(|(supported, _)| supported)
 }
 
 /// Persist a fresh verdict (value format: `0|1:<unix seconds>`). The verdict is
@@ -228,7 +239,7 @@ pub async fn reconcile_missing(
                 Ok(Err(e)) => {
                     crate::log_warn!("[Negentropy] {} failed: {}", url, e);
                     if session.is_live()
-                        && classify_neg_sync_error(&e.to_string(), connected) == Some(false)
+                        && classify_neg_sync_error(&e.to_string(), connected && !neg_ever_confirmed(&url)) == Some(false)
                     {
                         crate::log_info!("[Negentropy] {} marked no-NIP-77 for 24h", url);
                         record_neg_support(&url, false);

@@ -15,8 +15,10 @@ use nostr_sdk::prelude::*;
 use vector_core::community::v2::realtime;
 use vector_core::community::v2::volley::{self, PaintTarget};
 use vector_core::community::CommunityId;
+use vector_core::dm_catchup::{self, Opts, Report};
+use vector_core::event_handler::{commit_prepared_event, BatchingPersist};
 use vector_core::simd::hex::bytes_to_hex_32;
-use vector_core::{db, state, VectorCore};
+use vector_core::{db, state};
 
 /// Channels paged at once: bounds the REQ pressure on a phone's few sockets.
 const WINDOW: usize = 4;
@@ -61,7 +63,7 @@ pub fn after_reconnect() {
         vector_core::rt::time::sleep(Duration::from_millis(cooling.max(1500))).await;
         RECONNECT_ARMED.store(false, Ordering::SeqCst);
         request();
-        sync_dms().await;
+        dms(true).await;
     });
 }
 
@@ -101,17 +103,56 @@ pub async fn resume(hidden_ms: u64) {
     // Subscriptions a dead socket took down come back on the redialled one.
     realtime::force_refresh_subscription(&client).await;
     request();
-    sync_dms().await;
+    dms(true).await;
 }
 
 fn live() -> bool {
     realtime::subscription_ready()
 }
 
-async fn sync_dms() {
-    if let Err(e) = VectorCore.sync_dms(None, &crate::events::WebEventHandler).await {
-        vector_core::log_warn!("[Web] DM catch-up failed: {e}");
+struct Bootstrapping;
+
+/// Catch up on DMs: each read relay's window since its cursor, retried behind it
+/// until held. A relay with no cursor yet then reconciles its whole history once,
+/// in the background.
+pub async fn dms(is_new: bool) -> Report {
+    let report = dm_pass(Opts { is_new, only: None, bootstrap: false }).await;
+    if !report.complete() {
+        let first = report.clone();
+        db::spawn_bound(async move {
+            dm_catchup::retry_incomplete(&first, |relays| {
+                dm_pass(Opts { is_new, only: (!relays.is_empty()).then_some(relays), bootstrap: false })
+            })
+            .await;
+        });
     }
+    bootstrap_cursorless().await;
+    dm_catchup::start_safety_net(|| dm_pass(Opts { is_new: true, only: None, bootstrap: false }));
+    report
+}
+
+async fn dm_pass(opts: Opts) -> Report {
+    let batcher = BatchingPersist::new(&crate::events::WebEventHandler);
+    dm_catchup::catch_up(&opts, &batcher, |prepared, is_new| commit_prepared_event(prepared, is_new, &batcher)).await
+}
+
+async fn bootstrap_cursorless() {
+    let Some(client) = state::nostr_client() else { return };
+    let fresh: Vec<String> = client
+        .relays()
+        .await
+        .into_iter()
+        .filter(|(url, relay)| relay.capabilities().has_read() && vector_core::negentropy::reconcile_cursor(url.as_str()).is_none())
+        .map(|(url, _)| url.to_string())
+        .collect();
+    let busy = db::current_session().scoped::<Bootstrapping, AtomicBool>();
+    if fresh.is_empty() || busy.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    db::spawn_bound(async move {
+        dm_pass(Opts { is_new: false, only: Some(fresh), bootstrap: true }).await;
+        busy.store(false, Ordering::SeqCst);
+    });
 }
 
 async fn run() {

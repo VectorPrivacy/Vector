@@ -54,7 +54,6 @@ pub async fn get_messages_around(chat_id: &str, anchor_id: &str, before: usize, 
 // Wrapper tracking — sync functions re-exported directly
 pub use vector_core::db::wrappers::{
     save_processed_wrapper, load_processed_wrappers, load_processed_wrappers_since, load_negentropy_items,
-    load_negentropy_items_since,
 };
 // Attachment database functions (remain in src-tauri)
 pub use attachments::{

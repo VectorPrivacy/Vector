@@ -91,9 +91,7 @@ pub async fn fetch_messages(init: bool) -> Result<(), String> {
     // History arrives behind the painted list; `sync_finished` repaints what it added.
     db::spawn_bound(async move {
         emitter::emit("sync_progress", &serde_json::json!({ "mode": "Syncing" }));
-        if let Err(e) = VectorCore.sync_dms(None, &crate::events::WebEventHandler).await {
-            vector_core::log_warn!("[Web] DM sync failed: {e}");
-        }
+        crate::catchup::dms(false).await;
         emitter::emit("sync_finished", &());
         if init {
             db::spawn_bound(merge_media_servers());

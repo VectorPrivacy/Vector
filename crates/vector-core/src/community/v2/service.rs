@@ -15043,6 +15043,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_relay_that_has_reconciled_stays_confirmed_until_it_refuses() {
+        use crate::negentropy::{neg_ever_confirmed, record_neg_support};
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let url = "wss://slow.example";
+        assert!(!neg_ever_confirmed(url), "unknown is not confirmed");
+        record_neg_support(url, true);
+        assert!(neg_ever_confirmed(url));
+        record_neg_support(url, false);
+        assert!(!neg_ever_confirmed(url), "a refusal unlearns it");
+    }
+
+    #[tokio::test]
     async fn a_swapped_member_cannot_see_the_owners_community_until_joining() {
         // Multi-account isolation: after the swap, the member's DB holds nothing
         // of the owner's community — community storage is per-account.

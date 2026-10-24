@@ -86,6 +86,7 @@ pub mod tls;
 pub mod events_tracker;
 pub mod proxy;
 pub mod negentropy;
+pub mod dm_catchup;
 pub mod blossom;
 pub mod blossom_servers;
 pub mod blossom_capabilities;
@@ -5080,7 +5081,7 @@ impl VectorCore {
                     Ok(Err(e)) => {
                         log_warn!("[SyncDMs] {} failed: {}", url, e);
                         if cap_session.is_live()
-                            && negentropy::classify_neg_sync_error(&e.to_string(), connected) == Some(false)
+                            && negentropy::classify_neg_sync_error(&e.to_string(), connected && !negentropy::neg_ever_confirmed(url.as_str())) == Some(false)
                         {
                             log_info!("[SyncDMs] {} marked no-NIP-77 for 24h", url);
                             negentropy::record_neg_support(url.as_str(), false);

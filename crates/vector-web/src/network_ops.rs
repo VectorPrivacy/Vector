@@ -681,7 +681,7 @@ pub fn start_relay_monitor(client: &Client) {
                 vector_core::emit_event("relay_status_change", &json!({ "url": url, "status": status_label(status) }));
 
                 // A reconnected socket carries no live subscriptions: Vector owns reconnects.
-                if status == RelayStatus::Connected && !STATE.lock().await.is_syncing {
+                if status == RelayStatus::Connected {
                     if let Some(c) = state::nostr_client() {
                         vector_core::resubscribe_relay_after_reconnect(&c, &relay_url).await;
                     }
@@ -691,22 +691,32 @@ pub fn start_relay_monitor(client: &Client) {
         });
     }
 
+    // A relay that sent nothing since the last look must answer a probe, or its socket
+    // is redialled: a phone's sockets can die without closing.
     db::spawn_bound(async {
         vector_core::rt::time::sleep(Duration::from_secs(30)).await;
+        let mut heard: HashMap<RelayUrl, usize> = HashMap::new();
         while !db::session_stopped() {
             if let Some(client) = state::nostr_client() {
                 for (url, relay) in client.relays().await {
                     if relay.status() != RelayStatus::Connected {
                         continue;
                     }
+                    let received = relay.stats().bytes_received();
+                    if heard.insert(url.clone(), received).is_some_and(|before| received > before) {
+                        update_relay_metrics(url.as_str(), |m| m.last_check = Some(now_secs()));
+                        continue;
+                    }
                     let start = web_time::Instant::now();
+                    // An id no event can have: the relay answers with a bare EOSE.
+                    let probe_filter = Filter::new().id(EventId::from_byte_array([0; 32]));
+                    let budget = vector_core::relay_request_timeout(Duration::from_secs(8));
                     let probe = vector_core::rt::time::timeout(
-                        Duration::from_secs(10),
-                        client
-                            .fetch_events(ReqTarget::single(url.to_string(), [Filter::new().kind(Kind::Metadata).limit(1)]))
-                            .timeout(Duration::from_secs(8)),
+                        budget + Duration::from_secs(2),
+                        client.fetch_events(ReqTarget::single(url.to_string(), [probe_filter])).timeout(budget),
                     )
                     .await;
+                    heard.insert(url.clone(), relay.stats().bytes_received());
                     if matches!(probe, Ok(Ok(_))) {
                         let ping = start.elapsed().as_millis() as u64;
                         update_relay_metrics(url.as_str(), |m| {
@@ -714,7 +724,9 @@ pub fn start_relay_monitor(client: &Client) {
                             m.last_check = Some(now_secs());
                         });
                     } else {
-                        add_relay_log(url.as_str(), "warn", "Health check failed");
+                        add_relay_log(url.as_str(), "warn", "Health check failed; reconnecting");
+                        relay.disconnect();
+                        let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(Duration::from_secs(8))).await;
                     }
                 }
             }
