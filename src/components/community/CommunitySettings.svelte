@@ -17,7 +17,8 @@
     import SectionNav from '../settings/SectionNav.svelte';
 
     // h: close(), pickIcon(), pickBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
-    //    avatarSrc(npub), copyIdItems(what, id), showContextMenu(menu), loadAudit(communityId), openLink(key), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
+    //    avatarSrc(npub), copyIdItems(what, id), copyBannedId(npub), showContextMenu(menu), loadAudit(communityId), openLink(key),
+    //    ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
     const ov = csOverlay.state();
@@ -154,6 +155,12 @@
 
     // Select-all acts on what the search shows, so "all" never reaches rows out of view.
     const shownSelected = $derived(banRows.filter((r) => st.banSel.has(r.npub)).length);
+    function banMenu(npub, e) {
+        const items = h.copyBannedId(npub);
+        if (!items.length) return;
+        e.preventDefault();
+        h.showContextMenu({ x: e.clientX, y: e.clientY, items });
+    }
     const allShown = $derived(banRows.length > 0 && shownSelected === banRows.length);
     function toggleAll() {
         csSelectBans(banRows.map((r) => r.npub), !allShown);
@@ -374,6 +381,7 @@
                                         hasName={!row.veiled && !!row.name}
                                         keyHint={row.name && !row.veiled ? shortNpub(row.npub) : ''}
                                         onactivate={() => csSelectBans([row.npub])}
+                                        oncontextmenu={(e) => banMenu(row.npub, e)}
                                         ui={h.ui}
                                     >
                                         {#snippet trailing()}

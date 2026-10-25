@@ -14,6 +14,8 @@ VectorSvelte.setScreen('communitySettings', {
         deleteRole: (role) => csDeleteRole(role),
         activateRoles: () => csActivateRoles(),
         copyIdItems: (what, id) => copyIdItems(what, id),
+        // A banned member is often only a key: copying it needs no Advanced Mode.
+        copyBannedId: (npub) => copyIdItemsAlways('User', npub),
         showContextMenu: (menu) => showContextMenu(menu),
         // Empty when they have no name of their own, so the row shows the key once.
         name: (npub) => {

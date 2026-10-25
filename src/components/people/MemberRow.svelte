@@ -22,6 +22,7 @@
         keyHint = '',             // see MemberName
         timeoutUntil = 0,         // see MemberName
         onactivate = null,        // (event) => void — row click / Enter / Space
+        oncontextmenu = null,     // (event) => void — right-click
         gutter = null,            // snippet: the left control slot
         trailing = null,          // snippet: the right control slot
         ui,                       // { placeholder, twemojify, showTooltip, hideTooltip }
@@ -46,6 +47,7 @@
     style:cursor={onactivate ? 'pointer' : null}
     onclick={onactivate}
     onkeydown={key}
+    {oncontextmenu}
 >
     <div class="member-pick-hover" style="background:{hoverBg}"></div>
     {@render gutter?.()}

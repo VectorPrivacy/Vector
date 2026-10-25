@@ -105,7 +105,13 @@ function hideContextMenu() {
  * sees: a community or channel id, a message's rumor id, a user's npub.
  */
 function copyIdItems(what, id) {
-    if (!id || !VectorSvelte.advancedState().on || streamHidden(id)) return [];
+    if (!VectorSvelte.advancedState().on) return [];
+    return copyIdItemsAlways(what, id);
+}
+
+/** Copy ID whether or not Advanced Mode is on: where an ID is what the user came for. */
+function copyIdItemsAlways(what, id) {
+    if (!id || streamHidden(id)) return [];
     return [{
         label: `Copy ${what} ID`,
         icon: 'channel-hash',
