@@ -295,6 +295,9 @@ windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_UI_Wi
 # Native file clipboard (CF_HDROP read/write). Already in the lock via the
 # wry/tao stack — promoted to a direct dep.
 clipboard-win = "5"
+# WebView2 profile calls (webview_cache.rs), on the versions wry links.
+webview2-com = "0.39"
+webview2-windows-core = { package = "windows-core", version = "0.62" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }

@@ -94,6 +94,7 @@ mod chapters;
 // Media held in memory, served to the main window by hash
 mod media_scheme;
 mod media_export;
+mod webview_cache;
 
 // Which microphone and speaker every audio path opens
 mod audio_devices;
@@ -154,6 +155,11 @@ pub fn run() {
     vector_core::net::set_app_version(env!("CARGO_PKG_VERSION"));
     // Before the first socket or pool exists: GUI apps start with a 256 ceiling.
     vector_core::net::raise_fd_limit();
+
+    let context = tauri::generate_context!();
+    // Before the first webview: its engine must find no cache folder to open.
+    #[cfg(desktop)]
+    webview_cache::block(&context.config().identifier);
 
     // Opt out of the modal "Bad Image" hard-error dialog: injected hooks and GPU
     // driver probes LoadLibrary optional DLLs that can be corrupt on user machines;
@@ -399,6 +405,10 @@ pub fn run() {
     builder
         .setup(|app| {
             media_export::purge();
+            #[cfg(desktop)]
+            if let Some(main) = app.get_webview_window("main") {
+                webview_cache::purge(&main);
+            }
             message::files::purge_composer_copies(app.handle());
             #[cfg(desktop)]
             app.handle().plugin(
@@ -1219,7 +1229,7 @@ pub fn run() {
             #[cfg(feature = "whisper")]
             whisper::cancel_whisper_download
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while running tauri application")
         .run(|_app, event| {
             // A clean quit mid-call tells the peer, instead of leaving them to the
