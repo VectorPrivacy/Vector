@@ -1042,6 +1042,7 @@ async fn process_outbound_community_attachment_bytes(
         .unwrap_or("bin")
         .to_lowercase();
     let name = file_name.to_string();
+    let sent_as = extension.clone();
 
     let is_image = matches!(
         extension.as_str(),
@@ -1069,6 +1070,8 @@ async fn process_outbound_community_attachment_bytes(
     .map_err(|e| e.to_string())??;
 
     let plain_len = bytes.len() as u64;
+    // A compressed picture's name follows its new format, so the receiver opens it as one.
+    let name = if extension == sent_as { name } else { crate::message::video_compression::renamed(&name, &extension) };
     Ok(stage_community_attachment(FileSource::Bytes(std::sync::Arc::new(bytes)), plain_len, plaintext_hash, extension, name, img_meta))
 }
 

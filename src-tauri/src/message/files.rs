@@ -1493,29 +1493,37 @@ pub(crate) async fn sweep_compression_cache() -> usize {
 pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
     use super::compression::process_image_for_send;
 
-    let file_name = std::path::Path::new(&file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string();
+    // An Android pick is a content URI: its name, type and bytes come from the pick.
+    #[cfg(target_os = "android")]
+    let picked = ANDROID_FILE_CACHE.lock().unwrap().get(&file_path).map(|(bytes, ext, name, ..)| (bytes.clone(), ext.clone(), name.clone()));
+    #[cfg(not(target_os = "android"))]
+    let picked: Option<(Arc<Vec<u8>>, String, String)> = None;
+
+    let file_name = match &picked {
+        Some((_, _, name)) => name.clone(),
+        None => std::path::Path::new(&file_path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+    };
 
     // Keep-metadata re-derives from the original, so only the default path waits.
     let precompressed = take_precompressed(&file_path, !keep_metadata).await;
 
-    let extension = path_extension(&file_path);
+    let extension = picked.as_ref().map_or_else(|| path_extension(&file_path), |(_, ext, _)| ext.clone());
 
     // Default strip+compress reuses the pre-compressed result. Keep-metadata
     // (needs EXIF re-attach) and cache misses re-derive from the original file.
     let processed = match precompressed {
         Some(pc) if !keep_metadata => pc,
         _ => {
-            let (path, extension) = (file_path.clone(), extension.clone());
+            let (path, extension, held) = (file_path.clone(), extension.clone(), picked.map(|(bytes, ..)| bytes));
             tokio::task::spawn_blocking(move || {
                 if super::video_compression::is_video_extension(&extension) {
                     return super::video_compression::compress_file(&path);
                 }
-                let bytes = read_file_checked(&path)?;
-                process_image_for_send(Arc::new(bytes), &extension, true, keep_metadata, None)
+                let bytes = match held {
+                    Some(bytes) => bytes,
+                    None => Arc::new(read_file_checked(&path)?),
+                };
+                process_image_for_send(bytes, &extension, true, keep_metadata, None)
             })
             .await
             .map_err(|e| e.to_string())??
@@ -1539,8 +1547,8 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
         img_meta: processed.img_meta,
         name,
     };
-    // A compressed video's name follows its new container, so the receiver opens it as one.
-    if super::video_compression::is_video_extension(&extension) && attachment_file.extension != extension {
+    // A compressed file's name follows its new format, so the receiver opens it as one.
+    if attachment_file.extension != extension {
         attachment_file.name = super::video_compression::renamed(&attachment_file.name, &attachment_file.extension);
     }
     message(receiver, String::new(), replied_to, Some(attachment_file)).await

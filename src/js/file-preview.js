@@ -149,16 +149,6 @@ function getFileName(filepath) {
 }
 
 /**
- * Check if file is a supported image
- * @param {string} filepath - File path
- * @returns {boolean} True if file is a supported image
- */
-function isSupportedImage(filepath) {
-    const ext = getFileExtension(filepath);
-    return SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
-}
-
-/**
  * Check if file is a supported video (for preview)
  * @param {string} filepath - File path
  * @returns {boolean} True if file is a supported video
@@ -996,10 +986,8 @@ async function sendPreviewedFile() {
     const usingBytes = !!fileBytes;
     const isZipSend = !!pendingZipPath;
     
-    // Check if this is an image for compression logic
-    const isImage = usingBytes
-        ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
-        : isSupportedImage(filePath);
+    // The resolved type, not the path's: an Android pick is a content:// URI with no extension.
+    const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
     const shouldCompress = !!((isImage || isVideo) && fp.compress && fp.compressChecked);
     // A video encode can run long and the chat shows nothing until it lands, so the preview
