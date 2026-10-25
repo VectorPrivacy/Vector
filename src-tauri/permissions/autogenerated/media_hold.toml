@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-media-hold"
+description = "Enables the media_hold command without any pre-configured scope."
+commands.allow = ["media_hold"]
+
+[[permission]]
+identifier = "deny-media-hold"
+description = "Denies the media_hold command without any pre-configured scope."
+commands.deny = ["media_hold"]

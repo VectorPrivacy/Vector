@@ -5,6 +5,7 @@
     import FileBox from './FileBox.svelte';
     import { loadModelEngine } from '../../lib/model3d.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
+    import { mediaPath } from '../../lib/media.js';
     let { att, msg, sender, h } = $props();   // h: MediaHelpers (js/render/chat/message-row.js)
 
     let phase = $state('loading');
@@ -28,7 +29,7 @@
             if (!live) return;
             if (!engine.available()) { fallback = true; return; }
             view = engine.createView(canvas, {
-                url: h.assetUrl(att.path),
+                url: h.assetUrl(mediaPath(att)),
                 ext: (att.extension || '').toLowerCase(),
                 onState: (s) => { phase = s.phase; error = s.text || ''; animated = !!s.animated; clips = s.clips || []; },
                 onTap: () => h.openModel(att),

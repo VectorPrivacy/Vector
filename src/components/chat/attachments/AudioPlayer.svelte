@@ -13,6 +13,7 @@
     import { lockSelection } from '../../lib/draglock.js';
     import Transcription from './Transcription.svelte';
     import Lyrics from './Lyrics.svelte';
+    import { mediaPath } from '../../lib/media.js';
 
     let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
 
@@ -68,7 +69,7 @@
     // too: the file is already on this device, so the card is whole from its first frame
     // and only the ring becomes a play button when the upload lands.
     $effect(() => {
-        const path = att.path;
+        const path = mediaPath(att);
         if (!path) return;
         // Once per file: what the reads write back must not set them off again.
         untrack(() => {
@@ -326,7 +327,7 @@
     // ── transcription ──
     const transcribing = $derived(transcription?.phase === 'loading');
     function onTranscribe() {
-        if (!download.active) toggleTranscript(att.id, att.path, h.transcribe);
+        if (!download.active) toggleTranscript(att.id, mediaPath(att), h.transcribe);
     }
     // A fresh voice message transcribes itself when the setting is on and the model is here.
     $effect(() => {

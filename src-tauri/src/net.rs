@@ -401,6 +401,16 @@ pub async fn download_with_reporter(
     reporter: &impl ProgressReporter,
     timeout: Option<std::time::Duration>,
 ) -> Result<Vec<u8>, &'static str> {
+    download_to_memory(content_url, reporter, timeout, MAX_DOWNLOAD_BYTES).await
+}
+
+/// [`download_with_reporter`] refusing any body over `limit` bytes, before or as it arrives.
+pub async fn download_to_memory(
+    content_url: &str,
+    reporter: &impl ProgressReporter,
+    timeout: Option<std::time::Duration>,
+    limit: u64,
+) -> Result<Vec<u8>, &'static str> {
     validate_url_not_private(content_url)?;
     // Through the user's Magnitude when the privacy setting is on and the
     // host is not ours: the host sees the edge, not this device. Every
@@ -422,7 +432,7 @@ pub async fn download_with_reporter(
     // network switch starts it again once the new network is ready.
     let mut network_waits = 0u8;
     loop {
-        match download_with_streaming(&client, &fetch_url, reporter, authorization.as_ref()).await {
+        match download_with_streaming(&client, &fetch_url, reporter, authorization.as_ref(), limit.min(MAX_DOWNLOAD_BYTES)).await {
             Err(Interrupted::Network(e)) if network_waits < 8 && vector_core::net::wait_after(&e).await.is_ok() => {
                 network_waits += 1;
             }
@@ -452,6 +462,7 @@ async fn download_with_streaming(
     url: &str,
     reporter: &impl ProgressReporter,
     auth: Option<&reqwest::header::HeaderValue>,
+    limit: u64,
 ) -> Result<Vec<u8>, Interrupted> {
     if reporter.cancelled() {
         return Err(TRANSFER_CANCELLED.into());
@@ -475,7 +486,7 @@ async fn download_with_streaming(
     }
 
     let total_size = res.content_length().filter(|&n| n > 0);
-    if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
+    if matches!(total_size, Some(size) if size > limit) {
         return Err("File exceeds the maximum download size".into());
     }
     let started = std::time::Instant::now();
@@ -504,7 +515,7 @@ async fn download_with_streaming(
 
         result.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
-        if downloaded > MAX_DOWNLOAD_BYTES {
+        if downloaded > limit {
             return Err("File exceeds the maximum download size".into());
         }
 

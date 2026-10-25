@@ -3,6 +3,7 @@
 // A row that mounts for the same attachment takes it back, so leaving and returning is
 // seamless in both directions.
 import { claimPlayback, releasePlayback, holdsPlayback, setAudioDuration, playerFor, waveformBytes } from './audio.svelte.js';
+import { mediaPath } from './media.js';
 
 /** One audio attachment on the engine, whoever is showing it. */
 export class AudioSession {
@@ -69,7 +70,7 @@ export class AudioSession {
             }));
             this.#offs.push(await h.listen('audio_duration', (e) => { if (e.payload.id === this.#sourceId) this.#setDuration(e.payload.duration_ms); }));
         }
-        const result = await h.load(this.att.path);
+        const result = await h.load(mediaPath(this.att));
         this.#sourceId = result.id;
         if (result.duration_ms > 0) this.#setDuration(result.duration_ms);
         if (!this.waveform) this.waveform = { data: null, fps: result.waveform_fps, bins: result.bins };

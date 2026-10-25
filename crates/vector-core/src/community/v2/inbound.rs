@@ -1792,7 +1792,7 @@ mod tests {
             size: 4096,
             img_meta: None,
             downloading: false,
-            downloaded: false, verified: false,
+            downloaded: false, verified: false, resident: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("b".repeat(64)),

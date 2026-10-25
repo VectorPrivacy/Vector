@@ -93,7 +93,7 @@ impl MediaRam {
     fn insert_at(&self, hash: [u8; 32], bytes: Vec<u8>, mime: &str, now: Instant) -> Result<Arc<Entry>, Refused> {
         let bytes = Zeroizing::new(bytes);
         let len = bytes.len() as u64;
-        if len > self.budget / 3 {
+        if !self.admits(len) {
             return Err(Refused::TooLarge);
         }
         let mut slots = self.lock();
@@ -119,6 +119,15 @@ impl MediaRam {
         let entry = Arc::new(Entry { bytes, mime: mime.into(), live: self.live.clone() });
         slots.insert(hash, Slot { entry: entry.clone(), touched: now, holds: 0 });
         Ok(entry)
+    }
+
+    /// The largest file that may live here at all.
+    pub fn largest(&self) -> u64 {
+        self.budget / 3
+    }
+
+    pub fn admits(&self, len: u64) -> bool {
+        len <= self.largest()
     }
 
     pub fn get(&self, hash: &[u8; 32]) -> Option<Arc<Entry>> {

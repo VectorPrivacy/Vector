@@ -214,6 +214,20 @@ function mediaUrl(filePath) {
 }
 
 /**
+ * A src for a backend ref or a path: media held in memory through `vmedia`, a file through
+ * `legacy` (the asset protocol unless a caller needs Range).
+ * @param {string} ref - `vmedia:<hash>` or an absolute file path
+ * @param {(path: string) => string} [legacy]
+ * @returns {string}
+ */
+function refSrc(ref, legacy = convertFileSrc) {
+    if (ref && ref.startsWith('vmedia:') && platformFeatures?.vmedia) {
+        return `${platformFeatures.vmedia}/${ref.slice(7)}`;
+    }
+    return legacy(ref);
+}
+
+/**
  * Fetch platform features from the backend
  */
 async function fetchPlatformFeatures() {

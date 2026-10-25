@@ -580,7 +580,7 @@ fn process_file_attachment(
         img_meta,
         downloading: false,
         downloaded,
-        verified: false,
+        verified: false, resident: false,
         webxdc_topic,
         group_id: None,       // Kind 15 attachments use explicit key/nonce
         original_hash: original_file_hash, // ox tag value (original file hash)

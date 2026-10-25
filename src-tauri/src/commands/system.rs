@@ -32,6 +32,8 @@ pub struct PlatformFeatures {
     /// When set, the frontend uses this instead of `asset://` for media elements
     /// to get proper HTTP Range request support (seeking, streaming).
     pub media_url: Option<String>,
+    /// Where media this account holds in memory is served: `<vmedia>/<hash>`.
+    pub vmedia: String,
     /// Whether this build looks for and installs its own updates. Off in the
     /// F-Droid flavour, where the store owns updates.
     pub self_update: bool,
@@ -74,6 +76,12 @@ pub async fn get_platform_features() -> PlatformFeatures {
     #[cfg(not(target_os = "android"))]
     let media_url: Option<String> = None;
 
+    // Android's webview can't seek through a custom scheme, so its media server serves these too.
+    #[cfg(target_os = "android")]
+    let vmedia = media_url.as_ref().map(|prefix| format!("{prefix}/m")).unwrap_or_default();
+    #[cfg(not(target_os = "android"))]
+    let vmedia = crate::media_scheme::base_url();
+
     PlatformFeatures {
         transcription: cfg!(feature = "whisper"),
         notification_sounds: cfg!(desktop),
@@ -81,6 +89,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
         is_mobile,
         debug_mode: cfg!(debug_assertions),
         media_url,
+        vmedia,
         self_update: !cfg!(feature = "fdroid"),
         video_compression: crate::message::video_compression::available(),
         // F-Droid counts a built-in YouTube player as promoting a non-free network service.

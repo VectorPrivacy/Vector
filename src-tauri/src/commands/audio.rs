@@ -35,7 +35,7 @@ pub async fn open_mic_settings() -> Result<(), String> {
 #[tauri::command]
 pub async fn audio_probe(path: String) -> Result<u64, String> {
     tokio::task::spawn_blocking(move || {
-        audio_engine::probe_duration(&path)
+        audio_engine::probe_duration(&audio_engine::AudioInput::resolve(&path)?)
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -48,7 +48,7 @@ pub async fn audio_probe(path: String) -> Result<u64, String> {
 pub async fn audio_load(path: String) -> Result<AudioLoadResult, String> {
     // Run decode/resample on blocking thread to avoid blocking the async runtime
     tokio::task::spawn_blocking(move || {
-        AudioEngine::get()?.load_from_file(&path)
+        AudioEngine::get()?.load_from_file(&audio_engine::AudioInput::resolve(&path)?)
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?
@@ -134,8 +134,16 @@ pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, S
         use lofty::file::TaggedFileExt;
         use lofty::tag::Accessor;
 
-        let tagged_file = lofty::read_from_path(&path)
-            .map_err(|e| format!("Failed to read tags: {}", e))?;
+        let input = audio_engine::AudioInput::resolve(&path)?;
+        // A file is typed by its extension first; held bytes have only their content.
+        let tagged_file = match &input {
+            audio_engine::AudioInput::File(path) => lofty::read_from_path(path),
+            audio_engine::AudioInput::Held(_) => lofty::probe::Probe::new(input.open()?)
+                .guess_file_type()
+                .map_err(|e| format!("Failed to read tags: {}", e))?
+                .read(),
+        }
+        .map_err(|e| format!("Failed to read tags: {}", e))?;
 
         let tag = match tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
             Some(t) => t,
@@ -161,14 +169,14 @@ pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, S
         });
 
         // An MP3's raw ID3 tag carries what the generic tag drops (SYLT, CHAP): read it once.
-        let id3 = path.to_ascii_lowercase().ends_with(".mp3").then(|| {
+        let id3 = (input.extension().as_deref() == Some("mp3")).then(|| {
             use lofty::file::AudioFile;
-            let mut file = std::fs::File::open(&path).ok()?;
+            let mut file = input.open().ok()?;
             lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new()).ok()?.id3v2().cloned()
         }).flatten();
         let lyrics = crate::lyrics::read(&tagged_file, id3.as_ref());
         let year = tag.date().map(|d| d.year);
-        let chapters = crate::chapters::read(&path, &tagged_file, id3.as_ref());
+        let chapters = crate::chapters::read(&input, &tagged_file, id3.as_ref());
 
         // Only return if there's something useful to display
         if title.is_none() && cover_art.is_none() && lyrics.is_none() && chapters.is_empty() {

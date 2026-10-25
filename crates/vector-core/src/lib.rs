@@ -3895,9 +3895,9 @@ impl VectorCore {
             let attachment = crate::community::attachments::attachment_from_imeta(&tag, &dir)
                 .ok_or_else(|| VectorError::Other("this pin's attachment metadata is malformed".into()))?;
 
-            let respond = |path: &std::path::Path| {
+            let respond = |path: &str| {
                 serde_json::json!({
-                    "path": path.to_string_lossy(),
+                    "path": path,
                     "name": attachment.name.to_string(),
                     "extension": attachment.extension.to_string(),
                 })
@@ -3907,11 +3907,16 @@ impl VectorCore {
             // `ox` carries the author's signature-weight claim — the same trust the
             // chat pipeline extends). Reuse and fresh downloads both verify it.
             let expected = attachment.original_hash.as_deref();
+            // A pin the drawer only shows is held in memory, like a chat's.
+            let in_memory = !cfg!(target_arch = "wasm32") && crate::media::previewable(&attachment.extension.to_ascii_lowercase());
+            if let Some(hash) = expected.and_then(crate::simd::hex::hex_to_bytes_32_checked).filter(|h| in_memory && crate::media::resident(h)) {
+                return Ok(respond(&crate::media::MediaRef::held(&hash)));
+            }
             let path = std::path::PathBuf::from(&*attachment.path);
             if let Ok(bytes) = std::fs::read(&path) {
                 match expected {
-                    Some(want) if crate::crypto::sha256_hex(&bytes) == want => return Ok(respond(&path)),
-                    None => return Ok(respond(&path)),
+                    Some(want) if crate::crypto::sha256_hex(&bytes) == want => return Ok(respond(&path.to_string_lossy())),
+                    None => return Ok(respond(&path.to_string_lossy())),
                     _ => {} // stale or foreign bytes at the path: re-download
                 }
             }
@@ -3920,13 +3925,19 @@ impl VectorCore {
                 .ok()
                 .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok());
             let bytes = self.download_attachment_from(&attachment, author_npub.as_deref()).await?;
-            if let Some(want) = expected {
-                if crate::crypto::sha256_hex(&bytes) != want {
-                    return Err(VectorError::Other("downloaded bytes do not match the pinned content hash".into()));
-                }
+            let hash = crate::crypto::sha256_hex(&bytes);
+            if expected.is_some_and(|want| hash != want) {
+                return Err(VectorError::Other("downloaded bytes do not match the pinned content hash".into()));
+            }
+            if in_memory {
+                let hash = crate::simd::hex::hex_to_bytes_32(&hash);
+                let mime = crate::crypto::mime_from_extension(&attachment.extension.to_ascii_lowercase());
+                crate::media::ram::insert(hash, bytes, mime)
+                    .map_err(|_| VectorError::Other("too much media is open to show this one".into()))?;
+                return Ok(respond(&crate::media::MediaRef::held(&hash)));
             }
             std::fs::write(&path, &bytes).map_err(|e| VectorError::Other(format!("could not cache the attachment: {e}")))?;
-            Ok(respond(&path))
+            Ok(respond(&path.to_string_lossy()))
         })
         .await
     }

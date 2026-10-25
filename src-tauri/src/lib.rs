@@ -91,6 +91,10 @@ mod lyrics;
 // Tracks inside one audio file: ID3 chapters and cue sheets
 mod chapters;
 
+// Media held in memory, served to the main window by hash
+mod media_scheme;
+mod media_export;
+
 // Which microphone and speaker every audio path opens
 mod audio_devices;
 mod mic_access;
@@ -351,6 +355,7 @@ pub fn run() {
         })
         // Register the webxdc:// custom protocol for Mini Apps (async to avoid deadlocks on Windows)
         .register_asynchronous_uri_scheme_protocol("webxdc", miniapps::scheme::miniapp_protocol)
+        .register_asynchronous_uri_scheme_protocol(media_scheme::SCHEME, media_scheme::protocol)
         // Register Mini Apps state
         .manage(miniapps::state::MiniAppsState::new());
 
@@ -393,6 +398,7 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            media_export::purge();
             #[cfg(desktop)]
             app.handle().plugin(
                 tauri_plugin_updater::Builder::new()
@@ -1054,6 +1060,9 @@ pub fn run() {
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
             commands::attachments::cancel_download,
+            commands::attachments::save_attachment,
+            commands::attachments::media_hold,
+            commands::attachments::media_release,
             commands::attachments::get_paused_downloads,
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,

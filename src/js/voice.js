@@ -875,7 +875,7 @@ const AUDIO_PLAYER_HELPERS = {
         const msgs = _dmsgListHelpers.messages(chatId);
         const i = msgs.findIndex(m => m.id === msgId);
         const msg = i >= 0 ? msgs[i + 1] : null;
-        const att = msg?.attachments?.find(a => !a.name && a.downloaded && a.path && _dmsgMediaHelpers.isAudio(a.extension));
+        const att = msg?.attachments?.find(a => !a.name && ((a.downloaded && a.path) || a.resident) && _dmsgMediaHelpers.isAudio(a.extension));
         return att ? { att, msg } : null;
     },
     openChat: () => strOpenChat,

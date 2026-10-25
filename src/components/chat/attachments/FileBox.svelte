@@ -10,6 +10,7 @@
     import { miniappStatus } from '../../lib/miniapps.svelte.js';
     import { profileVersion } from '../../lib/signals.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
+    import { mediaPath } from '../../lib/media.js';
 
     let { att, msg, sender = null, phase, label = null, failed = false, onActivate = null, h } = $props();
     // phase: 'downloaded' | 'download' | 'downloading'; label overrides the second line,
@@ -50,8 +51,8 @@
     let iconRemote = $state(null);
     $effect(() => {
         if (!isMiniApp) return;
-        if (phase === 'downloaded' && att.path) {
-            h.loadMiniAppInfo(att.path).then((i) => { if (i) { title = i.name || 'Mini App'; iconSrc = h.miniAppIconSrc(i) || iconSrc; } }).catch(() => {});
+        if (phase === 'downloaded' && mediaPath(att)) {
+            h.loadMiniAppInfo(mediaPath(att)).then((i) => { if (i) { title = i.name || 'Mini App'; iconSrc = h.miniAppIconSrc(i) || iconSrc; } }).catch(() => {});
         } else if (phase !== 'downloaded') {
             h.marketplaceApp(att.id).then((app) => {
                 if (!app) return;
@@ -115,7 +116,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="file-attachment" filepath={att.path || undefined} class:miniapp-attachment={isMiniApp} data-webxdc-topic={att.webxdc_topic || undefined}
+<div class="file-attachment" filepath={mediaPath(att) || undefined} class:miniapp-attachment={isMiniApp} data-webxdc-topic={att.webxdc_topic || undefined}
      data-playing={rt?.active ? 'true' : undefined} onclick={click}>
     <div class="file-box" data-state={state} class:is-static={phase === 'downloading' || rt?.active}>
         <span class="file-box-icon">

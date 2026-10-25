@@ -43,6 +43,7 @@ fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpe
             .map(|s| s.to_string())
             .collect(),
         verified: row.get::<_, i64>(16)? != 0,
+        resident: false,
     };
     Ok((event_id, att))
 }

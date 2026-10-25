@@ -406,10 +406,16 @@ async function setupRustListeners() {
         cAttachment.downloading = false;
         cAttachment.download_failed = false;
         if (evt.payload.success) {
-            cAttachment.downloaded = true;
-            // Update path from backend result (always has the correct file path)
-            if (evt.payload.result) {
-                cAttachment.path = evt.payload.result;
+            // Held in memory: shown by hash, with no file behind it.
+            const resident = !!evt.payload.resident;
+            if (resident) {
+                cAttachment.resident = true;
+            } else {
+                cAttachment.downloaded = true;
+                // Update path from backend result (always has the correct file path)
+                if (evt.payload.result) {
+                    cAttachment.path = evt.payload.result;
+                }
             }
             // Update ID if hash changed (nonce → blossom hash)
             if (evt.payload.old_id) {
@@ -426,9 +432,13 @@ async function setupRustListeners() {
                 for (const att of msg.attachments) {
                     if (att.id === matchId && !att.downloaded) {
                         att.downloading = false;
-                        att.downloaded = true;
                         att.download_failed = false;
-                        att.path = cAttachment.path;
+                        if (resident) {
+                            att.resident = true;
+                        } else {
+                            att.downloaded = true;
+                            att.path = cAttachment.path;
+                        }
                         if (evt.payload.old_id) {
                             att.id = evt.payload.id;
                         }

@@ -9,6 +9,7 @@
     import ModelAttachment from './attachments/ModelAttachment.svelte';
     import { MODEL_EXTENSIONS, modelsSupported } from '../lib/model3d.js';
     import { messageVersion } from '../lib/chatview.svelte.js';
+    import { attachmentReady, nearScreen } from '../lib/media.js';
 
     let { msg, sender, ctx, h } = $props();
     // h: MediaHelpers (js/render/chat/message-row.js); `h.audio` is AudioPlayer's own bag
@@ -21,20 +22,25 @@
         messageVersion(msg.id);
         return (msg.attachments || []).map((att) => ({
             att,
-            phase: att.downloaded ? 'downloaded' : h.isDownloading(att) ? 'downloading' : 'idle',
-            auto: !att.downloaded && h.willAutoDownload(att, ctx),
+            phase: attachmentReady(att) ? 'downloaded' : h.isDownloading(att) ? 'downloading' : 'idle',
+            auto: !attachmentReady(att) && h.willAutoDownload(att, ctx),
             uploading: !!(msg.mine && msg.pending),
         }));
     });
 
-    // Auto-download: a side effect, once per attachment id (the app dedupes across renders).
+    // Auto-download: a side effect, once per attachment id (the app dedupes across renders),
+    // and only once the message comes near the screen: a long chat loads what you scroll to.
+    let near = $state(false);
+    const waiting = $derived(rows.some((r) => r.phase === 'idle' && r.auto));
     $effect(() => {
+        if (!near) return;
         for (const r of rows) {
             if (r.phase === 'idle' && r.auto) h.autoDownload(r.att, msg, sender);
         }
     });
 </script>
 
+{#if waiting && !near}<span class="att-near" aria-hidden="true" use:nearScreen={() => (near = true)}></span>{/if}
 <!-- By position, not id: an upload's id changes when it lands, and its picture must not remount. -->
 {#each rows as { att, phase, auto }, i (i)}
     {#if phase === 'downloaded'}

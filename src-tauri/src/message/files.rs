@@ -981,6 +981,9 @@ fn write_preview_as_is(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result
 /// viewer's many window sizes share renders); `None` when the SVG refuses to render.
 #[tauri::command]
 pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Result<Option<String>, String> {
+    if let Some(vector_core::media::MediaRef::Held(hash)) = vector_core::media::MediaRef::parse(&path) {
+        return tokio::task::spawn_blocking(move || Ok(render_held_svg(&hash, max_dim))).await.map_err(|e| e.to_string())?;
+    }
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > vector_core::svg::MAX_SVG_BYTES as u64 {
         return Ok(None);
@@ -1011,6 +1014,27 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// An SVG held in memory, drawn into memory beside it: the render is held under its own hash.
+fn render_held_svg(hash: &[u8; 32], max_dim: u32) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let dim = max_dim.clamp(256, vector_core::svg::MAX_RENDER_DIM).div_ceil(256) * 256;
+    let render: [u8; 32] = Sha256::new().chain_update(b"svg-render").chain_update(hash).chain_update(dim.to_le_bytes()).finalize().into();
+    if vector_core::media::resident(&render) {
+        return Some(vector_core::media::MediaRef::held(&render));
+    }
+    let src = vector_core::media::open(hash)?;
+    if src.len() > vector_core::svg::MAX_SVG_BYTES as u64 {
+        return None;
+    }
+    let bytes = vector_core::media::read_all(&*src).ok()?;
+    if !vector_core::svg::looks_like_svg(&bytes) {
+        return None;
+    }
+    let png = vector_core::svg::rasterize_png(&bytes, dim).ok()?;
+    vector_core::media::ram::insert(render, png, "image/png").ok()?;
+    Some(vector_core::media::MediaRef::held(&render))
 }
 
 fn svg_render_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {

@@ -6,6 +6,7 @@
     import { claimPlayback, releasePlayback } from '../../lib/audio.svelte.js';
     import { popOut, takeBack, yieldPopout, popoutPlayingAudio } from '../../lib/popout.svelte.js';
     import { createVideo, adoptVideo, ownsVideo, parkVideo, dropVideo, videoLane } from '../../lib/videohost.js';
+    import { mediaPath } from '../../lib/media.js';
     let { att, msg, h } = $props();   // h: MediaHelpers (js/render/chat/message-row.js)
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let container = $state(null);
@@ -20,8 +21,15 @@
     // svelte-ignore state_referenced_locally
     const adopted = adoptVideo(back?.hostKey, owner);
     // svelte-ignore state_referenced_locally
-    const { key, el } = adopted ? { key: back.hostKey, el: adopted } : createVideo(h.mediaUrl(att.path), owner);
+    const { key, el } = adopted ? { key: back.hostKey, el: adopted } : createVideo(h.mediaUrl(mediaPath(att)), owner);
     el.className = '';
+    // A paused or fully buffered video reads nothing for minutes: its bytes stay held while shown.
+    $effect(() => {
+        if (!att.resident) return;
+        const held = att;
+        h.hold(held);
+        return () => h.release(held);
+    });
     el.style.cssText = 'height: auto; border-radius: 8px; cursor: pointer;';
     $effect(() => {
         el.controls = !uploading;

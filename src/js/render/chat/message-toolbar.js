@@ -244,7 +244,10 @@ function _dmsgToolbarView(rowEl) {
     const uniqueEmojiCount = msg && msg.reactions ? new Set(msg.reactions.map(r => r.emoji)).size : 0;
     // Any message with a downloaded attachment can be revealed or copied as a file,
     // not only own ones: in groups this is the primary path to media you saved.
-    const downloadedPath = (msg && msg.attachments) ? (msg.attachments.find(a => a.downloaded) || {}).path : null;
+    const shown = (msg && msg.attachments) ? msg.attachments.find(a => VectorSvelte.attachmentReady(a)) : null;
+    const downloadedPath = shown ? VectorSvelte.mediaPath(shown) : null;
+    // Held in memory has no folder to reveal: the same button saves a file instead.
+    const held = !!shown && !shown.downloaded;
 
     const show = {
         react: !dissolved && uniqueEmojiCount < 8,
@@ -275,7 +278,7 @@ function _dmsgToolbarView(rowEl) {
         del = { mode: 'hide', label: 'Hide message' };
     }
     show.delete = !!del;
-    return { show, path: downloadedPath, del };
+    return { show, path: downloadedPath, name: shown?.name || '', held, del };
 }
 
 function hideMessageToolbar() {
@@ -359,13 +362,14 @@ function _dmsgHandleToolbarClick(e) {
         }
         case 'reveal-file': {
             const path = btn.dataset.path;
-            if (path) revealItemInDir(path);
+            if (path?.startsWith('vmedia:')) saveAttachmentFile({ resident: true, id: path.slice(7), name: btn.dataset.name || '' });
+            else if (path) revealItemInDir(path);
             break;
         }
         case 'copy-file': {
             const path = btn.dataset.path;
             if (path) {
-                invoke('write_clipboard_files', { paths: [path] })
+                invoke('write_clipboard_files', { paths: [path], names: [btn.dataset.name || ''] })
                     .then(() => showToast('Copied file to clipboard'))
                     .catch((err) => showToast(String(err)));
             }
@@ -834,15 +838,16 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
     // manager; Android has no "reveal in folder", so open it with the user's
     // chosen app (ACTION_VIEW chooser via the backend).
     {
-        const downloadedPath = (msg && msg.attachments)
-            ? (msg.attachments.find(a => a.downloaded) || {}).path
-            : null;
+        const shown = (msg && msg.attachments) ? msg.attachments.find(a => VectorSvelte.attachmentReady(a)) : null;
+        const downloadedPath = shown ? VectorSvelte.mediaPath(shown) : null;
+        const name = shown?.name || '';
         if (downloadedPath) {
             if (platformFeatures?.os === 'android') {
-                items.push({ label: 'Open', icon: 'file-search', onClick: () => (platformFeatures.os === 'android' ? openAndroidAttachment(downloadedPath) : invoke('open_attachment', { path: downloadedPath })) });
-                items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
+                items.push({ label: 'Open', icon: 'file-search', onClick: () => openAndroidAttachment(downloadedPath, name) });
+                items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath, name }) });
+                if (!shown.downloaded) items.push({ label: 'Save', icon: 'download', onClick: () => saveAttachmentFile(shown) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {
-                    invoke('write_clipboard_files', { paths: [downloadedPath] })
+                    invoke('write_clipboard_files', { paths: [downloadedPath], names: [name] })
                         .then(() => showToast('Copied file to clipboard'))
                         .catch((err) => showToast(String(err)));
                 } });
@@ -858,9 +863,10 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                     } });
                 }
             } else if (!platformFeatures?.is_mobile) {
-                items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+                if (shown.downloaded) items.push({ label: 'Reveal in folder', icon: 'file-search', onClick: () => revealItemInDir(downloadedPath) });
+                else items.push({ label: 'Save', icon: 'download', onClick: () => saveAttachmentFile(shown) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {
-                    invoke('write_clipboard_files', { paths: [downloadedPath] })
+                    invoke('write_clipboard_files', { paths: [downloadedPath], names: [name] })
                         .then(() => showToast('Copied file to clipboard'))
                         .catch((err) => showToast(String(err)));
                 } });

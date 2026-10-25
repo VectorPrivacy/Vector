@@ -142,7 +142,8 @@ VectorSvelte.setPinsHandlers({
                         communityId: pinsCtx.communityId, channelId: pinsCtx.channelId, messageId: pin.rumor_id,
                     });
                     if (!att?.path) return;
-                    if (platformFeatures?.os === 'android') await openAndroidAttachment(att.path);
+                    if (platformFeatures?.os === 'android') await openAndroidAttachment(att.path, att.name);
+                    else if (att.path.startsWith('vmedia:')) saveAttachmentFile({ resident: true, id: att.path.slice(7), name: att.name || '' });
                     else revealItemInDir(att.path);
                 } catch (err) {
                     showToast(String(err));
@@ -265,8 +266,8 @@ async function pinsUpgradeMediaPreview(row, body, pin, kind) {
     // The drawer may have re-rendered or collapsed while we fetched.
     if (!att?.path || !row.classList.contains('pins-expanded') || !body.isConnected) return;
     // An SVG shows as the backend's render of it; one that refuses keeps the chip.
-    const svg = kind === 'image' && /\.svg$/i.test(att.path);
-    const src = svg ? await svgRenderSrc(att.path, 1024) : convertFileSrc(att.path);
+    const svg = kind === 'image' && (att.extension || '').toLowerCase() === 'svg';
+    const src = svg ? await svgRenderSrc(att.path, 1024) : refSrc(att.path, kind === 'video' ? mediaUrl : convertFileSrc);
     if (!src || !row.classList.contains('pins-expanded') || !body.isConnected) return;
     const media = kind === 'video'
         ? Object.assign(document.createElement('video'), { src, controls: true, preload: 'metadata' })

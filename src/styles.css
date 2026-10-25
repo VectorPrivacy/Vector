@@ -13968,6 +13968,14 @@ body.mobile:not(.ws) .navbar-btn::before {
    box too: a block-width wrapper leaves a dead strip beside the box that still
    opens the file when tapped. The transfer line is kept from resizing the box by
    the fixed slot on `.file-box-rate`. */
+/* Out of flow and boxless: only marks where a message's attachments sit, for auto-load. */
+.att-near {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
 .file-attachment {
     width: fit-content;
     /* The same cap the box takes: without it a long filename stretches the wrapper

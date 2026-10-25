@@ -18,9 +18,34 @@ pub trait MediaSource: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
+/// Kinds a chat bubble draws itself: these load for viewing without being kept.
+pub fn previewable(extension: &str) -> bool {
+    const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];
+    const AUDIO: [&str; 6] = ["wav", "mp3", "flac", "aac", "m4a", "ogg"];
+    const VIDEO: [&str; 3] = ["mp4", "webm", "mov"];
+    const MODELS: [&str; 5] = ["glb", "gltf", "stl", "obj", "fbx"];
+    // Linux's webview plays no inline video.
+    let video = !cfg!(all(target_os = "linux", not(target_arch = "wasm32"))) && VIDEO.contains(&extension);
+    IMAGES.contains(&extension) || AUDIO.contains(&extension) || MODELS.contains(&extension) || video
+}
+
 /// What holds `hash` for this account right now, if anything.
 pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
     ram::cache().get(hash).map(|entry| entry as Arc<dyn MediaSource>)
+}
+
+/// Every byte of `src`, for a reader that wants the whole file.
+pub fn read_all(src: &dyn MediaSource) -> std::io::Result<Vec<u8>> {
+    let mut bytes = vec![0u8; usize::try_from(src.len()).map_err(|_| std::io::ErrorKind::OutOfMemory)?];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match src.read_at(filled as u64, &mut bytes[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    bytes.truncate(filled);
+    Ok(bytes)
 }
 
 /// Whether this account can show `hash` without fetching it.
@@ -59,6 +84,16 @@ pub struct Reader {
 
 pub fn reader(src: Arc<dyn MediaSource>) -> Reader {
     Reader { src, pos: 0 }
+}
+
+impl Reader {
+    pub fn len(&self) -> u64 {
+        self.src.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.src.is_empty()
+    }
 }
 
 impl Read for Reader {

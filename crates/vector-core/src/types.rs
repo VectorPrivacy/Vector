@@ -297,6 +297,9 @@ pub struct Attachment {
     /// blob safe to reuse: `downloaded` can come from matching a local file to a sender's claim.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub verified: bool,
+    /// This account holds the bytes in memory right now. Shown, never stored.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resident: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webxdc_topic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -324,6 +327,7 @@ impl Default for Attachment {
             downloading: false,
             downloaded: true,
             verified: false,
+            resident: false,
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
@@ -813,7 +817,7 @@ mod tests {
                 height: 600,
             }),
             downloading: false,
-            downloaded: true, verified: false,
+            downloaded: true, verified: false, resident: false,
             webxdc_topic: Some("game".to_string()),
             group_id: Some("g1".to_string()),
             original_hash: Some("sha256hash".to_string()),

@@ -26,6 +26,7 @@ import { uploadProgressed, uploadPublishing, transferPublishing, downloadProgres
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
+export { mediaPath, attachmentReady } from './lib/media.js';
 export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';

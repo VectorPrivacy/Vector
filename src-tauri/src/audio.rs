@@ -322,13 +322,12 @@ pub fn resample_mono_i16(samples: &[i16], from_rate: u32, to_rate: u32) -> Resul
 ///
 /// Both paths use rayon parallel SIMD linear interpolation resampling to 16kHz. ~2ms.
 #[cfg_attr(not(feature = "whisper"), allow(dead_code))]
-pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
+pub fn decode_for_whisper(input: &crate::audio_engine::AudioInput) -> Result<Vec<f32>, String> {
     use rayon::prelude::*;
 
     let t0 = std::time::Instant::now();
 
-    let file_bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    let file_bytes = input.read_all()?;
 
     // Try WAV fast path first — raw PCM byte conversion, no codec overhead
     let (mono_samples, sample_rate) = match wav_fast_decode(&file_bytes, 16000) {
@@ -339,7 +338,7 @@ pub fn decode_for_whisper(path: &Path) -> Result<Vec<f32>, String> {
         }
         None => {
             // Symphonia needs owned Vec<u8>
-            let result = symphonia_decode_mono(file_bytes, path)?;
+            let result = symphonia_decode_mono(file_bytes, input.extension().as_deref())?;
             let t_decode = t0.elapsed();
             println!("[Whisper]     decode: {:?} (Symphonia)", t_decode);
             result
@@ -531,12 +530,12 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
 
 /// Symphonia slow path: decode compressed audio (MP3, OGG, FLAC, etc.) to mono f32.
 #[cfg_attr(not(feature = "whisper"), allow(dead_code))]
-fn symphonia_decode_mono(file_bytes: Vec<u8>, path: &Path) -> Result<(Vec<f32>, u32), String> {
+fn symphonia_decode_mono(file_bytes: Vec<u8>, extension: Option<&str>) -> Result<(Vec<f32>, u32), String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
 
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = extension {
         hint.with_extension(ext);
     }
 

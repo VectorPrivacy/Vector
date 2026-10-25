@@ -501,6 +501,10 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
     if attachments.is_empty() {
         return;
     }
+    let ram = crate::media::ram::cache();
+    for hash in attachments.iter().filter_map(|a| crate::simd::hex::hex_to_bytes_32_checked(&a.id)) {
+        ram.remove(&hash);
+    }
     #[cfg(target_arch = "wasm32")]
     {
         let dir = crate::db::get_download_dir();

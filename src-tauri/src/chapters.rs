@@ -156,13 +156,13 @@ fn read_cue_comment(tagged: &lofty::file::TaggedFile) -> Vec<Chapter> {
 }
 
 /// FLAC's binary CUESHEET block: points without titles.
-fn read_flac_cues(path: &str) -> Vec<Chapter> {
+fn read_flac_cues(input: &crate::audio_engine::AudioInput) -> Vec<Chapter> {
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
-    let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let Ok(file) = input.open() else { return Vec::new() };
+    let mss = MediaSourceStream::new(file, Default::default());
     let mut hint = Hint::new();
     hint.with_extension("flac");
     let Ok(probed) = symphonia::default::get_probe().format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default()) else {
@@ -185,17 +185,16 @@ fn read_flac_cues(path: &str) -> Vec<Chapter> {
 
 /// Every source a file might carry, most descriptive first; empty when it is one track.
 /// `id3` is an MP3's raw tag, read once by the caller for this and the lyrics.
-pub fn read(path: &str, tagged: &lofty::file::TaggedFile, id3: Option<&lofty::id3::v2::Id3v2Tag>) -> Vec<Chapter> {
+pub fn read(input: &crate::audio_engine::AudioInput, tagged: &lofty::file::TaggedFile, id3: Option<&lofty::id3::v2::Id3v2Tag>) -> Vec<Chapter> {
     if let Some(tag) = id3 {
         return read_id3(tag);
     }
-    let lower = path.to_ascii_lowercase();
     let from_cue = read_cue_comment(tagged);
     if !from_cue.is_empty() {
         return from_cue;
     }
-    if lower.ends_with(".flac") {
-        return read_flac_cues(path);
+    if input.extension().as_deref() == Some("flac") {
+        return read_flac_cues(input);
     }
     Vec::new()
 }

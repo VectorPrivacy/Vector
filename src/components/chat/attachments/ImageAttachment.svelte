@@ -4,8 +4,9 @@
     import UploadOverlay from './UploadOverlay.svelte';
     import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
+    import { mediaPath } from '../../lib/media.js';
     let { att, msg, ctx, sender, h } = $props();
-    // h: assetUrl(path), svgRender(path, dim), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
+    // h: assetUrl(path), svgRender(path, dim), lost(att, msg), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
@@ -22,7 +23,7 @@
     let svgRefused = $state(false);
     $effect(() => {
         if (!isSvg) return;
-        const path = att.path;
+        const path = mediaPath(att);
         let live = true;
         h.svgRender(path, 1024).then((src) => {
             if (!live) return;
@@ -31,7 +32,7 @@
         });
         return () => { live = false; };
     });
-    const real = $derived(isSvg ? svgSrc : h.assetUrl(att.path));
+    const real = $derived(isSvg ? svgSrc : h.assetUrl(mediaPath(att)));
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
     let blur = $state(null);
@@ -74,7 +75,7 @@
 {:else if spoiler && !blurFailed}
     <div style="position: relative; display: inline-block;" bind:this={container} data-spoiler-upload={uploading ? '1' : undefined} use:badgeOnly>
         {#if blur}
-            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} alt=""
+            <img class={revealed ? 'dmsg-image-attachment' : 'spoiler-img'} src={revealed ? real : blur} onerror={() => { if (revealed) h.lost(att, msg); }} alt=""
                  width={!revealed && fit ? fit.w : undefined} height={!revealed && fit ? fit.h : undefined}
                  style="max-width: 100%; height: auto; border-radius: 8px;"
                  style:aspect-ratio={!revealed && fit ? fit.ratio : null}
@@ -92,9 +93,9 @@
 {:else}
     <div style="position: relative; display: inline-block; line-height: 0; max-width: 100%;" bind:this={container}>
         {#if isSvg}
-            {#if real}<img data-attachment-type="svg" data-svg-path={att.path} src={real} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
+            {#if real}<img data-attachment-type="svg" data-svg-path={mediaPath(att)} src={real} onerror={() => h.lost(att, msg)} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>{/if}
         {:else}
-            <img class="dmsg-image-attachment" src={real} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
+            <img class="dmsg-image-attachment" src={real} onerror={() => h.lost(att, msg)} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
         {/if}
         {#if uploading}
             <UploadOverlay pendingId={msg.id} {h} />

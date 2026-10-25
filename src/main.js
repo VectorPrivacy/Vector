@@ -2720,14 +2720,14 @@ document.addEventListener('mouseout', (e) => {
  * untrusted tap to the settings screen that grants it. Say so first, otherwise
  * asking to open a file appears to fling you into Settings for no reason.
  */
-async function openAndroidAttachment(filepath) {
+async function openAndroidAttachment(filepath, name = '') {
     if (/\.apk$/i.test(filepath || '')) {
         const allowed = await invoke('can_install_apks').catch(() => true);
         if (!allowed) {
             showToast('Android needs your permission first — switch on "Allow from this source", then tap the file again');
         }
     }
-    return invoke('open_attachment', { path: filepath });
+    return invoke('open_attachment', { path: filepath, name });
 }
 
 // Listen for app-wide click interations

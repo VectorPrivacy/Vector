@@ -158,15 +158,17 @@ pub fn decode_thumbhash(thumbhash: String) -> String {
 /// the opener plugin's `revealItemInDir` from the frontend, so this is a no-op
 /// fallback there. Returns true if an app was launched.
 #[tauri::command]
-pub async fn open_attachment(path: String) -> Result<bool, String> {
+pub async fn open_attachment(path: String, name: Option<String>) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
-        ensure_path_in_download_dir(&path)?;
-        crate::android::storage::open_file(&path)
+        let file = crate::media_export::materialize(&path, name.as_deref().unwrap_or_default())?;
+        let file = file.to_string_lossy().into_owned();
+        ensure_path_in_download_dir(&file)?;
+        crate::android::storage::open_file(&file)
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = path;
+        let _ = (path, name);
         Ok(false)
     }
 }
@@ -191,16 +193,69 @@ pub async fn can_install_apks() -> Result<bool, String> {
 /// No-op on non-Android (desktop shares are handled elsewhere). Returns true
 /// if the share sheet was launched.
 #[tauri::command]
-pub async fn share_attachment(path: String) -> Result<bool, String> {
+pub async fn share_attachment(path: String, name: Option<String>) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
-        ensure_path_in_download_dir(&path)?;
-        crate::android::storage::share_file(&path)
+        let file = crate::media_export::materialize(&path, name.as_deref().unwrap_or_default())?;
+        let file = file.to_string_lossy().into_owned();
+        ensure_path_in_download_dir(&file)?;
+        crate::android::storage::share_file(&file)
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = path;
+        let _ = (path, name);
         Ok(false)
+    }
+}
+
+/// Keep held media for as long as a player shows it: a paused video reads nothing for minutes.
+#[tauri::command]
+pub fn media_hold(hash: String) -> bool {
+    vector_core::simd::hex::hex_to_bytes_32_checked(&hash).is_some_and(|h| vector_core::media::ram::cache().hold(&h))
+}
+
+#[tauri::command]
+pub fn media_release(hash: String) {
+    if let Some(h) = vector_core::simd::hex::hex_to_bytes_32_checked(&hash) {
+        vector_core::media::ram::cache().release(&h);
+    }
+}
+
+/// Save a file where the user picks (Android: into Vector's download folder, then the gallery
+/// sees it). Held media is written out as plaintext only here. None when the picker was closed.
+#[tauri::command]
+pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        let dir = vector_core::db::get_download_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
+        let name = crate::media_export::file_name(&name, &[0u8; 32], "");
+        let dest = vector_core::crypto::resolve_unique_filename(&dir, &name);
+        let (from, to) = (path, dest.clone());
+        tokio::task::spawn_blocking(move || crate::media_export::save_to(&from, &to))
+            .await
+            .map_err(|e| e.to_string())??;
+        let dest = dest.to_string_lossy().into_owned();
+        crate::android::storage::scan_file(&dest);
+        Ok(Some(dest))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri::Manager;
+        use tauri_plugin_dialog::DialogExt;
+        let mut dialog = app.dialog().file().set_file_name(crate::media_export::file_name(&name, &[0u8; 32], ""));
+        if let Ok(downloads) = app.path().download_dir() {
+            dialog = dialog.set_directory(downloads);
+        }
+        tokio::task::spawn_blocking(move || {
+            let Some(dest) = dialog.blocking_save_file() else { return Ok(None) };
+            let dest = dest.into_path().map_err(|e| e.to_string())?;
+            crate::media_export::save_to(&path, &dest)?;
+            Ok(Some(dest.to_string_lossy().into_owned()))
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }
 
@@ -246,7 +301,7 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
     let dl = std::fs::canonicalize(vector_core::db::get_download_dir())
         .map_err(|_| "download dir unavailable".to_string())?;
     let target = std::fs::canonicalize(path).map_err(|_| "file not found".to_string())?;
-    if target.starts_with(&dl) {
+    if target.starts_with(&dl) || crate::media_export::is_export(&target) {
         Ok(())
     } else {
         Err("path is outside the download directory".to_string())
@@ -370,6 +425,34 @@ fn verify_download(
     }
 }
 
+/// Open a download held in memory: the source's content address, then the cipher, then the
+/// identity, with nothing written anywhere. Returns the plaintext and its SHA-256.
+fn open_in_memory(bytes: Vec<u8>, url: &str, attachment: &Attachment) -> Result<(Vec<u8>, String), Verdict> {
+    let address = vector_core::blossom::blob_hash(url);
+    let source = vector_core::crypto::sha256_hex(&bytes);
+    if address.as_deref().is_some_and(|a| a != source) {
+        return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
+    }
+    if attachment.key.is_empty() || attachment.nonce.is_empty() {
+        if attachment.original_hash.as_deref().is_some_and(|claim| claim != source) {
+            return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
+        }
+        return Ok((bytes, source));
+    }
+    if bytes.len() < 16 {
+        return Err(Verdict::BadSource(format!("Downloaded file too small ({} bytes)", bytes.len())));
+    }
+    match vector_core::crypto::decrypt_data_owned(bytes, &attachment.key, &attachment.nonce) {
+        Ok(plain) => {
+            let hash = vector_core::crypto::sha256_hex(&plain);
+            Ok((plain, hash))
+        }
+        // Bytes that match their address but won't decrypt are the right blob with the wrong key.
+        Err(_) if address.is_some() => Err(Verdict::Fatal("Decryption failed - file may be corrupted".to_string())),
+        Err(_) => Err(Verdict::BadSource("Decryption failed - file may be corrupted".to_string())),
+    }
+}
+
 /// This account's paused downloads: each partial's attachment id, how far it got
 /// and how large the file is, for the Resume state a restart would otherwise lose.
 #[tauri::command]
@@ -404,9 +487,11 @@ pub async fn cancel_download(attachment_id: String) -> bool {
     true
 }
 
-/// Download and decrypt an attachment
+/// Fetch an attachment for viewing, or to keep (`keep`). What a bubble draws is held in memory
+/// unless kept; everything else lands on disk.
 #[tauri::command]
-pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String, keep: Option<bool>) -> bool {
+    let keep = keep.unwrap_or(false);
     // A command runs unbound: after a swap the "current" account is the new one, so the
     // account this download belongs to is pinned here and every emission checks it.
     let sid = vector_core::db::current_session_id();
@@ -473,6 +558,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             // Check that we're not already downloading
                             if attachment.downloading() {
                                 return fail("This file is already downloading");
+                            }
+
+                            // Already held from an earlier look: there's nothing to fetch.
+                            if !keep && vector_core::media::resident(attachment.id()) {
+                                emit_for(sid, handle, "attachment_download_result", serde_json::json!({
+                                    "profile_id": &npub,
+                                    "msg_id": &msg_id,
+                                    "id": &attachment_id,
+                                    "success": true,
+                                    "resident": true,
+                                    "result": vector_core::media::MediaRef::held(attachment.id()),
+                                }));
+                                return true;
                             }
 
                             // Check if file already exists on disk (downloaded but flag was wrong).
@@ -613,6 +711,12 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         };
 
         let attachment_hex_id = util::bytes_to_hex_32(attachment.id());
+        let extension = attachment.extension().to_ascii_lowercase();
+        // What a bubble only shows is held in memory; what is kept goes to disk.
+        let ram = vector_core::media::ram::cache();
+        let in_memory = !keep && vector_core::media::previewable(&extension) && ram.admits(attachment.size);
+        let memory_limit = if attachment.size > 0 { attachment.size + 64 * 1024 } else { ram.largest() };
+        drop(ram);
 
         // The ciphertext streams into this account's partial file and survives any
         // failure behind a checkpoint, so a retry, a mirror or the next launch picks
@@ -627,11 +731,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 return fail(&e);
             }
         };
-        if let Some(dir) = part.parent() {
-            sweep_stale_partials(dir);
+        if !in_memory {
+            if let Some(dir) = part.parent() {
+                sweep_stale_partials(dir);
+            }
+            sweep_stale_staging(&vector_core::db::get_download_dir());
         }
-        sweep_stale_staging(&vector_core::db::get_download_dir());
-        let resumed = net::read_checkpoint(&part).unwrap_or_default();
+        let resumed = if in_memory { net::Checkpoint::default() } else { net::read_checkpoint(&part).unwrap_or_default() };
         emit_for(sid, handle, "attachment_download_progress", serde_json::json!({
             "id": &attachment_hex_id,
             "progress": resumed.total.filter(|&t| t > 0).map(|t| resumed.offset * 100 / t).unwrap_or(0),
@@ -651,6 +757,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let mut candidates: Vec<String> = vec![attachment.url.to_string()];
         candidates.extend(attachment.fallback_urls().iter().map(|u| u.to_string()));
         let mut saved: Option<(std::path::PathBuf, String)> = None;
+        let mut held: Option<String> = None;
         let mut last_error: String = "Download failed".to_string();
         let mut hash_swap_tried = false;
         // The source already given a fresh start: bytes it didn't serve can't condemn it twice.
@@ -664,15 +771,21 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             }
             let url = candidates[i].clone();
             // Bytes already on disk came from an earlier source or launch, not this one.
-            let inherited = net::read_checkpoint(&part).is_some_and(|c| c.offset > 0);
+            let inherited = !in_memory && net::read_checkpoint(&part).is_some_and(|c| c.offset > 0);
 
             // Fetch this source's bytes, retrying transient failures with backoff.
             // Each retry resumes from the checkpoint rather than the first byte.
             let mut attempt: u32 = 0;
+            let mut fetched_bytes: Option<Vec<u8>> = None;
             let fetched = loop {
                 let reporter = net::TauriProgressReporter::new(handle, &attachment_hex_id);
-                match net::download_to_file(&url, &part, Some(attachment.size), &reporter).await {
-                    Ok(_) => break true,
+                let got = if in_memory {
+                    net::download_to_memory(&url, &reporter, None, memory_limit).await.map(|bytes| fetched_bytes = Some(bytes))
+                } else {
+                    net::download_to_file(&url, &part, Some(attachment.size), &reporter).await.map(|_| ())
+                };
+                match got {
+                    Ok(()) => break true,
                     Err(error) => {
                         if error == net::TRANSFER_CANCELLED {
                             break false;
@@ -697,7 +810,57 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 }
             };
 
-            if fetched {
+            if fetched && in_memory {
+                let encrypted = !attachment_for_decrypt.key.is_empty();
+                emit_for(sid, handle, "attachment_download_stage", serde_json::json!({
+                    "id": &attachment_hex_id,
+                    "stage": if encrypted { "decrypting" } else { "verifying" },
+                    "progress": encrypted.then_some(0),
+                }));
+                let (bytes, url_for_check, att) = (fetched_bytes.take().unwrap_or_default(), url.clone(), attachment_for_decrypt.clone());
+                let opened = tokio::task::spawn_blocking(move || open_in_memory(bytes, &url_for_check, &att))
+                    .await
+                    .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
+                match opened {
+                    Ok((plain, file_hash)) => {
+                        let mime = vector_core::crypto::mime_from_extension(&extension);
+                        match vector_core::media::ram::insert(vector_core::simd::hex::hex_to_bytes_32(&file_hash), plain, mime) {
+                            Ok(_) => held = Some(file_hash),
+                            // No other mirror changes how much memory is free.
+                            Err(vector_core::media::ram::Refused::Busy) => {
+                                last_error = "Too much media is open to show this one".to_string();
+                                break;
+                            }
+                            Err(vector_core::media::ram::Refused::TooLarge) => {
+                                last_error = "Too large to show without keeping it".to_string();
+                                break;
+                            }
+                        }
+                    }
+                    Err(Verdict::Cancelled) => break,
+                    Err(Verdict::BadSource(reason)) => {
+                        last_error = reason;
+                        vector_core::log_net_fail!("[AttachmentDownload] {} — bad source: {}", last_error, url);
+                    }
+                    Err(Verdict::Fatal(reason)) => {
+                        vector_core::log_net_fail!(
+                            "[AttachmentDownload] terminal failure: {} (msg {}, attachment {}, source {})",
+                            reason, msg_id, attachment_id, url
+                        );
+                        let mut state = STATE.lock().await;
+                        state.update_attachment(&npub, &msg_id, &attachment_id, |att| att.set_downloading(false));
+                        drop(state);
+                        emit_for(sid, handle, "attachment_download_result", serde_json::json!({
+                            "profile_id": npub,
+                            "msg_id": msg_id,
+                            "id": attachment_id,
+                            "success": false,
+                            "result": reason
+                        }));
+                        return false;
+                    }
+                }
+            } else if fetched {
                 let (src, url_for_check, att) = (part.clone(), url.clone(), attachment_for_decrypt.clone());
                 // Named for this account too: the same file downloading in two can't share it.
                 let staging = vector_core::db::get_download_dir().join(format!(".{}.{}.download", attachment_hex_id, sid));
@@ -785,7 +948,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 }
             }
 
-            if saved.is_some() {
+            if saved.is_some() || held.is_some() {
                 break;
             }
 
@@ -819,6 +982,51 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     i, candidates.len(), last_error, candidates[i]
                 );
             }
+        }
+
+        if let Some(file_hash) = held {
+            let hash = vector_core::simd::hex::hex_to_bytes_32(&file_hash);
+            let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                att.set_id(hash);
+                att.set_downloading(false);
+                att.set_verified(true);
+            });
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
+                "profile_id": npub,
+                "msg_id": msg_id,
+                "old_id": attachment_id,
+                "id": file_hash,
+                "success": true,
+                "resident": true,
+                "result": vector_core::media::MediaRef::held(&hash),
+            }));
+            let found = state.get_chat(&npub).and_then(|chat| {
+                let chat_id = chat.id().clone();
+                chat.messages.find_by_hex_id(&msg_id).map(|m| (chat_id, m.to_message(&state.interner)))
+            });
+            // Every other message of the same bytes shows them now too.
+            let mut also = Vec::new();
+            for chat in state.chats.iter() {
+                for m in chat.messages.iter() {
+                    if m.id_hex() != msg_id && m.attachments.iter().any(|a| a.id() == &hash) {
+                        also.push((chat.id.clone(), m.to_message(&state.interner)));
+                    }
+                }
+            }
+            drop(state);
+            for (chat_id, message) in found.iter().chain(also.iter()) {
+                emit_for(sid, handle, "message_update", serde_json::json!({
+                    "old_id": &message.id,
+                    "message": message,
+                    "chat_id": chat_id,
+                }));
+            }
+            // The proven blob and its content id persist; the bytes themselves never do.
+            if let Some((_, message)) = found {
+                let _ = db::save_message(&npub, &message).await;
+            }
+            return true;
         }
 
         if saved.is_none() && net::transfer_cancelled(&attachment_hex_id) {

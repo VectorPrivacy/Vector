@@ -42,14 +42,11 @@ pub async fn transcribe<R: Runtime>(
     model_name: String,
     translate: bool,
 ) -> Result<whisper::TranscriptionResult, String> {
-    let path = std::path::Path::new(&file_path);
-    if !path.exists() {
-        return Err("File not found".to_string());
-    }
+    let input = crate::audio_engine::AudioInput::resolve(&file_path).map_err(|_| "File not found".to_string())?;
 
     // Decode to mono 16kHz for Whisper (fast resample — whisper doesn't need audiophile quality)
     let t0 = std::time::Instant::now();
-    let audio_data = audio::decode_for_whisper(path)
+    let audio_data = audio::decode_for_whisper(&input)
         .map_err(|e| format!("Audio processing error: {}", e))?;
     println!("[Whisper]   audio decode:  {:>10?}  ({} samples, {:.1}s)",
         t0.elapsed(), audio_data.len(), audio_data.len() as f64 / 16000.0);

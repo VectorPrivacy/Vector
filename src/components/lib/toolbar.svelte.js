@@ -3,6 +3,8 @@
 let tb = $state.raw({
     show: {},            // { react, reply, edit, reveal, copy, retry, cancel, delete }: true = offered
     path: null,          // the downloaded attachment behind reveal / copy
+    name: '',            // its file name, for a copy written out
+    held: false,         // held in memory: reveal becomes save
     del: null,           // { mode: 'delete' | 'hide' | 'failed', label, partial, hasAttachments }
     why: null,           // a failed send's reason, on its Retry button
 });

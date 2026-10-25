@@ -133,10 +133,18 @@ fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
 /// (or back into a chat) as real files. Paths must be absolute and exist on
 /// disk. Increment 2 covers macOS; other platforms return an error until wired.
 #[tauri::command]
-pub async fn write_clipboard_files(paths: Vec<String>) -> Result<(), String> {
+pub async fn write_clipboard_files(paths: Vec<String>, names: Option<Vec<String>>) -> Result<(), String> {
     if paths.is_empty() {
         return Err("No files to copy".to_string());
     }
+    let names = names.unwrap_or_default();
+    let paths = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            crate::media_export::materialize(p, names.get(i).map_or("", String::as_str)).map(|f| f.to_string_lossy().into_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     write_clipboard_files_impl(paths)
 }
 

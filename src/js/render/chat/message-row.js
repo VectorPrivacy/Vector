@@ -278,6 +278,8 @@ const _dmsgContentHelpers = {
  *   openFile: (att: object, msg: object) => void,
  *   openModel: (att: object) => void,
  *   assetUrl: (path: string) => string, mediaUrl: (path: string) => string,
+ *   hold: (att: object) => void, release: (att: object) => void,
+ *   lost: (att: object, msg: object) => void,
  *   svgRender: (path: string, dim: number) => Promise<string|null>,
  *   isSpoiler: (att: object) => boolean,
  *   thumbhash: (chatId: string, msgId: string) => Promise<string|null>,
@@ -316,9 +318,12 @@ const _dmsgMediaHelpers = {
     marketplaceApp: (hash) => invoke('marketplace_get_app_by_hash', { fileHash: hash }),
     openFile: (att, msg) => _dmsgOpenFile(att, msg),
     openModel: (att) => openModelViewer(att),
-    assetUrl: (path) => convertFileSrc(path),
+    assetUrl: (path) => refSrc(path),
     svgRender: (path, dim) => svgRenderSrc(path, dim),
-    mediaUrl: (path) => mediaUrl(path),
+    mediaUrl: (path) => refSrc(path, mediaUrl),
+    hold: (att) => { invoke('media_hold', { hash: att.id }).catch(() => {}); },
+    release: (att) => { invoke('media_release', { hash: att.id }).catch(() => {}); },
+    lost: (att, msg) => _dmsgMediaLost(att, msg),
     isSpoiler: (att) => isSpoilerAttachment(att),
     thumbhash: (chatId, msgId) => invoke('generate_thumbhash_preview', { npub: chatId, msgId }),
     onImageLoad: () => compensateChatScrollForResize(),
@@ -624,6 +629,18 @@ function _dmsgStartDownload(att, msg) {
         });
 }
 
+/** Hashes refetched after their held copy went: once each per session, then tap-to-load. */
+const _dmsgRefetched = new Set();
+
+/** Held media a view could no longer read (evicted while off screen): fetch it again, once. */
+function _dmsgMediaLost(att, msg) {
+    if (!att.resident || _dmsgRefetched.has(att.id)) return;
+    _dmsgRefetched.add(att.id);
+    att.resident = false;
+    VectorSvelte.touchMessage(msg.id);
+    _dmsgStartDownload(att, msg);
+}
+
 /** Stop a download in flight. The walk owns the outcome event whenever one was running. */
 function _dmsgCancelDownload(att, msg) {
     invoke('cancel_download', { attachmentId: att.id })
@@ -641,7 +658,7 @@ function _dmsgCancelDownload(att, msg) {
 
 /** Open a downloaded file: a Mini App launches (and reports its session), a file reveals or opens. */
 async function _dmsgOpenFile(att, msg) {
-    const path = att.path;
+    const path = VectorSvelte.mediaPath(att);
     if (!path) return;
     if (getFileTypeInfo((att.extension || '').toLowerCase()).isMiniApp) {
         try {
@@ -666,10 +683,20 @@ async function _dmsgOpenFile(att, msg) {
         }
     } else if (platformFeatures.os === 'android') {
         // No file manager to reveal into: open the file itself (an .apk routes through the installer).
-        openAndroidAttachment(path);
+        openAndroidAttachment(path, att.name);
+    } else if (att.resident && !att.downloaded) {
+        // Held in memory, so there is no file to reveal: saving writes one.
+        saveAttachmentFile(att);
     } else {
         revealItemInDir(path);
     }
+}
+
+/** Save an attachment's bytes as a normal file where the user picks. */
+function saveAttachmentFile(att) {
+    invoke('save_attachment', { path: VectorSvelte.mediaPath(att), name: att.name || '' })
+        .then((dest) => { if (dest) showToast('Saved'); })
+        .catch((err) => showToast(String(err)));
 }
 
 /**

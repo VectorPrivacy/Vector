@@ -17,6 +17,7 @@
     import Transcription from './attachments/Transcription.svelte';
     import Lyrics from './attachments/Lyrics.svelte';
     import { profileVersion, chatVersion } from '../lib/signals.svelte.js';
+    import { mediaPath } from '../lib/media.js';
 
     let { h } = $props();   // h: MediaPopoutHelpers (js/voice.js)
 
@@ -39,7 +40,7 @@
     const canTranscribe = $derived(!!session?.voice && h.audio.transcriptionSupported(session.att));
     const download = modelDownloadState();
     function onTranscribe() {
-        if (!download.active) toggleTranscript(session.id, session.att.path, h.audio.transcribe);
+        if (!download.active) toggleTranscript(session.id, mediaPath(session.att), h.audio.transcribe);
     }
     const tb = $derived(transcriptButton(transcription));
     // The box is anchored at its bottom and grows upward: nothing in the chat to hold still.

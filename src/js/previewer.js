@@ -121,7 +121,7 @@ function rotationFix() {
 
 /** An SVG drawn by the backend at `dim` px, as a URL the webview can show; null when it refuses. */
 function svgRenderSrc(path, dim) {
-    return invoke('render_svg', { path, maxDim: Math.round(dim) }).then((p) => (p ? convertFileSrc(p) : null), () => null);
+    return invoke('render_svg', { path, maxDim: Math.round(dim) }).then((p) => (p ? refSrc(p) : null), () => null);
 }
 
 // An SVG in the viewer is the backend's render, drawn again at the pixels it covers as it zooms.
@@ -442,25 +442,29 @@ function updateZoomInfo() {
 /** Save a file on Vector Web: `{ path }` of a stored file, or `{ url }` of one on screen. */
 // The fullscreen 3D model viewer, and the file action this platform has for it.
 let modelViewerPath = null;
+let modelViewerAtt = null;
 VectorSvelte.setModelViewerHandlers({
     close: () => closeModelViewer(),
     file: () => {
         const path = modelViewerPath;
         if (!path) return;
-        if (platformFeatures.os === 'android') invoke('share_attachment', { path }).catch((e) => showToast(String(e)));
+        if (platformFeatures.os === 'android') invoke('share_attachment', { path, name: modelViewerAtt?.name || '' }).catch((e) => showToast(String(e)));
         else if (platformFeatures.os === 'web') saveWebFile({ path });
+        else if (path.startsWith('vmedia:')) saveAttachmentFile(modelViewerAtt);
         else revealItemInDir(path);
     },
 });
 
 /** Open a downloaded model attachment full screen. */
 function openModelViewer(att) {
-    if (!att?.path) return;
-    modelViewerPath = att.path;
+    const path = att ? VectorSvelte.mediaPath(att) : null;
+    if (!path) return;
+    modelViewerPath = path;
+    modelViewerAtt = att;
     const os = platformFeatures.os;
-    const fileAction = os === 'android' ? 'share' : os === 'web' ? 'save' : platformFeatures.is_mobile ? null : 'reveal';
-    if (os === 'web') invoke('prepare_attachment', { path: att.path }).catch(() => {});
-    VectorSvelte.setModelViewer({ open: true, active: false, url: convertFileSrc(att.path), ext: (att.extension || '').toLowerCase(), name: att.name || '', fileAction });
+    const fileAction = os === 'android' ? 'share' : os === 'web' ? 'save' : platformFeatures.is_mobile ? null : path.startsWith('vmedia:') ? 'save' : 'reveal';
+    if (os === 'web') invoke('prepare_attachment', { path }).catch(() => {});
+    VectorSvelte.setModelViewer({ open: true, active: false, url: refSrc(path), ext: (att.extension || '').toLowerCase(), name: att.name || '', fileAction });
     setTimeout(() => VectorSvelte.setModelViewer({ active: true }), 10);
     pushBack('model-viewer', closeModelViewer);
 }

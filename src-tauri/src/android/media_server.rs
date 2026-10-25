@@ -225,6 +225,11 @@ async fn handle_connection(
         return Ok(());
     }
 
+    // `m/<hash>`: media the live account holds in memory, with no file behind it.
+    if let Some(hash) = encoded_path.strip_prefix(b"m/") {
+        return serve_held(&mut stream, req, hash, method == Method::Head).await;
+    }
+
     // Decode the file path (only allocation in the happy path)
     let file_path_str = match percent_decode_bytes(encoded_path) {
         Some(s) => s,
@@ -274,6 +279,7 @@ async fn handle_connection(
 
     // Common trailing headers (static, written once per response)
     const COMMON_HEADERS: &[u8] = b"Accept-Ranges: bytes\r\n\
+        Cache-Control: no-store\r\n\
         Access-Control-Allow-Origin: *\r\n\
         Access-Control-Expose-Headers: Content-Range, Content-Length, Accept-Ranges\r\n\
         Connection: close\r\n\r\n";
@@ -314,6 +320,75 @@ async fn handle_connection(
         }
     }
 
+    Ok(())
+}
+
+/// The most one held response carries: a player asks for the rest as it plays.
+const HELD_PART: u64 = 4 * 1024 * 1024;
+
+/// Serve media the live account holds by hash. Only the app's own origin may read it.
+async fn serve_held(
+    stream: &mut tokio::net::TcpStream,
+    req: &[u8],
+    hash: &[u8],
+    is_head: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let src = std::str::from_utf8(hash)
+        .ok()
+        .and_then(vector_core::simd::hex::hex_to_bytes_32_checked)
+        .and_then(|h| vector_core::media::open(&h));
+    let Some(src) = src else {
+        send_response(stream, 404, "Not Found", &[("Cache-Control", "no-store")], &[]).await?;
+        return Ok(());
+    };
+    let Some(mime) = crate::media_scheme::passive_type(src.mime()).map(str::to_string) else {
+        send_response(stream, 403, "Forbidden", &[("Cache-Control", "no-store")], &[]).await?;
+        return Ok(());
+    };
+    let total = src.len();
+    let (status, start, end) = match parse_range_header(req, total) {
+        Some((start, end)) => ("206 Partial Content", start, end.min(start + HELD_PART - 1) + 1),
+        None => ("200 OK", 0, total),
+    };
+    let body = if is_head {
+        Vec::new()
+    } else {
+        tokio::task::spawn_blocking(move || {
+            let mut body = vec![0u8; (end - start) as usize];
+            let mut filled = 0;
+            while filled < body.len() {
+                match src.read_at(start + filled as u64, &mut body[filled..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => filled += n,
+                }
+            }
+            body.truncate(filled);
+            body
+        })
+        .await?
+    };
+
+    use std::io::Write;
+    let mut hdr = Vec::with_capacity(320);
+    let _ = write!(hdr, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n", end - start);
+    if status.starts_with("206") {
+        let _ = write!(hdr, "Content-Range: bytes {start}-{}/{total}\r\n", end - 1);
+    }
+    // A dev build's page comes from a dev server, not the app's own origin.
+    let origin = if cfg!(debug_assertions) { "*" } else { "http://tauri.localhost" };
+    let _ = write!(
+        hdr,
+        "Accept-Ranges: bytes\r\n\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Access-Control-Allow-Origin: {origin}\r\n\
+         Access-Control-Expose-Headers: Content-Range, Content-Length, Accept-Ranges\r\n\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(&hdr).await?;
+    if !is_head {
+        stream.write_all(&body).await?;
+    }
     Ok(())
 }
 

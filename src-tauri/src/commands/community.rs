@@ -950,7 +950,7 @@ fn stage_community_attachment(
         img_meta,
         downloading: false,
         downloaded: true, // plaintext already on disk for the sender
-        verified: true,
+        verified: true, resident: false,
         webxdc_topic,
         group_id: None,
         original_hash: Some(plaintext_hash),

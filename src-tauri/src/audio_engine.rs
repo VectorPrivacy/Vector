@@ -21,6 +21,86 @@ use tauri::Emitter;
 
 use crate::TAURI_APP;
 
+/// Where a decoder reads: a file, or media this account holds in memory.
+#[derive(Clone)]
+pub enum AudioInput {
+    File(std::path::PathBuf),
+    Held(Arc<dyn vector_core::media::MediaSource>),
+}
+
+impl AudioInput {
+    /// A file path, or the `vmedia:` ref of audio this account holds.
+    pub fn resolve(path_or_ref: &str) -> Result<Self, String> {
+        use vector_core::media::MediaRef;
+        match MediaRef::parse(path_or_ref) {
+            Some(MediaRef::Held(hash)) => vector_core::media::open(&hash).map(AudioInput::Held),
+            Some(MediaRef::File(path)) => {
+                let path = std::path::PathBuf::from(path);
+                path.exists().then_some(AudioInput::File(path))
+            }
+            None => None,
+        }
+        .ok_or_else(|| "Audio file not found".to_string())
+    }
+
+    pub fn open(&self) -> Result<Box<dyn symphonia::core::io::MediaSource>, String> {
+        match self {
+            AudioInput::File(path) => Ok(Box::new(std::fs::File::open(path).map_err(|e| format!("open: {}", e))?)),
+            AudioInput::Held(src) => Ok(Box::new(HeldAudio(vector_core::media::reader(src.clone())))),
+        }
+    }
+
+    pub fn read_all(&self) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        self.open()?.read_to_end(&mut bytes).map_err(|e| format!("Failed to read audio file: {}", e))?;
+        Ok(bytes)
+    }
+
+    /// The lowercase extension a file has, or the one a held entry's type implies.
+    pub fn extension(&self) -> Option<String> {
+        match self {
+            AudioInput::File(path) => path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase),
+            AudioInput::Held(src) => Some(vector_core::crypto::extension_from_mime(src.mime())).filter(|e| !e.is_empty()),
+        }
+    }
+
+    fn hint(&self) -> symphonia::core::probe::Hint {
+        let mut hint = symphonia::core::probe::Hint::new();
+        if let Some(ext) = self.extension() {
+            hint.with_extension(&ext);
+        }
+        if let AudioInput::Held(src) = self {
+            hint.mime_type(src.mime());
+        }
+        hint
+    }
+}
+
+struct HeldAudio(vector_core::media::Reader);
+
+impl std::io::Read for HeldAudio {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, buf)
+    }
+}
+
+impl std::io::Seek for HeldAudio {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.0, to)
+    }
+}
+
+impl symphonia::core::io::MediaSource for HeldAudio {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.0.len())
+    }
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -726,28 +806,22 @@ impl AudioEngine {
 
     /// Load audio from file path. WAV uses instant decode; other formats stream-decode
     /// in a background thread so playback can begin within milliseconds.
-    pub fn load_from_file(&self, path: &str) -> Result<AudioLoadResult, String> {
-        let path_buf = std::path::PathBuf::from(path);
-        if !path_buf.exists() {
-            return Err("Audio file not found".to_string());
-        }
-
+    pub fn load_from_file(&self, input: &AudioInput) -> Result<AudioLoadResult, String> {
         // Only a WAV is read whole; every other decoder opens its own handle on the file.
-        if has_wav_header(&path_buf) {
-            let file_bytes = std::fs::read(&path_buf)
-                .map_err(|e| format!("Failed to read audio file: {}", e))?;
+        if has_wav_header(input) {
+            let file_bytes = input.read_all()?;
             if let Some((mono_samples, sample_rate)) = crate::audio::wav_fast_decode_for_engine(&file_bytes) {
                 return self.load_from_samples(mono_samples, sample_rate);
             }
         }
-        self.load_streaming(&path_buf)
+        self.load_streaming(input)
     }
 
     /// Stream-decode a non-WAV audio file. Probes metadata synchronously (fast),
     /// creates an empty source, then spawns a background thread for packet-by-packet decode.
-    fn load_streaming(&self, path: &std::path::Path) -> Result<AudioLoadResult, String> {
+    fn load_streaming(&self, input: &AudioInput) -> Result<AudioLoadResult, String> {
         // Probe metadata from file (re-opens from disk, already in page cache — <1ms)
-        let (sample_rate, channels, est_frames) = probe_audio_metadata(path)?;
+        let (sample_rate, channels, est_frames) = probe_audio_metadata(input)?;
         if sample_rate == 0 {
             return Err("Invalid sample rate".to_string());
         }
@@ -760,7 +834,7 @@ impl AudioEngine {
         self.evict_if_needed();
 
         if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
-            return self.load_windowed(id, path, sample_rate, channels, src_channels, duration_ms);
+            return self.load_windowed(id, input, sample_rate, channels, src_channels, duration_ms);
         }
 
         let source = AudioSource {
@@ -787,11 +861,11 @@ impl AudioEngine {
 
         // Spawn background decode thread
         let shared = Arc::clone(&self.shared);
-        let path = path.to_path_buf();
+        let input = input.clone();
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
-                stream_decode_worker(id, &path, sample_rate, est_frames, &shared);
+                stream_decode_worker(id, &input, sample_rate, est_frames, &shared);
             })
             .map_err(|e| format!("Failed to spawn decode thread: {}", e))?;
 
@@ -810,7 +884,7 @@ impl AudioEngine {
     fn load_windowed(
         &self,
         id: u32,
-        path: &std::path::Path,
+        input: &AudioInput,
         sample_rate: u32,
         channels: usize,
         src_channels: usize,
@@ -842,18 +916,18 @@ impl AudioEngine {
         self.insert_source(id, source)?;
 
         {
-            let (path, shared) = (path.to_path_buf(), Arc::clone(&self.shared));
+            let (input, shared) = (input.clone(), Arc::clone(&self.shared));
             std::thread::Builder::new()
                 .name("audio-window".into())
-                .spawn(move || window_decode_worker(id, &path, channels, sample_rate, ctl, &shared))
+                .spawn(move || window_decode_worker(id, &input, channels, sample_rate, ctl, &shared))
                 .map_err(|e| format!("Failed to spawn window decoder: {}", e))?;
         }
         {
-            let (path, shared) = (path.to_path_buf(), Arc::clone(&self.shared));
+            let (input, shared) = (input.clone(), Arc::clone(&self.shared));
             let est_frames = duration_ms * sample_rate as u64 / 1000;
             std::thread::Builder::new()
                 .name("audio-waveform".into())
-                .spawn(move || waveform_pass(id, &path, sample_rate, est_frames, shared))
+                .spawn(move || waveform_pass(id, &input, sample_rate, est_frames, shared))
                 .map_err(|e| format!("Failed to spawn waveform pass: {}", e))?;
         }
         Ok(AudioLoadResult { id, duration_ms, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 })
@@ -1152,19 +1226,14 @@ impl AudioEngine {
 
 /// Probe an audio file for its duration without decoding.
 /// WAV: parses RIFF header directly. Other formats: symphonia metadata probe.
-pub fn probe_duration(path: &str) -> Result<u64, String> {
-    let path = std::path::Path::new(path);
-    if !path.exists() {
-        return Err("Audio file not found".to_string());
-    }
-
+pub fn probe_duration(input: &AudioInput) -> Result<u64, String> {
     // WAV fast path: parse RIFF header for data size + sample rate
-    if let Some(duration_ms) = wav_probe_duration(path) {
+    if let Some(duration_ms) = wav_probe_duration(input) {
         return Ok(duration_ms);
     }
 
     // Symphonia probe for other formats
-    let (sample_rate, _channels, est_frames) = probe_audio_metadata(path)?;
+    let (sample_rate, _channels, est_frames) = probe_audio_metadata(input)?;
     if sample_rate > 0 {
         Ok(est_frames * 1000 / sample_rate as u64)
     } else {
@@ -1172,19 +1241,19 @@ pub fn probe_duration(path: &str) -> Result<u64, String> {
     }
 }
 
-fn has_wav_header(path: &std::path::Path) -> bool {
+fn has_wav_header(input: &AudioInput) -> bool {
     use std::io::Read;
     let mut head = [0u8; 12];
-    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok()
+    input.open().is_ok_and(|mut f| f.read_exact(&mut head).is_ok())
         && &head[0..4] == b"RIFF"
         && &head[8..12] == b"WAVE"
 }
 
 /// Fast WAV duration probe: reads RIFF header, computes duration from data chunk size.
-fn wav_probe_duration(path: &std::path::Path) -> Option<u64> {
+fn wav_probe_duration(input: &AudioInput) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     // Header chunks only: the data chunk's size gives the length without reading the audio.
-    let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut file = std::io::BufReader::new(input.open().ok()?);
     let mut riff = [0u8; 12];
     file.read_exact(&mut riff).ok()?;
     if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
@@ -1407,21 +1476,15 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
 // ============================================================================
 
 /// Probe audio file metadata without decoding. Returns (sample_rate, channels, estimated_frames).
-fn probe_audio_metadata(path: &std::path::Path) -> Result<(u32, usize, u64), String> {
+fn probe_audio_metadata(input: &AudioInput) -> Result<(u32, usize, u64), String> {
     use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("Failed to open audio file for probe: {}", e))?;
-    let media_source = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+    let file = input.open().map_err(|e| format!("Failed to open audio file for probe: {}", e))?;
+    let media_source = MediaSourceStream::new(file, Default::default());
+    let hint = input.hint();
 
     let probed = symphonia::default::get_probe()
         .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
@@ -1483,14 +1546,14 @@ fn probe_audio_metadata(path: &std::path::Path) -> Result<(u32, usize, u64), Str
 /// Background decode entry: long files split into parallel segments (each
 /// core decodes its own slice, seam-primed by a warmup pre-roll); short files
 /// take the simple sequential path.
-fn stream_decode_worker(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: u64, shared: &SharedState) {
+fn stream_decode_worker(id: u32, input: &AudioInput, sample_rate: u32, est_frames: u64, shared: &SharedState) {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let workers = cores.saturating_sub(2).min(MAX_DECODE_WORKERS);
     let est_secs = if sample_rate > 0 { est_frames / sample_rate as u64 } else { 0 };
     if workers >= 2 && est_secs >= PARALLEL_MIN_SECS {
-        parallel_stream_decode(id, path, sample_rate, est_frames, workers, shared);
+        parallel_stream_decode(id, input, sample_rate, est_frames, workers, shared);
     } else {
-        sequential_stream_decode(id, path, sample_rate, shared);
+        sequential_stream_decode(id, input, sample_rate, shared);
     }
 }
 
@@ -1549,19 +1612,14 @@ struct PacketCursor {
 }
 
 impl PacketCursor {
-    fn open(path: &std::path::Path) -> Result<Self, String> {
+    fn open(input: &AudioInput) -> Result<Self, String> {
         use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
         use symphonia::core::formats::FormatOptions;
         use symphonia::core::io::MediaSourceStream;
         use symphonia::core::meta::MetadataOptions;
-        use symphonia::core::probe::Hint;
 
-        let file = std::fs::File::open(path).map_err(|e| format!("open: {}", e))?;
-        let media_source = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
+        let media_source = MediaSourceStream::new(input.open()?, Default::default());
+        let hint = input.hint();
         let format = symphonia::default::get_probe()
             .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
             .map_err(|e| format!("probe: {}", e))?
@@ -1643,14 +1701,14 @@ type FrameSink<'a> = dyn FnMut(&[f32], usize, usize, usize) -> bool + 'a;
 /// as (interleaved samples, channels, frames to skip, frames to take). The sink returns
 /// false to stop.
 fn decode_range(
-    path: &std::path::Path,
+    input: &AudioInput,
     sample_rate: u32,
     start_frame: u64,
     end_frame: u64,
     cancel: &std::sync::atomic::AtomicBool,
     sink: &mut FrameSink<'_>,
 ) -> Result<(), String> {
-    let mut cursor = PacketCursor::open(path)?;
+    let mut cursor = PacketCursor::open(input)?;
     if start_frame > 0 {
         cursor.seek_before(start_frame, sample_rate)?;
     }
@@ -1673,7 +1731,7 @@ fn decode_range(
 /// `progressive` flushes playback batches into the source as they land (the head
 /// segment's instant-start path).
 fn decode_segment(
-    path: &std::path::Path,
+    input: &AudioInput,
     sample_rate: u32,
     start_frame: u64,
     end_frame: u64,
@@ -1682,7 +1740,7 @@ fn decode_segment(
 ) -> Result<SegmentOut, String> {
     let mut out = SegmentOut { samples: Vec::new(), mono: Vec::new() };
     let mut removed = false;
-    decode_range(path, sample_rate, start_frame, end_frame, cancel, &mut |samples, ch, skip, take| {
+    decode_range(input, sample_rate, start_frame, end_frame, cancel, &mut |samples, ch, skip, take| {
         append_packet_frames(samples, ch, skip, take, &mut out.samples, &mut out.mono);
         if let Some((id, shared)) = progressive {
             if out.samples.len() >= DECODE_BATCH_SIZE && !flush_decode_batch(id, &mut out.samples, shared) {
@@ -1715,13 +1773,13 @@ fn window_capacity(sample_rate: u32, src_channels: usize) -> usize {
 /// buffer built outside the lock and swapped in: the audio thread never waits on a copy.
 fn window_decode_worker(
     id: u32,
-    path: &std::path::Path,
+    input: &AudioInput,
     channels: usize,
     sample_rate: u32,
     ctl: Arc<StreamCtl>,
     shared: &SharedState,
 ) {
-    let mut cursor = match PacketCursor::open(path) {
+    let mut cursor = match PacketCursor::open(input) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[AudioEngine] Window decoder failed to open source {}: {}", id, e);
@@ -1871,7 +1929,7 @@ const WAVEFORM_LIVENESS_PACKETS: u32 = 256;
 
 type WaveformPart = (Vec<f32>, u64);
 
-fn waveform_pass(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: u64, shared: Arc<SharedState>) {
+fn waveform_pass(id: u32, input: &AudioInput, sample_rate: u32, est_frames: u64, shared: Arc<SharedState>) {
     let t0 = std::time::Instant::now();
     let hop = WaveformComputer::new(sample_rate).hop_size as u64;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -1883,7 +1941,7 @@ fn waveform_pass(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: 
     for w in 0..workers {
         let start = per * w as u64;
         let end = if w + 1 == workers { u64::MAX } else { per * (w as u64 + 1) };
-        let (path, tx, stop, shared) = (path.to_path_buf(), tx.clone(), Arc::clone(&cancel), Arc::clone(&shared));
+        let (input, tx, stop, shared) = (input.clone(), tx.clone(), Arc::clone(&cancel), Arc::clone(&shared));
         let spawned = std::thread::Builder::new()
             .name(format!("audio-waveform-{}", w))
             .spawn(move || {
@@ -1892,7 +1950,7 @@ fn waveform_pass(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: 
                 let mut scratch: Vec<f32> = Vec::new();
                 let mut frames = 0u64;
                 let mut packets = 0u32;
-                let r = decode_range(&path, sample_rate, start, end, &stop, &mut |samples, ch, skip, take| {
+                let r = decode_range(&input, sample_rate, start, end, &stop, &mut |samples, ch, skip, take| {
                     packets += 1;
                     if packets.is_multiple_of(WAVEFORM_LIVENESS_PACKETS)
                         && !shared.sources.lock().map(|s| s.contains_key(&id)).unwrap_or(false)
@@ -1974,7 +2032,7 @@ fn waveform_pass(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: 
 #[allow(clippy::too_many_arguments)]
 fn parallel_stream_decode(
     id: u32,
-    path: &std::path::Path,
+    input: &AudioInput,
     sample_rate: u32,
     est_frames: u64,
     workers: usize,
@@ -1991,13 +2049,13 @@ fn parallel_stream_decode(
         // The last segment runs to EOF so an estimate that undershoots never
         // truncates the file; overshooting estimates just yield empty tails.
         let end = if w + 1 == workers { u64::MAX } else { head_end + span * (w as u64 + 1) };
-        let path = path.to_path_buf();
+        let input = input.clone();
         let tx = tx.clone();
         let cancel = Arc::clone(&cancel);
         std::thread::Builder::new()
             .name(format!("audio-decode-{}", w))
             .spawn(move || {
-                let r = decode_segment(&path, sample_rate, start, end, None, &cancel);
+                let r = decode_segment(&input, sample_rate, start, end, None, &cancel);
                 let _ = tx.send((w, r));
             })
             .ok();
@@ -2008,7 +2066,7 @@ fn parallel_stream_decode(
     // sequential path's instant start.
     let mut waveform_computer = WaveformComputer::new(sample_rate);
     let mut mono_acc: Vec<f32> = Vec::new();
-    let mut head = match decode_segment(path, sample_rate, 0, head_end, Some((id, shared)), &cancel) {
+    let mut head = match decode_segment(input, sample_rate, 0, head_end, Some((id, shared)), &cancel) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[AudioEngine] Head decode failed for source {}: {}", id, e);
@@ -2069,7 +2127,7 @@ fn parallel_stream_decode(
         cancel.store(true, Ordering::Relaxed);
         let resume = mono_acc.len() as u64;
         let fresh_cancel = std::sync::atomic::AtomicBool::new(false);
-        match decode_segment(path, sample_rate, resume, u64::MAX, None, &fresh_cancel) {
+        match decode_segment(input, sample_rate, resume, u64::MAX, None, &fresh_cancel) {
             Ok(mut rest) => {
                 if !flush_decode_batch(id, &mut rest.samples, shared) {
                     return;
@@ -2118,9 +2176,9 @@ fn parallel_stream_decode(
 /// Sequential decode worker: decodes audio packets progressively and appends
 /// decoded samples to the source in batches. When complete, triggers FFT
 /// waveform computation and emits actual duration.
-fn sequential_stream_decode(id: u32, path: &std::path::Path, sample_rate: u32, shared: &SharedState) {
+fn sequential_stream_decode(id: u32, input: &AudioInput, sample_rate: u32, shared: &SharedState) {
     let t0 = std::time::Instant::now();
-    let mut cursor = match PacketCursor::open(path) {
+    let mut cursor = match PacketCursor::open(input) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[AudioEngine] Decoder failed to open source {}: {}", id, e);
@@ -2490,7 +2548,7 @@ mod window_tests {
         for (tag, bytes) in [("plain", plain), ("listed", listed)] {
             let path = std::env::temp_dir().join(format!("vector-wav-probe-{}-{tag}.wav", std::process::id()));
             std::fs::write(&path, bytes).unwrap();
-            assert_eq!(wav_probe_duration(&path), Some(SECS as u64 * 1000), "{tag}");
+            assert_eq!(wav_probe_duration(&AudioInput::File(path.clone())), Some(SECS as u64 * 1000), "{tag}");
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -2563,8 +2621,8 @@ mod window_tests {
         let wav = std::env::temp_dir().join(format!("vector-window-{}.wav", std::process::id()));
         std::fs::write(&wav, stamped_wav()).unwrap();
         let worker = {
-            let (shared, ctl, path) = (Arc::clone(&shared), Arc::clone(&ctl), wav.clone());
-            std::thread::spawn(move || window_decode_worker(1, &path, 1, RATE, ctl, &shared))
+            let (shared, ctl, input) = (Arc::clone(&shared), Arc::clone(&ctl), AudioInput::File(wav.clone()));
+            std::thread::spawn(move || window_decode_worker(1, &input, 1, RATE, ctl, &shared))
         };
         settles_at(&shared, 0);
 
