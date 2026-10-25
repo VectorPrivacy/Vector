@@ -1113,6 +1113,11 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         // Serialize against an inline (headless) follow of the same community — the
         // queue only serializes triggers routed THROUGH it.
         let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
+        // A grave has nothing left to follow, and its death was surfaced when it sealed: the
+        // refresh that surfacing triggers asks for a follow, so answering it would loop.
+        if crate::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+            return;
+        }
         // Owed rotations take this lock themselves: queued now, they run after this pass.
         if super::service::has_read_cuts(&community_id) || super::service::has_owed_settle(&community_id) {
             let owed = *id;
@@ -1132,9 +1137,12 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             // A tombstone surfaced during catch-up (an offline member learning of a
             // death) — the flag is set; seal + surface, and stop following.
             Ok(follow) if follow.dissolved => {
-                crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
-                stamp_dissolved_chats(id).await;
-                handler.on_community_dissolved(&community_id);
+                // Only the pass that learned of the death surfaces it.
+                if !current.dissolved {
+                    crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
+                    stamp_dissolved_chats(id).await;
+                    handler.on_community_dissolved(&community_id);
+                }
                 return;
             }
             Ok(follow) if follow.self_removed => {
@@ -2278,6 +2286,16 @@ mod tests {
 
         assert_eq!(rec.deaths.lock().unwrap().len(), 1, "death is announced exactly once");
         assert!(rec.messages.lock().unwrap().is_empty(), "a post-tombstone message is never honored (CORD-02 §9)");
+
+        // Surfacing the death refreshes the UI, which asks for a follow; following a known
+        // grave must stay quiet, or the two feed each other.
+        crate::state::set_nostr_client(crate::nostr_client_builder().build());
+        let session = crate::db::current_session();
+        for _ in 0..3 {
+            follow_community(&session, community.id(), &*rec).await;
+        }
+        let _ = crate::state::take_nostr_client();
+        assert_eq!(rec.deaths.lock().unwrap().len(), 1, "a follow of a known grave announces nothing");
     }
 
     #[test]
