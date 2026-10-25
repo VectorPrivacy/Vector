@@ -16,6 +16,8 @@ pub const SCHEME: &str = "vmedia";
 /// The most one response carries: a player asks for the rest as it plays, and a whole video
 /// is never copied for one request.
 const MAX_PART: u64 = 4 * 1024 * 1024;
+/// The most a request without a range is answered whole.
+const WHOLE_MAX: u64 = 32 * 1024 * 1024;
 
 type Response = http::Response<Cow<'static, [u8]>>;
 
@@ -70,8 +72,7 @@ fn respond_to(request: &http::Request<Vec<u8>>) -> Response {
         let Some(path) = vector_core::vcache::decode_rel(rel).and_then(|rel| vector_core::vcache::resolve(&rel)) else {
             return status(StatusCode::NOT_FOUND);
         };
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        vector_core::vcache::open(&path, vector_core::crypto::mime_from_extension(ext))
+        vector_core::vcache::open_for_page(&path)
     } else {
         vector_core::simd::hex::hex_to_bytes_32_checked(rest).and_then(|hash| vector_core::media::open(&hash))
     };
@@ -86,6 +87,8 @@ fn respond_to(request: &http::Request<Vec<u8>>) -> Response {
     let len = src.len();
     let asked = request.headers().get(header::RANGE).and_then(|v| v.to_str().ok());
     let (code, start, end) = match range::parse(asked, len) {
+        // A request for all of something large gets its first part: nothing is copied whole.
+        ByteRange::Whole if len > WHOLE_MAX => (StatusCode::PARTIAL_CONTENT, 0, MAX_PART),
         ByteRange::Whole => (StatusCode::OK, 0, len),
         ByteRange::Part { start, end } => (StatusCode::PARTIAL_CONTENT, start, end.min(start + MAX_PART - 1) + 1),
         ByteRange::Unsatisfiable => {

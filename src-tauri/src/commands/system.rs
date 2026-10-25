@@ -369,12 +369,13 @@ async fn clear_media_caches<R: Runtime>(
     handle: &AppHandle<R>,
 ) -> Result<(), String> {
     vector_core::db::scoped(async move {
-        // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
+        // Every Vector cache and the resampled sounds, nothing else in the folder: on Android it
+        // is the system's own cache directory, where the webview and this launch's exports live.
         let cache_dir = handle.path().app_data_dir()
             .map_err(|e| format!("Failed to get app data dir: {}", e))?
             .join("cache");
-        if cache_dir.exists() {
-            let _ = std::fs::remove_dir_all(&cache_dir);
+        for kind in vector_core::vcache::KINDS.iter().chain(&["sounds"]) {
+            let _ = std::fs::remove_dir_all(cache_dir.join(kind));
         }
         crate::commands::emoji_packs::forget_sheets();
 
@@ -520,6 +521,8 @@ static MOVING_DOWNLOADS: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
     use std::sync::atomic::Ordering;
     use vector_core::media::import::{self, Moved};
+    // Originals go a batch at a time, after the rows that replace them are synced.
+    const BATCH: usize = 32;
     if MOVING_DOWNLOADS.swap(true, Ordering::AcqRel) {
         return Err("Already moving files into Vector".to_string());
     }
@@ -531,9 +534,20 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
             }
         }
         let _done = Done;
-        let (files, elsewhere) = vector_core::db::blocking_bound(|| (import::on_disk(), import::paths_elsewhere())).await?;
+        let (files, elsewhere) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await?;
         let (files, elsewhere) = (files?, std::sync::Arc::new(elsewhere));
-        let (mut moved, mut shared, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+        let (mut moved, mut shared, mut stayed, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let mut pending: Vec<String> = Vec::new();
+        let flush = |pending: Vec<String>| async move {
+            let stuck = vector_core::db::blocking_bound(move || import::remove_originals(&pending).map(|stuck| (pending, stuck))).await?;
+            #[cfg(target_os = "android")]
+            if let Ok((pending, stuck)) = &stuck {
+                for path in pending.iter().filter(|p| !stuck.contains(p)) {
+                    crate::android::storage::scan_file(path);
+                }
+            }
+            stuck.map(|(pending, stuck)| (pending.len(), stuck.len()))
+        };
         for (i, item) in files.iter().enumerate() {
             if !vector_core::db::writes_to_live_account() {
                 break;
@@ -542,9 +556,9 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
             match vector_core::db::blocking_bound(move || import::move_in(&file, others.as_ref().as_ref())).await? {
                 Ok((outcome, events)) => {
                     match outcome {
-                        Moved::Moved => moved += 1,
+                        Moved::Moved => pending.push(item.path.clone()),
                         Moved::Shared => shared += 1,
-                        Moved::Mismatch => skipped += 1,
+                        Moved::Changed | Moved::Mismatch => skipped += 1,
                     }
                     reflect_move(item, outcome, &events).await;
                 }
@@ -553,9 +567,19 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
                     vector_core::log_warn!("[MediaImport] couldn't move a file in: {}", e);
                 }
             }
+            if pending.len() >= BATCH {
+                let (gone, stuck) = flush(std::mem::take(&mut pending)).await?;
+                moved += gone - stuck;
+                stayed += stuck;
+            }
             vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": i + 1, "total": files.len() }));
         }
-        Ok(serde_json::json!({ "moved": moved, "shared": shared, "skipped": skipped, "failed": failed }))
+        if !pending.is_empty() {
+            let (gone, stuck) = flush(pending).await?;
+            moved += gone - stuck;
+            stayed += stuck;
+        }
+        Ok(serde_json::json!({ "moved": moved, "shared": shared, "stayed": stayed, "skipped": skipped, "failed": failed }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -564,10 +588,6 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
 /// STATE and the open chat follow a moved file.
 async fn reflect_move(item: &vector_core::media::import::OnDisk, outcome: vector_core::media::import::Moved, events: &[String]) {
     let updates = vector_core::media::import::reflect(&mut *STATE.lock().await, item, outcome, events);
-    #[cfg(target_os = "android")]
-    if outcome == vector_core::media::import::Moved::Moved {
-        crate::android::storage::scan_file(&item.path);
-    }
     for (chat_id, mut message) in updates {
         let old_id = message.id.clone();
         vector_core::traits::emit_message_update(&chat_id, &old_id, &mut message).await;

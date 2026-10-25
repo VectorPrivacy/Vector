@@ -35,28 +35,60 @@ pub fn is_export(path: &Path) -> bool {
 pub fn materialize(path_or_ref: &str, name: &str) -> Result<PathBuf, String> {
     match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
         MediaRef::File(path) if vector_core::vcache::is_sealed(Path::new(&path)) => {
-            let bytes = vector_core::vcache::read(Path::new(&path)).map_err(|e| format!("Couldn't read the file: {e}"))?;
-            let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or_default();
-            let hash = vector_core::crypto::sha256::digest(&bytes);
-            export(&bytes, file_name(name, &hash, vector_core::crypto::mime_from_extension(ext)))
+            let path = Path::new(&path);
+            let name = if name.is_empty() { path.file_name().and_then(|n| n.to_str()).unwrap_or("file") } else { name };
+            let src = vector_core::vcache::open(path, "application/octet-stream").ok_or("Couldn't read the file")?;
+            export(&*src, vector_core::crypto::sanitize_filename(name))
         }
         MediaRef::File(path) => Ok(PathBuf::from(path)),
         MediaRef::Held(hash) => {
-            let (bytes, mime) = held(&hash)?;
-            export(&bytes, file_name(name, &hash, &mime))
+            let src = media::open(&hash).ok_or("This file isn't open any more: show it again first")?;
+            export(&*src, file_name(name, &hash, src.mime()))
         }
     }
 }
 
-/// `bytes` as `name` in a folder of its own under this launch's exports.
-fn export(bytes: &[u8], name: String) -> Result<PathBuf, String> {
+/// What `src` holds, as `name` in a folder of its own under this launch's exports.
+fn export(src: &dyn media::MediaSource, name: String) -> Result<PathBuf, String> {
     let mut id = [0u8; 8];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
     let dir = root()?.join(crate::util::bytes_to_hex_string(&id));
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the file: {e}"))?;
     let file = dir.join(name);
-    write_private(&file, bytes)?;
+    copy_out(src, &file)?;
     Ok(file)
+}
+
+/// Write what `src` holds to `dest` a chunk at a time, beside it first, then into place: a
+/// large file is never whole in memory.
+fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dest.with_file_name(format!(".{name}.saving"));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, options.open(&tmp)?);
+        let mut buf = zeroize::Zeroizing::new(vec![0u8; 1 << 20]);
+        let mut at = 0u64;
+        while at < src.len() {
+            let n = src.read_at(at, &mut buf)?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            out.write_all(&buf[..n])?;
+            at += n as u64;
+        }
+        out.flush()?;
+        drop(out);
+        std::fs::rename(&tmp, dest)
+    })();
+    result.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Couldn't save the file: {e}")
+    })
 }
 
 /// The package a Mini App runs from: a file is itself; a kept app is written out sealed once
@@ -82,21 +114,17 @@ pub fn package_path(path_or_ref: &str) -> Result<String, String> {
 /// A normal copy of held media in the download folder, for an account that asked for one: the
 /// same file already there under its name is used as it is. Returns where it is.
 pub fn save_to_downloads(hash: &[u8; 32], name: &str) -> Result<PathBuf, String> {
-    let (bytes, mime) = held(hash)?;
+    let src = media::open(hash).ok_or("This file isn't open any more: show it again first")?;
     let dir = vector_core::db::get_download_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
-    let name = file_name(name, hash, &mime);
+    let name = file_name(name, hash, src.mime());
     let candidate = dir.join(&name);
     let hex = crate::util::bytes_to_hex_string(hash);
     if vector_core::crypto::stream::hash_file(&candidate).is_ok_and(|(h, _)| h == hex) {
         return Ok(candidate);
     }
     let dest = vector_core::crypto::resolve_unique_filename(&dir, &name);
-    let tmp = dir.join(format!(".{hex}.saving"));
-    std::fs::write(&tmp, &*bytes).and_then(|_| std::fs::rename(&tmp, &dest)).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("Couldn't save the file: {e}")
-    })?;
+    copy_out(&*src, &dest)?;
     Ok(dest)
 }
 
@@ -110,18 +138,12 @@ pub fn held_bytes(path_or_ref: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
 
 /// Write `path_or_ref` to `dest`: beside it first, then into place.
 pub fn save_to(path_or_ref: &str, dest: &Path) -> Result<(), String> {
-    let bytes = match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
-        MediaRef::Held(hash) => held(&hash)?.0,
-        MediaRef::File(path) => vector_core::vcache::read(Path::new(&path)).map_err(|e| format!("Couldn't read the file: {e}"))?,
+    let src = match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        MediaRef::Held(hash) => media::open(&hash).ok_or("This file isn't open any more: show it again first")?,
+        // A cache file opens sealed; any other file reads as it is.
+        MediaRef::File(path) => vector_core::vcache::open(Path::new(&path), "application/octet-stream").ok_or("Couldn't read the file")?,
     };
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dest.with_file_name(format!(".{name}.saving"));
-    std::fs::write(&tmp, &*bytes)
-        .and_then(|_| std::fs::rename(&tmp, dest))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("Couldn't save the file: {e}")
-        })
+    copy_out(&*src, dest)
 }
 
 /// The name a file is saved under: the sender's, else its hash and type.
@@ -139,18 +161,6 @@ fn held(hash: &[u8; 32]) -> Result<(zeroize::Zeroizing<Vec<u8>>, String), String
     let src = media::open(hash).ok_or("This file isn't open any more: show it again first")?;
     let bytes = media::read_all(&*src).map_err(|e| format!("Couldn't read the file: {e}"))?;
     Ok((zeroize::Zeroizing::new(bytes), src.mime().to_string()))
-}
-
-fn write_private(file: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(file)
-        .and_then(|mut f| f.write_all(bytes))
-        .map_err(|e| format!("Couldn't prepare the file: {e}"))
 }
 
 #[cfg(test)]

@@ -196,9 +196,14 @@ pub fn prune_dangling_miniapp_history() -> Result<u32, String> {
         if path.is_empty() {
             continue;
         }
-        // Fail closed: only prune on a definite "missing". A stat error
-        // (permissions, unmounted Android storage) must not delete valid rows
-        if !matches!(std::path::Path::new(&path).try_exists(), Ok(false)) {
+        let gone = match crate::media::MediaRef::parse(&path) {
+            // An app kept in Vector is there while the store holds it.
+            Some(crate::media::MediaRef::Held(hash)) => !crate::media::store::holds(&hash),
+            // Fail closed: only prune on a definite "missing". A stat error
+            // (permissions, unmounted Android storage) must not delete valid rows
+            _ => matches!(std::path::Path::new(&path).try_exists(), Ok(false)),
+        };
+        if !gone {
             continue;
         }
         conn.execute(

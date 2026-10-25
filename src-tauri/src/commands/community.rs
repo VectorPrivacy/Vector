@@ -851,6 +851,12 @@ async fn process_outbound_community_attachment(
     use_compression: bool,
     keep_metadata: bool,
 ) -> Result<PreparedCommunityAttachment, String> {
+    // Media Vector holds (a Mini App kept from a chat) sends from its bytes.
+    if let Some(vector_core::media::MediaRef::Held(hash)) = vector_core::media::MediaRef::parse(file_path) {
+        let file = crate::message::files::held_attachment(hash, name_override).await?;
+        let bytes = std::sync::Arc::try_unwrap(file.bytes).unwrap_or_else(|shared| (*shared).clone());
+        return process_outbound_community_attachment_bytes(bytes, &file.name, use_compression, keep_metadata, None).await;
+    }
     // Android's file dialog hands back a content:// URI, which std::fs can't open and which
     // has no usable filename in its last path segment — the content resolver holds both the
     // bytes and the real display name. Same routing the community image picker already uses.

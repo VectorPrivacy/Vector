@@ -128,6 +128,17 @@ pub fn is_raster_wrapped(bytes: &[u8]) -> bool {
     bytes.starts_with(RASTER_MARKER.as_bytes())
 }
 
+/// The PNG inside a render Vector wrapped, or None for anything else (and for an empty one).
+pub fn unwrap_raster(bytes: &[u8]) -> Option<Vec<u8>> {
+    const OPEN: &[u8] = b"href=\"data:image/png;base64,";
+    if !is_raster_wrapped(bytes) {
+        return None;
+    }
+    let start = bytes.windows(OPEN.len()).position(|w| w == OPEN)? + OPEN.len();
+    let len = bytes[start..].iter().position(|&b| b == b'"')?;
+    crate::simd::base64::STANDARD.decode_to_vec(&bytes[start..start + len]).ok()
+}
+
 fn wrap_png(png: &[u8], w: u32, h: u32) -> Vec<u8> {
     format!(
         r#"{RASTER_MARKER}<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image width="{w}" height="{h}" href="data:image/png;base64,{}"/></svg>"#,

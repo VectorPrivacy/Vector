@@ -12,6 +12,13 @@ use std::sync::{Arc, OnceLock};
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use zeroize::Zeroizing;
 
+/// Vector's caches under `<app_data>/cache/`. Nothing else there is Vector Cache: on Android the
+/// folder is the system's own cache directory, which also holds the webview's files.
+pub const KINDS: [&str; 11] = [
+    "avatars", "banners", "emojis", "emoji_pack_icons", "emoji_spritesheets", "miniapp_icons",
+    "inline_images", "embed_videos", "gif_previews", "svg_renders", "previews",
+];
+
 const MAGIC: &[u8; 4] = b"VCC1";
 const HEADER: usize = 4 + 4 + 12;
 const CHUNK: usize = 256 * 1024;
@@ -59,7 +66,15 @@ fn load_or_create(path: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
         Ok(key)
     };
     if path.exists() {
-        return read(path);
+        match read(path) {
+            Ok(key) => return Ok(key),
+            // A key that can't be read is set aside, never left to block every write: what it
+            // sealed reads as missing and is fetched again.
+            Err(e) => {
+                crate::log_warn!("[VCache] cache key unusable, starting a new one: {}", e);
+                std::fs::rename(path, path.with_extension("key.unusable")).map_err(|e| e.to_string())?;
+            }
+        }
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -141,14 +156,6 @@ pub fn write(path: &Path, plain: &[u8]) -> Result<(), String> {
     })
 }
 
-/// Seal the file at `src` into `path`, streaming, and remove `src`. For downloads too large to
-/// hold: they land in a part file, then move here sealed.
-pub fn seal_file(src: &Path, path: &Path) -> Result<(), String> {
-    seal_stream(src, path)?;
-    let _ = std::fs::remove_file(src);
-    Ok(())
-}
-
 /// Write what `src` holds to `path` sealed, a chunk at a time: a large file never sits whole in
 /// memory, or plain on disk.
 pub fn write_source(src: &dyn crate::media::MediaSource, path: &Path) -> Result<(), String> {
@@ -171,6 +178,7 @@ pub fn write_source(src: &dyn crate::media::MediaSource, path: &Path) -> Result<
             at += n as u64;
         }
         output.flush().map_err(|e| e.to_string())?;
+        output.get_ref().sync_data().map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
     if result.is_err() {
@@ -179,8 +187,8 @@ pub fn write_source(src: &dyn crate::media::MediaSource, path: &Path) -> Result<
     result
 }
 
-/// `src` sealed into a temp beside `path`, then renamed over it: `path` is never partial, and
-/// `src` may be `path` itself.
+/// `src` sealed into a temp beside `path`, synced, then renamed over it: `path` is never partial,
+/// and `src` may be `path` itself, in which case a write that replaced it meanwhile wins.
 fn seal_stream(src: &Path, path: &Path) -> Result<(), String> {
     let key = key().ok_or("Vector's cache key isn't available")?;
     let (header, nonce) = fresh_header(key);
@@ -200,6 +208,10 @@ fn seal_stream(src: &Path, path: &Path) -> Result<(), String> {
             output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         }
         output.flush().map_err(|e| e.to_string())?;
+        output.get_ref().sync_data().map_err(|e| e.to_string())?;
+        if src == path && is_sealed(path) {
+            return Err("sealed meanwhile".into());
+        }
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     })();
     if result.is_err() {
@@ -277,6 +289,10 @@ pub fn readable(path: &Path) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else { return false };
     let mut head = [0u8; HEADER];
     let n = read_up_to(&mut file, &mut head);
+    // An empty file is a write a crash cut short.
+    if n == 0 {
+        return false;
+    }
     match key() {
         Some(key) => !matches!(kind(&head[..n], key), Kind::Foreign),
         None => !head[..n].starts_with(MAGIC),
@@ -312,8 +328,11 @@ pub fn seal_dir(dir: &Path) -> usize {
         if kind.is_dir() {
             sealed += seal_dir(&path);
         } else if path.extension().is_some_and(|e| e == "vtmp") {
-            // A write cut short: ciphertext with no file to become.
-            let _ = std::fs::remove_file(&path);
+            // A write cut short: ciphertext with no file to become. A fresh one may be in flight.
+            let age = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            if age.is_some_and(|age| age > std::time::Duration::from_secs(600)) {
+                let _ = std::fs::remove_file(&path);
+            }
         } else if kind.is_file() && media && seal_in_place(&path).unwrap_or(false) {
             sealed += 1;
         }
@@ -324,11 +343,19 @@ pub fn seal_dir(dir: &Path) -> usize {
 /// Seal everything Vector cached before sealing: the shared cache and every account's
 /// wallpapers. Idempotent; a sealed file costs one header read.
 pub fn seal_legacy() -> usize {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // Files from before sealing don't reappear: once a launch is enough.
+    if DONE.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return 0;
+    }
     let Ok(root) = crate::db::get_app_data_dir() else { return 0 };
-    let mut sealed = seal_dir(&root.join("cache"));
+    let mut sealed: usize = KINDS.iter().map(|kind| seal_dir(&root.join("cache").join(kind))).sum();
     if let Ok(entries) = std::fs::read_dir(root) {
-        for account in entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("npub1")) {
-            sealed += seal_dir(&account.path().join("wallpapers"));
+        for account in entries.flatten() {
+            let real_dir = account.file_type().is_ok_and(|t| t.is_dir());
+            if real_dir && account.file_name().to_string_lossy().starts_with("npub1") {
+                sealed += seal_dir(&account.path().join("wallpapers"));
+            }
         }
     }
     sealed
@@ -340,7 +367,7 @@ pub fn resolve(rel: &str) -> Option<PathBuf> {
     let parts: Vec<&str> = rel.split('/').collect();
     let clean = parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains(['\\', ':', '\0']));
     let allowed = match parts.as_slice() {
-        ["cache", _, ..] => true,
+        ["cache", kind, _, ..] => KINDS.contains(kind),
         [account, "wallpapers", _, ..] => account.starts_with("npub1"),
         _ => false,
     };
@@ -370,6 +397,39 @@ pub fn decode_rel(encoded: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// A cache file as a page may show it. A cached SVG is a render Vector drew and wrapped, so the
+/// page gets the picture inside, never SVG markup; anything else opens as it is.
+pub fn open_for_page(path: &Path) -> Option<Arc<dyn crate::media::MediaSource>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if ext == "svg" {
+        let png = crate::svg::unwrap_raster(&read(path).ok()?)?;
+        return Some(Arc::new(InMemory { bytes: png, mime: "image/png" }));
+    }
+    open(path, crate::crypto::mime_from_extension(&ext))
+}
+
+struct InMemory {
+    bytes: Vec<u8>,
+    mime: &'static str,
+}
+
+impl crate::media::MediaSource for InMemory {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn mime(&self) -> &str {
+        self.mime
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(self.bytes.len());
+        let n = buf.len().min(self.bytes.len() - start);
+        buf[..n].copy_from_slice(&self.bytes[start..start + n]);
+        Ok(n)
+    }
 }
 
 /// A cache file read by range: what a player or a large picture asks for.
@@ -531,6 +591,26 @@ mod tests {
     }
 
     #[test]
+    fn a_cached_svg_reaches_a_page_as_the_picture_inside() {
+        let _g = ready();
+        let dir = tempfile::tempdir().unwrap();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="red"/></svg>"#;
+        let wrapped = crate::svg::rasterize_wrapped(svg, 64).unwrap();
+        let path = dir.path().join("face.svg");
+        write(&path, &wrapped).unwrap();
+        let src = open_for_page(&path).unwrap();
+        assert_eq!(src.mime(), "image/png");
+        assert!(crate::media::read_all(&*src).unwrap().starts_with(b"\x89PNG"));
+        // Markup Vector didn't draw never reaches a page.
+        let raw = dir.path().join("raw.svg");
+        write(&raw, svg).unwrap();
+        assert!(open_for_page(&raw).is_none());
+        let empty = dir.path().join("empty.svg");
+        write(&empty, &crate::svg::empty_wrapped()).unwrap();
+        assert!(open_for_page(&empty).is_none());
+    }
+
+    #[test]
     fn a_part_written_in_pieces_and_resumed_reads_whole() {
         let _g = ready();
         let dir = tempfile::tempdir().unwrap();
@@ -563,8 +643,7 @@ mod tests {
         let plain: Vec<u8> = (0..(CHUNK * 2 + 77) as u32).map(|i| (i % 241) as u8).collect();
         std::fs::write(&part, &plain).unwrap();
         let dest = dir.path().join("v.mp4");
-        seal_file(&part, &dest).unwrap();
-        assert!(!part.exists());
+        seal_stream(&part, &dest).unwrap();
         assert_eq!(&*read(&dest).unwrap(), &plain);
 
         let nested = dir.path().join("thumbs");

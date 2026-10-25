@@ -248,6 +248,22 @@ pub fn move_to_store(hash: &str, path: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("move_to_store: {e}"))?;
     conn.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1", [path])
         .map_err(|e| format!("move_to_store: {e}"))?;
+    // A Mini App opened from that file opens from the kept copy now.
+    let held = crate::media::MediaRef::held(&crate::simd::hex::hex_to_bytes_32(hash));
+    conn.execute("UPDATE miniapps_history SET attachment_ref=?2 WHERE attachment_ref=?1", [path, held.as_str()])
+        .map_err(|e| format!("move_to_store: {e}"))?;
+    conn.execute("UPDATE miniapps_history SET src_url=?2 WHERE src_url=?1", [path, held.as_str()])
+        .map_err(|e| format!("move_to_store: {e}"))?;
+    Ok(events)
+}
+
+/// Rows of `hash` at `path` show the store's copy, and the file stays: it holds other bytes now.
+/// Returns the events touched.
+pub fn keep_at_store(hash: &str, path: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let events = events_at_path(&conn, path)?;
+    conn.execute("UPDATE attachments SET path='' WHERE path=?1 AND hash=?2", [path, hash])
+        .map_err(|e| format!("keep_at_store: {e}"))?;
     Ok(events)
 }
 

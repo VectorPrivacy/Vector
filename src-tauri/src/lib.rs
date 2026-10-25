@@ -582,6 +582,11 @@ pub fn run() {
 
             #[cfg(desktop)]
             services::native_notify::init(&handle);
+            // Plain copies made for notifications last only the launch that drew them.
+            #[cfg(target_os = "android")]
+            if let Ok(dir) = handle.path().app_data_dir() {
+                let _ = std::fs::remove_dir_all(dir.join("notifications").join("avatars"));
+            }
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));

@@ -456,7 +456,7 @@ fn write_sheet(dir: &std::path::Path, url: &str, decoded: &DecodedSheet) -> Resu
 fn read_sheet(dir: &std::path::Path, url: &str) -> Option<EmojiSheet> {
     let (png, json) = sheet_files(dir, url);
     if let Ok(buf) = std::fs::read(&json) {
-        if png.is_file() {
+        if vector_core::vcache::readable(&png) {
             if let Ok(meta) = serde_json::from_slice::<SheetMeta>(&buf).ok().filter(|m| m.version == SHEET_VERSION).ok_or(()) {
                 touch(&png);
                 return Some(EmojiSheet { path: png.to_string_lossy().into_owned(), x: 0, y: 0, frame_count: meta.frame_count, frame_size: meta.frame_size, frame_durations_ms: meta.frame_durations_ms });
@@ -679,7 +679,7 @@ fn atlas_for(dir: &std::path::Path, sheets: &[EmojiSheet]) -> Option<(std::path:
         vector_core::crypto::sha256_hex(ident.as_bytes())
     };
     let path = dir.join(format!("atlas-{key}.png"));
-    if path.is_file() {
+    if vector_core::vcache::readable(&path) {
         touch(&path);
         return Some((path, at));
     }

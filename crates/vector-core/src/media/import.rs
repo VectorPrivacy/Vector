@@ -1,6 +1,7 @@
 //! Files downloaded before the store, moved into it: checked against their hash, sealed under
 //! fresh parameters, then taken out of the download folder. Resumable by construction: a file
-//! is either still a download on disk or already the store's.
+//! is either still a download on disk or already the store's. An original goes only once its
+//! kept copy has been read back whole and the database that points at it is on disk.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -18,12 +19,28 @@ pub struct OnDisk {
 /// What became of one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moved {
-    /// Kept in Vector and gone from the download folder.
+    /// Kept in Vector; the original may go.
     Moved,
-    /// Kept in Vector; the file stays for another account that still shows it.
+    /// Kept in Vector; the original stays for another account that still shows it.
     Shared,
+    /// Kept in Vector already; the file holds other bytes now and is left alone.
+    Changed,
     /// Not the bytes its message sent: the message stops showing it, and the file is left alone.
     Mismatch,
+}
+
+/// What another account on this device still shows: by path, and by content, since a path can
+/// be stale (an account that hasn't logged in since its download folder moved).
+#[derive(Debug, Default)]
+pub struct Elsewhere {
+    paths: HashSet<String>,
+    hashes: HashSet<[u8; 32]>,
+}
+
+impl Elsewhere {
+    fn shows(&self, item: &OnDisk) -> bool {
+        self.paths.contains(&item.path) || self.hashes.contains(&item.hash)
+    }
 }
 
 /// This account's downloads that still sit in the download folder, one per file.
@@ -42,109 +59,137 @@ pub fn on_disk() -> Result<Vec<OnDisk>, String> {
         .collect())
 }
 
-/// Every path another account on this device shows a download from. None when one can't be
-/// read, so nothing is deleted on a guess.
-pub fn paths_elsewhere() -> Option<HashSet<String>> {
+/// What every other account on this device shows. None when one can't be read, so nothing is
+/// deleted on a guess.
+pub fn elsewhere() -> Option<Elsewhere> {
     let me = crate::db::current_account_dir().ok()?;
     let dirs = crate::db::get_accounts().ok()?.iter().map(|npub| crate::db::account_dir(npub)).collect::<Result<Vec<_>, _>>().ok()?;
-    paths_in(dirs.into_iter().filter(|dir| *dir != me).map(|dir| dir.join("vector.db")))
+    shown_in(dirs.into_iter().filter(|dir| *dir != me).map(|dir| dir.join("vector.db")))
 }
 
-fn paths_in(dbs: impl IntoIterator<Item = PathBuf>) -> Option<HashSet<String>> {
-    let mut paths = HashSet::new();
+fn shown_in(dbs: impl IntoIterator<Item = PathBuf>) -> Option<Elsewhere> {
+    let mut shown = Elsewhere::default();
     for db in dbs {
-        if let Err(e) = paths_of(&db, &mut paths) {
+        if let Err(e) = shown_by(&db, &mut shown) {
             crate::log_warn!("[MediaImport] couldn't read another account's downloads, so originals stay: {}", e);
             return None;
         }
     }
-    Some(paths)
+    Some(shown)
 }
 
-/// One account's download paths. An account not opened since attachments got their own table
-/// still names them in the JSON of its events or messages.
-fn paths_of(db: &Path, paths: &mut HashSet<String>) -> Result<(), String> {
+/// One account's downloads. An account not opened since attachments got their own table still
+/// names them in the JSON of its events or messages.
+fn shown_by(db: &Path, shown: &mut Elsewhere) -> Result<(), String> {
     let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| e.to_string())?;
     conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     let has = |table: &str| {
         conn.query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", [table], |_| Ok(())).is_ok()
     };
-    let query = |sql: &str, each: &mut dyn FnMut(String) -> Result<(), String>| -> Result<(), String> {
+    if has("attachments") {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT hash, path FROM attachments WHERE downloaded=1 OR path!=''")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+        for row in rows {
+            let (hash, path) = row.map_err(|e| e.to_string())?;
+            shown.hashes.extend(crate::simd::hex::hex_to_bytes_32_checked(&hash));
+            if !path.is_empty() {
+                shown.paths.insert(path);
+            }
+        }
+        return Ok(());
+    }
+    let mut json = |sql: &str| -> Result<(), String> {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        for value in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())? {
-            each(value.map_err(|e| e.to_string())?)?;
+        for text in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())? {
+            let text = text.map_err(|e| e.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("unreadable attachments: {e}"))?;
+            json_shown(&value, shown);
         }
         Ok(())
     };
-    if has("attachments") {
-        return query("SELECT DISTINCT path FROM attachments WHERE path!=''", &mut |path| {
-            paths.insert(path);
-            Ok(())
-        });
-    }
-    let mut from_json = |text: String| {
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("unreadable attachments: {e}"))?;
-        json_paths(&value, paths);
-        Ok(())
-    };
     if has("events") {
-        query("SELECT tags FROM events WHERE tags LIKE '%attachments%'", &mut from_json)?;
+        json("SELECT tags FROM events WHERE tags LIKE '%attachments%'")?;
     }
     if has("messages") {
-        query("SELECT attachments FROM messages WHERE attachments!='[]' AND attachments!=''", &mut from_json)?;
+        json("SELECT attachments FROM messages WHERE attachments!='[]' AND attachments!=''")?;
     }
     Ok(())
 }
 
-/// Every `"path"` an attachment list names, through any JSON nested inside a string.
-fn json_paths(value: &serde_json::Value, paths: &mut HashSet<String>) {
+/// Every attachment an attachment list shows from a file, through any JSON nested inside a
+/// string: its path, and its content hash (`id`).
+fn json_shown(value: &serde_json::Value, shown: &mut Elsewhere) {
     match value {
-        serde_json::Value::Array(items) => items.iter().for_each(|v| json_paths(v, paths)),
+        serde_json::Value::Array(items) => items.iter().for_each(|v| json_shown(v, shown)),
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::String(path)) = map.get("path") {
                 if !path.is_empty() {
-                    paths.insert(path.clone());
+                    shown.paths.insert(path.clone());
+                    if let Some(serde_json::Value::String(id)) = map.get("id") {
+                        shown.hashes.extend(crate::simd::hex::hex_to_bytes_32_checked(id));
+                    }
                 }
             }
-            map.values().for_each(|v| json_paths(v, paths));
+            map.values().for_each(|v| json_shown(v, shown));
         }
         serde_json::Value::String(text) if text.starts_with('[') || text.starts_with('{') => {
             if let Ok(inner) = serde_json::from_str(text) {
-                json_paths(&inner, paths);
+                json_shown(&inner, shown);
             }
         }
         _ => {}
     }
 }
 
-/// Move one file in. Returns what became of it and the events whose rows changed.
-pub fn move_in(item: &OnDisk, elsewhere: Option<&HashSet<String>>) -> Result<(Moved, Vec<String>), String> {
+/// Keep one file and point its messages at the kept copy. Returns what became of it and the
+/// events whose rows changed; on `Moved` the original may go, once [`remove_originals`] has made
+/// those rows durable. Nothing here deletes a file the user had.
+pub fn move_in(item: &OnDisk, elsewhere: Option<&Elsewhere>) -> Result<(Moved, Vec<String>), String> {
     let hex = crate::simd::hex::bytes_to_hex_32(&item.hash);
     let path = Path::new(&item.path);
-    let matches = if super::store::holds(&item.hash) {
-        crate::crypto::stream::hash_file(path)?.0 == hex
+    // A row whose copy is gone or won't open is no copy: it goes, and this file is kept anew.
+    if super::store::holds(&item.hash) && !super::store::verify(&item.hash) {
+        super::store::forget(&item.hash);
+    }
+    if super::store::holds(&item.hash) {
+        if crate::crypto::stream::hash_file(path)?.0 != hex {
+            return Ok((Moved::Changed, crate::db::attachments::keep_at_store(&hex, &item.path)?));
+        }
     } else {
         match seal(item, &hex) {
-            Ok(()) => true,
-            Err(e) if e == crate::crypto::stream::CHANGED => false,
+            Ok(()) => {}
+            Err(e) if e == crate::crypto::stream::CHANGED => {
+                return Ok((Moved::Mismatch, crate::db::attachments::forget_path(&hex, &item.path)?));
+            }
             Err(e) => return Err(e),
         }
-    };
-    if !matches {
-        return Ok((Moved::Mismatch, crate::db::attachments::forget_path(&hex, &item.path)?));
+        if !super::store::verify(&item.hash) {
+            return Err("the kept copy didn't read back as the file".into());
+        }
     }
     let events = crate::db::attachments::move_to_store(&hex, &item.path)?;
-    if elsewhere.is_none_or(|paths| paths.contains(&item.path)) {
-        return Ok((Moved::Shared, events));
-    }
-    match std::fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            crate::log_warn!("[MediaImport] kept in Vector, but the original stays: {}", e);
-        }
-        _ => {}
-    }
-    Ok((Moved::Moved, events))
+    let shared = elsewhere.is_none_or(|shown| shown.shows(item));
+    Ok((if shared { Moved::Shared } else { Moved::Moved }, events))
+}
+
+/// Delete originals whose rows now point at kept copies: the database is synced first, so a
+/// crash can never leave a row pointing at a file that's gone. Returns the ones that stayed.
+pub fn remove_originals(paths: &[String]) -> Result<Vec<String>, String> {
+    crate::db::sync_wal()?;
+    Ok(paths
+        .iter()
+        .filter(|path| match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                crate::log_warn!("[MediaImport] kept in Vector, but the original stays: {}", e);
+                true
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect())
 }
 
 /// Loaded messages follow a moved file as its rows did: those of its hash show the store's copy,
@@ -158,8 +203,8 @@ pub fn reflect(state: &mut crate::state::ChatState, item: &OnDisk, outcome: Move
             let mut changed = false;
             for att in msg.attachments.iter_mut().filter(|a| *a.path() == *item.path) {
                 match (outcome, att.id() == &item.hash) {
-                    (Moved::Mismatch, false) => continue,
-                    (Moved::Moved | Moved::Shared, true) => att.set_path(String::new()),
+                    (Moved::Mismatch | Moved::Changed, false) => continue,
+                    (Moved::Moved | Moved::Shared | Moved::Changed, true) => att.set_path(String::new()),
                     _ => {
                         att.set_downloaded(false);
                         att.set_path(String::new());
@@ -258,8 +303,12 @@ mod tests {
         }
     }
 
+    fn nobody_else() -> Elsewhere {
+        Elsewhere::default()
+    }
+
     #[test]
-    fn a_download_moves_in_and_its_messages_show_the_store() {
+    fn a_download_moves_in_and_its_original_goes_only_when_removed() {
         let _guard = init_test_db();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("photo.png");
@@ -269,13 +318,14 @@ mod tests {
         download("ev-ours", &hex, &file);
         download("ev-other", &"ab".repeat(32), &file);
 
-        let (outcome, mut events) = move_in(&moving, Some(&HashSet::new())).unwrap();
+        let (outcome, mut events) = move_in(&moving, Some(&nobody_else())).unwrap();
         events.sort();
         assert_eq!(outcome, Moved::Moved);
         assert_eq!(events, ["ev-other", "ev-ours"]);
-        assert!(!file.exists());
+        assert!(file.exists(), "nothing is deleted until the rows are durable");
         assert_eq!(row("ev-ours"), (String::new(), true));
         assert_eq!(row("ev-other"), (String::new(), false));
+        assert!(crate::media::store::verify(&moving.hash));
         let src = crate::media::open(&moving.hash).unwrap();
         assert_eq!(crate::media::read_all(&*src).unwrap(), b"a photo from before the store");
         assert_eq!(src.mime(), "image/png");
@@ -283,6 +333,8 @@ mod tests {
         for entry in std::fs::read_dir(crate::media::store::dir().unwrap()).unwrap().flatten() {
             assert_ne!(std::fs::read(entry.path()).unwrap(), b"a photo from before the store");
         }
+        assert!(remove_originals(&[moving.path.clone()]).unwrap().is_empty());
+        assert!(!file.exists());
     }
 
     #[test]
@@ -294,17 +346,26 @@ mod tests {
         let moving = item(b"two accounts saw this", &file);
         download("ev-shared", &crate::simd::hex::bytes_to_hex_32(&moving.hash), &file);
 
-        let elsewhere = HashSet::from([moving.path.clone()]);
-        assert_eq!(move_in(&moving, Some(&elsewhere)).unwrap().0, Moved::Shared);
-        assert!(file.exists() && crate::media::store::holds(&moving.hash));
+        let by_path = Elsewhere { paths: HashSet::from([moving.path.clone()]), ..Default::default() };
+        assert_eq!(move_in(&moving, Some(&by_path)).unwrap().0, Moved::Shared);
+        assert!(crate::media::store::holds(&moving.hash));
         assert_eq!(row("ev-shared"), (String::new(), true));
+
+        // The other account names the file under a path that has since moved: its bytes still say.
+        let again = dir.path().join("moved.png");
+        std::fs::write(&again, b"named under an old folder").unwrap();
+        let stale = item(b"named under an old folder", &again);
+        download("ev-stale", &crate::simd::hex::bytes_to_hex_32(&stale.hash), &again);
+        let by_hash = Elsewhere { paths: HashSet::from(["/old/folder/moved.png".to_string()]), hashes: HashSet::from([stale.hash]) };
+        assert_eq!(move_in(&stale, Some(&by_hash)).unwrap().0, Moved::Shared);
+
         // Unknown elsewhere: nothing is deleted on a guess.
-        let again = dir.path().join("unknown.png");
-        std::fs::write(&again, b"no one can say who else saw this").unwrap();
-        let unknown = item(b"no one can say who else saw this", &again);
-        download("ev-unknown", &crate::simd::hex::bytes_to_hex_32(&unknown.hash), &again);
+        let unknown_file = dir.path().join("unknown.png");
+        std::fs::write(&unknown_file, b"no one can say who else saw this").unwrap();
+        let unknown = item(b"no one can say who else saw this", &unknown_file);
+        download("ev-unknown", &crate::simd::hex::bytes_to_hex_32(&unknown.hash), &unknown_file);
         assert_eq!(move_in(&unknown, None).unwrap().0, Moved::Shared);
-        assert!(again.exists());
+        assert!(file.exists() && again.exists() && unknown_file.exists());
     }
 
     #[test]
@@ -316,7 +377,7 @@ mod tests {
         let claimed = item(b"what the message sent", &file);
         download("ev-edited", &crate::simd::hex::bytes_to_hex_32(&claimed.hash), &file);
 
-        assert_eq!(move_in(&claimed, Some(&HashSet::new())).unwrap().0, Moved::Mismatch);
+        assert_eq!(move_in(&claimed, Some(&nobody_else())).unwrap().0, Moved::Mismatch);
         assert_eq!(std::fs::read(&file).unwrap(), b"edited since it arrived");
         assert!(!crate::media::store::holds(&claimed.hash));
         assert_eq!(row("ev-edited"), (String::new(), false));
@@ -324,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn an_already_kept_file_is_checked_before_its_original_goes() {
+    fn a_kept_copy_is_trusted_only_once_it_reads_back() {
         let _guard = init_test_db();
         let dir = tempfile::tempdir().unwrap();
         let (first, second) = (dir.path().join("a.png"), dir.path().join("a-1.png"));
@@ -333,10 +394,23 @@ mod tests {
         let hex = crate::crypto::sha256_hex(b"downloaded twice");
         download("ev-first", &hex, &first);
         download("ev-second", &hex, &second);
+        assert_eq!(move_in(&item(b"downloaded twice", &first), Some(&nobody_else())).unwrap().0, Moved::Moved);
 
-        assert_eq!(move_in(&item(b"downloaded twice", &first), Some(&HashSet::new())).unwrap().0, Moved::Moved);
-        assert_eq!(move_in(&item(b"downloaded twice", &second), Some(&HashSet::new())).unwrap().0, Moved::Mismatch);
+        // The store keeps these bytes, and this file holds others: it stays, its row shows the copy.
+        assert_eq!(move_in(&item(b"downloaded twice", &second), Some(&nobody_else())).unwrap().0, Moved::Changed);
         assert!(second.exists());
+        assert_eq!(row("ev-second"), (String::new(), true));
+
+        // A row whose blob vanished is no copy: the next file of those bytes is kept anew.
+        let hash = crate::simd::hex::hex_to_bytes_32(&hex);
+        let entry = crate::db::media_store::get(&hash).unwrap().unwrap();
+        std::fs::remove_file(crate::media::store::dir().unwrap().join(&entry.file)).unwrap();
+        assert!(!crate::media::store::verify(&hash));
+        let third = dir.path().join("a-2.png");
+        std::fs::write(&third, b"downloaded twice").unwrap();
+        download("ev-third", &hex, &third);
+        assert_eq!(move_in(&item(b"downloaded twice", &third), Some(&nobody_else())).unwrap().0, Moved::Moved);
+        assert!(crate::media::store::verify(&hash));
     }
 
     #[test]
@@ -380,28 +454,33 @@ mod tests {
     }
 
     #[test]
-    fn another_accounts_paths_are_read_and_an_unreadable_one_stops_deletes() {
+    fn another_accounts_downloads_are_read_and_an_unreadable_one_stops_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("vector.db");
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch("CREATE TABLE attachments (path TEXT NOT NULL DEFAULT ''); INSERT INTO attachments VALUES ('/d/a.png'), ('');").unwrap();
+        conn.execute_batch("CREATE TABLE attachments (hash TEXT NOT NULL, path TEXT NOT NULL DEFAULT '', downloaded INTEGER NOT NULL DEFAULT 0);").unwrap();
+        conn.execute("INSERT INTO attachments VALUES (?1, '/d/a.png', 1), (?2, '', 1), (?3, '', 0)", ["11".repeat(32), "22".repeat(32), "33".repeat(32)]).unwrap();
         drop(conn);
-        assert_eq!(paths_in([db.clone()]), Some(HashSet::from(["/d/a.png".to_string()])));
+        let shown = shown_in([db.clone()]).unwrap();
+        assert_eq!(shown.paths, HashSet::from(["/d/a.png".to_string()]));
+        assert_eq!(shown.hashes, HashSet::from([[0x11; 32], [0x22; 32]]));
 
-        // Older schemas name paths in their events' tags and their messages' attachment lists.
+        // Older schemas name downloads in their events' tags and their messages' attachment lists.
         let old = dir.path().join("old.db");
-        let tag = serde_json::json!([["attachments", serde_json::json!([{ "id": "x", "path": "/d/b.png" }]).to_string()]]).to_string();
+        let tag = serde_json::json!([["attachments", serde_json::json!([{ "id": "44".repeat(32), "path": "/d/b.png" }]).to_string()]]).to_string();
         let conn = rusqlite::Connection::open(&old).unwrap();
         conn.execute_batch("CREATE TABLE events (tags TEXT); CREATE TABLE messages (attachments TEXT NOT NULL DEFAULT '[]');").unwrap();
         conn.execute("INSERT INTO events VALUES (?1)", [&tag]).unwrap();
         conn.execute("INSERT INTO messages VALUES ('[{\"path\":\"/d/c.png\"},{\"path\":\"\"}]'), ('[]')", []).unwrap();
         drop(conn);
+        let both = shown_in([db.clone(), old.clone()]).unwrap();
         let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
-        assert_eq!(paths_in([db.clone(), old.clone()]), Some(names(&["/d/a.png", "/d/b.png", "/d/c.png"])));
+        assert_eq!(both.paths, names(&["/d/a.png", "/d/b.png", "/d/c.png"]));
+        assert!(both.hashes.contains(&[0x44; 32]));
 
         let garbled = dir.path().join("garbled.db");
         rusqlite::Connection::open(&garbled).unwrap().execute_batch("CREATE TABLE messages (attachments TEXT); INSERT INTO messages VALUES ('sealed:abc');").unwrap();
-        assert_eq!(paths_in([db, garbled]), None);
-        assert_eq!(paths_in([dir.path().join("missing.db")]), None);
+        assert!(shown_in([db, garbled]).is_none());
+        assert!(shown_in([dir.path().join("missing.db")]).is_none());
     }
 }

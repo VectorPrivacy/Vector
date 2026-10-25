@@ -255,6 +255,15 @@ pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn super::MediaSource>> {
     Some(Arc::new(StoredGcm { file, key: Zeroizing::new(key), nonce, len: entry.pt_len, mime: entry.mime }))
 }
 
+/// Whether the kept copy of `hash` opens under its key, tag and all, and is those bytes. Reads
+/// the whole blob: for when the copy is about to become the only one.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify(hash: &[u8; 32]) -> bool {
+    let (Ok(dir), Ok(Some(entry))) = (dir(), media_store::get(hash)) else { return false };
+    crate::crypto::stream::verify_file(&dir.join(&entry.file), &entry.key, &entry.nonce)
+        .is_ok_and(|seen| seen.output_sha256 == crate::simd::hex::bytes_to_hex_32(hash))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl StoredGcm {
     /// A blob of our own sealing, read the same way: `path` holds ciphertext and tag.

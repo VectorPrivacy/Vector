@@ -284,7 +284,7 @@ impl MiniAppPackage {
             return None;
         }
         let file = icon_file(icon_dir, &self.file_hash);
-        if file.is_file() {
+        if vector_core::vcache::readable(&file) {
             return Some(file);
         }
         let manifest_icon = Self::stored_meta(&self.file_hash)

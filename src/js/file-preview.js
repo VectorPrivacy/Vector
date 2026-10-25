@@ -71,11 +71,13 @@ const SUPPORTED_VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov'];
  */
 function validateImageSrc(src) {
     if (!src || typeof src !== 'string') return null;
-    // Inline images, blobs, the app's own asset route, and Vector Web's stored files (a
-    // same-origin `/vfs/` path its service worker serves sandboxed): never a remote origin.
+    // Inline images, blobs, the app's own asset route, its media scheme (held media and Vector
+    // Cache files), and Vector Web's stored files (a same-origin `/vfs/` path its service worker
+    // serves sandboxed): never a remote origin.
+    const own = [platformFeatures?.vmedia, platformFeatures?.vcache].filter(Boolean).map(base => `${base}/`);
     if (src.startsWith('data:image/') || src.startsWith('blob:') || src.startsWith('asset://')
         || src.startsWith('http://asset.localhost/') || src.startsWith('https://asset.localhost/')
-        || src.startsWith('/vfs/')) {
+        || src.startsWith('/vfs/') || own.some(base => src.startsWith(base))) {
         return src;
     }
     console.warn('[file-preview] Rejected invalid image src:', src.substring(0, 50));

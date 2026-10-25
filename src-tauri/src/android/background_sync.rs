@@ -1088,6 +1088,26 @@ async fn preload_profiles_into_state() {
 /// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
 ///
 /// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
+/// A picture the notification service can decode. A sealed cache file is written out plain,
+/// once, in the app's private folder: the service decodes it by path, and the folder is
+/// cleared at the next launch.
+fn notification_image(path: Option<String>) -> Option<String> {
+    let path = path?;
+    let source = std::path::Path::new(&path);
+    if !vector_core::vcache::is_sealed(source) {
+        return Some(path);
+    }
+    let dir = vector_core::db::get_app_data_dir().ok()?.join("notifications").join("avatars");
+    std::fs::create_dir_all(&dir).ok()?;
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("img");
+    let out = dir.join(format!("{}.{ext}", &vector_core::crypto::sha256_hex(path.as_bytes())[..32]));
+    if !out.is_file() {
+        let bytes = vector_core::vcache::read(source).ok()?;
+        std::fs::write(&out, &*bytes).ok()?;
+    }
+    Some(out.to_string_lossy().into_owned())
+}
+
 pub fn post_notification_jni(
     title: &str,
     body: &str,
@@ -1118,6 +1138,7 @@ pub fn post_notification_jni(
     let vector_core::notify::Preview {
         title, body, sender: sender_name, avatar: avatar_path, group: group_name, group_avatar: group_avatar_path,
     } = shown;
+    let (avatar_path, group_avatar_path) = (notification_image(avatar_path), notification_image(group_avatar_path));
 
     let vm = match BG_JAVA_VM.get() {
         Some(vm) => vm,

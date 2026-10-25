@@ -960,10 +960,11 @@ async function moveDownloads() {
         VectorSvelte.setSettingsScreen({ storage: { moving: `${done.toLocaleString()} / ${total.toLocaleString()}` } });
     });
     try {
-        const { moved, shared, skipped, failed } = await invoke('move_downloads_into_vector');
-        const kept = moved + shared;
+        const { moved, shared, stayed, skipped, failed } = await invoke('move_downloads_into_vector');
+        const kept = moved + shared + stayed;
         const parts = [`Moved ${kept.toLocaleString()} ${kept === 1 ? 'file' : 'files'} into Vector`];
         if (shared) parts.push(`${shared.toLocaleString()} also stay in ${where} for another account`);
+        if (stayed) parts.push(`${stayed.toLocaleString()} couldn't leave ${where}`);
         if (skipped) parts.push(`${skipped.toLocaleString()} had changed and stayed`);
         if (failed) parts.push(`${failed.toLocaleString()} couldn't move`);
         showToast(parts.join(', '));

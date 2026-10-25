@@ -231,10 +231,9 @@ async fn handle_connection(
     }
     // `c/<path under the app's folder>`: a Vector Cache file, opened sealed or from before.
     if let Some(rel) = encoded_path.strip_prefix(b"c/") {
-        let src = percent_decode_bytes(rel).and_then(|rel| vector_core::vcache::resolve(&rel)).and_then(|path| {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-            vector_core::vcache::open(&path, vector_core::crypto::mime_from_extension(ext))
-        });
+        let src = percent_decode_bytes(rel)
+            .and_then(|rel| vector_core::vcache::resolve(&rel))
+            .and_then(|path| vector_core::vcache::open_for_page(&path));
         return serve_source(&mut stream, req, src, method == Method::Head).await;
     }
 
@@ -333,6 +332,8 @@ async fn handle_connection(
 
 /// The most one held response carries: a player asks for the rest as it plays.
 const HELD_PART: u64 = 4 * 1024 * 1024;
+/// The most a request without a range is answered whole.
+const HELD_WHOLE_MAX: u64 = 32 * 1024 * 1024;
 
 /// Serve media the live account holds by hash.
 async fn serve_held(
@@ -366,6 +367,8 @@ async fn serve_source(
     let total = src.len();
     let (status, start, end) = match parse_range_header(req, total) {
         Some((start, end)) => ("206 Partial Content", start, end.min(start + HELD_PART - 1) + 1),
+        // A request for all of something large gets its first part: nothing is copied whole.
+        None if total > HELD_WHOLE_MAX => ("206 Partial Content", 0, HELD_PART),
         None => ("200 OK", 0, total),
     };
     let body = if is_head {
@@ -386,11 +389,13 @@ async fn serve_source(
         .await?
     };
 
+    // What was read, which a source can cut short.
+    let end = if is_head { end } else { start + body.len() as u64 };
     use std::io::Write;
     let mut hdr = Vec::with_capacity(320);
     let _ = write!(hdr, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n", end - start);
     if status.starts_with("206") {
-        let _ = write!(hdr, "Content-Range: bytes {start}-{}/{total}\r\n", end - 1);
+        let _ = write!(hdr, "Content-Range: bytes {start}-{}/{total}\r\n", end.saturating_sub(1));
     }
     // A dev build's page comes from a dev server, not the app's own origin.
     let origin = if cfg!(debug_assertions) { "*" } else { "http://tauri.localhost" };

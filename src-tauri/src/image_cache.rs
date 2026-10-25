@@ -256,7 +256,7 @@ pub fn get_cached_path<R: Runtime>(
     // entry of a cache holding thousands, on every lookup.
     for ext in ["jpg", "png", "webp", "gif", "ico", "svg", "bmp"] {
         let path = cache_dir.join(format!("{cache_key}.{ext}"));
-        if path.is_file() {
+        if vector_core::vcache::readable(&path) {
             return Some(path.to_string_lossy().into_owned());
         }
     }

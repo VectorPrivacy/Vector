@@ -60,7 +60,7 @@ fn cache_paths(identifier: &str) -> Vec<PathBuf> {
 }
 
 /// Purge the main window's caches: anything from before `block`, or kept by an engine that
-/// found a way around it. Linux also switches its cache model off.
+/// found a way around it.
 #[cfg(desktop)]
 pub fn purge(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "macos")]
@@ -86,9 +86,8 @@ pub fn purge(window: &tauri::WebviewWindow) {
 
     #[cfg(target_os = "linux")]
     let _ = window.with_webview(|wv| {
-        use webkit2gtk::{CacheModel, WebContextExt, WebViewExt};
+        use webkit2gtk::{WebContextExt, WebViewExt};
         if let Some(context) = wv.inner().context() {
-            context.set_cache_model(CacheModel::DocumentViewer);
             context.clear_cache();
         }
     });

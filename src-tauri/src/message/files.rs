@@ -464,8 +464,24 @@ pub fn clear_all_android_file_cache() -> Result<(), String> {
     Ok(())
 }
 
+/// What Vector holds for `hash` (in memory or kept), as a file to send under `name`.
+pub(crate) async fn held_attachment(hash: [u8; 32], name: &str) -> Result<AttachmentFile, String> {
+    let src = vector_core::media::open(&hash).ok_or("This file isn't on this device any more")?;
+    let bytes = tokio::task::spawn_blocking(move || vector_core::media::read_all(&*src))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("Couldn't read the file: {e}"))?;
+    let name = crate::commands::attachments::sanitize_filename(name);
+    Ok(AttachmentFile { bytes: Arc::new(bytes), img_meta: None, extension: path_extension(&name), name })
+}
+
 #[tauri::command]
 pub async fn file_message(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
+    // Media Vector holds (a Mini App kept from a chat) sends from its bytes.
+    if let Some(vector_core::media::MediaRef::Held(hash)) = vector_core::media::MediaRef::parse(&file_path) {
+        let attachment = held_attachment(hash, &name_override).await?;
+        return message(receiver, String::new(), replied_to, Some(attachment)).await;
+    }
     // Extract filename from the path
     let file_name = std::path::Path::new(&file_path)
         .file_name()
@@ -999,7 +1015,7 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
         let dir = svg_render_dir(&app)?;
         let key = crate::util::bytes_to_hex_string(&Sha256::digest(&bytes)[..16]);
         let out = dir.join(format!("{key}-{dim}.png"));
-        if out.is_file() {
+        if vector_core::vcache::readable(&out) {
             // A hit is a use: keep it out of the age sweep.
             if let Ok(f) = std::fs::File::open(&out) {
                 let _ = f.set_modified(std::time::SystemTime::now());

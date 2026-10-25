@@ -1386,6 +1386,21 @@ pub fn account_dir(npub: &str) -> Result<PathBuf, String> {
 
 /// The directory of the account this task belongs to, for files that are that
 /// account's alone. Resolved through the session, never the account on screen.
+/// Make every commit so far durable: the write-ahead log synced to disk. Commits are only
+/// written, not synced, until a checkpoint; this is for a step that can't be undone after them.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sync_wal() -> Result<(), String> {
+    let db = current_account_dir()?.join("vector.db");
+    for path in [db.with_file_name("vector.db-wal"), db] {
+        match std::fs::File::open(&path) {
+            Ok(file) => file.sync_all().map_err(|e| format!("sync {}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("sync {}: {e}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn current_account_dir() -> Result<PathBuf, String> {
     let db = current_session().path()?;
     db.parent().map(PathBuf::from).ok_or_else(|| "account directory unknown".to_string())

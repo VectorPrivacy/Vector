@@ -531,12 +531,14 @@ async function inviteMiniAppToChat(app, targetChatId, leave = () => {}) {
     // Snapshot BEFORE firing: an older .xdc message of ours in this chat must
     // not be mistaken for the one this send is about to surface.
     const priorXdcId = newestOwnXdcMessage(targetChatId)?.messageId || null;
+    // An app kept in Vector has no file name of its own: it goes out under the app's.
+    const name = app.src_url.startsWith('vmedia:') ? `${app.name || 'app'}.xdc` : '';
     const sendPromise = isGroup
         ? invoke('send_community_files', {
             channelId: targetChatId,
             content: '',
             filePaths: [app.src_url],
-            nameOverrides: [''],
+            nameOverrides: [name],
             useCompression: false,
             keepMetadata: false,
             repliedTo: '',
@@ -546,7 +548,7 @@ async function inviteMiniAppToChat(app, targetChatId, leave = () => {}) {
             repliedTo: '',
             filePath: app.src_url,
             keepMetadata: false,
-            nameOverride: '',
+            nameOverride: name,
         });
 
     leave(true);

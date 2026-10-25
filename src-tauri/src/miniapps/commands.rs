@@ -771,9 +771,16 @@ pub async fn miniapp_load_info(
     if file_path.is_empty() {
         return Err(Error::InvalidPackage("Empty file path".to_string()));
     }
-    // A kept app: read its listing from its bytes, as a content URI's is.
-    if let Some(bytes) = crate::media_export::held_bytes(&file_path) {
-        return load_info_from_bytes(&bytes, "app.xdc");
+    // A kept app: read its listing from its bytes, as a content URI's is. Off the async
+    // workers: the whole package is opened and parsed.
+    if let Some(vector_core::media::MediaRef::Held(_)) = vector_core::media::MediaRef::parse(&file_path) {
+        let path = file_path.clone();
+        return tokio::task::spawn_blocking(move || {
+            let bytes = crate::media_export::held_bytes(&path).ok_or_else(|| Error::InvalidPackage("This app isn't on this device any more".into()))?;
+            load_info_from_bytes(&bytes, "app.xdc")
+        })
+        .await
+        .map_err(|e| Error::InvalidPackage(e.to_string()))?;
     }
 
     // Android content:// URIs (share / clipboard paste) aren't real filesystem

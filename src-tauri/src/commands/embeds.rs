@@ -193,7 +193,7 @@ fn cached(dir: &Path, stem: &str) -> Option<String> {
     ["mp4", "webm", "mov"]
         .iter()
         .map(|ext| dir.join(format!("{stem}.{ext}")))
-        .find(|p| p.is_file())
+        .find(|p| vector_core::vcache::readable(p))
         .map(|p| p.to_string_lossy().into_owned())
 }
 

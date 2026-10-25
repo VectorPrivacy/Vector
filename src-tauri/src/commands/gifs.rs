@@ -92,12 +92,12 @@ pub async fn cache_gif_preview<R: tauri::Runtime>(
         format!("{}.{ext}", h.iter().map(|b| format!("{b:02x}")).collect::<String>())
     };
     let path = dir.join(&name);
-    if path.is_file() {
+    if vector_core::vcache::readable(&path) {
         return Ok(Some(path.to_string_lossy().into_owned()));
     }
 
     let _permit = PREVIEW_LANE.acquire().await.map_err(|e| e.to_string())?;
-    if path.is_file() {
+    if vector_core::vcache::readable(&path) {
         return Ok(Some(path.to_string_lossy().into_owned()));
     }
     let client = vector_core::net::build_http_client(std::time::Duration::from_secs(20))?;
