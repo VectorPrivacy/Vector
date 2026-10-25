@@ -81,6 +81,10 @@ static PENDING_REPLY: Mutex<Option<Activation>> = Mutex::new(None);
 pub fn init(app: &AppHandle) {
     if let Ok(dir) = app.path().app_data_dir() {
         let dir = dir.join("notifications");
+        // Faces are plain files only because the OS reads them: none outlives the launch that
+        // drew it, and each is drawn again from the sealed avatar cache when next needed.
+        let _ = std::fs::remove_dir_all(dir.join("avatars"));
+        let _ = std::fs::remove_dir_all(dir.join("attachments"));
         if std::fs::create_dir_all(dir.join("avatars")).is_ok() {
             let _ = CACHE_DIR.set(dir);
         }

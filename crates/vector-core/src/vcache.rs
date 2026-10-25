@@ -149,6 +149,36 @@ pub fn seal_file(src: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Write what `src` holds to `path` sealed, a chunk at a time: a large file never sits whole in
+/// memory, or plain on disk.
+pub fn write_source(src: &dyn crate::media::MediaSource, path: &Path) -> Result<(), String> {
+    let key = key().ok_or("Vector's cache key isn't available")?;
+    let (header, nonce) = fresh_header(key);
+    let mut cipher = cipher(key, &nonce);
+    let tmp = temp_beside(path);
+    let result = (|| -> Result<(), String> {
+        let mut output = std::io::BufWriter::with_capacity(CHUNK, create_private(&tmp)?);
+        output.write_all(&header).map_err(|e| e.to_string())?;
+        let mut buf = Zeroizing::new(vec![0u8; CHUNK]);
+        let mut at = 0u64;
+        while at < src.len() {
+            let n = src.read_at(at, &mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("the source ended early".into());
+            }
+            cipher.apply_keystream(&mut buf[..n]);
+            output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            at += n as u64;
+        }
+        output.flush().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// `src` sealed into a temp beside `path`, then renamed over it: `path` is never partial, and
 /// `src` may be `path` itself.
 fn seal_stream(src: &Path, path: &Path) -> Result<(), String> {

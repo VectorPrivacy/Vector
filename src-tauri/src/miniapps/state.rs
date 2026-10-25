@@ -106,10 +106,10 @@ fn modified_nanos(meta: &std::fs::Metadata) -> i64 {
         .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
 }
 
-/// SHA-256 of a file, streamed: a package can be hundreds of MB.
+/// SHA-256 of a package's content, streamed: a package can be hundreds of MB.
 pub(crate) fn hash_file(path: &std::path::Path) -> Result<[u8; 32], Error> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)?;
+    let mut file = SharedFile::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
     loop {
@@ -251,7 +251,7 @@ impl MiniAppPackage {
     /// Everything a listing or an open needs from the archive, read from disk without loading
     /// it whole. The listing icon goes to `icon_out` rather than into the record.
     fn read_package(path: &std::path::Path, icon_out: Option<&std::path::Path>) -> Result<PackageMeta, Error> {
-        let file = std::io::BufReader::new(std::fs::File::open(path)?);
+        let file = std::io::BufReader::new(SharedFile::open(path)?);
         let mut archive = zip::ZipArchive::new(file)?;
         let manifest = match resolve_entry_ci(&archive, "manifest.toml")
             .and_then(|n| archive.by_name(&n).ok())
@@ -291,7 +291,7 @@ impl MiniAppPackage {
             .and_then(|m| m.manifest)
             .map(|m| m.icon)
             .unwrap_or_default();
-        let archive = std::io::BufReader::new(std::fs::File::open(&self.path).ok()?);
+        let archive = std::io::BufReader::new(SharedFile::open(&self.path).ok()?);
         let bytes = Self::icon_from(&mut zip::ZipArchive::new(archive).ok()?, &manifest_icon)?;
         write_icon(&file, &listing_icon(&bytes)?).then_some(file)
     }
@@ -397,25 +397,28 @@ impl MiniAppPackage {
 /// 100 MB. It only stops a small archive deflating to gigabytes; `load` caps the archive.
 const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 
-/// One open file read at explicit offsets, so each clone keeps its own cursor over one handle.
+/// One open package read at explicit offsets, so each clone keeps its own cursor over one
+/// handle. A kept app's copy is sealed, and reads open it as they go.
 #[derive(Clone)]
 struct SharedFile {
-    file: Arc<std::fs::File>,
-    len: u64,
+    src: Arc<dyn vector_core::media::MediaSource>,
     pos: u64,
+}
+
+impl SharedFile {
+    fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        let src = vector_core::vcache::open(path, "application/zip")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "the package can't be read"))?;
+        Ok(Self { src, pos: 0 })
+    }
 }
 
 impl Read for SharedFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        #[cfg(unix)]
-        let n = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.pos)?;
-        // Windows queues I/O on a synchronous handle, so a big stored asset in one read would
-        // hold every other request behind it.
-        #[cfg(windows)]
-        let n = {
-            let len = buf.len().min(1 << 20);
-            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..len], self.pos)?
-        };
+        // A megabyte at a time: Windows queues I/O on a synchronous handle, so a big stored asset
+        // in one read would hold every other request behind it.
+        let len = buf.len().min(1 << 20);
+        let n = self.src.read_at(self.pos, &mut buf[..len])?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -425,7 +428,7 @@ impl std::io::Seek for SharedFile {
     fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
         let pos = match to {
             std::io::SeekFrom::Start(p) => Some(p),
-            std::io::SeekFrom::End(d) => self.len.checked_add_signed(d),
+            std::io::SeekFrom::End(d) => self.src.len().checked_add_signed(d),
             std::io::SeekFrom::Current(d) => self.pos.checked_add_signed(d),
         };
         self.pos = pos.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"))?;
@@ -449,9 +452,7 @@ impl std::fmt::Debug for PackageArchive {
 
 impl PackageArchive {
     pub fn open(path: &std::path::Path) -> Result<Self, Error> {
-        let file = std::fs::File::open(path)?;
-        let len = file.metadata()?.len();
-        let zip = zip::ZipArchive::new(SharedFile { file: Arc::new(file), len, pos: 0 })?;
+        let zip = zip::ZipArchive::new(SharedFile::open(path)?)?;
         Ok(Self { zip, folded: Default::default() })
     }
 

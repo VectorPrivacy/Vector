@@ -7,13 +7,16 @@ use tauri::Manager;
 use vector_core::media::{self, MediaRef};
 
 fn root() -> Result<PathBuf, String> {
-    let app = crate::TAURI_APP.get().ok_or("Vector is still starting")?;
+    root_in(crate::TAURI_APP.get().ok_or("Vector is still starting")?)
+}
+
+fn root_in<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app.path().app_cache_dir().map_err(|e| e.to_string())?.join("exports"))
 }
 
 /// Clear what earlier launches handed out. Never mid-run: a share may still be reading one.
-pub fn purge() {
-    if let Ok(dir) = root() {
+pub fn purge<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Ok(dir) = root_in(app) {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -56,8 +59,8 @@ fn export(bytes: &[u8], name: String) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-/// The package a Mini App runs from: a file is itself; a kept app is written out once per
-/// launch to a path named by its hash, so its window and storage stay the same app.
+/// The package a Mini App runs from: a file is itself; a kept app is written out sealed once
+/// per launch to a path named by its hash, so its window and storage stay the same app.
 pub fn package_path(path_or_ref: &str) -> Result<String, String> {
     match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
         MediaRef::File(path) => Ok(path),
@@ -65,15 +68,12 @@ pub fn package_path(path_or_ref: &str) -> Result<String, String> {
             let dir = root()?.join("apps");
             let file = dir.join(format!("{}.xdc", crate::util::bytes_to_hex_string(&hash)));
             let src = media::open(&hash).ok_or("This app isn't on this device any more")?;
-            if std::fs::metadata(&file).is_ok_and(|m| m.len() == src.len()) {
+            if vector_core::vcache::open(&file, "application/zip").is_some_and(|f| f.len() == src.len()) {
                 return Ok(file.to_string_lossy().into_owned());
             }
             std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
-            let bytes = zeroize::Zeroizing::new(media::read_all(&*src).map_err(|e| format!("Couldn't read the app: {e}"))?);
-            let tmp = dir.join(format!(".{}.tmp", crate::util::bytes_to_hex_string(&hash)));
-            let _ = std::fs::remove_file(&tmp);
-            write_private(&tmp, &bytes)?;
-            std::fs::rename(&tmp, &file).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
+            // Sealed like any cache file: the app reads it through vcache, never in the clear.
+            vector_core::vcache::write_source(&*src, &file).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
             Ok(file.to_string_lossy().into_owned())
         }
     }

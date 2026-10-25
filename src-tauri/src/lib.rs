@@ -404,7 +404,7 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            media_export::purge();
+            media_export::purge(app.handle());
             #[cfg(desktop)]
             if let Some(main) = app.get_webview_window("main") {
                 webview_cache::purge(&main);
