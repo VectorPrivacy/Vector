@@ -3932,8 +3932,17 @@ impl VectorCore {
                     .map_err(|_| VectorError::Other("too much media is open to show this one".into()))?;
                 return Ok(respond(&crate::media::MediaRef::held(&hash)));
             }
-            std::fs::write(&path, &bytes).map_err(|e| VectorError::Other(format!("could not cache the attachment: {e}")))?;
-            Ok(respond(&path.to_string_lossy()))
+            // Anything else is kept the way a chat keeps it: sealed in the store, never plain.
+            let held = crate::simd::hex::hex_to_bytes_32(&hash);
+            let mime = crate::crypto::mime_from_extension(&attachment.extension.to_ascii_lowercase());
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
+                .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
+            #[cfg(target_arch = "wasm32")]
+            crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
+                .await
+                .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
+            Ok(respond(&crate::media::MediaRef::held(&held)))
         })
         .await
     }
