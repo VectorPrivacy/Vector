@@ -73,6 +73,36 @@ pub fn insert(entry: &StoredMedia) -> Result<bool, String> {
     })
 }
 
+/// Record a kept file in place of whatever was kept for its hash. Returns the file it replaced,
+/// for the caller to delete now that the new one is recorded.
+pub fn replace(entry: &StoredMedia) -> Result<Option<String>, String> {
+    let _ticket = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let old: Option<String> = match conn.query_row("SELECT file FROM media_store WHERE hash = ?1", [bytes_to_hex_32(&entry.hash)], |r| r.get(0)) {
+        Ok(file) => Some(file),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(format!("read media: {e}")),
+    };
+    crate::crypto::seal_batch(|seal| {
+        let (key, nonce) = (seal.seal(&entry.key)?, seal.seal(&entry.nonce)?);
+        conn.execute(
+            "INSERT INTO media_store (hash, file, format, key, nonce, blob_sha256, pt_len, mime, origin, created_at, used_at)
+             VALUES (?1, ?2, 'gcm', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(hash) DO UPDATE SET file = excluded.file, format = 'gcm', key = excluded.key,
+                nonce = excluded.nonce, blob_sha256 = excluded.blob_sha256, pt_len = excluded.pt_len,
+                mime = excluded.mime, origin = excluded.origin, used_at = excluded.used_at,
+                missing_at = NULL, chunk_size = NULL, have = NULL",
+            rusqlite::params![
+                bytes_to_hex_32(&entry.hash), entry.file, key, nonce, entry.blob_sha256,
+                entry.pt_len as i64, entry.mime, entry.origin.as_str(), now(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("keep media: {e}"))
+    })?;
+    Ok(old.filter(|file| *file != entry.file))
+}
+
 pub fn get(hash: &[u8; 32]) -> Result<Option<StoredMedia>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let row = conn.query_row(
@@ -97,6 +127,14 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<StoredMedia>, String> {
             blob_sha256, pt_len: pt_len as u64, mime, origin: Origin::parse(&origin),
         })
     }))
+}
+
+/// Whether a row is kept for `hash`, readable or not.
+pub fn has_row(hash: &[u8; 32]) -> Result<bool, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row("SELECT 1 FROM media_store WHERE hash = ?1", [bytes_to_hex_32(hash)], |_| Ok(()))
+        .map(|_| true)
+        .or_else(|e| if matches!(e, rusqlite::Error::QueryReturnedNoRows) { Ok(false) } else { Err(format!("read media: {e}")) })
 }
 
 /// Forget a kept file's row, returning its file name. Deleted pages are zeroed, so the key

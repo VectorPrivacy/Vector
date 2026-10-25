@@ -17,7 +17,7 @@ pub const SCHEME: &str = "vmedia";
 /// is never copied for one request.
 const MAX_PART: u64 = 4 * 1024 * 1024;
 /// The most a request without a range is answered whole.
-const WHOLE_MAX: u64 = 32 * 1024 * 1024;
+const WHOLE_MAX: u64 = 512 * 1024 * 1024;
 
 type Response = http::Response<Cow<'static, [u8]>>;
 
@@ -119,7 +119,7 @@ fn respond_to(request: &http::Request<Vec<u8>>) -> Response {
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'");
     if code == StatusCode::PARTIAL_CONTENT {
-        builder = builder.header(header::CONTENT_RANGE, format!("bytes {}-{}/{len}", start, start + body.len() as u64 - 1));
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {}-{}/{len}", start, (start + body.len() as u64).saturating_sub(1)));
     }
     builder.body(Cow::Owned(body)).unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR))
 }

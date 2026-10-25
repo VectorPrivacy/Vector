@@ -969,7 +969,8 @@ pub fn get_cache_size<R: Runtime>(
         size
     }
 
-    Ok(dir_size(&cache_dir))
+    // What clearing the cache removes: on Android the folder is also the system's own cache.
+    Ok(vector_core::vcache::KINDS.iter().chain(&["sounds"]).map(|kind| dir_size(&cache_dir.join(kind))).sum())
 }
 
 /// Tauri command: Get the cached path for an image, or download and cache it

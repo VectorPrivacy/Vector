@@ -129,6 +129,7 @@ pub async fn check_downloaded_attachments_integrity(
     // The store first: a kept file missing twice loses its row, and the rows below that
     // pointed at it then have no copy left.
     vector_core::media::store::check();
+    crate::commands::system::settle_owed(vector_core::media::import::settle).await;
 
     // One indexed read of the downloaded attachments (WHERE downloaded=1) — no per-event JSON parse.
     let downloaded = vector_core::db::attachments::downloaded_attachment_paths()?;

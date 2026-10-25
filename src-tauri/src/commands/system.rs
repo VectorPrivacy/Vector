@@ -38,6 +38,8 @@ pub struct PlatformFeatures {
     pub vcache: String,
     /// The app's folder, with a trailing separator: a cache file's path starts with it.
     pub app_data: String,
+    /// The folders under `<app_data>/cache` served sealed at `vcache`.
+    pub vcache_kinds: Vec<String>,
     /// Whether this build looks for and installs its own updates. Off in the
     /// F-Droid flavour, where the store owns updates.
     pub self_update: bool,
@@ -103,6 +105,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
         vmedia,
         vcache,
         app_data,
+        vcache_kinds: vector_core::vcache::KINDS.iter().map(|kind| kind.to_string()).collect(),
         self_update: !cfg!(feature = "fdroid"),
         video_compression: crate::message::video_compression::available(),
         // F-Droid counts a built-in YouTube player as promoting a non-free network service.
@@ -534,20 +537,11 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
             }
         }
         let _done = Done;
+        settle_owed(import::settle).await;
         let (files, elsewhere) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await?;
         let (files, elsewhere) = (files?, std::sync::Arc::new(elsewhere));
         let (mut moved, mut shared, mut stayed, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize, 0usize);
-        let mut pending: Vec<String> = Vec::new();
-        let flush = |pending: Vec<String>| async move {
-            let stuck = vector_core::db::blocking_bound(move || import::remove_originals(&pending).map(|stuck| (pending, stuck))).await?;
-            #[cfg(target_os = "android")]
-            if let Ok((pending, stuck)) = &stuck {
-                for path in pending.iter().filter(|p| !stuck.contains(p)) {
-                    crate::android::storage::scan_file(path);
-                }
-            }
-            stuck.map(|(pending, stuck)| (pending.len(), stuck.len()))
-        };
+        let mut owed: Vec<String> = Vec::new();
         for (i, item) in files.iter().enumerate() {
             if !vector_core::db::writes_to_live_account() {
                 break;
@@ -556,7 +550,7 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
             match vector_core::db::blocking_bound(move || import::move_in(&file, others.as_ref().as_ref())).await? {
                 Ok((outcome, events)) => {
                     match outcome {
-                        Moved::Moved => pending.push(item.path.clone()),
+                        Moved::Moved => owed.push(item.path.clone()),
                         Moved::Shared => shared += 1,
                         Moved::Changed | Moved::Mismatch => skipped += 1,
                     }
@@ -567,22 +561,43 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
                     vector_core::log_warn!("[MediaImport] couldn't move a file in: {}", e);
                 }
             }
-            if pending.len() >= BATCH {
-                let (gone, stuck) = flush(std::mem::take(&mut pending)).await?;
-                moved += gone - stuck;
-                stayed += stuck;
+            if owed.len() >= BATCH || (!owed.is_empty() && i + 1 == files.len()) {
+                let (batch, others) = (std::mem::take(&mut owed), elsewhere.clone());
+                let count = batch.len();
+                match settle_owed(move || import::settle_batch(&batch, others.as_ref().as_ref())).await {
+                    Some((gone, left)) => (moved, stayed) = (moved + gone, stayed + left),
+                    None => stayed += count,
+                }
             }
             vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": i + 1, "total": files.len() }));
         }
-        if !pending.is_empty() {
-            let (gone, stuck) = flush(pending).await?;
-            moved += gone - stuck;
-            stayed += stuck;
-        }
+        // A move cut short by a swap leaves its owed originals for the next settle.
+        stayed += owed.len();
         Ok(serde_json::json!({ "moved": moved, "shared": shared, "stayed": stayed, "skipped": skipped, "failed": failed }))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Delete originals a move owes. Returns how many went and how many stayed, or None when none
+/// could be judged; those stay owed.
+pub async fn settle_owed<F>(settle: F) -> Option<(usize, usize)>
+where
+    F: FnOnce() -> Result<vector_core::media::import::Settled, String> + Send + 'static,
+{
+    match vector_core::db::blocking_bound(settle).await.ok()? {
+        Ok(settled) => {
+            #[cfg(target_os = "android")]
+            for path in &settled.gone {
+                crate::android::storage::scan_file(path);
+            }
+            Some((settled.gone.len(), settled.stayed))
+        }
+        Err(e) => {
+            vector_core::log_warn!("[MediaImport] originals stay owed for now: {}", e);
+            None
+        }
+    }
 }
 
 /// STATE and the open chat follow a moved file.

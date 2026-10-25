@@ -239,22 +239,43 @@ pub fn downloads_on_disk() -> Result<Vec<(String, String, String)>, String> {
     Ok(rows.flatten().collect())
 }
 
-/// `path` is leaving: rows of `hash` show the store's copy, and any claiming other bytes there
-/// are no longer downloaded. Returns the events touched.
-pub fn move_to_store(hash: &str, path: &str) -> Result<Vec<String>, String> {
+/// A file is leaving, under every name rows give it: rows of `hash` show the store's copy, and
+/// any claiming other bytes there are no longer downloaded. Returns the events touched.
+pub fn move_to_store(hash: &str, paths: &[&str]) -> Result<Vec<String>, String> {
     let conn = super::get_write_connection_guard_static()?;
-    let events = events_at_path(&conn, path)?;
-    conn.execute("UPDATE attachments SET path='' WHERE path=?1 AND hash=?2", [path, hash])
-        .map_err(|e| format!("move_to_store: {e}"))?;
-    conn.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1", [path])
+    // Immediate: a read-first transaction can't always become a write once another has written.
+    let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("move_to_store: {e}"))?;
     // A Mini App opened from that file opens from the kept copy now.
     let held = crate::media::MediaRef::held(&crate::simd::hex::hex_to_bytes_32(hash));
-    conn.execute("UPDATE miniapps_history SET attachment_ref=?2 WHERE attachment_ref=?1", [path, held.as_str()])
-        .map_err(|e| format!("move_to_store: {e}"))?;
-    conn.execute("UPDATE miniapps_history SET src_url=?2 WHERE src_url=?1", [path, held.as_str()])
-        .map_err(|e| format!("move_to_store: {e}"))?;
+    let mut events = Vec::new();
+    for path in paths {
+        events.extend(events_at_path(&tx, path)?);
+        tx.execute("UPDATE attachments SET path='' WHERE path=?1 AND hash=?2", [path, hash])
+            .map_err(|e| format!("move_to_store: {e}"))?;
+        tx.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1", [path])
+            .map_err(|e| format!("move_to_store: {e}"))?;
+        tx.execute("UPDATE miniapps_history SET attachment_ref=?2 WHERE attachment_ref=?1", [path, held.as_str()])
+            .map_err(|e| format!("move_to_store: {e}"))?;
+        tx.execute("UPDATE miniapps_history SET src_url=?2 WHERE src_url=?1", [path, held.as_str()])
+            .map_err(|e| format!("move_to_store: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("move_to_store: {e}"))?;
+    events.sort();
+    events.dedup();
     Ok(events)
+}
+
+/// Whether anything this account keeps still opens `path`.
+pub fn names_path(path: &str) -> Result<bool, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachments WHERE path=?1)
+             OR EXISTS(SELECT 1 FROM miniapps_history WHERE attachment_ref=?1 OR src_url=?1)",
+        [path],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("names_path: {e}"))
 }
 
 /// Rows of `hash` at `path` show the store's copy, and the file stays: it holds other bytes now.

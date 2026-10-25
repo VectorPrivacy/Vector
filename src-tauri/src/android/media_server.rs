@@ -333,7 +333,7 @@ async fn handle_connection(
 /// The most one held response carries: a player asks for the rest as it plays.
 const HELD_PART: u64 = 4 * 1024 * 1024;
 /// The most a request without a range is answered whole.
-const HELD_WHOLE_MAX: u64 = 32 * 1024 * 1024;
+const HELD_WHOLE_MAX: u64 = 512 * 1024 * 1024;
 
 /// Serve media the live account holds by hash.
 async fn serve_held(

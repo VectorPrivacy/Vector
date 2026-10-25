@@ -57,7 +57,7 @@ pub fn dir() -> Result<PathBuf, String> {
     Ok(crate::db::current_account_dir()?.join("media"))
 }
 
-fn fresh_name() -> String {
+pub(crate) fn fresh_name() -> String {
     let mut bytes = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     crate::simd::hex::bytes_to_hex_string(&bytes)
@@ -78,6 +78,13 @@ pub struct Keep {
 /// Keep a verified blob: `src` moves into the store, then a row records how to open it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn keep_file(src: &Path, keep: Keep) -> Result<(), String> {
+    let (dir, name) = place(src)?;
+    record(&dir.join(&name), name, keep)
+}
+
+/// Move `src` into the store under a fresh name, durable. Returns the store and the name.
+#[cfg(not(target_arch = "wasm32"))]
+fn place(src: &Path) -> Result<(PathBuf, String), String> {
     let dir = dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't keep the file: {e}"))?;
     let name = fresh_name();
@@ -96,7 +103,39 @@ pub fn keep_file(src: &Path, keep: Keep) -> Result<(), String> {
     settle(&dir, &dest).inspect_err(|_| {
         let _ = std::fs::remove_file(&dest);
     })?;
-    record(&dest, name, keep)
+    Ok((dir, name))
+}
+
+/// Keep a sealed file in place of anything kept for its hash, once it has read back whole as
+/// those bytes. An old copy goes only after the new one is recorded.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn keep_verified(src: &Path, keep: Keep) -> Result<(), String> {
+    let (dir, name) = place(src)?;
+    let dest = dir.join(&name);
+    let hex = crate::simd::hex::bytes_to_hex_32(&keep.hash);
+    let good = crate::crypto::stream::verify_file(&dest, &keep.key, &keep.nonce).is_ok_and(|seen| seen.output_sha256 == hex);
+    if !good {
+        let _ = std::fs::remove_file(&dest);
+        return Err("the kept copy didn't read back as the file".into());
+    }
+    let hash = keep.hash;
+    let entry = StoredMedia {
+        hash, file: name, key: keep.key, nonce: keep.nonce, blob_sha256: keep.blob_sha256,
+        pt_len: keep.pt_len, mime: keep.mime, origin: keep.origin,
+    };
+    match media_store::replace(&entry) {
+        Ok(old) => {
+            indexed(hash, true);
+            if let Some(old) = old {
+                let _ = std::fs::remove_file(dir.join(old));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            Err(e)
+        }
+    }
 }
 
 /// Keep a verified blob held in memory.
@@ -255,14 +294,42 @@ pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn super::MediaSource>> {
     Some(Arc::new(StoredGcm { file, key: Zeroizing::new(key), nonce, len: entry.pt_len, mime: entry.mime }))
 }
 
-/// Whether the kept copy of `hash` opens under its key, tag and all, and is those bytes. Reads
-/// the whole blob: for when the copy is about to become the only one.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn verify(hash: &[u8; 32]) -> bool {
-    let (Ok(dir), Ok(Some(entry))) = (dir(), media_store::get(hash)) else { return false };
-    crate::crypto::stream::verify_file(&dir.join(&entry.file), &entry.key, &entry.nonce)
-        .is_ok_and(|seen| seen.output_sha256 == crate::simd::hex::bytes_to_hex_32(hash))
+/// What reading a kept copy back whole found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// It opens under its key, tag and all, and is those bytes.
+    Good,
+    /// Provably not those bytes: gone, the wrong size, or other bytes under a key that opened.
+    Bad,
+    /// It couldn't be checked: a key that won't open yet, or a read that failed.
+    Unknown,
 }
+
+/// Read the kept copy of `hash` back whole: for when it is about to become the only one.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_back(hash: &[u8; 32]) -> Check {
+    let Ok(dir) = dir() else { return Check::Unknown };
+    let entry = match media_store::get(hash) {
+        Ok(Some(entry)) => entry,
+        // No row is no copy; a row whose key won't open can't be judged.
+        Ok(None) if media_store::has_row(hash) == Ok(false) => return Check::Bad,
+        _ => return Check::Unknown,
+    };
+    let path = dir.join(&entry.file);
+    match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Check::Bad,
+        Err(_) => return Check::Unknown,
+        Ok(meta) if meta.len() != entry.pt_len + 16 => return Check::Bad,
+        Ok(_) => {}
+    }
+    match crate::crypto::stream::verify_file(&path, &entry.key, &entry.nonce) {
+        Ok(seen) if seen.output_sha256 == crate::simd::hex::bytes_to_hex_32(hash) => Check::Good,
+        Ok(_) => Check::Bad,
+        Err(e) if e == crate::crypto::stream::TAG_MISMATCH => Check::Bad,
+        Err(_) => Check::Unknown,
+    }
+}
+
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StoredGcm {
@@ -349,7 +416,8 @@ pub fn check() -> Vec<[u8; 32]> {
         }
     }
     // Files no row names, from a crash between a file and its row, once they're an hour old.
-    let named: HashSet<String> = media_store::all().unwrap_or_default().into_iter().map(|(_, f)| f).collect();
+    let Ok(rows) = media_store::all() else { return gone };
+    let named: HashSet<String> = rows.into_iter().map(|(_, f)| f).collect();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let hour = std::time::Duration::from_secs(3600);
         for entry in entries.flatten() {

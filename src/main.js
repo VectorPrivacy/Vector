@@ -27,7 +27,9 @@ function vcacheSrc(path) {
     const root = platformFeatures?.app_data;
     if (!root || !path || !path.startsWith(root)) return null;
     const rel = path.slice(root.length).replaceAll('\\', '/');
-    if (!rel.startsWith('cache/') && !/^npub1[^/]+\/wallpapers\//.test(rel)) return null;
+    const [top, kind] = rel.split('/');
+    const sealed = top === 'cache' ? platformFeatures.vcache_kinds?.includes(kind) : /^npub1[^/]+\/wallpapers\//.test(rel);
+    if (!sealed) return null;
     return `${platformFeatures.vcache}/${rel.split('/').map(encodeURIComponent).join('/')}`;
 }
 

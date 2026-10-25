@@ -762,6 +762,13 @@ fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
 // See: https://delta.chat/en/2023-05-22-webxdc-security for background on webxdc security.
 
 /// Load Mini App info from a file path
+struct KeptInfo;
+
+/// Listings of this account's kept apps, by content.
+fn kept_info() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], MiniAppInfo>>> {
+    vector_core::db::current_session().scoped::<KeptInfo, _>()
+}
+
 #[tauri::command]
 pub async fn miniapp_load_info(
     app: AppHandle,
@@ -771,16 +778,26 @@ pub async fn miniapp_load_info(
     if file_path.is_empty() {
         return Err(Error::InvalidPackage("Empty file path".to_string()));
     }
-    // A kept app: read its listing from its bytes, as a content URI's is. Off the async
-    // workers: the whole package is opened and parsed.
-    if let Some(vector_core::media::MediaRef::Held(_)) = vector_core::media::MediaRef::parse(&file_path) {
+    // A kept app: read its listing from its bytes, as a content URI's is, once per app. Off the
+    // async workers: the whole package is opened and parsed.
+    if let Some(vector_core::media::MediaRef::Held(hash)) = vector_core::media::MediaRef::parse(&file_path) {
+        if let Some(info) = kept_info().lock().unwrap_or_else(|e| e.into_inner()).get(&hash) {
+            return Ok(info.clone());
+        }
         let path = file_path.clone();
-        return tokio::task::spawn_blocking(move || {
+        let info = vector_core::db::blocking_bound(move || {
             let bytes = crate::media_export::held_bytes(&path).ok_or_else(|| Error::InvalidPackage("This app isn't on this device any more".into()))?;
             load_info_from_bytes(&bytes, "app.xdc")
         })
         .await
-        .map_err(|e| Error::InvalidPackage(e.to_string()))?;
+        .map_err(Error::InvalidPackage)??;
+        let cache = kept_info();
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(hash, info.clone());
+        return Ok(info);
     }
 
     // Android content:// URIs (share / clipboard paste) aren't real filesystem

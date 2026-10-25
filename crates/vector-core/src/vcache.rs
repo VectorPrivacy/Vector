@@ -55,12 +55,14 @@ fn key_id(key: &[u8; 32]) -> [u8; 4] {
     [digest[0], digest[1], digest[2], digest[3]]
 }
 
+const WRONG_LENGTH: &str = "cache key has the wrong length";
+
 fn load_or_create(path: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
     let read = |path: &Path| -> Result<Zeroizing<[u8; 32]>, String> {
         let raw = Zeroizing::new(std::fs::read(path).map_err(|e| e.to_string())?);
         let mut key = Zeroizing::new([0u8; 32]);
         if raw.len() != 32 {
-            return Err("cache key has the wrong length".into());
+            return Err(WRONG_LENGTH.into());
         }
         key.copy_from_slice(&raw);
         Ok(key)
@@ -68,12 +70,15 @@ fn load_or_create(path: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
     if path.exists() {
         match read(path) {
             Ok(key) => return Ok(key),
-            // A key that can't be read is set aside, never left to block every write: what it
-            // sealed reads as missing and is fetched again.
-            Err(e) => {
-                crate::log_warn!("[VCache] cache key unusable, starting a new one: {}", e);
-                std::fs::rename(path, path.with_extension("key.unusable")).map_err(|e| e.to_string())?;
+            // A key file that isn't a key is set aside, never left to block every write: what
+            // it sealed reads as missing and is fetched again. A read that merely failed is
+            // tried again later.
+            Err(e) if e == WRONG_LENGTH => {
+                crate::log_warn!("[VCache] cache key unusable, starting a new one");
+                let stamp = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                std::fs::rename(path, path.with_extension(format!("key.unusable-{stamp}"))).map_err(|e| e.to_string())?;
             }
+            Err(e) => return Err(e),
         }
     }
     if let Some(dir) = path.parent() {
@@ -344,11 +349,11 @@ pub fn seal_dir(dir: &Path) -> usize {
 /// wallpapers. Idempotent; a sealed file costs one header read.
 pub fn seal_legacy() -> usize {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Ok(root) = crate::db::get_app_data_dir() else { return 0 };
     // Files from before sealing don't reappear: once a launch is enough.
     if DONE.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return 0;
     }
-    let Ok(root) = crate::db::get_app_data_dir() else { return 0 };
     let mut sealed: usize = KINDS.iter().map(|kind| seal_dir(&root.join("cache").join(kind))).sum();
     if let Ok(entries) = std::fs::read_dir(root) {
         for account in entries.flatten() {
@@ -377,7 +382,7 @@ pub fn resolve(rel: &str) -> Option<PathBuf> {
     let root = crate::db::get_app_data_dir().ok()?;
     let path = parts.iter().fold(root.clone(), |p, part| p.join(part));
     // A link inside the folder could still point out of it.
-    let (real, real_root) = (std::fs::canonicalize(&path).ok()?, std::fs::canonicalize(&root).ok()?);
+    let (real, real_root) = (std::fs::canonicalize(&path).ok()?, std::fs::canonicalize(root).ok()?);
     real.starts_with(&real_root).then_some(real)
 }
 

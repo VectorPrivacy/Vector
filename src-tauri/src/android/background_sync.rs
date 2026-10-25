@@ -1083,14 +1083,9 @@ async fn preload_profiles_into_state() {
     }
 }
 
-/// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
-/// Uses the stored JavaVM + GlobalRef context (captured during JNI entry) instead of
-/// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
-///
-/// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
 /// A picture the notification service can decode. A sealed cache file is written out plain,
-/// once, in the app's private folder: the service decodes it by path, and the folder is
-/// cleared at the next launch.
+/// once per version of it, in the app's private folder: the service decodes it by path, and the
+/// folder is cleared at the next launch.
 fn notification_image(path: Option<String>) -> Option<String> {
     let path = path?;
     let source = std::path::Path::new(&path);
@@ -1100,14 +1095,26 @@ fn notification_image(path: Option<String>) -> Option<String> {
     let dir = vector_core::db::get_app_data_dir().ok()?.join("notifications").join("avatars");
     std::fs::create_dir_all(&dir).ok()?;
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("img");
-    let out = dir.join(format!("{}.{ext}", &vector_core::crypto::sha256_hex(path.as_bytes())[..32]));
+    let modified = std::fs::metadata(source).and_then(|m| m.modified()).ok()?;
+    let stamp = modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let key = vector_core::crypto::sha256_hex(format!("{path}\n{stamp}").as_bytes());
+    let out = dir.join(format!("{}.{ext}", &key[..32]));
     if !out.is_file() {
         let bytes = vector_core::vcache::read(source).ok()?;
-        std::fs::write(&out, &*bytes).ok()?;
+        let tmp = dir.join(format!(".{}.{:08x}.tmp", &key[..32], rand::random::<u32>()));
+        if std::fs::write(&tmp, &*bytes).and_then(|_| std::fs::rename(&tmp, &out)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return None;
+        }
     }
     Some(out.to_string_lossy().into_owned())
 }
 
+/// Post a notification by calling VectorNotificationService.showMessageNotification() in Kotlin.
+/// Uses the stored JavaVM + GlobalRef context (captured during JNI entry) instead of
+/// ndk_context, which is NOT initialized in service-only mode (no Tauri Activity).
+///
+/// Also used by `show_notification_generic` on Android to bypass the Tauri notification plugin.
 pub fn post_notification_jni(
     title: &str,
     body: &str,

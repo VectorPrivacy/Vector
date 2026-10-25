@@ -92,6 +92,9 @@ pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
     result.map(|(blob, len, _)| (blob, len))
 }
 
+/// What opening says when the bytes aren't the ones sealed under that key.
+pub const TAG_MISMATCH: &str = "Decryption failed: aead::Error (authentication tag mismatch)";
+
 /// What a send says when its file changed between being hashed and being sealed.
 pub const CHANGED: &str = "The file changed while it was being sent. Attach it again to send it.";
 
@@ -211,7 +214,7 @@ fn decrypt_file_inner(src: &Path, dst: Option<&Path>, key_hex: &str, nonce_hex: 
     source_hash.update(tag);
 
     if !gcm::tags_equal(&gcm.finish(), &tag) {
-        return Err("Decryption failed: aead::Error (authentication tag mismatch)".to_string());
+        return Err(TAG_MISMATCH.to_string());
     }
 
     if let Some(output) = output {

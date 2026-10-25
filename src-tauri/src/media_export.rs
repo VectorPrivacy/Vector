@@ -54,7 +54,8 @@ fn export(src: &dyn media::MediaSource, name: String) -> Result<PathBuf, String>
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
     let dir = root()?.join(crate::util::bytes_to_hex_string(&id));
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the file: {e}"))?;
-    let file = dir.join(name);
+    let name = vector_core::crypto::sanitize_filename(&name);
+    let file = dir.join(if name.is_empty() { "file" } else { &name });
     copy_out(src, &file)?;
     Ok(file)
 }
@@ -64,7 +65,7 @@ fn export(src: &dyn media::MediaSource, name: String) -> Result<PathBuf, String>
 fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
     use std::io::Write;
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dest.with_file_name(format!(".{name}.saving"));
+    let tmp = dest.with_file_name(format!(".{name}.{:08x}.saving", rand::random::<u32>()));
     let result = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -81,8 +82,7 @@ fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
             out.write_all(&buf[..n])?;
             at += n as u64;
         }
-        out.flush()?;
-        drop(out);
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         std::fs::rename(&tmp, dest)
     })();
     result.map_err(|e| {

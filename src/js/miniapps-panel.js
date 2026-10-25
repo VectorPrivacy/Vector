@@ -630,7 +630,7 @@ function newestOwnXdcMessage(chatId) {
             return {
                 messageId: m.id,
                 topicId: att.webxdc_topic || null,
-                filePath: att.path || null,
+                filePath: VectorSvelte.mediaPath(att) || null,
             };
         }
     }
