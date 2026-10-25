@@ -31,7 +31,7 @@
     let { h } = $props();
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
-    //    setAutoDownloadLimit(bytes), setVideoQuality(quality), clearStorage(), setBackgroundService(on), batteryWarningTap(),
+    //    setAutoDownloadLimit(bytes), setVideoQuality(quality), moveDownloads(), clearStorage(), setBackgroundService(on), batteryWarningTap(),
     //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout()
 
     const sc = settingsScreen();
@@ -359,6 +359,13 @@
             <span class="st-line-label">Video Quality</span>
             <Select class="vselect-narrow" options={VIDEO_QUALITIES} value={sc.storage.videoQuality}
                     onchange={(v) => h.setVideoQuality(v)} />
+        </div>
+    {/if}
+    {#if sc.storage.exportShown && !sc.storage.saveToDownloads && (sc.storage.onDisk > 0 || sc.storage.moving)}
+        <div class="form-group st-line">
+            <InfoIcon side="right" flex onclick={() => h.help('moveDownloads')} />
+            <span class="st-line-label">{sc.storage.onDisk === 1 ? '1 File' : `${sc.storage.onDisk.toLocaleString()} Files`} to Move into Vector</span>
+            <button class="btn cancel-btn" style="margin: 0;" disabled={!!sc.storage.moving} onclick={() => h.moveDownloads()}>{sc.storage.moving || 'Move'}</button>
         </div>
     {/if}
     <div class="form-group st-line">

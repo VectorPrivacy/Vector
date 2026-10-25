@@ -117,6 +117,8 @@ pub mod tor;
 pub mod i2p;
 pub mod transport;
 pub mod svg;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod vcache;
 
 /// NIP-42 authenticator.
 ///

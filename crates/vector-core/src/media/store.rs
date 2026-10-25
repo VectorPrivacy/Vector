@@ -307,12 +307,12 @@ impl super::MediaSource for StoredGcm {
 }
 
 #[cfg(unix)]
-pub(super) fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
 }
 
 #[cfg(windows)]
-pub(super) fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
     while !buf.is_empty() {
         match std::os::windows::fs::FileExt::seek_read(file, buf, offset)? {
             0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),

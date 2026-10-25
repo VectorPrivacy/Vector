@@ -126,9 +126,7 @@ pub async fn cache_gif_preview<R: tauri::Runtime>(
     if !looks_right {
         return Ok(None);
     }
-    let tmp = dir.join(format!("{name}.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, &body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&path, &body)?;
     let prune_dir = dir.clone();
     tokio::task::spawn_blocking(move || prune_previews(&prune_dir));
     Ok(Some(path.to_string_lossy().into_owned()))

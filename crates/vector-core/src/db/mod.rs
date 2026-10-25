@@ -1056,6 +1056,18 @@ pub fn with_session<F: std::future::Future>(
     TASK_SESSION.scope(session, Box::pin(fut))
 }
 
+/// Run blocking `f` on the blocking pool as the CURRENT account's work: a pool thread carries
+/// no task binding of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn blocking_bound<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let session = current_session();
+    tokio::task::spawn_blocking(move || TASK_SESSION.sync_scope(session, f)).await.map_err(|e| e.to_string())
+}
+
 /// Spawn a task pinned to the CURRENT account.
 ///
 /// Everything it does through `db::` resolves to that account for as long as it

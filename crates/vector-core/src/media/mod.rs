@@ -1,6 +1,8 @@
 //! Media Vector shows without writing it down: decrypted bytes held in memory per account
 //! (`ram`), read through one interface whatever holds them.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod import;
 pub mod pending;
 pub mod ram;
 pub mod range;

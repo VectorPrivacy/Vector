@@ -27,6 +27,27 @@ pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Write a Vector Cache file: sealed natively, so it is never a plain picture on disk.
+pub async fn write_cache(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::webfiles::write(path, bytes).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+        }
+        crate::vcache::write(path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    }
+}
+
+/// Read a Vector Cache file, sealed or from before sealing.
+pub async fn read_cache(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(target_arch = "wasm32")]
+    return crate::webfiles::read(path).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::vcache::read(path).map(|b| b.to_vec()).map_err(|e| format!("Failed to read {}: {e}", path.display()))
+}
+
 pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {

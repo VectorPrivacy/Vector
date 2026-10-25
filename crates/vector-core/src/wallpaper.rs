@@ -128,7 +128,7 @@ pub async fn prepare_wallpaper_preview(
     clean_chat_files(chat_npub, FileKind::Preview, None).await?;
 
     let preview = wallpapers_dir()?.join(format!("{}.preview.{}", chat_npub, final_extension));
-    crate::files::write(&preview, &final_bytes)
+    crate::files::write_cache(&preview, &final_bytes)
         .await
         .map_err(|e| format!("Failed to stage preview file: {}", e))?;
 
@@ -327,7 +327,7 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     }
     let preview = preview_path
         .ok_or_else(|| "No wallpaper preview to publish. Pick an image first.".to_string())?;
-    let bytes = crate::files::read(&preview)
+    let bytes = crate::files::read_cache(&preview)
         .await
         .map_err(|e| format!("Failed to read preview file: {}", e))?;
 
@@ -734,7 +734,7 @@ pub async fn apply_received_wallpaper(
 
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
     clean_chat_files(chat_npub, FileKind::Active, None).await?;
-    crate::files::write(&active, &plaintext).await.map_err(|e| format!("Write wallpaper: {}", e))?;
+    crate::files::write_cache(&active, &plaintext).await.map_err(|e| format!("Write wallpaper: {}", e))?;
     let active_str = active.to_string_lossy().to_string();
 
     // Capture previous URL + uploader under the same lock — only DELETE

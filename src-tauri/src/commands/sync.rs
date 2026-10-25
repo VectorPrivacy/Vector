@@ -330,6 +330,10 @@ pub async fn fetch_messages<R: Runtime>(
                                 crate::image_cache::backfill_emoji_stills(&handle);
                                 crate::message::files::prune_preview_cache(&handle);
                                 crate::message::files::prune_svg_renders(&handle);
+                                let sealed = vector_core::vcache::seal_legacy();
+                                if sealed > 0 {
+                                    vector_core::log_info!("[VCache] sealed {} cache files from before sealing", sealed);
+                                }
                             })
                             .await;
                         }

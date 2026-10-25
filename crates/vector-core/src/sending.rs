@@ -1030,11 +1030,18 @@ pub fn discard_retry_copy(att: &Attachment) {
     }
 }
 
-/// Ciphertext of uploads that never went again, once it's two weeks old.
+/// Ciphertext of uploads that never went again, once it's two weeks old, and plaintext working
+/// copies a send left behind, once they're a day old.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn sweep_outgoing() {
-    let Ok(entries) = std::fs::read_dir(outgoing_dir()) else { return };
-    let max_age = std::time::Duration::from_secs(14 * 24 * 3600);
+    let dir = outgoing_dir();
+    sweep_older_than(&dir, std::time::Duration::from_secs(14 * 24 * 3600));
+    sweep_older_than(&dir.join("work"), std::time::Duration::from_secs(24 * 3600));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_older_than(dir: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
         if old {

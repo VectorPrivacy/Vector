@@ -209,7 +209,8 @@ async fn finish(dir: &Path, stem: &str, part: &Path, sha256: Option<&str>) -> Re
         }
     };
     let path = dir.join(format!("{stem}.{ext}"));
-    std::fs::rename(part, &path).map_err(|e| e.to_string())?;
+    let (from, to) = (part.to_path_buf(), path.clone());
+    tokio::task::spawn_blocking(move || vector_core::vcache::seal_file(&from, &to)).await.map_err(|e| e.to_string())??;
     net::discard_partial(part);
     Ok(path.to_string_lossy().into_owned())
 }

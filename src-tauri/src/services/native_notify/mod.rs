@@ -380,7 +380,7 @@ pub fn notification_icon(main: Option<&Path>, badge: Option<&Path>, px: u32) -> 
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let fresh = modified(&out).is_some_and(|o| sources.iter().all(|s| modified(s).is_some_and(|s| o >= s)));
     if !fresh {
-        let decode = |p: Option<&Path>| p.and_then(|p| image::open(p).ok());
+        let decode = |p: Option<&Path>| p.and_then(|p| image::load_from_memory(&vector_core::vcache::read(p).ok()?).ok());
         let (main, badge) = match (decode(main), decode(badge)) {
             (Some(m), b) => (m, b),
             (None, Some(b)) => (b, None),

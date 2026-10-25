@@ -929,7 +929,7 @@ async fn process_outbound_community_attachment(
     // uses that result, a full-resolution one only its thumbhash.
     let precompressed = crate::message::files::take_precompressed(file_path, use_compression && !keep_metadata).await;
     let path = file_path.to_string();
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+    let bytes = tokio::task::spawn_blocking(move || vector_core::vcache::read(std::path::Path::new(&path)).map(|b| b.to_vec()))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("read attachment: {e}"))?;

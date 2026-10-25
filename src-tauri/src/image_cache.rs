@@ -320,8 +320,7 @@ pub fn precache_image_bytes<R: Runtime>(
     let filename = format!("{}.{}", cache_key, extension);
     let file_path = cache_dir.join(&filename);
 
-    // Write the file
-    if let Err(e) = std::fs::write(&file_path, bytes) {
+    if let Err(e) = vector_core::vcache::write(&file_path, bytes) {
         log_warn!("[ImageCache] Failed to write precache file: {}", e);
         return CacheResult::Failed(format!("Failed to write: {}", e));
     }
@@ -587,8 +586,7 @@ async fn cache_image_uncached<R: Runtime>(
     let filename = format!("{}.{}", cache_key, extension);
     let file_path = cache_dir.join(&filename);
 
-    // Write the file
-    if let Err(e) = std::fs::write(&file_path, &bytes) {
+    if let Err(e) = vector_core::vcache::write(&file_path, &bytes) {
         return CacheResult::Failed(format!("Failed to write cache file: {}", e));
     }
     let url_owned = url.to_string();
@@ -640,10 +638,7 @@ pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result
             out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
         }
     }
-    let tmp = dest.with_extension("tmp");
-    std::fs::write(&tmp, out.as_deref().unwrap_or(bytes))
-        .and_then(|_| std::fs::rename(&tmp, &dest))
-        .map_err(|e| format!("thumb write: {e}"))
+    vector_core::vcache::write(&dest, out.as_deref().unwrap_or(bytes)).map_err(|e| format!("thumb write: {e}"))
 }
 
 /// Longest side a still emoji or pack icon is kept at: it shows at most 64 CSS px, and a
@@ -682,12 +677,10 @@ pub fn backfill_emoji_stills<R: Runtime>(handle: &AppHandle<R>) -> usize {
         }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
             let Some(still) = emoji_still(image_type, &bytes) else { continue };
             let dest = path.with_extension(still.extension);
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, &still.bytes).and_then(|_| std::fs::rename(&tmp, &dest)).is_err() {
-                let _ = std::fs::remove_file(&tmp);
+            if vector_core::vcache::write(&dest, &still.bytes).is_err() {
                 continue;
             }
             if dest != path {
@@ -727,14 +720,12 @@ pub fn migrate_svg_cache<R: Runtime>(handle: &AppHandle<R>) -> usize {
             if !path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
             if vector_core::svg::is_raster_wrapped(&bytes) {
                 continue;
             }
             let out = vector_core::svg::rasterize_wrapped(&bytes, dim).unwrap_or_else(|_| vector_core::svg::empty_wrapped());
-            // Temp + rename: the webview may be reading this path right now.
-            let tmp = path.with_extension("svg.tmp");
-            if std::fs::write(&tmp, &out).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+            if vector_core::vcache::write(&path, &out).is_ok() {
                 rewritten += 1;
             }
         }
@@ -756,7 +747,7 @@ pub fn backfill_avatar_thumbs<R: Runtime>(handle: &AppHandle<R>) -> usize {
         if dest.exists() {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
         match write_avatar_thumb(&path, &bytes) {
             Ok(()) => written += 1,
             Err(e) => log_debug!("[ImageCache] thumb skipped {:?}: {}", path.file_name(), e),
@@ -840,21 +831,19 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
             .collect();
         paths.sort_by_key(|p| std::cmp::Reverse(p.0));
         for (len, path) in paths {
-            let mut head = Vec::with_capacity(16);
-            if std::fs::File::open(&path).and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 16), &mut head)).is_err()
+            let mut head = [0u8; 16];
+            let read = vector_core::vcache::open(&path, "image/gif").and_then(|src| src.read_at(0, &mut head).ok());
+            if read.is_none_or(|n| n < head.len())
                 || crate::shared::image::animated_format(&head).is_none()
                 || !needs_animated_transcode(&head, len as usize, target, budget)
             {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = vector_core::vcache::read(&path) else { continue };
             match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
                 Ok(re) if keep_transcode(&bytes, &re.bytes, target, budget) => {
-                    // Temp + rename: the webview's asset protocol can read this
-                    // exact path mid-rewrite, and a truncate-then-write window
-                    // would serve it half a GIF.
-                    let tmp = path.with_extension("gif.tmp");
-                    if std::fs::write(&tmp, &re.bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+                    // Beside it, then renamed in: the webview may be reading this path.
+                    if vector_core::vcache::write(&path, &re.bytes).is_ok() {
                         log_info!(
                             "[ImageCache] backfill: {} {} normalized {} KB -> {} KB",
                             label,
@@ -1340,8 +1329,7 @@ pub async fn cache_url_image<R: Runtime>(
     let filename = format!("{}.{}", cache_key, extension);
     let file_path = cache_dir.join(&filename);
 
-    // Write the file
-    if let Err(e) = std::fs::write(&file_path, &bytes) {
+    if let Err(e) = vector_core::vcache::write(&file_path, &bytes) {
         cleanup().await;
         log_warn!("[ImageCache] Failed to write cache file: {}", e);
         return Ok(None);
@@ -1456,13 +1444,14 @@ mod avatar_thumb_tests {
 
     #[test]
     fn large_avatars_shrink_to_the_thumb_and_small_ones_copy_verbatim() {
+        crate::util::test_app_data();
         let dir = tempfile::tempdir().unwrap();
         // 1280 decodes DCT-scaled to exactly the thumb size, which must still re-encode.
         for (w, h) in [(1280, 960), (4000, 300), (300, 170)] {
             let path = dir.path().join(format!("{w}x{h}.jpg"));
             let bytes = jpeg(w, h);
             write_avatar_thumb(&path, &bytes).unwrap();
-            let thumb = std::fs::read(avatar_thumb_path(&path).unwrap()).unwrap();
+            let thumb = vector_core::vcache::read(&avatar_thumb_path(&path).unwrap()).unwrap();
             let img = image::load_from_memory(&thumb).unwrap();
             assert_eq!(img.width().max(img.height()), AVATAR_THUMB_DIM, "{w}x{h}");
             assert!(thumb.len() < bytes.len(), "{w}x{h}");
@@ -1470,6 +1459,8 @@ mod avatar_thumb_tests {
         let path = dir.path().join("small.jpg");
         let bytes = jpeg(120, 90);
         write_avatar_thumb(&path, &bytes).unwrap();
-        assert_eq!(std::fs::read(avatar_thumb_path(&path).unwrap()).unwrap(), bytes);
+        let thumb = avatar_thumb_path(&path).unwrap();
+        assert_eq!(&*vector_core::vcache::read(&thumb).unwrap(), &bytes);
+        assert_ne!(std::fs::read(&thumb).unwrap(), bytes, "sealed on disk");
     }
 }

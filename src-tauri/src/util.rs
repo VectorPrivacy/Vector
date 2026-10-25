@@ -407,3 +407,16 @@ pub fn mime_from_extension_static(extension: &str) -> &'static str {
     let ext = extension.trim().trim_start_matches('.');
     vector_core::crypto::mime_from_extension(ext)
 }
+
+/// The app folder a test runs against, one per process: the cache key lives in it.
+#[cfg(test)]
+pub(crate) fn test_app_data() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if vector_core::db::get_app_data_dir().is_err() {
+            vector_core::db::set_app_data_dir(tempfile::tempdir().unwrap().keep());
+        }
+        vector_core::db::get_app_data_dir().unwrap().clone()
+    })
+    .clone()
+}

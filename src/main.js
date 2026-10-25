@@ -1,9 +1,32 @@
-const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { invoke, convertFileSrc: assetSrc } = window.__TAURI__.core;
 const { getCurrentWebview } = window.__TAURI__.webview;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 const { listen } = window.__TAURI__.event;
 const { openUrl: openUrlDirect, revealItemInDir } = window.__TAURI__.opener;
+
+/**
+ * A src for a file on disk. Vector Cache files (`cache/…`, wallpapers) are sealed, so they come
+ * through `vmedia` opened; anything else through the asset protocol.
+ * @param {string} path
+ * @returns {string}
+ */
+function convertFileSrc(path) {
+    return vcacheSrc(path) ?? assetSrc(path);
+}
+
+/**
+ * The `vmedia` src of a Vector Cache file, or null for any other path.
+ * @param {string} path
+ * @returns {string|null}
+ */
+function vcacheSrc(path) {
+    const root = platformFeatures?.app_data;
+    if (!root || !path || !path.startsWith(root)) return null;
+    const rel = path.slice(root.length).replaceAll('\\', '/');
+    if (!rel.startsWith('cache/') && !/^npub1[^/]+\/wallpapers\//.test(rel)) return null;
+    return `${platformFeatures.vcache}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+}
 
 // System event types (matches Rust SystemEventType enum)
 const SystemEventType = {

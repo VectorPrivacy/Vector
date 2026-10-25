@@ -323,6 +323,8 @@
     "allow-get-storage-info",
     "allow-clear-storage",
     "allow-clear-storage-category",
+    "allow-count-downloads-on-disk",
+    "allow-move-downloads-into-vector",
     "allow-export-keys",
     "allow-transfer-start",
     "allow-transfer-check-number",

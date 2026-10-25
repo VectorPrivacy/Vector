@@ -107,7 +107,7 @@ fn encode(path: &str) -> Result<Option<Vec<u8>>, String> {
     if let Ok(mut jobs) = JOBS.lock() {
         jobs.insert(path.to_string(), job.clone());
     }
-    let out = std::env::temp_dir().join(format!("vector-video-{}.mp4", &vector_core::crypto::sha256_hex(path.as_bytes())[..16]));
+    let out = crate::message::files::private_temp_dir().join(format!("vector-video-{}.mp4", &vector_core::crypto::sha256_hex(path.as_bytes())[..16]));
     let result = crate::video::compress(path.as_ref(), &out, quality, &job.cancel, |f| job.progress.store((f * 1000.0) as u32, Ordering::Relaxed))
         .and_then(|done| done.map(|_| std::fs::read(&out).map_err(|e| format!("read compressed video: {e}"))).transpose());
     let _ = std::fs::remove_file(&out);

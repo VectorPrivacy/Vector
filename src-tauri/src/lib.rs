@@ -399,6 +399,7 @@ pub fn run() {
     builder
         .setup(|app| {
             media_export::purge();
+            message::files::purge_composer_copies(app.handle());
             #[cfg(desktop)]
             app.handle().plugin(
                 tauri_plugin_updater::Builder::new()
@@ -815,6 +816,8 @@ pub fn run() {
             commands::system::get_storage_info,
             commands::system::clear_storage,
             commands::system::clear_storage_category,
+            commands::system::count_downloads_on_disk,
+            commands::system::move_downloads_into_vector,
             commands::system::check_battery_optimized,
             commands::system::request_battery_optimization,
             commands::system::get_background_service_enabled,

@@ -207,6 +207,8 @@ async function refreshObfs4Banner(text) {
  * @returns {string} URL for use in media element src
  */
 function mediaUrl(filePath) {
+    const cached = vcacheSrc(filePath);
+    if (cached) return cached;
     if (platformFeatures && platformFeatures.media_url) {
         return `${platformFeatures.media_url}/${encodeURIComponent(filePath)}`;
     }
@@ -928,6 +930,10 @@ async function initStorageSection() {
     VectorSvelte.setSettingsScreen({ storage: {
         keepShown: true, keepMedia: keep === 'true', exportShown: platformFeatures.os !== 'web', saveToDownloads: save === 'true',
     } });
+    if (platformFeatures.os !== 'web') {
+        const onDisk = await invoke('count_downloads_on_disk').catch(() => 0);
+        VectorSvelte.setSettingsScreen({ storage: { onDisk } });
+    }
 
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
     // and Vector Web on a phone is mobile without a gallery to hide from.
@@ -935,6 +941,37 @@ async function initStorageSection() {
         let hidden = false;
         try { hidden = await invoke('get_gallery_hidden'); } catch (_) {}
         VectorSvelte.setSettingsScreen({ storage: { galleryShown: true, galleryHidden: !!hidden } });
+    }
+}
+
+/** Move this account's downloads out of the download folder into Vector's encrypted store. */
+async function moveDownloads() {
+    const { onDisk, moving } = VectorSvelte.settingsScreen().storage;
+    if (moving || !onDisk) return;
+    const where = platformFeatures.os === 'android' ? 'gallery' : 'Downloads folder';
+    const files = onDisk === 1 ? '1 File' : `${onDisk.toLocaleString()} Files`;
+    const ok = await popupConfirm(`Move ${files} into Vector?`, `They leave your ${where} and are kept in Vector, encrypted. Save gives you a normal copy any time.`, false, '', '', '', 'Move');
+    if (!ok) return;
+
+    VectorSvelte.setSettingsScreen({ storage: { moving: 'Moving...' } });
+    const unlisten = await listen('media_import_progress', (evt) => {
+        const { done, total } = evt.payload;
+        VectorSvelte.setSettingsScreen({ storage: { moving: `${done.toLocaleString()} / ${total.toLocaleString()}` } });
+    });
+    try {
+        const { moved, shared, skipped, failed } = await invoke('move_downloads_into_vector');
+        const kept = moved + shared;
+        const parts = [`Moved ${kept.toLocaleString()} ${kept === 1 ? 'file' : 'files'} into Vector`];
+        if (shared) parts.push(`${shared.toLocaleString()} also stay in ${where} for another account`);
+        if (skipped) parts.push(`${skipped.toLocaleString()} had changed and stayed`);
+        if (failed) parts.push(`${failed.toLocaleString()} couldn't move`);
+        showToast(parts.join(', '));
+    } catch (e) {
+        await popupConfirm('Move Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    } finally {
+        unlisten();
+        VectorSvelte.setSettingsScreen({ storage: { moving: '' } });
+        initStorageSection();
     }
 }
 
@@ -1979,6 +2016,9 @@ function updateMigrationProgress(total, completed, phase) {
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
     keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes.'],
+    moveDownloads: () => platformFeatures.os === 'android'
+        ? ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your gallery and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.']
+        : ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your Downloads folder and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.'],
     saveToDownloads: () => platformFeatures.os === 'android'
         ? ['Save Media to Gallery', 'Also saves a normal copy of each picture, video and voice note you view to your gallery, where other apps can open it.']
         : ['Save Media to Downloads', 'Also saves a normal copy of each picture, video and voice note you view to your Downloads folder, where other apps can open it.'],
@@ -2174,6 +2214,7 @@ const SETTINGS_HELPERS = {
         VectorSvelte.setSettingsScreen({ storage: { limit: bytes } });
         await saveMaxAutoDownloadBytes(bytes);
     },
+    moveDownloads,
     clearStorage: async () => {
         if (await clearStorage()) initStorageSection();
     },

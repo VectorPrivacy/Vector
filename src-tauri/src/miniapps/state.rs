@@ -71,7 +71,6 @@ const PACKAGE_META_VERSION: u32 = 2;
 const ICON_CAP: u64 = 8 * 1024 * 1024;
 /// Longest side of a cached listing icon: the largest tile, at up to 3x density.
 const LISTING_ICON_PX: u32 = 256;
-static ICON_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Where a package's listing icon is cached, by content hash.
 pub fn icon_file(icon_dir: &std::path::Path, file_hash: &[u8; 32]) -> PathBuf {
@@ -96,13 +95,7 @@ fn listing_icon(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Write a cached icon whole or not at all; a concurrent writer of the same hash counts.
 fn write_icon(file: &std::path::Path, png: &[u8]) -> bool {
-    let seq = ICON_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = file.with_extension(format!("tmp-{}-{seq}", std::process::id()));
-    if std::fs::write(&tmp, png).and_then(|_| std::fs::rename(&tmp, file)).is_ok() {
-        return true;
-    }
-    let _ = std::fs::remove_file(&tmp);
-    file.is_file()
+    vector_core::vcache::write(file, png).is_ok() || file.is_file()
 }
 
 /// Modification time in nanoseconds since the epoch, 0 when the platform can't say.
@@ -872,7 +865,7 @@ mod package_meta_tests {
         assert_eq!(first.file_hash, vector_core::crypto::sha256::digest(&bytes));
         // The icon lives on disk, downscaled for a listing, never in the record.
         let icon = first.icon_path(icons.path()).unwrap();
-        assert_eq!(png_dims(&std::fs::read(&icon).unwrap()), (256, 128));
+        assert_eq!(png_dims(&vector_core::vcache::read(&icon).unwrap()), (256, 128));
 
         // Same size and time over other bytes: the second load trusts what it stored.
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -900,7 +893,7 @@ mod package_meta_tests {
         let icon = pkg.icon_path(icons.path()).unwrap();
         std::fs::remove_file(&icon).unwrap();
         assert_eq!(pkg.icon_path(icons.path()), Some(icon.clone()));
-        assert_eq!(png_dims(&std::fs::read(icon).unwrap()), (64, 64));
+        assert_eq!(png_dims(&vector_core::vcache::read(&icon).unwrap()), (64, 64));
     }
 
     #[test]

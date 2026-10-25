@@ -70,7 +70,6 @@ const PREVIEW_JPEG_QUALITY: u8 = 70;
 const PREVIEW_GIF_VERBATIM_MAX: usize = 4 * 1024 * 1024;
 /// Previews outlive one preview dialog only by accident; anything this old is litter.
 const PREVIEW_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-static PREVIEW_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 
 /// A path's extension, lower-cased, or `bin` when it has none: never the whole path, as
@@ -98,6 +97,16 @@ fn preview_cache_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Strin
         .join("previews");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create preview cache: {}", e))?;
     Ok(dir)
+}
+
+/// Drop what earlier launches left of the composer: previews, and picks never sent.
+pub fn purge_composer_copies(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Ok(data) = app.path().app_data_dir() {
+        let _ = std::fs::remove_dir_all(data.join("cache").join("previews"));
+        #[cfg(target_os = "android")]
+        let _ = std::fs::remove_dir_all(data.join("picked"));
+    }
 }
 
 /// Write a downscaled copy of an image into the preview cache and return its path. `for_send`
@@ -162,14 +171,10 @@ fn write_preview_into(dir: &std::path::Path, bytes: &[u8], for_send: bool) -> Re
     };
 
     let path = dir.join(format!("{key}.{ext}"));
-    let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!("{key}.{ext}.tmp-{}-{seq}", std::process::id()));
-    std::fs::write(&tmp, &out).map_err(|e| format!("Failed to write preview: {}", e))?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp);
-        // A concurrent writer of the same key already placed identical content.
+    // A concurrent writer of the same key may already have placed identical content.
+    if let Err(e) = vector_core::vcache::write(&path, &out) {
         if !path.is_file() {
-            return Err(format!("Failed to place preview: {}", e));
+            return Err(format!("Failed to write preview: {}", e));
         }
     }
     Ok(path)
@@ -284,7 +289,7 @@ fn thumbhash_for_preview(file_path: &str) -> Result<String, String> {
         crate::shared::image::decode_image(bytes, 100)
             .map_err(|e| format!("Failed to decode cached image: {}", e))?
     } else {
-        let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to open image: {}", e))?;
+        let bytes = vector_core::vcache::read(std::path::Path::new(file_path)).map_err(|e| format!("Failed to open image: {}", e))?;
         crate::shared::image::decode_image(&bytes, 100)
             .map_err(|e| format!("Failed to open image: {}", e))?
     };
@@ -915,7 +920,7 @@ pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<S
         return Err("file too large for an inline preview".to_string());
     }
     tokio::task::spawn_blocking(move || {
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = vector_core::vcache::read(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
         // An explicit list, not a prefix: the sniffer also names SVG (any XML) an image. An SVG
         // passes only as the pixels the preview renders; any other XML fails to render.
         let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
@@ -964,13 +969,9 @@ fn write_preview_as_is(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result
     if path.is_file() {
         return Ok(path);
     }
-    let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!("{key}.{ext}.tmp-{}-{seq}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("Failed to write preview: {}", e))?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = vector_core::vcache::write(&path, bytes) {
         if !path.is_file() {
-            return Err(format!("Failed to place preview: {}", e));
+            return Err(format!("Failed to write preview: {}", e));
         }
     }
     Ok(path)
@@ -990,7 +991,7 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
     }
     tokio::task::spawn_blocking(move || {
         use sha2::{Digest, Sha256};
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = vector_core::vcache::read(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
         if !vector_core::svg::looks_like_svg(&bytes) {
             return Ok(None);
         }
@@ -1006,10 +1007,7 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
             return Ok(Some(out.to_string_lossy().into_owned()));
         }
         let Ok(png) = vector_core::svg::rasterize_png(&bytes, dim) else { return Ok(None) };
-        let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = dir.join(format!("{key}-{dim}.png.tmp-{}-{seq}", std::process::id()));
-        std::fs::write(&tmp, &png).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &out).map_err(|e| e.to_string())?;
+        vector_core::vcache::write(&out, &png)?;
         Ok(Some(out.to_string_lossy().into_owned()))
     })
     .await
@@ -1220,8 +1218,7 @@ fn zip_paths_blocking(paths: &[String], my_generation: u64) -> Result<ZipResult,
     // Zip phase — byte-based progress for smooth updates
     // Use generation in filename to avoid collisions with previous cleanup_zip calls
     let zip_name = format!("{}.zip", archive_name);
-    let temp_dir = std::env::temp_dir();
-    let zip_path = temp_dir.join(format!("vector_zip_{}_{}", my_generation, &zip_name));
+    let zip_path = private_temp_dir().join(format!("vector_zip_{}_{}", my_generation, &zip_name));
 
     // Run the zip phase, cleaning up the partial file on any error
     let result = (|| -> Result<(u32, u32, Vec<ZipEntry>), String> {
@@ -1377,6 +1374,16 @@ fn zip_paths_blocking(paths: &[String], my_generation: u64) -> Result<ZipResult,
     })
 }
 
+/// Where a send's plaintext working copies go (a folder's zip, a compressed video): the
+/// account's own folder, not a temp dir other users can list. The outgoing sweep clears leftovers.
+pub(crate) fn private_temp_dir() -> std::path::PathBuf {
+    let dir = vector_core::db::current_account_dir()
+        .map(|d| d.join("outgoing").join("work"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Cancel an in-progress zip and/or clean up the pending zip file
 #[tauri::command]
 pub fn cleanup_zip() -> Result<(), String> {
@@ -1528,6 +1535,7 @@ mod preview_tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        crate::util::test_app_data();
         let dir = std::env::temp_dir().join(format!("vector-preview-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1564,7 +1572,8 @@ mod preview_tests {
         let bytes = jpeg(2000, 1500);
         let first = write_preview_into(&dir, &bytes, false).unwrap();
         assert_eq!(first.extension().unwrap(), "jpg");
-        let dims = image::image_dimensions(&first).unwrap();
+        let shown = image::load_from_memory(&vector_core::vcache::read(&first).unwrap()).unwrap();
+        let dims = (shown.width(), shown.height());
         assert!(dims.0 <= PREVIEW_MAX_DIM && dims.1 <= PREVIEW_MAX_DIM, "not bounded: {dims:?}");
         assert_eq!(dims.0, 1024, "longest side lands exactly on the cap");
         let again = write_preview_into(&dir, &bytes, false).unwrap();
@@ -1587,13 +1596,13 @@ mod preview_tests {
         let small = gif(64, 48);
         let path = write_preview_into(&dir, &small, false).unwrap();
         assert_eq!(path.extension().unwrap(), "gif");
-        assert_eq!(std::fs::read(&path).unwrap(), small, "the animation must survive untouched");
+        assert_eq!(&*vector_core::vcache::read(&path).unwrap(), &small, "the animation must survive untouched");
 
         let wide = gif(PREVIEW_MAX_DIM + 1, 8);
         let path = write_preview_into(&dir, &wide, false).unwrap();
         assert_ne!(path.extension().unwrap(), "gif", "over the cap it is decoded like a photo");
-        let dims = image::image_dimensions(&path).unwrap();
-        assert!(dims.0 <= PREVIEW_MAX_DIM);
+        let shown = image::load_from_memory(&vector_core::vcache::read(&path).unwrap()).unwrap();
+        assert!(shown.width() <= PREVIEW_MAX_DIM);
     }
 
     #[test]

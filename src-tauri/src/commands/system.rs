@@ -34,6 +34,10 @@ pub struct PlatformFeatures {
     pub media_url: Option<String>,
     /// Where media this account holds in memory is served: `<vmedia>/<hash>`.
     pub vmedia: String,
+    /// Where Vector Cache files are served: `<vcache>/<path under app_data>`.
+    pub vcache: String,
+    /// The app's folder, with a trailing separator: a cache file's path starts with it.
+    pub app_data: String,
     /// Whether this build looks for and installs its own updates. Off in the
     /// F-Droid flavour, where the store owns updates.
     pub self_update: bool,
@@ -81,6 +85,13 @@ pub async fn get_platform_features() -> PlatformFeatures {
     let vmedia = media_url.as_ref().map(|prefix| format!("{prefix}/m")).unwrap_or_default();
     #[cfg(not(target_os = "android"))]
     let vmedia = crate::media_scheme::base_url();
+    #[cfg(target_os = "android")]
+    let vcache = media_url.as_ref().map(|prefix| format!("{prefix}/c")).unwrap_or_default();
+    #[cfg(not(target_os = "android"))]
+    let vcache = format!("{vmedia}/c");
+    let app_data = vector_core::db::get_app_data_dir()
+        .map(|dir| format!("{}{}", dir.to_string_lossy(), std::path::MAIN_SEPARATOR))
+        .unwrap_or_default();
 
     PlatformFeatures {
         transcription: cfg!(feature = "whisper"),
@@ -90,6 +101,8 @@ pub async fn get_platform_features() -> PlatformFeatures {
         debug_mode: cfg!(debug_assertions),
         media_url,
         vmedia,
+        vcache,
+        app_data,
         self_update: !cfg!(feature = "fdroid"),
         video_compression: crate::message::video_compression::available(),
         // F-Droid counts a built-in YouTube player as promoting a non-free network service.
@@ -491,6 +504,74 @@ pub async fn clear_storage_category<R: Runtime>(
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes)
     }))
+}
+
+/// How many of this account's downloads still sit in the download folder.
+#[tauri::command]
+pub async fn count_downloads_on_disk() -> Result<usize, String> {
+    vector_core::db::blocking_bound(|| vector_core::media::import::on_disk().map(|files| files.len())).await?
+}
+
+static MOVING_DOWNLOADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Move this account's downloads out of the download folder and into Vector, reporting each
+/// file as `media_import_progress`. Stops if the account changes.
+#[tauri::command]
+pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
+    use std::sync::atomic::Ordering;
+    use vector_core::media::import::{self, Moved};
+    if MOVING_DOWNLOADS.swap(true, Ordering::AcqRel) {
+        return Err("Already moving files into Vector".to_string());
+    }
+    vector_core::db::spawn_bound(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                MOVING_DOWNLOADS.store(false, Ordering::Release);
+            }
+        }
+        let _done = Done;
+        let (files, elsewhere) = vector_core::db::blocking_bound(|| (import::on_disk(), import::paths_elsewhere())).await?;
+        let (files, elsewhere) = (files?, std::sync::Arc::new(elsewhere));
+        let (mut moved, mut shared, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+        for (i, item) in files.iter().enumerate() {
+            if !vector_core::db::writes_to_live_account() {
+                break;
+            }
+            let (file, others) = (item.clone(), elsewhere.clone());
+            match vector_core::db::blocking_bound(move || import::move_in(&file, others.as_ref().as_ref())).await? {
+                Ok((outcome, events)) => {
+                    match outcome {
+                        Moved::Moved => moved += 1,
+                        Moved::Shared => shared += 1,
+                        Moved::Mismatch => skipped += 1,
+                    }
+                    reflect_move(item, outcome, &events).await;
+                }
+                Err(e) => {
+                    failed += 1;
+                    vector_core::log_warn!("[MediaImport] couldn't move a file in: {}", e);
+                }
+            }
+            vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": i + 1, "total": files.len() }));
+        }
+        Ok(serde_json::json!({ "moved": moved, "shared": shared, "skipped": skipped, "failed": failed }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// STATE and the open chat follow a moved file.
+async fn reflect_move(item: &vector_core::media::import::OnDisk, outcome: vector_core::media::import::Moved, events: &[String]) {
+    let updates = vector_core::media::import::reflect(&mut *STATE.lock().await, item, outcome, events);
+    #[cfg(target_os = "android")]
+    if outcome == vector_core::media::import::Moved::Moved {
+        crate::android::storage::scan_file(&item.path);
+    }
+    for (chat_id, mut message) in updates {
+        let old_id = message.id.clone();
+        vector_core::traits::emit_message_update(&chat_id, &old_id, &mut message).await;
+    }
 }
 
 // ============================================================================

@@ -27,22 +27,33 @@ pub fn is_export(path: &Path) -> bool {
     path.starts_with(root)
 }
 
-/// A file another app can open for `path_or_ref`: held media is written out as `name`, and a
-/// path is itself.
+/// A file another app can open for `path_or_ref`: held media and sealed cache files are written
+/// out as `name`, and any other path is itself.
 pub fn materialize(path_or_ref: &str, name: &str) -> Result<PathBuf, String> {
     match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        MediaRef::File(path) if vector_core::vcache::is_sealed(Path::new(&path)) => {
+            let bytes = vector_core::vcache::read(Path::new(&path)).map_err(|e| format!("Couldn't read the file: {e}"))?;
+            let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or_default();
+            let hash = vector_core::crypto::sha256::digest(&bytes);
+            export(&bytes, file_name(name, &hash, vector_core::crypto::mime_from_extension(ext)))
+        }
         MediaRef::File(path) => Ok(PathBuf::from(path)),
         MediaRef::Held(hash) => {
             let (bytes, mime) = held(&hash)?;
-            let mut id = [0u8; 8];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
-            let dir = root()?.join(crate::util::bytes_to_hex_string(&id));
-            std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the file: {e}"))?;
-            let file = dir.join(file_name(name, &hash, &mime));
-            write_private(&file, &bytes)?;
-            Ok(file)
+            export(&bytes, file_name(name, &hash, &mime))
         }
     }
+}
+
+/// `bytes` as `name` in a folder of its own under this launch's exports.
+fn export(bytes: &[u8], name: String) -> Result<PathBuf, String> {
+    let mut id = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
+    let dir = root()?.join(crate::util::bytes_to_hex_string(&id));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the file: {e}"))?;
+    let file = dir.join(name);
+    write_private(&file, bytes)?;
+    Ok(file)
 }
 
 /// The package a Mini App runs from: a file is itself; a kept app is written out once per
@@ -101,7 +112,7 @@ pub fn held_bytes(path_or_ref: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
 pub fn save_to(path_or_ref: &str, dest: &Path) -> Result<(), String> {
     let bytes = match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
         MediaRef::Held(hash) => held(&hash)?.0,
-        MediaRef::File(path) => zeroize::Zeroizing::new(std::fs::read(path).map_err(|e| format!("Couldn't read the file: {e}"))?),
+        MediaRef::File(path) => vector_core::vcache::read(Path::new(&path)).map_err(|e| format!("Couldn't read the file: {e}"))?,
     };
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = dest.with_file_name(format!(".{name}.saving"));
@@ -156,6 +167,7 @@ mod tests {
 
     #[test]
     fn saving_writes_the_held_bytes_and_leaves_no_temp() {
+        let _session = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
         let hash = [0x5cu8; 32];
         media::ram::cache().insert(hash, b"held bytes".to_vec(), "image/png").unwrap();
         let dir = tempfile::tempdir().unwrap();

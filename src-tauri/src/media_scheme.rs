@@ -1,4 +1,5 @@
-//! `vmedia`: media this account holds in memory, served to the main window by content hash.
+//! `vmedia`: media this account holds, served to the main window by content hash, and Vector
+//! Cache files (`c/<path>`), which are sealed on disk.
 //!
 //! Every URL carries a token drawn at launch. The app's own pages know it; an embedded player's
 //! frame inside the same window never does, and the webview label alone can't tell them apart.
@@ -58,16 +59,23 @@ pub fn protocol<R: tauri::Runtime>(ctx: UriSchemeContext<'_, R>, request: http::
 
 fn respond_to(request: &http::Request<Vec<u8>>) -> Response {
     let mut parts = request.uri().path().trim_start_matches('/').splitn(2, '/');
-    let (Some(given), Some(hash)) = (parts.next(), parts.next()) else {
+    let (Some(given), Some(rest)) = (parts.next(), parts.next()) else {
         return status(StatusCode::NOT_FOUND);
     };
     if !same(given.as_bytes(), token().as_bytes()) {
         return status(StatusCode::FORBIDDEN);
     }
-    let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(hash) else {
-        return status(StatusCode::NOT_FOUND);
+    // `c/<path under the app's folder>`: a Vector Cache file, opened sealed or from before.
+    let src = if let Some(rel) = rest.strip_prefix("c/") {
+        let Some(path) = vector_core::vcache::decode_rel(rel).and_then(|rel| vector_core::vcache::resolve(&rel)) else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        vector_core::vcache::open(&path, vector_core::crypto::mime_from_extension(ext))
+    } else {
+        vector_core::simd::hex::hex_to_bytes_32_checked(rest).and_then(|hash| vector_core::media::open(&hash))
     };
-    let Some(src) = vector_core::media::open(&hash) else {
+    let Some(src) = src else {
         return status(StatusCode::NOT_FOUND);
     };
     // A held SVG is shown only through its render, never as a document of its own.
@@ -163,6 +171,8 @@ mod tests {
 
     #[test]
     fn it_serves_what_the_account_holds_by_range() {
+        // Held media is the live session's: no other test may swap it out mid-check.
+        let _session = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
         let path = held(0x11, 10, "video/mp4");
         let whole = get(&path, None);
         assert_eq!((whole.status(), whole.body().len()), (StatusCode::OK, 10));
@@ -176,6 +186,8 @@ mod tests {
 
     #[test]
     fn an_open_range_is_answered_a_part_at_a_time() {
+        // Held media is the live session's: no other test may swap it out mid-check.
+        let _session = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
         let path = held(0x22, (MAX_PART + 10) as usize, "video/mp4");
         let first = get(&path, Some("bytes=0-"));
         assert_eq!(first.body().len() as u64, MAX_PART);
@@ -185,7 +197,28 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_file_is_served_opened_and_nothing_else_under_the_folder_is() {
+        let root = crate::util::test_app_data();
+        let avatars = root.join("cache").join("avatars");
+        std::fs::create_dir_all(&avatars).unwrap();
+        vector_core::vcache::write(&avatars.join("face test.png"), b"\x89PNG the face").unwrap();
+        std::fs::write(root.join("vector.db"), b"not for pages").unwrap();
+
+        let whole = get(&format!("/{}/c/cache/avatars/face%20test.png", token()), None);
+        assert_eq!((whole.status(), whole.body().as_ref()), (StatusCode::OK, b"\x89PNG the face".as_slice()));
+        assert_eq!(whole.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(whole.headers()[header::CACHE_CONTROL], "no-store");
+        let part = get(&format!("/{}/c/cache/avatars/face%20test.png", token()), Some("bytes=5-7"));
+        assert_eq!(part.body().as_ref(), b"the");
+        for refused in ["cache/avatars/../../vector.db", "cache/..%2F..%2Fvector.db", "vector.db", "cache", "npub1x/vector.db"] {
+            assert_eq!(get(&format!("/{}/c/{refused}", token()), None).status(), StatusCode::NOT_FOUND, "{refused}");
+        }
+    }
+
+    #[test]
     fn a_wrong_token_an_unknown_hash_or_a_raw_svg_is_refused() {
+        // Held media is the live session's: no other test may swap it out mid-check.
+        let _session = crate::commands::transport::tests::TEST_LOCK.blocking_lock();
         let path = held(0x33, 4, "image/png");
         let hash = path.rsplit('/').next().unwrap().to_string();
         assert_eq!(get(&format!("/{}/{hash}", "0".repeat(32)), None).status(), StatusCode::FORBIDDEN);

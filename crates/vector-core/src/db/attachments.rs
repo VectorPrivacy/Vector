@@ -227,6 +227,47 @@ pub fn clear_kept(hash: &str) -> Result<usize, String> {
         .map_err(|e| format!("clear kept: {e}"))
 }
 
+/// Downloads still shown from a file of their own: (hash, path, extension), one row per pair.
+pub fn downloads_on_disk() -> Result<Vec<(String, String, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT hash, path, MAX(extension) FROM attachments WHERE downloaded=1 AND path!='' GROUP BY hash, path")
+        .map_err(|e| format!("prepare downloads_on_disk: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+        .map_err(|e| format!("query downloads_on_disk: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
+/// `path` is leaving: rows of `hash` show the store's copy, and any claiming other bytes there
+/// are no longer downloaded. Returns the events touched.
+pub fn move_to_store(hash: &str, path: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let events = events_at_path(&conn, path)?;
+    conn.execute("UPDATE attachments SET path='' WHERE path=?1 AND hash=?2", [path, hash])
+        .map_err(|e| format!("move_to_store: {e}"))?;
+    conn.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1", [path])
+        .map_err(|e| format!("move_to_store: {e}"))?;
+    Ok(events)
+}
+
+/// Rows of `hash` stop showing `path`, which holds other bytes. Returns the events touched.
+pub fn forget_path(hash: &str, path: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let events = events_at_path(&conn, path)?;
+    conn.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1 AND hash=?2", [path, hash])
+        .map_err(|e| format!("forget_path: {e}"))?;
+    Ok(events)
+}
+
+fn events_at_path(conn: &rusqlite::Connection, path: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT event_id FROM attachments WHERE path=?1")
+        .map_err(|e| format!("prepare events_at_path: {e}"))?;
+    let rows = stmt.query_map([path], |r| r.get::<_, String>(0)).map_err(|e| format!("query events_at_path: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
 /// Mark an attachment not-downloaded (its file went missing). Clears the path.
 pub fn clear_attachment_download(event_id: &str, hash: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
@@ -282,13 +323,17 @@ pub struct ReusableUpload {
     pub mine: bool,
 }
 
-/// The verified on-disk copy of a claimed attachment, if any: candidates are
+/// The verified on-disk copy of a claimed attachment, if any: the store's (an empty path), else
 /// the ledger's recorded paths for the hash plus the download dir under the
 /// wire name, size-gated cheaply (wire size is ciphertext length, 16 AES-GCM
 /// bytes over the plaintext), then content-hashed on the blocking pool. The
 /// claim is never trusted without the hash passing — same bar as a download.
 pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String> {
     let expected = att.id.clone();
+    // The store keeps only bytes proven to hash to their key.
+    if crate::simd::hex::hex_to_bytes_32_checked(&expected).is_some_and(|h| crate::media::store::holds(&h)) {
+        return Some(String::new());
+    }
     let mut candidates: Vec<std::path::PathBuf> = downloaded_paths_by_hash(&expected)
         .unwrap_or_default()
         .into_iter()
@@ -669,6 +714,10 @@ mod tests {
         // A row whose file was swapped out from under it: hash fails, no trust.
         std::fs::write(&good, b"not the game").unwrap();
         assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_none());
+
+        // Bytes the store keeps are the copy, whatever lies in the download folder.
+        crate::media::store::keep_sealed(b"the actual game bytes", crate::simd::hex::hex_to_bytes_32(&real_hash), "application/zip", crate::db::media_store::Origin::Imported).unwrap();
+        assert_eq!(verify_local_copy(&claim(&real_hash, plain_len)).await.as_deref(), Some(""));
     }
 
     /// Sealed URLs still protect a shared blob, mirrors included, and a URL that won't open

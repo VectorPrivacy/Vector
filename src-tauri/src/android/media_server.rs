@@ -229,6 +229,14 @@ async fn handle_connection(
     if let Some(hash) = encoded_path.strip_prefix(b"m/") {
         return serve_held(&mut stream, req, hash, method == Method::Head).await;
     }
+    // `c/<path under the app's folder>`: a Vector Cache file, opened sealed or from before.
+    if let Some(rel) = encoded_path.strip_prefix(b"c/") {
+        let src = percent_decode_bytes(rel).and_then(|rel| vector_core::vcache::resolve(&rel)).and_then(|path| {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            vector_core::vcache::open(&path, vector_core::crypto::mime_from_extension(ext))
+        });
+        return serve_source(&mut stream, req, src, method == Method::Head).await;
+    }
 
     // Decode the file path (only allocation in the happy path)
     let file_path_str = match percent_decode_bytes(encoded_path) {
@@ -326,7 +334,7 @@ async fn handle_connection(
 /// The most one held response carries: a player asks for the rest as it plays.
 const HELD_PART: u64 = 4 * 1024 * 1024;
 
-/// Serve media the live account holds by hash. Only the app's own origin may read it.
+/// Serve media the live account holds by hash.
 async fn serve_held(
     stream: &mut tokio::net::TcpStream,
     req: &[u8],
@@ -337,6 +345,16 @@ async fn serve_held(
         .ok()
         .and_then(vector_core::simd::hex::hex_to_bytes_32_checked)
         .and_then(|h| vector_core::media::open(&h));
+    serve_source(stream, req, src, is_head).await
+}
+
+/// Answer with `src` by range, a part at a time; only the app's own origin may read it.
+async fn serve_source(
+    stream: &mut tokio::net::TcpStream,
+    req: &[u8],
+    src: Option<std::sync::Arc<dyn vector_core::media::MediaSource>>,
+    is_head: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let Some(src) = src else {
         send_response(stream, 404, "Not Found", &[("Cache-Control", "no-store")], &[]).await?;
         return Ok(());

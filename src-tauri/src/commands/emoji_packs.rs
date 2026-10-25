@@ -415,14 +415,6 @@ struct DecodedSheet {
 // metadata). Frames are decoded + resized ONCE; every later open, on every
 // launch, is a stat and a small JSON read. The previous single-container
 // format (`<key>.vspr`, "VSPR" magic) is converted on first read.
-static SHEET_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A tmp path no concurrent writer of the same file can share.
-fn sheet_tmp_path(target: &std::path::Path) -> std::path::PathBuf {
-    let seq = SHEET_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    target.with_extension(format!("png.tmp-{}-{seq}", std::process::id()))
-}
-
 /// A cache hit is a use: bump the file's mtime so the age-ordered sweep keeps a pack
 /// that is opened every day ahead of one that was added and forgotten.
 fn touch(path: &std::path::Path) {
@@ -453,9 +445,7 @@ fn sheet_files(dir: &std::path::Path, url: &str) -> (std::path::PathBuf, std::pa
 /// once per batch (`prune_spritesheet_cache`), not per file.
 fn write_sheet(dir: &std::path::Path, url: &str, decoded: &DecodedSheet) -> Result<EmojiSheet, String> {
     let (png, json) = sheet_files(dir, url);
-    let tmp = sheet_tmp_path(&png);
-    std::fs::write(&tmp, &decoded.png).map_err(|e| format!("sheet write: {e}"))?;
-    std::fs::rename(&tmp, &png).map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("sheet place: {e}") })?;
+    vector_core::vcache::write(&png, &decoded.png).map_err(|e| format!("sheet write: {e}"))?;
     let meta = SheetMeta { version: SHEET_VERSION, frame_count: decoded.frame_count, frame_size: decoded.frame_size, frame_durations_ms: decoded.durations.clone() };
     let body = serde_json::to_vec(&meta).map_err(|e| e.to_string())?;
     std::fs::write(&json, body).map_err(|e| format!("sheet meta write: {e}"))?;
@@ -695,7 +685,7 @@ fn atlas_for(dir: &std::path::Path, sheets: &[EmojiSheet]) -> Option<(std::path:
     }
     let mut atlas = image::RgbaImage::new(width, height);
     for (sheet, &(x, y)) in sheets.iter().zip(&at) {
-        let bytes = std::fs::read(&sheet.path).ok()?;
+        let bytes = vector_core::vcache::read(std::path::Path::new(&sheet.path)).ok()?;
         let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
         image::imageops::overlay(&mut atlas, &img, x as i64, y as i64);
     }
@@ -707,13 +697,8 @@ fn atlas_for(dir: &std::path::Path, sheets: &[EmojiSheet]) -> Option<(std::path:
     )
     .write_image(atlas.as_raw(), width, height, image::ExtendedColorType::Rgba8)
     .ok()?;
-    let tmp = sheet_tmp_path(&path);
-    std::fs::write(&tmp, &png).ok()?;
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        if !path.is_file() {
-            return None;
-        }
+    if vector_core::vcache::write(&path, &png).is_err() && !path.is_file() {
+        return None;
     }
     Some((path, at))
 }
@@ -863,7 +848,7 @@ async fn decode_animated_emoji_uncached<R: tauri::Runtime>(
             &handle, &url, crate::image_cache::ImageType::EmojiPackIcon,
         ));
     let local_bytes_with_type = local_hit.and_then(|path| {
-        let bytes = std::fs::read(&path).ok()?;
+        let bytes = vector_core::vcache::read(std::path::Path::new(&path)).ok()?.to_vec();
         let ct = std::path::Path::new(&path)
             .extension()
             .and_then(|e| e.to_str())
@@ -1419,6 +1404,7 @@ mod tests {
     use super::*;
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        crate::util::test_app_data();
         let dir = std::env::temp_dir().join(format!("vector-sheets-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1466,7 +1452,7 @@ mod tests {
         let (path, at) = atlas_for(&dir, &[a.clone(), b.clone()]).expect("two cached sheets fold");
         let gap = ATLAS_PAD_PX;
         assert_eq!(at, vec![(0, 0), (0, 56 + gap)]);
-        let atlas = image::open(&path).unwrap().to_rgba8();
+        let atlas = image::load_from_memory(&vector_core::vcache::read(&path).unwrap()).unwrap().to_rgba8();
         assert_eq!(atlas.dimensions(), (56, 56 * 4 + gap));
         assert_eq!(atlas.get_pixel(3, 3)[0], 10, "a's pixels at a's offset");
         assert_eq!(atlas.get_pixel(3, 56)[3], 0, "the gutter between strips is transparent");
@@ -1551,7 +1537,8 @@ mod tests {
         let read = read_sheet(&dir, "https://x/a.gif").expect("a written sheet reads back");
         assert_eq!(read.path, written.path);
         assert_eq!((read.frame_count, read.frame_size, read.frame_durations_ms.clone()), (3, 56, vec![100, 120, 80]));
-        assert_eq!(std::fs::read(&read.path).unwrap(), decoded.png, "the PNG is served as-is");
+        assert_eq!(&*vector_core::vcache::read(std::path::Path::new(&read.path)).unwrap(), &decoded.png, "the PNG reads back as written");
+        assert_ne!(std::fs::read(&read.path).unwrap(), decoded.png, "sealed on disk");
         assert!(read_sheet(&dir, "https://x/missing.gif").is_none(), "a miss is None, not an error");
     }
 

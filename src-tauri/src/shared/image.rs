@@ -1638,9 +1638,10 @@ pub fn read_file_checked(path: &str) -> Result<Vec<u8>, String> {
         return Err(format!("File is empty (0 bytes): {}", path));
     }
 
-    let bytes = std::fs::read(path)
+    // A file Vector sealed (a cached picture being sent on) reads as its plaintext.
+    let bytes = vector_core::vcache::read(std::path::Path::new(path))
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    Ok(bytes)
+    Ok(bytes.to_vec())
 }
 
 #[cfg(test)]
