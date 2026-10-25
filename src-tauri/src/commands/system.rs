@@ -256,6 +256,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
 async fn clear_attachment_files<R: Runtime>(
     handle: &AppHandle<R>,
     exts: Option<&std::collections::HashSet<String>>,
+    kept_media_only: bool,
 ) -> Result<usize, String> {
     vector_core::db::scoped(async move {
         // Deletion is confined to the download dir: a stale or symlinked
@@ -285,6 +286,9 @@ async fn clear_attachment_files<R: Runtime>(
                     let path = attachment.path();
                     // Downloaded with no path of its own: a copy the media store keeps.
                     let kept = path.is_empty();
+                    if kept_media_only && !(kept && vector_core::media::previewable(&attachment.extension().to_ascii_lowercase())) {
+                        continue;
+                    }
 
                     // Category clears match on the on-disk filename extension — the
                     // same derivation the storage chart buckets by
@@ -432,7 +436,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
 
-    let updated_chats = clear_attachment_files(&handle, None).await?;
+    let updated_chats = clear_attachment_files(&handle, None, false).await?;
     vector_core::media::store::forget_where(|_| true);
     clear_media_caches(&handle).await?;
     // Attachment deletion can strand Mini App history rows pointing at nothing
@@ -482,7 +486,7 @@ pub async fn clear_storage_category<R: Runtime>(
             if ext_set.is_empty() {
                 return Err("No file types to clear".to_string());
             }
-            clear_attachment_files(&handle, Some(&ext_set)).await?;
+            clear_attachment_files(&handle, Some(&ext_set), false).await?;
             sweep_dir_by_ext(&vector_core::db::get_download_dir(), &ext_set);
             // Kept files of these types that no loaded message names.
             vector_core::media::store::forget_where(|mime| ext_set.contains(&vector_core::crypto::extension_from_mime(mime)));
@@ -508,6 +512,63 @@ pub async fn clear_storage_category<R: Runtime>(
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes)
     }))
+}
+
+/// The link media Keep Media seals into the cache: what a chat shows from a link.
+const KEPT_LINK_MEDIA: [&str; 2] = ["inline_images", "embed_videos"];
+
+const KEEP_MEDIA_BUSY: &str = "Turn this off once your downloads finish.";
+
+/// Whether anything is downloading that could still keep a file.
+async fn keep_media_busy() -> bool {
+    use std::sync::atomic::Ordering;
+    MOVING_DOWNLOADS.load(Ordering::Acquire) || !crate::commands::attachments::ACTIVE_DOWNLOADS.lock().await.is_empty()
+}
+
+fn link_media_dirs<R: Runtime>(handle: &AppHandle<R>) -> Vec<std::path::PathBuf> {
+    handle.path().app_data_dir().map(|d| KEPT_LINK_MEDIA.iter().map(|k| d.join("cache").join(k)).collect()).unwrap_or_default()
+}
+
+/// What turning Keep Media off would delete: the files it kept and the link media sealed with them.
+#[tauri::command]
+pub async fn kept_media_summary<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let (mut files, mut bytes) = vector_core::db::blocking_bound(vector_core::media::store::kept_media).await?;
+    for dir in link_media_dirs(&handle) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
+                files += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    Ok(serde_json::json!({ "files": files, "bytes": bytes, "busy": keep_media_busy().await }))
+}
+
+/// Keep Media on or off. Off deletes what it kept, so media is kept or held, never both; refused
+/// while a download that read the old setting could still keep something.
+#[tauri::command]
+pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        let set = |on: bool| vector_core::db::set_sql_setting("keep_media".into(), on.to_string());
+        if on {
+            return set(true);
+        }
+        if keep_media_busy().await {
+            return Err(KEEP_MEDIA_BUSY.into());
+        }
+        set(false)?;
+        if keep_media_busy().await {
+            let _ = set(true);
+            return Err(KEEP_MEDIA_BUSY.into());
+        }
+        clear_attachment_files(&handle, None, true).await?;
+        vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(vector_core::media::store::kept_by_keep_media)).await?;
+        for dir in link_media_dirs(&handle) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// How many of this account's downloads still sit in the download folder.

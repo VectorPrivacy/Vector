@@ -68,6 +68,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             "get_storage_info" => Ok(storage_info().await),
             "clear_storage" => clear_storage().await,
             "clear_storage_category" => clear_storage_category(a).await,
+            "kept_media_summary" => kept_media_summary().await,
+            "set_keep_media" => set_keep_media(a.bool("on").unwrap_or(false)).await,
 
             _ => return None,
         })
@@ -630,6 +632,81 @@ async fn clear_attachment_files(exts: Option<&HashSet<String>>) -> Result<usize,
         }
     }
     Ok(updates.len())
+}
+
+/// Link media kept for chats, beside the attachments Keep Media keeps.
+const KEPT_LINK_MEDIA: [&str; 2] = ["/cache/inline_images", "/cache/embed_videos"];
+
+/// What turning Keep Media off would delete: the files it kept and the link media kept with them.
+async fn kept_media_summary() -> Result<Value, String> {
+    let (mut files, mut bytes) = vector_core::media::store::kept_media();
+    for dir in KEPT_LINK_MEDIA {
+        for (_, size) in list_files(Path::new(dir), true).await {
+            files += 1;
+            bytes += size;
+        }
+    }
+    Ok(json!({ "files": files, "bytes": bytes, "busy": crate::attachments::downloading() }))
+}
+
+/// Keep Media on or off. Off deletes what it kept, so media is kept or held, never both;
+/// refused while a download could still keep something.
+async fn set_keep_media(on: bool) -> Result<Value, String> {
+    db::set_sql_setting("keep_media".into(), on.to_string())?;
+    if on {
+        return Ok(Value::Null);
+    }
+    if crate::attachments::downloading() {
+        db::set_sql_setting("keep_media".into(), "true".into())?;
+        return Err("Turn this off once your downloads finish.".into());
+    }
+    let gone: HashSet<[u8; 32]> = vector_core::db::media_store::totals_by_hash()?
+        .into_iter()
+        .filter(|(_, mime)| vector_core::media::store::kept_by_keep_media(mime))
+        .map(|(hash, _)| hash)
+        .collect();
+    for hash in &gone {
+        vector_core::media::store::forget(hash).await;
+    }
+    // Loaded messages that showed a kept copy load it again.
+    let mut updates: Vec<(String, Vec<vector_core::Message>)> = Vec::new();
+    {
+        let mut state = STATE.lock().await;
+        for chat_idx in 0..state.chats.len() {
+            let mut touched = Vec::new();
+            for message in state.chats[chat_idx].messages.iter_mut() {
+                let mut changed = false;
+                for attachment in &mut message.attachments {
+                    if attachment.downloaded() && attachment.path().is_empty() && gone.contains(attachment.id()) {
+                        attachment.set_downloaded(false);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    touched.push(*message.id());
+                }
+            }
+            if touched.is_empty() {
+                continue;
+            }
+            let chat = &state.chats[chat_idx];
+            let messages = touched
+                .iter()
+                .filter_map(|id| chat.messages.find_by_hex_id(&vector_core::simd::hex::bytes_to_hex_32(id)))
+                .map(|m| m.to_message(&state.interner))
+                .collect();
+            updates.push((chat.id().to_string(), messages));
+        }
+    }
+    for (chat_id, messages) in &updates {
+        for message in messages {
+            db::events::save_message(chat_id, message).await?;
+            vector_core::emit_event("message_update", &json!({ "old_id": message.id, "message": message, "chat_id": chat_id }));
+        }
+    }
+    images::forget_inline().await;
+    vector_core::webfiles::remove(Path::new(KEPT_LINK_MEDIA[1])).await;
+    Ok(Value::Null)
 }
 
 /// Forget every cached picture, repaint the profiles that showed one, and fetch them again.

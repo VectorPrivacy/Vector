@@ -267,6 +267,20 @@ pub fn forget(hash: &[u8; 32]) {
     indexed(*hash, false);
 }
 
+/// Whether Keep Media is what keeps a file of this type: one a chat shows.
+pub fn kept_by_keep_media(mime: &str) -> bool {
+    super::previewable(&crate::crypto::extension_from_mime(mime))
+}
+
+/// The files Keep Media has kept, and their size in bytes.
+pub fn kept_media() -> (u64, u64) {
+    media_store::totals()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(mime, ..)| kept_by_keep_media(mime))
+        .fold((0, 0), |(files, bytes), (_, n, size)| (files + n, bytes + size))
+}
+
 /// Forget every kept file whose type `matches`; returns the hashes forgotten.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn forget_where(matches: impl Fn(&str) -> bool) -> Vec<[u8; 32]> {
@@ -537,6 +551,23 @@ mod tests {
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200)).unwrap();
         check();
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn keep_media_governs_what_a_chat_shows_and_leaves_other_files() {
+        let (_dir, _guard) = init_test_db();
+        let (picture, archive) = (b"a kept picture".to_vec(), b"a kept archive".to_vec());
+        let (p, a) = (
+            crate::simd::hex::hex_to_bytes_32(&crate::crypto::sha256_hex(&picture)),
+            crate::simd::hex::hex_to_bytes_32(&crate::crypto::sha256_hex(&archive)),
+        );
+        keep_sealed(&picture, p, "image/png", Origin::Sealed).unwrap();
+        keep_sealed(&archive, a, "application/zip", Origin::Sealed).unwrap();
+        assert_eq!(kept_media(), (1, picture.len() as u64));
+
+        assert_eq!(forget_where(kept_by_keep_media), vec![p]);
+        assert!(!holds(&p) && holds(&a));
+        assert_eq!(kept_media(), (0, 0));
     }
 
     #[test]

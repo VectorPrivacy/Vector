@@ -832,6 +832,8 @@ pub fn run() {
             commands::system::clear_storage,
             commands::system::clear_storage_category,
             commands::system::count_downloads_on_disk,
+            commands::system::kept_media_summary,
+            commands::system::set_keep_media,
             commands::system::move_downloads_into_vector,
             commands::system::check_battery_optimized,
             commands::system::request_battery_optimization,

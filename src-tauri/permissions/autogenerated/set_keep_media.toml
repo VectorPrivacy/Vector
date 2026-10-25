@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-keep-media"
+description = "Enables the set_keep_media command without any pre-configured scope."
+commands.allow = ["set_keep_media"]
+
+[[permission]]
+identifier = "deny-set-keep-media"
+description = "Denies the set_keep_media command without any pre-configured scope."
+commands.deny = ["set_keep_media"]

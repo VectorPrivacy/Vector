@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-kept-media-summary"
+description = "Enables the kept_media_summary command without any pre-configured scope."
+commands.allow = ["kept_media_summary"]
+
+[[permission]]
+identifier = "deny-kept-media-summary"
+description = "Denies the kept_media_summary command without any pre-configured scope."
+commands.deny = ["kept_media_summary"]

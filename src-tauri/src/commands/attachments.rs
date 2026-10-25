@@ -600,7 +600,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             // Use the same canonical dir the write path uses
                             // (vector-core download dir) so dedup looks where files
                             // actually land — not a divergent Tauri-resolved path.
-                            {
+                            // Media a chat only shows is held in memory: a copy on disk (an
+                            // export, an older download) is never taken in as this one.
+                            if keep || !vector_core::media::previewable(&attachment.extension().to_ascii_lowercase()) {
                                 let vector_dir = vector_core::db::get_download_dir();
                                 // Check both hash-based and human-readable filenames
                                 let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(attachment.id()), attachment.extension()));

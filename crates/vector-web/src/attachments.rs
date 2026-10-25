@@ -31,6 +31,11 @@ impl Drop for Active {
     }
 }
 
+/// Whether any attachment is downloading.
+pub fn downloading() -> bool {
+    ACTIVE.with(|a| !a.borrow().is_empty())
+}
+
 /// Stop a download at its next chunk. True when one was running, so its outcome event is owed.
 pub fn cancel_download(attachment_id: &str) -> bool {
     let id = attachment_id.to_ascii_lowercase();

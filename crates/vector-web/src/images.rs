@@ -252,6 +252,15 @@ pub async fn clear_all() {
     vector_core::webfiles::remove(Path::new("/cache")).await;
 }
 
+/// Forget the link pictures kept for chats: their files and the index that hands them out.
+pub async fn forget_inline() {
+    KNOWN.with(|k| k.borrow_mut().retain(|(_, kind), _| *kind != Kind::InlineImage as u8));
+    if let Some(dir) = app_data() {
+        let _ = db::webfs::remove_tree(&dir, Path::new("/image-index/inline_images"));
+    }
+    vector_core::webfiles::remove(Path::new("/cache/inline_images")).await;
+}
+
 /// Delete blocked profiles' pictures: each file, an avatar's thumb, and the index entry that
 /// would hand the path out again.
 pub async fn forget(images: Vec<vector_core::profile::CachedImage>) {

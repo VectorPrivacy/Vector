@@ -2017,7 +2017,7 @@ function updateMigrationProgress(total, completed, phase) {
 // Help prompts: one explainer per info icon. A function body resolves at click
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
-    keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes.'],
+    keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes. Turning it off deletes what it kept.'],
     moveDownloads: () => platformFeatures.os === 'android'
         ? ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your gallery and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.']
         : ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your Downloads folder and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.'],
@@ -2199,8 +2199,30 @@ const SETTINGS_HELPERS = {
         await saveAutoDownloadEnabled(on);
     },
     setKeepMedia: async (on) => {
+        // The toggle moves at once and goes back if the change doesn't happen.
         VectorSvelte.setSettingsScreen({ storage: { keepMedia: on } });
-        await invoke('set_sql_setting', { key: 'keep_media', value: on ? 'true' : 'false' });
+        const undo = () => VectorSvelte.setSettingsScreen({ storage: { keepMedia: !on } });
+        if (!on) {
+            const kept = await invoke('kept_media_summary').catch(() => ({ files: 0, bytes: 0, busy: false }));
+            if (kept.busy) {
+                undo();
+                return popupConfirm('Downloads in progress', 'Turn this off once your downloads finish.', true, '', 'vector_warning.svg');
+            }
+            const files = `${kept.files} kept ${kept.files === 1 ? 'file' : 'files'} (${formatBytes(kept.bytes)})`;
+            if (kept.files > 0 && !(await popupConfirm('Stop keeping media?', `${files} will be deleted from this device. They load again when you open them.`, false, '', 'vector_warning.svg'))) {
+                return undo();
+            }
+        }
+        try {
+            await invoke('set_keep_media', { on });
+        } catch (e) {
+            undo();
+            return popupConfirm('Keep Media', String(e), true, '', 'vector_warning.svg');
+        }
+        if (!on) {
+            const info = await getStorageInfo();
+            if (info) VectorSvelte.setStorageDistribution(info.type_distribution);
+        }
     },
     setSaveToDownloads: async (on) => {
         VectorSvelte.setSettingsScreen({ storage: { saveToDownloads: on } });
