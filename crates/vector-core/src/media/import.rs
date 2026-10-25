@@ -299,7 +299,7 @@ impl Ledger {
             .write(true)
             .open(dir.join("import-pending.lock"))
             .map_err(|e| format!("open import ledger lock: {e}"))?;
-        lock.lock().map_err(|e| format!("lock import ledger: {e}"))?;
+        lock_file(&lock).map_err(|e| format!("lock import ledger: {e}"))?;
         Ok(Ledger { path: dir.join("import-pending.jsonl"), _lock: lock })
     }
 
@@ -381,6 +381,34 @@ impl Ledger {
             format!("write import ledger: {e}")
         })
     }
+}
+
+/// An exclusive lock on `file`, held until it closes. Android's std has none: flock is there.
+fn lock_file(file: &std::fs::File) -> std::io::Result<()> {
+    match file.lock() {
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => flock(file),
+        locked => locked,
+    }
+}
+
+#[cfg(unix)]
+fn flock(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        // SAFETY: the descriptor is open for as long as `file` is borrowed.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn flock(_: &std::fs::File) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Sync the folder holding `path`, where a platform allows opening one.
@@ -701,6 +729,20 @@ mod tests {
         assert_eq!(settle_all(Some(&adopted)).stayed, 1);
         assert!(file.exists());
         assert!(owed().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_flock_fallback_excludes_another_handle() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let open = || std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.path().join("l")).unwrap();
+        let (held, other) = (open(), open());
+        flock(&held).unwrap();
+        // SAFETY: `other` is open for the call.
+        assert_ne!(unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        drop(held);
+        flock(&other).unwrap();
     }
 
     #[test]
