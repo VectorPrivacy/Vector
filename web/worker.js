@@ -1,6 +1,6 @@
 // Vector Web backend: vector-core as WebAssembly, one dedicated worker per tab.
 // OPFS's synchronous access handles, which the SQLite VFS needs, exist only here.
-import init, { start, invoke, invoke_bytes, set_event_sink, set_call_sink } from './pkg/vector_web.js';
+import init, { start, invoke, invoke_bytes, media_bytes, set_event_sink, set_call_sink } from './pkg/vector_web.js';
 import { probeStorage, filesFor } from './storage.js';
 import { onSink, onPageMessage } from './calls-media.js';
 
@@ -44,6 +44,7 @@ async function run(data) {
         case 'invoke-bytes': return invoke_bytes(data.cmd, data.bytes, JSON.stringify(data.headers ?? {}));
         case 'store': return JSON.stringify(await Promise.all(data.files.map(storeFile)));
         case 'file': return globalThis.vectorFiles.read(data.path);
+        case 'media': return media_bytes(data.hash);
     }
 }
 
@@ -63,7 +64,8 @@ onmessage = async ({ data }) => {
     try {
         await booted;
         const value = await run(data);
-        const transfer = value instanceof Uint8Array ? [value.buffer] : [];
+        const bytes = value instanceof Uint8Array ? value : value?.bytes;
+        const transfer = bytes instanceof Uint8Array ? [bytes.buffer] : [];
         postMessage({ t: 'result', id: data.id, ok: true, value }, transfer);
     } catch (e) {
         if (trapped(e)) die(e);

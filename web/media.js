@@ -212,7 +212,8 @@
     });
 
     // --- Attachment actions ------------------------------------------------
-    const fileName = (path) => path.split('/').pop() || 'file';
+    // Held media has no file name of its own: its message names it, or it saves as 'file'.
+    const fileName = (path) => (path.startsWith('vmedia:') ? 'file' : path.split('/').pop() || 'file');
 
     async function save(path) {
         const a = document.createElement('a');
@@ -248,6 +249,7 @@
     const savePath = ({ path, url }) => path || (url && pathOf(url)) || null;
     const saveKey = (args) => savePath(args) || args.url;
     function saveName(args) {
+        if (args.name) return args.name;
         const path = savePath(args);
         if (path) return fileName(path);
         const last = (() => { try { return new URL(args.url, location.href).pathname.split('/').pop(); } catch (_) { return ''; } })();

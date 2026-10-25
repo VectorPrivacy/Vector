@@ -181,8 +181,9 @@ fn trim_idle(slots: &mut HashMap<[u8; 32], Slot>, now: Instant) {
 
 fn budget() -> u64 {
     const MIB: u64 = 1 << 20;
+    // The page holds its own copy of what it shows as blobs.
     #[cfg(target_arch = "wasm32")]
-    let fixed = 256 * MIB;
+    let fixed = 128 * MIB;
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let fixed = 192 * MIB;
     #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]

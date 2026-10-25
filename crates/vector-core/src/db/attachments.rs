@@ -20,10 +20,13 @@ const SELECT_COLS: &str = "event_id, att_index, hash, key, nonce, extension, nam
 /// runtime state and is never persisted (always false on load).
 fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpener) -> rusqlite::Result<(String, Attachment)> {
     let event_id: String = row.get(0)?;
+    let id: String = row.get(2)?;
+    // Held or kept right now: worked out on every read, never stored.
+    let resident = crate::simd::hex::hex_to_bytes_32_checked(&id).is_some_and(|h| crate::media::resident(&h));
     let img_meta_json: Option<String> = row.get(10)?;
     let mut open = |i: usize| -> rusqlite::Result<String> { Ok(at_rest.open_or_keep(row.get(i)?)) };
     let att = Attachment {
-        id: row.get(2)?,
+        id,
         key: open(3)?,
         nonce: open(4)?,
         extension: row.get(5)?,
@@ -43,7 +46,7 @@ fn row_to_attachment(row: &rusqlite::Row, at_rest: &mut crate::crypto::AtRestOpe
             .map(|s| s.to_string())
             .collect(),
         verified: row.get::<_, i64>(16)? != 0,
-        resident: false,
+        resident,
     };
     Ok((event_id, att))
 }

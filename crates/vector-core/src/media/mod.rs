@@ -49,6 +49,28 @@ pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
     }
 }
 
+/// The plaintext and type of media this account holds, from memory or the store. A kept file
+/// read on the web is held in memory after, since its store can't be read a range at a time.
+pub async fn held_bytes(hash: &[u8; 32]) -> Option<(Vec<u8>, String)> {
+    if let Some(src) = open(hash) {
+        return read_all(&*src).ok().map(|bytes| (bytes, src.mime().to_string()));
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some((plain, mime)) = store::read_plain(hash).await {
+        let _ = ram::cache().insert(*hash, plain.clone(), &mime);
+        return Some((plain, mime));
+    }
+    None
+}
+
+/// The bytes behind a path or a `vmedia:` ref, for readers that want the whole file.
+pub async fn read(path_or_ref: &str) -> Result<Vec<u8>, String> {
+    match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        MediaRef::File(path) => crate::files::read(std::path::Path::new(&path)).await,
+        MediaRef::Held(hash) => held_bytes(&hash).await.map(|(bytes, _)| bytes).ok_or_else(|| "This file isn't on this device any more".to_string()),
+    }
+}
+
 /// Every byte of `src`, for a reader that wants the whole file.
 pub fn read_all(src: &dyn MediaSource) -> std::io::Result<Vec<u8>> {
     let mut bytes = vec![0u8; usize::try_from(src.len()).map_err(|_| std::io::ErrorKind::OutOfMemory)?];

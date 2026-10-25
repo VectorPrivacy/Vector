@@ -1075,8 +1075,9 @@ pub async fn seal_or_reuse(
     // Resolved here, on the task that carries the account, not on a blocking thread.
     #[cfg(not(target_arch = "wasm32"))]
     let outgoing = outgoing_dir();
+    // The web never seals from a file; wasm has no temp dir to fall back on.
     #[cfg(target_arch = "wasm32")]
-    let outgoing = std::env::temp_dir();
+    let outgoing = crate::db::current_account_dir().map(|d| d.join("outgoing")).unwrap_or_default();
     // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
     callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_) | FileSource::Saved(_)).then_some(0));
     let sealed = match plain {
@@ -1193,18 +1194,16 @@ pub async fn send_file_dm_from(
 
     let mime_type = crypto::mime_from_extension(extension);
 
-    // The web keeps its copy content-addressed in OPFS, and sends from memory only.
+    // The web sends from memory only, and its bubble shows the bytes in hand.
     #[cfg(target_arch = "wasm32")]
     let (file_hash, local_path_str, img_meta, plain_len) = {
-        let download_dir = crate::db::get_download_dir();
         let FileSource::Bytes(bytes) = &source else {
             return Err("Vector Web sends files from memory".into());
         };
         let file_hash = crypto::sha256_hex(bytes);
-        let local_path = download_dir.join(format!("{file_hash}.{extension}"));
-        crate::webfiles::write(&local_path, bytes).await?;
+        let _ = crate::media::ram::insert(crate::simd::hex::hex_to_bytes_32(&file_hash), bytes.to_vec(), mime_type);
         let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(bytes));
-        (file_hash, local_path.to_string_lossy().to_string(), img_meta, bytes.len() as u64)
+        (file_hash, String::new(), img_meta, bytes.len() as u64)
     };
     // Hash and (if not given) read the preview metadata off the runtime: each is a full
     // pass over the bytes, and a runtime worker parked on one stalls every task queued
@@ -1262,8 +1261,8 @@ pub async fn send_file_dm_from(
         id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
         url: String::new(), path: local_path_str.clone(), size: plain_len + 16,
-        // Only the web keeps a copy of its own sends; elsewhere the bubble reads the sender's.
-        img_meta: img_meta.clone(), downloading: false, downloaded: cfg!(target_arch = "wasm32"), verified: true,
+        // No copy of its own: the bubble reads the sender's bytes until the send ends.
+        img_meta: img_meta.clone(), downloading: false, downloaded: false, verified: true,
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };
@@ -1282,12 +1281,6 @@ pub async fn send_file_dm_from(
     let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
     // Encrypt and upload, or reference a live blob of the same bytes and skip both.
-    #[cfg(target_arch = "wasm32")]
-    let plain = match source {
-        FileSource::Path(_) | FileSource::Saved(_) => FileSource::Path(std::path::PathBuf::from(&local_path_str)),
-        other => other,
-    };
-    #[cfg(not(target_arch = "wasm32"))]
     let plain = source;
     let sealed = match seal_or_reuse(plain, &file_hash, &params.key, &params.nonce, &pending_id, callback.clone(), cancel.clone()).await {
         Ok(sealed) => sealed,
@@ -1296,6 +1289,7 @@ pub async fn send_file_dm_from(
     };
     // Held to the end of the send, so the ciphertext goes however it ends, unless a failed
     // upload keeps it for the retry.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     let (reused, encrypted, ciphertext_file) = match sealed {
         Sealed::Reused(r) => (Some(r), None, None),
         Sealed::Body(body, guard) => (None, Some(body), guard),
@@ -1353,6 +1347,7 @@ pub async fn send_file_dm_from(
             (att_url.clone(), Vec::new())
         }
         Some(encrypted) => {
+            #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
             let body = encrypted.clone();
             let accepted = match crate::blossom::upload_body_with_progress_and_failover(
                 signer.clone(), servers, encrypted, Some(mime_type),

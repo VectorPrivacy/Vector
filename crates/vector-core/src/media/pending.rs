@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Source {
     /// The sender's own file, as they picked it.
     Plain(PathBuf),

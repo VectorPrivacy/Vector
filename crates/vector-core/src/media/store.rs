@@ -2,9 +2,12 @@
 //! ledger (`db::media_store`) holds each file's key; nothing here is ever plaintext.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+#[cfg(not(target_arch = "wasm32"))]
 use zeroize::Zeroizing;
 
 use crate::db::media_store::{self, Origin, StoredMedia};
@@ -141,23 +144,75 @@ fn settle(dir: &Path, file: &Path) -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn record(dest: &Path, file: String, keep: Keep) -> Result<(), String> {
-    let entry = StoredMedia {
-        hash: keep.hash, file, key: keep.key, nonce: keep.nonce, blob_sha256: keep.blob_sha256,
-        pt_len: keep.pt_len, mime: keep.mime, origin: keep.origin,
-    };
-    match media_store::insert(&entry) {
-        Ok(true) => {}
+    match record_row(file, keep) {
+        Ok(true) => Ok(()),
         // Kept already: this copy is spare.
         Ok(false) => {
             let _ = std::fs::remove_file(dest);
+            Ok(())
         }
         Err(e) => {
             let _ = std::fs::remove_file(dest);
-            return Err(e);
+            Err(e)
         }
     }
-    indexed(keep.hash, true);
-    Ok(())
+}
+
+/// The row for a file just written; false when the hash was kept already.
+fn record_row(file: String, keep: Keep) -> Result<bool, String> {
+    let hash = keep.hash;
+    let entry = StoredMedia {
+        hash, file, key: keep.key, nonce: keep.nonce, blob_sha256: keep.blob_sha256,
+        pt_len: keep.pt_len, mime: keep.mime, origin: keep.origin,
+    };
+    let fresh = media_store::insert(&entry)?;
+    indexed(hash, true);
+    Ok(fresh)
+}
+
+/// Keep plaintext on the web, sealed under fresh parameters into the origin's private files.
+#[cfg(target_arch = "wasm32")]
+pub async fn keep_sealed(plain: &[u8], hash: [u8; 32], mime: &str, origin: Origin) -> Result<(), String> {
+    let params = crate::crypto::generate_encryption_params();
+    let blob = crate::crypto::encrypt_data(plain, &params)?;
+    let name = fresh_name();
+    let path = dir()?.join(&name);
+    crate::webfiles::write(&path, &blob).await?;
+    let keep = Keep {
+        hash, key: params.key.clone(), nonce: params.nonce.clone(), blob_sha256: crate::crypto::sha256_hex(&blob),
+        pt_len: plain.len() as u64, mime: mime.to_string(), origin,
+    };
+    match record_row(name, keep) {
+        Ok(true) => Ok(()),
+        other => {
+            crate::webfiles::remove(&path).await;
+            other.map(|_| ())
+        }
+    }
+}
+
+/// A kept file's plaintext and type on the web, read whole: the origin's files are async.
+#[cfg(target_arch = "wasm32")]
+pub async fn read_plain(hash: &[u8; 32]) -> Option<(Vec<u8>, String)> {
+    if !holds(hash) {
+        return None;
+    }
+    let entry = media_store::get(hash).ok().flatten()?;
+    let blob = crate::webfiles::read(&dir().ok()?.join(&entry.file)).await.ok()?;
+    let plain = crate::crypto::decrypt_data_owned(blob, &entry.key, &entry.nonce).ok()?;
+    Some((plain, entry.mime))
+}
+
+/// Stop keeping `hash` on the web: the row first, then its file.
+#[cfg(target_arch = "wasm32")]
+pub async fn forget(hash: &[u8; 32]) {
+    if let Ok(Some(file)) = media_store::remove(hash) {
+        if let Ok(dir) = dir() {
+            crate::webfiles::remove(&dir.join(file)).await;
+        }
+        let _ = crate::db::attachments::clear_kept(&crate::simd::hex::bytes_to_hex_32(hash));
+    }
+    indexed(*hash, false);
 }
 
 /// Stop keeping `hash`: the row goes first, then its file, and the attachments that had no

@@ -920,16 +920,14 @@ async function initStorageSection() {
         videoQuality: VIDEO_QUALITY, videoShown: videoCompressionOffered(),
     } });
 
-    // Kept media and saved copies live on this device's disk: the native apps only.
-    if (platformFeatures.os !== 'web') {
-        const [keep, save] = await Promise.all([
-            invoke('get_sql_setting', { key: 'keep_media' }).catch(() => null),
-            invoke('get_sql_setting', { key: 'save_media_to_downloads' }).catch(() => null),
-        ]);
-        VectorSvelte.setSettingsScreen({ storage: {
-            keepShown: true, keepMedia: keep === 'true', exportShown: true, saveToDownloads: save === 'true',
-        } });
-    }
+    // A saved copy lands in a folder other apps read: the native apps only.
+    const [keep, save] = await Promise.all([
+        invoke('get_sql_setting', { key: 'keep_media' }).catch(() => null),
+        invoke('get_sql_setting', { key: 'save_media_to_downloads' }).catch(() => null),
+    ]);
+    VectorSvelte.setSettingsScreen({ storage: {
+        keepShown: true, keepMedia: keep === 'true', exportShown: platformFeatures.os !== 'web', saveToDownloads: save === 'true',
+    } });
 
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
     // and Vector Web on a phone is mobile without a gallery to hide from.

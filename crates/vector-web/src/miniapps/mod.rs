@@ -134,7 +134,7 @@ fn stem(path: &str) -> String {
 }
 
 async fn read_package(path: &str) -> Result<(Vec<u8>, package::Package), String> {
-    let bytes = vector_core::files::read(Path::new(path)).await?;
+    let bytes = vector_core::media::read(path).await?;
     let pkg = package::parse(&bytes, &stem(path))?;
     Ok((bytes, pkg))
 }

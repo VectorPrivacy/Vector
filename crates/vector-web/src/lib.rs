@@ -104,6 +104,22 @@ pub async fn invoke(cmd: String, args: String) -> Result<String, JsValue> {
     }
 }
 
+/// The bytes and type of media this account holds, for the page to show as a blob; null when
+/// it isn't held, or is an SVG (a blob is a document on this origin, with no sandbox).
+#[wasm_bindgen]
+pub async fn media_bytes(hash: String) -> JsValue {
+    let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(&hash) else { return JsValue::NULL };
+    match vector_core::media::held_bytes(&hash).await {
+        Some((bytes, mime)) if !mime.starts_with("image/svg") => {
+            let out = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&out, &"bytes".into(), &js_sys::Uint8Array::from(&bytes[..]));
+            let _ = js_sys::Reflect::set(&out, &"mime".into(), &mime.into());
+            out.into()
+        }
+        _ => JsValue::NULL,
+    }
+}
+
 /// A raw-body command: `invoke(cmd, bytes, { headers })` on desktop.
 #[wasm_bindgen]
 pub async fn invoke_bytes(cmd: String, bytes: Vec<u8>, headers: String) -> Result<String, JsValue> {

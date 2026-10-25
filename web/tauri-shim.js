@@ -390,6 +390,11 @@
         txt: 'text/plain; charset=utf-8',
     };
     const typeOf = (path) => TYPES[path.split('.').pop().toLowerCase()] || 'application/octet-stream';
+    const PASSIVE = new Set(Object.values(TYPES));
+    // Media the account holds by hash: always the worker's bytes as a blob, whatever the
+    // storage, since there is no file of its own to serve.
+    const HELD = 'vmedia:';
+    const isHeld = (path) => typeof path === 'string' && path.startsWith(HELD);
 
     // Least recently used first; past the budget the oldest URLs nothing shows are released.
     const BLOB_BUDGET = 256 * 1024 * 1024;
@@ -435,7 +440,7 @@
 
     /** The URL a stored file can be loaded from now; null when it doesn't exist. */
     function fileUrl(path) {
-        if (!blobMode()) return Promise.resolve(vfsUrl(path));
+        if (!isHeld(path) && !blobMode()) return Promise.resolve(vfsUrl(path));
         const hit = blobs.get(path);
         if (hit) {
             blobs.delete(path);
@@ -444,14 +449,18 @@
         }
         if (Date.now() - (missing.get(path) || 0) < MISSING_FOR) return Promise.resolve(null);
         if (!loading.has(path)) {
-            loading.set(path, post({ t: 'file', path })
-                .then((bytes) => {
-                    if (!bytes) {
+            const ask = isHeld(path)
+                ? post({ t: 'media', hash: path.slice(HELD.length) })
+                    .then((got) => got && { bytes: got.bytes, type: PASSIVE.has(got.mime) ? got.mime : 'application/octet-stream' })
+                : post({ t: 'file', path }).then((bytes) => bytes && { bytes, type: typeOf(path) });
+            loading.set(path, ask
+                .then((got) => {
+                    if (!got) {
                         missing.set(path, Date.now());
                         return null;
                     }
-                    const url = URL.createObjectURL(new Blob([bytes], { type: typeOf(path) }));
-                    remember(path, url, bytes.byteLength);
+                    const url = URL.createObjectURL(new Blob([got.bytes], { type: got.type }));
+                    remember(path, url, got.bytes.byteLength);
                     return url;
                 })
                 .catch(() => null)
@@ -473,8 +482,8 @@
     };
 
     function convertFileSrc(path) {
-        if (!path || /^[a-z]+:/i.test(path)) return path;
-        if (!blobMode()) return vfsUrl(path);
+        if (!path || (/^[a-z]+:/i.test(path) && !isHeld(path))) return path;
+        if (!isHeld(path) && !blobMode()) return vfsUrl(path);
         let token = tokenOf.get(path);
         if (!token) {
             token = `${PLACEHOLDER}#vfs-${crypto.randomUUID()}`;

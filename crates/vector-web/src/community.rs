@@ -431,14 +431,15 @@ pub async fn send_community_file(
         let author = vector_core::my_public_key().ok_or("Public key not set")?;
 
         let hash = vector_core::crypto::sha256_hex(&bytes);
-        let local = db::get_download_dir().join(format!("{hash}.{extension}"));
-        vector_core::webfiles::write(&local, &bytes).await?;
+        // The bubble shows the bytes in hand: nothing is written for it.
+        let mime = vector_core::crypto::mime_from_extension(&extension);
+        let _ = vector_core::media::ram::insert(vector_core::simd::hex::hex_to_bytes_32(&hash), bytes.to_vec(), mime);
         let params = vector_core::crypto::generate_encryption_params();
         let mut attachment = vector_core::types::Attachment {
             id: hash.clone(), key: params.key, nonce: params.nonce,
             extension: extension.clone(), name, url: String::new(),
-            path: local.to_string_lossy().to_string(), size: bytes.len() as u64 + 16,
-            img_meta, downloading: false, downloaded: true, verified: true,
+            path: String::new(), size: bytes.len() as u64 + 16,
+            img_meta, downloading: false, downloaded: false, verified: true,
             ..Default::default()
         };
 

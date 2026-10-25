@@ -1,5 +1,5 @@
-//! Attachments: fetched and decrypted in memory, kept in OPFS, served by the
-//! page's service worker at `/vfs/<path>`.
+//! Attachments: fetched and decrypted in memory. What a bubble shows is held there; what is
+//! kept goes to the origin's files sealed, and the page shows either as a blob.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -51,13 +51,6 @@ fn fail(chat: &str, msg_id: &str, attachment_id: &str, reason: &str) -> bool {
         &json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "result": reason }),
     );
     false
-}
-
-/// Where a blob lives on the web: content-addressed, so every message
-/// carrying the same file shares one copy.
-fn blob_path(hash: &str, extension: &str) -> std::path::PathBuf {
-    let ext = if extension.is_empty() { "bin" } else { extension };
-    db::get_download_dir().join(format!("{hash}.{ext}"))
 }
 
 pub async fn download_attachment(chat: String, msg_id: String, attachment_id: String) -> bool {
@@ -136,28 +129,42 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
     };
     stage("saving");
     let hash = vector_core::crypto::sha256_hex(&bytes);
-    let path = blob_path(&hash, &attachment.extension);
-    if let Err(e) = vector_core::webfiles::write(&path, &bytes).await {
-        return fail(&chat, &msg_id, &attachment_id, &e);
+    let hash32 = vector_core::simd::hex::hex_to_bytes_32(&hash);
+    let extension = attachment.extension.to_ascii_lowercase();
+    let mime = vector_core::crypto::mime_from_extension(&extension);
+    // What a bubble only shows is held in memory; anything else, or anything an account keeps,
+    // goes to the store sealed.
+    let ram = vector_core::media::ram::cache();
+    let in_memory = vector_core::media::previewable(&extension) && ram.admits(bytes.len() as u64);
+    let keep = !in_memory || vector_core::media::keep_media();
+    if keep {
+        if let Err(e) = vector_core::media::store::keep_sealed(&bytes, hash32, mime, vector_core::db::media_store::Origin::Sealed).await {
+            return fail(&chat, &msg_id, &attachment_id, &e);
+        }
     }
-    let path_str = path.to_string_lossy().to_string();
+    if in_memory && ram.insert(hash32, bytes, mime).is_err() && !keep {
+        return fail(&chat, &msg_id, &attachment_id, "Too much media is open to show this one");
+    }
 
     {
         let att = &mut message.attachments[idx];
         att.id = hash.clone();
-        att.downloaded = true;
+        att.downloaded = keep;
         att.verified = true;
+        att.resident = true;
         att.downloading = false;
-        att.path = path_str.clone();
+        att.path = String::new();
     }
     {
         let mut state = STATE.lock().await;
         state.update_attachment(&chat_id, &msg_id, &attachment_id, |att| {
-            att.set_id(vector_core::simd::hex::hex_to_bytes_32(&hash));
+            att.set_id(hash32);
             att.set_downloading(false);
-            att.set_downloaded(true);
             att.set_verified(true);
-            att.set_path(path_str.clone());
+            if keep {
+                att.set_downloaded(true);
+                att.set_path(String::new());
+            }
         });
     }
 
@@ -165,12 +172,11 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
         "attachment_download_result",
         &json!({
             "profile_id": chat, "msg_id": msg_id, "old_id": attachment_id,
-            "id": hash, "success": true, "result": path_str,
+            "id": hash, "success": true, "resident": true, "result": vector_core::media::MediaRef::held(&hash32),
         }),
     );
     emitter::emit("message_update", &json!({ "old_id": message.id, "message": message, "chat_id": chat_id }));
 
     let _ = db::events::save_message(&chat_id, &message).await;
-    let _ = db::attachments::backfill_downloaded_by_hash(&hash, &path_str, &msg_id);
     true
 }

@@ -507,6 +507,8 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
         crate::media::pending::forget(&hash);
         #[cfg(not(target_arch = "wasm32"))]
         crate::media::store::forget(&hash);
+        #[cfg(target_arch = "wasm32")]
+        crate::db::spawn_bound(async move { crate::media::store::forget(&hash).await });
     }
     #[cfg(target_arch = "wasm32")]
     {

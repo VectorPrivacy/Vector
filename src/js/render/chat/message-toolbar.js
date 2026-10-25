@@ -854,8 +854,8 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
                 } });
             } else if (platformFeatures?.os === 'web') {
                 // A browser has no folder to reveal: the file is saved, or shared on a phone.
-                invoke('prepare_attachment', { path: downloadedPath }).catch(() => {});
-                items.push({ label: 'Save', icon: 'download', onClick: () => saveWebFile({ path: downloadedPath }) });
+                invoke('prepare_attachment', { path: downloadedPath, name }).catch(() => {});
+                items.push({ label: 'Save', icon: 'download', onClick: () => saveWebFile({ path: downloadedPath, name }) });
                 if (!platformFeatures.is_mobile) {
                     items.push({ label: 'Copy', icon: 'copy', onClick: () => {
                         invoke('write_clipboard_files', { paths: [downloadedPath] })

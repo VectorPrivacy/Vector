@@ -55,7 +55,7 @@ fn sanitized_name(name_override: &str, fallback: String) -> String {
 }
 
 async fn read(path: &str) -> Result<Vec<u8>, String> {
-    let bytes = vector_core::webfiles::read(Path::new(path)).await?;
+    let bytes = vector_core::media::read(path).await?;
     if bytes.is_empty() {
         return Err(format!("File is empty (0 bytes): {path}"));
     }

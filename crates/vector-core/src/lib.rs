@@ -3902,7 +3902,7 @@ impl VectorCore {
             // chat pipeline extends). Reuse and fresh downloads both verify it.
             let expected = attachment.original_hash.as_deref();
             // A pin the drawer only shows is held in memory, like a chat's.
-            let in_memory = !cfg!(target_arch = "wasm32") && crate::media::previewable(&attachment.extension.to_ascii_lowercase());
+            let in_memory = crate::media::previewable(&attachment.extension.to_ascii_lowercase());
             if let Some(hash) = expected.and_then(crate::simd::hex::hex_to_bytes_32_checked).filter(|h| in_memory && crate::media::resident(h)) {
                 return Ok(respond(&crate::media::MediaRef::held(&hash)));
             }
