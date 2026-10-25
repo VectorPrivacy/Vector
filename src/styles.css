@@ -2992,7 +2992,7 @@ body.mobile #chat-new-scan-btn { display: block; }
 /* Reusable context menu — generalised from `.profile-more-dropdown`.
    Singleton appended to <body> + positioned absolutely so it can
    anchor to any element (cursor coords on right-click, button rect
-   on click). z-index sits above the picker (2000) and toolbar overlays. */
+   on click). z-index sits above modals (10000), under the popups (10002) an item may open. */
 .context-menu {
   position: fixed;
   background: #1e1e1e;
@@ -3003,7 +3003,7 @@ body.mobile #chat-new-scan-btn { display: block; }
   min-width: 160px;
   max-width: min(320px, calc(100vw - 16px));
   overflow: hidden;
-  z-index: 3000;
+  z-index: 10001;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
   opacity: 0;
   transform: translateY(-4px);
