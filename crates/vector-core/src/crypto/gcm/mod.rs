@@ -5,7 +5,7 @@
 #[cfg(target_arch = "x86_64")]
 mod x86;
 
-use aes::cipher::{BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher};
+use aes::cipher::{BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher, StreamCipherSeek};
 use aes::Aes256;
 use ghash::universal_hash::UniversalHash;
 use ghash::GHash;
@@ -20,6 +20,46 @@ enum Engine {
     Stitched(x86::Gcm),
     Generic { ctr: ctr::Ctr32BE<Aes256>, ghash: GHash, tag_mask: [u8; TAG_LEN] },
 }
+
+/// H = E_K(0^128), and the J0 a 16-byte nonce derives through GHASH (SP 800-38D 7.1).
+fn hash_key_and_j0(key: &[u8; 32], nonce: &[u8; 16]) -> (ghash::Block, ghash::Block) {
+    let cipher = Aes256::new(&(*key).into());
+    let mut h = ghash::Block::default();
+    cipher.encrypt_block(&mut h);
+    let mut j0_hash = GHash::new(&h);
+    j0_hash.update_padded(nonce);
+    let mut len_block = ghash::Block::default();
+    len_block[8..].copy_from_slice(&128u64.to_be_bytes());
+    j0_hash.update(&[len_block]);
+    (h, j0_hash.finalize())
+}
+
+/// One message's payload keystream, from any offset. It is CTR without GHASH, so it
+/// checks nothing: only for ciphertext whose tag was checked once already.
+pub struct Keystream(ctr::Ctr32BE<Aes256>);
+
+impl Keystream {
+    pub fn new(key: &[u8; 32], nonce: &[u8; 16]) -> Self {
+        let (_, j0) = hash_key_and_j0(key, nonce);
+        Self::from_j0(key, &j0)
+    }
+
+    fn from_j0(key: &[u8; 32], j0: &ghash::Block) -> Self {
+        Keystream(ctr::Ctr32BE::<Aes256>::new(&(*key).into(), j0))
+    }
+
+    /// Decrypt `buf`, the payload bytes that start `offset` bytes in. Fails only past the
+    /// longest message GCM allows.
+    pub fn apply_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), PastTheEnd> {
+        // Keystream block 0 masks the tag; the payload starts at block 1.
+        let start = offset.checked_add(TAG_LEN as u64).ok_or(PastTheEnd)?;
+        self.0.try_seek(start).map_err(|_| PastTheEnd)?;
+        self.0.try_apply_keystream(buf).map_err(|_| PastTheEnd)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct PastTheEnd;
 
 /// One GCM message fed in chunks. Every chunk but the last must be a multiple of 16
 /// bytes: GHASH may only pad the final block.
@@ -48,16 +88,7 @@ impl Stream {
     }
 
     fn generic(key: &[u8; 32], nonce: &[u8; 16]) -> Self {
-        // H = E_K(0^128); a 16-byte nonce derives J0 through GHASH (SP 800-38D 7.1).
-        let cipher = Aes256::new(&(*key).into());
-        let mut h = ghash::Block::default();
-        cipher.encrypt_block(&mut h);
-        let mut j0_hash = GHash::new(&h);
-        j0_hash.update_padded(nonce);
-        let mut len_block = ghash::Block::default();
-        len_block[8..].copy_from_slice(&128u64.to_be_bytes());
-        j0_hash.update(&[len_block]);
-        let j0 = j0_hash.finalize();
+        let (h, j0) = hash_key_and_j0(key, nonce);
 
         // Keystream block 0 masks the tag; the payload starts at block 1.
         let mut ctr = ctr::Ctr32BE::<Aes256>::new(&(*key).into(), &j0);

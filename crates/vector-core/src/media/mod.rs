@@ -1,0 +1,118 @@
+//! Media Vector shows without writing it down: decrypted bytes held in memory per account
+//! (`ram`), read through one interface whatever holds them.
+
+pub mod ram;
+pub mod range;
+
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
+
+/// Bytes a media view reads, wherever they live.
+pub trait MediaSource: Send + Sync {
+    fn len(&self) -> u64;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn mime(&self) -> &str;
+    /// Fill `buf` from `offset`. Fewer bytes only at the end, none past it.
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
+/// What holds `hash` for this account right now, if anything.
+pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
+    ram::cache().get(hash).map(|entry| entry as Arc<dyn MediaSource>)
+}
+
+/// Whether this account can show `hash` without fetching it.
+pub fn resident(hash: &[u8; 32]) -> bool {
+    ram::cache().contains(hash)
+}
+
+/// How a command names an attachment's bytes: a hash this account holds, or a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaRef {
+    Held([u8; 32]),
+    File(String),
+}
+
+impl MediaRef {
+    pub const SCHEME: &'static str = "vmedia:";
+
+    /// None for a `vmedia:` ref that names no hash.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.strip_prefix(Self::SCHEME) {
+            Some(hex) => crate::simd::hex::hex_to_bytes_32_checked(hex).map(MediaRef::Held),
+            None => Some(MediaRef::File(s.to_string())),
+        }
+    }
+
+    pub fn held(hash: &[u8; 32]) -> String {
+        format!("{}{}", Self::SCHEME, crate::simd::hex::bytes_to_hex_32(hash))
+    }
+}
+
+/// A cursor over a source, for readers that want `Read + Seek`.
+pub struct Reader {
+    src: Arc<dyn MediaSource>,
+    pos: u64,
+}
+
+pub fn reader(src: Arc<dyn MediaSource>) -> Reader {
+    Reader { src, pos: 0 }
+}
+
+impl Read for Reader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.src.read_at(self.pos, buf)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for Reader {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let next = match to {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::End(d) => i128::from(self.src.len()) + i128::from(d),
+            SeekFrom::Current(d) => i128::from(self.pos) + i128::from(d),
+        };
+        if next < 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"));
+        }
+        self.pos = u64::try_from(next).unwrap_or(u64::MAX);
+        Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ref_is_a_held_hash_or_a_file() {
+        let hash = [0xabu8; 32];
+        let held = MediaRef::held(&hash);
+        assert_eq!(MediaRef::parse(&held), Some(MediaRef::Held(hash)));
+        assert_eq!(MediaRef::parse("/dl/photo.jpg"), Some(MediaRef::File("/dl/photo.jpg".into())));
+        assert_eq!(MediaRef::parse("vmedia:nothex"), None);
+        assert_eq!(MediaRef::parse("vmedia:"), None);
+    }
+
+    #[test]
+    fn the_reader_reads_and_seeks_like_a_file() {
+        let ram = ram::MediaRam::default();
+        let data: Vec<u8> = (0..=255u8).collect();
+        let mut r = reader(ram.insert([9; 32], data.clone(), "audio/wav").unwrap());
+        let mut head = [0u8; 4];
+        r.read_exact(&mut head).unwrap();
+        assert_eq!(head, [0, 1, 2, 3]);
+        assert_eq!(r.seek(SeekFrom::End(-2)).unwrap(), 254);
+        let mut rest = Vec::new();
+        r.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, vec![254, 255]);
+        assert_eq!(r.seek(SeekFrom::Current(-100)).unwrap(), 156);
+        assert!(r.seek(SeekFrom::Current(-1000)).is_err());
+        assert_eq!(r.seek(SeekFrom::Start(9999)).unwrap(), 9999);
+        assert_eq!(r.read(&mut head).unwrap(), 0, "past the end reads nothing");
+    }
+}

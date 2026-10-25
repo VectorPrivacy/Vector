@@ -138,3 +138,60 @@ fn a_bad_tag_is_refused_and_leaves_no_plaintext() {
         assert!(open(&key, &other, &mut buf, &tag).is_err(), "len {len}: wrong nonce");
     }
 }
+
+#[test]
+fn the_keystream_opens_any_range_of_a_sealed_message() {
+    let key = [0x2cu8; 32];
+    let nonce = [0x91u8; 16];
+    let mut next = rng(0x5eed);
+    for len in [0usize, 1, 15, 16, 17, 255, 4096, 70_001] {
+        let pt: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        let (ct, _) = reference(&key, &nonce, &pt);
+        let mut ranges: Vec<(usize, usize)> = vec![(0, len), (0, 0), (len, len)];
+        for edge in [15usize, 16, 17, 32] {
+            if edge <= len {
+                ranges.push((edge, len));
+                ranges.push((0, edge));
+            }
+        }
+        for _ in 0..40 {
+            if len == 0 {
+                break;
+            }
+            let a = (next() as usize) % len;
+            let b = a + (next() as usize) % (len - a + 1);
+            ranges.push((a, b));
+        }
+        let mut keystream = Keystream::new(&key, &nonce);
+        for (a, b) in ranges {
+            let mut part = ct[a..b].to_vec();
+            keystream.apply_at(a as u64, &mut part).unwrap();
+            assert!(part == pt[a..b], "len {len} range {a}..{b}");
+        }
+    }
+}
+
+#[test]
+fn the_keystream_wraps_its_counter_like_a_whole_pass() {
+    let key = [7u8; 32];
+    for start in [u32::MAX - 20, u32::MAX - 1, u32::MAX, 0] {
+        let mut j0 = ghash::Block::default();
+        j0[..12].copy_from_slice(&[0xa5; 12]);
+        j0[12..].copy_from_slice(&start.to_be_bytes());
+        let mut whole = vec![0u8; 16 + 1024];
+        ctr::Ctr32BE::<Aes256>::new(&key.into(), &j0).apply_keystream(&mut whole);
+        for (offset, len) in [(0usize, 1024usize), (1, 31), (15, 2), (16, 16), (300, 700), (1023, 1)] {
+            let mut got = vec![0u8; len];
+            Keystream::from_j0(&key, &j0).apply_at(offset as u64, &mut got).unwrap();
+            assert!(got == whole[16 + offset..16 + offset + len], "start {start:#x} at {offset}+{len}");
+        }
+    }
+}
+
+#[test]
+fn the_keystream_refuses_to_run_past_the_longest_message() {
+    let mut keystream = Keystream::new(&[1u8; 32], &[2u8; 16]);
+    assert_eq!(keystream.apply_at(u64::MAX, &mut [0u8; 1]), Err(PastTheEnd));
+    assert_eq!(keystream.apply_at(1 << 40, &mut [0u8; 1]), Err(PastTheEnd));
+    assert!(keystream.apply_at(5, &mut [0u8; 4]).is_ok(), "and still works afterwards");
+}

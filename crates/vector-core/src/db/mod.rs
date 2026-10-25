@@ -694,6 +694,7 @@ impl Session {
             stopped: SessionStop::default(),
         });
         crate::transport::prefs::attach(&s);
+        crate::media::ram::attach(&s);
         s
     }
 
@@ -714,6 +715,7 @@ impl Session {
             stopped: SessionStop::default(),
         });
         crate::transport::prefs::attach(&s);
+        crate::media::ram::attach(&s);
         s
     }
 
@@ -1136,6 +1138,7 @@ fn install(next: Arc<Session>) {
         let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
         if current.id != next.id {
             current.stop();
+            crate::media::ram::clear_for(&current);
         }
         let prev = current.id;
         let next_id = next.id;

@@ -88,6 +88,7 @@ pub mod proxy;
 pub mod negentropy;
 pub mod dm_catchup;
 pub mod blossom;
+pub mod media;
 pub mod blossom_servers;
 pub mod blossom_capabilities;
 pub mod blossom_error;

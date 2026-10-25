@@ -57,11 +57,22 @@ pub fn decrypt_file(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) -> R
 /// [`decrypt_file`], telling `progress` each new whole percentage of the file opened.
 /// `progress` answering false stops the pass, as for [`encrypt_file_with_progress`].
 pub fn decrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
-    let result = decrypt_file_inner(src, dst, key_hex, nonce_hex, progress);
+    let result = decrypt_file_inner(src, Some(dst), key_hex, nonce_hex, progress);
     if result.is_err() {
         let _ = std::fs::remove_file(dst);
     }
     result
+}
+
+/// What [`decrypt_file`] learns about `src`, with no plaintext written anywhere: the tag
+/// verdict, both hashes and the length. For ciphertext that stays ciphertext on disk.
+pub fn verify_file(src: &Path, key_hex: &str, nonce_hex: &str) -> Result<StreamedFile, String> {
+    verify_file_with_progress(src, key_hex, nonce_hex, &mut |_| true)
+}
+
+/// [`verify_file`], reporting progress as [`decrypt_file_with_progress`] does.
+pub fn verify_file_with_progress(src: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
+    decrypt_file_inner(src, None, key_hex, nonce_hex, progress)
 }
 
 /// Encrypt `src` into `dst` (ciphertext || tag), the counterpart of [`decrypt_file`].
@@ -135,7 +146,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
     Ok((hex32(&blob_hash.finalize()), len + 16))
 }
 
-fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
+fn decrypt_file_inner(src: &Path, dst: Option<&Path>, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
     let (mut key, nonce) = super::attachment_params(key_hex, nonce_hex, "Invalid decryption key")?;
     let mut input = std::fs::File::open(src).map_err(|e| format!("open download: {e}"))?;
     let total = input.metadata().map_err(|e| format!("stat download: {e}"))?.len();
@@ -152,10 +163,13 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
 
     let mut source_hash = Sha256::new();
     let mut output_hash = Sha256::new();
-    let mut output = std::io::BufWriter::with_capacity(
-        CHUNK,
-        std::fs::File::create(dst).map_err(|e| format!("create output: {e}"))?,
-    );
+    let mut output = match dst {
+        Some(dst) => Some(std::io::BufWriter::with_capacity(
+            CHUNK,
+            std::fs::File::create(dst).map_err(|e| format!("create output: {e}"))?,
+        )),
+        None => None,
+    };
 
     let mut buf = vec![0u8; CHUNK];
     let mut remaining = ciphertext_len;
@@ -166,7 +180,9 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
         source_hash.update(&*chunk);
         gcm.decrypt(chunk);
         output_hash.update(&*chunk);
-        output.write_all(chunk).map_err(|e| format!("write output: {e}"))?;
+        if let Some(output) = output.as_mut() {
+            output.write_all(chunk).map_err(|e| format!("write output: {e}"))?;
+        }
         remaining -= n as u64;
         if !report(ciphertext_len - remaining, ciphertext_len, &mut reported, progress) {
             return Err(CANCELLED.to_string());
@@ -181,8 +197,10 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
         return Err("Decryption failed: aead::Error (authentication tag mismatch)".to_string());
     }
 
-    let file = output.into_inner().map_err(|e| format!("write output: {e}"))?;
-    file.sync_all().map_err(|e| format!("sync output: {e}"))?;
+    if let Some(output) = output {
+        let file = output.into_inner().map_err(|e| format!("write output: {e}"))?;
+        file.sync_all().map_err(|e| format!("sync output: {e}"))?;
+    }
     Ok(StreamedFile {
         source_sha256: hex32(&source_hash.finalize()),
         output_sha256: hex32(&output_hash.finalize()),
@@ -290,6 +308,51 @@ mod tests {
         for len in [0, 1, 15, 16, 17, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 7] {
             roundtrip(len);
         }
+    }
+
+    #[test]
+    fn a_verify_pass_learns_what_a_decrypt_does_and_writes_nothing() {
+        for len in [0usize, 17, CHUNK + 1] {
+            let dir = scratch(&format!("verify{len}"));
+            let plain: Vec<u8> = (0..len).map(|i| (i * 13 % 241) as u8).collect();
+            let params = crate::crypto::generate_encryption_params();
+            let sealed = crate::crypto::encrypt_data(&plain, &params).unwrap();
+            let src = dir.join("blob");
+            std::fs::write(&src, &sealed).unwrap();
+
+            let got = verify_file(&src, &params.key, &params.nonce).unwrap();
+            assert_eq!(got.output_sha256, crate::crypto::sha256_hex(&plain));
+            assert_eq!(got.source_sha256, crate::crypto::sha256_hex(&sealed));
+            assert_eq!(got.output_len, len as u64);
+            let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert_eq!(left, vec![std::ffi::OsString::from("blob")], "nothing beside the blob at {len} bytes");
+        }
+    }
+
+    #[test]
+    fn a_verify_pass_refuses_a_wrong_key_tamper_and_truncation() {
+        let dir = scratch("verifybad");
+        let plain = vec![0x42u8; CHUNK + 33];
+        let params = crate::crypto::generate_encryption_params();
+        let sealed = crate::crypto::encrypt_data(&plain, &params).unwrap();
+        let src = dir.join("blob");
+
+        let mut tampered = sealed.clone();
+        tampered[CHUNK + 3] ^= 1;
+        std::fs::write(&src, &tampered).unwrap();
+        assert!(verify_file(&src, &params.key, &params.nonce).unwrap_err().contains("aead"));
+
+        std::fs::write(&src, &sealed[..sealed.len() - 1]).unwrap();
+        assert!(verify_file(&src, &params.key, &params.nonce).is_err(), "a truncated blob");
+        std::fs::write(&src, &sealed[..10]).unwrap();
+        assert!(verify_file(&src, &params.key, &params.nonce).is_err(), "shorter than its tag");
+
+        std::fs::write(&src, &sealed).unwrap();
+        let other = crate::crypto::generate_encryption_params();
+        assert!(verify_file(&src, &other.key, &params.nonce).unwrap_err().contains("aead"));
+        let mut stop = |pct: u8| pct < 50;
+        assert_eq!(verify_file_with_progress(&src, &params.key, &params.nonce, &mut stop).unwrap_err(), CANCELLED);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the blob, whatever happened");
     }
 
     #[test]
