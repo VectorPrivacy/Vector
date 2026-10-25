@@ -533,6 +533,10 @@ async fn cache_embed_video(url: &str, sha256: Option<&str>, fallbacks: Vec<Strin
     }
     // Reused only for the same link and the same promised hash.
     let stem = &vector_core::crypto::sha256_hex(format!("{url}\n{}", sha256.unwrap_or("").to_ascii_lowercase()).as_bytes())[..32];
+    let held = vector_core::media::url_key("embed-video", stem);
+    if vector_core::media::ram::cache().contains(&held) {
+        return Ok(vector_core::media::MediaRef::held(&held));
+    }
     for ext in ["mp4", "webm", "mov"] {
         let path = format!("/cache/embed_videos/{stem}.{ext}");
         if vector_core::webfiles::exists(Path::new(&path)).await {
@@ -567,8 +571,20 @@ async fn cache_embed_video(url: &str, sha256: Option<&str>, fallbacks: Vec<Strin
         if sha256.is_some_and(|h| !vector_core::crypto::sha256_hex(&body).eq_ignore_ascii_case(h)) {
             return Err("The video doesn't match the post's fingerprint".into());
         }
-        let path = format!("/cache/embed_videos/{stem}.{ext}");
-        vector_core::webfiles::write(Path::new(&path), &body).await?;
+        // A video in a chat follows the attachment rules: held in memory when it fits and the
+        // account doesn't keep media.
+        let ram = vector_core::media::ram::cache();
+        let in_memory = !vector_core::media::keep_media() && ram.admits(body.len() as u64);
+        drop(ram);
+        let path = if in_memory {
+            vector_core::media::ram::insert(held, body, vector_core::crypto::mime_from_extension(ext))
+                .map_err(|_| "Too much media is open to play this one".to_string())?;
+            vector_core::media::MediaRef::held(&held)
+        } else {
+            let path = format!("/cache/embed_videos/{stem}.{ext}");
+            vector_core::webfiles::write(Path::new(&path), &body).await?;
+            path
+        };
         vector_core::emit_event("embed_video_progress", &json!({ "url": url, "progress": 100 }));
         return Ok(path);
     }
@@ -582,6 +598,10 @@ async fn embed_video_preview(url: &str, sha256: Option<&str>) -> Result<String, 
         return Err("Not a web video".into());
     }
     let stem = &vector_core::crypto::sha256_hex(format!("{url}\n{}", sha256.unwrap_or("").to_ascii_lowercase()).as_bytes())[..32];
+    let whole = vector_core::media::url_key("embed-video", stem);
+    if vector_core::media::ram::cache().contains(&whole) {
+        return Ok(vector_core::media::MediaRef::held(&whole));
+    }
     for name in [stem.to_string(), format!("{stem}-poster")] {
         for ext in ["mp4", "webm", "mov"] {
             let path = format!("/cache/embed_videos/{name}.{ext}");
@@ -590,7 +610,16 @@ async fn embed_video_preview(url: &str, sha256: Option<&str>) -> Result<String, 
             }
         }
     }
+    let held = vector_core::media::url_key("embed-poster", stem);
+    if vector_core::media::ram::cache().contains(&held) {
+        return Ok(vector_core::media::MediaRef::held(&held));
+    }
     let poster = vector_core::video_poster::fetch(url).await?;
+    if !vector_core::media::keep_media() {
+        vector_core::media::ram::insert(held, poster.bytes, vector_core::crypto::mime_from_extension(poster.ext))
+            .map_err(|_| "Too much media is open to show this one".to_string())?;
+        return Ok(vector_core::media::MediaRef::held(&held));
+    }
     let path = format!("/cache/embed_videos/{stem}-poster.{}", poster.ext);
     vector_core::webfiles::write(Path::new(&path), &poster.bytes).await?;
     Ok(path)

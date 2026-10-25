@@ -13,7 +13,8 @@ const { openUrl: openUrlDirect, revealItemInDir } = window.__TAURI__.opener;
  * @returns {string}
  */
 function convertFileSrc(path) {
-    if (path?.startsWith('vmedia:')) return platformFeatures?.vmedia ? `${platformFeatures.vmedia}/${path.slice(7)}` : '';
+    // Vector Web has no vmedia scheme: its shim turns a ref into the worker's bytes.
+    if (path?.startsWith('vmedia:') && platformFeatures?.vmedia) return `${platformFeatures.vmedia}/${path.slice(7)}`;
     return vcacheSrc(path) ?? assetSrc(path);
 }
 

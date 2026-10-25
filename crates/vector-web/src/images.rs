@@ -164,9 +164,13 @@ fn thumb(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A displayable src for `url`: the local copy's path.
+/// A displayable src for `url`: the local copy's path, or a picture in a chat held in memory
+/// while the account doesn't keep media.
 pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     vector_core::net::validate_url_not_private(url).map_err(str::to_string)?;
+    if kind == Kind::InlineImage && !vector_core::media::keep_media() {
+        return hold(url).await;
+    }
     if let Some(path) = remembered(url, kind) {
         defuse(&path, kind).await;
         return Ok(path);
@@ -186,6 +190,22 @@ pub async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     let path = result?;
     remember(url, kind, &path);
     Ok(path)
+}
+
+/// Fetch a picture into memory under its link: what a chat shows follows the attachment rules.
+async fn hold(url: &str) -> Result<String, String> {
+    let key = vector_core::media::url_key("inline-image", url);
+    if vector_core::media::ram::cache().contains(&key) {
+        return Ok(vector_core::media::MediaRef::held(&key));
+    }
+    let bytes = vector_core::rt::time::timeout(FETCH_BUDGET, fetch(url, MAX_BYTES))
+        .await
+        .unwrap_or_else(|_| Err("timed out".into()))?;
+    let bytes = if vector_core::svg::looks_like_svg(&bytes) { vector_core::svg::rasterize_png(&bytes, Kind::InlineImage.svg_dim())? } else { bytes };
+    let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
+    extension_for(mime).ok_or("Not an image")?;
+    vector_core::media::ram::insert(key, bytes, mime).map_err(|_| "Too much media is open to show this one".to_string())?;
+    Ok(vector_core::media::MediaRef::held(&key))
 }
 
 async fn fetch_and_store(url: &str, kind: Kind) -> Result<String, String> {
