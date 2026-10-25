@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 116;
+pub const HIGHEST_MIGRATION_ID: u32 = 117;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1613,6 +1613,32 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 116: {e}"))?;
+        Ok(())
+    })?;
+
+    // Files this account keeps, as the ciphertext they arrived as, under `media/`. Each row holds
+    // the key and nonce that open its file (sealed under Local Encryption); `chunk_size` and
+    // `have` are for media that streams in parts.
+    run_atomic_migration(conn, 117, "Media store", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS media_store (
+                hash        TEXT PRIMARY KEY,
+                file        TEXT NOT NULL,
+                format      TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                nonce       TEXT NOT NULL,
+                blob_sha256 TEXT NOT NULL,
+                pt_len      INTEGER NOT NULL,
+                mime        TEXT NOT NULL DEFAULT '',
+                origin      TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                used_at     INTEGER NOT NULL,
+                missing_at  INTEGER,
+                chunk_size  INTEGER,
+                have        BLOB
+            );",
+        )
+        .map_err(|e| format!("migration 117: {e}"))?;
         Ok(())
     })?;
 

@@ -797,7 +797,29 @@ pub async fn retry_failed_community_message(message_id: String) -> Result<bool, 
         if !failed {
             return Err("Message is not failed or does not exist".to_string());
         }
-        Ok(vector_core::community::v2::service::retry_unconfirmed(&message_id).await)
+        if vector_core::community::v2::service::retry_unconfirmed(&message_id).await {
+            return Ok(true);
+        }
+        // Nothing was wrapped: an upload failed first. The files go again as they are (the
+        // first send already processed them), from whatever this device still holds of them.
+        let failed = {
+            let state = vector_core::state::STATE.lock().await;
+            state.find_message(&message_id).map(|(chat, m)| (chat.id().to_string(), m))
+        };
+        let Some((channel_id, msg)) = failed.filter(|(_, m)| !m.attachments.is_empty()) else {
+            return Ok(false);
+        };
+        let mut prepared = Vec::with_capacity(msg.attachments.len());
+        for att in &msg.attachments {
+            let source = crate::message::sending::retry_source(att)
+                .ok_or_else(|| crate::message::sending::RETRY_FILE_MISSING.to_string())?;
+            let plain_len = att.size.saturating_sub(16);
+            prepared.push(stage_community_attachment(source, plain_len, att.id.clone(), att.extension.clone(), att.name.clone(), att.img_meta.clone()));
+        }
+        crate::message::sending::remove_failed_message(&message_id, false).await?;
+        let replied_to = (!msg.replied_to.is_empty()).then_some(msg.replied_to);
+        dispatch_community_attachment_message(channel_id, msg.content, replied_to, prepared).await?;
+        Ok(true)
     })
     .await
 }
@@ -920,13 +942,24 @@ fn stage_community_attachment(
     plain: FileSource,
     plain_len: u64,
     plaintext_hash: String,
-    local_path: std::path::PathBuf,
     extension: String,
     name: String,
     img_meta: Option<vector_core::types::ImageMetadata>,
 ) -> PreparedCommunityAttachment {
-    let params = vector_core::crypto::generate_encryption_params();
+    // A kept seal goes again under the key it was sealed with.
+    let params = match &plain {
+        FileSource::Sealed { key, nonce, .. } => vector_core::crypto::EncryptionParams { key: key.clone(), nonce: nonce.clone() },
+        _ => vector_core::crypto::generate_encryption_params(),
+    };
     let mime = vector_core::crypto::mime_from_extension(&extension).to_string();
+    let hash = vector_core::simd::hex::hex_to_bytes_32(&plaintext_hash);
+    match &plain {
+        FileSource::Bytes(bytes) => {
+            let _ = vector_core::media::ram::insert(hash, bytes.to_vec(), &mime);
+        }
+        FileSource::Path(path) | FileSource::Saved(path) => vector_core::media::pending::plain(hash, path.clone(), &mime),
+        FileSource::Sealed { path, key, nonce, .. } => vector_core::media::pending::sealed(hash, path.clone(), key, nonce, &mime),
+    }
 
     // Mini Apps: mint the realtime topic at send time so every member joins the
     // same gossip topic — it rides the imeta (see vector_core::webxdc).
@@ -944,12 +977,13 @@ fn stage_community_attachment(
         extension,
         name,
         url: String::new(), // filled in once the upload completes, or by a reused blob
-        path: local_path.to_string_lossy().to_string(),
+        // No copy of its own: the bubble reads the sender's bytes, and only a kept blob stays.
+        path: String::new(),
         // AES-GCM appends a 16-byte tag, so the sealed size is known before sealing.
         size: plain_len + 16,
         img_meta,
         downloading: false,
-        downloaded: true, // plaintext already on disk for the sender
+        downloaded: false,
         verified: true, resident: false,
         webxdc_topic,
         group_id: None,
@@ -959,8 +993,8 @@ fn stage_community_attachment(
     PreparedCommunityAttachment { attachment, plain, mime }
 }
 
-/// Prepare a file that needs no processing straight from disk: hashed, copied into
-/// the download folder and sealed file to file, so its size costs no memory.
+/// Prepare a file that needs no processing straight from disk: hashed where it lies and
+/// sealed file to file, so its size costs no memory and no copy is made.
 async fn process_outbound_community_attachment_path(
     path: std::path::PathBuf,
     name: String,
@@ -970,37 +1004,14 @@ async fn process_outbound_community_attachment_path(
         .and_then(|e| e.to_str())
         .unwrap_or("bin")
         .to_lowercase();
-    let dir = vector_core::db::get_download_dir();
-    let ext = extension.clone();
-    let (plaintext_hash, local_path) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let (hash, len) = vector_core::crypto::stream::hash_file(&path)?;
-        if len == 0 {
-            return Err("Empty attachment".to_string());
-        }
-        // The local copy, keyed by hash like the inbound path's: a file copy, a clone
-        // where the filesystem has them.
-        let _ = std::fs::create_dir_all(&dir);
-        let local = dir.join(format!("{}.{}", hash, ext));
-        // Reused only when it really is these bytes: an edited or truncated copy under the
-        // hash's name would be sealed and sent as this file.
-        let intact = std::fs::metadata(&local).is_ok_and(|m| m.len() == len)
-            && vector_core::crypto::stream::hash_file(&local).is_ok_and(|(h, _)| h == hash);
-        if !intact {
-            // Named for this send: two sends of the same file must not share one.
-            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let tmp = dir.join(format!(".{}.{}.{}.tmp", hash, nonce, ext));
-            std::fs::copy(&path, &tmp).map_err(|e| format!("read attachment: {e}"))?;
-            if let Err(e) = std::fs::rename(&tmp, &local) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(format!("save attachment: {e}"));
-            }
-        }
-        Ok((hash, local))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let plain_len = std::fs::metadata(&local_path).map(|m| m.len()).map_err(|e| format!("read attachment: {e}"))?;
-    Ok(stage_community_attachment(FileSource::Path(local_path.clone()), plain_len, plaintext_hash, local_path, extension, name, None))
+    let source = path.clone();
+    let (plaintext_hash, plain_len) = tokio::task::spawn_blocking(move || vector_core::crypto::stream::hash_file(&source))
+        .await
+        .map_err(|e| e.to_string())??;
+    if plain_len == 0 {
+        return Err("Empty attachment".to_string());
+    }
+    Ok(stage_community_attachment(FileSource::Path(path), plain_len, plaintext_hash, extension, name, None))
 }
 
 /// Encrypt a single outbound file (raw bytes + filename) for a Community message.
@@ -1033,10 +1044,9 @@ async fn process_outbound_community_attachment_bytes(
 
     // Process image bytes per the compress + keep-metadata choice: strips EXIF
     // by default, keeps orientation, and re-attaches metadata when kept. GIFs and
-    // non-images pass through untouched. Parity with DM sends. Hashing and the
-    // local save ride the same blocking task: each is a full pass over the bytes.
-    let dir = vector_core::db::get_download_dir();
-    let (bytes, img_meta, extension, plaintext_hash, local_path) = tokio::task::spawn_blocking(move || {
+    // non-images pass through untouched. Parity with DM sends. Hashing rides the
+    // same blocking task: each is a full pass over the bytes.
+    let (bytes, img_meta, extension, plaintext_hash) = tokio::task::spawn_blocking(move || {
         let (bytes, img_meta) = if is_image {
             let processed = crate::message::compression::process_image_for_send(
                 std::sync::Arc::new(bytes), &extension, use_compression, keep_metadata, precompressed,
@@ -1047,20 +1057,13 @@ async fn process_outbound_community_attachment_bytes(
             (bytes, None)
         };
         let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
-        // Save the plaintext locally (keyed by hash, matching the inbound path convention)
-        // so the sender's optimistic bubble renders immediately as a downloaded file.
-        let _ = std::fs::create_dir_all(&dir);
-        let local_path = dir.join(format!("{}.{}", plaintext_hash, extension));
-        if !local_path.exists() {
-            let _ = std::fs::write(&local_path, &bytes);
-        }
-        Ok::<_, String>((bytes, img_meta, extension, plaintext_hash, local_path))
+        Ok::<_, String>((bytes, img_meta, extension, plaintext_hash))
     })
     .await
     .map_err(|e| e.to_string())??;
 
     let plain_len = bytes.len() as u64;
-    Ok(stage_community_attachment(FileSource::Bytes(std::sync::Arc::new(bytes)), plain_len, plaintext_hash, local_path, extension, name, img_meta))
+    Ok(stage_community_attachment(FileSource::Bytes(std::sync::Arc::new(bytes)), plain_len, plaintext_hash, extension, name, img_meta))
 }
 
 /// Post a Community message carrying a caption (`content`, may be empty) plus one or more
@@ -1247,8 +1250,9 @@ async fn dispatch_community_attachment_message(
                     return Err(e);
                 }
             };
-            // `_sealed_file` outlives the upload below, then takes its ciphertext file with it.
-            let (encrypted, _sealed_file) = match sealed {
+            // `sealed_file` outlives the upload below, then takes its ciphertext file with it,
+            // unless a failed upload keeps it for the retry.
+            let (encrypted, sealed_file) = match sealed {
                 // Smart-forward: the attachment now references a live blob — no
                 // upload, no fan-out; the send is just the message. A foreign blob
                 // gets a background mirror as availability insurance.
@@ -1288,6 +1292,7 @@ async fn dispatch_community_attachment_message(
                     )
                 });
 
+            let body = encrypted.clone();
             let accepted = match vector_core::blossom::upload_body_with_progress_and_failover(
                 signer.clone(),
                 servers.clone(),
@@ -1304,10 +1309,19 @@ async fn dispatch_community_attachment_message(
                 Ok(url) => url,
                 Err(e) => {
                     vector_core::log_net_fail!("[Community Upload] attachment upload failed (channel {}…): {}", &channel_id[..8.min(channel_id.len())], e);
+                    if !cancel_flag.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+                        vector_core::sending::keep_for_retry(&body, sealed_file, &attachment.id, &attachment.key, &attachment.nonce, &pending_id, &mime);
+                    }
                     let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
                     return Err(format!("Upload failed: {e}"));
                 }
             };
+            // The account keeps media: the blob just uploaded is the copy it keeps.
+            if vector_core::media::keep_media()
+                && vector_core::sending::keep_sent(&body, &attachment.id, &attachment.key, &attachment.nonce, attachment.size.saturating_sub(16), &mime)
+            {
+                attachment.downloaded = true;
+            }
             let upload_url = accepted.url.clone();
 
             attachment.url = upload_url.clone();
@@ -1390,13 +1404,14 @@ async fn dispatch_community_attachment_message(
                     // back from Blossom, which on a slow transport shows as a file that sits
                     // in a downloading state for minutes after sending. The DB upsert already
                     // applies this rule via `downloaded=MAX(...)`; STATE needs it too.
-                    for local in uploaded.iter().filter(|u| u.downloaded) {
-                        let path = local.path.clone();
+                    for local in &uploaded {
                         state.update_attachment(&channel_id, &real_id, &local.id, |a| {
-                            a.set_downloaded(true);
                             a.set_verified(local.verified);
                             a.set_downloading(false);
-                            a.set_path(path.clone());
+                            if local.downloaded {
+                                a.set_downloaded(true);
+                                a.set_path(local.path.clone());
+                            }
                         });
                     }
                     state.find_message(&real_id).map(|(_, m)| m.clone())

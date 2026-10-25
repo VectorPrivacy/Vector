@@ -11,7 +11,6 @@ use tauri::Emitter;
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
 use crate::{util, net, db};
-use crate::util::hex_string_to_bytes;
 
 /// Global set of attachment IDs currently being downloaded.
 /// Prevents duplicate download threads for the same file (deduplication).
@@ -376,14 +375,13 @@ enum Verdict {
 /// Check a finished download against its content address and the sender's claim,
 /// decrypting it into `staging` in the same pass. Returns the plaintext's path,
 /// hash and length. Runs on a blocking thread: each step is a pass over the file.
-fn verify_download(
+fn verify_part(
     part: &std::path::Path,
-    staging: &std::path::Path,
     url: &str,
     attachment: &Attachment,
     progress: &mut dyn FnMut(u8) -> bool,
-) -> Result<(std::path::PathBuf, String, u64), Verdict> {
-    use vector_core::crypto::stream::{decrypt_file_with_progress, hash_file};
+) -> Result<(String, u64, String), Verdict> {
+    use vector_core::crypto::stream::{hash_file, verify_file_with_progress};
     let address = vector_core::blossom::blob_hash(url);
     let len = std::fs::metadata(part).map(|m| m.len()).map_err(|e| Verdict::Fatal(e.to_string()))?;
 
@@ -395,20 +393,19 @@ fn verify_download(
         if address.as_deref().is_some_and(|a| a != hash) || claim.is_some_and(|c| c != hash) {
             return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
         }
-        return Ok((part.to_path_buf(), hash, len));
+        return Ok((hash.clone(), len, hash));
     }
 
     // Anything sealed carries at least its 16-byte tag.
     if len < 16 {
         return Err(Verdict::BadSource(format!("Downloaded file too small ({} bytes)", len)));
     }
-    match decrypt_file_with_progress(part, staging, &attachment.key, &attachment.nonce, progress) {
+    match verify_file_with_progress(part, &attachment.key, &attachment.nonce, progress) {
         Ok(done) => {
             if address.as_deref().is_some_and(|a| a != done.source_sha256) {
-                let _ = std::fs::remove_file(staging);
                 return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
             }
-            Ok((staging.to_path_buf(), done.output_sha256, done.output_len))
+            Ok((done.output_sha256, done.output_len, done.source_sha256))
         }
         Err(e) if e == vector_core::crypto::stream::CANCELLED => Err(Verdict::Cancelled),
         Err(e) if e.contains("aead") => {
@@ -423,6 +420,32 @@ fn verify_download(
         }
         Err(e) => Err(Verdict::Fatal(e)),
     }
+}
+
+/// Keep a verified download: an encrypted blob moves into the store as it arrived; plaintext
+/// from an unencrypted source is sealed under fresh parameters first.
+fn keep_part(part: &std::path::Path, att: &Attachment, hash: &str, len: u64, blob_sha256: &str, mime: &str) -> Result<(), String> {
+    use vector_core::db::media_store::Origin;
+    use vector_core::media::store::{keep_file, Keep};
+    let hash = vector_core::simd::hex::hex_to_bytes_32(hash);
+    if !att.key.is_empty() && !att.nonce.is_empty() {
+        let keep = Keep {
+            hash, key: att.key.clone(), nonce: att.nonce.clone(), blob_sha256: blob_sha256.to_string(),
+            pt_len: len, mime: mime.to_string(), origin: Origin::Received,
+        };
+        return keep_file(part, keep);
+    }
+    let params = vector_core::crypto::generate_encryption_params();
+    let sealed = part.with_extension("sealing");
+    let (blob_sha256, _) = vector_core::crypto::stream::encrypt_file(part, &sealed, &params.key, &params.nonce)?;
+    let _ = std::fs::remove_file(part);
+    let keep = Keep {
+        hash, key: params.key.clone(), nonce: params.nonce.clone(), blob_sha256, pt_len: len,
+        mime: mime.to_string(), origin: Origin::Sealed,
+    };
+    keep_file(&sealed, keep).inspect_err(|_| {
+        let _ = std::fs::remove_file(&sealed);
+    })
 }
 
 /// Open a download held in memory: the source's content address, then the cipher, then the
@@ -715,6 +738,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         // What a bubble only shows is held in memory; what is kept goes to disk.
         let ram = vector_core::media::ram::cache();
         let in_memory = !keep && vector_core::media::previewable(&extension) && ram.admits(attachment.size);
+        // Viewed media is kept as well as held when the account keeps media.
+        let keep_viewed = in_memory && vector_core::media::keep_media();
         let memory_limit = if attachment.size > 0 { attachment.size + 64 * 1024 } else { ram.largest() };
         drop(ram);
 
@@ -756,8 +781,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let attachment_for_decrypt = attachment.to_attachment();
         let mut candidates: Vec<String> = vec![attachment.url.to_string()];
         candidates.extend(attachment.fallback_urls().iter().map(|u| u.to_string()));
-        let mut saved: Option<(std::path::PathBuf, String)> = None;
+        // Where the bytes landed: held in memory, or kept in the store.
         let mut held: Option<String> = None;
+        let mut kept: Option<String> = None;
         let mut last_error: String = "Download failed".to_string();
         let mut hash_swap_tried = false;
         // The source already given a fresh start: bytes it didn't serve can't condemn it twice.
@@ -818,14 +844,34 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     "progress": encrypted.then_some(0),
                 }));
                 let (bytes, url_for_check, att) = (fetched_bytes.take().unwrap_or_default(), url.clone(), attachment_for_decrypt.clone());
+                // The blob as it came, kept beside the held plaintext: opening decrypts in place.
+                let blob = keep_viewed.then(|| bytes.clone());
                 let opened = tokio::task::spawn_blocking(move || open_in_memory(bytes, &url_for_check, &att))
                     .await
                     .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
                 match opened {
                     Ok((plain, file_hash)) => {
                         let mime = vector_core::crypto::mime_from_extension(&extension);
-                        match vector_core::media::ram::insert(vector_core::simd::hex::hex_to_bytes_32(&file_hash), plain, mime) {
+                        let hash = vector_core::simd::hex::hex_to_bytes_32(&file_hash);
+                        if keep_viewed {
+                            let encrypted = !attachment_for_decrypt.key.is_empty() && !attachment_for_decrypt.nonce.is_empty();
+                            let kept_now = match blob {
+                                Some(blob) if encrypted => vector_core::media::store::keep_bytes(&blob, vector_core::media::store::Keep {
+                                    hash, key: attachment_for_decrypt.key.clone(), nonce: attachment_for_decrypt.nonce.clone(),
+                                    blob_sha256: vector_core::crypto::sha256_hex(&blob), pt_len: plain.len() as u64,
+                                    mime: mime.to_string(), origin: vector_core::db::media_store::Origin::Received,
+                                }),
+                                _ => vector_core::media::store::keep_sealed(&plain, hash, mime, vector_core::db::media_store::Origin::Sealed),
+                            };
+                            match kept_now {
+                                Ok(()) => kept = Some(file_hash.clone()),
+                                Err(e) => vector_core::log_net_fail!("[AttachmentDownload] shown, but couldn't keep it: {}", e),
+                            }
+                        }
+                        match vector_core::media::ram::insert(hash, plain, mime) {
                             Ok(_) => held = Some(file_hash),
+                            // Kept, so it shows from the store instead.
+                            Err(_) if kept.is_some() => {}
                             // No other mirror changes how much memory is free.
                             Err(vector_core::media::ram::Refused::Busy) => {
                                 last_error = "Too much media is open to show this one".to_string();
@@ -862,8 +908,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 }
             } else if fetched {
                 let (src, url_for_check, att) = (part.clone(), url.clone(), attachment_for_decrypt.clone());
-                // Named for this account too: the same file downloading in two can't share it.
-                let staging = vector_core::db::get_download_dir().join(format!(".{}.{}.download", attachment_hex_id, sid));
                 // The last byte is in, but the file isn't ready until it's opened: the
                 // bubble says so rather than sitting on a full bar.
                 let stage = |stage: &str, pct: Option<u8>| {
@@ -875,7 +919,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 stage(if encrypted { "decrypting" } else { "verifying" }, encrypted.then_some(0));
                 let (stage_handle, stage_id) = (handle.clone(), attachment_hex_id.clone());
                 let outcome = tokio::task::spawn_blocking(move || {
-                    verify_download(&src, &staging, &url_for_check, &att, &mut |pct| {
+                    verify_part(&src, &url_for_check, &att, &mut |pct| {
                         emit_for(sid, &stage_handle, "attachment_download_stage", serde_json::json!({
                             "id": &stage_id, "stage": "decrypting", "progress": pct,
                         }));
@@ -885,23 +929,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 .await
                 .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
                 match outcome {
-                    Ok((ready, file_hash, len)) => {
+                    Ok((file_hash, len, blob_sha256)) => {
                         stage("saving", None);
-                        let (name, extension) = (attachment_for_decrypt.name.clone(), attachment_for_decrypt.extension.clone());
-                        let hash = file_hash.clone();
-                        let ready_path = ready.clone();
-                        let placed = tokio::task::spawn_blocking(move || {
-                            vector_core::crypto::stream::place_download(&ready, &hash, len, &name, &extension)
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
+                        let (src, att, hash) = (part.clone(), attachment_for_decrypt.clone(), file_hash.clone());
+                        let mime = vector_core::crypto::mime_from_extension(&extension);
+                        let placed = tokio::task::spawn_blocking(move || keep_part(&src, &att, &hash, len, &blob_sha256, mime))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
                         net::discard_partial(&part);
                         match placed {
-                            Ok(path) => saved = Some((path, file_hash)),
+                            Ok(()) => kept = Some(file_hash),
                             // The bytes were right and this device couldn't keep them (full,
                             // no permission): another mirror's copy would fail the same way.
                             Err(e) => {
-                                if ready_path != part { let _ = std::fs::remove_file(&ready_path); }
                                 last_error = e;
                                 break;
                             }
@@ -948,7 +988,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 }
             }
 
-            if saved.is_some() || held.is_some() {
+            if held.is_some() || kept.is_some() {
                 break;
             }
 
@@ -984,13 +1024,42 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             }
         }
 
-        if let Some(file_hash) = held {
+        if let Some((file_hash, on_disk)) = kept.map(|h| (h, true)).or(held.map(|h| (h, false))) {
             let hash = vector_core::simd::hex::hex_to_bytes_32(&file_hash);
+            // A normal copy for an account that asked for one; what it views still shows from Vector.
+            let saved = if vector_core::media::save_to_downloads() && vector_core::media::previewable(&extension) {
+                let name = attachment.name().to_string();
+                let copy = tokio::task::spawn_blocking(move || crate::media_export::save_to_downloads(&hash, &name))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                match copy {
+                    Ok(path) => {
+                        #[cfg(target_os = "android")]
+                        crate::android::storage::scan_file(&path.to_string_lossy());
+                        Some(path.to_string_lossy().into_owned())
+                    }
+                    Err(e) => {
+                        vector_core::log_warn!("[AttachmentDownload] couldn't save a copy: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                 att.set_id(hash);
                 att.set_downloading(false);
                 att.set_verified(true);
+                // Kept in the store: a local copy with no path of its own.
+                if on_disk {
+                    att.set_downloaded(true);
+                    att.set_path(String::new());
+                }
+                if let Some(path) = &saved {
+                    att.set_downloaded(true);
+                    att.set_path(path.clone());
+                }
             });
             emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": npub,
@@ -1022,14 +1091,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     "chat_id": chat_id,
                 }));
             }
-            // The proven blob and its content id persist; the bytes themselves never do.
+            // The proven blob and its content id persist; held bytes never do.
             if let Some((_, message)) = found {
                 let _ = db::save_message(&npub, &message).await;
             }
             return true;
         }
 
-        if saved.is_none() && net::transfer_cancelled(&attachment_hex_id) {
+        if net::transfer_cancelled(&attachment_hex_id) {
             vector_core::log_info!(
                 "[AttachmentDownload] stopped by the user (msg {}, attachment {})",
                 msg_id, attachment_id
@@ -1053,143 +1122,29 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             return false;
         }
 
-        let Some((hash_file_path, file_hash)) = saved else {
-            // Every source is dead for now. Whatever arrived stays behind its
-            // checkpoint, and the outcome says how far a resume would start.
-            vector_core::log_net_fail!(
-                "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
-                last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
-            );
-            let mut state = STATE.lock().await;
-            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                att.set_downloading(false);
-                att.set_downloaded(false);
-            });
-            drop(state);
-            let paused = net::read_checkpoint(&part).filter(|c| c.offset > 0);
-            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
-                "profile_id": npub,
-                "msg_id": msg_id,
-                "id": attachment_id,
-                "success": false,
-                "result": last_error,
-                "resumeFrom": paused.map(|c| c.offset),
-                "total": paused.and_then(|c| c.total),
-            }));
-            return false;
-        };
-
-        // Update state with successful download
-        let path_str = hash_file_path.to_string_lossy().to_string();
-
-        // Index the file so it appears in the gallery / file managers now.
-        #[cfg(target_os = "android")]
-        crate::android::storage::scan_file(&path_str);
-
-        {
-            let mut state = STATE.lock().await;
-            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                // Update ID from nonce to hash
-                if let Ok(hash) = <[u8; 32]>::try_from(hex_string_to_bytes(&file_hash).as_slice()) {
-                    att.set_id(hash);
-                }
-                att.set_downloading(false);
-                att.set_downloaded(true);
-                att.set_verified(true);
-                att.set_path(path_str.clone());
-            });
-
-            // Emit the finished download with both old and new IDs
-            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
-                "profile_id": npub,
-                "msg_id": msg_id,
-                "old_id": attachment_id,
-                "id": file_hash,
-                "success": true,
-                "result": &path_str,
-            }));
-
-            // Persist updated message/attachment metadata to the database
-            if let Some(handle) = TAURI_APP.get() {
-                // Chat/message can vanish mid-download (deletion race, swap
-                // remnants) — skip persistence rather than panic.
-                let found = state.get_chat(&npub).and_then(|chat| {
-                    let chat_id = chat.id().clone();
-                    chat.messages.find_by_hex_id(&msg_id)
-                        .map(|m| (chat_id, m.to_message(&state.interner)))
-                });
-                let Some((chat_id, updated_message)) = found else {
-                    drop(state);
-                    return true;
-                };
-
-                // Update the frontend state
-                emit_for(sid, handle, "message_update", serde_json::json!({
-                    "old_id": &updated_message.id,
-                    "message": &updated_message,
-                    "chat_id": &chat_id
-                }));
-
-                // In-memory backfill: update EVERY resident message sharing the
-                // attachment hash — across ALL chats, not just this one. The same
-                // file forwarded between a DM and a Community (smart-forward's
-                // whole point) has copies in both; the DB backfill below covers
-                // disk, but a chat already loaded in STATE would keep offering a
-                // download for a file that's on disk until reopened.
-                // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
-                let hash_bytes = hex_string_to_bytes(&file_hash);
-                let mut backfilled: Vec<(String, String)> = Vec::new(); // (chat_id, msg_id)
-                for chat_mut in state.chats.iter_mut() {
-                    let cid = chat_mut.id.clone();
-                    for compact_msg in chat_mut.messages.iter_mut() {
-                        if compact_msg.id_hex() == msg_id { continue; }
-                        let mut changed = false;
-                        for att in compact_msg.attachments.iter_mut() {
-                            if att.id().as_slice() == hash_bytes.as_slice() && !att.downloaded() {
-                                att.set_downloading(false);
-                                att.set_downloaded(true);
-                                att.set_path(path_str.clone());
-                                changed = true;
-                            }
-                        }
-                        if changed {
-                            backfilled.push((cid.clone(), compact_msg.id_hex()));
-                        }
-                    }
-                }
-                // Emit message_update for each backfilled message, into ITS chat.
-                for (backfill_chat, backfill_id) in &backfilled {
-                    if let Some(chat_ref) = state.get_chat(backfill_chat) {
-                        if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
-                            let backfill_msg = compact_msg.to_message(&state.interner);
-                            emit_for(sid, handle, "message_update", serde_json::json!({
-                                "old_id": &backfill_msg.id,
-                                "message": &backfill_msg,
-                                "chat_id": backfill_chat
-                            }));
-                        }
-                    }
-                }
-
-                // Drop the STATE lock before performing async I/O
-                drop(state);
-
-                let _ = db::save_message(&npub, &updated_message).await;
-
-                // Backfill other messages with the same attachment hash
-                let file_hash_clone = file_hash.clone();
-                let path_str_clone = path_str.clone();
-                let msg_id_clone = msg_id.clone();
-                let _ = db::backfill_attachment_downloaded_status(
-                    &file_hash_clone,
-                    true,
-                    &path_str_clone,
-                    &msg_id_clone,
-                );
-            }
-        }
-
-        true
+        // Every source is dead for now. Whatever arrived stays behind its
+        // checkpoint, and the outcome says how far a resume would start.
+        vector_core::log_net_fail!(
+            "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
+            last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
+        );
+        let mut state = STATE.lock().await;
+        state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+            att.set_downloading(false);
+            att.set_downloaded(false);
+        });
+        drop(state);
+        let paused = net::read_checkpoint(&part).filter(|c| c.offset > 0);
+        emit_for(sid, handle, "attachment_download_result", serde_json::json!({
+            "profile_id": npub,
+            "msg_id": msg_id,
+            "id": attachment_id,
+            "success": false,
+            "result": last_error,
+            "resumeFrom": paused.map(|c| c.offset),
+            "total": paused.and_then(|c| c.total),
+        }));
+        false
     })
     .await
 }

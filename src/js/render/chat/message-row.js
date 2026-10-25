@@ -684,8 +684,8 @@ async function _dmsgOpenFile(att, msg) {
     } else if (platformFeatures.os === 'android') {
         // No file manager to reveal into: open the file itself (an .apk routes through the installer).
         openAndroidAttachment(path, att.name);
-    } else if (att.resident && !att.downloaded) {
-        // Held in memory, so there is no file to reveal: saving writes one.
+    } else if (att.resident) {
+        // Held by Vector, so there is no file of its own to reveal: saving writes one.
         saveAttachmentFile(att);
     } else {
         revealItemInDir(path);

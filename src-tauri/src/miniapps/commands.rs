@@ -771,6 +771,10 @@ pub async fn miniapp_load_info(
     if file_path.is_empty() {
         return Err(Error::InvalidPackage("Empty file path".to_string()));
     }
+    // A kept app: read its listing from its bytes, as a content URI's is.
+    if let Some(bytes) = crate::media_export::held_bytes(&file_path) {
+        return load_info_from_bytes(&bytes, "app.xdc");
+    }
 
     // Android content:// URIs (share / clipboard paste) aren't real filesystem
     // paths — the existence check below would fail. Read the bytes via the content
@@ -881,6 +885,9 @@ pub async fn miniapp_open(
 ) -> Result<(), Error> {
     vector_core::db::scoped(async move {
         log_info!("[WEBXDC] miniapp_open called: chat={}, msg={}", chat_id, message_id);
+        // History keeps what was opened; a kept app runs from a package written out for it.
+        let opened = file_path.clone();
+        let file_path = crate::media_export::package_path(&file_path).map_err(Error::InvalidPackage)?;
         let path = PathBuf::from(&file_path);
 
         // Generate unique ID from file hash
@@ -1055,10 +1062,10 @@ pub async fn miniapp_open(
             ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
 
             // Record to Mini Apps history
-            let attachment_ref = file_path.clone();
+            let attachment_ref = opened.clone();
             if let Err(e) = crate::db::record_miniapp_opened(
                 package.name.to_string(),
-                file_path.clone(),
+                opened.clone(),
                 attachment_ref,
             ) {
                 log_warn!("Failed to record Mini App to history: {}", e);
@@ -1341,10 +1348,10 @@ pub async fn miniapp_open(
     
         // Record to Mini Apps history
         // Use file_path as attachment_ref since it uniquely identifies the Mini App
-        let attachment_ref = file_path.clone();
+        let attachment_ref = opened.clone();
         if let Err(e) = crate::db::record_miniapp_opened(
             package.name.to_string(),
-            file_path.clone(),
+            opened.clone(),
             attachment_ref,
         ) {
             log_warn!("Failed to record Mini App to history: {}", e);

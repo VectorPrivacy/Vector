@@ -731,45 +731,18 @@ async function retryFailedMessage(msg) {
         return;
     }
 
-    // Fallback, only when nothing was retained: drop the failed row and send
-    // fresh. Its saved files stay: they are what gets sent.
+    // Fallback, only when nothing was retained: a text message (the backend sends
+    // files again itself). Drop the failed row and send it fresh.
     try {
-        await invoke('delete_failed_message', { messageId: msg.id, keepFiles: !!msg.attachments?.length });
+        await invoke('delete_failed_message', { messageId: msg.id });
     } catch (e) {
         console.error('Failed to delete failed message for retry:', e);
         return;
     }
-    // Re-send: use file_message if attachment exists, otherwise text message
     try {
-        if (msg.attachments && msg.attachments.length > 0) {
-            if (isCommunity) {
-                // Community resends all attachments + caption in one event (multi-attachment).
-                // Bail if any local file is gone — silently resending fewer files would
-                // publish a different message than the one that failed.
-                const paths = msg.attachments.map(a => a.path);
-                if (paths.some(p => !p)) {
-                    popupConfirm('Cannot retry', 'One or more attachments are no longer available locally. Re-attach the files to send again.', true, '', 'vector_warning.svg');
-                    return;
-                }
-                // Preserve each attachment's name (incl. SPOILER_ prefix) on resend. The local
-                // files were already compressed on first send, so don't re-compress.
-                const names = msg.attachments.map(a => a.name || '');
-                await invoke('send_community_files', { channelId: chatId, content: msg.content || '', filePaths: paths, nameOverrides: names, useCompression: false, keepMetadata: false, repliedTo: msg.replied_to || '' });
-            } else {
-                const att = msg.attachments[0];
-                await invoke('file_message', {
-                    receiver: chatId,
-                    repliedTo: msg.replied_to || '',
-                    filePath: att.path,
-                    keepMetadata: false,
-                    nameOverride: att.name || ''
-                });
-            }
-        } else {
-            // Route through message() so Community retries hit send_community_message
-            // (not the DM `message` command, which can't address a channel id).
-            await message(chatId, tcRestore(msg.content, msg.text_spans), msg.replied_to || '');
-        }
+        // Route through message() so Community retries hit send_community_message
+        // (not the DM `message` command, which can't address a channel id).
+        await message(chatId, tcRestore(msg.content, msg.text_spans), msg.replied_to || '');
     } catch (e) {
         console.error('Retry send failed:', e);
     }

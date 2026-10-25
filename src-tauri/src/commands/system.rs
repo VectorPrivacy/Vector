@@ -187,6 +187,13 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     if let Ok(app_data) = handle.path().app_data_dir() {
         walk_dir(&app_data.join("miniapps").join("marketplace"), Some("xdc"));
     }
+    // Files kept in the media store, by the type each was kept as.
+    for (mime, files, bytes) in vector_core::db::media_store::totals().unwrap_or_default() {
+        let ext = vector_core::crypto::extension_from_mime(&mime);
+        total_bytes += bytes;
+        file_count += files as usize;
+        *type_distribution.entry(if ext.is_empty() { "bin".to_string() } else { ext }).or_insert(0) += bytes;
+    }
 
     // Calculate Whisper models size if whisper feature is enabled
     #[cfg(feature = "whisper")]
@@ -260,15 +267,21 @@ async fn clear_attachment_files<R: Runtime>(
                         continue;
                     }
                     let path = attachment.path();
+                    // Downloaded with no path of its own: a copy the media store keeps.
+                    let kept = path.is_empty();
 
                     // Category clears match on the on-disk filename extension — the
                     // same derivation the storage chart buckets by
                     if let Some(set) = exts {
-                        let ext = std::path::Path::new(&*path)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .and_then(|n| n.split('.').next_back())
-                            .map(|e| e.to_lowercase());
+                        let ext = if kept {
+                            Some(vector_core::crypto::extension_from_mime(vector_core::crypto::mime_from_extension(attachment.extension())))
+                        } else {
+                            std::path::Path::new(&*path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .and_then(|n| n.split('.').next_back())
+                                .map(|e| e.to_lowercase())
+                        };
                         if !ext.is_some_and(|e| set.contains(&e)) {
                             continue;
                         }
@@ -278,7 +291,9 @@ async fn clear_attachment_files<R: Runtime>(
                     // send, symlink) is left fully intact: it isn't Vector's
                     // storage. A path that no longer resolves is a dangling ref:
                     // nothing to delete, but the metadata still needs the reset
-                    if let Ok(real) = std::path::Path::new(&*path).canonicalize() {
+                    if kept {
+                        vector_core::media::store::forget(attachment.id());
+                    } else if let Ok(real) = std::path::Path::new(&*path).canonicalize() {
                         match &download_dir {
                             Some(dir) if real.starts_with(dir) => {
                                 let _ = std::fs::remove_file(&real);
@@ -401,6 +416,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
 
     let updated_chats = clear_attachment_files(&handle, None).await?;
+    vector_core::media::store::forget_where(|_| true);
     clear_media_caches(&handle).await?;
     // Attachment deletion can strand Mini App history rows pointing at nothing
     let _ = crate::db::prune_dangling_miniapp_history();
@@ -451,6 +467,8 @@ pub async fn clear_storage_category<R: Runtime>(
             }
             clear_attachment_files(&handle, Some(&ext_set)).await?;
             sweep_dir_by_ext(&vector_core::db::get_download_dir(), &ext_set);
+            // Kept files of these types that no loaded message names.
+            vector_core::media::store::forget_where(|mime| ext_set.contains(&vector_core::crypto::extension_from_mime(mime)));
             // Marketplace installs live in app data, not the download dir;
             // wiping the Apps slice must uninstall them too, or the library
             // keeps offering "Play" on packages that are gone

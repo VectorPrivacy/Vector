@@ -944,59 +944,9 @@ pub enum FileSource {
     /// A copy this app already saved in the download folder (a failed send's, retried):
     /// sent from where it is, since copying it again would only leave a duplicate.
     Saved(std::path::PathBuf),
-}
-
-/// Hash a send's file and give it its copy in the download folder: (hash, path, preview
-/// metadata, plaintext length). A saved file is already that copy.
-#[cfg(not(target_arch = "wasm32"))]
-fn save_local_copy(
-    source: &FileSource,
-    filename: &str,
-    extension: &str,
-    download_dir: &std::path::Path,
-    img_meta: Option<crate::types::ImageMetadata>,
-    tmp_tag: &str,
-) -> Result<(String, String, Option<crate::types::ImageMetadata>, u64), String> {
-    let (file_hash, plain_len) = match source {
-        FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
-        FileSource::Path(path) | FileSource::Saved(path) => crypto::stream::hash_file(path)?,
-    };
-    if let FileSource::Saved(path) = source {
-        return Ok((file_hash, path.to_string_lossy().to_string(), img_meta, plain_len));
-    }
-    let _ = std::fs::create_dir_all(download_dir);
-    // Save with an extension matching the actual content. The caller's
-    // `extension` is post-compression (e.g. JPEG when an original PNG was
-    // compressed), but `filename` may still carry the pre-compression one;
-    // JPEG bytes saved as `.png` would poison a later re-upload with a
-    // MIP-04 mismatch.
-    let local_name = if filename.is_empty() {
-        format!("{}.{}", &file_hash, extension)
-    } else {
-        let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
-        format!("{}.{}", stem, extension)
-    };
-    // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
-    let local_path = crypto::resolve_unique_filename(download_dir, &local_name);
-    // Atomic write: temp file then rename. A file source copies file to file
-    // (a clone where the filesystem has them), never through memory.
-    // Named for this send: two sends of the same file must not share one.
-    let tmp = download_dir.join(format!(".{}.{}.tmp", &file_hash, tmp_tag));
-    let img_meta = match source {
-        FileSource::Bytes(bytes) => {
-            std::fs::write(&tmp, &***bytes).map_err(|e| format!("Failed to save the file: {e}"))?;
-            img_meta.or_else(|| crypto::generate_image_metadata(bytes))
-        }
-        FileSource::Path(path) | FileSource::Saved(path) => {
-            std::fs::copy(path, &tmp).map_err(|e| format!("Failed to save the file: {e}"))?;
-            img_meta
-        }
-    };
-    if let Err(e) = std::fs::rename(&tmp, &local_path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("Failed to save the file: {e}"));
-    }
-    Ok((file_hash, local_path.to_string_lossy().to_string(), img_meta, plain_len))
+    /// Our own ciphertext of an upload that failed, kept to go again as it is: the same blob,
+    /// under the key and nonce it was sealed with.
+    Sealed { path: std::path::PathBuf, hash: String, key: String, nonce: String, blob_sha256: String },
 }
 
 /// Removes a file when dropped: the ciphertext of an upload that ended either way.
@@ -1005,6 +955,91 @@ pub struct TempFile(std::path::PathBuf);
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl TempFile {
+    /// Keep the file after all: a failed upload's ciphertext, for its retry.
+    pub fn keep(self) -> std::path::PathBuf {
+        let path = self.0.clone();
+        std::mem::forget(self);
+        path
+    }
+}
+
+/// Where a send's ciphertext waits for its upload, and a failed one for its retry.
+#[cfg(not(target_arch = "wasm32"))]
+fn outgoing_dir() -> std::path::PathBuf {
+    crate::db::current_account_dir().map(|d| d.join("outgoing")).unwrap_or_else(|_| std::env::temp_dir())
+}
+
+/// A failed upload's ciphertext, kept for its retry: written out when it was sealed in memory.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn keep_for_retry(body: &crate::blossom::UploadBody, guard: Option<TempFile>, hash: &str, key: &str, nonce: &str, pending_id: &str, mime: &str) {
+    let path = match (body, guard) {
+        (crate::blossom::UploadBody::File { .. }, Some(guard)) => guard.keep(),
+        (crate::blossom::UploadBody::Memory(data), _) => {
+            let dir = outgoing_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(format!("{hash}-{pending_id}.enc"));
+            if std::fs::write(&path, &***data).is_err() {
+                return;
+            }
+            path
+        }
+        _ => return,
+    };
+    crate::media::pending::sealed(crate::simd::hex::hex_to_bytes_32(hash), path, key, nonce, mime);
+}
+
+/// What a failed send of `att` can go again from, best first: the sender's own file, the
+/// bytes this account still holds, or the ciphertext its failed upload kept.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn retry_source(att: &Attachment) -> Option<FileSource> {
+    let hash = crate::simd::hex::hex_to_bytes_32_checked(&att.id)?;
+    if let Some(path) = crate::media::pending::plain_path(&hash) {
+        return Some(FileSource::Path(path));
+    }
+    if crate::media::ram::cache().contains(&hash) || crate::media::store::holds(&hash) {
+        let src = crate::media::open(&hash)?;
+        return crate::media::read_all(&*src).ok().map(|bytes| FileSource::Bytes(Arc::new(bytes)));
+    }
+    let prefix = format!("{}-", att.id);
+    let kept = std::fs::read_dir(outgoing_dir())
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix) && e.file_name().to_string_lossy().ends_with(".enc"))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?;
+    let (blob_sha256, _) = crypto::stream::hash_file(&kept.path()).ok()?;
+    Some(FileSource::Sealed { path: kept.path(), hash: att.id.clone(), key: att.key.clone(), nonce: att.nonce.clone(), blob_sha256 })
+}
+
+/// Forget what a failed send of `att` kept to go again: its sealed copies and its bubble's source.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discard_retry_copy(att: &Attachment) {
+    let Some(hash) = crate::simd::hex::hex_to_bytes_32_checked(&att.id) else { return };
+    crate::media::pending::forget(&hash);
+    let prefix = format!("{}-", att.id);
+    if let Ok(entries) = std::fs::read_dir(outgoing_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&prefix) && name.ends_with(".enc") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Ciphertext of uploads that never went again, once it's two weeks old.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sweep_outgoing() {
+    let Ok(entries) = std::fs::read_dir(outgoing_dir()) else { return };
+    let max_age = std::time::Duration::from_secs(14 * 24 * 3600);
+    for entry in entries.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -1038,9 +1073,10 @@ pub async fn seal_or_reuse(
 
     let (key, nonce) = (key.to_string(), nonce.to_string());
     // Resolved here, on the task that carries the account, not on a blocking thread.
-    let outgoing = crate::db::current_account_dir()
-        .map(|d| d.join("outgoing"))
-        .unwrap_or_else(|_| std::env::temp_dir());
+    #[cfg(not(target_arch = "wasm32"))]
+    let outgoing = outgoing_dir();
+    #[cfg(target_arch = "wasm32")]
+    let outgoing = std::env::temp_dir();
     // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
     callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_) | FileSource::Saved(_)).then_some(0));
     let sealed = match plain {
@@ -1052,14 +1088,19 @@ pub async fn seal_or_reuse(
             .map_err(|e| format!("Encryption failed: {}", e))??;
             Sealed::Body(crate::blossom::UploadBody::Memory(Arc::new(sealed)), None)
         }
+        FileSource::Sealed { path, blob_sha256, .. } => {
+            let len = std::fs::metadata(&path).map_err(|e| format!("Couldn't read the file: {e}"))?.len();
+            Sealed::Body(crate::blossom::UploadBody::file(path.clone(), len, &blob_sha256)?, Some(TempFile(path)))
+        }
         FileSource::Path(path) | FileSource::Saved(path) => {
             let _ = std::fs::create_dir_all(&outgoing);
             let out = outgoing.join(format!("{}-{}.enc", hash, pending_id));
             let guard = TempFile(out.clone());
             let target = out.clone();
-            let (stage_cb, pid) = (callback.clone(), pending_id.to_string());
+            let (stage_cb, pid, plain_hash) = (callback.clone(), pending_id.to_string(), hash.to_string());
+            // Sealed from the sender's own file, so it must still be the bytes that were hashed.
             let (sealed_hash, len) = crate::rt::spawn_blocking(move || {
-                crypto::stream::encrypt_file_with_progress(&path, &target, &key, &nonce, &mut |pct| {
+                crypto::stream::encrypt_file_matching(&path, &target, &key, &nonce, &plain_hash, &mut |pct| {
                     stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
                     // A cancel lands here, not after the whole file is sealed.
                     !cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
@@ -1101,6 +1142,21 @@ pub fn failure_line(err: &str) -> String {
 }
 
 /// Mark a pending file message failed (in state, in the UI, on disk) and hand back `err`.
+/// Keep a sent blob in the store: the file moves in, bytes in hand are written there.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn keep_sent(body: &crate::blossom::UploadBody, hash: &str, key: &str, nonce: &str, pt_len: u64, mime: &str) -> bool {
+    use crate::media::store::{keep_bytes, keep_file, Keep};
+    let keep = |blob_sha256: String| Keep {
+        hash: crate::simd::hex::hex_to_bytes_32(hash), key: key.to_string(), nonce: nonce.to_string(),
+        blob_sha256, pt_len, mime: mime.to_string(), origin: crate::db::media_store::Origin::Sent,
+    };
+    let kept = match body {
+        crate::blossom::UploadBody::Memory(data) => keep_bytes(data, keep(crypto::sha256_hex(data))),
+        crate::blossom::UploadBody::File { path, sha256, .. } => keep_file(path, keep(sha256.to_string())),
+    };
+    kept.inspect_err(|e| crate::log_warn!("[Send] sent, but couldn't keep it: {e}")).is_ok()
+}
+
 async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, err: String) -> String {
     fail_pending(callback, receiver_npub, pending_id, &failure_line(&err)).await;
     err
@@ -1136,11 +1192,11 @@ pub async fn send_file_dm_from(
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
     let mime_type = crypto::mime_from_extension(extension);
-    let download_dir = crate::db::get_download_dir();
 
     // The web keeps its copy content-addressed in OPFS, and sends from memory only.
     #[cfg(target_arch = "wasm32")]
     let (file_hash, local_path_str, img_meta, plain_len) = {
+        let download_dir = crate::db::get_download_dir();
         let FileSource::Bytes(bytes) = &source else {
             return Err("Vector Web sends files from memory".into());
         };
@@ -1150,21 +1206,42 @@ pub async fn send_file_dm_from(
         let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(bytes));
         (file_hash, local_path.to_string_lossy().to_string(), img_meta, bytes.len() as u64)
     };
-    // Hash, save and (if not given) read the preview metadata off the runtime: each
-    // is a full pass over the bytes, and a runtime worker parked on one stalls every
-    // task queued behind it.
+    // Hash and (if not given) read the preview metadata off the runtime: each is a full
+    // pass over the bytes, and a runtime worker parked on one stalls every task queued
+    // behind it. Nothing is copied: the bubble reads the sender's own bytes.
     #[cfg(not(target_arch = "wasm32"))]
     let (file_hash, local_path_str, img_meta, plain_len) = {
-        let source = match &source {
-            FileSource::Bytes(bytes) => FileSource::Bytes(Arc::clone(bytes)),
-            FileSource::Path(path) => FileSource::Path(path.clone()),
-            FileSource::Saved(path) => FileSource::Saved(path.clone()),
+        let (file_hash, img_meta, plain_len) = match &source {
+            FileSource::Bytes(bytes) => {
+                let bytes = Arc::clone(bytes);
+                crate::rt::spawn_blocking(move || {
+                    let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(&bytes));
+                    (crypto::sha256_hex(&bytes), img_meta, bytes.len() as u64)
+                })
+                .await
+                .map_err(|e| format!("Attachment prep failed: {}", e))?
+            }
+            FileSource::Path(path) | FileSource::Saved(path) => {
+                let path = path.clone();
+                let (hash, len) = crate::rt::spawn_blocking(move || crypto::stream::hash_file(&path))
+                    .await
+                    .map_err(|e| format!("Attachment prep failed: {}", e))??;
+                (hash, img_meta, len)
+            }
+            FileSource::Sealed { path, hash, .. } => {
+                let len = std::fs::metadata(path).map_err(|e| format!("Couldn't read the file: {e}"))?.len();
+                (hash.clone(), img_meta, len.saturating_sub(16))
+            }
         };
-        let (filename, extension) = (filename.to_string(), extension.to_string());
-        let tmp_tag = pending_id.clone();
-        crate::rt::spawn_blocking(move || save_local_copy(&source, &filename, &extension, &download_dir, img_meta, &tmp_tag))
-        .await
-        .map_err(|e| format!("Attachment prep failed: {}", e))??
+        let hash = crate::simd::hex::hex_to_bytes_32(&file_hash);
+        match &source {
+            FileSource::Bytes(bytes) => {
+                let _ = crate::media::ram::insert(hash, bytes.to_vec(), mime_type);
+            }
+            FileSource::Path(path) | FileSource::Saved(path) => crate::media::pending::plain(hash, path.clone(), mime_type),
+            FileSource::Sealed { path, key, nonce, .. } => crate::media::pending::sealed(hash, path.clone(), key, nonce, mime_type),
+        }
+        (file_hash, String::new(), img_meta, plain_len)
     };
 
     // WebXDC Mini Apps: mint the realtime-channel topic at send time and carry
@@ -1174,14 +1251,19 @@ pub async fn send_file_dm_from(
     let webxdc_topic = (extension.eq_ignore_ascii_case("xdc"))
         .then(|| crate::webxdc::mint_topic_id(&file_hash, &my_pk.to_hex()));
 
-    // The bubble goes up now, on fresh encryption parameters; a reused blob swaps in
-    // its own below. AES-GCM appends a 16-byte tag, so the size is known unencrypted.
-    let params = crypto::generate_encryption_params();
+    // The bubble goes up now, on fresh encryption parameters (a kept seal brings its own);
+    // a reused blob swaps in its own below. AES-GCM appends a 16-byte tag, so the size is
+    // known unencrypted.
+    let params = match &source {
+        FileSource::Sealed { key, nonce, .. } => crypto::EncryptionParams { key: key.clone(), nonce: nonce.clone() },
+        _ => crypto::generate_encryption_params(),
+    };
     let attachment = Attachment {
         id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
         url: String::new(), path: local_path_str.clone(), size: plain_len + 16,
-        img_meta: img_meta.clone(), downloading: false, downloaded: true, verified: true,
+        // Only the web keeps a copy of its own sends; elsewhere the bubble reads the sender's.
+        img_meta: img_meta.clone(), downloading: false, downloaded: cfg!(target_arch = "wasm32"), verified: true,
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };
@@ -1200,18 +1282,21 @@ pub async fn send_file_dm_from(
     let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
     // Encrypt and upload, or reference a live blob of the same bytes and skip both.
-    // A file seals from the local copy made above, not the source the caller may still change.
+    #[cfg(target_arch = "wasm32")]
     let plain = match source {
-        FileSource::Bytes(bytes) => FileSource::Bytes(bytes),
         FileSource::Path(_) | FileSource::Saved(_) => FileSource::Path(std::path::PathBuf::from(&local_path_str)),
+        other => other,
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    let plain = source;
     let sealed = match seal_or_reuse(plain, &file_hash, &params.key, &params.nonce, &pending_id, callback.clone(), cancel.clone()).await {
         Ok(sealed) => sealed,
         // The bubble is up: a seal that fails (or is cancelled) must say so, not stay pending.
         Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, e).await),
     };
-    // Held to the end of the send, so the ciphertext goes however it ends.
-    let (reused, encrypted, _ciphertext_file) = match sealed {
+    // Held to the end of the send, so the ciphertext goes however it ends, unless a failed
+    // upload keeps it for the retry.
+    let (reused, encrypted, ciphertext_file) = match sealed {
         Sealed::Reused(r) => (Some(r), None, None),
         Sealed::Body(body, guard) => (None, Some(body), guard),
     };
@@ -1268,6 +1353,7 @@ pub async fn send_file_dm_from(
             (att_url.clone(), Vec::new())
         }
         Some(encrypted) => {
+            let body = encrypted.clone();
             let accepted = match crate::blossom::upload_body_with_progress_and_failover(
                 signer.clone(), servers, encrypted, Some(mime_type),
                 /* is_encrypted */ true,
@@ -1275,8 +1361,24 @@ pub async fn send_file_dm_from(
                 cancel.clone(),
             ).await {
                 Ok(accepted) => accepted,
-                Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, format!("Upload failed: {}", e)).await),
+                Err(e) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if !cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        keep_for_retry(&body, ciphertext_file, &file_hash, &att_key, &att_nonce, &pending_id, mime_type);
+                    }
+                    return Err(mark_send_failed(&callback, receiver_npub, &pending_id, format!("Upload failed: {}", e)).await);
+                }
             };
+            // The account keeps media: the blob just uploaded is the copy it keeps.
+            #[cfg(not(target_arch = "wasm32"))]
+            if crate::media::keep_media() && keep_sent(&body, &file_hash, &att_key, &att_nonce, plain_len, mime_type) {
+                let mut state = STATE.lock().await;
+                state.update_message(&pending_id, |msg| {
+                    if let Some(att) = msg.attachments.last_mut() {
+                        att.set_downloaded(true);
+                    }
+                });
+            }
 
             let upload_url = accepted.url.clone();
             {
@@ -1756,21 +1858,6 @@ mod seal_tests {
             }
         }
         let _ = std::fs::remove_file(&src);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn a_saved_file_is_sent_from_where_it_is() {
-        let dir = tempfile::tempdir().unwrap();
-        let saved = dir.path().join("photo.jpg");
-        std::fs::write(&saved, b"jpeg bytes").unwrap();
-        // A picked file gets its own copy beside whatever is there...
-        let (hash, copy, _, len) = save_local_copy(&FileSource::Path(saved.clone()), "photo.jpg", "jpg", dir.path(), None, "a").unwrap();
-        assert_eq!(copy, dir.path().join("photo-1.jpg").to_string_lossy());
-        // ...while a retry's saved file is already that copy.
-        let again = save_local_copy(&FileSource::Saved(saved.clone()), "photo.jpg", "jpg", dir.path(), None, "b").unwrap();
-        assert_eq!((again.0, again.1, again.3), (hash, saved.to_string_lossy().to_string(), len));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "no further copy");
     }
 
     #[tokio::test]

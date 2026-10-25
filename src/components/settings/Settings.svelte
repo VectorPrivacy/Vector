@@ -335,6 +335,24 @@
         <Select class="vselect-narrow" options={LIMITS} value={sc.storage.limit} disabled={!sc.storage.autoDownload}
                 onchange={(v) => h.setAutoDownloadLimit(v)} />
     </div>
+    {#if sc.storage.keepShown}
+        <div class="form-group" style="margin-top: 15px;">
+            <label class="toggle-container">
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('keepMedia')} />Keep Media on This Device</span>
+                <input type="checkbox" checked={sc.storage.keepMedia} onchange={(e) => h.setKeepMedia(e.currentTarget.checked)}>
+                <span class="neon-toggle"></span>
+            </label>
+        </div>
+    {/if}
+    {#if sc.storage.exportShown}
+        <div class="form-group" style="margin-top: 15px;">
+            <label class="toggle-container">
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('saveToDownloads')} />{sc.storage.galleryShown ? 'Save Media to Gallery' : 'Save Media to Downloads'}</span>
+                <input type="checkbox" checked={sc.storage.saveToDownloads} onchange={(e) => h.setSaveToDownloads(e.currentTarget.checked)}>
+                <span class="neon-toggle"></span>
+            </label>
+        </div>
+    {/if}
     {#if sc.storage.videoShown}
         <div class="form-group st-line">
             <InfoIcon side="right" flex onclick={() => h.help('videoQuality')} />

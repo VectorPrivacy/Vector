@@ -21,6 +21,7 @@ pub mod profiles;
 pub mod id_cache;
 pub mod events;
 pub mod attachments;
+pub mod media_store;
 pub mod chats;
 pub mod wrappers;
 pub mod nip17_keys;
@@ -695,6 +696,8 @@ impl Session {
         });
         crate::transport::prefs::attach(&s);
         crate::media::ram::attach(&s);
+        crate::media::store::attach(&s);
+        crate::media::pending::attach(&s);
         s
     }
 
@@ -716,6 +719,8 @@ impl Session {
         });
         crate::transport::prefs::attach(&s);
         crate::media::ram::attach(&s);
+        crate::media::store::attach(&s);
+        crate::media::pending::attach(&s);
         s
     }
 
@@ -1677,6 +1682,9 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // Straight from `db_path` into `session`: switch_account opens the database before it
     // marks the account current, and the task may be bound to the previous session.
     crate::transport::prefs::hydrate(&session, &db_path);
+    if let Ok(conn) = create_connection(&db_path) {
+        crate::media::store::load_index(&session, &conn);
+    }
 
     // Read the notification preferences now: every badge recount resolves every
     // chat against them, so a lazy first read would land a SQLite round trip on

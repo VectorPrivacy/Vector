@@ -2159,13 +2159,6 @@ impl VectorCore {
             let mime = crate::crypto::mime_from_extension(&extension);
             let img_meta = crate::crypto::generate_image_metadata(&bytes);
 
-            // Save the plaintext locally (hash-keyed) so the sender previews it instantly.
-            let download_dir = crate::db::get_download_dir();
-            let _ = std::fs::create_dir_all(&download_dir);
-            let local_name = if filename.is_empty() { format!("{}.{}", &file_hash, extension) } else { filename.clone() };
-            let local_path = crate::crypto::resolve_unique_filename(&download_dir, &local_name);
-            let _ = std::fs::write(&local_path, &bytes);
-
             // Encrypt → upload to Blossom.
             let params = crate::crypto::generate_encryption_params();
             let encrypted = crate::crypto::encrypt_data(&bytes, &params)?;
@@ -2199,11 +2192,12 @@ impl VectorCore {
                 extension: extension.clone(),
                 name: filename.clone(),
                 url,
-                path: local_path.to_string_lossy().to_string(),
+                // The caller's own file is the only plaintext copy there is.
+                path: String::new(),
                 size: encrypted_size,
                 img_meta,
                 downloading: false,
-                downloaded: true,
+                downloaded: false,
                 verified: true,
                 // Mini Apps: one topic minted at send, so every member joins the same session.
                 webxdc_topic: extension

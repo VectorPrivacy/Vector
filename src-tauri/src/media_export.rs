@@ -45,6 +45,58 @@ pub fn materialize(path_or_ref: &str, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// The package a Mini App runs from: a file is itself; a kept app is written out once per
+/// launch to a path named by its hash, so its window and storage stay the same app.
+pub fn package_path(path_or_ref: &str) -> Result<String, String> {
+    match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        MediaRef::File(path) => Ok(path),
+        MediaRef::Held(hash) => {
+            let dir = root()?.join("apps");
+            let file = dir.join(format!("{}.xdc", crate::util::bytes_to_hex_string(&hash)));
+            let src = media::open(&hash).ok_or("This app isn't on this device any more")?;
+            if std::fs::metadata(&file).is_ok_and(|m| m.len() == src.len()) {
+                return Ok(file.to_string_lossy().into_owned());
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
+            let bytes = zeroize::Zeroizing::new(media::read_all(&*src).map_err(|e| format!("Couldn't read the app: {e}"))?);
+            let tmp = dir.join(format!(".{}.tmp", crate::util::bytes_to_hex_string(&hash)));
+            let _ = std::fs::remove_file(&tmp);
+            write_private(&tmp, &bytes)?;
+            std::fs::rename(&tmp, &file).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
+            Ok(file.to_string_lossy().into_owned())
+        }
+    }
+}
+
+/// A normal copy of held media in the download folder, for an account that asked for one: the
+/// same file already there under its name is used as it is. Returns where it is.
+pub fn save_to_downloads(hash: &[u8; 32], name: &str) -> Result<PathBuf, String> {
+    let (bytes, mime) = held(hash)?;
+    let dir = vector_core::db::get_download_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
+    let name = file_name(name, hash, &mime);
+    let candidate = dir.join(&name);
+    let hex = crate::util::bytes_to_hex_string(hash);
+    if vector_core::crypto::stream::hash_file(&candidate).is_ok_and(|(h, _)| h == hex) {
+        return Ok(candidate);
+    }
+    let dest = vector_core::crypto::resolve_unique_filename(&dir, &name);
+    let tmp = dir.join(format!(".{hex}.saving"));
+    std::fs::write(&tmp, &*bytes).and_then(|_| std::fs::rename(&tmp, &dest)).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Couldn't save the file: {e}")
+    })?;
+    Ok(dest)
+}
+
+/// A held file's bytes, for readers that parse them in memory.
+pub fn held_bytes(path_or_ref: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    match MediaRef::parse(path_or_ref)? {
+        MediaRef::Held(hash) => held(&hash).ok().map(|(bytes, _)| bytes),
+        MediaRef::File(_) => None,
+    }
+}
+
 /// Write `path_or_ref` to `dest`: beside it first, then into place.
 pub fn save_to(path_or_ref: &str, dest: &Path) -> Result<(), String> {
     let bytes = match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {

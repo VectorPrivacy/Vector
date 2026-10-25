@@ -920,6 +920,17 @@ async function initStorageSection() {
         videoQuality: VIDEO_QUALITY, videoShown: videoCompressionOffered(),
     } });
 
+    // Kept media and saved copies live on this device's disk: the native apps only.
+    if (platformFeatures.os !== 'web') {
+        const [keep, save] = await Promise.all([
+            invoke('get_sql_setting', { key: 'keep_media' }).catch(() => null),
+            invoke('get_sql_setting', { key: 'save_media_to_downloads' }).catch(() => null),
+        ]);
+        VectorSvelte.setSettingsScreen({ storage: {
+            keepShown: true, keepMedia: keep === 'true', exportShown: true, saveToDownloads: save === 'true',
+        } });
+    }
+
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
     // and Vector Web on a phone is mobile without a gallery to hide from.
     if (platformFeatures.os === 'android') {
@@ -1969,6 +1980,10 @@ function updateMigrationProgress(total, completed, phase) {
 // Help prompts: one explainer per info icon. A function body resolves at click
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
+    keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes.'],
+    saveToDownloads: () => platformFeatures.os === 'android'
+        ? ['Save Media to Gallery', 'Also saves a normal copy of each picture, video and voice note you view to your gallery, where other apps can open it.']
+        : ['Save Media to Downloads', 'Also saves a normal copy of each picture, video and voice note you view to your Downloads folder, where other apps can open it.'],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
@@ -2142,6 +2157,14 @@ const SETTINGS_HELPERS = {
     setAutoDownload: async (on) => {
         AUTO_DOWNLOAD_ENABLED = on;
         await saveAutoDownloadEnabled(on);
+    },
+    setKeepMedia: async (on) => {
+        VectorSvelte.setSettingsScreen({ storage: { keepMedia: on } });
+        await invoke('set_sql_setting', { key: 'keep_media', value: on ? 'true' : 'false' });
+    },
+    setSaveToDownloads: async (on) => {
+        VectorSvelte.setSettingsScreen({ storage: { saveToDownloads: on } });
+        await invoke('set_sql_setting', { key: 'save_media_to_downloads', value: on ? 'true' : 'false' });
     },
     setVideoQuality: async (quality) => {
         VIDEO_QUALITY = quality;

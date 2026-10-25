@@ -4538,6 +4538,12 @@ mod tests {
         crate::db::nip17_keys::stash_resend_payload(&wrap.id, "pending-1", &wrap, &rumor).unwrap();
         // A stranger's wallpaper, held until their request is accepted.
         crate::db::chats::hold_wallpaper(&dm_chat, 5, r#"{"url":"https://blossom.example/held-wallpaper"}"#).unwrap();
+        // A kept file's key.
+        let kept = crate::db::media_store::StoredMedia {
+            hash: [0x5b; 32], file: "f".into(), key: "e5".repeat(32), nonce: "f6".repeat(16), blob_sha256: "aa".repeat(32),
+            pt_len: 9, mime: "image/png".into(), origin: crate::db::media_store::Origin::Received,
+        };
+        crate::db::media_store::insert(&kept).unwrap();
 
         // A ban set while sealed still hides its author from the channel and its unread count.
         let (banned, allowed) = {
@@ -4572,10 +4578,12 @@ mod tests {
                     rt.block_on(crate::db::events::unread_counts()).unwrap().get(&ch).copied(),
                 ),
                 wrap_owners("m1").unwrap().into_iter().map(|(k, outer, relays)| (k.public_key(), outer, relays)).collect::<Vec<_>>(),
+                crate::db::media_store::get(&[0x5b; 32]).unwrap(),
             )
         };
         let before = read();
         assert_eq!(before.8, vec![(owner.public_key(), "o1".to_string(), vec!["wss://r".to_string()])]);
+        assert_eq!(before.9.as_ref(), Some(&kept));
         assert_eq!(before.0, vec![([0x33; 32], "ab".repeat(32))]);
         assert_eq!(before.2, Some((r#"{"pins":["x"]}"#.to_string(), 1)));
         assert_eq!(before.3, Some(format!("{v2:?}")));
@@ -4643,7 +4651,7 @@ mod tests {
         assert_eq!(flag().as_deref(), Some("1"));
         crate::state::ENCRYPTION_KEY.set(K2, &[]);
         at_rest::backfill_at_rest().unwrap();
-        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("7")));
+        assert_eq!((read(), flag().as_deref()), (before.clone(), Some("8")));
         let stored = |id: &str| -> String {
             crate::db::get_db_connection_guard_static().unwrap()
                 .query_row("SELECT content FROM events WHERE id = ?1", [id.repeat(32)], |r| r.get(0)).unwrap()

@@ -598,6 +598,7 @@ mod xform_tests {
              CREATE TABLE community_pins (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
              CREATE TABLE community_writers (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
              CREATE TABLE attachments (key TEXT, nonce TEXT, name TEXT, url TEXT, fallback_urls TEXT, img_meta TEXT);
+             CREATE TABLE media_store (hash TEXT PRIMARY KEY, key TEXT, nonce TEXT);
              CREATE TABLE events (preview_metadata TEXT);
              CREATE TABLE nip17_wrap_keys (rumor_json TEXT);
              CREATE TABLE community_bans (community_id TEXT, npub TEXT);
@@ -909,6 +910,7 @@ mod xform_tests {
 /// disable are also backed by `sweep_residue_in_tx`, which catches a column missing here by its tag.
 const SWEEP: &[(&str, &[&str])] = &[
     ("attachments", &["key", "nonce", "name", "url", "fallback_urls", "img_meta"]),
+    ("media_store", &["key", "nonce"]),
     ("events", &["preview_metadata"]),
     ("nip17_wrap_keys", &["rumor_json"]),
     ("communities", &[
@@ -1204,7 +1206,7 @@ pub(crate) fn rekey_columns_in_tx(tx: &rusqlite::Transaction, old_key: &[u8; 32]
 /// encryption on before then may still hold that data in plaintext, and the backfill runs once
 /// more to wrap it.
 /// The flag row keeps its first name, `community_at_rest_encrypted`.
-const BACKFILL_VERSION: &str = "7";
+const BACKFILL_VERSION: &str = "8";
 
 /// One-time backfill for an account whose Local Encryption predates some of what it now covers:
 /// any swept column, message text, seed or bunker URL still in plaintext is sealed once, gated by a

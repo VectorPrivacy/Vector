@@ -480,6 +480,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // messages before this runs, so a missing file on a preloaded message would otherwise
                     // stay a broken image until a full reload.
                     vector_core::db::spawn_bound(async move {
+                        vector_core::sending::sweep_outgoing();
                         match db::check_downloaded_attachments_integrity().await {
                             Ok((_, missing, _, affected)) if missing > 0 => {
                                 crate::commands::attachments::reconcile_missing_attachments_in_state(&affected).await;

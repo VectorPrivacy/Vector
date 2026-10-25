@@ -126,6 +126,10 @@ pub async fn check_downloaded_attachments_integrity(
 ) -> Result<(usize, usize, std::time::Duration, Vec<String>), String> {
     let start = std::time::Instant::now();
 
+    // The store first: a kept file missing twice loses its row, and the rows below that
+    // pointed at it then have no copy left.
+    vector_core::media::store::check();
+
     // One indexed read of the downloaded attachments (WHERE downloaded=1) — no per-event JSON parse.
     let downloaded = vector_core::db::attachments::downloaded_attachment_paths()?;
 
@@ -134,7 +138,13 @@ pub async fn check_downloaded_attachments_integrity(
     let mut affected_ids: Vec<String> = Vec::new();
     for (event_id, hash, path) in downloaded {
         total_checked += 1;
-        if !std::path::Path::new(&path).exists() {
+        // No path of its own: kept in the store, or nowhere.
+        let present = if path.is_empty() {
+            vector_core::simd::hex::hex_to_bytes_32_checked(&hash).is_some_and(|h| vector_core::media::store::holds(&h))
+        } else {
+            std::path::Path::new(&path).exists()
+        };
+        if !present {
             vector_core::db::attachments::clear_attachment_download(&event_id, &hash).ok();
             missing_count += 1;
             if !affected_ids.contains(&event_id) {

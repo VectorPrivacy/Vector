@@ -205,16 +205,23 @@ pub fn backfill_downloaded_by_hash(hash: &str, path: &str, exclude_event_id: &st
 }
 
 /// A downloaded attachment's on-disk path, for the integrity sweep. Returns (event_id, hash, path)
-/// for every attachment claiming `downloaded=1` with a non-empty path — an indexed read, no per-event
-/// JSON parse.
+/// for every attachment claiming `downloaded=1`; an empty path is a copy kept in the media store.
+/// An indexed read, no per-event JSON parse.
 pub fn downloaded_attachment_paths() -> Result<Vec<(String, String, String)>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn.prepare(
-        "SELECT event_id, hash, path FROM attachments WHERE downloaded=1 AND path!=''"
+        "SELECT event_id, hash, path FROM attachments WHERE downloaded=1"
     ).map_err(|e| format!("prepare downloaded_paths: {e}"))?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
         .map_err(|e| format!("query downloaded_paths: {e}"))?;
     Ok(rows.flatten().collect())
+}
+
+/// Attachments of `hash` whose only copy was the one the store kept are no longer downloaded.
+pub fn clear_kept(hash: &str) -> Result<usize, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("UPDATE attachments SET downloaded=0 WHERE hash=?1 AND downloaded=1 AND path=''", [hash])
+        .map_err(|e| format!("clear kept: {e}"))
 }
 
 /// Mark an attachment not-downloaded (its file went missing). Clears the path.

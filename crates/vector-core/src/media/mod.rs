@@ -1,8 +1,10 @@
 //! Media Vector shows without writing it down: decrypted bytes held in memory per account
 //! (`ram`), read through one interface whatever holds them.
 
+pub mod pending;
 pub mod ram;
 pub mod range;
+pub mod store;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -18,6 +20,16 @@ pub trait MediaSource: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
+/// "Keep media on this device": what is viewed is kept in the store too, not only held.
+pub fn keep_media() -> bool {
+    crate::db::get_sql_setting("keep_media".to_string()).ok().flatten().as_deref() == Some("true")
+}
+
+/// "Save media to Downloads": a normal copy of what's viewed goes to the download folder too.
+pub fn save_to_downloads() -> bool {
+    crate::db::get_sql_setting("save_media_to_downloads".to_string()).ok().flatten().as_deref() == Some("true")
+}
+
 /// Kinds a chat bubble draws itself: these load for viewing without being kept.
 pub fn previewable(extension: &str) -> bool {
     const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];
@@ -29,9 +41,12 @@ pub fn previewable(extension: &str) -> bool {
     IMAGES.contains(&extension) || AUDIO.contains(&extension) || MODELS.contains(&extension) || video
 }
 
-/// What holds `hash` for this account right now, if anything.
+/// What holds `hash` for this account right now, memory first, if anything.
 pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
-    ram::cache().get(hash).map(|entry| entry as Arc<dyn MediaSource>)
+    match ram::cache().get(hash) {
+        Some(entry) => Some(entry as Arc<dyn MediaSource>),
+        None => store::open(hash).or_else(|| pending::open(hash)),
+    }
 }
 
 /// Every byte of `src`, for a reader that wants the whole file.
@@ -50,7 +65,7 @@ pub fn read_all(src: &dyn MediaSource) -> std::io::Result<Vec<u8>> {
 
 /// Whether this account can show `hash` without fetching it.
 pub fn resident(hash: &[u8; 32]) -> bool {
-    ram::cache().contains(hash)
+    ram::cache().contains(hash) || store::holds(hash) || pending::holds(hash)
 }
 
 /// How a command names an attachment's bytes: a hash this account holds, or a file.

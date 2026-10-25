@@ -89,6 +89,21 @@ pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
     if result.is_err() {
         let _ = std::fs::remove_file(dst);
     }
+    result.map(|(blob, len, _)| (blob, len))
+}
+
+/// What a send says when its file changed between being hashed and being sealed.
+pub const CHANGED: &str = "The file changed while it was being sent. Attach it again to send it.";
+
+/// [`encrypt_file_with_progress`] for a file the sender may still change: the bytes sealed
+/// must be the ones hashed as `plain_sha256`, or nothing is written and the send says so.
+pub fn encrypt_file_matching(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, plain_sha256: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
+    let result = encrypt_file_inner(src, dst, key_hex, nonce_hex, progress).and_then(|(blob, len, plain)| {
+        if plain == plain_sha256 { Ok((blob, len)) } else { Err(CHANGED.to_string()) }
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
     result
 }
 
@@ -96,7 +111,7 @@ pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
 /// the keystream repeats.
 const GCM_MAX_PLAINTEXT: u64 = (1 << 36) - 32;
 
-fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
+fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64, String), String> {
     let (mut key, nonce) = super::attachment_params(key_hex, nonce_hex, "Invalid decryption key")?;
     let mut input = std::fs::File::open(src).map_err(|e| format!("open file: {e}"))?;
     let total = input.metadata().map(|m| m.len()).unwrap_or(0);
@@ -111,6 +126,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
         std::fs::File::create(dst).map_err(|e| format!("create ciphertext: {e}"))?,
     );
     let mut blob_hash = Sha256::new();
+    let mut plain_hash = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     let mut len = 0u64;
     loop {
@@ -127,6 +143,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
             break;
         }
         let chunk = &mut buf[..n];
+        plain_hash.update(&*chunk);
         gcm.encrypt(chunk);
         blob_hash.update(&*chunk);
         output.write_all(chunk).map_err(|e| format!("write ciphertext: {e}"))?;
@@ -143,7 +160,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
     output.write_all(&tag).map_err(|e| format!("write ciphertext: {e}"))?;
     let file = output.into_inner().map_err(|e| format!("write ciphertext: {e}"))?;
     file.sync_all().map_err(|e| format!("sync ciphertext: {e}"))?;
-    Ok((hex32(&blob_hash.finalize()), len + 16))
+    Ok((hex32(&blob_hash.finalize()), len + 16, hex32(&plain_hash.finalize())))
 }
 
 fn decrypt_file_inner(src: &Path, dst: Option<&Path>, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
@@ -353,6 +370,19 @@ mod tests {
         let mut stop = |pct: u8| pct < 50;
         assert_eq!(verify_file_with_progress(&src, &params.key, &params.nonce, &mut stop).unwrap_err(), CANCELLED);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the blob, whatever happened");
+    }
+
+    #[test]
+    fn a_file_changed_after_hashing_is_never_sealed() {
+        let dir = scratch("matching");
+        let (src, sealed) = (dir.join("plain"), dir.join("sealed"));
+        std::fs::write(&src, b"what was hashed").unwrap();
+        let hash = crate::crypto::sha256_hex(b"what was hashed");
+        let params = crate::crypto::generate_encryption_params();
+        assert!(encrypt_file_matching(&src, &sealed, &params.key, &params.nonce, &hash, &mut |_| true).is_ok());
+        std::fs::write(&src, b"what was hashed, then edited").unwrap();
+        assert_eq!(encrypt_file_matching(&src, &sealed, &params.key, &params.nonce, &hash, &mut |_| true).unwrap_err(), CHANGED);
+        assert!(!sealed.exists(), "nothing is left to upload");
     }
 
     #[test]

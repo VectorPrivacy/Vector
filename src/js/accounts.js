@@ -200,7 +200,7 @@ const profileSwitcher = {
         } catch (_) { /* err side: don't block the popup */ }
 
         const label = meta.display_name || 'This account';
-        const baseMsg = `<span style="color: var(--primary-color);">${escapeHtml(label)}</span> will be permanently removed from this device. Make sure you have the seed phrase or nsec backed up if you want to recover it later.`;
+        const baseMsg = `<span style="color: var(--primary-color);">${escapeHtml(label)}</span> will be permanently removed from this device, with the files it keeps in Vector. Make sure you have the seed phrase or nsec backed up if you want to recover it later, and save any files you want to keep.`;
         const lastAccountWarning = `\n\n<b>This is your only Vector account on this device.</b> All downloaded attachments will also be removed. Copy any files you want to keep before continuing.`;
         const message = isLastAccount ? baseMsg + lastAccountWarning : baseMsg;
 
