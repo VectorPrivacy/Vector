@@ -207,6 +207,7 @@ async function refreshObfs4Banner(text) {
  * @returns {string} URL for use in media element src
  */
 function mediaUrl(filePath) {
+    if (filePath?.startsWith('vmedia:')) return convertFileSrc(filePath);
     const cached = vcacheSrc(filePath);
     if (cached) return cached;
     if (platformFeatures && platformFeatures.media_url) {

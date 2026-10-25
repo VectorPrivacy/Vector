@@ -32,6 +32,12 @@ pub fn save_to_downloads() -> bool {
     crate::db::get_sql_setting("save_media_to_downloads".to_string()).ok().flatten().as_deref() == Some("true")
 }
 
+/// The memory key of media fetched by URL rather than by content hash: `kind` keeps one kind's
+/// keys apart from another's, and from every content hash.
+pub fn url_key(kind: &str, url: &str) -> [u8; 32] {
+    crate::crypto::sha256::digest(format!("vector-url-media\n{kind}\n{url}").as_bytes())
+}
+
 /// Kinds a chat bubble draws itself: these load for viewing without being kept.
 pub fn previewable(extension: &str) -> bool {
     const IMAGES: [&str; 10] = ["png", "jpeg", "jpg", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico"];

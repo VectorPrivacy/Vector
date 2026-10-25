@@ -405,7 +405,14 @@ const NOSTR_EMBED_HELPERS = {
     },
     cancelVideo: (url) => { invoke('cancel_embed_video', { url }).catch(() => {}); },
     mediaUrl: (path) => mediaUrl(path),
-    reveal: (path) => { if (platformFeatures.os === 'android') openAndroidAttachment(path); else revealItemInDir(path); },
+    // Where the webview can't play it: Android opens it in another app, the desktop saves a copy.
+    reveal: (path) => {
+        if (platformFeatures.os === 'android') { openAndroidAttachment(path); return; }
+        const ext = (path.match(/\.(mp4|webm|mov)$/i)?.[1] || 'mp4').toLowerCase();
+        invoke('save_attachment', { path, name: `video.${ext}` })
+            .then((dest) => { if (dest) showToast('Saved'); })
+            .catch((err) => showToast(String(err)));
+    },
     duration: (secs) => _fmtMediaDuration(secs),
     openUrl: (url) => _dmsgOpenPreviewUrl(url),
     copy: (text, label) => {

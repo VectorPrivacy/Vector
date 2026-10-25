@@ -40,23 +40,95 @@ pub async fn cache_embed_video<R: Runtime>(
     }
     let dir = video_dir(&handle)?;
     let stem = video_stem(&url, sha256.as_deref());
-    if let Some(done) = cached(&dir, &stem) {
+    let held = vector_core::media::url_key("embed-video", &stem);
+    let ready = |dir: &Path| {
+        vector_core::media::resident(&held).then(|| vector_core::media::MediaRef::held(&held)).or_else(|| cached(dir, &stem))
+    };
+    if let Some(done) = ready(&dir) {
         return Ok(done);
     }
     let lock = VIDEO_LOCKS.lock().unwrap().entry(url.clone()).or_default().clone();
     let _held = lock.lock().await;
-    if let Some(done) = cached(&dir, &stem) {
+    if let Some(done) = ready(&dir) {
         return Ok(done);
     }
+    let declared = match size.filter(|n| *n > 0) {
+        Some(n) => Some(n),
+        None => vector_core::net::get_remote_file_size(&url).await,
+    };
+    if declared.is_some_and(|n| n > MAX_VIDEO_BYTES) {
+        VIDEO_LOCKS.lock().unwrap().remove(&url);
+        return Err("This video is too large to play in chat".into());
+    }
+    // A video in a chat follows the attachment rules: held in memory when it fits and the
+    // account doesn't keep media, otherwise kept sealed.
+    let in_memory = !vector_core::media::keep_media() && declared.is_some_and(|n| vector_core::media::ram::cache().admits(n));
+    let mirrors: Vec<String> = fallbacks.unwrap_or_default().into_iter().filter(|u| u.starts_with("https://")).take(3).collect();
     net::clear_transfer_cancel(&url);
-    let result = download(&dir, &stem, &url, size, sha256.as_deref(), fallbacks.unwrap_or_default()).await;
+    let result = if in_memory {
+        hold(held, &url, declared, sha256.as_deref(), &mirrors).await
+    } else {
+        download(&dir, &stem, &url, declared, sha256.as_deref(), &mirrors).await
+    };
     net::clear_transfer_cancel(&url);
     VIDEO_LOCKS.lock().unwrap().remove(&url);
     let path = result?;
-    let prune_dir = dir.clone();
-    let keep = path.clone();
-    tokio::task::spawn_blocking(move || prune(&prune_dir, &keep));
+    if !in_memory {
+        let prune_dir = dir.clone();
+        let keep = path.clone();
+        tokio::task::spawn_blocking(move || prune(&prune_dir, &keep));
+    }
     Ok(path)
+}
+
+/// Fetch the video into memory under `key`, checked as `finish` checks a file.
+async fn hold(key: [u8; 32], url: &str, declared: Option<u64>, sha256: Option<&str>, mirrors: &[String]) -> Result<String, String> {
+    let reporter = VideoProgress { url };
+    let limit = declared.unwrap_or(MAX_VIDEO_BYTES).saturating_add(64 * 1024);
+    let mut last_err = "Failed to download".to_string();
+    for source in std::iter::once(url).chain(mirrors.iter().map(String::as_str)) {
+        let bytes = match net::download_to_memory(source, &reporter, None, limit).await {
+            Ok(bytes) => bytes,
+            Err(e) if e == net::TRANSFER_CANCELLED => return Err(e.to_string()),
+            Err(e) => {
+                last_err = e.to_string();
+                continue;
+            }
+        };
+        let expected = sha256.map(str::to_ascii_lowercase);
+        let checked = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, &'static str), String> {
+            let ext = video_kind(&bytes).ok_or("Not a video")?;
+            if expected.is_some_and(|want| vector_core::crypto::sha256_hex(&bytes) != want) {
+                return Err("The video doesn't match the post's fingerprint".into());
+            }
+            Ok((bytes, ext))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (bytes, ext) = match checked {
+            Ok(ok) => ok,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        vector_core::media::ram::insert(key, bytes, vector_core::crypto::mime_from_extension(ext))
+            .map_err(|_| "Too much media is open to play this one".to_string())?;
+        let _ = reporter.report_complete();
+        return Ok(vector_core::media::MediaRef::held(&key));
+    }
+    Err(last_err)
+}
+
+/// A video's container, from its first bytes.
+fn video_kind(head: &[u8]) -> Option<&'static str> {
+    if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        Some(if &head[8..12] == b"qt  " { "mov" } else { "mp4" })
+    } else if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("webm")
+    } else {
+        None
+    }
 }
 
 /// The opening of the video at `url`, enough to show its first frame, fetched as byte ranges
@@ -68,19 +140,29 @@ pub async fn embed_video_preview<R: Runtime>(handle: AppHandle<R>, url: String, 
     }
     let dir = video_dir(&handle)?;
     let stem = video_stem(&url, sha256.as_deref());
+    let whole = vector_core::media::url_key("embed-video", &stem);
+    if vector_core::media::resident(&whole) {
+        return Ok(vector_core::media::MediaRef::held(&whole));
+    }
     if let Some(done) = cached(&dir, &stem) {
         return Ok(done);
     }
     let preview = format!("{stem}-poster");
+    let held = vector_core::media::url_key("embed-poster", &stem);
+    if vector_core::media::resident(&held) {
+        return Ok(vector_core::media::MediaRef::held(&held));
+    }
     if let Some(done) = cached(&dir, &preview) {
         return Ok(done);
     }
     let poster = vector_core::video_poster::fetch(&url).await?;
+    if !vector_core::media::keep_media() {
+        let mime = vector_core::crypto::mime_from_extension(poster.ext);
+        vector_core::media::ram::insert(held, poster.bytes, mime).map_err(|_| "Too much media is open to show this one".to_string())?;
+        return Ok(vector_core::media::MediaRef::held(&held));
+    }
     let path = dir.join(format!("{preview}.{}", poster.ext));
-    // Written aside and renamed, so a card never reads half a file.
-    let part = dir.join(format!("{preview}.poster-part"));
-    tokio::fs::write(&part, &poster.bytes).await.map_err(|e| e.to_string())?;
-    tokio::fs::rename(&part, &path).await.map_err(|e| e.to_string())?;
+    vector_core::vcache::write(&path, &poster.bytes)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -119,24 +201,16 @@ async fn download(
     dir: &Path,
     stem: &str,
     url: &str,
-    size: Option<u64>,
+    declared: Option<u64>,
     sha256: Option<&str>,
-    fallbacks: Vec<String>,
+    mirrors: &[String],
 ) -> Result<String, String> {
-    let declared = match size.filter(|n| *n > 0) {
-        Some(n) => Some(n),
-        None => vector_core::net::get_remote_file_size(url).await,
-    };
-    if declared.is_some_and(|n| n > MAX_VIDEO_BYTES) {
-        return Err("This video is too large to play in chat".into());
-    }
     // The download's size limit comes from here: a host that won't say gets the cap.
     let declared = Some(declared.unwrap_or(MAX_VIDEO_BYTES));
     let part = dir.join(format!("{stem}.part"));
     let reporter = VideoProgress { url };
     let mut last_err = "Failed to download".to_string();
-    let mirrors = fallbacks.into_iter().filter(|u| u.starts_with("https://")).take(3);
-    for (i, source) in std::iter::once(url.to_string()).chain(mirrors).enumerate() {
+    for (i, source) in std::iter::once(url).chain(mirrors.iter().map(String::as_str)).enumerate() {
         // A partial from another host is only the same file when a hash vouches for it.
         if i > 0 && sha256.is_none() {
             net::discard_partial(&part);
@@ -144,7 +218,7 @@ async fn download(
         // Media hosts drop long streams: a dropped one resumes from its checkpoint, with backoff.
         // Only a refusal moves on to the next mirror at once.
         for attempt in 1..=MAX_ATTEMPTS {
-            match net::download_to_file(&source, &part, declared, &reporter).await {
+            match net::download_sealed(source, &part, declared, &reporter).await {
                 Ok(_) => {
                     let finished = finish(dir, stem, &part, sha256).await;
                     if finished.is_ok() {
@@ -172,26 +246,30 @@ async fn download(
 }
 
 /// Keep the download only if its bytes are a video (and the event's hash, when it gave one).
+/// The part is sealed as it was written, so keeping it is a rename.
 async fn finish(dir: &Path, stem: &str, part: &Path, sha256: Option<&str>) -> Result<String, String> {
     let part_owned = part.to_path_buf();
     let expected = sha256.map(str::to_ascii_lowercase);
     let verdict = tokio::task::spawn_blocking(move || -> Result<&'static str, String> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&part_owned).map_err(|e| e.to_string())?;
+        use sha2::Digest;
+        let src = vector_core::vcache::open(&part_owned, "video/mp4").ok_or("Not a video")?;
         let mut head = [0u8; 12];
-        file.read_exact(&mut head).map_err(|_| "Not a video".to_string())?;
-        let ext = if &head[4..8] == b"ftyp" {
-            if &head[8..12] == b"qt  " { "mov" } else { "mp4" }
-        } else if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-            "webm"
-        } else {
+        if src.read_at(0, &mut head).unwrap_or(0) < head.len() {
             return Err("Not a video".into());
-        };
+        }
+        let ext = video_kind(&head).ok_or("Not a video")?;
         if let Some(expected) = expected {
-            use sha2::Digest;
             let mut hasher = sha2::Sha256::new();
-            let mut file = std::fs::File::open(&part_owned).map_err(|e| e.to_string())?;
-            std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; 256 * 1024];
+            let mut at = 0u64;
+            loop {
+                let n = src.read_at(at, &mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                at += n as u64;
+            }
             let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
             if got != expected {
                 return Err("The video doesn't match the post's fingerprint".into());
@@ -209,8 +287,7 @@ async fn finish(dir: &Path, stem: &str, part: &Path, sha256: Option<&str>) -> Re
         }
     };
     let path = dir.join(format!("{stem}.{ext}"));
-    let (from, to) = (part.to_path_buf(), path.clone());
-    tokio::task::spawn_blocking(move || vector_core::vcache::seal_file(&from, &to)).await.map_err(|e| e.to_string())??;
+    std::fs::rename(part, &path).map_err(|e| e.to_string())?;
     net::discard_partial(part);
     Ok(path.to_string_lossy().into_owned())
 }

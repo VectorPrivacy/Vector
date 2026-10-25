@@ -1226,7 +1226,11 @@ pub async fn cache_url_image<R: Runtime>(
         }
     }
 
-    // Check if already cached - skip download if so
+    // Held in memory already, or kept on disk.
+    let held_key = vector_core::media::url_key("inline-image", &url);
+    if vector_core::media::resident(&held_key) {
+        return Ok(Some(vector_core::media::MediaRef::held(&held_key)));
+    }
     if let Some(path) = get_cached_path(&handle, &url, ImageType::InlineImage) {
         return Ok(Some(path));
     }
@@ -1317,28 +1321,36 @@ pub async fn cache_url_image<R: Runtime>(
         bytes
     };
 
-    // Get cache directory and create filename
-    let cache_dir = match get_cache_dir(&handle, ImageType::InlineImage) {
-        Ok(d) => d,
-        Err(e) => {
+    // A picture in a chat follows the attachment rules: held in memory unless the account
+    // keeps media, and kept only sealed.
+    let path_str = if vector_core::media::keep_media() {
+        let cache_dir = match get_cache_dir(&handle, ImageType::InlineImage) {
+            Ok(d) => d,
+            Err(e) => {
+                cleanup().await;
+                return Err(e);
+            }
+        };
+        let file_path = cache_dir.join(format!("{}.{}", url_to_cache_key(&url), extension));
+        if let Err(e) = vector_core::vcache::write(&file_path, &bytes) {
             cleanup().await;
-            return Err(e);
+            log_warn!("[ImageCache] Failed to write cache file: {}", e);
+            emit_failure(&handle, &url);
+            return Ok(None);
         }
+        file_path.to_string_lossy().into_owned()
+    } else {
+        let mime = vector_core::crypto::mime_from_extension(extension);
+        if vector_core::media::ram::insert(held_key, bytes, mime).is_err() {
+            cleanup().await;
+            emit_failure(&handle, &url);
+            return Ok(None);
+        }
+        vector_core::media::MediaRef::held(&held_key)
     };
-    let cache_key = url_to_cache_key(&url);
-    let filename = format!("{}.{}", cache_key, extension);
-    let file_path = cache_dir.join(&filename);
-
-    if let Err(e) = vector_core::vcache::write(&file_path, &bytes) {
-        cleanup().await;
-        log_warn!("[ImageCache] Failed to write cache file: {}", e);
-        return Ok(None);
-    }
 
     // Done - remove from in-progress
     cleanup().await;
-
-    let path_str = file_path.to_string_lossy().to_string();
     log_info!("[ImageCache] Cached inline image {} -> {}", url, path_str);
 
     // Emit completion event so ALL loading indicators for this URL get updated

@@ -6,12 +6,14 @@ const { listen } = window.__TAURI__.event;
 const { openUrl: openUrlDirect, revealItemInDir } = window.__TAURI__.opener;
 
 /**
- * A src for a file on disk. Vector Cache files (`cache/…`, wallpapers) are sealed, so they come
- * through `vmedia` opened; anything else through the asset protocol.
+ * A src for a file on disk or media held in memory. A `vmedia:` ref and a Vector Cache file
+ * (`cache/…`, wallpapers, sealed on disk) come through `vmedia`; anything else through the
+ * asset protocol.
  * @param {string} path
  * @returns {string}
  */
 function convertFileSrc(path) {
+    if (path?.startsWith('vmedia:')) return platformFeatures?.vmedia ? `${platformFeatures.vmedia}/${path.slice(7)}` : '';
     return vcacheSrc(path) ?? assetSrc(path);
 }
 

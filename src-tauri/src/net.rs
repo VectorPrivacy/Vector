@@ -171,12 +171,17 @@ fn checkpoint_path(part: &std::path::Path) -> std::path::PathBuf {
 
 /// The checkpoint beside `part`, if both it and enough bytes to back it exist.
 pub fn read_checkpoint(part: &std::path::Path) -> Option<Checkpoint> {
+    read_checkpoint_at(part, 0)
+}
+
+/// [`read_checkpoint`] for a part whose content starts `base` bytes in.
+fn read_checkpoint_at(part: &std::path::Path, base: u64) -> Option<Checkpoint> {
     let raw = std::fs::read(checkpoint_path(part)).ok()?;
     let raw: [u8; 16] = raw.try_into().ok()?;
     let offset = u64::from_le_bytes(raw[..8].try_into().ok()?);
     let total = u64::from_le_bytes(raw[8..].try_into().ok()?);
     let on_disk = std::fs::metadata(part).ok()?.len();
-    (on_disk >= offset).then_some(Checkpoint { offset, total: (total > 0).then_some(total) })
+    (on_disk >= base + offset).then_some(Checkpoint { offset, total: (total > 0).then_some(total) })
 }
 
 fn write_checkpoint(part: &std::path::Path, at: Checkpoint) -> std::io::Result<()> {
@@ -206,6 +211,33 @@ pub async fn download_to_file(
     declared: Option<u64>,
     reporter: &impl ProgressReporter,
 ) -> Result<u64, &'static str> {
+    download_into(content_url, part, declared, reporter, None).await
+}
+
+/// [`download_to_file`] for plaintext from the web: `part` is a Vector Cache file, sealed as it
+/// is written, so no byte of it is ever plain on disk. Once whole it is the cache file.
+pub async fn download_sealed(
+    content_url: &str,
+    part: &std::path::Path,
+    declared: Option<u64>,
+    reporter: &impl ProgressReporter,
+) -> Result<u64, &'static str> {
+    if let Some(dir) = part.parent() {
+        std::fs::create_dir_all(dir).map_err(|_| "Failed to prepare the download")?;
+    }
+    let sealer = vector_core::vcache::Sealer::for_part(part).map_err(|_| "Failed to prepare the download")?;
+    download_into(content_url, part, declared, reporter, Some(&sealer)).await
+}
+
+async fn download_into(
+    content_url: &str,
+    part: &std::path::Path,
+    declared: Option<u64>,
+    reporter: &impl ProgressReporter,
+    sealer: Option<&vector_core::vcache::Sealer>,
+) -> Result<u64, &'static str> {
+    // A sealed part's content starts after its header.
+    let base = if sealer.is_some() { vector_core::vcache::HEADER_LEN } else { 0 };
     // The message said how big the blob is, so a body running past that is not it.
     // The slack covers senders that state the plaintext's size, 16 bytes short.
     let limit = declared.filter(|&d| d > 0).map(|d| d + 64 * 1024).unwrap_or(UNDECLARED_MAX_BYTES);
@@ -219,7 +251,7 @@ pub async fn download_to_file(
         std::fs::create_dir_all(dir).map_err(|_| "Failed to prepare the download")?;
     }
 
-    let mut at = read_checkpoint(part).unwrap_or_default();
+    let mut at = read_checkpoint_at(part, base).unwrap_or_default();
     // A checkpoint that already covers the whole file needs no request at all.
     if at.total.is_some_and(|t| t > 0 && at.offset == t) {
         return Ok(at.offset);
@@ -296,9 +328,9 @@ pub async fn download_to_file(
             .open(part)
             .await
             .map_err(|_| "Failed to prepare the download")?;
-        file.set_len(start).await.map_err(|_| "Failed to prepare the download")?;
+        file.set_len(base + start).await.map_err(|_| "Failed to prepare the download")?;
         let mut file = tokio::io::BufWriter::with_capacity(256 * 1024, file);
-        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start))
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(base + start))
             .await
             .map_err(|_| "Failed to prepare the download")?;
 
@@ -354,7 +386,14 @@ pub async fn download_to_file(
             if written + chunk.len() as u64 > limit {
                 return Err("File exceeds the maximum download size");
             }
-            file.write_all(&chunk).await.map_err(|_| "Failed to save the download")?;
+            match sealer {
+                Some(sealer) => {
+                    let mut sealed = chunk.to_vec();
+                    sealer.seal_at(written, &mut sealed).map_err(|_| "Failed to save the download")?;
+                    file.write_all(&sealed).await.map_err(|_| "Failed to save the download")?;
+                }
+                None => file.write_all(&chunk).await.map_err(|_| "Failed to save the download")?,
+            }
             written += chunk.len() as u64;
             if written - durable.offset >= CHECKPOINT_EVERY {
                 durable = Checkpoint { offset: written, total };

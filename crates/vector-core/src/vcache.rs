@@ -178,6 +178,44 @@ fn seal_stream(src: &Path, path: &Path) -> Result<(), String> {
     result
 }
 
+/// Where a sealed file's ciphertext starts.
+pub const HEADER_LEN: u64 = HEADER as u64;
+
+/// A sealed file written a piece at a time, at any offset: a download's part file, which a
+/// resume continues. Once whole it is a cache file as it stands.
+pub struct Sealer {
+    key: Zeroizing<[u8; 32]>,
+    nonce: [u8; 12],
+}
+
+impl Sealer {
+    /// The part file at `path`, continued under its own header, or begun afresh (emptied, with a
+    /// new header) when it has none this install can continue.
+    pub fn for_part(path: &Path) -> Result<Sealer, String> {
+        let key = key().ok_or("Vector's cache key isn't available")?;
+        if let Ok(mut file) = std::fs::File::open(path) {
+            let mut head = [0u8; HEADER];
+            if read_up_to(&mut file, &mut head) == HEADER {
+                if let Kind::Sealed(nonce) = kind(&head, key) {
+                    return Ok(Sealer { key: Zeroizing::new(*key.bytes), nonce });
+                }
+            }
+        }
+        let (header, nonce) = fresh_header(key);
+        let mut file = create_private(path)?;
+        file.write_all(&header).map_err(|e| e.to_string())?;
+        Ok(Sealer { key: Zeroizing::new(*key.bytes), nonce })
+    }
+
+    /// Seal `buf`, the plaintext that sits `offset` bytes into the file's content.
+    pub fn seal_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let mut cipher = chacha20::ChaCha20::new((&*self.key).into(), (&self.nonce).into());
+        cipher.try_seek(offset).map_err(|_| "past the end of the cipher".to_string())?;
+        cipher.apply_keystream(buf);
+        Ok(())
+    }
+}
+
 /// The plaintext of a file Vector may have sealed: a cache file, sealed or from before sealing,
 /// and any other file as it is. A file under a lost key reads as missing, so its caller fetches
 /// it again and the write replaces it.
@@ -460,6 +498,31 @@ mod tests {
         assert!(open(&path, "image/png").is_none());
         assert!(read(&path).is_err());
         assert!(path.exists(), "a read never deletes");
+    }
+
+    #[test]
+    fn a_part_written_in_pieces_and_resumed_reads_whole() {
+        let _g = ready();
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("v.part");
+        let plain: Vec<u8> = (0..200_000u32).map(|i| (i % 239) as u8).collect();
+        let first = Sealer::for_part(&part).unwrap();
+        let mut a = plain[..70_001].to_vec();
+        first.seal_at(0, &mut a).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&part).unwrap().write_all(&a).unwrap();
+        // A resume reads the header back and continues under it.
+        let again = Sealer::for_part(&part).unwrap();
+        let mut b = plain[70_001..].to_vec();
+        again.seal_at(70_001, &mut b).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&part).unwrap().write_all(&b).unwrap();
+        assert_eq!(&*read(&part).unwrap(), &plain);
+        assert!(!std::fs::read(&part).unwrap().windows(32).any(|w| w == &plain[100..132]));
+
+        // A part from before sealing starts over.
+        let old = dir.path().join("old.part");
+        std::fs::write(&old, b"plaintext from an older download").unwrap();
+        Sealer::for_part(&old).unwrap();
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), HEADER_LEN);
     }
 
     #[test]
