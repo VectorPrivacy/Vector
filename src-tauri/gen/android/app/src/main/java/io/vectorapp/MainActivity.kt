@@ -129,6 +129,7 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        blockWebViewDiskCache()
         super.onCreate(savedInstanceState)
 
         // Hand Rust the activity for ndk_context (tao 0.35 stopped registering it).
@@ -178,6 +179,30 @@ class MainActivity : TauriActivity() {
         super.onPause()
         stopGyro()   // never leave the rotation sensor running while backgrounded
         try { nativeOnPause() } catch (_: Exception) {}
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Whatever an embedded player's pages left in the webview's cache goes with the app.
+        managedWebView?.clearCache(true)
+    }
+
+    /**
+     * Pages the webview loads from the network (the embedded players) keep no HTTP cache on
+     * disk: a file stands where its cache folder would be, so the cache can't open. Runs
+     * before the webview exists. Local storage and IndexedDB are untouched.
+     */
+    private fun blockWebViewDiskCache() {
+        try {
+            val cache = java.io.File(cacheDir, "WebView/Default/HTTP Cache")
+            if (cache.isDirectory) cache.deleteRecursively()
+            if (!cache.exists()) {
+                cache.parentFile?.mkdirs()
+                cache.createNewFile()
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "webview cache block failed", e)
+        }
     }
 
     private fun handleNotificationIntent(intent: Intent?) {
