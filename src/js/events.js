@@ -113,6 +113,11 @@ async function setupRustListeners() {
             // A folded control edition can add, rename or tombstone channels.
             setCommunityChannels(communityId, summary.channels, summary.categories);
             const channelNames = new Map((summary.channels || []).map(ch => [ch.channel_id, ch.name || '']));
+            // A message can reach a new channel before its control edition does.
+            for (const [id, name] of channelNames) {
+                const bare = arrChats.find(c => c.id === id);
+                if (bare) adoptChannelChat(bare, communityId, name);
+            }
             for (const c of arrChats) {
                 if (c.metadata?.custom_fields?.community_id !== communityId) continue;
                 const f = c.metadata.custom_fields;
@@ -711,6 +716,12 @@ async function setupRustListeners() {
             chat = evt.payload.chat_id.startsWith('npub1')
                 ? getOrCreateDMChat(evt.payload.chat_id)
                 : getOrCreateChat(evt.payload.chat_id, 'Community');
+            // A channel created since this device last looked: its community, when the list knows it.
+            if (chat.chat_type === 'Community') {
+                const home = communityOfChannel(chat.id);
+                if (home) adoptChannelChat(chat, home.communityId, home.name);
+                else refreshCommunityChannels();
+            }
         }
         
         // Early-unlock an optimistic "Joining…" row the moment a message streams in (proves

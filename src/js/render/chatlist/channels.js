@@ -91,6 +91,11 @@ function loadCommunityChannels() {
                 communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
                 communityLockedChannels.set(community.community_id, lockedChannels(community.channels));
                 communityCategoriesCache.set(community.community_id, categoriesOf(community.categories));
+                // A message can reach a channel before its list does.
+                for (const ch of community.channels || []) {
+                    const bare = arrChats.find((c) => c.id === ch.channel_id && !communityIdOfChat(c));
+                    if (bare) adoptChannelChat(bare, community.community_id, ch.name || '');
+                }
             }
             for (const community of list || []) {
                 communityChanged(community.community_id);
@@ -875,21 +880,39 @@ function openCommunityChannel(communityId, channel) {
         refreshVoicePresent(channel.id);
     }
     if (chatOnScreen(channel.id)) return;
-    let chat = arrChats.find(c => c.id === channel.id);
-    if (!chat) {
-        const primary = arrChats.find(c =>
-            communityIdOfChat(c) === communityId && isPrimaryChannelChat(c));
-        chat = getOrCreateChat(channel.id, 'Community');
-        chat.metadata = {
-            ...(primary?.metadata || {}),
-            custom_fields: { ...(primary?.metadata?.custom_fields || {}) },
-        };
-        chat.metadata.custom_fields.channel_name = channel.name;
+    const chat = getOrCreateChat(channel.id, 'Community');
+    if (adoptChannelChat(chat, communityId, channel.name)) {
         invoke('sync_community_channel', { channelId: channel.id, beforeMs: null }).catch(() => {});
-    } else if (!chat.metadata?.custom_fields?.channel_name) {
+    } else if (!chat.metadata.custom_fields.channel_name) {
         chat.metadata.custom_fields.channel_name = channel.name;
     }
     openChat(channel.id);
+}
+
+/**
+ * Give a channel's chat its community's identity, copied from the community's primary row,
+ * when nothing has yet: a channel this device never synced, or one a message reached before
+ * the channel list did. Returns whether it did.
+ */
+function adoptChannelChat(chat, communityId, channelName) {
+    if (communityIdOfChat(chat)) return false;
+    const primary = arrChats.find(c => c !== chat && communityIdOfChat(c) === communityId && isPrimaryChannelChat(c));
+    chat.metadata = {
+        ...(primary?.metadata || chat.metadata || {}),
+        custom_fields: { ...(primary?.metadata?.custom_fields || {}), community_id: communityId, channel_name: channelName || '' },
+    };
+    return true;
+}
+
+/** The community whose channel list holds `channelId`, or null while none does. */
+function communityOfChannel(channelId) {
+    for (const map of [communityChannelsCache, communityLockedChannels]) {
+        for (const [communityId, channels] of map) {
+            const channel = channels?.find?.((c) => c.id === channelId);
+            if (channel) return { communityId, name: channel.name };
+        }
+    }
+    return null;
 }
 
 /**

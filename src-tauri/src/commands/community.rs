@@ -2593,10 +2593,8 @@ async fn create_community_channel_inner(
     }
     // Re-load: the create wrote the new channel onto the held document, and registering
     // from the stale in-memory copy would drop it again.
-    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
-        vector_core::VectorCore.register_v2_chats(&c, &vector_core::db::current_session()).await;
-    }
-    Ok(vector_core::simd::hex::bytes_to_hex_32(&channel_id.0))
+    reregister_channels(&community_id).await;
+    Ok(channel_hex)
 }
 
 /// Tombstone a channel in a **v2** Community (CORD-03 §2). The primary channel is refused:
@@ -2622,9 +2620,7 @@ async fn delete_community_channel_inner(community_id: String, channel_id: String
         .ok_or("Channel not found in Community")?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
     vector_core::community::v2::service::delete_channel(&transport, &community, &ch_id, &name).await?;
-    if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
-        vector_core::VectorCore.register_v2_chats(&c, &vector_core::db::current_session()).await;
-    }
+    reregister_channels(&community_id).await;
     Ok(())
 }
 
@@ -3156,6 +3152,11 @@ async fn reregister_channels(community_id: &str) {
         if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id)) {
             vector_core::VectorCore.register_v2_chats(&c, &vector_core::db::current_session()).await;
         }
+    }
+    // A channel this device created or re-keyed has a plane our own edition's echo won't
+    // add: the fold finds nothing new, so the live sub would never hear it.
+    if let Some(client) = vector_core::state::nostr_client() {
+        vector_core::community::v2::realtime::refresh_subscription(&client).await;
     }
 }
 
