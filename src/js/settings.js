@@ -923,17 +923,17 @@ async function initStorageSection() {
         videoQuality: VIDEO_QUALITY, videoShown: videoCompressionOffered(),
     } });
 
-    // A saved copy lands in a folder other apps read: the native apps only.
-    const [keep, save] = await Promise.all([
+    // Plain files land in a folder other apps read: the native apps only.
+    const [keep, plain] = await Promise.all([
         invoke('get_sql_setting', { key: 'keep_media' }).catch(() => null),
-        invoke('get_sql_setting', { key: 'save_media_to_downloads' }).catch(() => null),
+        invoke('get_sql_setting', { key: 'keep_unencrypted' }).catch(() => null),
     ]);
     VectorSvelte.setSettingsScreen({ storage: {
-        keepShown: true, keepMedia: keep === 'true', exportShown: platformFeatures.os !== 'web', saveToDownloads: save === 'true',
+        keepShown: true, keepMedia: keep === 'true', plainShown: platformFeatures.os !== 'web', keepUnencrypted: keep === 'true' && plain === 'true',
     } });
 
-    // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
-    // and Vector Web on a phone is mobile without a gallery to hide from.
+    // Show in Gallery is Android only: the backend command is a no-op elsewhere,
+    // and Vector Web on a phone is mobile without a gallery to show in.
     if (platformFeatures.os === 'android') {
         let hidden = false;
         try { hidden = await invoke('get_gallery_hidden'); } catch (_) {}
@@ -943,13 +943,18 @@ async function initStorageSection() {
 
 let fMediaPortTracked = false;
 
+/** Where media kept unencrypted lives, as the user's file manager names it. */
+function keptFolderName() {
+    return platformFeatures.os === 'android' ? 'Downloads/Vector' : 'Downloads/vector';
+}
+
 /** Old downloads moving into Vector in the background: shown in Storage while it runs. */
 function trackMediaPort() {
     if (fMediaPortTracked) return;
     fMediaPortTracked = true;
     listen('media_import_progress', (evt) => {
-        const { done, total } = evt.payload;
-        VectorSvelte.setSettingsScreen({ storage: { moving: done < total ? `${done.toLocaleString()} of ${total.toLocaleString()}` : '' } });
+        const { done, total, plain } = evt.payload;
+        VectorSvelte.setSettingsScreen({ storage: { moving: done < total ? `${done.toLocaleString()} of ${total.toLocaleString()}` : '', movingPlain: !!plain } });
     });
 }
 
@@ -1995,9 +2000,7 @@ function updateMigrationProgress(total, completed, phase) {
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
     keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes. Turning it off deletes what it kept.'],
-    saveToDownloads: () => platformFeatures.os === 'android'
-        ? ['Also Save Everything You View', 'Saves a normal copy of every picture, video and voice note you view to your gallery, without tapping Save.']
-        : ['Save Everything You View', 'Saves a normal copy of every picture, video and voice note you view to your Downloads folder, without tapping Save.'],
+    keepUnencrypted: () => ['Keep Unencrypted', `What Vector keeps is saved as normal files in ${keptFolderName()}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.`],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
@@ -2013,7 +2016,7 @@ const SETTINGS_HELP = {
     onionAlias: ['Onion Address', 'A server can also be reachable as a Tor onion service. Vector connects there instead of through a Tor exit.<br><br>Your connection stays encrypted to the server itself.'],
     i2pAlias: ['I2P Address', 'A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
-    gallery: ['Save to Gallery', 'Pictures and videos you Save appear in your gallery, where other apps can open them.<br><br>Off: what you Save stays on this device in Vector\'s folder, hidden from the gallery.'],
+    gallery: ['Show in Gallery', 'Pictures and videos you Save go straight to Downloads/Vector and appear in your gallery.<br><br>Off: Vector asks where to save each file, and hides its folder from the gallery.'],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
     autoDownloadLimit: ['Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.'],
     videoQuality: ['Video Quality', 'How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows.'],
@@ -2167,8 +2170,6 @@ const SETTINGS_HELPERS = {
         } catch (err) {
             console.error('set_gallery_hidden failed:', err);
         }
-        // Saving what you view rides on Save to Gallery.
-        if (hidden && VectorSvelte.settingsScreen().storage.saveToDownloads) await SETTINGS_HELPERS.setSaveToDownloads(false);
     },
     setAutoDownload: async (on) => {
         AUTO_DOWNLOAD_ENABLED = on;
@@ -2196,13 +2197,26 @@ const SETTINGS_HELPERS = {
             return popupConfirm('Keep Media', String(e), true, '', 'vector_warning.svg');
         }
         if (!on) {
+            VectorSvelte.setSettingsScreen({ storage: { keepUnencrypted: false } });
             const info = await getStorageInfo();
             if (info) VectorSvelte.setStorageDistribution(info.type_distribution);
         }
     },
-    setSaveToDownloads: async (on) => {
-        VectorSvelte.setSettingsScreen({ storage: { saveToDownloads: on } });
-        await invoke('set_sql_setting', { key: 'save_media_to_downloads', value: on ? 'true' : 'false' });
+    setKeepUnencrypted: async (on) => {
+        VectorSvelte.setSettingsScreen({ storage: { keepUnencrypted: on } });
+        const undo = () => VectorSvelte.setSettingsScreen({ storage: { keepUnencrypted: !on } });
+        if (on) {
+            const st = VectorSvelte.settingsScreen().storage;
+            const gallery = st.galleryShown && !st.galleryHidden ? ', and they show in your gallery' : '';
+            const body = `Everything Vector keeps becomes a normal file in ${keptFolderName()}. Any app or person with access to this device's files can open them${gallery}.`;
+            if (!(await popupConfirm('Keep media unencrypted?', body, false, '', 'vector_warning.svg'))) return undo();
+        }
+        try {
+            await invoke('set_keep_unencrypted', { on });
+        } catch (e) {
+            undo();
+            return popupConfirm('Keep Unencrypted', String(e), true, '', 'vector_warning.svg');
+        }
     },
     setVideoQuality: async (quality) => {
         VIDEO_QUALITY = quality;

@@ -549,6 +549,10 @@ pub fn run() {
                         let _ = handle.asset_protocol_scope().allow_directory(&dir, true);
                         vector_core::db::set_download_dir(dir);
                     }
+                    if let Some(dir) = android::storage::public_dir().map(std::path::PathBuf::from) {
+                        let _ = handle.asset_protocol_scope().allow_directory(&dir, true);
+                        vector_core::db::set_public_dir(dir);
+                    }
                 }
                 #[cfg(not(target_os = "android"))]
                 {
@@ -618,8 +622,7 @@ pub fn run() {
             #[cfg(target_os = "android")]
             {
                 let mut allowed_dirs = Vec::new();
-                // Current (public) download dir — external media storage.
-                allowed_dirs.push(vector_core::db::get_download_dir());
+                allowed_dirs.extend(vector_core::db::download_roots());
                 // Legacy locations, kept readable so attachments downloaded
                 // before the migration still play until their paths are moved.
                 if let Ok(dir) = handle.path().download_dir() {
@@ -833,6 +836,7 @@ pub fn run() {
             commands::system::clear_storage_category,
             commands::system::kept_media_summary,
             commands::system::set_keep_media,
+            commands::system::set_keep_unencrypted,
             commands::system::check_battery_optimized,
             commands::system::request_battery_optimization,
             commands::system::get_background_service_enabled,

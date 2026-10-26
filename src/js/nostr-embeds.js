@@ -410,7 +410,7 @@ const NOSTR_EMBED_HELPERS = {
         if (platformFeatures.os === 'android') { openAndroidAttachment(path); return; }
         const ext = (path.match(/\.(mp4|webm|mov)$/i)?.[1] || 'mp4').toLowerCase();
         invoke('save_attachment', { path, name: `video.${ext}` })
-            .then((dest) => { if (dest) showToast('Saved'); })
+            .then(toastSaved)
             .catch((err) => showToast(String(err)));
     },
     duration: (secs) => _fmtMediaDuration(secs),

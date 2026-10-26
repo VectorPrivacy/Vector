@@ -27,9 +27,9 @@ pub fn keep_media() -> bool {
     crate::db::get_sql_setting("keep_media".to_string()).ok().flatten().as_deref() == Some("true")
 }
 
-/// "Save media to Downloads": a normal copy of what's viewed goes to the download folder too.
-pub fn save_to_downloads() -> bool {
-    crate::db::get_sql_setting("save_media_to_downloads".to_string()).ok().flatten().as_deref() == Some("true")
+/// "Keep Unencrypted": what is kept is a plain file in the public folder, not sealed in the store.
+pub fn keep_unencrypted() -> bool {
+    keep_media() && crate::db::get_sql_setting("keep_unencrypted".to_string()).ok().flatten().as_deref() == Some("true")
 }
 
 /// The memory key of media fetched by URL rather than by content hash: `kind` keeps one kind's
@@ -53,8 +53,25 @@ pub fn previewable(extension: &str) -> bool {
 pub fn open(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
     match ram::cache().get(hash) {
         Some(entry) => Some(entry as Arc<dyn MediaSource>),
-        None => store::open(hash).or_else(|| pending::open(hash)),
+        None => store::open(hash).or_else(|| pending::open(hash)).or_else(|| kept_plain(hash)),
     }
+}
+
+/// A file kept unencrypted in one of Vector's folders, for a hash memory has let go of.
+#[cfg(not(target_arch = "wasm32"))]
+fn kept_plain(hash: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
+    let roots: Vec<std::path::PathBuf> = crate::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+    let paths = crate::db::attachments::downloaded_paths_by_hash(&crate::simd::hex::bytes_to_hex_32(hash)).ok()?;
+    paths.iter().find_map(|path| {
+        let real = std::fs::canonicalize(path).ok().filter(|real| roots.iter().any(|root| real.starts_with(root)))?;
+        let ext = real.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        crate::vcache::open(&real, crate::crypto::mime_from_extension(&ext))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn kept_plain(_: &[u8; 32]) -> Option<Arc<dyn MediaSource>> {
+    None
 }
 
 /// The plaintext and type of media this account holds, from memory or the store. A kept file

@@ -530,10 +530,10 @@ fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn delete_cached_attachment_files_native(attachments: &[crate::types::Attachment]) {
-    let download_dir = match crate::db::get_download_dir().canonicalize() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
+    let roots: Vec<std::path::PathBuf> = crate::db::download_roots().iter().filter_map(|r| r.canonicalize().ok()).collect();
+    if roots.is_empty() {
+        return;
+    }
     for att in attachments {
         if att.path.is_empty() {
             continue;
@@ -543,9 +543,12 @@ fn delete_cached_attachment_files_native(attachments: &[crate::types::Attachment
             // File already gone, or path unresolvable — nothing to do.
             Err(_) => continue,
         };
-        if !candidate.starts_with(&download_dir) {
+        if !roots.iter().any(|root| candidate.starts_with(root)) {
             // User-managed path (moved/copied out of Vector's cache);
             // never touch.
+            continue;
+        }
+        if crate::db::saved::is_saved(&candidate.to_string_lossy()).unwrap_or(true) {
             continue;
         }
         if let Err(e) = std::fs::remove_file(&candidate) {

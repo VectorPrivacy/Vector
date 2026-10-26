@@ -1023,6 +1023,9 @@ fn bootstrap_pipeline(data_dir: &str) -> Result<String, String> {
     if let Some(dir) = crate::android::storage::external_media_dir().map(std::path::PathBuf::from) {
         vector_core::db::set_download_dir(dir);
     }
+    if let Some(dir) = crate::android::storage::public_dir().map(std::path::PathBuf::from) {
+        vector_core::db::set_public_dir(dir);
+    }
 
     // Prefer the active-account marker so background sync stays aligned with
     // whichever account the user last picked in the GUI. Fall back to the

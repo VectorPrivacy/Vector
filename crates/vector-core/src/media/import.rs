@@ -46,7 +46,7 @@ pub struct Elsewhere {
 }
 
 impl Elsewhere {
-    fn shows(&self, item: &OnDisk) -> bool {
+    pub fn shows(&self, item: &OnDisk) -> bool {
         self.hashes.contains(&item.hash)
             || item.spellings().any(|path| {
                 let path = Path::new(path);
@@ -71,17 +71,18 @@ impl Elsewhere {
     }
 }
 
-/// This account's downloads that still sit in the download folder, one per file.
+/// This account's downloads that still sit in one of Vector's folders, one per file.
 pub fn on_disk() -> Result<Vec<OnDisk>, String> {
-    let Ok(root) = std::fs::canonicalize(crate::db::get_download_dir()) else {
+    let roots: Vec<PathBuf> = crate::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+    if roots.is_empty() {
         return Ok(Vec::new());
-    };
+    }
     let mut files: Vec<OnDisk> = Vec::new();
     let mut at: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
     for (hash, path, extension) in crate::db::attachments::downloads_on_disk()? {
         let Some(hash) = crate::simd::hex::hex_to_bytes_32_checked(&hash) else { continue };
         let Ok(real) = std::fs::canonicalize(&path) else { continue };
-        if !real.starts_with(&root) || !real.is_file() {
+        if !roots.iter().any(|root| real.starts_with(root)) || !real.is_file() {
             continue;
         }
         match at.get(&real) {
@@ -96,13 +97,25 @@ pub fn on_disk() -> Result<Vec<OnDisk>, String> {
     Ok(files)
 }
 
-/// What every other account on this device shows. None when one can't be read, so nothing is
-/// deleted on a guess.
+/// What every other account on this device shows, and every file the user saved. None when one
+/// can't be read, so nothing is deleted on a guess.
 pub fn elsewhere() -> Option<Elsewhere> {
     let me = crate::db::current_account_dir().ok()?;
     let root = crate::db::get_app_data_dir().ok()?;
     let others = crate::db::get_accounts().ok()?.into_iter().map(|name| root.join(name)).filter(|dir| *dir != me);
-    shown_in(others.map(|dir| dir.join("vector.db")))
+    with_saved(shown_in(others.map(|dir| dir.join("vector.db")))?)
+}
+
+/// `shown` and every file this account's user saved.
+fn with_saved(mut shown: Elsewhere) -> Option<Elsewhere> {
+    match crate::db::saved::all() {
+        Ok(saved) => saved.iter().for_each(|path| shown.note(None, path)),
+        Err(e) => {
+            crate::log_warn!("[MediaImport] couldn't read the saved files, so originals stay: {}", e);
+            return None;
+        }
+    }
+    Some(shown)
 }
 
 fn shown_in(dbs: impl IntoIterator<Item = PathBuf>) -> Option<Elsewhere> {
@@ -125,6 +138,12 @@ fn shown_by(db: &Path, shown: &mut Elsewhere) -> Result<(), String> {
     let has = |table: &str| {
         conn.query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", [table], |_| Ok(())).is_ok()
     };
+    if has("saved_files") {
+        let mut stmt = conn.prepare("SELECT path FROM saved_files").map_err(|e| e.to_string())?;
+        for path in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())? {
+            shown.note(None, &path.map_err(|e| e.to_string())?);
+        }
+    }
     if has("miniapps_history") {
         let with_ref = conn
             .query_row("SELECT 1 FROM pragma_table_info('miniapps_history') WHERE name='attachment_ref'", [], |_| Ok(()))
@@ -769,6 +788,57 @@ mod tests {
         assert_eq!(settle_all(Some(&adopted)).stayed, 1);
         assert!(file.exists());
         assert!(owed().is_empty());
+    }
+
+    #[test]
+    fn a_saved_file_outlives_the_download_it_also_was() {
+        let _guard = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let (saved, plain) = (dir.path().join("saved.png"), dir.path().join("plain.png"));
+        std::fs::write(&saved, b"kept, then saved").unwrap();
+        std::fs::write(&plain, b"kept, never saved").unwrap();
+        download("ev-saved", &crate::crypto::sha256_hex(b"kept, then saved"), &saved);
+        download("ev-plain", &crate::crypto::sha256_hex(b"kept, never saved"), &plain);
+        crate::db::saved::mark(&saved.to_string_lossy()).unwrap();
+        let shown = with_saved(nobody_else()).unwrap();
+
+        // Let go: Vector stops showing both, and deletes only the one nobody saved.
+        release(&item(b"kept, then saved", &saved), Some(&shown)).unwrap();
+        release(&item(b"kept, never saved", &plain), Some(&shown)).unwrap();
+        assert!(saved.exists() && !plain.exists());
+        assert_eq!(row("ev-saved"), (String::new(), false));
+
+        // Moved in: the store keeps a copy and the saved file stays where it is, owed to nobody.
+        download("ev-again", &crate::crypto::sha256_hex(b"kept, then saved"), &saved);
+        assert_eq!(move_in(&item(b"kept, then saved", &saved), Some(&shown)).unwrap().0, Moved::Shared);
+        assert!(owed().is_empty() && saved.exists());
+
+        // A new file at that name is not the one that was saved.
+        crate::db::saved::unmark(&saved.to_string_lossy()).unwrap();
+        assert!(!with_saved(nobody_else()).unwrap().shows(&item(b"kept, then saved", &saved)));
+    }
+
+    #[test]
+    fn a_kept_file_moves_out_to_a_plain_copy() {
+        let _guard = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("first.png");
+        std::fs::write(&file, b"kept, then made plain").unwrap();
+        let kept = item(b"kept, then made plain", &file);
+        let hex = crate::simd::hex::bytes_to_hex_32(&kept.hash);
+        download("ev-out", &hex, &file);
+        move_in(&kept, Some(&nobody_else())).unwrap();
+        settle_all(Some(&nobody_else()));
+        assert_eq!(crate::db::attachments::kept_names().unwrap(), vec![(kept.hash, String::new(), "png".to_string())]);
+
+        let plain = dir.path().join("plain.png");
+        std::fs::write(&plain, b"kept, then made plain").unwrap();
+        assert_eq!(crate::db::attachments::out_of_store(&hex, &plain.to_string_lossy()).unwrap(), ["ev-out"]);
+        crate::media::store::forget(&kept.hash);
+        assert_eq!(row("ev-out"), (plain.to_string_lossy().into_owned(), true), "the store letting go leaves the plain row");
+        assert!(crate::db::attachments::kept_names().unwrap().is_empty());
+        // Only a file in one of Vector's own folders stands in for the store.
+        assert!(crate::media::open(&kept.hash).is_none());
     }
 
     #[test]

@@ -35,6 +35,50 @@ object VectorFiles {
     }
 
     /**
+     * Where the user's own copies go: the public Download/Vector, which outlives the app and
+     * shows in the gallery as "Vector". Android 11+ only; earlier, null (the media dir serves).
+     * A folder made here starts hidden when the media dir was hidden.
+     */
+    @JvmStatic
+    fun publicDir(context: Context): String? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+        return try {
+            val base = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val dir = File(base, "Vector")
+            if (!dir.exists()) {
+                if (!dir.mkdirs()) return null
+                val legacy = externalMediaDir(context)?.let { File(it, ".nomedia") }
+                if (legacy != null && legacy.exists()) File(dir, ".nomedia").createNewFile()
+            }
+            if (dir.isDirectory && dir.canWrite()) dir.absolutePath else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * A writable file descriptor for a document the user picked (ACTION_CREATE_DOCUMENT),
+     * truncated, owned by the caller from here. -1 if it can't be opened.
+     */
+    @JvmStatic
+    fun openForWrite(context: Context, uri: String): Int {
+        return try {
+            context.contentResolver.openFileDescriptor(Uri.parse(uri), "wt")?.detachFd() ?: -1
+        } catch (_: Throwable) {
+            -1
+        }
+    }
+
+    /** Remove a picked document a failed write left behind. */
+    @JvmStatic
+    fun deleteDocument(context: Context, uri: String) {
+        try {
+            android.provider.DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(uri))
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
      * Ask the system MediaScanner to index a file so it shows up in the gallery
      * and file managers promptly instead of after the next full scan.
      */

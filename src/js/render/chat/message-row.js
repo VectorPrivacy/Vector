@@ -695,8 +695,14 @@ async function _dmsgOpenFile(att, msg) {
 /** Save an attachment's bytes as a normal file where the user picks. */
 function saveAttachmentFile(att) {
     invoke('save_attachment', { path: VectorSvelte.mediaPath(att), name: att.name || '' })
-        .then((dest) => { if (dest) showToast('Saved'); })
+        .then(toastSaved)
         .catch((err) => showToast(String(err)));
+}
+
+/** Says where a Save went: Android's gallery takes a path, a picked place a content URI. */
+function toastSaved(dest) {
+    if (!dest) return;
+    showToast(platformFeatures.os === 'android' && !dest.startsWith('content://') ? 'Saved to Gallery' : 'Saved');
 }
 
 /**

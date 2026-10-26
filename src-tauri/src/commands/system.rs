@@ -170,6 +170,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     // Dotfiles are neither counted nor swept: they're OS/app markers
     // (.nomedia is the Hide-from-Gallery switch, .{hash}.tmp is a staged
     // send), not user content
+    let saved: std::collections::HashSet<String> = vector_core::db::saved::all().unwrap_or_default().into_iter().collect();
     let mut walk_dir = |dir: &std::path::Path, only_ext: Option<&str>| {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -183,6 +184,9 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
                     None => continue,
                 };
                 if only_ext.is_some_and(|want| extension != want) {
+                    continue;
+                }
+                if std::fs::canonicalize(entry.path()).is_ok_and(|real| saved.contains(&*real.to_string_lossy())) {
                     continue;
                 }
                 if let Ok(metadata) = entry.metadata() {
@@ -202,6 +206,22 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     // Packages only: a crashed update's .xdc.tmp isn't reachable by any sweep
     if let Ok(app_data) = handle.path().app_data_dir() {
         walk_dir(&app_data.join("miniapps").join("marketplace"), Some("xdc"));
+    }
+    // Kept unencrypted in the public folder: Vector's while unsaved, and nothing else there is.
+    let public = vector_core::db::get_public_dir();
+    if public != vector_dir {
+        let root = public.canonicalize().ok();
+        for item in vector_core::media::import::on_disk().unwrap_or_default() {
+            let Ok(real) = std::path::Path::new(&item.path).canonicalize() else { continue };
+            if !root.as_ref().is_some_and(|r| real.starts_with(r)) || vector_core::db::saved::is_saved(&item.path).unwrap_or(true) {
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(&real) {
+                total_bytes += meta.len();
+                file_count += 1;
+                *type_distribution.entry(item.extension.to_lowercase()).or_insert(0) += meta.len();
+            }
+        }
     }
     // Files kept in the media store, by the type each was kept as.
     for (mime, files, bytes) in vector_core::db::media_store::totals().unwrap_or_default() {
@@ -261,7 +281,7 @@ async fn clear_attachment_files<R: Runtime>(
     vector_core::db::scoped(async move {
         // Deletion is confined to the download dir: a stale or symlinked
         // attachment path must not be able to reach files elsewhere on disk
-        let download_dir = vector_core::db::get_download_dir().canonicalize().ok();
+        let roots: Vec<std::path::PathBuf> = vector_core::db::download_roots().iter().filter_map(|r| r.canonicalize().ok()).collect();
 
         // Lock the state to access all chats and messages
         let mut state = STATE.lock().await;
@@ -314,11 +334,12 @@ async fn clear_attachment_files<R: Runtime>(
                     if kept {
                         vector_core::media::store::forget(attachment.id());
                     } else if let Ok(real) = std::path::Path::new(&*path).canonicalize() {
-                        match &download_dir {
-                            Some(dir) if real.starts_with(dir) => {
-                                let _ = std::fs::remove_file(&real);
-                            }
-                            _ => continue,
+                        if !roots.iter().any(|root| real.starts_with(root)) {
+                            continue;
+                        }
+                        // A file the user saved stays theirs; Vector only stops showing it.
+                        if !vector_core::db::saved::is_saved(&real.to_string_lossy()).unwrap_or(true) {
+                            let _ = std::fs::remove_file(&real);
                         }
                     }
                     // Reset attachment properties
@@ -421,7 +442,7 @@ fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<Stri
                 .split('.')
                 .next_back()
                 .is_some_and(|e| exts.contains(&e.to_lowercase()));
-            if matches {
+            if matches && !vector_core::db::saved::is_saved(&entry.path().to_string_lossy()).unwrap_or(true) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -526,9 +547,11 @@ async fn downloads_running() -> bool {
 
 /// Old downloads still in the download folder: how many, and their size.
 async fn old_downloads() -> (u64, u64) {
-    let files = vector_core::db::blocking_bound(vector_core::media::import::on_disk).await.ok().and_then(Result::ok).unwrap_or_default();
-    let bytes = files.iter().filter_map(|f| std::fs::metadata(&f.path).ok()).map(|m| m.len()).sum();
-    (files.len() as u64, bytes)
+    use vector_core::media::import;
+    let Ok((Ok(files), Some(shown))) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return (0, 0) };
+    let goes: Vec<_> = files.iter().filter(|f| !shown.shows(f)).collect();
+    let bytes = goes.iter().filter_map(|f| std::fs::metadata(&f.path).ok()).map(|m| m.len()).sum();
+    (goes.len() as u64, bytes)
 }
 
 fn link_media_dirs<R: Runtime>(handle: &AppHandle<R>) -> Vec<std::path::PathBuf> {
@@ -571,12 +594,31 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
             let _ = set(true);
             return Err(KEEP_MEDIA_BUSY.into());
         }
+        vector_core::db::set_sql_setting("keep_unencrypted".into(), "false".into())?;
         clear_attachment_files(&handle, None, true).await?;
         vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(vector_core::media::store::kept_by_keep_media)).await?;
         for dir in link_media_dirs(&handle) {
             let _ = std::fs::remove_dir_all(dir);
         }
         release_old_downloads().await;
+        Ok(())
+    })
+    .await
+}
+
+/// Keep Unencrypted on or off: what is kept moves, paced, to plain files in the public folder or
+/// back into the store. Refused while a download could still keep a file the old way.
+#[tauri::command]
+pub async fn set_keep_unencrypted(on: bool) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        if on && !vector_core::media::keep_media() {
+            return Err("Turn on Keep Media on This Device first.".into());
+        }
+        if downloads_running().await || !stop_media_port().await {
+            return Err("Change this once your downloads finish.".into());
+        }
+        vector_core::db::set_sql_setting("keep_unencrypted".into(), on.to_string())?;
+        start_media_port(std::time::Duration::ZERO);
         Ok(())
     })
     .await
@@ -619,6 +661,10 @@ pub fn start_media_port(delay: std::time::Duration) {
         if stopped() || !vector_core::media::keep_media() {
             return;
         }
+        if vector_core::media::keep_unencrypted() {
+            move_out(&stopped).await;
+            return;
+        }
         settle_owed(import::settle).await;
         let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };
         let elsewhere = std::sync::Arc::new(elsewhere);
@@ -658,6 +704,63 @@ pub fn start_media_port(delay: std::time::Duration) {
         }
         vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": files.len(), "total": files.len() }));
     });
+}
+
+/// Kept files made plain in the public folder, a file at a time and paced, for an account that
+/// keeps media unencrypted. Each is whole in one place or the other, so a cut-short launch
+/// resumes on the next.
+async fn move_out(stopped: &impl Fn() -> bool) {
+    let Ok(Ok(kept)) = vector_core::db::blocking_bound(vector_core::db::attachments::kept_names).await else { return };
+    for (i, (hash, name, _)) in kept.iter().enumerate() {
+        #[cfg(target_os = "android")]
+        while !crate::android::background_sync::is_activity_in_foreground() && !stopped() {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        if stopped() {
+            break;
+        }
+        let len = vector_core::media::open(hash).map_or(0, |src| src.len());
+        let (hash, name) = (*hash, name.clone());
+        match vector_core::db::blocking_bound(move || crate::media_export::unseal(&hash, &name)).await {
+            Ok(Ok((path, _))) => reflect_unsealed(&hash, &path.to_string_lossy()).await,
+            Ok(Err(e)) => vector_core::log_warn!("[MediaExport] couldn't keep a file unencrypted: {}", e),
+            Err(_) => break,
+        }
+        vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": i + 1, "total": kept.len(), "plain": true }));
+        let pace = std::time::Duration::from_secs_f64(len as f64 / PORT_RATE).max(std::time::Duration::from_millis(150));
+        tokio::time::sleep(pace).await;
+    }
+    vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": kept.len(), "total": kept.len(), "plain": true }));
+}
+
+/// STATE and the open chat show a kept file from its plain copy.
+async fn reflect_unsealed(hash: &[u8; 32], path: &str) {
+    let mut state = STATE.lock().await;
+    let mut touched = Vec::new();
+    for (chat_idx, chat) in state.chats.iter_mut().enumerate() {
+        for m in chat.messages.iter_mut() {
+            let mut changed = false;
+            for att in m.attachments.iter_mut().filter(|a| a.id() == hash && a.downloaded() && a.path().is_empty()) {
+                att.set_path(path.to_string());
+                changed = true;
+            }
+            if changed {
+                touched.push((chat_idx, *m.id()));
+            }
+        }
+    }
+    let updates: Vec<(String, crate::Message)> = touched
+        .into_iter()
+        .filter_map(|(chat_idx, id)| {
+            let chat = &state.chats[chat_idx];
+            chat.messages.find_by_hex_id(&crate::util::bytes_to_hex_32(&id)).map(|m| (chat.id().clone(), m.to_message(&state.interner)))
+        })
+        .collect();
+    drop(state);
+    for (chat_id, mut message) in updates {
+        let old_id = message.id.clone();
+        vector_core::traits::emit_message_update(&chat_id, &old_id, &mut message).await;
+    }
 }
 
 /// Stop the port between files. False when it is still in a file after a while.

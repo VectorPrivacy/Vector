@@ -478,7 +478,7 @@ function closeModelViewer() {
 }
 
 function saveWebFile(args) {
-    invoke('save_attachment', args).catch((err) => showToast(String(err?.message ?? err)));
+    invoke('save_attachment', args).then(toastSaved).catch((err) => showToast(String(err?.message ?? err)));
 }
 
 /**

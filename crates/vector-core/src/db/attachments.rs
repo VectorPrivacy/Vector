@@ -266,6 +266,60 @@ pub fn move_to_store(hash: &str, paths: &[&str]) -> Result<Vec<String>, String> 
     Ok(events)
 }
 
+/// Rows shown from the store's copy of `hash` show the plain file at `path` instead. Returns the
+/// events touched.
+pub fn out_of_store(hash: &str, path: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("out_of_store: {e}"))?;
+    let events: Vec<String> = {
+        let mut stmt = tx
+            .prepare("SELECT DISTINCT event_id FROM attachments WHERE hash=?1 AND path='' AND downloaded=1")
+            .map_err(|e| format!("out_of_store: {e}"))?;
+        let rows = stmt.query_map([hash], |r| r.get::<_, String>(0)).map_err(|e| format!("out_of_store: {e}"))?;
+        rows.flatten().collect()
+    };
+    tx.execute("UPDATE attachments SET path=?2 WHERE hash=?1 AND path='' AND downloaded=1", [hash, path])
+        .map_err(|e| format!("out_of_store: {e}"))?;
+    let held = crate::media::MediaRef::held(&crate::simd::hex::hex_to_bytes_32(hash));
+    tx.execute("UPDATE miniapps_history SET attachment_ref=?2 WHERE attachment_ref=?1", [held.as_str(), path])
+        .map_err(|e| format!("out_of_store: {e}"))?;
+    tx.execute("UPDATE miniapps_history SET src_url=?2 WHERE src_url=?1", [held.as_str(), path])
+        .map_err(|e| format!("out_of_store: {e}"))?;
+    tx.commit().map_err(|e| format!("out_of_store: {e}"))?;
+    Ok(events)
+}
+
+/// Each kept file with the name and extension one of its messages gave it.
+pub fn kept_names() -> Result<Vec<([u8; 32], String, String)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.hash, a.name, a.extension FROM attachments a JOIN media_store m ON m.hash = a.hash \
+             WHERE a.path='' AND a.downloaded=1 ORDER BY a.hash",
+        )
+        .map_err(|e| format!("kept_names: {e}"))?;
+    crate::crypto::open_batch(|at_rest| {
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("kept_names: {e}"))?;
+        let mut out: Vec<([u8; 32], String, String)> = Vec::new();
+        for (hash, name, extension) in rows.flatten() {
+            let Some(hash) = crate::simd::hex::hex_to_bytes_32_checked(&hash) else { continue };
+            let name = at_rest.open_or_keep(name);
+            match out.last_mut() {
+                Some(last) if last.0 == hash => {
+                    if last.1.is_empty() {
+                        last.1 = name;
+                    }
+                }
+                _ => out.push((hash, name, extension)),
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// A file this account no longer shows, under every name rows give it. Returns the events touched.
 pub fn let_go(paths: &[&str]) -> Result<Vec<String>, String> {
     let conn = super::get_write_connection_guard_static()?;

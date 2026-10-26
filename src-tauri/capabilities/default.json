@@ -325,6 +325,7 @@
     "allow-clear-storage-category",
     "allow-kept-media-summary",
     "allow-set-keep-media",
+    "allow-set-keep-unencrypted",
     "allow-export-keys",
     "allow-transfer-start",
     "allow-transfer-check-number",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-keep-unencrypted"
+description = "Enables the set_keep_unencrypted command without any pre-configured scope."
+commands.allow = ["set_keep_unencrypted"]
+
+[[permission]]
+identifier = "deny-set-keep-unencrypted"
+description = "Denies the set_keep_unencrypted command without any pre-configured scope."
+commands.deny = ["set_keep_unencrypted"]

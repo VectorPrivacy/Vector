@@ -335,20 +335,20 @@
             </label>
         </div>
     {/if}
-    {#if sc.storage.galleryShown}
+    {#if sc.storage.plainShown && (adv.on || sc.storage.keepUnencrypted) && sc.storage.keepMedia}
         <div class="form-group" style="margin-top: 15px;">
             <label class="toggle-container">
-                <span><InfoIcon side="right" align="middle" onclick={() => h.help('gallery')} />Save to Gallery</span>
-                <input type="checkbox" checked={!sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(!e.currentTarget.checked)}>
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('keepUnencrypted')} />Keep Unencrypted</span>
+                <input type="checkbox" checked={sc.storage.keepUnencrypted} onchange={(e) => h.setKeepUnencrypted(e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
         </div>
     {/if}
-    {#if sc.storage.exportShown && !(sc.storage.galleryShown && sc.storage.galleryHidden)}
+    {#if sc.storage.galleryShown}
         <div class="form-group" style="margin-top: 15px;">
             <label class="toggle-container">
-                <span><InfoIcon side="right" align="middle" onclick={() => h.help('saveToDownloads')} />{sc.storage.galleryShown ? 'Also Save Everything You View' : 'Save Everything You View'}</span>
-                <input type="checkbox" checked={sc.storage.saveToDownloads} onchange={(e) => h.setSaveToDownloads(e.currentTarget.checked)}>
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('gallery')} />Show in Gallery</span>
+                <input type="checkbox" checked={!sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(!e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
         </div>
@@ -363,7 +363,7 @@
     {/if}
     {#if sc.storage.moving}
         <div class="form-group st-line">
-            <span class="st-line-label">Moving your media into Vector</span>
+            <span class="st-line-label">{sc.storage.movingPlain ? 'Decrypting your kept media' : 'Moving your media into Vector'}</span>
             <span>{sc.storage.moving}</span>
         </div>
     {/if}

@@ -69,41 +69,78 @@ pub fn external_media_dir() -> Option<String> {
     .ok()
 }
 
-/// Path of the `.nomedia` marker in the shared media dir. Its presence tells
-/// Android's MediaScanner to skip (and evict) everything in Vector's media dir.
-fn nomedia_marker() -> std::path::PathBuf {
-    vector_core::db::get_download_dir().join(".nomedia")
-}
-
-/// True when the user has hidden Vector's media from the gallery. Device-wide by
-/// nature: the marker governs the whole shared media dir, regardless of account.
-pub fn gallery_hidden() -> bool {
-    nomedia_marker().exists()
-}
-
-/// Hide or reveal all of Vector's saved media in the gallery. Writes/removes the
-/// `.nomedia` marker, then forces a MediaScanner pass over existing files so they
-/// are evicted (hidden) or re-indexed (visible) to match the new state.
-pub fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
-    let dir = vector_core::db::get_download_dir();
-    let marker = dir.join(".nomedia");
-    if hidden {
-        std::fs::write(&marker, b"").map_err(|e| format!("create .nomedia: {:?}", e))?;
-    } else if let Err(e) = std::fs::remove_file(&marker) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("remove .nomedia: {:?}", e));
+/// The public `Download/Vector` (Android 11+), or `None` where the media dir serves instead.
+pub fn public_dir() -> Option<String> {
+    with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let res = env
+            .call_static_method(&cls, "publicDir", "(Landroid/content/Context;)Ljava/lang/String;", &[JValue::Object(activity)])
+            .map_err(|e| format!("publicDir: {:?}", e))?
+            .l()
+            .map_err(|e| format!("publicDir obj: {:?}", e))?;
+        if res.is_null() {
+            return Err("no public dir".to_string());
         }
-    }
+        Ok(env.get_string(&JString::from(res)).map_err(|e| format!("publicDir str: {:?}", e))?.into())
+    })
+    .ok()
+}
 
-    // Re-run the scanner over existing files so it re-evaluates them against the
-    // marker (raw scan — bypasses the gallery_hidden gate, since when hiding we
-    // explicitly want the scan to evict). Batched to bound JNI churn.
-    const BATCH: usize = 128;
-    let mut batch: Vec<String> = Vec::with_capacity(BATCH);
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
+/// A picked document (`content://`), opened for writing from its first byte.
+pub fn open_for_write(uri: &str) -> Result<std::fs::File, String> {
+    let fd = with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let j_uri = env.new_string(uri).map_err(|e| format!("uri str: {:?}", e))?;
+        env.call_static_method(&cls, "openForWrite", "(Landroid/content/Context;Ljava/lang/String;)I", &[JValue::Object(activity), JValue::Object(&j_uri)])
+            .map_err(|e| format!("openForWrite: {:?}", e))?
+            .i()
+            .map_err(|e| format!("openForWrite fd: {:?}", e))
+    })?;
+    if fd < 0 {
+        return Err("Couldn't open the place you picked".to_string());
+    }
+    // SAFETY: the descriptor was detached from its ParcelFileDescriptor for us alone.
+    Ok(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) })
+}
+
+/// Remove a picked document a failed save left behind.
+pub fn delete_document(uri: &str) {
+    let _ = with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let j_uri = env.new_string(uri).map_err(|e| format!("uri str: {:?}", e))?;
+        env.call_static_method(&cls, "deleteDocument", "(Landroid/content/Context;Ljava/lang/String;)V", &[JValue::Object(activity), JValue::Object(&j_uri)])
+            .map_err(|e| format!("deleteDocument: {:?}", e))?;
+        Ok(())
+    });
+}
+
+/// True when the user has hidden Vector's files from the gallery. Device-wide by nature: the
+/// marker governs the shared folder, regardless of account.
+pub fn gallery_hidden() -> bool {
+    vector_core::db::get_public_dir().join(".nomedia").exists()
+}
+
+/// Hide or reveal every file of Vector's in the gallery, in place: a `.nomedia` marker in each of
+/// its folders, then a scanner pass so existing files are evicted or indexed again.
+pub fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
+    for dir in vector_core::db::download_roots() {
+        if !dir.is_dir() {
+            continue;
+        }
+        let marker = dir.join(".nomedia");
+        if hidden {
+            std::fs::write(&marker, b"").map_err(|e| format!("create .nomedia: {:?}", e))?;
+        } else if let Err(e) = std::fs::remove_file(&marker) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("remove .nomedia: {:?}", e));
+            }
+        }
+        // Raw scan: when hiding, the scan is what evicts. Batched to bound JNI churn.
+        const BATCH: usize = 128;
+        let mut batch: Vec<String> = Vec::with_capacity(BATCH);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
-            if !path.is_file() || path.file_name().map(|n| n == ".nomedia").unwrap_or(false) {
+            if !path.is_file() || path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
                 continue;
             }
             batch.push(path.to_string_lossy().to_string());
@@ -112,8 +149,6 @@ pub fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
                 batch.clear();
             }
         }
-    }
-    if !batch.is_empty() {
         scan_files_raw(&batch);
     }
     Ok(())

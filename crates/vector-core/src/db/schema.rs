@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 117;
+pub const HIGHEST_MIGRATION_ID: u32 = 118;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1639,6 +1639,13 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             );",
         )
         .map_err(|e| format!("migration 117: {e}"))?;
+        Ok(())
+    })?;
+
+    // Files the user saved into one of Vector's folders: theirs, so nothing Vector clears takes them.
+    run_atomic_migration(conn, 118, "Saved files", |tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS saved_files (path TEXT PRIMARY KEY);")
+            .map_err(|e| format!("migration 118: {e}"))?;
         Ok(())
     })?;
 

@@ -29,6 +29,7 @@ pub mod community;
 pub mod v1_purge;
 pub mod bots;
 pub mod notify;
+pub mod saved;
 #[cfg(target_arch = "wasm32")]
 pub mod webfs;
 #[cfg(target_arch = "wasm32")]
@@ -118,6 +119,24 @@ static DOWNLOAD_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 /// run earlier hit the fallback.
 pub fn set_download_dir(path: PathBuf) {
     let _ = DOWNLOAD_DIR_OVERRIDE.set(path);
+}
+
+/// Where the user's own copies go: Saves, and media kept unencrypted. Android's public
+/// `Download/Vector`, which outlives the app; elsewhere the download directory.
+static PUBLIC_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_public_dir(path: PathBuf) {
+    let _ = PUBLIC_DIR_OVERRIDE.set(path);
+}
+
+pub fn get_public_dir() -> PathBuf {
+    PUBLIC_DIR_OVERRIDE.get().cloned().unwrap_or_else(get_download_dir)
+}
+
+/// Every folder Vector writes plain files into: the download directory, then the public one.
+pub fn download_roots() -> Vec<PathBuf> {
+    let (download, public) = (get_download_dir(), get_public_dir());
+    if public == download { vec![download] } else { vec![download, public] }
 }
 
 /// Platform-appropriate download directory for file attachments.

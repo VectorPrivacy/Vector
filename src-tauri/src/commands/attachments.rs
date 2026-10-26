@@ -220,42 +220,87 @@ pub fn media_release(hash: String) {
     }
 }
 
-/// Save a file where the user picks (Android: into Vector's download folder, then the gallery
-/// sees it). Held media is written out as plaintext only here. None when the picker was closed.
+/// Save a plain copy of a file. Android with Show in Gallery: pictures and videos go straight to
+/// `Download/Vector`; anything else asks where, as the desktop always does. None when the picker
+/// was closed.
 #[tauri::command]
 pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]
-    {
-        let _ = app;
-        let dir = vector_core::db::get_download_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
-        let name = crate::media_export::file_name(&name, &[0u8; 32], "");
-        let dest = vector_core::crypto::resolve_unique_filename(&dir, &name);
-        let (from, to) = (path, dest.clone());
-        tokio::task::spawn_blocking(move || crate::media_export::save_to(&from, &to))
-            .await
-            .map_err(|e| e.to_string())??;
+    if !crate::android::storage::gallery_hidden() && shows_in_gallery(&path, &name) {
+        let public = vector_core::db::get_public_dir();
+        let dest = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+            // Kept unencrypted, it is there already.
+            let kept = match vector_core::media::MediaRef::parse(&path) {
+                Some(vector_core::media::MediaRef::File(file)) => vec![file],
+                Some(vector_core::media::MediaRef::Held(hash)) => {
+                    vector_core::db::attachments::downloaded_paths_by_hash(&crate::util::bytes_to_hex_32(&hash)).unwrap_or_default()
+                }
+                None => Vec::new(),
+            };
+            if let Ok(root) = std::fs::canonicalize(&public) {
+                if let Some(real) = kept.iter().filter_map(|f| std::fs::canonicalize(f).ok()).find(|real| real.starts_with(&root)) {
+                    return Ok(real);
+                }
+            }
+            Ok(crate::media_export::place_plain(&path, &name, &public)?.0)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let dest = dest.to_string_lossy().into_owned();
+        vector_core::db::saved::mark(&dest)?;
         crate::android::storage::scan_file(&dest);
-        Ok(Some(dest))
+        return Ok(Some(dest));
     }
+    use tauri_plugin_dialog::DialogExt;
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
+    let mut dialog = app.dialog().file().set_file_name(crate::media_export::file_name(&name, &[0u8; 32], ""));
     #[cfg(not(target_os = "android"))]
     {
         use tauri::Manager;
-        use tauri_plugin_dialog::DialogExt;
-        let mut dialog = app.dialog().file().set_file_name(crate::media_export::file_name(&name, &[0u8; 32], ""));
         if let Ok(downloads) = app.path().download_dir() {
             dialog = dialog.set_directory(downloads);
         }
-        tokio::task::spawn_blocking(move || {
-            let Some(dest) = dialog.blocking_save_file() else { return Ok(None) };
-            let dest = dest.into_path().map_err(|e| e.to_string())?;
-            crate::media_export::save_to(&path, &dest)?;
-            Ok(Some(dest.to_string_lossy().into_owned()))
-        })
-        .await
-        .map_err(|e| e.to_string())?
     }
+    tokio::task::spawn_blocking(move || {
+        let Some(picked) = dialog.blocking_save_file() else { return Ok(None) };
+        #[cfg(target_os = "android")]
+        if let tauri_plugin_dialog::FilePath::Url(url) = &picked {
+            let uri = url.to_string();
+            let written = crate::android::storage::open_for_write(&uri).and_then(|file| crate::media_export::save_into(&path, file));
+            if written.is_err() {
+                crate::android::storage::delete_document(&uri);
+            }
+            return written.map(|()| Some(uri));
+        }
+        let dest = picked.into_path().map_err(|e| e.to_string())?;
+        crate::media_export::save_to(&path, &dest)?;
+        let dest = dest.to_string_lossy().into_owned();
+        // Saved into one of Vector's own folders, it stays the user's.
+        if let Ok(real) = std::fs::canonicalize(&dest) {
+            if vector_core::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).any(|root| real.starts_with(root)) {
+                vector_core::db::saved::mark(&dest)?;
+            }
+        }
+        Ok(Some(dest))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Whether a Save goes to the gallery: pictures and videos, by the name it is saved under or else
+/// the type it was held as.
+#[cfg(target_os = "android")]
+fn shows_in_gallery(path_or_ref: &str, name: &str) -> bool {
+    let ext = |n: &str| std::path::Path::new(n).extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    let mime = match ext(name) {
+        Some(e) => vector_core::crypto::mime_from_extension(&e).to_string(),
+        None => match vector_core::media::MediaRef::parse(path_or_ref) {
+            Some(vector_core::media::MediaRef::Held(hash)) => vector_core::media::open(&hash).map(|s| s.mime().to_string()).unwrap_or_default(),
+            Some(vector_core::media::MediaRef::File(file)) => ext(&file).map(|e| vector_core::crypto::mime_from_extension(&e).to_string()).unwrap_or_default(),
+            None => String::new(),
+        },
+    };
+    mime.starts_with("image/") || mime.starts_with("video/")
 }
 
 /// Whether Vector's saved media is currently hidden from the device gallery
@@ -297,10 +342,9 @@ pub async fn set_gallery_hidden(hidden: bool) -> Result<(), String> {
 /// comparison defeats `..` traversal and symlinks.
 #[cfg(target_os = "android")]
 fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
-    let dl = std::fs::canonicalize(vector_core::db::get_download_dir())
-        .map_err(|_| "download dir unavailable".to_string())?;
+    let roots: Vec<std::path::PathBuf> = vector_core::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
     let target = std::fs::canonicalize(path).map_err(|_| "file not found".to_string())?;
-    if target.starts_with(&dl) || crate::media_export::is_export(&target) {
+    if roots.iter().any(|root| target.starts_with(root)) || crate::media_export::is_export(&target) {
         Ok(())
     } else {
         Err("path is outside the download directory".to_string())
@@ -934,26 +978,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
         if let Some((file_hash, on_disk)) = kept.map(|h| (h, true)).or(held.map(|h| (h, false))) {
             let hash = vector_core::simd::hex::hex_to_bytes_32(&file_hash);
-            // A normal copy for an account that asked for one; what it views still shows from Vector.
-            let saved = if vector_core::media::save_to_downloads() && vector_core::media::previewable(&extension) {
-                let name = attachment.name().to_string();
-                let copy = tokio::task::spawn_blocking(move || crate::media_export::save_to_downloads(&hash, &name))
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()));
-                match copy {
-                    Ok(path) => {
-                        #[cfg(target_os = "android")]
-                        crate::android::storage::scan_file(&path.to_string_lossy());
-                        Some(path.to_string_lossy().into_owned())
-                    }
-                    Err(e) => {
-                        vector_core::log_warn!("[AttachmentDownload] couldn't save a copy: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                 att.set_id(hash);
@@ -964,44 +988,67 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     att.set_downloaded(true);
                     att.set_path(String::new());
                 }
-                if let Some(path) = &saved {
-                    att.set_downloaded(true);
-                    att.set_path(path.clone());
-                }
             });
+            let found = state.get_chat(&npub).and_then(|chat| {
+                let chat_id = chat.id().clone();
+                chat.messages.find_by_hex_id(&msg_id).map(|m| (chat_id, m.to_message(&state.interner)))
+            });
+            drop(state);
+            // The proven blob and its content id persist; held bytes never do.
+            if let Some((_, message)) = &found {
+                let _ = db::save_message(&npub, message).await;
+            }
+            // Kept unencrypted: the plain file takes the store copy's place once the row is down.
+            let mut shown = vector_core::media::MediaRef::held(&hash);
+            if on_disk && vector_core::media::keep_unencrypted() {
+                let name = attachment.name().to_string();
+                match tokio::task::spawn_blocking(move || crate::media_export::unseal(&hash, &name)).await.unwrap_or_else(|e| Err(e.to_string())) {
+                    Ok((path, _)) => shown = path.to_string_lossy().into_owned(),
+                    Err(e) => vector_core::log_warn!("[AttachmentDownload] kept, but couldn't keep it unencrypted yet: {}", e),
+                }
+            }
+            let unsealed = !shown.starts_with("vmedia:");
+            let mut state = STATE.lock().await;
+            // Every other message of the same bytes shows them now too.
+            let mut updates = Vec::new();
+            for chat in state.chats.iter_mut() {
+                let chat_id = chat.id.clone();
+                for m in chat.messages.iter_mut() {
+                    let mut touched = m.id_hex() == msg_id;
+                    for att in m.attachments.iter_mut().filter(|a| a.id() == &hash) {
+                        if unsealed && att.downloaded() && att.path().is_empty() {
+                            att.set_path(shown.clone());
+                        }
+                        touched = true;
+                    }
+                    if touched {
+                        updates.push((chat_id.clone(), *m.id()));
+                    }
+                }
+            }
+            let messages: Vec<(String, crate::Message)> = updates
+                .iter()
+                .filter_map(|(chat_id, id)| {
+                    let chat = state.get_chat(chat_id)?;
+                    chat.messages.find_by_hex_id(&util::bytes_to_hex_32(id)).map(|m| (chat_id.clone(), m.to_message(&state.interner)))
+                })
+                .collect();
+            drop(state);
             emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "old_id": attachment_id,
                 "id": file_hash,
                 "success": true,
-                "resident": true,
-                "result": vector_core::media::MediaRef::held(&hash),
+                "resident": !unsealed,
+                "result": shown,
             }));
-            let found = state.get_chat(&npub).and_then(|chat| {
-                let chat_id = chat.id().clone();
-                chat.messages.find_by_hex_id(&msg_id).map(|m| (chat_id, m.to_message(&state.interner)))
-            });
-            // Every other message of the same bytes shows them now too.
-            let mut also = Vec::new();
-            for chat in state.chats.iter() {
-                for m in chat.messages.iter() {
-                    if m.id_hex() != msg_id && m.attachments.iter().any(|a| a.id() == &hash) {
-                        also.push((chat.id.clone(), m.to_message(&state.interner)));
-                    }
-                }
-            }
-            drop(state);
-            for (chat_id, message) in found.iter().chain(also.iter()) {
+            for (chat_id, message) in &messages {
                 emit_for(sid, handle, "message_update", serde_json::json!({
                     "old_id": &message.id,
                     "message": message,
                     "chat_id": chat_id,
                 }));
-            }
-            // The proven blob and its content id persist; held bytes never do.
-            if let Some((_, message)) = found {
-                let _ = db::save_message(&npub, &message).await;
             }
             return true;
         }

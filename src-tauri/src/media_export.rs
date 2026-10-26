@@ -63,7 +63,6 @@ fn export(src: &dyn media::MediaSource, name: String) -> Result<PathBuf, String>
 /// Write what `src` holds to `dest` a chunk at a time, beside it first, then into place: a
 /// large file is never whole in memory.
 fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
-    use std::io::Write;
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = dest.with_file_name(format!(".{name}.{:08x}.saving", rand::random::<u32>()));
     let result = (|| -> std::io::Result<()> {
@@ -72,16 +71,7 @@ fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut out = std::io::BufWriter::with_capacity(1 << 20, options.open(&tmp)?);
-        let mut buf = zeroize::Zeroizing::new(vec![0u8; 1 << 20]);
-        let mut at = 0u64;
-        while at < src.len() {
-            let n = src.read_at(at, &mut buf)?;
-            if n == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            out.write_all(&buf[..n])?;
-            at += n as u64;
-        }
+        write_out(src, &mut out)?;
         out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         std::fs::rename(&tmp, dest)
     })();
@@ -89,6 +79,20 @@ fn copy_out(src: &dyn media::MediaSource, dest: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("Couldn't save the file: {e}")
     })
+}
+
+fn write_out(src: &dyn media::MediaSource, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; 1 << 20]);
+    let mut at = 0u64;
+    while at < src.len() {
+        let n = src.read_at(at, &mut buf)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        out.write_all(&buf[..n])?;
+        at += n as u64;
+    }
+    Ok(())
 }
 
 /// The package a Mini App runs from: a file is itself; a kept app is written out sealed once
@@ -111,21 +115,80 @@ pub fn package_path(path_or_ref: &str) -> Result<String, String> {
     }
 }
 
-/// A normal copy of held media in the download folder, for an account that asked for one: the
-/// same file already there under its name is used as it is. Returns where it is.
-pub fn save_to_downloads(hash: &[u8; 32], name: &str) -> Result<PathBuf, String> {
-    let src = media::open(hash).ok_or("This file isn't open any more: show it again first")?;
-    let dir = vector_core::db::get_download_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
-    let name = file_name(name, hash, src.mime());
-    let candidate = dir.join(&name);
-    let hex = crate::util::bytes_to_hex_string(hash);
-    if vector_core::crypto::stream::hash_file(&candidate).is_ok_and(|(h, _)| h == hex) {
-        return Ok(candidate);
+type Source = (std::sync::Arc<dyn media::MediaSource>, Option<[u8; 32]>);
+
+/// What `path_or_ref` names, and its content hash when the ref carries one.
+fn source(path_or_ref: &str) -> Result<Source, String> {
+    match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+        MediaRef::Held(hash) => Ok((media::open(&hash).ok_or("This file isn't open any more: show it again first")?, Some(hash))),
+        // A cache file opens sealed; any other file reads as it is.
+        MediaRef::File(path) => Ok((vector_core::vcache::open(Path::new(&path), "application/octet-stream").ok_or("Couldn't read the file")?, None)),
     }
-    let dest = vector_core::crypto::resolve_unique_filename(&dir, &name);
+}
+
+fn digest(src: &dyn media::MediaSource) -> Result<[u8; 32], String> {
+    let mut hasher = vector_core::crypto::sha256::Sha256::new();
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; 1 << 20]);
+    let mut at = 0u64;
+    while at < src.len() {
+        let n = src.read_at(at, &mut buf).map_err(|e| format!("Couldn't read the file: {e}"))?;
+        if n == 0 {
+            return Err("Couldn't read the file: it ended early".into());
+        }
+        hasher.update(&buf[..n]);
+        at += n as u64;
+    }
+    Ok(hasher.finalize())
+}
+
+/// A plain copy of `path_or_ref` in `dir` named `name`; a file there already holding these bytes
+/// is used as it is. Returns where it is, and whether this wrote it.
+pub fn place_plain(path_or_ref: &str, name: &str, dir: &Path) -> Result<(PathBuf, bool), String> {
+    let (src, hash) = source(path_or_ref)?;
+    let hash = match hash {
+        Some(hash) => hash,
+        None => digest(&*src)?,
+    };
+    let hex = crate::util::bytes_to_hex_string(&hash);
+    let holds = |path: &Path| vector_core::crypto::stream::hash_file(path).is_ok_and(|(h, _)| h == hex);
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't save the file: {e}"))?;
+    let name = file_name(name, &hash, src.mime());
+    let candidate = dir.join(&name);
+    if holds(&candidate) {
+        return Ok((candidate, false));
+    }
+    let dest = vector_core::crypto::resolve_unique_filename(dir, &name);
     copy_out(&*src, &dest)?;
-    Ok(dest)
+    // A kept file reads through its keystream, which checks no tag: the copy proves its bytes.
+    if !holds(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err("Couldn't save the file: it didn't read back as sent".into());
+    }
+    Ok((dest, true))
+}
+
+/// A kept file made plain in the public folder: its messages show that copy, then the store lets
+/// go of its own. Returns where it is and the events whose rows moved.
+pub fn unseal(hash: &[u8; 32], name: &str) -> Result<(PathBuf, Vec<String>), String> {
+    let (path, wrote) = place_plain(&MediaRef::held(hash), name, &vector_core::db::get_public_dir())?;
+    let spelled = path.to_string_lossy().into_owned();
+    if wrote {
+        vector_core::db::saved::unmark(&spelled)?;
+    }
+    let events = vector_core::db::attachments::out_of_store(&crate::util::bytes_to_hex_string(hash), &spelled)?;
+    vector_core::db::sync_wal()?;
+    vector_core::media::store::forget(hash);
+    #[cfg(target_os = "android")]
+    crate::android::storage::scan_file(&spelled);
+    Ok((path, events))
+}
+
+/// Write `path_or_ref` into a file the caller opened, from its first byte.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn save_into(path_or_ref: &str, file: std::fs::File) -> Result<(), String> {
+    let (src, _) = source(path_or_ref)?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    write_out(&*src, &mut out).and_then(|()| out.into_inner().map_err(|e| e.into_error())?.sync_all()).map_err(|e| format!("Couldn't save the file: {e}"))
 }
 
 /// A held file's bytes, for readers that parse them in memory.
@@ -138,11 +201,7 @@ pub fn held_bytes(path_or_ref: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
 
 /// Write `path_or_ref` to `dest`: beside it first, then into place.
 pub fn save_to(path_or_ref: &str, dest: &Path) -> Result<(), String> {
-    let src = match MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
-        MediaRef::Held(hash) => media::open(&hash).ok_or("This file isn't open any more: show it again first")?,
-        // A cache file opens sealed; any other file reads as it is.
-        MediaRef::File(path) => vector_core::vcache::open(Path::new(&path), "application/octet-stream").ok_or("Couldn't read the file")?,
-    };
+    let (src, _) = source(path_or_ref)?;
     copy_out(&*src, dest)
 }
 
