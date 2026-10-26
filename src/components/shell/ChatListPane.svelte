@@ -106,6 +106,8 @@
         {#if slim}
             <!-- Folded, it's still here at no width, so a pull can bring it out. -->
             <div class="cc-rail-slot" inert={railP === 0} use:railPull={railGrip}><ConsoleRail /></div>
+            <!-- Folded, a swipe in from the screen's edge pulls it out as the tab does. -->
+            <div class="cc-rail-edge" inert={railP === 1} use:railPull={pull}></div>
         {/if}
         <div class="cc-pane">
             {#if (slim || shell.ws) && !pane.communityId && !searching && screens.chatlist}

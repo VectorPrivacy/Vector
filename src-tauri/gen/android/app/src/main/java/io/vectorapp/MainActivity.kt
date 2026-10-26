@@ -2,6 +2,7 @@ package io.vectorapp
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.hardware.Sensor
@@ -272,6 +273,26 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /**
+     * Vector draws its own side swipes (the Communities sidebar, swipe to reply), so the system
+     * back gesture gives way along both side edges as far as Android allows: 200dp of height a
+     * side, placed where a thumb swipes. Back itself still reaches the app through onBackPressed.
+     */
+    private fun claimSideEdges(view: View) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        view.addOnLayoutChangeListener { v, left, top, right, bottom, _, _, _, _ ->
+            val density = v.resources.displayMetrics.density
+            val (width, height) = (right - left) to (bottom - top)
+            val band = (200 * density).toInt().coerceAtMost(height)
+            val edge = (48 * density).toInt()
+            val from = (height * 2 / 5 - band / 2).coerceIn(0, height - band)
+            v.systemGestureExclusionRects = listOf(
+                Rect(0, from, edge, from + band),
+                Rect(width - edge, from, width, from + band),
+            )
+        }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         // If a Mini App is open, close it instead of navigating back
@@ -303,6 +324,8 @@ class MainActivity : TauriActivity() {
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         managedWebView = webView
+
+        claimSideEdges(webView)
 
         // Expose the gyro bridge to the badge card: JS calls window.__vectorGyroBridge.start()/stop().
         webView.addJavascriptInterface(GyroBridge(), "__vectorGyroBridge")

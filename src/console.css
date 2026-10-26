@@ -384,6 +384,18 @@ body.cc .cc-rail-slot {
   touch-action: pan-y;
 }
 
+/* Folded, the screen's left edge pulls the rail out too. On Android, MainActivity claims
+   what it can of this edge from the system back gesture. */
+body.cc .cc-rail-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 20px;
+  z-index: 2;
+  touch-action: pan-y;
+}
+
 body.cc .cc-rail-slot > .cc-rail {
   flex: none;
   transform: translateX(calc((var(--cc-rail-p, 1) - 1) * var(--cc-rail-w)));
