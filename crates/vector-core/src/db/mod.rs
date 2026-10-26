@@ -1625,11 +1625,22 @@ pub fn init_database(npub: &str) -> Result<(), String> {
         return Err(block.to_string());
     }
 
+    // No tables yet is a new account. One from before Keep Media was a choice kept every
+    // download, so it goes on keeping media and its old downloads move in.
+    let fresh = conn
+        .query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'", [], |_| Ok(()))
+        .is_err();
+
     conn.execute_batch(schema::SQL_SCHEMA)
         .map_err(|e| format!("Failed to create schema: {}", e))?;
 
     // Run migrations
     schema::run_migrations(&mut conn)?;
+
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('keep_media', ?1)",
+        [if fresh { "false" } else { "true" }],
+    );
 
     // Stamped after migrations, so it names the build whose schema is now on
     // disk. A blocked build never reaches here, so this only ever records a

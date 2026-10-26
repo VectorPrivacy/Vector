@@ -31,7 +31,7 @@
     let { h } = $props();
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), streamer: {...}, transport: {...}, tor: {...}, blocked: {...},
     //    display: {...}, notif: {...}, storageDonut: {...}, setGalleryHidden(on), setAutoDownload(on),
-    //    setAutoDownloadLimit(bytes), setVideoQuality(quality), moveDownloads(), clearStorage(), setBackgroundService(on), batteryWarningTap(),
+    //    setAutoDownloadLimit(bytes), setVideoQuality(quality), clearStorage(), setBackgroundService(on), batteryWarningTap(),
     //    security: {...}, setAdvancedMode(on), setPlayers(on), copyLogs(), logout()
 
     const sc = settingsScreen();
@@ -313,15 +313,6 @@
 
 {#snippet storageBody()}
     <div><StorageDonut h={h.storageDonut} /></div>
-    {#if sc.storage.galleryShown}
-        <div class="form-group" style="margin-top: 15px;">
-            <label class="toggle-container">
-                <span><InfoIcon side="right" align="middle" onclick={() => h.help('gallery')} />Hide Media from Gallery</span>
-                <input type="checkbox" checked={sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(e.currentTarget.checked)}>
-                <span class="neon-toggle"></span>
-            </label>
-        </div>
-    {/if}
     <div class="form-group" style="margin-top: 15px;">
         <label class="toggle-container">
             <span><InfoIcon side="right" align="middle" onclick={() => h.help('autoDownload')} />Auto-Download Media</span>
@@ -344,10 +335,19 @@
             </label>
         </div>
     {/if}
-    {#if sc.storage.exportShown}
+    {#if sc.storage.galleryShown}
         <div class="form-group" style="margin-top: 15px;">
             <label class="toggle-container">
-                <span><InfoIcon side="right" align="middle" onclick={() => h.help('saveToDownloads')} />{sc.storage.galleryShown ? 'Save Media to Gallery' : 'Save Media to Downloads'}</span>
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('gallery')} />Save to Gallery</span>
+                <input type="checkbox" checked={!sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(!e.currentTarget.checked)}>
+                <span class="neon-toggle"></span>
+            </label>
+        </div>
+    {/if}
+    {#if sc.storage.exportShown && !(sc.storage.galleryShown && sc.storage.galleryHidden)}
+        <div class="form-group" style="margin-top: 15px;">
+            <label class="toggle-container">
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('saveToDownloads')} />{sc.storage.galleryShown ? 'Also Save Everything You View' : 'Save Everything You View'}</span>
                 <input type="checkbox" checked={sc.storage.saveToDownloads} onchange={(e) => h.setSaveToDownloads(e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
@@ -361,11 +361,10 @@
                     onchange={(v) => h.setVideoQuality(v)} />
         </div>
     {/if}
-    {#if sc.storage.exportShown && !sc.storage.saveToDownloads && (sc.storage.onDisk > 0 || sc.storage.moving)}
+    {#if sc.storage.moving}
         <div class="form-group st-line">
-            <InfoIcon side="right" flex onclick={() => h.help('moveDownloads')} />
-            <span class="st-line-label">{sc.storage.onDisk === 1 ? '1 File' : `${sc.storage.onDisk.toLocaleString()} Files`} to Move into Vector</span>
-            <button class="btn cancel-btn" style="margin: 0;" disabled={!!sc.storage.moving} onclick={() => h.moveDownloads()}>{sc.storage.moving || 'Move'}</button>
+            <span class="st-line-label">Moving your media into Vector</span>
+            <span>{sc.storage.moving}</span>
         </div>
     {/if}
     <div class="form-group st-line">

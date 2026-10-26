@@ -931,10 +931,6 @@ async function initStorageSection() {
     VectorSvelte.setSettingsScreen({ storage: {
         keepShown: true, keepMedia: keep === 'true', exportShown: platformFeatures.os !== 'web', saveToDownloads: save === 'true',
     } });
-    if (platformFeatures.os !== 'web') {
-        const onDisk = await invoke('count_downloads_on_disk').catch(() => 0);
-        VectorSvelte.setSettingsScreen({ storage: { onDisk } });
-    }
 
     // Hide Media from Gallery is Android only: the backend command is a no-op elsewhere,
     // and Vector Web on a phone is mobile without a gallery to hide from.
@@ -945,36 +941,16 @@ async function initStorageSection() {
     }
 }
 
-/** Move this account's downloads out of the download folder into Vector's encrypted store. */
-async function moveDownloads() {
-    const { onDisk, moving } = VectorSvelte.settingsScreen().storage;
-    if (moving || !onDisk) return;
-    const where = platformFeatures.os === 'android' ? 'gallery' : 'Downloads folder';
-    const files = onDisk === 1 ? '1 File' : `${onDisk.toLocaleString()} Files`;
-    const ok = await popupConfirm(`Move ${files} into Vector?`, `They leave your ${where} and are kept in Vector, encrypted. Save gives you a normal copy any time.`, false, '', '', '', 'Move');
-    if (!ok) return;
+let fMediaPortTracked = false;
 
-    VectorSvelte.setSettingsScreen({ storage: { moving: 'Moving...' } });
-    const unlisten = await listen('media_import_progress', (evt) => {
+/** Old downloads moving into Vector in the background: shown in Storage while it runs. */
+function trackMediaPort() {
+    if (fMediaPortTracked) return;
+    fMediaPortTracked = true;
+    listen('media_import_progress', (evt) => {
         const { done, total } = evt.payload;
-        VectorSvelte.setSettingsScreen({ storage: { moving: `${done.toLocaleString()} / ${total.toLocaleString()}` } });
+        VectorSvelte.setSettingsScreen({ storage: { moving: done < total ? `${done.toLocaleString()} of ${total.toLocaleString()}` : '' } });
     });
-    try {
-        const { moved, shared, stayed, skipped, failed } = await invoke('move_downloads_into_vector');
-        const kept = moved + shared + stayed;
-        const parts = [`Moved ${kept.toLocaleString()} ${kept === 1 ? 'file' : 'files'} into Vector`];
-        if (shared) parts.push(`${shared.toLocaleString()} also stay in ${where} for another account`);
-        if (stayed) parts.push(`${stayed.toLocaleString()} couldn't leave ${where}`);
-        if (skipped) parts.push(`${skipped.toLocaleString()} had changed and stayed`);
-        if (failed) parts.push(`${failed.toLocaleString()} couldn't move`);
-        showToast(parts.join(', '));
-    } catch (e) {
-        await popupConfirm('Move Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-    } finally {
-        unlisten();
-        VectorSvelte.setSettingsScreen({ storage: { moving: '' } });
-        initStorageSection();
-    }
 }
 
 /** Category-aware confirmation for a storage delete; returns the user's choice. */
@@ -1337,6 +1313,7 @@ async function initSettings() {
     // gate in message-row.js is correct before Settings is opened.
     await initAutoDownloadSettings();
     VIDEO_QUALITY = await loadVideoQuality();
+    trackMediaPort();
 
     // The network in use, and the settings of each network this build has. Signing in changes
     // whose settings they are, so they are read again whatever the view says.
@@ -2018,12 +1995,9 @@ function updateMigrationProgress(total, completed, phase) {
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
     keepMedia: ['Keep Media on This Device', 'Pictures, videos and voice notes you view are kept on this device, encrypted, so they open instantly and never download twice.<br><br>Off: they stay in memory while Vector is open, and load again after it closes. Turning it off deletes what it kept.'],
-    moveDownloads: () => platformFeatures.os === 'android'
-        ? ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your gallery and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.']
-        : ['Move Files into Vector', 'Moves the files Vector downloaded in the past out of your Downloads folder and into Vector, encrypted.<br><br>Save gives you a normal copy of any of them.'],
     saveToDownloads: () => platformFeatures.os === 'android'
-        ? ['Save Media to Gallery', 'Also saves a normal copy of each picture, video and voice note you view to your gallery, where other apps can open it.']
-        : ['Save Media to Downloads', 'Also saves a normal copy of each picture, video and voice note you view to your Downloads folder, where other apps can open it.'],
+        ? ['Also Save Everything You View', 'Saves a normal copy of every picture, video and voice note you view to your gallery, without tapping Save.']
+        : ['Save Everything You View', 'Saves a normal copy of every picture, video and voice note you view to your Downloads folder, without tapping Save.'],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
@@ -2039,7 +2013,7 @@ const SETTINGS_HELP = {
     onionAlias: ['Onion Address', 'A server can also be reachable as a Tor onion service. Vector connects there instead of through a Tor exit.<br><br>Your connection stays encrypted to the server itself.'],
     i2pAlias: ['I2P Address', 'A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
-    gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
+    gallery: ['Save to Gallery', 'Pictures and videos you Save appear in your gallery, where other apps can open them.<br><br>Off: what you Save stays on this device in Vector\'s folder, hidden from the gallery.'],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
     autoDownloadLimit: ['Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.'],
     videoQuality: ['Video Quality', 'How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows.'],
@@ -2193,6 +2167,8 @@ const SETTINGS_HELPERS = {
         } catch (err) {
             console.error('set_gallery_hidden failed:', err);
         }
+        // Saving what you view rides on Save to Gallery.
+        if (hidden && VectorSvelte.settingsScreen().storage.saveToDownloads) await SETTINGS_HELPERS.setSaveToDownloads(false);
     },
     setAutoDownload: async (on) => {
         AUTO_DOWNLOAD_ENABLED = on;
@@ -2238,7 +2214,6 @@ const SETTINGS_HELPERS = {
         VectorSvelte.setSettingsScreen({ storage: { limit: bytes } });
         await saveMaxAutoDownloadBytes(bytes);
     },
-    moveDownloads,
     clearStorage: async () => {
         if (await clearStorage()) initStorageSection();
     },

@@ -266,6 +266,23 @@ pub fn move_to_store(hash: &str, paths: &[&str]) -> Result<Vec<String>, String> 
     Ok(events)
 }
 
+/// A file this account no longer shows, under every name rows give it. Returns the events touched.
+pub fn let_go(paths: &[&str]) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("let_go: {e}"))?;
+    let mut events = Vec::new();
+    for path in paths {
+        events.extend(events_at_path(&tx, path)?);
+        tx.execute("UPDATE attachments SET downloaded=0, path='' WHERE path=?1", [path])
+            .map_err(|e| format!("let_go: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("let_go: {e}"))?;
+    events.sort();
+    events.dedup();
+    Ok(events)
+}
+
 /// Whether anything this account keeps still opens `path`.
 pub fn names_path(path: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;

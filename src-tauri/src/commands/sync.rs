@@ -483,6 +483,8 @@ pub async fn fetch_messages<R: Runtime>(
                     // reconcile any missing files against in-memory STATE + the frontend — boot preloads
                     // messages before this runs, so a missing file on a preloaded message would otherwise
                     // stay a broken image until a full reload.
+                    // Old downloads move into Vector once the boot work has settled.
+                    crate::commands::system::start_media_port(std::time::Duration::from_secs(60));
                     vector_core::db::spawn_bound(async move {
                         vector_core::sending::sweep_outgoing();
                         match db::check_downloaded_attachments_integrity().await {

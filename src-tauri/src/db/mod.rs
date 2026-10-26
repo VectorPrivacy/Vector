@@ -59,7 +59,7 @@ pub use vector_core::db::wrappers::{
 pub use attachments::{
     get_chat_messages_paginated,
     get_messages_around_id,
-    update_attachment_downloaded_status, backfill_attachment_downloaded_status, check_downloaded_attachments_integrity,
+    check_downloaded_attachments_integrity,
 };
 // Event database functions
 pub use events::{

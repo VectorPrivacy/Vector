@@ -328,11 +328,6 @@ pub fn get_file_type_description(extension: &str) -> String {
         .to_string()
 }
 
-/// Calculate SHA-256 hash of file data
-pub fn calculate_file_hash(data: &[u8]) -> String {
-    vector_core::crypto::sha256_hex(data)
-}
-
 /// Generate a thumbhash from a DynamicImage with minimal memory allocation.
 ///
 /// Resizes to a small thumbnail before converting to RGBA,

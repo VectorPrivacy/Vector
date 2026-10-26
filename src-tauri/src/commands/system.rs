@@ -519,10 +519,16 @@ const KEPT_LINK_MEDIA: [&str; 2] = ["inline_images", "embed_videos"];
 
 const KEEP_MEDIA_BUSY: &str = "Turn this off once your downloads finish.";
 
-/// Whether anything is downloading that could still keep a file.
-async fn keep_media_busy() -> bool {
-    use std::sync::atomic::Ordering;
-    MOVING_DOWNLOADS.load(Ordering::Acquire) || !crate::commands::attachments::ACTIVE_DOWNLOADS.lock().await.is_empty()
+/// Whether an attachment is downloading: one that read the old setting could still keep a file.
+async fn downloads_running() -> bool {
+    !crate::commands::attachments::ACTIVE_DOWNLOADS.lock().await.is_empty()
+}
+
+/// Old downloads still in the download folder: how many, and their size.
+async fn old_downloads() -> (u64, u64) {
+    let files = vector_core::db::blocking_bound(vector_core::media::import::on_disk).await.ok().and_then(Result::ok).unwrap_or_default();
+    let bytes = files.iter().filter_map(|f| std::fs::metadata(&f.path).ok()).map(|m| m.len()).sum();
+    (files.len() as u64, bytes)
 }
 
 fn link_media_dirs<R: Runtime>(handle: &AppHandle<R>) -> Vec<std::path::PathBuf> {
@@ -533,6 +539,8 @@ fn link_media_dirs<R: Runtime>(handle: &AppHandle<R>) -> Vec<std::path::PathBuf>
 #[tauri::command]
 pub async fn kept_media_summary<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
     let (mut files, mut bytes) = vector_core::db::blocking_bound(vector_core::media::store::kept_media).await?;
+    let (old, old_bytes) = old_downloads().await;
+    (files, bytes) = (files + old, bytes + old_bytes);
     for dir in link_media_dirs(&handle) {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
@@ -541,7 +549,7 @@ pub async fn kept_media_summary<R: Runtime>(handle: AppHandle<R>) -> Result<serd
             }
         }
     }
-    Ok(serde_json::json!({ "files": files, "bytes": bytes, "busy": keep_media_busy().await }))
+    Ok(serde_json::json!({ "files": files, "bytes": bytes, "busy": downloads_running().await }))
 }
 
 /// Keep Media on or off. Off deletes what it kept, so media is kept or held, never both; refused
@@ -551,13 +559,15 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
     vector_core::db::scoped(async move {
         let set = |on: bool| vector_core::db::set_sql_setting("keep_media".into(), on.to_string());
         if on {
-            return set(true);
+            set(true)?;
+            start_media_port(std::time::Duration::ZERO);
+            return Ok(());
         }
-        if keep_media_busy().await {
+        if downloads_running().await || !stop_media_port().await {
             return Err(KEEP_MEDIA_BUSY.into());
         }
         set(false)?;
-        if keep_media_busy().await {
+        if downloads_running().await {
             let _ = set(true);
             return Err(KEEP_MEDIA_BUSY.into());
         }
@@ -566,30 +576,33 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
         for dir in link_media_dirs(&handle) {
             let _ = std::fs::remove_dir_all(dir);
         }
+        release_old_downloads().await;
         Ok(())
     })
     .await
 }
 
-/// How many of this account's downloads still sit in the download folder.
-#[tauri::command]
-pub async fn count_downloads_on_disk() -> Result<usize, String> {
-    vector_core::db::blocking_bound(|| vector_core::media::import::on_disk().map(|files| files.len())).await?
-}
-
 static MOVING_DOWNLOADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PORT_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Move this account's downloads out of the download folder and into Vector, reporting each
-/// file as `media_import_progress`. Stops if the account changes.
-#[tauri::command]
-pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
+/// How fast old downloads move in, as source bytes a second: slow enough to go unnoticed.
+#[cfg(target_os = "android")]
+const PORT_RATE: f64 = 4.0 * 1024.0 * 1024.0;
+#[cfg(not(target_os = "android"))]
+const PORT_RATE: f64 = 12.0 * 1024.0 * 1024.0;
+
+/// Move this account's old downloads into Vector in the background, a file at a time and
+/// paced, while it keeps media. Each file is whole in Vector or still a download, so a launch
+/// that cuts it short simply picks it up on the next. Reports `media_import_progress`.
+pub fn start_media_port(delay: std::time::Duration) {
     use std::sync::atomic::Ordering;
     use vector_core::media::import::{self, Moved};
     // Originals go a batch at a time, after the rows that replace them are synced.
     const BATCH: usize = 32;
     if MOVING_DOWNLOADS.swap(true, Ordering::AcqRel) {
-        return Err("Already moving files into Vector".to_string());
+        return;
     }
+    PORT_STOP.store(false, Ordering::Release);
     vector_core::db::spawn_bound(async move {
         struct Done;
         impl Drop for Done {
@@ -598,46 +611,66 @@ pub async fn move_downloads_into_vector() -> Result<serde_json::Value, String> {
             }
         }
         let _done = Done;
+        let stopped = || PORT_STOP.load(Ordering::Acquire) || !vector_core::db::writes_to_live_account();
+        let start = tokio::time::Instant::now() + delay;
+        while tokio::time::Instant::now() < start && !stopped() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if stopped() || !vector_core::media::keep_media() {
+            return;
+        }
         settle_owed(import::settle).await;
-        let (files, elsewhere) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await?;
-        let (files, elsewhere) = (files?, std::sync::Arc::new(elsewhere));
-        let (mut moved, mut shared, mut stayed, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };
+        let elsewhere = std::sync::Arc::new(elsewhere);
         let mut owed: Vec<String> = Vec::new();
         for (i, item) in files.iter().enumerate() {
-            if !vector_core::db::writes_to_live_account() {
+            // The app in the background moves nothing.
+            #[cfg(target_os = "android")]
+            while !crate::android::background_sync::is_activity_in_foreground() && !stopped() {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            if stopped() {
                 break;
             }
+            let len = std::fs::metadata(&item.path).map_or(0, |m| m.len());
             let (file, others) = (item.clone(), elsewhere.clone());
-            match vector_core::db::blocking_bound(move || import::move_in(&file, others.as_ref().as_ref())).await? {
-                Ok((outcome, events)) => {
-                    match outcome {
-                        Moved::Moved => owed.push(item.path.clone()),
-                        Moved::Shared => shared += 1,
-                        Moved::Changed | Moved::Mismatch => skipped += 1,
+            match vector_core::db::blocking_bound(move || import::move_in(&file, others.as_ref().as_ref())).await {
+                Ok(Ok((outcome, events))) => {
+                    if outcome == Moved::Moved {
+                        owed.push(item.path.clone());
                     }
                     reflect_move(item, outcome, &events).await;
                 }
-                Err(e) => {
-                    failed += 1;
-                    vector_core::log_warn!("[MediaImport] couldn't move a file in: {}", e);
-                }
+                Ok(Err(e)) => vector_core::log_warn!("[MediaImport] couldn't move a file in: {}", e),
+                Err(_) => break,
             }
-            if owed.len() >= BATCH || (!owed.is_empty() && i + 1 == files.len()) {
+            if owed.len() >= BATCH {
                 let (batch, others) = (std::mem::take(&mut owed), elsewhere.clone());
-                let count = batch.len();
-                match settle_owed(move || import::settle_batch(&batch, others.as_ref().as_ref())).await {
-                    Some((gone, left)) => (moved, stayed) = (moved + gone, stayed + left),
-                    None => stayed += count,
-                }
+                settle_owed(move || import::settle_batch(&batch, others.as_ref().as_ref())).await;
             }
             vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": i + 1, "total": files.len() }));
+            let pace = std::time::Duration::from_secs_f64(len as f64 / PORT_RATE).max(std::time::Duration::from_millis(150));
+            tokio::time::sleep(pace).await;
         }
-        // A move cut short by a swap leaves its owed originals for the next settle.
-        stayed += owed.len();
-        Ok(serde_json::json!({ "moved": moved, "shared": shared, "stayed": stayed, "skipped": skipped, "failed": failed }))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        if !owed.is_empty() {
+            let others = elsewhere.clone();
+            settle_owed(move || import::settle_batch(&owed, others.as_ref().as_ref())).await;
+        }
+        vector_core::traits::emit_event("media_import_progress", &serde_json::json!({ "done": files.len(), "total": files.len() }));
+    });
+}
+
+/// Stop the port between files. False when it is still in a file after a while.
+async fn stop_media_port() -> bool {
+    use std::sync::atomic::Ordering;
+    PORT_STOP.store(true, Ordering::Release);
+    for _ in 0..150 {
+        if !MOVING_DOWNLOADS.load(Ordering::Acquire) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
 }
 
 /// Delete originals a move owes. Returns how many went and how many stayed, or None when none
@@ -657,6 +690,30 @@ where
         Err(e) => {
             vector_core::log_warn!("[MediaImport] originals stay owed for now: {}", e);
             None
+        }
+    }
+}
+
+/// Old downloads go with media that isn't kept: each file this account alone shows is deleted,
+/// and loaded messages stop showing it.
+async fn release_old_downloads() {
+    use vector_core::media::import;
+    let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };
+    let elsewhere = std::sync::Arc::new(elsewhere);
+    for item in files {
+        let (file, others) = (item.clone(), elsewhere.clone());
+        match vector_core::db::blocking_bound(move || import::release(&file, others.as_ref().as_ref())).await {
+            Ok(Ok(events)) => {
+                #[cfg(target_os = "android")]
+                crate::android::storage::scan_file(&item.path);
+                let updates = import::reflect_released(&mut *STATE.lock().await, &item, &events);
+                for (chat_id, mut message) in updates {
+                    let old_id = message.id.clone();
+                    vector_core::traits::emit_message_update(&chat_id, &old_id, &mut message).await;
+                }
+            }
+            Ok(Err(e)) => vector_core::log_warn!("[MediaImport] couldn't let a download go: {}", e),
+            Err(_) => return,
         }
     }
 }

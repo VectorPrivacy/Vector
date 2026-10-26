@@ -532,6 +532,46 @@ fn settle_one(o: &mut Owed, shown: Option<&Elsewhere>) -> Result<Fate, String> {
     }
 }
 
+/// Let a download go when media isn't kept: the file goes, then the rows that showed it, so a
+/// crash between leaves rows the boot check finds missing. A file another account shows, or
+/// one whose other accounts can't be read, stays where it is. Returns the events touched.
+pub fn release(item: &OnDisk, elsewhere: Option<&Elsewhere>) -> Result<Vec<String>, String> {
+    if elsewhere.is_some_and(|shown| !shown.shows(item)) {
+        match std::fs::remove_file(&item.path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("delete: {e}")),
+            _ => {}
+        }
+    }
+    let paths: Vec<&str> = item.spellings().collect();
+    crate::db::attachments::let_go(&paths)
+}
+
+/// Loaded messages stop showing a released file.
+pub fn reflect_released(state: &mut crate::state::ChatState, item: &OnDisk, events: &[String]) -> Vec<(String, crate::types::Message)> {
+    let mut touched = Vec::new();
+    for (chat_idx, chat) in state.chats.iter_mut().enumerate() {
+        for id in events {
+            let Some(msg) = chat.messages.find_by_hex_id_mut(id) else { continue };
+            let mut changed = false;
+            for att in msg.attachments.iter_mut().filter(|a| item.spellings().any(|p| *a.path() == *p)) {
+                att.set_downloaded(false);
+                att.set_path(String::new());
+                changed = true;
+            }
+            if changed {
+                touched.push((chat_idx, id.clone()));
+            }
+        }
+    }
+    touched
+        .into_iter()
+        .filter_map(|(chat_idx, id)| {
+            let chat = &state.chats[chat_idx];
+            chat.messages.find_by_hex_id(&id).map(|m| (chat.id().clone(), m.to_message(&state.interner)))
+        })
+        .collect()
+}
+
 /// Loaded messages follow a moved file as its rows did: those of its hash show the store's copy,
 /// any claiming other bytes there lose the download; for bytes that weren't the message's, only
 /// rows of its hash let go. Returns each changed message as (chat id, message).
@@ -729,6 +769,50 @@ mod tests {
         assert_eq!(settle_all(Some(&adopted)).stayed, 1);
         assert!(file.exists());
         assert!(owed().is_empty());
+    }
+
+    #[test]
+    fn a_new_account_starts_memory_only_and_one_from_before_keeps_media() {
+        let _guard = init_test_db();
+        assert!(!crate::media::keep_media());
+        crate::db::set_sql_setting("keep_media".into(), "false".into()).unwrap();
+        let account = crate::db::get_current_account().unwrap();
+        crate::db::close_database();
+        crate::db::init_database(&account).unwrap();
+        assert!(!crate::media::keep_media(), "a choice already made stands");
+
+        crate::db::get_write_connection_guard_static().unwrap().execute("DELETE FROM settings WHERE key='keep_media'", []).unwrap();
+        crate::db::close_database();
+        crate::db::init_database(&account).unwrap();
+        assert!(crate::media::keep_media(), "an account from before the choice keeps media");
+    }
+
+    #[test]
+    fn a_released_download_goes_unless_another_account_shows_it() {
+        let _guard = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, shared) = (dir.path().join("mine.png"), dir.path().join("shared.png"));
+        std::fs::write(&mine, b"only this account showed it").unwrap();
+        std::fs::write(&shared, b"another account shows this").unwrap();
+        let (a, b) = (item(b"only this account showed it", &mine), item(b"another account shows this", &shared));
+        download("ev-mine", &crate::simd::hex::bytes_to_hex_32(&a.hash), &mine);
+        download("ev-shared", &crate::simd::hex::bytes_to_hex_32(&b.hash), &shared);
+        let shown = Elsewhere { paths: HashSet::from([std::fs::canonicalize(&shared).unwrap()]), ..Default::default() };
+
+        assert_eq!(release(&a, Some(&shown)).unwrap(), vec!["ev-mine".to_string()]);
+        assert_eq!(release(&b, Some(&shown)).unwrap(), vec!["ev-shared".to_string()]);
+        assert!(!mine.exists() && shared.exists());
+        assert_eq!(row("ev-mine"), (String::new(), false));
+        assert_eq!(row("ev-shared"), (String::new(), false));
+
+        // Other accounts that can't be read: nothing is deleted on a guess.
+        let third = dir.path().join("third.png");
+        std::fs::write(&third, b"no one can say").unwrap();
+        let c = item(b"no one can say", &third);
+        download("ev-third", &crate::simd::hex::bytes_to_hex_32(&c.hash), &third);
+        release(&c, None).unwrap();
+        assert!(third.exists());
+        assert_eq!(row("ev-third"), (String::new(), false));
     }
 
     #[cfg(unix)]

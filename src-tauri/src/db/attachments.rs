@@ -93,30 +93,6 @@ pub async fn get_messages_around_id(
     get_message_views(chat_int_id, limit, 0).await
 }
 
-/// Update the downloaded status of an attachment — a single-row UPDATE keyed by (event id, hash)
-/// against the dedicated attachments table.
-pub fn update_attachment_downloaded_status(
-    _chat_id: &str,  // legacy param; the table is keyed by event id directly
-    msg_id: &str,
-    attachment_id: &str,
-    downloaded: bool,
-    path: &str,
-) -> Result<(), String> {
-    vector_core::db::attachments::set_attachment_downloaded(msg_id, attachment_id, downloaded, path)
-}
-
-/// Mark every OTHER message sharing this file hash as downloaded to the same path (download-sharing).
-/// Now an indexed `WHERE hash = ?` update instead of a `LIKE '%hash%'` scan. Returns the affected
-/// event ids so the caller can reconcile in-memory STATE.
-pub fn backfill_attachment_downloaded_status(
-    attachment_hash: &str,
-    _downloaded: bool, // always a download-share (mark downloaded); kept for signature stability
-    path: &str,
-    exclude_msg_id: &str,
-) -> Result<Vec<String>, String> {
-    vector_core::db::attachments::backfill_downloaded_by_hash(attachment_hash, path, exclude_msg_id)
-}
-
 /// Check all downloaded attachments in the database for missing files.
 /// Updates the database directly for any files that no longer exist.
 /// Returns (total_checked, missing_count, elapsed_time, affected_event_ids). The caller reconciles
