@@ -433,6 +433,9 @@ body.cc .cc-tabs-row .cc-rail-pull + .cc-tabs {
   cursor: grab;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+  /* Over the screen-edge strip, so a tap on the tab is the tab's. */
+  position: relative;
+  z-index: 3;
 }
 
 .cc-tabs-row .cc-rail-pull:active {
