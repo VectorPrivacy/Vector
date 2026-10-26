@@ -14,7 +14,7 @@
     import CommunityBanner from '../chatlist/CommunityBanner.svelte';
     import NetworkNotice from './NetworkNotice.svelte';
     import { loginState } from '../lib/login.svelte.js';
-    import { settler, railPull } from '../lib/railmotion.js';
+    import { settler, railPull, edgeClaim } from '../lib/railmotion.js';
     import { untrack } from 'svelte';
     const panes = shellPanes();
     const login = loginState();
@@ -116,7 +116,7 @@
                         <!-- The button is the grab area, wider and taller than the tab it draws,
                              which tucks into the rail's edge as it comes out. -->
                         <button class="cc-rail-pull" title="Show communities" aria-label="Show communities" inert={railP === 1}
-                                use:railPull={pull} onclick={() => shellHandlers().consoleSetRail?.(true)}>
+                                use:railPull={pull} use:edgeClaim onclick={() => shellHandlers().consoleSetRail?.(true)}>
                             <span class="cc-rail-pull-tab"><span class="icon icon-chevron-right"></span></span>
                         </button>
                     {/if}

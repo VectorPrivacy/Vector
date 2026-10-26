@@ -203,3 +203,17 @@ export function railPull(node, o) {
         },
     };
 }
+
+/** Android: the system back gesture gives way where `node` meets the screen's left edge. */
+export function edgeClaim(node) {
+    const edges = window.__vectorEdges;
+    if (!edges) return {};
+    const report = () => {
+        const r = node.getBoundingClientRect();
+        if (r.height) edges.claimLeft(r.top, r.bottom);
+    };
+    const ro = new ResizeObserver(report);
+    ro.observe(node);
+    ro.observe(document.documentElement);
+    return { destroy() { ro.disconnect(); edges.releaseLeft(); } };
+}

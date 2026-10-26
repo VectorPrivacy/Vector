@@ -276,21 +276,45 @@ class MainActivity : TauriActivity() {
     /**
      * Vector draws its own side swipes (the Communities sidebar, swipe to reply), so the system
      * back gesture gives way along both side edges as far as Android allows: 200dp of height a
-     * side, placed where a thumb swipes. Back itself still reaches the app through onBackPressed.
+     * side. On the left it sits on the Communities tab while one shows, else where a thumb
+     * swipes. Back itself still reaches the app through onBackPressed.
      */
     private fun claimSideEdges(view: View) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-        view.addOnLayoutChangeListener { v, left, top, right, bottom, _, _, _, _ ->
-            val density = v.resources.displayMetrics.density
-            val (width, height) = (right - left) to (bottom - top)
-            val band = (200 * density).toInt().coerceAtMost(height)
-            val edge = (48 * density).toInt()
-            val from = (height * 2 / 5 - band / 2).coerceIn(0, height - band)
-            v.systemGestureExclusionRects = listOf(
-                Rect(0, from, edge, from + band),
-                Rect(width - edge, from, width, from + band),
-            )
+        view.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> applyEdges(v) }
+    }
+
+    /** The page's left-edge pull (top, bottom) in the WebView's pixels, while it shows one. */
+    private var leftPull: Pair<Int, Int>? = null
+
+    inner class EdgeBridge {
+        @JavascriptInterface fun claimLeft(top: Float, bottom: Float) {
+            runOnUiThread {
+                val density = resources.displayMetrics.density
+                leftPull = (top * density).toInt() to (bottom * density).toInt()
+                managedWebView?.let { applyEdges(it) }
+            }
         }
+        @JavascriptInterface fun releaseLeft() {
+            runOnUiThread {
+                leftPull = null
+                managedWebView?.let { applyEdges(it) }
+            }
+        }
+    }
+
+    private fun applyEdges(v: View) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val density = v.resources.displayMetrics.density
+        val (width, height) = v.width to v.height
+        val band = (200 * density).toInt().coerceAtMost(height)
+        val edge = (48 * density).toInt()
+        val thumb = (height * 2 / 5 - band / 2).coerceIn(0, height - band)
+        val left = leftPull?.let { (top, bottom) -> ((top + bottom) / 2 - band / 2).coerceIn(0, height - band) } ?: thumb
+        v.systemGestureExclusionRects = listOf(
+            Rect(0, left, edge, left + band),
+            Rect(width - edge, thumb, width, thumb + band),
+        )
     }
 
     @Deprecated("Deprecated in Java")
@@ -329,6 +353,7 @@ class MainActivity : TauriActivity() {
 
         // Expose the gyro bridge to the badge card: JS calls window.__vectorGyroBridge.start()/stop().
         webView.addJavascriptInterface(GyroBridge(), "__vectorGyroBridge")
+        webView.addJavascriptInterface(EdgeBridge(), "__vectorEdges")
 
         // Initialize MiniAppManager for Mini Apps overlay support
         MiniAppManager.initialize(this)
