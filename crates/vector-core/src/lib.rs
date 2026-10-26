@@ -3903,9 +3903,11 @@ impl VectorCore {
             // `ox` carries the author's signature-weight claim — the same trust the
             // chat pipeline extends). Reuse and fresh downloads both verify it.
             let expected = attachment.original_hash.as_deref();
-            // A pin the drawer only shows is held in memory, like a chat's.
-            let in_memory = crate::media::previewable(&attachment.extension.to_ascii_lowercase());
-            if let Some(hash) = expected.and_then(crate::simd::hex::hex_to_bytes_32_checked).filter(|h| in_memory && crate::media::resident(h)) {
+            // A pin is held in memory like a chat's file; kept too when the account keeps files,
+            // or when it is too large to hold.
+            let in_memory = crate::media::ram::cache().admits(attachment.size);
+            let keep = !in_memory || crate::media::keep_media();
+            if let Some(hash) = expected.and_then(crate::simd::hex::hex_to_bytes_32_checked).filter(|h| crate::media::resident(h)) {
                 return Ok(respond(&crate::media::MediaRef::held(&hash)));
             }
             let path = std::path::PathBuf::from(&*attachment.path);
@@ -3925,23 +3927,25 @@ impl VectorCore {
             if expected.is_some_and(|want| hash != want) {
                 return Err(VectorError::Other("downloaded bytes do not match the pinned content hash".into()));
             }
-            if in_memory {
-                let hash = crate::simd::hex::hex_to_bytes_32(&hash);
-                let mime = crate::crypto::mime_from_extension(&attachment.extension.to_ascii_lowercase());
-                crate::media::ram::insert(hash, bytes, mime)
-                    .map_err(|_| VectorError::Other("too much media is open to show this one".into()))?;
-                return Ok(respond(&crate::media::MediaRef::held(&hash)));
-            }
-            // Anything else is kept the way a chat keeps it: sealed in the store, never plain.
             let held = crate::simd::hex::hex_to_bytes_32(&hash);
             let mime = crate::crypto::mime_from_extension(&attachment.extension.to_ascii_lowercase());
-            #[cfg(not(target_arch = "wasm32"))]
-            crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
-                .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
-            #[cfg(target_arch = "wasm32")]
-            crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
-                .await
-                .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
+            // Kept the way a chat keeps it: sealed in the store, never plain.
+            if keep {
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
+                    .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
+                #[cfg(target_arch = "wasm32")]
+                crate::media::store::keep_sealed(&bytes, held, mime, crate::db::media_store::Origin::Sealed)
+                    .await
+                    .map_err(|e| VectorError::Other(format!("could not keep the attachment: {e}")))?;
+            }
+            if in_memory {
+                match crate::media::ram::insert(held, bytes, mime) {
+                    Ok(_) => {}
+                    Err(_) if keep => {}
+                    Err(_) => return Err(VectorError::Other("too much media is open to show this one".into())),
+                }
+            }
             Ok(respond(&crate::media::MediaRef::held(&held)))
         })
         .await

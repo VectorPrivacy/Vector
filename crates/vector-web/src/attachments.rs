@@ -58,7 +58,7 @@ fn fail(chat: &str, msg_id: &str, attachment_id: &str, reason: &str) -> bool {
     false
 }
 
-pub async fn download_attachment(chat: String, msg_id: String, attachment_id: String) -> bool {
+pub async fn download_attachment(chat: String, msg_id: String, attachment_id: String, auto: bool) -> bool {
     let Some((chat_id, mut message)) = VectorCore.get_message(&msg_id).await else {
         return fail(&chat, &msg_id, &attachment_id, "Message not found");
     };
@@ -67,6 +67,17 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
     };
     let attachment = message.attachments[idx].clone();
     let author = if message.mine { None } else { message.npub.clone().or_else(|| Some(chat_id.clone())) };
+    // Too large to hold: kept, so only once asked for, unless the account keeps files.
+    if auto && !vector_core::media::ram::cache().admits(attachment.size) && !vector_core::media::keep_media() {
+        emitter::emit(
+            "attachment_download_result",
+            &json!({
+                "profile_id": chat, "msg_id": msg_id, "id": attachment_id,
+                "success": false, "cancelled": true, "result": "Too large to hold without keeping it",
+            }),
+        );
+        return false;
+    }
     let Some(active) = Active::claim(&attachment_id) else {
         return fail(&chat, &msg_id, &attachment_id, "This file is already downloading");
     };
@@ -137,10 +148,10 @@ pub async fn download_attachment(chat: String, msg_id: String, attachment_id: St
     let hash32 = vector_core::simd::hex::hex_to_bytes_32(&hash);
     let extension = attachment.extension.to_ascii_lowercase();
     let mime = vector_core::crypto::mime_from_extension(&extension);
-    // What a bubble only shows is held in memory; anything else, or anything an account keeps,
-    // goes to the store sealed.
+    // Every file is held in memory; one too large to hold, or any an account keeps, goes to the
+    // store sealed.
     let ram = vector_core::media::ram::cache();
-    let in_memory = vector_core::media::previewable(&extension) && ram.admits(bytes.len() as u64);
+    let in_memory = ram.admits(bytes.len() as u64);
     let keep = !in_memory || vector_core::media::keep_media();
     if keep {
         if let Err(e) = vector_core::media::store::keep_sealed(&bytes, hash32, mime, vector_core::db::media_store::Origin::Sealed).await {

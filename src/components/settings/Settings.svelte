@@ -96,7 +96,7 @@
         {
             id: 'storage', label: 'Storage', icon: 'folder',
             anchors: [
-                { id: 'storage', label: 'Storage', icon: 'folder', keys: 'storage usage clear auto-download download limit gallery hide media video quality compression compress' },
+                { id: 'storage', label: 'Storage', icon: 'folder', keys: 'storage usage clear auto-download download limit gallery show save keep files unencrypted media video quality compression compress' },
             ],
         },
         {
@@ -329,7 +329,7 @@
     {#if sc.storage.keepShown}
         <div class="form-group" style="margin-top: 15px;">
             <label class="toggle-container">
-                <span><InfoIcon side="right" align="middle" onclick={() => h.help('keepMedia')} />Keep Media on This Device</span>
+                <span><InfoIcon side="right" align="middle" onclick={() => h.help('keepMedia')} />Keep Files on This Device</span>
                 <input type="checkbox" checked={sc.storage.keepMedia} onchange={(e) => h.setKeepMedia(e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
@@ -363,7 +363,7 @@
     {/if}
     {#if sc.storage.moving}
         <div class="form-group st-line">
-            <span class="st-line-label">{sc.storage.movingPlain ? 'Decrypting your kept media' : 'Moving your media into Vector'}</span>
+            <span class="st-line-label">{sc.storage.movingPlain ? 'Decrypting your kept files' : 'Moving your files into Vector'}</span>
             <span>{sc.storage.moving}</span>
         </div>
     {/if}

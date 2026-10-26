@@ -267,17 +267,11 @@ pub fn forget(hash: &[u8; 32]) {
     indexed(*hash, false);
 }
 
-/// Whether Keep Media is what keeps a file of this type: one a chat shows.
-pub fn kept_by_keep_media(mime: &str) -> bool {
-    super::previewable(&crate::crypto::extension_from_mime(mime))
-}
-
-/// The files Keep Media has kept, and their size in bytes.
-pub fn kept_media() -> (u64, u64) {
+/// The files kept here, and their size in bytes.
+pub fn kept_files() -> (u64, u64) {
     media_store::totals()
         .unwrap_or_default()
         .into_iter()
-        .filter(|(mime, ..)| kept_by_keep_media(mime))
         .fold((0, 0), |(files, bytes), (_, n, size)| (files + n, bytes + size))
 }
 
@@ -554,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_media_governs_what_a_chat_shows_and_leaves_other_files() {
+    fn every_kept_file_counts_and_goes_whatever_its_type() {
         let (_dir, _guard) = init_test_db();
         let (picture, archive) = (b"a kept picture".to_vec(), b"a kept archive".to_vec());
         let (p, a) = (
@@ -563,11 +557,15 @@ mod tests {
         );
         keep_sealed(&picture, p, "image/png", Origin::Sealed).unwrap();
         keep_sealed(&archive, a, "application/zip", Origin::Sealed).unwrap();
-        assert_eq!(kept_media(), (1, picture.len() as u64));
+        assert_eq!(kept_files(), (2, (picture.len() + archive.len()) as u64));
 
-        assert_eq!(forget_where(kept_by_keep_media), vec![p]);
-        assert!(!holds(&p) && holds(&a));
-        assert_eq!(kept_media(), (0, 0));
+        let mut gone = forget_where(|_| true);
+        gone.sort();
+        let mut both = vec![p, a];
+        both.sort();
+        assert_eq!(gone, both);
+        assert!(!holds(&p) && !holds(&a));
+        assert_eq!(kept_files(), (0, 0));
     }
 
     #[test]

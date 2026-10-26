@@ -276,7 +276,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
 async fn clear_attachment_files<R: Runtime>(
     handle: &AppHandle<R>,
     exts: Option<&std::collections::HashSet<String>>,
-    kept_media_only: bool,
+    kept_only: bool,
 ) -> Result<usize, String> {
     vector_core::db::scoped(async move {
         // Deletion is confined to the download dir: a stale or symlinked
@@ -306,7 +306,7 @@ async fn clear_attachment_files<R: Runtime>(
                     let path = attachment.path();
                     // Downloaded with no path of its own: a copy the media store keeps.
                     let kept = path.is_empty();
-                    if kept_media_only && !(kept && vector_core::media::previewable(&attachment.extension().to_ascii_lowercase())) {
+                    if kept_only && !kept {
                         continue;
                     }
 
@@ -535,7 +535,7 @@ pub async fn clear_storage_category<R: Runtime>(
     }))
 }
 
-/// The link media Keep Media seals into the cache: what a chat shows from a link.
+/// The link media Keep Files seals into the cache: what a chat shows from a link.
 const KEPT_LINK_MEDIA: [&str; 2] = ["inline_images", "embed_videos"];
 
 const KEEP_MEDIA_BUSY: &str = "Turn this off once your downloads finish.";
@@ -558,10 +558,10 @@ fn link_media_dirs<R: Runtime>(handle: &AppHandle<R>) -> Vec<std::path::PathBuf>
     handle.path().app_data_dir().map(|d| KEPT_LINK_MEDIA.iter().map(|k| d.join("cache").join(k)).collect()).unwrap_or_default()
 }
 
-/// What turning Keep Media off would delete: the files it kept and the link media sealed with them.
+/// What turning Keep Files off would delete: the files it kept and the link media sealed with them.
 #[tauri::command]
 pub async fn kept_media_summary<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
-    let (mut files, mut bytes) = vector_core::db::blocking_bound(vector_core::media::store::kept_media).await?;
+    let (mut files, mut bytes) = vector_core::db::blocking_bound(vector_core::media::store::kept_files).await?;
     let (old, old_bytes) = old_downloads().await;
     (files, bytes) = (files + old, bytes + old_bytes);
     for dir in link_media_dirs(&handle) {
@@ -575,7 +575,7 @@ pub async fn kept_media_summary<R: Runtime>(handle: AppHandle<R>) -> Result<serd
     Ok(serde_json::json!({ "files": files, "bytes": bytes, "busy": downloads_running().await }))
 }
 
-/// Keep Media on or off. Off deletes what it kept, so media is kept or held, never both; refused
+/// Keep Files on or off. Off deletes what it kept, so a file is kept or held, never both; refused
 /// while a download that read the old setting could still keep something.
 #[tauri::command]
 pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Result<(), String> {
@@ -596,7 +596,7 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
         }
         vector_core::db::set_sql_setting("keep_unencrypted".into(), "false".into())?;
         clear_attachment_files(&handle, None, true).await?;
-        vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(vector_core::media::store::kept_by_keep_media)).await?;
+        vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(|_| true)).await?;
         for dir in link_media_dirs(&handle) {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -612,7 +612,7 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
 pub async fn set_keep_unencrypted(on: bool) -> Result<(), String> {
     vector_core::db::scoped(async move {
         if on && !vector_core::media::keep_media() {
-            return Err("Turn on Keep Media on This Device first.".into());
+            return Err("Turn on Keep Files on This Device first.".into());
         }
         if downloads_running().await || !stop_media_port().await {
             return Err("Change this once your downloads finish.".into());
@@ -797,8 +797,8 @@ where
     }
 }
 
-/// Old downloads go with media that isn't kept: each file this account alone shows is deleted,
-/// and loaded messages stop showing it.
+/// Plain downloads go with files that aren't kept: each file this account alone shows is
+/// deleted, and loaded messages stop showing it.
 async fn release_old_downloads() {
     use vector_core::media::import;
     let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };

@@ -634,12 +634,12 @@ async fn clear_attachment_files(exts: Option<&HashSet<String>>) -> Result<usize,
     Ok(updates.len())
 }
 
-/// Link media kept for chats, beside the attachments Keep Media keeps.
+/// Link media kept for chats, beside the attachments Keep Files keeps.
 const KEPT_LINK_MEDIA: [&str; 2] = ["/cache/inline_images", "/cache/embed_videos"];
 
-/// What turning Keep Media off would delete: the files it kept and the link media kept with them.
+/// What turning Keep Files off would delete: the files it kept and the link media kept with them.
 async fn kept_media_summary() -> Result<Value, String> {
-    let (mut files, mut bytes) = vector_core::media::store::kept_media();
+    let (mut files, mut bytes) = vector_core::media::store::kept_files();
     for dir in KEPT_LINK_MEDIA {
         for (_, size) in list_files(Path::new(dir), true).await {
             files += 1;
@@ -649,7 +649,7 @@ async fn kept_media_summary() -> Result<Value, String> {
     Ok(json!({ "files": files, "bytes": bytes, "busy": crate::attachments::downloading() }))
 }
 
-/// Keep Media on or off. Off deletes what it kept, so media is kept or held, never both;
+/// Keep Files on or off. Off deletes what it kept, so a file is kept or held, never both;
 /// refused while a download could still keep something.
 async fn set_keep_media(on: bool) -> Result<Value, String> {
     db::set_sql_setting("keep_media".into(), on.to_string())?;
@@ -660,11 +660,7 @@ async fn set_keep_media(on: bool) -> Result<Value, String> {
         db::set_sql_setting("keep_media".into(), "true".into())?;
         return Err("Turn this off once your downloads finish.".into());
     }
-    let gone: HashSet<[u8; 32]> = vector_core::db::media_store::totals_by_hash()?
-        .into_iter()
-        .filter(|(_, mime)| vector_core::media::store::kept_by_keep_media(mime))
-        .map(|(hash, _)| hash)
-        .collect();
+    let gone: HashSet<[u8; 32]> = vector_core::db::media_store::totals_by_hash()?.into_iter().map(|(hash, _)| hash).collect();
     for hash in &gone {
         vector_core::media::store::forget(hash).await;
     }

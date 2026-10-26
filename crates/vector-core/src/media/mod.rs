@@ -22,7 +22,7 @@ pub trait MediaSource: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
-/// "Keep media on this device": what is viewed is kept in the store too, not only held.
+/// "Keep Files on This Device": every file received is kept in the store too, not only held.
 pub fn keep_media() -> bool {
     crate::db::get_sql_setting("keep_media".to_string()).ok().flatten().as_deref() == Some("true")
 }

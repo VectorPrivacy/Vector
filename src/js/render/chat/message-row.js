@@ -300,7 +300,7 @@ const _dmsgMediaHelpers = {
     willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && !ctx.held && att.size > 0
         && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed && !att.download_cancelled,
     // Once per attachment id across renders, or every repaint would re-fire the download.
-    autoDownload: (att, msg) => _dmsgStartDownload(att, msg),
+    autoDownload: (att, msg) => _dmsgStartDownload(att, msg, true),
     // False when refused: a DM request's files wait until it's accepted.
     startDownload: (att, msg) => {
         if (chatIsRequest(getChat(strOpenChat))) {
@@ -609,8 +609,9 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     return span;
 }
 
-/** Start an attachment download once; the backend's result event clears the gate. */
-function _dmsgStartDownload(att, msg) {
+/** Start an attachment download once; the backend's result event clears the gate. An `auto`
+ *  start leaves a file too large to hold in memory for a tap. */
+function _dmsgStartDownload(att, msg, auto = false) {
     if (downloadingAttachmentIds.has(att.id)) return;
     downloadingAttachmentIds.add(att.id);
     // Asking for it again withdraws the stop that kept auto-download off it.
@@ -621,7 +622,7 @@ function _dmsgStartDownload(att, msg) {
     VectorSvelte.touchMessage(msg.id);
     // The chat, never the sender: a file you sent from another device has you as its
     // sender, and the backend files it under the conversation it belongs to.
-    invoke('download_attachment', { npub: strOpenChat, msgId: msg.id, attachmentId: att.id })
+    invoke('download_attachment', { npub: strOpenChat, msgId: msg.id, attachmentId: att.id, auto })
         .catch(() => {
             downloadingAttachmentIds.delete(att.id);
             att.downloading = false;

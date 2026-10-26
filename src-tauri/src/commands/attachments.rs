@@ -228,7 +228,7 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
     #[cfg(target_os = "android")]
     if !crate::android::storage::gallery_hidden() && shows_in_gallery(&path, &name) {
         let public = vector_core::db::get_public_dir();
-        let dest = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+        let dest = vector_core::db::blocking_bound(move || -> Result<std::path::PathBuf, String> {
             // Kept unencrypted, it is there already.
             let kept = match vector_core::media::MediaRef::parse(&path) {
                 Some(vector_core::media::MediaRef::File(file)) => vec![file],
@@ -244,8 +244,7 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
             }
             Ok(crate::media_export::place_plain(&path, &name, &public)?.0)
         })
-        .await
-        .map_err(|e| e.to_string())??;
+        .await??;
         let dest = dest.to_string_lossy().into_owned();
         vector_core::db::saved::mark(&dest)?;
         crate::android::storage::scan_file(&dest);
@@ -261,7 +260,7 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
             dialog = dialog.set_directory(downloads);
         }
     }
-    tokio::task::spawn_blocking(move || {
+    vector_core::db::blocking_bound(move || {
         let Some(picked) = dialog.blocking_save_file() else { return Ok(None) };
         #[cfg(target_os = "android")]
         if let tauri_plugin_dialog::FilePath::Url(url) = &picked {
@@ -283,8 +282,7 @@ pub async fn save_attachment(app: tauri::AppHandle, path: String, name: String) 
         }
         Ok(Some(dest))
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?
 }
 
 /// Whether a Save goes to the gallery: pictures and videos, by the name it is saved under or else
@@ -557,8 +555,9 @@ pub async fn cancel_download(attachment_id: String) -> bool {
 /// Fetch an attachment for viewing, or to keep (`keep`). What a bubble draws is held in memory
 /// unless kept; everything else lands on disk.
 #[tauri::command]
-pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String, keep: Option<bool>) -> bool {
+pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String, keep: Option<bool>, auto: Option<bool>) -> bool {
     let keep = keep.unwrap_or(false);
+    let auto = auto.unwrap_or(false);
     // A command runs unbound: after a swap the "current" account is the new one, so the
     // account this download belongs to is pinned here and every emission checks it.
     let sid = vector_core::db::current_session_id();
@@ -687,13 +686,28 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
         let attachment_hex_id = util::bytes_to_hex_32(attachment.id());
         let extension = attachment.extension().to_ascii_lowercase();
-        // What a bubble only shows is held in memory; what is kept goes to disk.
+        // Every file is held in memory, and kept as well when the account keeps files. One too
+        // large to hold is kept, encrypted, and only once asked for.
         let ram = vector_core::media::ram::cache();
-        let in_memory = !keep && vector_core::media::previewable(&extension) && ram.admits(attachment.size);
-        // Viewed media is kept as well as held when the account keeps media.
+        let in_memory = !keep && ram.admits(attachment.size);
         let keep_viewed = in_memory && vector_core::media::keep_media();
         let memory_limit = if attachment.size > 0 { attachment.size + 64 * 1024 } else { ram.largest() };
         drop(ram);
+        if auto && !in_memory && !keep && !vector_core::media::keep_media() {
+            let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| att.set_downloading(false));
+            drop(state);
+            // Waits for a tap, as a stopped download does.
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
+                "profile_id": &npub,
+                "msg_id": &msg_id,
+                "id": &attachment_id,
+                "success": false,
+                "cancelled": true,
+                "result": "Too large to hold without keeping it",
+            }));
+            return false;
+        }
 
         // The ciphertext streams into this account's partial file and survives any
         // failure behind a checkpoint, so a retry, a mirror or the next launch picks
@@ -1002,7 +1016,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             let mut shown = vector_core::media::MediaRef::held(&hash);
             if on_disk && vector_core::media::keep_unencrypted() {
                 let name = attachment.name().to_string();
-                match tokio::task::spawn_blocking(move || crate::media_export::unseal(&hash, &name)).await.unwrap_or_else(|e| Err(e.to_string())) {
+                match vector_core::db::blocking_bound(move || crate::media_export::unseal(&hash, &name)).await.and_then(|r| r) {
                     Ok((path, _)) => shown = path.to_string_lossy().into_owned(),
                     Err(e) => vector_core::log_warn!("[AttachmentDownload] kept, but couldn't keep it unencrypted yet: {}", e),
                 }

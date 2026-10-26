@@ -312,7 +312,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "get_system_events" => messaging::get_system_events(&a.str("conversationId")?),
         "pivx_get_chat_payments" => Ok(json!([])),
         "download_attachment" => {
-            Ok(json!(attachments::download_attachment(a.str("npub")?, a.str("msgId")?, a.str("attachmentId")?).await))
+            Ok(json!(attachments::download_attachment(a.str("npub")?, a.str("msgId")?, a.str("attachmentId")?, a.bool("auto").unwrap_or(false)).await))
         }
         "evict_chat_messages" => Ok(Value::Null),
         "message" => {
