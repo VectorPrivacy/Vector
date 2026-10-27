@@ -1186,6 +1186,7 @@ pub(crate) mod tests {
 
     /// Add Profile: the account being left lends its SAM login to a new account on its router,
     /// typed and in memory only; another router or a login of its own takes none.
+    #[cfg(feature = "i2p")]
     #[tokio::test]
     async fn add_profile_lends_the_sam_login_for_the_same_router() {
         let _serial = TEST_LOCK.lock().await;
@@ -1447,6 +1448,7 @@ pub(crate) mod tests {
         clean().await;
     }
 
+    #[cfg(all(feature = "tor", feature = "i2p"))]
     #[tokio::test]
     async fn lifecycle_refuses_a_stale_caller() {
         let _serial = TEST_LOCK.lock().await;
