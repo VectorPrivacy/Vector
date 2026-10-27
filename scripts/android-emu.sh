@@ -7,8 +7,8 @@
 # opt-level=3, codegen-units=1, the most expensive settings in the profile.
 # This asks adb which ABI is actually attached and builds just that.
 #
-#   ./scripts/android-emu.sh            release, attached ABI only
-#   ./scripts/android-emu.sh --debug    also skip the optimiser (fastest)
+#   ./scripts/android-emu.sh            release without LTO, attached ABI only
+#   ./scripts/android-emu.sh --debug    also skip the optimiser
 #
 # For FRONTEND-ONLY changes prefer `npm run android:dev`: it serves the assets
 # over the network, so a reload replaces the whole rebuild. This script is for
@@ -27,6 +27,16 @@ for arg in "$@"; do
   if [ "$arg" = "--debug" ]; then PROFILE_FLAG="--debug"; PROFILE_DIR="debug"; fi
 done
 
+# A test build, not a shipped one: the same opt-level without the whole-program LTO and single
+# codegen unit that cost minutes a build, in its own target dir so neither build invalidates the
+# other's dependencies. Exported, so Gradle's re-entry into cargo finds the same build.
+if [ -z "$PROFILE_FLAG" ]; then
+  export CARGO_PROFILE_RELEASE_LTO=false
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+  export CARGO_PROFILE_RELEASE_INCREMENTAL=true
+  export CARGO_TARGET_DIR="$PROJECT_ROOT/src-tauri/target/emu"
+fi
+
 DEVICE_ABI="$(adb shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
 if [ -z "$DEVICE_ABI" ]; then
   echo "No device via adb. Start the emulator or plug in a phone." >&2
@@ -44,7 +54,7 @@ esac
 echo "Device ABI $DEVICE_ABI -> tauri target $TARGET (${PROFILE_DIR})"
 
 node scripts/build-frontend.mjs
-npx tauri android build --target "$TARGET" $PROFILE_FLAG
+npx tauri android build --apk true --target "$TARGET" $PROFILE_FLAG
 
 OUT="src-tauri/gen/android/app/build/outputs/apk"
 # Prefer the split matching this ABI; the universal is the fallback.
@@ -56,12 +66,18 @@ if [ -z "$APK" ]; then
 fi
 echo "APK: $APK ($(( $(stat -f%z "$APK" 2>/dev/null || stat -c%s "$APK") / 1024 / 1024 )) MB)"
 
-# An emulator that already carries a debug-signed install refuses a release-signed
-# update, and reinstalling would wipe the account. Re-sign to match rather than
-# uninstall. Debug builds are already debug-signed, so this is a no-op for them.
+# An update signed by another key is refused, and reinstalling would wipe the account.
+# Re-sign to match a debug-signed install rather than uninstall.
 BT="$(ls -d "$HOME/Library/Android/sdk/build-tools"/* 2>/dev/null | sort -V | tail -1)"
 CURRENT_SIGNER="$("$BT/apksigner" verify --print-certs "$APK" 2>/dev/null | grep -m1 'certificate DN' || true)"
-if ! echo "$CURRENT_SIGNER" | grep -q 'Android Debug'; then
+INSTALLED_SIGNER=""
+INSTALLED_APK="$(adb shell pm path io.vectorapp 2>/dev/null | sed -n 's/^package://p' | head -1 | tr -d '\r')"
+if [ -n "$INSTALLED_APK" ]; then
+  PULLED="${TMPDIR:-/tmp}/vector-emu-installed.apk"
+  adb pull "$INSTALLED_APK" "$PULLED" >/dev/null
+  INSTALLED_SIGNER="$("$BT/apksigner" verify --print-certs "$PULLED" 2>/dev/null | grep -m1 'certificate DN' || true)"
+fi
+if echo "$INSTALLED_SIGNER" | grep -q 'Android Debug' && ! echo "$CURRENT_SIGNER" | grep -q 'Android Debug'; then
   echo "Re-signing with the debug keystore to match the installed app…"
   SIGNED="${TMPDIR:-/tmp}/vector-emu-signed.apk"
   cp "$APK" "$SIGNED"

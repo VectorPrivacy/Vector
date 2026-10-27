@@ -15,16 +15,10 @@ opt-level = 3
 [profile.dev.package.sqlite-wasm-vfs]
 debug-assertions = false
 
+# Our own crates stay at opt-level 0 under test: 1 runs vector-core's suite ~13s
+# faster but adds ~45s to every rebuild after an edit.
 [profile.test.package."*"]
 opt-level = 3
-
-# Our own crates under test: the vault stress tests are OUR code, so the
-# dependency override above can't reach them. 1 is the measured optimum — 2 and 3
-# both run SLOWER (50.9s / 50.2s vs 49.0s) and compile slower, because the vault's
-# cost is ~524k atomic writes per set(), which is memory-bandwidth-bound and
-# neither vectorizes nor reorders.
-[profile.test]
-opt-level = 1
 
 [patch.crates-io]
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork

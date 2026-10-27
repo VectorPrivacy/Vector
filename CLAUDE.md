@@ -30,6 +30,7 @@ npm run dev:bare         # Dev without default features — no whisper, tor or v
 npm run build:bare       # Release without default features (no whisper, tor or video)
 npm run android:dev      # Android dev (./scripts/android-dev.sh)
 npm run android:build    # Android release (tauri android build)
+scripts/android-emu.sh   # Test APK for the attached device: its ABI only, no LTO, installed
 scripts/fdroid-build.sh  # F-Droid flavour: source-only, unsigned, no in-app updater (docs/fdroid/)
 npm run web:build        # Vector Web: wasm core + frontend → dist-web/ (`-- --release` for production)
 npm run web:serve        # Serve dist-web at http://localhost:8790
