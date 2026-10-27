@@ -22413,6 +22413,76 @@ mod tests {
         crate::db::community::load_community_v2(c.id()).unwrap().unwrap()
     }
 
+    /// Every channel of a thirty-channel community, one message each, backfilled twice over a
+    /// real socket: more planes than the plane pool holds. Returns the connections it took.
+    async fn backfill_sockets() -> usize {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Many", vec!["wss://r".into()], None).await.unwrap();
+        for i in 1..30 {
+            create_public_channel(&relay, &held_of(&community), &format!("channel {i}")).await.unwrap();
+        }
+        let mut community = held_of(&community);
+        assert_eq!(community.channels.len(), 30);
+        for ch in &community.channels {
+            send_message(&relay, &community, &ch.id, &format!("hello {}", ch.name)).await.unwrap();
+        }
+        let wire = crate::community::transport::wire::WireRelay::start().await;
+        wire.hold(relay.fetch(&Query { kinds: vec![stream::KIND_WRAP], ..Default::default() }, &community.relays).await.unwrap());
+        community.relays = vec![wire.url()];
+        crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
+        let live = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        for _ in 0..2 {
+            for ch in &community.channels {
+                let read = fetch_channel_history(&live, &community, &ch.id, 50, 1, None, None, crate::community::transport::Evidence::Quorum, |_, _| true, |_| Default::default());
+                assert_eq!(read.await.unwrap().len(), 1, "#{} backfilled", ch.name);
+            }
+        }
+        crate::community::transport::clear_plane_pool();
+        wire.opened()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backfill_of_many_channels_holds_one_connection_to_a_relay_without_auth() {
+        assert_eq!(backfill_sockets().await, 1, "connections opened to the relay");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_found_gating_plane_reads_is_recorded_for_the_account() {
+        use nostr_sdk::prelude::FinalizeEvent;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = crate::community::transport::wire::WireRelay::start().await;
+        relay.gate(true);
+        crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
+        let plane = Keys::generate();
+        let wrap = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(stream::KIND_WRAP), "sealed").finalize(&plane).unwrap();
+        relay.hold([wrap]);
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![plane.public_key().to_hex()], ..Default::default() };
+        let live = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        live.fetch_plane(&plane, &query, &[relay.url()]).await.unwrap();
+        let gate_key = format!("auth_gate:{}", crate::inbox_relays::normalize_relay_url(&relay.url()));
+        assert!(crate::db::get_sql_setting(gate_key).unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_the_account_saw_challenge_goes_straight_to_authed_plane_reads() {
+        use nostr_sdk::prelude::FinalizeEvent;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = crate::community::transport::wire::WireRelay::start().await;
+        relay.gate(true);
+        let gate_key = format!("auth_gate:{}", crate::inbox_relays::normalize_relay_url(&relay.url()));
+        crate::db::settings::set_sql_setting(gate_key, "1".into()).unwrap();
+        crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
+        let plane = Keys::generate();
+        let wrap = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(stream::KIND_WRAP), "sealed").finalize(&plane).unwrap();
+        relay.hold([wrap.clone()]);
+        let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![plane.public_key().to_hex()], ..Default::default() };
+        let live = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
+        let read = live.fetch_plane(&plane, &query, &[relay.url()]).await.unwrap();
+        assert_eq!(read.events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![wrap.id]);
+        assert_eq!(relay.opened(), 1, "no open read first");
+    }
+
     #[tokio::test]
     async fn categories_order_and_delete_terminally() {
         let (_tmp, _guard, owner) = init_test_db();
