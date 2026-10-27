@@ -46,9 +46,12 @@ jobs:
       # Selected BY NAME, never `--include-ignored`: #[ignore] in this repo also
       # marks live-relay tests, which need a real network and must not gate a
       # push.
+      #
+      # Built at opt-level 1: the suite's own profile leaves vector-core unoptimised for fast
+      # rebuilds, and these spend minutes in its loops that way.
       - name: vault stress (ignored-by-default, hermetic)
         working-directory: crates
-        run: cargo test -p vector-core --lib -- --ignored guarded_key
+        run: cargo test -p vector-core --lib --config 'profile.test.opt-level=1' -- --ignored guarded_key
 
   src-tauri:
     name: src-tauri

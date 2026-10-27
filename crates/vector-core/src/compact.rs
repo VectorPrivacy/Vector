@@ -2718,9 +2718,11 @@ mod tests {
             .collect();
 
         // Benchmark binary search lookup (CompactMessageVec)
+        // One round: the linear baseline costs seconds per round in an unoptimised test build.
+        const ROUNDS: usize = 1;
         let lookup_start = Instant::now();
         let mut found_count = 0;
-        for _ in 0..100 { // 100 iterations
+        for _ in 0..ROUNDS {
             for id in &lookup_ids {
                 if compact_vec.find_by_hex_id(id).is_some() {
                     found_count += 1;
@@ -2728,7 +2730,7 @@ mod tests {
             }
         }
         let lookup_elapsed = lookup_start.elapsed();
-        let total_lookups = 100 * lookup_ids.len();
+        let total_lookups = ROUNDS * lookup_ids.len();
 
         println!("  Binary search (CompactMessageVec):");
         println!("    {} lookups in {:?}", total_lookups, lookup_elapsed);
@@ -2740,7 +2742,7 @@ mod tests {
         // Benchmark linear search (simulating Vec<Message>)
         let linear_start = Instant::now();
         let mut linear_found = 0;
-        for _ in 0..100 {
+        for _ in 0..ROUNDS {
             for id in &lookup_ids {
                 if messages.iter().find(|m| &m.id == id).is_some() {
                     linear_found += 1;

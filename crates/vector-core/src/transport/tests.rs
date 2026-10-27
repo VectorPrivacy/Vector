@@ -2422,6 +2422,8 @@ async fn an_unreachable_inbox_lookup_never_falls_back_to_our_relays() {
         budget::override_for_test(op, Some(Duration::from_millis(1)));
     }
     budget::override_for_test(Op::ReadyWait, Some(Duration::from_millis(300)));
+    // Each attempt's inbox fetch waits out a relay that never answers.
+    budget::cap_for_test(Op::RelayRequest, Duration::from_secs(1));
     set_preference(Some(Kind::I2p));
     let mock = Mock::new(Kind::I2p, false, MockDial::To(own_addr));
     let id = host::activate(mock.clone(), live(), false).unwrap().id();

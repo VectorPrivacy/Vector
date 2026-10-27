@@ -103,6 +103,10 @@ pub fn highest_compiled_floor(op: Op) -> Duration {
 /// since that is when connects are slowest.
 pub fn budget(op: Op, clearnet: Duration) -> Duration {
     #[cfg(test)]
+    if let Some(cap) = CAP_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(o, _)| *o == op).map(|(_, d)| *d) {
+        return clearnet.min(cap);
+    }
+    #[cfg(test)]
     if let Some(d) = FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(o, _)| *o == op).map(|(_, d)| *d) {
         return clearnet.max(d);
     }
@@ -127,7 +131,19 @@ pub(crate) fn override_for_test(op: Op, d: Option<Duration>) {
     }
 }
 
+/// A ceiling on `op`, under even the caller's clearnet value: for a wait the test expects to lapse.
+#[cfg(test)]
+static CAP_FOR_TEST: std::sync::Mutex<Vec<(Op, Duration)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn cap_for_test(op: Op, d: Duration) {
+    let mut v = CAP_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(o, _)| *o != op);
+    v.push((op, d));
+}
+
 #[cfg(test)]
 pub(crate) fn clear_overrides_for_test() {
     FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    CAP_FOR_TEST.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
