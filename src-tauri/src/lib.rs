@@ -111,6 +111,14 @@ mod shared;
 // SIMD-accelerated operations (hex encoding, image alpha, etc.)
 mod simd;
 
+/// What `benches/simd` times, reachable only from a `--features bench` build.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench {
+    pub use crate::simd::jpeg::{backend_name, encode_rgb};
+    pub use crate::simd::neuquant::{IndexCache, NeuQuant};
+}
+
 // State management module
 mod state;
 // Re-export commonly used state items at crate root for backwards compatibility.

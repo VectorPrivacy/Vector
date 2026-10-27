@@ -19,6 +19,8 @@ fdroid = []
 # Video compression through a selective static FFmpeg: build it with scripts/build-ffmpeg.sh
 # and set FFMPEG_DIR to src-tauri/native-deps/ffmpeg/<target>.
 video = ["dep:ffmpeg-next"]
+# The benchmarks `cargo bench --bench simd` runs: never part of a shipped or test build.
+bench = []
 # MCP bridge for AI-assisted debugging, desktop debug builds only. scripts/tauri.mjs enables it for `dev`.
 mcp-bridge = ["dep:tauri-plugin-mcp-bridge"]
 
@@ -27,6 +29,13 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+
+# Benchmarks optimise like a release without its single-unit, whole-program link: the shell's
+# benches time code inside one crate, and a rebuild after an edit takes seconds, not minutes.
+[profile.bench]
+lto = false
+codegen-units = 16
+incremental = true
 
 # Shipping-speed binary that still carries the debug-only tooling (the MCP bridge,
 # dev-speed KDF): `cargo build --profile dev-opt`. For measuring, never for release.
@@ -165,6 +174,11 @@ opt-level = 3
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "vector_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bench]]
+name = "simd"
+harness = false
+required-features = ["bench"]
 
 [build-dependencies]
 tauri-build = { version = "2.7.3", features = [] }

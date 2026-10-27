@@ -1567,17 +1567,16 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod processor_bench {
+/// The profile processor's benchmark, run by `benches/core`: in-crate for the private queue.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Thread wakeups while the queue sits empty, and how long a user-clicked refresh waits
-    /// before the processor picks it up. `#[ignore]`d: a measurement, run deliberately:
-    ///   cargo test --release -p vector-core --lib bench_profile_processor -- --ignored --nocapture
-    #[test]
-    #[ignore = "benchmark, not an assertion"]
-    fn bench_profile_processor() {
+    /// before the processor picks it up.
+    pub fn processor() {
         static UNPARKS: AtomicUsize = AtomicUsize::new(0);
         const IDLE: Duration = Duration::from_secs(20);
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1588,6 +1587,7 @@ mod processor_bench {
             .build()
             .unwrap();
         rt.block_on(async {
+            // spawn-detached: the benchmark's own runtime, no account.
             tokio::spawn(start_profile_sync_processor(Arc::new(NoOpProfileSyncHandler)));
             tokio::time::sleep(Duration::from_millis(50)).await;
             let before = UNPARKS.load(Ordering::Relaxed);
@@ -1601,7 +1601,7 @@ mod processor_bench {
                 let npub = format!("npub1bench{i}");
                 let t = Instant::now();
                 refresh_profile_now(npub.clone());
-                while !profile_sync_queue().lock().unwrap().last_fetched.contains(&npub) {
+                while profile_sync_queue().lock().unwrap().last_fetched.get(&npub).is_none() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 waits.push(t.elapsed().as_secs_f64() * 1e3);

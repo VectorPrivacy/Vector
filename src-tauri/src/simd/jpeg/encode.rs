@@ -693,40 +693,6 @@ mod tests {
         }
     }
 
-    /// On-device comparison with the image crate's encoder:
-    /// `cargo test --release --no-default-features --lib simd::jpeg -- --ignored --nocapture`
-    #[test]
-    #[ignore = "benchmark, not an assertion"]
-    fn bench_against_the_image_crate() {
-        let (w, h) = (1920u32, 1440u32);
-        let px = noise_image(w as usize, h as usize, 11);
-        let time = |f: &dyn Fn() -> Vec<u8>| {
-            let mut t: Vec<f64> = (0..9)
-                .map(|_| {
-                    let s = std::time::Instant::now();
-                    std::hint::black_box(f());
-                    s.elapsed().as_secs_f64() * 1e3
-                })
-                .collect();
-            t.sort_by(f64::total_cmp);
-            (t[4], f().len())
-        };
-        let image = time(&|| {
-            let mut o = Vec::new();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut o, 85)
-                .encode(&px, w, h, image::ExtendedColorType::Rgb8)
-                .unwrap();
-            o
-        });
-        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        let single = time(&|| one.install(|| encode_rgb(&px, w, h, 85).unwrap()));
-        let all = time(&|| encode_rgb(&px, w, h, 85).unwrap());
-        println!("{:?}, {} threads, 1920x1440 q85", Backend::detect(), rayon::current_num_threads());
-        println!("  image crate  {:7.1} ms  {} B", image.0, image.1);
-        println!("  ours, 1      {:7.1} ms  {} B  {:.1}x", single.0, single.1, image.0 / single.0);
-        println!("  ours, all    {:7.1} ms  {} B  {:.1}x", all.0, all.1, image.0 / all.0);
-    }
-
     #[test]
     fn rejects_bad_dimensions() {
         assert!(encode_rgb(&[0; 3], 0, 1, 85).is_err());

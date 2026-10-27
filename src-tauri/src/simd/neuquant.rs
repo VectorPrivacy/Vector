@@ -375,32 +375,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-mod bench {
-    use super::*;
-    #[test]
-    #[ignore]
-    fn bench_neuquant() {
-        let path = std::env::var("NQ_IMAGE").unwrap();
-        let img = image::open(path).unwrap().to_rgba8();
-        let px = img.as_raw();
-        for _ in 0..2 {
-            let t = std::time::Instant::now();
-            let theirs = color_quant::NeuQuant::new(10, 256, px);
-            let tl = t.elapsed();
-            let t = std::time::Instant::now();
-            let v: Vec<u8> = px.chunks_exact(4).map(|p| theirs.index_of(p) as u8).collect();
-            let ti = t.elapsed();
-            let t = std::time::Instant::now();
-            let ours = NeuQuant::new(10, px);
-            let ol = t.elapsed();
-            let t = std::time::Instant::now();
-            let mut m = IndexCache::new(&ours);
-            let w: Vec<u8> = px.chunks_exact(4).map(|p| m.index_of([p[0], p[1], p[2], p[3]])).collect();
-            let oi = t.elapsed();
-            assert_eq!(v, w);
-            println!("color_quant learn {tl:?} index {ti:?} | ours learn {ol:?} index {oi:?}");
-        }
-    }
-}

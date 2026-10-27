@@ -3053,44 +3053,6 @@ mod tests {
         (c, cid, private)
     }
 
-    /// `cargo test --release -p vector-core --lib bench_load_community -- --ignored --nocapture`
-    #[test]
-    #[ignore = "benchmark, not an assertion"]
-    fn bench_load_community_encrypted() {
-        let (_tmp, _guard) = init_test_db();
-        crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
-        crate::state::set_encryption_enabled(true);
-
-        let mut v2 = v2_fixture("V2", &["wss://r"]);
-        v2.description = Some("about".into());
-        for i in 0..7 {
-            let mut ch = v2.channels[0].clone();
-            ch.id = ChannelId([i as u8 + 0x40; 32]);
-            ch.name = format!("channel {i}");
-            v2.channels.push(ch);
-        }
-        save_community_v2(&v2).unwrap();
-
-        let time = |name: &str, f: &mut dyn FnMut()| {
-            for _ in 0..20 { f(); }
-            let mut best = f64::MAX;
-            for _ in 0..5 {
-                let t = std::time::Instant::now();
-                for _ in 0..200 { f(); }
-                best = best.min(t.elapsed().as_nanos() as f64 / 200.0);
-            }
-            println!("{name:<44} {:>9.1} µs", best / 1000.0);
-        };
-        let mut get = || { std::hint::black_box(crate::state::ENCRYPTION_KEY.get()); };
-        time("vault get()", &mut get);
-        time("load_community_v2, 8 channels, encrypted", &mut || {
-            std::hint::black_box(load_community_v2(v2.id()).unwrap().unwrap());
-        });
-
-        crate::state::set_encryption_enabled(false);
-        crate::state::ENCRYPTION_KEY.clear(&[]);
-    }
-
     fn encrypted_community_with_messages(n: usize) -> String {
         crate::state::ENCRYPTION_KEY.set([0x55u8; 32], &[]);
         crate::state::set_encryption_enabled(true);
@@ -3131,29 +3093,6 @@ mod tests {
         assert_eq!(window[0].text, "message number 0, a few words long");
         let recent = community_recent_texts(&cid, 100).unwrap();
         assert_eq!(recent[0].2, "message number 4, a few words long");
-    }
-
-    /// `cargo test --release -p vector-core --lib bench_policy_window -- --ignored --nocapture`
-    #[test]
-    #[ignore = "benchmark, not an assertion"]
-    fn bench_policy_window_encrypted() {
-        let (_tmp, _guard) = init_test_db();
-        let cid = encrypted_community_with_messages(2000);
-        for name in ["community_policy_messages, 2000 rows", "community_recent_texts, 2000 rows"] {
-            let mut best = f64::MAX;
-            for _ in 0..5 {
-                let t = std::time::Instant::now();
-                if name.starts_with("community_policy") {
-                    std::hint::black_box(community_policy_messages(&cid, 4000).unwrap());
-                } else {
-                    std::hint::black_box(community_recent_texts(&cid, 4000).unwrap());
-                }
-                best = best.min(t.elapsed().as_secs_f64() * 1000.0);
-            }
-            println!("{name:<44} {best:>9.2} ms");
-        }
-        crate::state::set_encryption_enabled(false);
-        crate::state::ENCRYPTION_KEY.clear(&[]);
     }
 
     #[test]

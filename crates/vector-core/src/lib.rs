@@ -55,7 +55,7 @@ pub mod compact;
 pub mod state;
 
 // === Debug Stats ===
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "bench"))]
 pub mod stats;
 
 // === Crypto ===

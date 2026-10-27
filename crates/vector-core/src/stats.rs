@@ -3,7 +3,7 @@
 //! This module provides tools for measuring memory usage and performance
 //! of the message cache, enabling before/after comparison during optimization.
 //!
-//! Only compiled in debug builds (`#[cfg(debug_assertions)]`).
+//! Only compiled in debug builds (`#[cfg(debug_assertions)]`) and for the benchmarks.
 
 use std::time::Duration;
 

@@ -79,6 +79,12 @@ impl Backend {
     }
 }
 
+/// The encoder's backend on this machine, for the benchmarks.
+#[cfg(feature = "bench")]
+pub fn backend_name() -> String {
+    format!("{:?}", Backend::detect())
+}
+
 /// The vector operations the block kernel needs. `V` holds eight f32 lanes (one block row).
 trait Simd {
     type V: Copy;

@@ -46,6 +46,10 @@ Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with 
 
 Vector Core test suite: `cd crates && cargo test -p vector-core`.
 
+Tests assert correctness and nothing else; timings live in `cargo bench`, built optimised behind each
+crate's `bench` feature: `cd crates && cargo bench -p vector-core --features bench [-- <name> | --list]`
+(`benches/core`), and `src-tauri/benches/simd` (`cargo bench --no-default-features --features bench --bench simd`).
+
 ## Architecture
 
 ### Vector Core (`crates/vector-core/`) — Single Source of Truth

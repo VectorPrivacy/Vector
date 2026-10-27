@@ -176,6 +176,8 @@ i2p = ["twin-check"]
 # Twin checks (`transport::twins`): a TLS handshake for a server's own name through the network in
 # use. Both crates are already in the tree, and with default features off aws-lc never enters it.
 twin-check = ["dep:tokio-rustls"]
+# The benchmarks `cargo bench` runs (benches/core): never part of a shipped or test build.
+bench = []
 
 [dev-dependencies]
 # Reference oracles for the differential tests of crypto::chachapoly, crypto::gcm and simd::base64.
@@ -190,3 +192,12 @@ tempfile = "3"
 # (`start_paused`) so timing-based tests (e.g. the inbox-relays debounce window) resolve
 # deterministically instead of depending on wall-clock margins under parallel CPU load.
 tokio = { version = "1.49.0", features = ["test-util"] }
+
+# `cargo bench` runs benches/core alone, not the unit tests rebuilt optimised.
+[lib]
+bench = false
+
+[[bench]]
+name = "core"
+harness = false
+required-features = ["bench"]
