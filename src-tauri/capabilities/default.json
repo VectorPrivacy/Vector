@@ -99,6 +99,7 @@
     "allow-generate-thumbhash-preview",
     "allow-decode-thumbhash",
     "allow-download-attachment",
+    "allow-probe-attachment-size",
     "allow-invite-to-community",
     "allow-list-community-invites",
     "allow-accept-community-invite",

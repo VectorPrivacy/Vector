@@ -187,6 +187,16 @@ pub fn set_attachment_downloaded(event_id: &str, hash: &str, downloaded: bool, p
     Ok(())
 }
 
+/// Record the size of an attachment that arrived without one.
+pub fn set_attachment_size(event_id: &str, hash: &str, size: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE attachments SET size=?1 WHERE event_id=?2 AND hash=?3 AND size=0",
+        rusqlite::params![size as i64, event_id, hash],
+    ).map_err(|e| format!("set_attachment_size: {e}"))?;
+    Ok(())
+}
+
 /// Mark every OTHER attachment sharing this content hash as downloaded to the same path — the
 /// download-sharing dedup, now an indexed `WHERE hash = ?` instead of a `LIKE '%hash%'` table scan.
 /// Returns the affected event ids so the caller can reconcile in-memory STATE.

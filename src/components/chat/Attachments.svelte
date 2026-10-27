@@ -30,12 +30,15 @@
 
     // Auto-download: a side effect, once per attachment id (the app dedupes across renders),
     // and only once the message comes near the screen: a long chat loads what you scroll to.
+    // A file that came without a size asks for it then too: auto-download needs it.
     let near = $state(false);
-    const waiting = $derived(rows.some((r) => r.phase === 'idle' && r.auto));
+    const unsized = (r) => r.phase === 'idle' && !(r.att.size > 0) && !ctx.held && !ctx.revealedBlocked;
+    const waiting = $derived(rows.some((r) => (r.phase === 'idle' && r.auto) || unsized(r)));
     $effect(() => {
         if (!near) return;
         for (const r of rows) {
             if (r.phase === 'idle' && r.auto) h.autoDownload(r.att, msg, sender);
+            else if (unsized(r)) h.probeSize(r.att, msg);
         }
     });
 </script>

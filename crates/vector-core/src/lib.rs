@@ -873,12 +873,11 @@ impl VectorCore {
             if !step(DownloadStep::Opening) {
                 return Err(DownloadError::Cancelled);
             }
-            // Plaintext public blob (no decryption tags): the sender's `ox` claim
-            // is the only integrity check available, so it is mandatory here —
-            // unverifiable plaintext is treated as a dead source, not served.
-            if attachment.key.is_empty() {
-                let claim = attachment.original_hash.as_deref().unwrap_or(&attachment.id);
-                if crate::crypto::sha256_hex(&encrypted) == claim {
+            // Plaintext public blob (no decryption tags): its content address and the sender's
+            // claim are the only integrity checks there are.
+            if attachment.key.is_empty() || attachment.nonce.is_empty() {
+                let hash = crate::crypto::sha256_hex(&encrypted);
+                if crate::blossom::plaintext_matches(&url, attachment.original_hash.as_deref(), &hash) {
                     return Ok(encrypted);
                 }
                 last_err = "plaintext blob fails its hash claim".to_string();
@@ -901,6 +900,33 @@ impl VectorCore {
         }
         log_net_fail!("[Download] all {} source(s) failed for {}: {}", candidates.len(), attachment.url, last_err);
         Err(if all_answered { DownloadError::Unusable(last_err) } else { DownloadError::Unreachable(last_err) })
+    }
+
+    /// The size of an attachment that arrived without one, asked of its server as a download
+    /// would ask it, and recorded on the message so auto-download can weigh it. `None` when the
+    /// server won't say, or the message is a request not yet answered.
+    pub async fn probe_attachment_size(&self, message_id: &str, attachment_id: &str) -> Option<u64> {
+        crate::db::scoped(async move {
+            let (chat_id, message) = self.get_message(message_id).await?;
+            let att = message.attachments.iter().find(|a| a.id == attachment_id)?;
+            if att.size > 0 {
+                return Some(att.size);
+            }
+            if !(att.url.starts_with("https://") || att.url.starts_with("http://")) {
+                return None;
+            }
+            if !message.mine && crate::requests::shielded() && state::STATE.lock().await.dm_unanswered(&chat_id) {
+                return None;
+            }
+            let probe = crate::net::get_remote_file_size(&att.url);
+            let size = crate::rt::time::timeout(crate::net::tor_http_timeout(std::time::Duration::from_secs(5)), probe).await.ok().flatten()?;
+            if let Err(e) = db::attachments::set_attachment_size(message_id, attachment_id, size) {
+                crate::log_warn!("[Attachments] could not record a probed size: {e}");
+            }
+            state::STATE.lock().await.update_attachment(&chat_id, message_id, attachment_id, |a| a.size = size);
+            Some(size)
+        })
+        .await
     }
 
     /// Send a NIP-17 gift-wrapped file attachment DM.

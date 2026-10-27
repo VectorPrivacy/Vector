@@ -314,6 +314,9 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "download_attachment" => {
             Ok(json!(attachments::download_attachment(a.str("npub")?, a.str("msgId")?, a.str("attachmentId")?, a.bool("auto").unwrap_or(false)).await))
         }
+        "probe_attachment_size" => {
+            to_value(vector_core::VectorCore.probe_attachment_size(&a.str("msgId")?, &a.str("attachmentId")?).await)
+        }
         "evict_chat_messages" => Ok(Value::Null),
         "message" => {
             messaging::message(a.str("receiver")?, a.opt_str("content").unwrap_or_default(), a.opt_str("repliedTo").unwrap_or_default())

@@ -268,6 +268,7 @@ const _dmsgContentHelpers = {
  *   isDownloading: (att: object) => boolean,
  *   willAutoDownload: (att: object, ctx: object) => boolean,
  *   autoDownload: (att: object, msg: object, sender: object|null) => void,
+ *   probeSize: (att: object, msg: object) => void,
  *   startDownload: (att: object, msg: object, sender: object|null) => boolean,
  *   cancelDownload: (att: object, msg: object) => void,
  *   audio: object,
@@ -301,6 +302,7 @@ const _dmsgMediaHelpers = {
         && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed && !att.download_cancelled,
     // Once per attachment id across renders, or every repaint would re-fire the download.
     autoDownload: (att, msg) => _dmsgStartDownload(att, msg, true),
+    probeSize: (att, msg) => _dmsgProbeSize(att, msg),
     // False when refused: a DM request's files wait until it's accepted.
     startDownload: (att, msg) => {
         if (chatIsRequest(getChat(strOpenChat))) {
@@ -628,6 +630,27 @@ function _dmsgStartDownload(att, msg, auto = false) {
             att.downloading = false;
             VectorSvelte.touchMessage(msg.id);
         });
+}
+
+/** Attachments asked their size this session: once each, answered or not. */
+const _dmsgSized = new Set();
+
+/** A file that came without a size asks its server once, so auto-download can weigh it. */
+function _dmsgProbeSize(att, msg) {
+    if (att.size > 0 || _dmsgSized.has(att.id) || !/^https?:\/\//.test(att.url || '')) return;
+    _dmsgSized.add(att.id);
+    invoke('probe_attachment_size', { msgId: msg.id, attachmentId: att.id })
+        .then((size) => {
+            if (!(size > 0)) return;
+            att.size = size;
+            // The chat may have been refilled while the server answered.
+            const current = getChat(strOpenChat)?.messages.find((m) => m.id === msg.id);
+            for (const a of current?.attachments || []) {
+                if (a.id === att.id) a.size = size;
+            }
+            VectorSvelte.touchMessage(msg.id);
+        })
+        .catch(() => {});
 }
 
 /** Hashes refetched after their held copy went: once each per session, then tap-to-load. */

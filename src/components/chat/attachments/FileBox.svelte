@@ -99,7 +99,8 @@
     });
     // What the file IS, for the line below the name: its own extension, or the closest word we have.
     const kind = $derived(ext ? `.${ext}` : info.description);
-    const sizeText = $derived(att.size > 0 ? h.formatBytes(att.size) : '');
+    // A size can arrive after the file did: read under the message's version.
+    const sizeText = $derived.by(() => { messageVersion(msg.id); return att.size > 0 ? h.formatBytes(att.size) : ''; });
     const restLine = $derived(sizeText ? `${kind} — ${sizeText}` : kind);
     const pausedLine = $derived(paused
         ? `Paused at ${h.formatBytes(paused.offset)}${paused.total ? ` of ${h.formatBytes(paused.total)}` : ''} · Tap to Resume`

@@ -1208,6 +1208,13 @@ pub fn blob_hash(url_str: &str) -> Option<String> {
     parse_blob_url(url_str).ok().map(|(_, hash)| hash.to_string())
 }
 
+/// Whether plaintext from `url` hashing to `sha256` (hex) is the file the message named: it
+/// matches the URL's content address and the sender's claim, each where there is one. A link
+/// with neither is taken as served, as any linked file is.
+pub fn plaintext_matches(url: &str, claim: Option<&str>, sha256: &str) -> bool {
+    blob_hash(url).is_none_or(|a| a.eq_ignore_ascii_case(sha256)) && claim.is_none_or(|c| c.eq_ignore_ascii_case(sha256))
+}
+
 /// Verify a downloaded body against its URL's content address.
 /// `Some(true)` = bytes match the blob hash, `Some(false)` = the source served
 /// the wrong bytes, `None` = the URL carries no content address to check.
@@ -1651,6 +1658,30 @@ mod network_failure_tests {
         assert!(matches!(upload_failure(HttpError::Refused(ConnectError::NotReady(None))), UploadFailure::Network(_)));
         assert!(matches!(upload_failure(HttpError::Refused(ConnectError::Stale)), UploadFailure::Other(_)));
         assert!(matches!(upload_failure(HttpError::Refused(ConnectError::Refused(Refusal::ExitOff))), UploadFailure::Other(_)));
+    }
+}
+
+#[cfg(test)]
+mod plaintext_tests {
+    use super::plaintext_matches;
+
+    const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const OTHER: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// A GIF link or a pasted file names no hash: what it serves is taken, as any link is.
+    #[test]
+    fn a_link_that_names_no_hash_is_taken_as_served() {
+        assert!(plaintext_matches("https://media.example/party.gif", None, HASH));
+    }
+
+    #[test]
+    fn a_blob_address_and_a_claim_each_bind_the_bytes() {
+        let blob = format!("https://blossom.example/{HASH}.xdc");
+        assert!(plaintext_matches(&blob, None, HASH));
+        assert!(!plaintext_matches(&blob, None, OTHER), "the server's own address");
+        assert!(plaintext_matches("https://media.example/app.xdc", Some(HASH), HASH));
+        assert!(!plaintext_matches("https://media.example/app.xdc", Some(OTHER), HASH), "the sender's claim");
+        assert!(!plaintext_matches(&blob, Some(OTHER), HASH), "both, when both are there");
     }
 }
 

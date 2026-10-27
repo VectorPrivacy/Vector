@@ -1096,6 +1096,7 @@ pub fn run() {
             commands::attachments::media_release,
             commands::attachments::get_paused_downloads,
             commands::attachments::download_attachment,
+            commands::attachments::probe_attachment_size,
             commands::attachments::open_attachment,
             commands::attachments::can_install_apks,
             commands::attachments::share_attachment,

@@ -105,6 +105,12 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 // Tauri Commands
 // ============================================================================
 
+/// The size of an attachment that arrived without one, from its server; `None` when unknown.
+#[tauri::command]
+pub async fn probe_attachment_size(msg_id: String, attachment_id: String) -> Option<u64> {
+    vector_core::VectorCore.probe_attachment_size(&msg_id, &attachment_id).await
+}
+
 /// Generate a thumbhash preview for an attachment
 #[tauri::command]
 pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<String, String> {
@@ -431,8 +437,7 @@ fn verify_part(
     // sender's `ox` claim are the only integrity checks there are.
     if attachment.key.is_empty() || attachment.nonce.is_empty() {
         let (hash, len) = hash_file(part).map_err(Verdict::Fatal)?;
-        let claim = attachment.original_hash.as_deref();
-        if address.as_deref().is_some_and(|a| a != hash) || claim.is_some_and(|c| c != hash) {
+        if !vector_core::blossom::plaintext_matches(url, attachment.original_hash.as_deref(), &hash) {
             return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
         }
         return Ok((hash.clone(), len, hash));
@@ -499,7 +504,7 @@ fn open_in_memory(bytes: Vec<u8>, url: &str, attachment: &Attachment) -> Result<
         return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
     }
     if attachment.key.is_empty() || attachment.nonce.is_empty() {
-        if attachment.original_hash.as_deref().is_some_and(|claim| claim != source) {
+        if !vector_core::blossom::plaintext_matches(url, attachment.original_hash.as_deref(), &source) {
             return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
         }
         return Ok((bytes, source));
