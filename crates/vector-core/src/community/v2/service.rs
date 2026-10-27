@@ -1949,22 +1949,28 @@ fn flatten_link_sets(sets: &[crate::db::community::InviteLinkSetRow]) -> Vec<Str
 /// announce a Guestbook Join (with invite attribution). Shared tail of both accept
 /// paths. Takes the caller's `std::sync::Arc<crate::db::Session>` (captured BEFORE any network fetch the
 /// caller did) so the whole operation stays with one account across that I/O.
+///
+/// `member_since` is `None` for a join made now, or the membership time of keys the account
+/// already holds elsewhere (a List adoption): the hold is stamped with it, so a removal made
+/// after that membership still outranks the copy.
 async fn accept_bundle<T: Transport + ?Sized>(
     transport: &T,
     bundle: &CommunityInvite,
     invited_by: Option<PublicKey>,
-    announce_join: bool,
+    member_since: Option<u64>,
 ) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         let signer = crate::signer::active_signer()?;
         let my_pk = me_pk()?;
         let at_ms = now_ms();
+        let announce_join = member_since.is_none();
+        let held_since = member_since.filter(|&t| t > 0).map_or(at_ms, |t| t.min(at_ms));
         // Expiry gate: a past invite still previews but must not join (CORD-05 §1).
         if bundle.expired(at_ms) {
             return Err("this invite has expired".to_string());
         }
         // `from_bundle` re-validates bounds + the owner commitment fail-closed.
-        let community = CommunityV2::from_bundle(bundle, at_ms)?;
+        let community = CommunityV2::from_bundle(bundle, held_since)?;
         // Captured before the save below: a re-accept of a held community must not
         // re-announce a membership this account already declared.
         let already_held = crate::db::community::load_community_v2(community.id()).ok().flatten().is_some();
@@ -1988,7 +1994,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
                 Some(v) => {
                     let mut c = v.folded;
                     // The preview holds no acquisition time — stamp the JOIN's.
-                    c.created_at_ms = at_ms;
+                    c.created_at_ms = held_since;
                     (c, v.heads, v.banned, (v.pins, v.writers), v.banlist_persist, v.roles, v.authority_heads)
                 }
                 None => {
@@ -2066,7 +2072,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
 
         // Announce our Guestbook Join, echoing the invite attribution when present.
         // Only an ACTUAL join speaks: a re-accept of a held community, or a
-        // cross-device key sync (announce_join=false), is not a membership event —
+        // cross-device key sync (`member_since` set), is not a membership event —
         // the account's original Join already stands in the guestbook, and every
         // re-publish renders as "<user> has joined" spam for the whole community.
         if announce_join && !already_held {
@@ -2087,7 +2093,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // happy path; anything else hands off to the durable retry, because an unrecorded
         // join is what strands a community behind a stale tombstone.
         //
-        // Only for a REAL join. `announce_join == false` is the list-sync adoption path,
+        // Only for a REAL join. A `member_since` is the list-sync adoption path,
         // and those entries were just read FROM this list — republishing it re-records what
         // it already holds. A device adopting N entries would otherwise rebuild and publish
         // the whole document N times, concurrently, every copy identical, on the boot path
@@ -2341,7 +2347,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
 pub async fn accept_direct_invite<T: Transport + ?Sized>(transport: &T, wrap: &Event) -> Result<CommunityV2, String> {
     let signer = crate::signer::active_signer()?;
     let (inviter, bundle) = invite::unwrap_direct_invite_signed(&signer, wrap).await.map_err(|e| e.to_string())?;
-    accept_bundle(transport, &bundle, Some(inviter), true).await
+    accept_bundle(transport, &bundle, Some(inviter), None).await
 }
 
 /// Accept a PARKED Direct Invite from its stored bundle JSON (the wrap was already
@@ -2356,7 +2362,7 @@ pub async fn accept_parked_invite<T: Transport + ?Sized>(
 ) -> Result<CommunityV2, String> {
     let bundle = CommunityInvite::from_bundle_json(bundle_json).map_err(|e| e.to_string())?;
     let invited_by = inviter_hex.and_then(|h| PublicKey::parse(h).ok());
-    accept_bundle(transport, &bundle, invited_by, true).await
+    accept_bundle(transport, &bundle, invited_by, None).await
 }
 
 /// Fetch + decrypt the newest Live bundle at a public link's coordinate
@@ -2531,7 +2537,7 @@ pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str)
     crate::db::scoped(async move {
         // Held across the network fetch so the join stays with one account.
         let bundle = fetch_public_bundle(transport, url).await?;
-        accept_bundle(transport, &bundle, None, true).await
+        accept_bundle(transport, &bundle, None, None).await
     })
     .await
 }
@@ -5533,13 +5539,21 @@ pub fn note_local_removal(community_id: &str, removed_at: u64) {
     mirror_tombstones([(community_id, removed_at)]);
 }
 
+/// Every removal this device has made or read: `community_id` → newest `removed_at` (ms).
+fn known_removals() -> std::collections::HashMap<String, u64> {
+    let mut known = load_tombstone_mirror().unwrap_or_default();
+    for t in load_pending().tombstones {
+        let at = known.entry(t.community_id.to_ascii_lowercase()).or_insert(0);
+        *at = (*at).max(t.removed_at);
+    }
+    known
+}
+
 /// Whether a leave or decline at least as new as an invite (its inner rumor time,
 /// in seconds) has already answered it, here or on a sibling device.
 pub fn tombstone_suppresses(community_id: &str, invite_created_at_secs: u64) -> bool {
     let invite_ms = invite_created_at_secs.saturating_mul(1000);
-    let id = community_id.to_ascii_lowercase();
-    load_tombstone_mirror().unwrap_or_default().get(&id).is_some_and(|&at| at >= invite_ms)
-        || load_pending().tombstones.iter().any(|t| t.community_id.eq_ignore_ascii_case(&id) && t.removed_at >= invite_ms)
+    known_removals().get(&community_id.to_ascii_lowercase()).is_some_and(|&at| at >= invite_ms)
 }
 
 /// Resume every list write a previous run left unfinished. Once per session.
@@ -5701,14 +5715,14 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
                 return Ok(ListSyncOutcome { joined: vec![], removed: vec![] });
             }
         };
-        // Our own removals still on their way to the relays count already: without them
-        // this pass would re-adopt a community we left before its tombstone landed.
-        let pending: Vec<super::list::Tombstone> = load_pending()
-            .tombstones
+        // Every removal this device has made or read counts, whatever this copy says: one still
+        // on its way to the relays, or one a relay serving an older copy never got, would
+        // otherwise bring back a community already left.
+        let known: Vec<super::list::Tombstone> = known_removals()
             .into_iter()
-            .map(|t| super::list::Tombstone { community_id: t.community_id, removed_at: t.removed_at, extra: Default::default() })
+            .map(|(community_id, removed_at)| super::list::Tombstone { community_id, removed_at, extra: Default::default() })
             .collect();
-        let list = list.merge(&super::list::CommunityList { tombstones: pending, ..Default::default() });
+        let list = list.merge(&super::list::CommunityList { tombstones: known, ..Default::default() });
         mirror_tombstones(list.tombstones.iter().map(|t| (t.community_id.as_str(), t.removed_at)));
         // Receive-side teardown (the counterpart to the republish tombstone guard):
         // a community this device still holds but the synced list shows TOMBSTONED (a
@@ -5775,7 +5789,13 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             // account already holds elsewhere — the membership was announced when it
             // actually joined, and a key sync is not a membership event.
             let bundle = material_to_invite(&entry.current);
-            match accept_bundle(transport, &bundle, None, false).await {
+            match accept_bundle(transport, &bundle, None, Some(entry.added_at)).await {
+                // A leave made while the adoption ran has already answered it.
+                Ok(community) if known_removals().get(&entry.community_id).is_some_and(|&at| at >= entry.added_at) => {
+                    let channel_ids = community.channels.iter().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
+                    let _ = crate::db::community::delete_community(&entry.community_id);
+                    removed.push((entry.community_id.clone(), channel_ids));
+                }
                 Ok(community) => {
                     // The staff write secret never rides a bundle shape — adopt it
                     // from the list entry directly, and only when it derives to the
@@ -31718,6 +31738,126 @@ mod tests {
         assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_none(), "the sibling's leave tore X down locally");
     }
 
+    /// Publish a List copy (signed by `me`) written at `at_secs`: a sibling device's, or an older
+    /// one a relay still serves.
+    async fn publish_remote_list(
+        relay: &MemoryRelay,
+        me: &Keys,
+        relays: &[String],
+        entries: Vec<super::super::list::CommunityListEntry>,
+        tombstones: Vec<super::super::list::Tombstone>,
+        at_secs: u64,
+    ) {
+        let doc = super::super::list::CommunityList { entries, tombstones, extra: Default::default() };
+        // Everywhere the List is read from, so this copy is the one every read finds.
+        let relays = list_read_relays(relays).await;
+        for (i, frag) in super::super::list_frag::fragment(&doc).iter().enumerate() {
+            let event = super::super::list_frag::build_fragment_event_keys(me, frag, i, at_secs).unwrap();
+            relay.publish(&event, &relays).await.unwrap();
+        }
+    }
+
+    fn listed(community: &CommunityV2, added_at: u64) -> super::super::list::CommunityListEntry {
+        let jm = join_material(community);
+        super::super::list::CommunityListEntry {
+            community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0),
+            seed: jm.clone(),
+            current: jm,
+            added_at,
+            extra: Default::default(),
+        }
+    }
+
+    /// A member holding `X`, and a second device of that member's account that holds nothing yet.
+    async fn member_with_a_second_device() -> (TestBed, Actor, CommunityV2) {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let x = create_community(&bed.relay, "Synced", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &x, "https://vectorapp.io", None, None).await.unwrap();
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        let device = Actor { keys: member.keys.clone(), account: account_name((now_ms() % 1_000_000_000) as u32) };
+        bed.swap_to(&device);
+        (bed, device, joined)
+    }
+
+    #[tokio::test]
+    async fn an_older_copy_of_the_list_never_brings_back_a_community_this_device_left() {
+        let (bed, device, x) = member_with_a_second_device().await;
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        let joined_at = now_ms() - 60_000;
+        // Left on this device; then a relay serves a copy from before the leave.
+        note_local_removal(&x_hex, joined_at + 30_000);
+        publish_remote_list(&bed.relay, &device.keys, &bed.relays, vec![listed(&x, joined_at)], vec![], now_ms() / 1000 + 5).await;
+
+        let out = sync_community_list(&bed.relay, &bed.relays).await.unwrap();
+        assert!(out.joined.is_empty() && out.removed.is_empty(), "the stale copy is never adopted, not even briefly");
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_none(), "the stale copy did not rejoin it");
+    }
+
+    #[tokio::test]
+    async fn a_leave_made_while_an_adoption_runs_answers_it() {
+        let (bed, device, x) = member_with_a_second_device().await;
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        publish_remote_list(&bed.relay, &device.keys, &bed.relays, vec![listed(&x, now_ms() - 60_000)], vec![], now_ms() / 1000 + 5).await;
+
+        // The leave lands while the adoption walks the community's planes.
+        struct LeaveMidAdoption<'a> {
+            relay: &'a MemoryRelay,
+            community_id: String,
+            left: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait::async_trait]
+        impl Transport for LeaveMidAdoption<'_> {
+            async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+                self.walked(query);
+                self.relay.fetch_plane(plane, query, relays).await
+            }
+            async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+                self.relay.publish(e, r).await
+            }
+            async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+                self.relay.publish_durable(e, r).await
+            }
+            async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
+                self.walked(q);
+                self.relay.fetch(q, r).await
+            }
+        }
+        impl LeaveMidAdoption<'_> {
+            /// Past the List read, every fetch is the adoption's own walk.
+            fn walked(&self, query: &Query) {
+                if !query.kinds.contains(&crate::community::v2::kind::COMMUNITY_LIST_FRAG) && !self.left.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    note_local_removal(&self.community_id, now_ms());
+                }
+            }
+        }
+        let transport = LeaveMidAdoption { relay: &bed.relay, community_id: x_hex.clone(), left: false.into() };
+        let out = sync_community_list(&transport, &bed.relays).await.unwrap();
+        assert!(out.joined.is_empty() && out.removed.iter().any(|(id, _)| *id == x_hex), "the adoption is undone, and said so");
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_none(), "nothing of it is left held");
+    }
+
+    #[tokio::test]
+    async fn an_adopted_community_dates_from_its_membership_so_a_later_leave_still_removes_it() {
+        let (bed, device, x) = member_with_a_second_device().await;
+        let x_hex = crate::simd::hex::bytes_to_hex_32(&x.id().0);
+        let joined_at = now_ms() - 3_600_000;
+        publish_remote_list(&bed.relay, &device.keys, &bed.relays, vec![listed(&x, joined_at)], vec![], now_ms() / 1000 + 5).await;
+        sync_community_list(&bed.relay, &bed.relays).await.unwrap();
+        let held = crate::db::community::load_community_v2(x.id()).unwrap().expect("adopted");
+        assert!(held.created_at_ms <= joined_at, "held since the membership, not since the adoption");
+
+        // A sibling's leave made after that membership, but before this adoption ran.
+        let leave = super::super::list::Tombstone { community_id: x_hex.clone(), removed_at: joined_at + 5_000, extra: Default::default() };
+        publish_remote_list(&bed.relay, &device.keys, &bed.relays, vec![listed(&x, joined_at)], vec![leave], now_ms() / 1000 + 10).await;
+        sync_community_list(&bed.relay, &bed.relays).await.unwrap();
+        assert!(crate::db::community::load_community_v2(x.id()).unwrap().is_none(), "the leave outranks the adopted copy");
+        republish_community_list(&bed.relay, None).await.unwrap();
+        let list = fetch_fragments(&bed.relay, &bed.relays).await.unwrap().unwrap().list;
+        assert!(!list.is_live(&x_hex), "and nothing writes it back");
+    }
+
     #[tokio::test]
     async fn a_rejoined_community_survives_a_stale_tombstone_on_sync() {
         // The re-join case must NOT be torn down: a fresh join re-adds live (beating
@@ -32095,14 +32235,14 @@ mod tests {
 
         bed.swap_to(&member);
         let bundle = bundle_of(&rotated, BundleAudience::Link, None, None, None);
-        let joined = accept_bundle(&bed.relay, &bundle, None, true).await.unwrap();
+        let joined = accept_bundle(&bed.relay, &bundle, None, None).await.unwrap();
         assert_eq!(joined.root_epoch, Epoch(1), "the rotated root is adopted");
     }
 
     #[tokio::test]
     async fn only_an_actual_join_publishes_a_guestbook_join() {
         // A Guestbook Join is a member's own word that they JOINED. A re-accept of
-        // a held community and a cross-device key sync (announce_join=false) must
+        // a held community and a cross-device key sync (a `member_since`) must
         // both stay silent — each re-publish renders as "<user> has joined" spam.
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);
@@ -32117,10 +32257,10 @@ mod tests {
 
         bed.swap_to(&member);
         let bundle = bundle_of(&community, BundleAudience::Link, None, None, None);
-        accept_bundle(&bed.relay, &bundle, None, true).await.unwrap();
+        accept_bundle(&bed.relay, &bundle, None, None).await.unwrap();
         assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a first join announces exactly once");
 
-        accept_bundle(&bed.relay, &bundle, None, true).await.unwrap();
+        accept_bundle(&bed.relay, &bundle, None, None).await.unwrap();
         assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a re-accept of a held community stays silent");
 
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -32140,7 +32280,7 @@ mod tests {
         }
         let my_pk = me_pk().unwrap();
         let list_before = list_id(&bed.relay, &my_pk, &bed.relays).await;
-        accept_bundle(&bed.relay, &bundle, None, false).await.unwrap();
+        accept_bundle(&bed.relay, &bundle, None, Some(now_ms())).await.unwrap();
         assert_eq!(gb_count(&bed.relay, &gb_pk, &bed.relays).await, baseline + 1, "a cross-device key sync is not a membership event");
         assert_eq!(
             list_id(&bed.relay, &my_pk, &bed.relays).await,
@@ -32151,7 +32291,7 @@ mod tests {
         // A genuine join still records, so the storm fix can't have muted the
         // thing the republish exists for.
         crate::db::community::delete_community(&cid_hex).unwrap();
-        accept_bundle(&bed.relay, &bundle, None, true).await.unwrap();
+        accept_bundle(&bed.relay, &bundle, None, None).await.unwrap();
         assert_ne!(
             list_id(&bed.relay, &my_pk, &bed.relays).await,
             list_before,
@@ -32173,7 +32313,7 @@ mod tests {
 
         bed.swap_to(&member);
         let bundle = bundle_of(&rotated, BundleAudience::Link, None, None, None);
-        let err = accept_bundle(&bed.relay, &bundle, None, true).await.unwrap_err();
+        let err = accept_bundle(&bed.relay, &bundle, None, None).await.unwrap_err();
         assert!(err.contains("could not verify"), "no owner-signed edition → refuse: {err}");
     }
 
@@ -32194,7 +32334,7 @@ mod tests {
 
         bed.swap_to(&member);
         let bundle = bundle_of(&fake, BundleAudience::Link, None, None, None);
-        let err = accept_bundle(&bed.relay, &bundle, None, true).await.unwrap_err();
+        let err = accept_bundle(&bed.relay, &bundle, None, None).await.unwrap_err();
         assert!(err.contains("could not verify"), "epoch 0 demands the owner genesis: {err}");
     }
 
