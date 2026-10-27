@@ -227,6 +227,26 @@ pub fn clear_kept(hash: &str) -> Result<usize, String> {
         .map_err(|e| format!("clear kept: {e}"))
 }
 
+/// Rows that name a file without marking it downloaded: (row id, hash, path, size).
+pub fn unmarked_downloads() -> Result<Vec<(i64, String, String, u64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT id, hash, path, size FROM attachments WHERE downloaded=0 AND path!=''")
+        .map_err(|e| format!("prepare unmarked_downloads: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)? as u64)))
+        .map_err(|e| format!("query unmarked_downloads: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
+/// Mark row `id` downloaded while it still names `path`; false if it changed meanwhile.
+pub fn mark_downloaded(id: i64, path: &str) -> Result<bool, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("UPDATE attachments SET downloaded=1 WHERE id=?1 AND downloaded=0 AND path=?2", rusqlite::params![id, path])
+        .map(|n| n == 1)
+        .map_err(|e| format!("mark_downloaded: {e}"))
+}
+
 /// Downloads still shown from a file of their own: (hash, path, extension), one row per pair.
 pub fn downloads_on_disk() -> Result<Vec<(String, String, String)>, String> {
     let conn = super::get_db_connection_guard_static()?;

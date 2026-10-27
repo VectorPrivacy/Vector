@@ -568,8 +568,7 @@ async fn downloads_running() -> bool {
 
 /// Old downloads still in the download folder: how many, and their size.
 async fn old_downloads() -> (u64, u64) {
-    use vector_core::media::import;
-    let Ok((Ok(files), Some(shown))) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return (0, 0) };
+    let Ok((Ok(files), Some(shown))) = vector_core::db::blocking_bound(find_old_downloads).await else { return (0, 0) };
     let goes: Vec<_> = files.iter().filter(|f| !shown.shows(f)).collect();
     let bytes = goes.iter().filter_map(|f| std::fs::metadata(&f.path).ok()).map(|m| m.len()).sum();
     (goes.len() as u64, bytes)
@@ -687,7 +686,7 @@ pub fn start_media_port(delay: std::time::Duration) {
             return;
         }
         settle_owed(import::settle).await;
-        let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };
+        let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(find_old_downloads).await else { return };
         let elsewhere = std::sync::Arc::new(elsewhere);
         let mut owed: Vec<String> = Vec::new();
         for (i, item) in files.iter().enumerate() {
@@ -820,9 +819,19 @@ where
 
 /// Plain downloads go with files that aren't kept: each file this account alone shows is
 /// deleted, and loaded messages stop showing it.
+/// This account's old downloads, rows older versions left unmarked included, and what other
+/// accounts show.
+fn find_old_downloads() -> (Result<Vec<vector_core::media::import::OnDisk>, String>, Option<vector_core::media::import::Elsewhere>) {
+    use vector_core::media::import;
+    if let Err(e) = import::reclaim_unmarked() {
+        vector_core::log_warn!("[MediaImport] couldn't check downloads left unmarked: {}", e);
+    }
+    (import::on_disk(), import::elsewhere())
+}
+
 async fn release_old_downloads() {
     use vector_core::media::import;
-    let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(|| (import::on_disk(), import::elsewhere())).await else { return };
+    let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(find_old_downloads).await else { return };
     let elsewhere = std::sync::Arc::new(elsewhere);
     for item in files {
         let (file, others) = (item.clone(), elsewhere.clone());

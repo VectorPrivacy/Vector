@@ -71,6 +71,37 @@ impl Elsewhere {
     }
 }
 
+/// Rows that name a file in one of Vector's folders without marking it downloaded, as older
+/// versions often left them. Each whose file holds exactly its bytes is marked downloaded, so
+/// moving in and letting go treat it as any other download. Returns how many were marked.
+pub fn reclaim_unmarked() -> Result<usize, String> {
+    let roots: Vec<PathBuf> = crate::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
+    reclaim_in(&roots)
+}
+
+fn reclaim_in(roots: &[PathBuf]) -> Result<usize, String> {
+    let mut held: std::collections::HashMap<PathBuf, Option<String>> = std::collections::HashMap::new();
+    let mut marked = 0;
+    for (id, hash, path, size) in crate::db::attachments::unmarked_downloads()? {
+        if crate::simd::hex::hex_to_bytes_32_checked(&hash).is_none() {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(&path) else { continue };
+        let Ok(meta) = std::fs::metadata(&real) else { continue };
+        if !roots.iter().any(|root| real.starts_with(root)) || !meta.is_file() {
+            continue;
+        }
+        if size != 0 && meta.len() != size && meta.len() + 16 != size {
+            continue;
+        }
+        let bytes = held.entry(real).or_insert_with_key(|real| crate::crypto::stream::hash_file(real).ok().map(|(hex, _)| hex));
+        if bytes.as_deref().is_some_and(|hex| hex.eq_ignore_ascii_case(&hash)) && crate::db::attachments::mark_downloaded(id, &path)? {
+            marked += 1;
+        }
+    }
+    Ok(marked)
+}
+
 /// This account's downloads that still sit in one of Vector's folders, one per file.
 pub fn on_disk() -> Result<Vec<OnDisk>, String> {
     let roots: Vec<PathBuf> = crate::db::download_roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect();
@@ -1012,6 +1043,37 @@ mod tests {
         assert!(!crate::media::store::holds(&claimed.hash));
         assert_eq!(row("ev-edited"), (String::new(), false));
         assert_eq!(std::fs::read_dir(crate::media::store::dir().unwrap()).map(|d| d.count()).unwrap_or(0), 0);
+    }
+
+    /// Older versions often left a download's row naming its file without marking it downloaded.
+    #[test]
+    fn an_unmarked_row_whose_file_holds_its_bytes_moves_in_like_a_download() {
+        let _guard = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("old.png");
+        std::fs::write(&file, b"downloaded long ago").unwrap();
+        let hex = crate::crypto::sha256_hex(b"downloaded long ago");
+        download("ev-old", &hex, &file);
+        let other = root.join("other.png");
+        std::fs::write(&other, b"someone else's bytes").unwrap();
+        download("ev-wrong", &"cd".repeat(32), &other);
+        let outside = tempfile::tempdir().unwrap();
+        let away = outside.path().join("away.png");
+        std::fs::write(&away, b"downloaded long ago").unwrap();
+        download("ev-away", &hex, &away);
+        crate::db::get_write_connection_guard_static().unwrap().execute("UPDATE attachments SET downloaded=0", []).unwrap();
+
+        assert_eq!(reclaim_in(std::slice::from_ref(&root)).unwrap(), 1);
+        assert_eq!(row("ev-old"), (file.to_string_lossy().into_owned(), true));
+        assert!(!row("ev-wrong").1, "a file of other bytes stays unmarked");
+        assert!(!row("ev-away").1, "only Vector's own folders count");
+        assert_eq!(reclaim_in(&[root]).unwrap(), 0);
+
+        let (outcome, _) = move_in(&item(b"downloaded long ago", &file), Some(&nobody_else())).unwrap();
+        assert_eq!(outcome, Moved::Moved);
+        assert_eq!(row("ev-old"), (String::new(), true));
+        assert_eq!(std::fs::read(&other).unwrap(), b"someone else's bytes");
     }
 
     #[test]
