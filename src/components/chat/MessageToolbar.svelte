@@ -12,8 +12,8 @@
 <button class="dmsg-toolbar-btn btn" data-action="react" aria-label="Add reaction" title="Add reaction" hidden={!show.react}><span class="icon icon-smile-face"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="reply" aria-label="Reply" title="Reply" hidden={!show.reply}><span class="icon icon-reply"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden={!show.edit}><span class="icon icon-edit"></span></button>
-<button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label={tb.held ? 'Save' : 'Reveal in folder'} title={tb.held ? 'Save' : 'Reveal in folder'} hidden={!show.reveal} data-path={show.reveal ? tb.path : null} data-name={tb.name}><span class="icon {tb.held ? 'icon-download' : 'icon-file-search'}"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="copy-file" aria-label="Copy" title="Copy" hidden={!show.copy} data-path={show.copy ? tb.path : null} data-name={tb.name}><span class="icon icon-copy"></span></button>
+<button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label={tb.held ? 'Save' : 'Reveal in folder'} title={tb.held ? 'Save' : 'Reveal in folder'} hidden={!show.reveal} data-path={show.reveal ? tb.path : null} data-name={tb.name}><span class="icon {tb.held ? 'icon-download' : 'icon-file-search'}"></span></button>
 <button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title={tb.why ? `Retry send. ${tb.why}` : 'Retry send'} hidden={!show.retry}><span class="icon icon-refresh"></span></button>
 <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="cancel-upload" aria-label="Cancel upload" title="Cancel upload" hidden={!show.cancel}><span class="icon icon-x"></span></button>
 <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label={deleteLabel} title={deleteLabel}
