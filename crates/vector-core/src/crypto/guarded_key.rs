@@ -105,18 +105,25 @@ fn ensure_vaults() {
     }
 }
 
-/// Fill every still-empty entry. Racing fillers keep whichever value lands first.
+/// Fill every still-empty entry straight from the OS, through a wiped buffer: `Draws`' keystream
+/// compiles at the caller's opt-level, and unoptimised costs ~50 ms a process. Racing fillers
+/// keep whichever value lands first.
 fn fill_random(rows: &[[AtomicUsize; ARRAY_SIZE]]) {
-    let mut draws = Draws::new();
+    let mut words = zeroize::Zeroizing::new([0usize; 256]);
     for row in rows {
-        for slot in row.iter() {
-            let _ = slot.compare_exchange(0, draws.next(), Ordering::SeqCst, Ordering::Relaxed);
+        for chunk in row.chunks(words.len()) {
+            // SAFETY: the words are plain integers, viewed as bytes for the OS to fill.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, std::mem::size_of_val(&*words)) };
+            rand::rngs::OsRng.fill_bytes(bytes);
+            for (slot, &w) in chunk.iter().zip(words.iter()) {
+                let _ = slot.compare_exchange(0, w.max(1), Ordering::SeqCst, Ordering::Relaxed);
+            }
         }
     }
 }
 
-/// Non-zero random words from a ChaCha20 keystream seeded once from the OS. Decoys and fills
-/// take thousands of words, and a syscall each dominated `set()`. Wiped on drop: whoever
+/// Non-zero random words from a ChaCha20 keystream seeded once from the OS. A `set()`'s decoys
+/// take thousands of words, and a syscall each dominated it. Wiped on drop: whoever
 /// recovers this state could tell decoy writes from real ones.
 struct Draws {
     cipher: chacha20::ChaCha20,
@@ -1601,7 +1608,7 @@ mod tests {
             }
         });
         let ks = time(&|rows| fill_random(rows));
-        eprintln!("BENCH vault fill ({} KiB): OsRng per entry {os:.2} ms, keystream {ks:.2} ms ({:+.1}%)",
+        eprintln!("BENCH vault fill ({} KiB): OsRng per entry {os:.2} ms, bulk {ks:.2} ms ({:+.1}%)",
             ARRAY_COUNT * ARRAY_SIZE * 8 / 1024, (ks / os - 1.0) * 100.0);
     }
 
