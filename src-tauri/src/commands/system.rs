@@ -47,6 +47,8 @@ pub struct PlatformFeatures {
     pub video_compression: bool,
     /// Whether this build can host an embedded video player.
     pub players: bool,
+    /// Where Save and Keep Unencrypted put files, as a file manager shows the path.
+    pub public_folder: String,
 }
 
 // ============================================================================
@@ -110,7 +112,26 @@ pub async fn get_platform_features() -> PlatformFeatures {
         video_compression: crate::message::video_compression::available(),
         // F-Droid counts a built-in YouTube player as promoting a non-free network service.
         players: !cfg!(feature = "fdroid"),
+        public_folder: public_folder(),
     }
+}
+
+/// The public dir relative to shared storage (Android) or home: Android 8-10 keeps it under
+/// `Android/media`, not `Download`.
+fn public_folder() -> String {
+    let dir = vector_core::db::get_public_dir();
+    #[cfg(target_os = "android")]
+    let root = vector_core::db::get_download_dir()
+        .ancestors()
+        .find(|a| a.ends_with("Android"))
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf);
+    #[cfg(not(target_os = "android"))]
+    let root = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from);
+    root.and_then(|root| dir.strip_prefix(root).ok().map(std::path::Path::to_path_buf))
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Periodic memory upkeep, called every ~45s from the JS profile sync loop: idle caches and

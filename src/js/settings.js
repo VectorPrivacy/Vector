@@ -944,8 +944,8 @@ async function initStorageSection() {
 let fMediaPortTracked = false;
 
 /** Where media kept unencrypted lives, as the user's file manager names it. */
-function keptFolderName() {
-    return platformFeatures.os === 'android' ? 'Downloads/Vector' : 'Downloads/vector';
+function publicFolderName() {
+    return platformFeatures.public_folder;
 }
 
 /** Old downloads moving into Vector in the background: shown in Storage while it runs. */
@@ -2000,7 +2000,7 @@ function updateMigrationProgress(total, completed, phase) {
 // time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
     keepMedia: ['Keep Files on This Device', 'Every file you receive is kept on this device, encrypted, so it opens instantly and never downloads twice.<br><br>Off: files stay in memory while Vector is open, and load again after it closes. One too large to hold waits for a tap, then is kept. Turning it off deletes what it kept.'],
-    keepUnencrypted: () => ['Keep Unencrypted', `What Vector keeps is saved as normal files in ${keptFolderName()}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.`],
+    keepUnencrypted: () => ['Keep Unencrypted', `What Vector keeps is saved as normal files in ${publicFolderName()}, so other apps and backups can open them.<br><br>Anyone with access to this device's files can open them too.`],
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every download (avatars, banners, custom emoji, GIFs, pictures posted as links, attachments, wallpapers, community logos, mini apps) through your Magnitude server instead of from this device. Only your Nostr relays and Vector\'s own servers are reached directly.<br><br>A file loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>On Tor or I2P, a link preview with no Magnitude server to fetch it loads through that network instead.<br><br>Off: everything loads directly from its source.'],
@@ -2016,7 +2016,7 @@ const SETTINGS_HELP = {
     onionAlias: ['Onion Address', 'A server can also be reachable as a Tor onion service. Vector connects there instead of through a Tor exit.<br><br>Your connection stays encrypted to the server itself.'],
     i2pAlias: ['I2P Address', 'A server can also be reachable inside I2P. Vector connects there instead of through an outproxy.<br><br>Your connection stays encrypted to the server itself.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
-    gallery: ['Show in Gallery', 'Pictures and videos you Save go straight to Downloads/Vector and appear in your gallery.<br><br>Off: Vector asks where to save each file, and hides its folder from the gallery.'],
+    gallery: () => ['Show in Gallery', `Pictures and videos you Save go straight to ${publicFolderName()} and appear in your gallery.<br><br>Off: Vector asks where to save each file, and hides its folder from the gallery.`],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
     autoDownloadLimit: ['Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.'],
     videoQuality: ['Video Quality', 'How much Vector shrinks the videos you send. Smaller videos send faster and play smoothly on older phones.<br><br><b>Small</b> fits 540p, <b>Balanced</b> and <b>High</b> fit 720p, all at up to 30 fps. A video that is already small enough is sent as it is.<br><br><b>Original</b> never compresses, and the Compress option no longer shows.'],
@@ -2208,7 +2208,7 @@ const SETTINGS_HELPERS = {
         if (on) {
             const st = VectorSvelte.settingsScreen().storage;
             const gallery = st.galleryShown && !st.galleryHidden ? ', and they show in your gallery' : '';
-            const body = `Everything Vector keeps becomes a normal file in ${keptFolderName()}. Any app or person with access to this device's files can open them${gallery}.`;
+            const body = `Everything Vector keeps becomes a normal file in ${publicFolderName()}. Any app or person with access to this device's files can open them${gallery}.`;
             if (!(await popupConfirm('Keep media unencrypted?', body, false, '', 'vector_warning.svg'))) return undo();
         }
         try {
