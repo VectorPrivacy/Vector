@@ -847,7 +847,7 @@ async function clearStorage() {
 
     const confirmClear = await popupConfirm(
         'Clear Storage?',
-        'This will delete all downloaded and sent files from Vector. This action cannot be undone.',
+        "Deletes this account's files, plus the cache. This can't be undone.",
         false,
         '',
         'vector_warning.svg'
@@ -2149,7 +2149,7 @@ const SETTINGS_HELPERS = {
     notif: NOTIF_HANDLERS,
     storageDonut: {
         // misc.js loads after this file: resolve at call time.
-        formatBytes: (n) => formatBytes(n),
+        formatBytes: (n, decimals) => formatBytes(n, decimals),
         confirmDelete: confirmStorageDelete,
         deleteCategory: async (category, exts) => {
             const result = await invoke('clear_storage_category', { category, exts });

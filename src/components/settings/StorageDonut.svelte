@@ -61,15 +61,18 @@
     // A new report resets the selection; the chart it pointed at is gone.
     $effect(() => { storage.seq; hovered = -1; selected = -1; });
 
+    // Three whole digits already fill the ring.
+    const ringSize = (n) => { const s = h.formatBytes(n); return parseFloat(s) >= 100 ? h.formatBytes(n, 0) : s; };
+
     const view = $derived(hovered !== -1 ? hovered : selected);
     const showDelete = $derived(selected !== -1 && view === selected);
     const centre = $derived.by(() => {
-        if (view === -1) return { value: h.formatBytes(total, 1), label: 'Total' };
+        if (view === -1) return { value: ringSize(total), label: 'Total' };
         const s = segments[view];
-    if (!s) return { value: h.formatBytes(total, 1), label: 'Total' };   // the report shrank under the selection
-        return { value: h.formatBytes(s.size, 1), label: `${s.name} · ${s.pct < 1 ? '<1' : Math.round(s.pct)}%` };
+    if (!s) return { value: ringSize(total), label: 'Total' };   // the report shrank under the selection
+        return { value: ringSize(s.size), label: `${s.name} · ${s.pct < 1 ? '<1' : Math.round(s.pct)}%` };
     });
-    const summary = $derived(total === 0 ? "A breakdown of Vector's storage use." : `Total Storage Used: ${h.formatBytes(total, 1)}`);
+    const summary = $derived(total === 0 ? "A breakdown of Vector's storage use." : `Total Storage Used: ${h.formatBytes(total)}`);
 
     /** Annular sector between gap centre-lines a0..a1 (radians from 12 o'clock, clockwise).
      *  Each edge is inset by (gap/2)/r so the gap keeps a constant linear width. */
@@ -118,7 +121,7 @@
         const cat = CATEGORIES.find(c => c.name === seg.name);
         confirming = true;
         let ok;
-        try { ok = await h.confirmDelete(cat, h.formatBytes(seg.size, 1)); } finally { confirming = false; }
+        try { ok = await h.confirmDelete(cat, h.formatBytes(seg.size)); } finally { confirming = false; }
         if (!ok) return;
         let category = 'files';
         let exts = [];

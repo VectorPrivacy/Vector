@@ -54,6 +54,18 @@ impl Elsewhere {
             })
     }
 
+    /// Whether another account or a Save still has the file at `path`: by where it is, or by its
+    /// bytes when an account's own path has gone stale. A file that can't be read is kept.
+    pub fn claims(&self, path: &Path) -> bool {
+        if self.paths.contains(path) || std::fs::canonicalize(path).is_ok_and(|real| self.paths.contains(&real)) {
+            return true;
+        }
+        !self.hashes.is_empty()
+            && crate::crypto::stream::hash_file(path).map_or(true, |(hex, _)| {
+                crate::simd::hex::hex_to_bytes_32_checked(&hex).is_some_and(|hash| self.hashes.contains(&hash))
+            })
+    }
+
     /// A file another account shows from `path`: that file if it is there, else any of its bytes.
     fn note(&mut self, hash: Option<[u8; 32]>, path: &str) {
         if path.is_empty() {
@@ -126,6 +138,19 @@ pub fn on_disk() -> Result<Vec<OnDisk>, String> {
         }
     }
     Ok(files)
+}
+
+/// Files in `dir` that no other account shows and nobody saved: what older versions and deleted
+/// chats left behind, plus this account's own. Dotfiles are markers, never content.
+pub fn unclaimed(dir: &Path, shown: &Elsewhere) -> Vec<(PathBuf, u64)> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .filter_map(|entry| Some((entry.path(), entry.metadata().ok().filter(|m| m.is_file())?.len())))
+        .filter(|(path, _)| !shown.claims(path))
+        .collect()
 }
 
 /// What every other account on this device shows, and every file the user saved. None when one
@@ -718,6 +743,33 @@ mod tests {
             rusqlite::params![event, hash, path.to_string_lossy()],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn unclaimed_files_are_the_ones_no_other_account_and_no_save_still_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let theirs = file("theirs.png", b"another account shows this");
+        let saved = file("saved.png", b"saved by the user");
+        let moved = file("moved.png", b"another account's copy whose path went stale");
+        file(".nomedia", b"");
+        let left = file("left.png", b"nobody has this");
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+
+        let mut shown = Elsewhere::default();
+        shown.note(None, &theirs.to_string_lossy());
+        shown.note(None, &saved.to_string_lossy());
+        let stale = crate::simd::hex::hex_to_bytes_32_checked(&crate::crypto::sha256_hex(b"another account's copy whose path went stale"));
+        shown.note(stale, &dir.path().join("gone").join("moved.png").to_string_lossy());
+
+        let found: Vec<PathBuf> = unclaimed(dir.path(), &shown).into_iter().map(|(path, _)| path).collect();
+        assert_eq!(found, vec![left.clone()], "only what nobody has, never a marker or a folder");
+        assert!(shown.claims(&moved), "a stale path still claims its bytes");
+        assert!(!shown.claims(&left));
     }
 
     fn row(event: &str) -> (String, bool) {

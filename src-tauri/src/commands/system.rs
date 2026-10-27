@@ -171,76 +171,48 @@ fn release_free_heap() {
     }
 }
 
-/// Get storage information for the Vector directory
+/// The type a plain file is charted and cleared as: its name's extension, else its message's.
+fn plain_ext(item: &vector_core::media::import::OnDisk) -> String {
+    std::path::Path::new(&item.path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| item.extension.to_lowercase())
+}
+
+/// This account's storage, by type, and what every account shares: caches, AI models and
+/// marketplace Mini Apps.
 #[tauri::command]
 pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     let handle = TAURI_APP.get().ok_or("App handle not initialized")?;
 
-    // Canonical media dir: Downloads/vector on desktop, the external media dir on
-    // Android (where DOWNLOAD_DIR_OVERRIDE points). Resolving BaseDirectory::Download
-    // here instead missed Android's real media location, so attachments never counted.
     let vector_dir = vector_core::db::get_download_dir();
-
-    // Calculate total size and file count
     let mut total_bytes = 0;
     let mut file_count = 0;
-
-    // Track file type distribution by size
     let mut type_distribution = std::collections::HashMap::new();
 
-    // Dotfiles are neither counted nor swept: they're OS/app markers
-    // (.nomedia is the Hide-from-Gallery switch, .{hash}.tmp is a staged
-    // send), not user content
-    let saved: std::collections::HashSet<String> = vector_core::db::saved::all().unwrap_or_default().into_iter().collect();
-    let mut walk_dir = |dir: &std::path::Path, only_ext: Option<&str>| {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with('.') {
-                    continue;
-                }
-                let extension = match name.split('.').next_back() {
-                    Some(ext) => ext.to_lowercase(),
-                    None => continue,
-                };
-                if only_ext.is_some_and(|want| extension != want) {
-                    continue;
-                }
-                if std::fs::canonicalize(entry.path()).is_ok_and(|real| saved.contains(&*real.to_string_lossy())) {
-                    continue;
-                }
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let file_size = metadata.len();
-                        total_bytes += file_size;
-                        file_count += 1;
-                        *type_distribution.entry(extension).or_insert(0) += file_size;
-                    }
-                }
-            }
+    // This account's plain files, wherever its messages keep them; Saves are the user's.
+    for item in vector_core::media::import::on_disk().unwrap_or_default() {
+        if vector_core::db::saved::is_saved(&item.path).unwrap_or(true) {
+            continue;
         }
-    };
-    walk_dir(&vector_dir, None);
-    // Marketplace-installed Mini Apps live in app data rather than the download
-    // dir, but they're user-visible storage all the same (the Apps slice).
-    // Packages only: a crashed update's .xdc.tmp isn't reachable by any sweep
-    if let Ok(app_data) = handle.path().app_data_dir() {
-        walk_dir(&app_data.join("miniapps").join("marketplace"), Some("xdc"));
+        if let Ok(meta) = std::fs::metadata(&item.path) {
+            total_bytes += meta.len();
+            file_count += 1;
+            *type_distribution.entry(plain_ext(&item)).or_insert(0) += meta.len();
+        }
     }
-    // Kept unencrypted in the public folder: Vector's while unsaved, and nothing else there is.
-    let public = vector_core::db::get_public_dir();
-    if public != vector_dir {
-        let root = public.canonicalize().ok();
-        for item in vector_core::media::import::on_disk().unwrap_or_default() {
-            let Ok(real) = std::path::Path::new(&item.path).canonicalize() else { continue };
-            if !root.as_ref().is_some_and(|r| real.starts_with(r)) || vector_core::db::saved::is_saved(&item.path).unwrap_or(true) {
+    // Marketplace Mini Apps are installed once for every account. Packages only: a crashed
+    // update's .xdc.tmp isn't reachable by any sweep.
+    if let Ok(app_data) = handle.path().app_data_dir() {
+        for entry in std::fs::read_dir(app_data.join("miniapps").join("marketplace")).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') || !name.to_string_lossy().to_lowercase().ends_with(".xdc") {
                 continue;
             }
-            if let Ok(meta) = std::fs::metadata(&real) {
+            if let Some(meta) = entry.metadata().ok().filter(|m| m.is_file()) {
                 total_bytes += meta.len();
                 file_count += 1;
-                *type_distribution.entry(item.extension.to_lowercase()).or_insert(0) += meta.len();
+                *type_distribution.entry("xdc".to_string()).or_insert(0) += meta.len();
             }
         }
     }
@@ -291,98 +263,46 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// Delete downloaded attachment files and reset their metadata, optionally
-/// restricted to a set of lowercase file extensions (None = every attachment).
-/// Returns the number of chats that had messages updated.
-async fn clear_attachment_files<R: Runtime>(
+/// Forget the kept copies loaded messages show, optionally only those of a set of lowercase
+/// extensions, and reset their metadata. Returns the number of chats that had messages updated.
+async fn clear_kept_files<R: Runtime>(
     handle: &AppHandle<R>,
     exts: Option<&std::collections::HashSet<String>>,
-    kept_only: bool,
 ) -> Result<usize, String> {
     vector_core::db::scoped(async move {
-        // Deletion is confined to the download dir: a stale or symlinked
-        // attachment path must not be able to reach files elsewhere on disk
-        let roots: Vec<std::path::PathBuf> = vector_core::db::download_roots().iter().filter_map(|r| r.canonicalize().ok()).collect();
-
-        // Lock the state to access all chats and messages
         let mut state = STATE.lock().await;
-
-        // Track which chats have been updated to avoid duplicate saves
         let mut updated_chats = std::collections::HashSet::new();
 
-        // Process each chat to clear attachment metadata in messages
-        // Use index-based iteration to allow interner access for Message conversion
+        // Index-based so the interner can convert each touched message.
         for chat_idx in 0..state.chats.len() {
             let mut updated_msg_ids = Vec::new();
-
-            // Iterate through all messages in this chat
             for message in state.chats[chat_idx].messages.iter_mut() {
                 let mut attachment_updated = false;
-
-                // Iterate through matching attachments and reset their properties
                 for attachment in &mut message.attachments {
-                    if !attachment.downloaded() && !attachment.has_path() {
-                        continue;
-                    }
-                    let path = attachment.path();
                     // Downloaded with no path of its own: a copy the media store keeps.
-                    let kept = path.is_empty();
-                    if kept_only && !kept {
+                    if !attachment.downloaded() || attachment.has_path() {
                         continue;
                     }
-
-                    // Category clears match on the on-disk filename extension — the
-                    // same derivation the storage chart buckets by
                     if let Some(set) = exts {
-                        let ext = if kept {
-                            Some(vector_core::crypto::extension_from_mime(vector_core::crypto::mime_from_extension(attachment.extension())))
-                        } else {
-                            std::path::Path::new(&*path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .and_then(|n| n.split('.').next_back())
-                                .map(|e| e.to_lowercase())
-                        };
-                        if !ext.is_some_and(|e| set.contains(&e)) {
+                        let ext = vector_core::crypto::extension_from_mime(vector_core::crypto::mime_from_extension(attachment.extension()));
+                        if !set.contains(&ext) {
                             continue;
                         }
                     }
-
-                    // A path that resolves outside the download dir (user-picked
-                    // send, symlink) is left fully intact: it isn't Vector's
-                    // storage. A path that no longer resolves is a dangling ref:
-                    // nothing to delete, but the metadata still needs the reset
-                    if kept {
-                        vector_core::media::store::forget(attachment.id());
-                    } else if let Ok(real) = std::path::Path::new(&*path).canonicalize() {
-                        if !roots.iter().any(|root| real.starts_with(root)) {
-                            continue;
-                        }
-                        // A file the user saved stays theirs; Vector only stops showing it.
-                        if !vector_core::db::saved::is_saved(&real.to_string_lossy()).unwrap_or(true) {
-                            let _ = std::fs::remove_file(&real);
-                        }
-                    }
-                    // Reset attachment properties
+                    vector_core::media::store::forget(attachment.id());
                     attachment.set_downloaded(false);
                     attachment.set_downloading(false);
                     attachment.set_path(String::new());
                     attachment_updated = true;
                 }
-
-                // If any attachment was updated, track this message for save/emit
                 if attachment_updated {
                     updated_msg_ids.push(*message.id());
                 }
             }
-
-            // If we have messages to update, save them to the database
             if updated_msg_ids.is_empty() {
                 continue;
             }
             let chat_id = state.chats[chat_idx].id().to_string();
-
-            // Convert updated messages to Message format for save and emit
             let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
                 .filter_map(|msg_id| {
                     let hex_id = crate::util::bytes_to_hex_32(msg_id);
@@ -390,13 +310,8 @@ async fn clear_attachment_files<R: Runtime>(
                         .map(|m| m.to_message(&state.interner))
                 })
                 .collect();
-
-
-            // Save updated messages to database
             db::save_chat_messages(&chat_id, &messages_to_update).await
                 .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
-
-            // Emit message_update events for each updated message
             for message in &messages_to_update {
                 handle.emit("message_update", serde_json::json!({
                     "old_id": &message.id,
@@ -404,10 +319,8 @@ async fn clear_attachment_files<R: Runtime>(
                     "chat_id": &chat_id
                 })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
             }
-
             updated_chats.insert(chat_id);
         }
-
         Ok(updated_chats.len())
     })
     .await
@@ -441,10 +354,7 @@ async fn clear_media_caches<R: Runtime>(
     .await
 }
 
-/// Delete files with matching extensions from a directory (top level only,
-/// mirroring the storage chart's walk). Category clears must sweep untracked
-/// files too: the chart counts every file in the folder, not just attachments
-/// referenced by the current account.
+/// Delete files with matching extensions from a directory, top level only. Dotfiles are markers.
 fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<String>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -470,33 +380,56 @@ fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<Stri
     }
 }
 
-/// Clear all downloaded attachments from messages and return freed storage space
+/// Clear this account's files, what no account on this device claims, and the shared caches.
 #[tauri::command]
 pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
-
-    // First, get the total storage size before clearing
-    let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
-    let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
-
-    let updated_chats = clear_attachment_files(&handle, None, false).await?;
-    vector_core::media::store::forget_where(|_| true);
+    let before = get_storage_info().await?["total_bytes"].as_u64().unwrap_or(0);
+    if !stop_media_port().await {
+        return Err(CLEAR_BUSY.into());
+    }
+    let updated_chats = clear_kept_files(&handle, None).await?;
+    vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(|_| true)).await?;
+    release_downloads(|_| true).await;
+    let unclaimed = clear_unclaimed().await;
     clear_media_caches(&handle).await?;
     // Attachment deletion can strand Mini App history rows pointing at nothing
     let _ = crate::db::prune_dangling_miniapp_history();
+    resume_media_port();
 
-    // Get storage info after clearing to calculate freed space
-    let storage_info_after = get_storage_info().await.map_err(|e| format!("Failed to get storage info after clearing: {}", e))?;
-    let total_bytes_after = storage_info_after["total_bytes"].as_u64().unwrap_or(0);
-
-    // Calculate freed space
-    let freed_bytes = total_bytes_before.saturating_sub(total_bytes_after);
-
-    // Return the freed storage information
+    let after = get_storage_info().await?["total_bytes"].as_u64().unwrap_or(0);
+    let freed_bytes = before.saturating_sub(after) + unclaimed;
     Ok(serde_json::json!({
         "freed_bytes": freed_bytes,
         "freed_formatted": format_bytes(freed_bytes),
         "updated_chats": updated_chats
     }))
+}
+
+const CLEAR_BUSY: &str = "Clear this once your files finish moving.";
+
+/// The move picks up again after a clear, if this account keeps files.
+fn resume_media_port() {
+    if vector_core::media::keep_media() {
+        start_media_port(std::time::Duration::ZERO);
+    }
+}
+
+/// Delete what no account on this device shows and nobody saved from the download folder.
+/// Returns the bytes freed; nothing goes when another account can't be read.
+async fn clear_unclaimed() -> u64 {
+    use vector_core::media::import;
+    let Ok(Some(shown)) = vector_core::db::blocking_bound(import::elsewhere).await else { return 0 };
+    let dir = vector_core::db::get_download_dir();
+    let Ok(files) = vector_core::db::blocking_bound(move || import::unclaimed(&dir, &shown)).await else { return 0 };
+    let mut freed = 0;
+    for (path, len) in files {
+        if std::fs::remove_file(&path).is_ok() {
+            freed += len;
+            #[cfg(target_os = "android")]
+            crate::android::storage::scan_file(&path.to_string_lossy());
+        }
+    }
+    freed
 }
 
 /// Clear a single storage category: "cache" (image/sound caches), "ai"
@@ -528,13 +461,20 @@ pub async fn clear_storage_category<R: Runtime>(
             if ext_set.is_empty() {
                 return Err("No file types to clear".to_string());
             }
-            clear_attachment_files(&handle, Some(&ext_set), false).await?;
-            sweep_dir_by_ext(&vector_core::db::get_download_dir(), &ext_set);
-            // Kept files of these types that no loaded message names.
-            vector_core::media::store::forget_where(|mime| ext_set.contains(&vector_core::crypto::extension_from_mime(mime)));
-            // Marketplace installs live in app data, not the download dir;
-            // wiping the Apps slice must uninstall them too, or the library
-            // keeps offering "Play" on packages that are gone
+            if !stop_media_port().await {
+                return Err(CLEAR_BUSY.into());
+            }
+            clear_kept_files(&handle, Some(&ext_set)).await?;
+            let kept = ext_set.clone();
+            vector_core::db::blocking_bound(move || {
+                vector_core::media::store::forget_where(|mime| kept.contains(&vector_core::crypto::extension_from_mime(mime)))
+            })
+            .await?;
+            let plain = ext_set.clone();
+            release_downloads(move |item| plain.contains(&plain_ext(item))).await;
+            resume_media_port();
+            // Marketplace installs are shared by every account; wiping the Apps slice
+            // uninstalls them, or the library keeps offering "Play" on packages that are gone
             if ext_set.contains("xdc") {
                 if let Ok(app_data) = handle.path().app_data_dir() {
                     sweep_dir_by_ext(&app_data.join("miniapps").join("marketplace"), &ext_set);
@@ -615,12 +555,12 @@ pub async fn set_keep_media<R: Runtime>(handle: AppHandle<R>, on: bool) -> Resul
             return Err(KEEP_MEDIA_BUSY.into());
         }
         vector_core::db::set_sql_setting("keep_unencrypted".into(), "false".into())?;
-        clear_attachment_files(&handle, None, true).await?;
+        clear_kept_files(&handle, None).await?;
         vector_core::db::blocking_bound(|| vector_core::media::store::forget_where(|_| true)).await?;
         for dir in link_media_dirs(&handle) {
             let _ = std::fs::remove_dir_all(dir);
         }
-        release_old_downloads().await;
+        release_downloads(|_| true).await;
         Ok(())
     })
     .await
@@ -829,11 +769,13 @@ fn find_old_downloads() -> (Result<Vec<vector_core::media::import::OnDisk>, Stri
     (import::on_disk(), import::elsewhere())
 }
 
-async fn release_old_downloads() {
+/// Let go of this account's plain files that `matches`: their messages stop showing them, and
+/// each file goes unless another account or a Save still has it.
+async fn release_downloads(matches: impl Fn(&vector_core::media::import::OnDisk) -> bool) {
     use vector_core::media::import;
     let Ok((Ok(files), elsewhere)) = vector_core::db::blocking_bound(find_old_downloads).await else { return };
     let elsewhere = std::sync::Arc::new(elsewhere);
-    for item in files {
+    for item in files.into_iter().filter(|item| matches(item)) {
         let (file, others) = (item.clone(), elsewhere.clone());
         match vector_core::db::blocking_bound(move || import::release(&file, others.as_ref().as_ref())).await {
             Ok(Ok(events)) => {
