@@ -1,0 +1,10 @@
+# `cargo nextest run`: every test in its own process, so tests that take the process-wide test
+# lock (DB_TEST_GUARD) run side by side instead of queueing on it.
+
+[profile.default]
+# A hung test fails instead of holding up the run.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+# Report every failure, not just the first.
+fail-fast = false

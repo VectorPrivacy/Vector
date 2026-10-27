@@ -32,23 +32,25 @@ jobs:
         with:
           workspaces: crates
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       # The bulk of Vector's logic, and no system dependencies: pure Rust.
       # Includes `highest_migration_id_matches_the_runner`, the guard that
       # catches a migration id added without bumping the constant.
       - name: test
         working-directory: crates
-        run: cargo test -p vector-core
+        run: |
+          cargo nextest run -p vector-core --profile ci
+          cargo test -p vector-core --doc
 
-      # The GuardedKey vault stress tests are #[ignore]d because they serialize
-      # on the vault statics and cost ~40s locally (~80% of the old suite). They
-      # are hermetic, so CI is exactly where they belong.
-      #
-      # Selected BY NAME, never `--include-ignored`: #[ignore] in this repo also
-      # marks live-relay tests, which need a real network and must not gate a
-      # push.
-      - name: vault stress (ignored-by-default, hermetic)
+      # The vault's attack demos are #[ignore]d to run by name with --nocapture, and they are
+      # hermetic. Never every ignored test: #[ignore] also marks the live-relay ones, which need a
+      # real network and must not gate a push.
+      - name: vault attack demos
         working-directory: crates
-        run: cargo test -p vector-core --lib -- --ignored guarded_key
+        run: cargo nextest run -p vector-core --lib --profile ci --run-ignored only -E 'test(/^crypto::guarded_key::attack::/)'
 
   src-tauri:
     name: src-tauri

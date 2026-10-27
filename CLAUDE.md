@@ -44,7 +44,10 @@ MSYS2 + clang-cl, see the script) releases build it; Linux has no encoder wired,
 
 Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with optional minification (terser + lightningcss in release).
 
-Vector Core test suite: `cd crates && cargo test -p vector-core`.
+Vector Core test suite: `cd crates && cargo nextest run -p vector-core` (~17s), plus
+`cargo test -p vector-core --doc` for the doc tests nextest skips. nextest gives each test its own
+process (`cargo install --locked cargo-nextest`); plain `cargo test` still works but is ~6x slower, as
+most tests queue on one process-wide lock (`DB_TEST_GUARD`).
 
 Tests assert correctness and nothing else; timings live in `cargo bench`, built optimised behind each
 crate's `bench` feature: `cd crates && cargo bench -p vector-core --features bench [-- <name> | --list]`
