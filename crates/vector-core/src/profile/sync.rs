@@ -1648,11 +1648,11 @@ mod request_tests {
             let mut chat = Chat::new_dm(peer.clone(), &mut state.interner);
             chat.add_message(theirs(1), &mut state.interner);
             state.chats.push(chat);
-            assert!(state.profile_held(&peer), "a stranger's pictures wait");
         }
+        assert!(crate::requests::pictures_held(&peer).await, "a stranger's pictures wait");
 
         accept_chat(peer.clone()).await.unwrap();
-        assert!(!STATE.lock().await.profile_held(&peer), "accepted: their pictures may load");
+        assert!(!crate::requests::pictures_held(&peer).await, "accepted: their pictures may load");
 
         let row = crate::db::chats::get_all_chats().unwrap().into_iter().find(|c| c.id == peer).expect("chat saved");
         let mut interner = crate::compact::NpubInterner::new();

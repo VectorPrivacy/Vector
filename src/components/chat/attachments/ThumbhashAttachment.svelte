@@ -3,6 +3,8 @@
     // take, under a download ring (downloading or auto-download) or a Download box.
     // A missing or undecodable blur falls back to the file box leaf.
     //
+    // A DM request's picture shows its blur with what lets it load instead.
+    //
     // Both overlays size themselves off the rendered blur, because a thumbnail can be
     // anything from a wide banner to a sliver: the box drops its text when there is no
     // room for it, and the ring shows a rate only when one will fit under it.
@@ -39,6 +41,8 @@
     // The full box measures 191x68 at its widest wording and sits at 94% of the media,
     // so below this it is the icon alone with no panel around it.
     const compact = $derived(boxW > 0 && (boxW < 205 || boxH < 76));
+    // The held pill's one line, or its icon alone.
+    const heldCompact = $derived(boxW > 0 && (boxW < 150 || boxH < 40));
     // The ring plus a line under it, with air around both.
     const showRate = $derived(boxH >= 118 && boxW >= 120);
 
@@ -75,7 +79,7 @@
 {/snippet}
 
 {#if blurFailed}
-    <FileBox {att} {msg} {sender} phase={downloading ? 'downloading' : 'download'} {h} />
+    <FileBox {att} {msg} {sender} phase={downloading ? 'downloading' : 'download'} held={!!ctx.held} {h} />
 {:else if blur}
     <div style="position: relative; display: inline-block;" style:line-height={downloading ? '0' : null}>
         <img src={blur} alt="" width={fit?.w} height={fit?.h}
@@ -97,6 +101,11 @@
                 {:else}
                     {@render ring()}
                 {/if}
+            </div>
+        {:else if ctx.held}
+            <div class="thumb-held" class:is-compact={heldCompact} title={heldCompact ? 'Accept to view' : null}>
+                <span class="icon icon-shield-alert"></span>
+                {#if !heldCompact}<span class="cutoff">Accept to view</span>{/if}
             </div>
         {:else}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

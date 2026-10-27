@@ -281,10 +281,10 @@ pub async fn forget(images: Vec<vector_core::profile::CachedImage>) {
     }
 }
 
-/// Blocked, or waiting on us to accept their DM request: their pictures aren't fetched.
+/// Blocked, or a stranger waiting on us to accept their DM request: their pictures aren't fetched.
 async fn withheld(npub: &str) -> bool {
-    let state = STATE.lock().await;
-    state.get_profile(npub).is_some_and(|p| p.flags.is_blocked()) || state.profile_held(npub)
+    let blocked = STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked());
+    blocked || vector_core::requests::pictures_held(npub).await
 }
 
 /// Cache a profile's pictures and repaint it when either landed.

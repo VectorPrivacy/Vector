@@ -729,6 +729,7 @@ pub fn run() {
             profile::block_user,
             profile::unblock_user,
             profile::accept_chat,
+            profile::request_mutuals,
             profile::get_blocked_users,
             message::message,
             message::delete_failed_message,

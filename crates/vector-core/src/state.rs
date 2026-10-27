@@ -907,13 +907,15 @@ impl ChatState {
         }
     }
 
-    /// The people whose pictures wait for us to accept their DM request.
-    pub fn held_profiles(&self) -> std::collections::HashSet<&str> {
+    /// The people whose DM requests wait on us. Their pictures wait too, unless a Community
+    /// counts them: see `requests::held_pictures`.
+    pub fn request_senders(&self) -> std::collections::HashSet<&str> {
         self.chats.iter().filter(|c| c.is_request()).map(|c| c.id.as_str()).collect()
     }
 
-    /// Whether this person's pictures wait for us to accept their DM request.
-    pub fn profile_held(&self, npub: &str) -> bool {
+    /// Whether this person's DM request waits on us. Whether their pictures do is
+    /// `requests::pictures_held`.
+    pub fn sent_request(&self, npub: &str) -> bool {
         self.chats.iter().any(|c| c.id == npub && c.is_request())
     }
 

@@ -501,6 +501,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     _communityCountInFlight.delete(communityId);
     _communityCountLastFetch.set(communityId, Date.now());
     communityMembersCache.set(communityId, members);
+    if (force) syncRequestMutuals(true);
     if (communityMemberCounts.get(communityId) === members.length) return; // unchanged, no re-render
     communityMemberCounts.set(communityId, members.length);
     // Live-update the open channel's header (its chat carries this community_id) + the overview status.

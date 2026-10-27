@@ -487,6 +487,10 @@ pub struct HeldV2 {
 }
 
 impl HeldV2 {
+    pub fn communities(&self) -> &[CommunityV2] {
+        &self.communities
+    }
+
     /// The held community whose plane `author` addresses.
     pub fn route(&self, author: &PublicKey) -> Option<&CommunityV2> {
         let routes = self.routes.get_or_init(|| {

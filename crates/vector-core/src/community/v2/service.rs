@@ -15185,6 +15185,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_from_a_fellow_member_shows_their_pictures_until_they_leave() {
+        use nostr_sdk::prelude::ToBech32;
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Mutual", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+
+        let fellow = member.keys.public_key().to_bech32().unwrap();
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let requests_from = |npubs: [String; 2]| async move {
+            let mut guard = crate::state::STATE.lock().await;
+            let state = &mut *guard;
+            for npub in npubs {
+                let mut chat = crate::chat::Chat::new_dm(npub, &mut state.interner);
+                let hi = crate::types::Message { id: "ab".repeat(32), content: "hi".into(), at: 1_700_000_000_000, ..Default::default() };
+                chat.add_message(hi, &mut state.interner);
+                state.chats.push(chat);
+            }
+        };
+
+        bed.swap_to(&owner);
+        sync_guestbook(&bed.relay, &community).await.unwrap();
+        requests_from([fellow.clone(), stranger.clone()]).await;
+        assert!(!crate::requests::pictures_held(&fellow).await, "a fellow member's pictures show");
+        assert!(crate::requests::pictures_held(&stranger).await, "a stranger's wait");
+        assert_eq!(crate::requests::request_mutuals().await, vec![fellow.clone()]);
+        assert_eq!(crate::requests::held_pictures().await, [stranger.clone()].into());
+
+        bed.swap_to(&member);
+        crate::rt::time::sleep(std::time::Duration::from_millis(2)).await;
+        leave_community(&bed.relay, &joined).await.unwrap();
+        bed.swap_to(&owner);
+        sync_guestbook(&bed.relay, &community).await.unwrap();
+        requests_from([fellow.clone(), stranger]).await;
+        assert!(crate::requests::pictures_held(&fellow).await, "gone from every Community we share, their request holds them again");
+    }
+
+    #[tokio::test]
     async fn a_relay_that_has_reconciled_stays_confirmed_until_it_refuses() {
         use crate::negentropy::{neg_ever_confirmed, record_neg_support};
         let (bed, owner, _member) = TestBed::new();

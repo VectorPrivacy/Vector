@@ -12,8 +12,9 @@
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { mediaPath } from '../../lib/media.js';
 
-    let { att, msg, sender = null, phase, label = null, failed = false, onActivate = null, h } = $props();
+    let { att, msg, sender = null, phase, label = null, failed = false, held = false, onActivate = null, h } = $props();
     // phase: 'downloaded' | 'download' | 'downloading'; label overrides the second line,
+    // held marks a DM request's file, which waits for it to be accepted,
     // failed paints the failed state for a caller whose attachment carries no flag,
     // onActivate overrides the click
     // h: MediaHelpers (js/render/chat/message-row.js)
@@ -39,6 +40,7 @@
         uploading ? 'uploading'
         : phase === 'downloading' ? 'downloading'
         : phase === 'downloaded' ? 'local'
+        : held ? 'held'
         : paused ? 'paused'
         : (failed || att.download_failed) ? 'failed'
         : 'remote'
@@ -102,6 +104,7 @@
     const pausedLine = $derived(paused
         ? `Paused at ${h.formatBytes(paused.offset)}${paused.total ? ` of ${h.formatBytes(paused.total)}` : ''} · Tap to Resume`
         : '');
+    const heldLine = $derived(sizeText ? `Accept to download · ${sizeText}` : 'Accept to download');
     const failLine = $derived.by(() => {
         const reason = (att.download_error || '').slice(0, 64);
         return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
@@ -109,6 +112,7 @@
 
 
     function click() {
+        if (state === 'held') return;
         if (onActivate) { if (phase !== 'downloading') onActivate(); return; }
         if (phase === 'downloaded') h.openFile(att, msg);
         else if (phase === 'download') h.startDownload(att, msg, sender);
@@ -163,7 +167,7 @@
                     {/if}
                 </span>
             {:else}
-                <span class="file-box-sub">{label ?? (state === 'paused' ? pausedLine : state === 'failed' ? failLine : restLine)}</span>
+                <span class="file-box-sub">{label ?? (state === 'held' ? heldLine : state === 'paused' ? pausedLine : state === 'failed' ? failLine : restLine)}</span>
             {/if}
         </span>
         {#if uploading && up?.phase !== 'publishing'}
@@ -177,6 +181,8 @@
                     onclick={(e) => { e.stopPropagation(); h.cancelDownload(att, msg); }}>
                 <span class="icon icon-x"></span>
             </button>
+        {:else if state === 'held'}
+            <span class="icon icon-shield-alert file-box-held" aria-hidden="true"></span>
         {:else if state === 'paused'}
             <button class="file-box-action" aria-label="Resume download"
                     onclick={(e) => { e.stopPropagation(); click(); }}>

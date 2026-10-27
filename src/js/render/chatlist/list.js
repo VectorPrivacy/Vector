@@ -75,6 +75,53 @@ function chatIsRequest(chat) {
     return false;
 }
 
+/** Request senders a Community we hold counts as a member: we see them there, so their pictures show. */
+let requestMutuals = new Set();
+let requestMutualsAsked = '';
+let requestMutualsTimer = 0;
+let requestMutualsSeq = 0;
+
+/** A stranger whose DM request waits shows no pictures until it's accepted. */
+function picturesHeld(npub) {
+    return chatIsRequest(getChat(npub)) && !requestMutuals.has(npub);
+}
+
+/** Re-ask which request senders share a Community with us: when the requests change, or
+ *  (`membership`) when a Community's members may have. */
+function syncRequestMutuals(membership = false) {
+    const asking = arrChats.filter(chatIsRequest).map(c => c.id).join(',');
+    if (asking === requestMutualsAsked && !(membership && asking)) return;
+    requestMutualsAsked = asking;
+    clearTimeout(requestMutualsTimer);
+    requestMutualsTimer = setTimeout(askRequestMutuals, membership ? 500 : 0);
+}
+
+async function askRequestMutuals() {
+    const seq = ++requestMutualsSeq;
+    let next = new Set();
+    if (requestMutualsAsked) {
+        try {
+            next = new Set(await invoke('request_mutuals'));
+        } catch {
+            return;
+        }
+    }
+    if (seq !== requestMutualsSeq) return;
+    const before = requestMutuals;
+    requestMutuals = next;
+    for (const npub of next) {
+        if (before.has(npub)) continue;
+        profileChanged(npub);
+        // Pictures a stranger's request held back come in now.
+        const p = getProfile(npub);
+        if ((p?.avatar && !p.avatar_cached) || (p?.banner && !p.banner_cached)) {
+            invoke('queue_profile_sync', { npub, priority: 'high', forceRefresh: true }).catch(() => {});
+        }
+    }
+    for (const npub of before) if (!next.has(npub)) profileChanged(npub);
+    syncRequestBar();
+}
+
 /** Someone we've talked with or let in: their invites show in full. */
 function npubIsKnown(npub) {
     const chat = getChat(npub);
@@ -83,7 +130,8 @@ function npubIsKnown(npub) {
 
 /** The open chat's request bar follows whether it is still one. */
 function syncRequestBar() {
-    VectorSvelte.setChatRequest(strOpenChat && chatIsRequest(getChat(strOpenChat)) ? strOpenChat : null);
+    const chatId = strOpenChat && chatIsRequest(getChat(strOpenChat)) ? strOpenChat : null;
+    VectorSvelte.setChatRequest(chatId, chatId && picturesHeld(chatId));
 }
 
 /** Whether a search (already lowercased) finds this chat: by its name, or an npub it starts. */
@@ -354,6 +402,7 @@ function listChanged() {
     if (fInit) return;
     ensureListSignals();
     sortChats();
+    syncRequestMutuals();
     VectorSvelte.reorderChatlist();
     renderRailShortcuts();
     warmCommunityBanners();
@@ -404,6 +453,7 @@ function reorderChatlist() {
     sortChats();
     renderRailShortcuts();
     if (listShapeKey() === before) return;
+    syncRequestMutuals();
     VectorSvelte.reorderChatlist();
 }
 

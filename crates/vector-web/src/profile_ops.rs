@@ -40,6 +40,7 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
                 Ok(npub) => profile_sync::accept_chat(npub).await.map(|_| Value::Null),
                 Err(e) => Err(e),
             },
+            "request_mutuals" => Ok(json!(vector_core::requests::request_mutuals().await)),
             "get_blocked_users" => to_value(profile_sync::get_blocked_users().await),
 
             // --- Accounts ---

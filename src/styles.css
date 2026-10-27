@@ -40,6 +40,10 @@
   mask-image: url("./icons/shield-filled.svg");
 }
 
+.icon-shield-alert {
+  mask-image: url("./icons/shield-alert.svg");
+}
+
 .icon-channel-hash {
   mask-image: url("./icons/channel-hash.svg");
 }
@@ -13570,6 +13574,7 @@ body.mobile:not(.ws) .navbar-btn::before {
    that failed takes the danger colour, and everything else stays grey. */
 .file-box,
 .thumb-download,
+.thumb-held,
 .custom-audio-player,
 .media-popout {
     --file-box-bg: #161616;
@@ -13645,6 +13650,25 @@ body.mobile:not(.ws) .navbar-btn::before {
     display: block;
     color: var(--file-box-title);
     font-weight: 400;
+}
+
+/* A DM request's file: nothing to press until the request is accepted. */
+.file-box[data-state="held"] {
+    cursor: default;
+}
+
+.file-box[data-state="held"]:hover {
+    background: var(--file-box-bg);
+    border-color: var(--file-box-line);
+}
+
+.file-box-held {
+    position: static;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin: 0 7px;
+    background-color: var(--icon-color-primary);
 }
 
 .file-box[data-state="local"] .file-box-title {
@@ -13822,6 +13846,8 @@ body.mobile:not(.ws) .navbar-btn::before {
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
     cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
     transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
@@ -13903,6 +13929,45 @@ body.mobile:not(.ws) .navbar-btn::before {
     margin-top: 2px;
     color: var(--file-box-dim);
     font-size: 12px;
+}
+
+/* A DM request's picture: one line over the blur, and the icon alone where that won't fit. */
+.thumb-held {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 94%;
+    box-sizing: border-box;
+    padding: 7px 14px 7px 10px;
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 10px;
+    background: rgba(12, 12, 12, 0.82);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    color: var(--file-box-title);
+    font-size: 13px;
+    line-height: 18px;
+    white-space: nowrap;
+    cursor: default;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.thumb-held.is-compact {
+    padding: 7px;
+}
+
+.thumb-held > .icon {
+    position: static;
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    background-color: var(--icon-color-primary);
 }
 
 /* The ring is unchanged; a line hangs under it carrying a transfer rate or a publish

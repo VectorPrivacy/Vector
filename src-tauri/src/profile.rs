@@ -92,10 +92,10 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
     }
 }
 
-/// Blocked, or waiting on us to accept their DM request: their pictures aren't fetched.
+/// Blocked, or a stranger waiting on us to accept their DM request: their pictures aren't fetched.
 async fn withheld(npub: &str) -> bool {
-    let state = STATE.lock().await;
-    state.get_profile(npub).is_some_and(|p| p.flags.is_blocked()) || state.profile_held(npub)
+    let blocked = STATE.lock().await.get_profile(npub).is_some_and(|p| p.flags.is_blocked());
+    blocked || vector_core::requests::pictures_held(npub).await
 }
 
 /// Cache images for all profiles that have avatar/banner URLs but no cached paths
@@ -108,9 +108,9 @@ pub async fn cache_all_profile_images() {
     };
 
     // Get all profiles that need caching (resolve npub from interner)
+    let held = vector_core::requests::held_pictures().await;
     let profiles_to_cache: Vec<(String, String, String)> = {
         let state = STATE.lock().await;
-        let held = state.held_profiles();
         state.profiles.iter()
             .filter(|p| {
                 (!p.avatar().is_empty() && !p.has_avatar_cached()) ||
@@ -118,7 +118,7 @@ pub async fn cache_all_profile_images() {
             })
             .filter_map(|p| {
                 state.interner.resolve(p.id)
-                    .filter(|npub| !held.contains(npub))
+                    .filter(|npub| !held.contains(*npub))
                     .map(|npub| (npub.to_string(), p.avatar().to_string(), p.banner().to_string()))
             })
             .collect()
@@ -381,6 +381,12 @@ pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: St
 #[tauri::command]
 pub async fn accept_chat(npub: String) -> Result<(), String> {
     vector_core::profile::sync::accept_chat(npub).await
+}
+
+/// The DM requests whose senders show their pictures anyway: a Community we hold counts them.
+#[tauri::command]
+pub async fn request_mutuals() -> Vec<String> {
+    vector_core::requests::request_mutuals().await
 }
 
 /// Unblock a user by npub.

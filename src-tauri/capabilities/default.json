@@ -30,6 +30,7 @@
     "allow-block-user",
     "allow-unblock-user",
     "allow-accept-chat",
+    "allow-request-mutuals",
     "allow-get-blocked-users",
     "allow-mark-as-read",
     "allow-mark-as-unread",

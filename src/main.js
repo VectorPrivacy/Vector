@@ -1366,8 +1366,7 @@ function getProfile(npub) {
 function getProfileAvatarSrc(profile, full = false) {
     if (!profile) return null;
     if (streamHidden(profile)) return VectorSvelte.streamTint(profile.id);
-    // Someone whose DM request waits shows no pictures until it's accepted.
-    if (profile.avatar_cached && !chatIsRequest(getChat(profile.id))) {
+    if (profile.avatar_cached && !picturesHeld(profile.id)) {
         return convertFileSrc(full ? profile.avatar_cached : avatarThumbPath(profile.avatar_cached));
     }
     return null;
@@ -1400,7 +1399,7 @@ function avatarThumbPath(path) {
  */
 function getProfileBannerSrc(profile) {
     if (!profile || streamHidden(profile)) return null;
-    if (profile.banner_cached && !chatIsRequest(getChat(profile.id))) {
+    if (profile.banner_cached && !picturesHeld(profile.id)) {
         return convertFileSrc(profile.banner_cached);
     }
     return null;
@@ -2306,6 +2305,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Init complete: the chat list may render
                 fInit = false;
                 wsUpdate();
+                syncRequestMutuals();
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();

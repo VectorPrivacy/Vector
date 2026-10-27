@@ -325,6 +325,7 @@ async function login(skipAnimations = false) {
                 fInit = false;
                 // Widescreen waits for a live session (it docks the account chip).
                 wsUpdate();
+                syncRequestMutuals();
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();

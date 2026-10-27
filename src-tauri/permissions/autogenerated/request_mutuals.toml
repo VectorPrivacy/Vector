@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-mutuals"
+description = "Enables the request_mutuals command without any pre-configured scope."
+commands.allow = ["request_mutuals"]
+
+[[permission]]
+identifier = "deny-request-mutuals"
+description = "Denies the request_mutuals command without any pre-configured scope."
+commands.deny = ["request_mutuals"]

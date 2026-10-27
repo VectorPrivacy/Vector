@@ -65,7 +65,7 @@
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} {auto} {h} />
         {:else}
-            <FileBox {att} {msg} {sender} phase={auto ? 'downloading' : 'download'} {h} />
+            <FileBox {att} {msg} {sender} phase={auto ? 'downloading' : 'download'} held={!!ctx.held} {h} />
         {/if}
     {/if}
 {/each}

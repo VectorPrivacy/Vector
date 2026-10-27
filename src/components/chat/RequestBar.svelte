@@ -13,7 +13,7 @@
         </svg>
         <div class="request-bar-text">
             <span class="request-bar-title">Message request</span>
-            <span class="request-bar-sub">Accept to load media &amp; profile</span>
+            <span class="request-bar-sub">{req.pictures ? 'Accept to load media & profile' : 'Accept to load media'}</span>
         </div>
         <button class="request-bar-btn is-block" onclick={() => h().block?.(req.chatId)}>Block</button>
         <button class="request-bar-btn is-accept" onclick={() => h().accept?.(req.chatId)}>Accept</button>
