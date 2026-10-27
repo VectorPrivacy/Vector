@@ -344,7 +344,7 @@ tauri-utils = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318
 tauri-build = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
 tauri-plugin = { git = "https://github.com/VectorPrivacy/tauri.git", rev = "c2318dc3abf8307dfebf55dd1d650d6b9749d57b" }
 # whisper-rs-sys: whisper.cpp 1.9.5 applying ../scripts/whisper/patches (WHISPER_PATCHES in
-# .cargo/config.toml), KleidiAI on Android arm64, x86-64-v3 releases. Pinned by rev.
+# the repo-root .cargo/config.toml), KleidiAI on Android arm64, x86-64-v3 releases. Pinned by rev.
 # Fork: https://github.com/VectorPrivacy/whisper-rs/tree/whisper-1.9.5
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", rev = "2d0a0d6e865ef3a08310d3d6cf05abab93d35055" }
 # nostr: SecretKey's Drop used non_secure_erase, which the compiler can optimise away; the fork

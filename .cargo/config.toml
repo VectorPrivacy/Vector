@@ -1,6 +1,8 @@
+# At the repo root because cargo reads config from the directory it runs in, and Gradle's
+# Android step runs cargo from here: a copy under src-tauri never reached shipped APKs.
 [env]
 # whisper-rs-sys applies these to its copy of whisper.cpp (scripts/whisper-web/build.sh does too).
-WHISPER_PATCHES = { value = "../scripts/whisper/patches", relative = true }
+WHISPER_PATCHES = { value = "scripts/whisper/patches", relative = true }
 # Without STAT4 a cached statement keeps its plan: with it, rebinding a value that an index
 # sample informed re-prepares the statement on every call.
 LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_STAT4"
