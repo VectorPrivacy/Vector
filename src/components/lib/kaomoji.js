@@ -396,5 +396,6 @@ export const KAOMOJI = [
         ['(｡◕‿‿◕｡)', 'Big grin', 'happy smile'],
         ['┬┴┬┴┤(･＿├┬┴┬┴', 'Peeking', 'hide peek wall'],
         ['｜ʘ‿ʘ)╯', 'Peek-a-boo', 'hide peek'],
+        ['ᠵデᡁ᠊╾━', 'Sniper', 'gun aim sniper shoot'],
     ]},
 ];
