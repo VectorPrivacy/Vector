@@ -126,9 +126,8 @@ pub(crate) fn write_preview_file(app: &tauri::AppHandle, bytes: &[u8], for_send:
 /// Keyed by content hash, so re-previewing the same bytes is a stat, not a decode.
 fn write_preview_into(dir: &std::path::Path, bytes: &[u8], for_send: bool) -> Result<std::path::PathBuf, String> {
     use crate::shared::image::{animated_dims, encode_rgba_auto};
-    use sha2::{Digest, Sha256};
 
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let digest = vector_core::crypto::sha256::digest(bytes);
     let key = crate::util::bytes_to_hex_string(&digest[..16]);
     let verbatim_gif = crate::util::mime_from_magic_bytes(bytes) == "image/gif"
         && bytes.len() <= PREVIEW_GIF_VERBATIM_MAX
@@ -979,8 +978,7 @@ pub async fn crop_image_preview(
 
 /// `bytes` into the preview cache unchanged, keyed by content.
 fn write_preview_as_is(dir: &std::path::Path, bytes: &[u8], ext: &str) -> Result<std::path::PathBuf, String> {
-    use sha2::{Digest, Sha256};
-    let key = crate::util::bytes_to_hex_string(&Sha256::digest(bytes)[..16]);
+    let key = crate::util::bytes_to_hex_string(&vector_core::crypto::sha256::digest(bytes)[..16]);
     let path = dir.join(format!("{key}.{ext}"));
     if path.is_file() {
         return Ok(path);
@@ -1006,14 +1004,13 @@ pub async fn render_svg(app: tauri::AppHandle, path: String, max_dim: u32) -> Re
         return Ok(None);
     }
     tokio::task::spawn_blocking(move || {
-        use sha2::{Digest, Sha256};
         let bytes = vector_core::vcache::read(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
         if !vector_core::svg::looks_like_svg(&bytes) {
             return Ok(None);
         }
         let dim = max_dim.clamp(256, vector_core::svg::MAX_RENDER_DIM).div_ceil(256) * 256;
         let dir = svg_render_dir(&app)?;
-        let key = crate::util::bytes_to_hex_string(&Sha256::digest(&bytes)[..16]);
+        let key = crate::util::bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes)[..16]);
         let out = dir.join(format!("{key}-{dim}.png"));
         if vector_core::vcache::readable(&out) {
             // A hit is a use: keep it out of the age sweep.

@@ -108,7 +108,7 @@ fn modified_nanos(meta: &std::fs::Metadata) -> i64 {
 
 /// SHA-256 of a package's content, streamed: a package can be hundreds of MB.
 pub(crate) fn hash_file(path: &std::path::Path) -> Result<[u8; 32], Error> {
-    use sha2::{Digest, Sha256};
+    use vector_core::crypto::sha256::Sha256;
     let mut file = SharedFile::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
@@ -119,7 +119,7 @@ pub(crate) fn hash_file(path: &std::path::Path) -> Result<[u8; 32], Error> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().into())
+    Ok(hasher.finalize())
 }
 
 /// Whether `needle` occurs in the first `cap` bytes of `reader`, read in chunks.

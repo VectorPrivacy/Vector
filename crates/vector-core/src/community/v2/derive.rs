@@ -146,16 +146,17 @@ impl GroupKey {
         // held community on every arriving wrap — a full core on a live
         // evening. Pure function of its inputs, so the memo is exact; keyed
         // by a digest so no input secret sits in the map, session-scoped so
-        // an account's derived keys die with its session.
+        // an account's derived keys die with its session. The digest itself runs
+        // per channel per arriving wrap, so it takes the hardware SHA-256 path.
         let memo_key: [u8; 32] = {
-            let mut h = Sha256::new();
+            let mut h = crate::crypto::sha256::Sha256::new();
             h.update(label.as_bytes());
             h.update([0u8]);
             h.update(secret);
             h.update(id32);
             h.update(epoch.unwrap_or(u64::MAX).to_be_bytes());
             h.update([epoch.is_some() as u8]);
-            h.finalize().into()
+            h.finalize()
         };
         struct GroupKeyMemo;
         type MemoMap = std::sync::Mutex<std::collections::HashMap<[u8; 32], GroupKey>>;

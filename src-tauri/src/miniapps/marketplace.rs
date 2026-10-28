@@ -429,10 +429,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
     };
 
     // Verify the hash matches
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let hash = bytes_to_hex_string(&hasher.finalize());
+    let hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes));
 
     if hash != app.blossom_hash {
         let mut state = MARKETPLACE_STATE.write().await;
@@ -662,10 +659,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
     };
 
     // Verify the hash matches (this is also the new file's permission hash)
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes_vec);
-    let new_file_hash = bytes_to_hex_string(&hasher.finalize());
+    let new_file_hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes_vec));
 
     if new_file_hash != app.blossom_hash {
         // Clean up temp file if it exists
@@ -771,10 +765,7 @@ pub async fn publish_to_marketplace<T: vector_core::signer::VectorSigner + Clone
     let file_size = file_data.len() as u64;
 
     // Calculate hash
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(&*file_data);
-    let blossom_hash = bytes_to_hex_string(&hasher.finalize());
+    let blossom_hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&file_data));
 
     // Extract icon from the .xdc file
     let icon_bytes = extract_icon_from_xdc(&file_data);

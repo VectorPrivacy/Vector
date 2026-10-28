@@ -251,7 +251,6 @@ async fn finish(dir: &Path, stem: &str, part: &Path, sha256: Option<&str>) -> Re
     let part_owned = part.to_path_buf();
     let expected = sha256.map(str::to_ascii_lowercase);
     let verdict = tokio::task::spawn_blocking(move || -> Result<&'static str, String> {
-        use sha2::Digest;
         let src = vector_core::vcache::open(&part_owned, "video/mp4").ok_or("Not a video")?;
         let mut head = [0u8; 12];
         if src.read_at(0, &mut head).unwrap_or(0) < head.len() {
@@ -259,7 +258,7 @@ async fn finish(dir: &Path, stem: &str, part: &Path, sha256: Option<&str>) -> Re
         }
         let ext = video_kind(&head).ok_or("Not a video")?;
         if let Some(expected) = expected {
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = vector_core::crypto::sha256::Sha256::new();
             let mut buf = vec![0u8; 256 * 1024];
             let mut at = 0u64;
             loop {
