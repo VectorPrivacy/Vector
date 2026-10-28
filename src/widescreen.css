@@ -1891,16 +1891,20 @@ body:is(.ws.ws-rail-collapsed, .cc) #ws-rail-spaces .ws-rail-item-badge {
   --folder-tint: var(--folder-color, #9a9a9a);
   margin: 0 4px;
   border-radius: 12px;
-  transition: background-color 0.24s ease;
+  /* One curve for all, so where the band reaches up the head holds still. */
+  transition: background-color 0.24s ease,
+    margin 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    padding-top 0.26s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .ws-rail-folder .ws-rail-item {
   margin: 0 4px;
 }
-/* Open, the folder is a band of its colour holding its communities, reaching into the gap
-   above so it clears the head by as much as it clears the sides, and their corners match. */
+/* Open, the folder is a band of its colour holding its communities. It clears the head by
+   as much as it clears the sides, so their corners match, and its neighbours by the same. */
 .ws-rail-folder.is-open {
   background-color: color-mix(in srgb, var(--folder-tint) 9%, transparent);
-  margin-top: -4px;
+  margin-top: 4px;
+  margin-bottom: 4px;
   padding-top: 4px;
 }
 .ws-rail-folder-body {
@@ -1993,6 +1997,11 @@ body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder {
 }
 body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder .ws-rail-item {
   margin: 0 auto;
+}
+/* Tiles already stand apart, so the band reaches into the gap above instead. */
+body:is(.ws.ws-rail-collapsed, .cc) .ws-rail-folder.is-open {
+  margin-top: -4px;
+  margin-bottom: 0;
 }
 /* Clipped vertically only, for the fold: the open community's bar reaches out to
    the rail's edge, past the folder's band. */
