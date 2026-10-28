@@ -163,7 +163,7 @@
 
 <div
     class="dmsg"
-    class:dmsg--has-reply={!!quote}
+    class:dmsg--has-reply={!!quote && !isPivx && !isBlocked && !isTimedOut}
     class:dmsg--merged={merged}
     id={current.id}
     data-sender={shortSender}
