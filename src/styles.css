@@ -4850,6 +4850,12 @@ body.chat-bg-disabled .chat-messages::before {
 .system-event-name {
   font-weight: 600;
 }
+.system-event-name .emoji {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+  display: inline-block;
+}
 .system-event-text:hover .system-event-name {
   text-decoration: underline;
   opacity: 1;
