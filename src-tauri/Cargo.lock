@@ -5589,6 +5589,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr-verify"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27f3d7e0c21c93134365ebc9c577acf244d77347fde957a25e68b155903d141"
+dependencies = [
+ "getrandom 0.2.15",
+ "secp256k1",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "notify"
 version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11795,6 +11806,7 @@ dependencies = [
  "nostr-database",
  "nostr-parse",
  "nostr-sdk",
+ "nostr-verify",
  "rand 0.8.7",
  "reqwest",
  "resvg",

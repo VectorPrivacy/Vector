@@ -1,3 +1,4 @@
+pub mod batch_verify;
 pub mod chachapoly;
 pub mod gate;
 pub mod gcm;

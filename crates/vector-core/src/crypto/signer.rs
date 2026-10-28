@@ -129,11 +129,23 @@ impl GuardedSigner {
             wipe_conversation_key(ck);
         }
 
+        // Every seal whose id matches has its signature checked in one batch. A seal that
+        // fails either goes through `seal.verify()`, which names the failure as before.
+        let id_ok: Vec<bool> = opened.iter().map(|slot| slot.as_ref().is_ok_and(|(seal, _)| seal.verify_id())).collect();
+        let to_check: Vec<&Event> = opened
+            .iter()
+            .zip(&id_ok)
+            .filter_map(|(slot, ok)| slot.as_ref().ok().filter(|_| *ok).map(|(seal, _)| seal))
+            .collect();
+        let mut sig_ok = super::batch_verify::signatures(&to_check).into_iter();
         opened
             .into_iter()
-            .map(|slot| {
+            .zip(id_ok)
+            .map(|(slot, id_ok)| {
                 let (seal, rumor) = slot?;
-                seal.verify().map_err(SignerError::backend)?;
+                if !(id_ok && sig_ok.next() == Some(true)) {
+                    seal.verify().map_err(SignerError::backend)?;
+                }
                 let rumor = crate::event_json::unsigned(&rumor).map_err(SignerError::backend)?;
                 if rumor.pubkey != seal.pubkey {
                     return Err(SignerError::from("sender mismatch"));
