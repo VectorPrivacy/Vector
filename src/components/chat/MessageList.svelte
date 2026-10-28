@@ -74,7 +74,7 @@
     {#if it.kind === 'system'}
         <SystemEvent msg={it.msg} merged={it.merged} mergeCount={it.mergeCount} h={h.row} />
     {:else}
-        <MessageRow msg={it.msg} sender={h.senderFor(it.msg)} streak={it.streak} ctx={h.ctxFor(it.msg)} lastMine={it.msg.id === lastMineId} h={h.row} />
+        <MessageRow msg={it.msg} sender={h.senderFor(it.msg)} streak={it.streak} ctx={h.ctxFor(it.msg)} lastMine={it.msg.id === lastMineId} blockedRun={it.blockedRun} merged={it.merged} h={h.row} />
     {/if}
     {#if dividerId === it.msg.id && dividerAfter}
         <p class="msg-inline-timestamp unread-divider">New</p>

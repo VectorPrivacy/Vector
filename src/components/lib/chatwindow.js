@@ -3,8 +3,9 @@
  *
  * One pass over `messages.slice(start, end)` yields everything the vanilla list used
  * to compute by reading sibling DOM: each row's streak state, where a day separator
- * goes, and which repeated system events fold into their run's head. Pure: the
- * rules come in as functions so the vanilla helpers stay the single definition.
+ * goes, and which repeated system events, or one author's blocked messages, fold into
+ * their run's head. Pure: the rules come in as functions so the vanilla helpers stay
+ * the single definition.
  *
  * @param {object[]} messages  raw messages, chronological
  * @param {number} start       slice start (inclusive)
@@ -14,8 +15,9 @@
  * @param {(a, b) => boolean}       rules.differentDay   _dmsgIsDifferentDay
  * @param {(msg) => boolean}        rules.isCommand      a command invocation renders as a continuation
  * @param {(type) => boolean}       rules.mergeable      MERGEABLE_SYSTEM_EVENTS.has
+ * @param {(msg) => boolean}        rules.blocked        the row renders as a blocked placeholder
  * @returns {Array<{ msg, kind: 'row'|'system', streak: 'first'|'continuation', dayBreak: boolean,
- *                   merged: boolean, mergeCount: number }>}
+ *                   merged: boolean, mergeCount: number, blockedRun: object[]|null }>}
  */
 export function deriveWindow(messages, start, end, rules) {
     const items = [];
@@ -29,6 +31,14 @@ export function deriveWindow(messages, start, end, rules) {
         }
         run = [];
     };
+    let blocked = [];         // current run of one author's blocked rows (items)
+    const flushBlocked = () => {
+        if (blocked.length > 1) {
+            blocked[0].blockedRun = blocked.map((it) => it.msg);
+            for (let i = 1; i < blocked.length; i++) blocked[i].merged = true;
+        }
+        blocked = [];
+    };
     for (let i = start; i < end; i++) {
         const msg = messages[i];
         if (!msg) continue;
@@ -40,6 +50,7 @@ export function deriveWindow(messages, start, end, rules) {
             dayBreak: false,
             merged: false,
             mergeCount: 1,
+            blockedRun: null,
         };
         // A day separator heads the first day-content item and every day change.
         if (msg.at) {
@@ -47,6 +58,7 @@ export function deriveWindow(messages, start, end, rules) {
             prevAt = msg.at;
         }
         if (isSystem) {
+            flushBlocked();
             const type = msg.system_event.event_type;
             const npub = msg.system_event.member_npub;
             if (rules.mergeable(type)) {
@@ -68,10 +80,17 @@ export function deriveWindow(messages, start, end, rules) {
             const prevRow = prev && prev.kind === 'row' ? prev.msg : null;
             item.streak = prevRow && rules.collapse(prevRow, msg) ? 'continuation' : 'first';
             if (rules.isCommand(msg)) item.streak = 'continuation';
+            // A day separator stays visible, so it ends the run rather than sit inside it.
+            if (!rules.blocked(msg)) flushBlocked();
+            else {
+                if (blocked.length && (blocked[0].msg.npub !== msg.npub || item.dayBreak)) flushBlocked();
+                blocked.push(item);
+            }
         }
         items.push(item);
         prev = item;
     }
     flush();
+    flushBlocked();
     return items;
 }

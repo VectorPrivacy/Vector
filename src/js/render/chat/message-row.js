@@ -37,7 +37,7 @@ function ensureMessageList() {
  * ListHelpers: the message list island. `row` is RowHelpers for every row it renders.
  * @typedef {Object} ListHelpers
  * @property {(chatId: string) => object[]} messages
- * @property {{ collapse: (prev: object, curr: object) => boolean, differentDay: (a: object, b: object) => boolean, isCommand: (m: object) => boolean, mergeable: (type: string) => boolean }} rules
+ * @property {{ collapse: (prev: object, curr: object) => boolean, differentDay: (a: object, b: object) => boolean, isCommand: (m: object) => boolean, mergeable: (type: string) => boolean, blocked: (m: object) => boolean }} rules
  * @property {(at: number) => string} dayLabel
  * @property {number} maxRows
  * @property {(msg: object) => object|null} senderFor
@@ -53,6 +53,7 @@ const _dmsgListHelpers = {
         differentDay: (a, b) => _dmsgIsDifferentDay(a, b),
         isCommand: (m) => !!_dmsgCommandInfo(m),
         mergeable: (t) => MERGEABLE_SYSTEM_EVENTS.has(t),
+        blocked: (m) => _dmsgListHelpers.ctxFor(m).blocked,
     },
     dayLabel: (at) => dayDividerHtml(at),
     get maxRows() { return typeof MAX_WINDOW_ROWS === 'number' ? MAX_WINDOW_ROWS : 80; },
@@ -131,6 +132,13 @@ function _dmsgRowCtx(msg) {
             held: chatIsRequest(currentChat),
         };
     }
+}
+/** What a collapsed row says in place of its content, or '' when it shows the content. */
+function _dmsgHiddenLabel(ctx) {
+    if (ctx.timedOut === 'unauthorized') return 'Unauthorized poster';
+    if (ctx.timedOut === 'nosend') return "Posted where they can't send";
+    if (ctx.timedOut) return 'Sent while timed out';
+    return ctx.blocked ? 'Blocked message' : '';
 }
 
 /**
@@ -345,7 +353,8 @@ const _dmsgMediaHelpers = {
  *   contentSig: (msg: object) => string,
  *   replyView: (msg: object, sender: object|null) => object|null,
  *   jumpToMessage: (id: string) => void,
- *   revealBlocked: (msg: object) => void,
+ *   revealBlocked: (msgs: object[]) => void,
+ *   hiddenLabel: (ctx: object) => string,
  *   renderCustomEmojiShortcodes: (el: Element, tags: object[]|null) => void,
  *   showMiniProfile: (npub: string, el: Element) => void,
  *   systemEventName: (npub: string) => string, systemEventSuffix: (type: string) => string,
@@ -367,7 +376,16 @@ const _dmsgRowHelpers = {
     contentSig: (msg) => _dmsgContentSig(msg),
     replyView: (msg, sender) => _dmsgReplyView(msg, sender),
     jumpToMessage: (id) => jumpToMessage(id),
-    revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
+    // In place: the rows and any quote of them re-derive, and the scroll stays put.
+    revealBlocked: (msgs) => {
+        for (const m of msgs) {
+            revealedBlockedMessages.add(m.id);
+            VectorSvelte.touchMessage(m.id);
+        }
+        VectorSvelte.touchWindow();
+        VectorSvelte.flushSync();
+    },
+    hiddenLabel: (ctx) => _dmsgHiddenLabel(ctx),
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
     systemEventName: (npub) => chatName(npub),
@@ -499,8 +517,12 @@ function _dmsgReplyView(msg, sender) {
 
     const name = profile || npub ? chatName(profile || npub) : 'Unknown';
 
-    const content = hasBackendContext ? msg.replied_to_content : cMsg?.content;
-    const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
+    // A quote shows what its parent's row shows: collapsed until that row is revealed.
+    const hidden = mine ? ''
+        : cMsg ? _dmsgHiddenLabel(_dmsgListHelpers.ctxFor(cMsg))
+        : chatIsGroup(chat) && profile?.is_blocked && !revealedBlockedMessages.has(msg.replied_to) ? 'Blocked message' : '';
+    const content = hidden ? '' : hasBackendContext ? msg.replied_to_content : cMsg?.content;
+    const hasAttachment = !hidden && (hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0);
     let html = '';
     let emojiTags = [];
     let attachment = null;
@@ -514,7 +536,7 @@ function _dmsgReplyView(msg, sender) {
         const ext = (hasBackendContext ? msg.replied_to_attachment_extension : null) || cMsg?.attachments?.[0]?.extension;
         attachment = ext ? getFileTypeInfo(ext) : { icon: 'attachment', description: 'Attachment' };
     }
-    return { parentId: msg.replied_to, mine, npub, name, avatarSrc: getProfileAvatarSrc(profile), html, emojiTags, attachment };
+    return { parentId: msg.replied_to, mine, npub, name, avatarSrc: getProfileAvatarSrc(profile), html, emojiTags, attachment, hidden };
 }
 
 /**

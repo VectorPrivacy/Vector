@@ -4,7 +4,7 @@
     // bubbles to the row's jump-to-message handler.
     import Avatar from '../ui/Avatar.svelte';
 
-    let { view, h } = $props();   // view: { parentId, mine, npub, name, avatarSrc, html, emojiTags, attachment }; h: twemojify, renderCustomEmojiShortcodes, showMiniProfile
+    let { view, h } = $props();   // view: { parentId, mine, npub, name, avatarSrc, html, emojiTags, attachment, hidden }; h: twemojify, renderCustomEmojiShortcodes, showMiniProfile
 
     function nameInto(node, text) {
         let cur;
@@ -41,7 +41,9 @@
         <Avatar src={view.avatarSrc} size={16} class="dmsg-reply-avatar" />
     </span>
     <span class="dmsg-reply-name" style="color: rgba(255, 255, 255, 0.7);" data-npub={view.npub || undefined} use:nameInto={view.name} onclick={openProfile}></span>
-    {#if view.html}
+    {#if view.hidden}
+        <span class="dmsg-reply-text dmsg-reply-snippet" style="color: rgba(255, 255, 255, 0.45); font-style: italic;">{view.hidden}</span>
+    {:else if view.html}
         <span class="dmsg-reply-text dmsg-reply-snippet" style="color: rgba(255, 255, 255, 0.45);" use:snippetInto={[view.html, view.emojiTags]}></span>
     {:else if view.attachment}
         <div class="dmsg-reply-snippet" style="display: flex; align-items: center;">

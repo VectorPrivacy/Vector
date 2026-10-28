@@ -31,6 +31,8 @@
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
         lastMine = false,  // the newest own message: the one that shows its Sent status
+        blockedRun = null, // a run head's blocked messages (itself first), shown as one row
+        merged = false,    // folded into the blocked run above it
         h,                 // RowHelpers (js/render/chat/message-row.js): the row's chrome, carrying
                            //   `content` and `media` for the leaves and `pivx` for the bubble
     } = $props();
@@ -162,6 +164,7 @@
 <div
     class="dmsg"
     class:dmsg--has-reply={!!quote}
+    class:dmsg--merged={merged}
     id={current.id}
     data-sender={shortSender}
     data-mine={current.mine ? 'true' : 'false'}
@@ -171,7 +174,7 @@
     data-pinged={ctx.pinged ? 'true' : undefined}
     data-replying-to={mode.kind === 'reply' && mode.id === current.id ? 'true' : undefined}
     data-reply-pending={pendingReply || undefined}
-    style:opacity={ctx.revealedBlocked ? '0.4' : null}
+    class:dmsg--revealed={ctx.revealedBlocked}
     class:new-anim={arrival.id === current.id}
     onanimationend={() => { if (arrival.id === current.id) setArrival(null); }}
     use:expando={current}
@@ -214,8 +217,8 @@
             <div class="dmsg-content">
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <span style="color: rgba(255,255,255,0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;"
-                      onclick={(e) => { e.stopPropagation(); h.revealBlocked(msg); }}>
-                    <span class="icon {isTimedOut && ctx.timedOut !== 'unauthorized' ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{ctx.timedOut === 'unauthorized' ? 'Unauthorized poster' : ctx.timedOut === 'nosend' ? "Posted where they can't send" : isTimedOut ? 'Sent while timed out' : 'Blocked message'}</span>
+                      onclick={(e) => { e.stopPropagation(); h.revealBlocked(blockedRun || [msg]); }}>
+                    <span class="icon {isTimedOut && ctx.timedOut !== 'unauthorized' ? 'icon-clock' : 'icon-cancel'}" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>{blockedRun ? `${blockedRun.length} blocked messages` : h.hiddenLabel(ctx)}</span>
             </div>
         </div>
     {:else}

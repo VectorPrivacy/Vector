@@ -20304,6 +20304,18 @@ textarea.command-part-input {
 
 .dmsg[data-streak="first"]        { margin-top: var(--dmsg-streak-gap); }
 .dmsg[data-streak="continuation"] { margin-top: var(--dmsg-continuation-gap); }
+/* Folded into its blocked run's head. Zero height rather than display:none: the scroll engine
+ * reads offsetTop off rows, and a last-child row still carries the list's bottom clearance. */
+.chat-messages > .dmsg.dmsg--merged {
+  height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+/* A revealed blocked message dims what it says; the author reads as it did collapsed. */
+.dmsg--revealed .dmsg-body > :not(.dmsg-header) { opacity: 0.4; }
 /* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
  * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
