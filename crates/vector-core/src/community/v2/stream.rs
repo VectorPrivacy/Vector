@@ -440,14 +440,16 @@ pub fn open_wrap_at(
     if wrap.pubkey != *address {
         return Err(StreamError::WrongStream);
     }
-    if verify_wrap_sig && wrap.verify().is_err() {
+    if verify_wrap_sig && !verified(wrap) {
         return Err(StreamError::BadWrapSignature);
     }
 
     let seal_json = open_nip44(conv_key, &wrap.content)?;
     let seal: Event = crate::event_json::event(&seal_json).map_err(|e| StreamError::Parse(e.to_string()))?;
     let seal_form = SealForm::from_kind(seal.kind.as_u16()).ok_or(StreamError::BadSealKind(seal.kind.as_u16()))?;
-    seal.verify().map_err(|_| StreamError::BadSealSignature)?;
+    if !verified(&seal) {
+        return Err(StreamError::BadSealSignature);
+    }
 
     let rumor_json = match seal_form {
         SealForm::Plaintext => seal.content.clone(),
@@ -480,6 +482,63 @@ pub fn open_wrap_at(
         rumor,
         held: false,
     })
+}
+
+/// An (author, id, signature) a batch found valid.
+type CheckedSig = ([u8; 32], [u8; 32], [u8; 64]);
+
+thread_local! {
+    /// The signatures of the page being opened on this thread, checked in one batch by
+    /// [`check_signatures_together`]: only ones that verified.
+    static BATCH_CHECKED: std::cell::RefCell<std::collections::HashSet<CheckedSig>> = Default::default();
+}
+
+fn checked_sig(e: &Event) -> CheckedSig {
+    (*e.pubkey.as_bytes(), *e.id.as_bytes(), *e.sig.as_bytes())
+}
+
+/// `Event::verify`. A signature the current page's batch already checked needs only its id
+/// confirmed against the content, which is all `verify` adds to it.
+fn verified(e: &Event) -> bool {
+    if BATCH_CHECKED.with_borrow(|set| set.contains(&checked_sig(e))) {
+        e.verify_id()
+    } else {
+        e.verify().is_ok()
+    }
+}
+
+/// A page's batch-checked signatures, held for [`open_wrap_at`] on this thread until it drops.
+/// Hold it only across the page's synchronous opens.
+pub struct BatchChecked(());
+
+impl Drop for BatchChecked {
+    fn drop(&mut self) {
+        BATCH_CHECKED.with_borrow_mut(std::collections::HashSet::clear);
+    }
+}
+
+/// Checks a page of wraps' signatures in one BIP-340 batch (nostr-verify) before they are
+/// opened one by one: every seal's, found by opening the wrap under the first of its
+/// conversation keys that fits, and with `true` the wrap's own (a Write-Restricted Stream).
+/// While the guard lives, [`open_wrap_at`] takes those signatures as checked and confirms
+/// only their ids; anything the batch rejected or never saw is verified in full as before.
+/// The cost is one extra outer-layer decrypt per wrap.
+pub fn check_signatures_together(wraps: &[(&Event, Vec<&ConversationKey>, bool)]) -> BatchChecked {
+    let seals: Vec<Event> = wraps
+        .iter()
+        .filter_map(|(wrap, keys, _)| keys.iter().find_map(|ck| open_nip44(ck, &wrap.content).ok()))
+        .filter_map(|json| crate::event_json::event(&json).ok())
+        .collect();
+    let events: Vec<&Event> = wraps.iter().filter(|(.., own)| *own).map(|(wrap, ..)| *wrap).chain(&seals).collect();
+    let guard = BatchChecked(());
+    if events.len() >= nostr_verify::MIN_BATCH {
+        let ok = crate::crypto::batch_verify::signatures(&events);
+        BATCH_CHECKED.with_borrow_mut(|set| {
+            set.clear();
+            set.extend(events.iter().zip(ok).filter(|(_, ok)| *ok).map(|(e, _)| checked_sig(e)));
+        });
+    }
+    guard
 }
 
 /// Enforce the Chat-plane binding (CORD-03 §3): the rumor MUST commit
@@ -661,6 +720,47 @@ mod tests {
         let Ok(forged) = forged else { return }; // strict parsers may reject outright — equally a pass
         let (wrap, _) = wrap_seal(&forged, &group(), KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         assert!(matches!(open_wrap(&wrap, &group()), Err(StreamError::BadSealSignature)));
+    }
+
+    /// A page checked in one batch opens exactly as each wrap opened alone: valid wraps the
+    /// same, every forgery refused with the same error. That includes a seal whose content
+    /// changed under its valid (id, signature) pair, which only the id check can catch.
+    #[test]
+    fn a_page_checked_together_opens_as_one_at_a_time() {
+        let g = group();
+        let authors: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        let mut page: Vec<Event> =
+            (0..12).map(|i| send(&authors[i % 3], &g, SealForm::Encrypted, &format!("message {i}"), 1_000 + i as u64)).collect();
+        let seal_of = |w: &Event| crate::event_json::event(&open_nip44(g.conv_key(), &w.content).unwrap()).unwrap();
+        let (mut swapped, mut edited) = (seal_of(&page[0]), seal_of(&page[1]));
+        swapped.sig = seal_of(&page[2]).sig;
+        edited.content = seal_of(&page[3]).content;
+        for seal in [swapped, edited] {
+            page.push(wrap_seal(&seal, &g, KIND_WRAP, Timestamp::from_secs(1)).unwrap().0);
+        }
+        let open = |w: &Event, own: bool| open_wrap_at(w, &g.pk(), g.conv_key(), own).map(|o| o.rumor_id).map_err(|e| e.to_string());
+
+        let alone: Vec<_> = page.iter().map(|w| open(w, false)).collect();
+        let before = crate::crypto::batch_verify::stats();
+        let batch = check_signatures_together(&page.iter().map(|w| (w, vec![g.conv_key()], false)).collect::<Vec<_>>());
+        assert!(crate::crypto::batch_verify::stats().batches > before.batches, "the page went through a batch");
+        let together: Vec<_> = page.iter().map(|w| open(w, false)).collect();
+        drop(batch);
+        assert_eq!(together, alone);
+        assert_eq!(alone.iter().filter(|r| r.is_ok()).count(), 12);
+        assert!(alone[12..].iter().all(|r| *r == Err(StreamError::BadSealSignature.to_string())));
+
+        // A Write-Restricted Stream checks each wrap's own signature as well.
+        let mut forged = page[4].clone();
+        forged.sig = page[5].sig;
+        let restricted = [&page[4], &page[5], &page[6], &forged];
+        let alone: Vec<_> = restricted.iter().map(|w| open(w, true)).collect();
+        let batch = check_signatures_together(&restricted.iter().map(|w| (*w, vec![g.conv_key()], true)).collect::<Vec<_>>());
+        let together: Vec<_> = restricted.iter().map(|w| open(w, true)).collect();
+        drop(batch);
+        assert_eq!(together, alone);
+        assert_eq!(alone[3], Err(StreamError::BadWrapSignature.to_string()));
+        assert!(alone[..3].iter().all(Result::is_ok));
     }
 
     #[test]

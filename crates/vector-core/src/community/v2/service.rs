@@ -997,6 +997,21 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
             let unseen: Vec<_> = wraps.iter().map(|w| w.id).filter(|id| !seen_wraps.contains(id)).collect();
             let settled_here = if unseen.is_empty() { Default::default() } else { settled(&unseen) };
             let mut page_events: Vec<FetchedEvent> = Vec::new();
+            // The page's signatures in one batch, each wrap under the keys the loop below opens it
+            // with: a writer address under every read epoch (and its own signature checked), a
+            // plane's under that plane's. The opens then confirm ids for what the batch vouched for.
+            let every_plane: Vec<&nostr_sdk::prelude::nip44::v2::ConversationKey> = planes.iter().map(|(p, _)| p.conv()).collect();
+            let to_open: Vec<(&Event, Vec<&nostr_sdk::prelude::nip44::v2::ConversationKey>, bool)> = wraps
+                .iter()
+                .filter(|w| !seen_wraps.contains(&w.id) && !settled_here.contains(&w.id))
+                .filter_map(|w| {
+                    if writer_planes.iter().any(|(a, _)| *a == w.pubkey) {
+                        return Some((w, every_plane.clone(), true));
+                    }
+                    planes.iter().find(|(p, _)| p.address() == w.pubkey).map(|(p, _)| (w, vec![p.conv()], false))
+                })
+                .collect();
+            let batch = stream::check_signatures_together(&to_open);
             for wrap in &wraps {
                 if !seen_wraps.insert(wrap.id) {
                     continue;
@@ -1046,6 +1061,7 @@ pub async fn fetch_channel_history_paged<T: Transport + ?Sized>(
                     break;
                 }
             }
+            drop(batch);
             // Messages dated ahead took page slots without joining the page, and their place in
             // it bounds what an older address may show: page again for free, or the caller could
             // read the end of history. Bounded, so a flood of them can't page forever.
