@@ -1355,7 +1355,7 @@ async fn rejudge_held_bound(community: &CommunityV2, handler: &dyn crate::event_
                 continue;
             }
             last.lock().unwrap_or_else(|e| e.into_inner()).insert((cid, wrap_id.clone()), print);
-            let Ok(wrap) = nostr_sdk::prelude::Event::from_json(&json) else {
+            let Ok(wrap) = crate::event_json::event(&json) else {
                 let _ = crate::db::community::release_held_wrap(&wrap_id);
                 continue;
             };

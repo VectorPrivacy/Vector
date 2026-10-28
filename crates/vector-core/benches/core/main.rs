@@ -10,6 +10,7 @@
 mod community;
 mod compact;
 mod db_reads;
+mod parse;
 mod pool;
 
 use nostr_sdk::prelude::{Keys, ToBech32};
@@ -26,6 +27,7 @@ const ALL: &[(&str, fn())] = &[
     ("db::read_paths", db_reads::read_paths),
     ("db::page_pipeline", db_reads::page_pipeline),
     ("db::compose_parts", db_reads::compose_parts),
+    ("parse::gift_wrap_layers", parse::gift_wrap_layers),
     ("profile::processor", vector_core::profile::sync::bench::processor),
     ("vault::designs", vault::designs),
     ("vault::set_sources", vault::set_sources),

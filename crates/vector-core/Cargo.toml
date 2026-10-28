@@ -34,6 +34,9 @@ nostr-sdk = "=0.45.4"
 # Named for the bounded dedup tracker short-lived clients take (`events_tracker.rs`).
 nostr-database = "=0.45.2"
 nostr-connect = "=0.45.2"
+# Event and rumor JSON in one pass (`event_json`). The nostr-sdk fork reads relay EVENTs with
+# it too: keep the two on one version, or the tree carries two copies.
+nostr-parse = "0.3"
 # Blossom blob hashing. Must track nostr's own bitcoin_hashes major, or the
 # tree carries two copies. `hex` is explicit because it
 # gates Display/FromStr on the hash: the `std` default only forwards to it

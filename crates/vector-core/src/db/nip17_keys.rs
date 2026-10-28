@@ -293,8 +293,8 @@ pub fn get_resend_payload_by_pending(pending_id: &str) -> Result<Option<ResendPa
     let secret = SecretKey::from_slice(&secret_blob).map_err(|e| format!("Bad secret: {}", e))?;
     let relay_urls: Vec<String> =
         serde_json::from_str(&relays_json).map_err(|e| format!("Bad relay urls: {}", e))?;
-    let wrap_event = Event::from_json(&wrap_json).map_err(|e| format!("Bad wrap json: {}", e))?;
-    let rumor = UnsignedEvent::from_json(crate::crypto::maybe_decrypt_text(&rumor_json))
+    let wrap_event = crate::event_json::event(&wrap_json).map_err(|e| format!("Bad wrap json: {}", e))?;
+    let rumor = crate::event_json::unsigned(&crate::crypto::maybe_decrypt_text(&rumor_json))
         .map_err(|e| format!("Bad rumor json: {}", e))?;
     Ok(Some(ResendPayload {
         wrap_event,

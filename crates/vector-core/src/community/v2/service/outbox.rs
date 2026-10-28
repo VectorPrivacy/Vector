@@ -25,7 +25,7 @@ pub(super) fn release(message_id: &str) {
 }
 
 pub(super) fn kept(message_id: &str) -> Option<Event> {
-    crate::db::get_sql_setting(key(message_id)).ok().flatten().and_then(|json| Event::from_json(json).ok())
+    crate::db::get_sql_setting(key(message_id)).ok().flatten().and_then(|json| crate::event_json::event(&json).ok())
 }
 
 /// Whether any relay holds `wrap`, asked as its plane (gating relays serve a plane only to it).

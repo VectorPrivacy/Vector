@@ -475,7 +475,7 @@ impl AsyncSignEvent for Nip55Signer {
             let signed_json = signed.ok_or_else(|| {
                 SignerError::backend(Nip55Error::Ipc("signer returned no signed event".to_string()))
             })?;
-            let event = Event::from_json(&signed_json).map_err(SignerError::backend)?;
+            let event = crate::event_json::event(&signed_json).map_err(SignerError::backend)?;
             // Fail closed: the signer must return an event authored by OUR
             // identity. A mismatch (wrong Amber account, corrupted IPC) would
             // otherwise fork the wire under a foreign key.

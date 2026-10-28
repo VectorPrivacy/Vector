@@ -26,7 +26,7 @@ use nostr_sdk::prelude::nip44::{
     v2::{decrypt_to_bytes, ConversationKey},
 };
 use nostr_sdk::prelude::{
-    Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32, UnsignedEvent,
+    Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
 };
 use serde::{Deserialize, Serialize};
 
@@ -729,7 +729,7 @@ pub fn unwrap_direct_invite(wrap: &Event, recipient_keys: &Keys) -> Result<(Publ
     }
     let seal_json = nip44::decrypt(recipient_keys.secret_key(), &wrap.pubkey, &wrap.content)
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let seal = Event::from_json(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
+    let seal = crate::event_json::event(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
     if seal.kind != Kind::Seal {
         return Err(InviteError::BadEvent("inner is not a seal"));
     }
@@ -737,7 +737,7 @@ pub fn unwrap_direct_invite(wrap: &Event, recipient_keys: &Keys) -> Result<(Publ
 
     let rumor_json = nip44::decrypt(recipient_keys.secret_key(), &seal.pubkey, &seal.content)
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let rumor = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| InviteError::Json(e.to_string()))?;
+    let rumor = crate::event_json::unsigned(&rumor_json).map_err(|e| InviteError::Json(e.to_string()))?;
     if rumor.kind.as_u16() != kind::DIRECT_INVITE {
         return Err(InviteError::BadEvent("rumor is not a direct invite"));
     }
@@ -833,13 +833,13 @@ pub async fn unwrap_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized
         return Err(InviteError::BadEvent("not a gift wrap"));
     }
     let seal_json = signer.nip44_decrypt_async(&wrap.pubkey, &wrap.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let seal = Event::from_json(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
+    let seal = crate::event_json::event(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
     if seal.kind != Kind::Seal {
         return Err(InviteError::BadEvent("inner is not a seal"));
     }
     seal.verify().map_err(|_| InviteError::BadEvent("seal signature invalid"))?;
     let rumor_json = signer.nip44_decrypt_async(&seal.pubkey, &seal.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let rumor = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| InviteError::Json(e.to_string()))?;
+    let rumor = crate::event_json::unsigned(&rumor_json).map_err(|e| InviteError::Json(e.to_string()))?;
     if rumor.kind.as_u16() != kind::DIRECT_INVITE {
         return Err(InviteError::BadEvent("rumor is not a direct invite"));
     }

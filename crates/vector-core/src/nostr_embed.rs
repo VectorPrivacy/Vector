@@ -459,7 +459,7 @@ fn repost_target(ev: &Event) -> Option<EmbedRef> {
 /// The reposted event carried in the repost's content, believed only if it is signed and is
 /// the event the repost's tags name.
 fn reposted_inline(ev: &Event, target: Option<&EmbedRef>) -> Option<Event> {
-    let inner = Event::from_json(ev.content.trim()).ok()?;
+    let inner = crate::event_json::event(ev.content.trim()).ok()?;
     match target {
         Some(t) => t.matches(&inner).then_some(inner),
         None => inner.verify().is_ok().then_some(inner),

@@ -70,6 +70,7 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 - **`db/`** — SQLite schema, 41 atomic migrations, downgrade guard, connection pools, RAII guards, settings KV
 - **`hex.rs`** — SIMD hex encode/decode (NEON ARM64, SSE2/AVX2 x86_64, scalar fallback)
 - **`rumor.rs`** — process_rumor() inbound message parser, RumorEvent, 11 result variants
+- **`event_json.rs`** — `event()` / `unsigned()`: events and rumors from JSON via nostr-parse, rust-nostr's reader for what it refuses. Read events through these, not `from_json`
 - **`stored_event.rs`** — StoredEvent, StoredEventBuilder, event_kind constants
 - **`sending.rs`** — SendCallback trait, SendConfig, send_dm/send_file_dm/send_rumor_dm, retry_send_gift_wrap
 - **`blossom.rs`** — File upload with progress tracking, retry, server failover

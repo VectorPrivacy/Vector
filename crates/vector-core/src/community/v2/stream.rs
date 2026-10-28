@@ -445,7 +445,7 @@ pub fn open_wrap_at(
     }
 
     let seal_json = open_nip44(conv_key, &wrap.content)?;
-    let seal: Event = Event::from_json(&seal_json).map_err(|e| StreamError::Parse(e.to_string()))?;
+    let seal: Event = crate::event_json::event(&seal_json).map_err(|e| StreamError::Parse(e.to_string()))?;
     let seal_form = SealForm::from_kind(seal.kind.as_u16()).ok_or(StreamError::BadSealKind(seal.kind.as_u16()))?;
     seal.verify().map_err(|_| StreamError::BadSealSignature)?;
 
@@ -453,7 +453,7 @@ pub fn open_wrap_at(
         SealForm::Plaintext => seal.content.clone(),
         SealForm::Encrypted => open_nip44(conv_key, &seal.content)?,
     };
-    let mut rumor: UnsignedEvent = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| StreamError::Parse(e.to_string()))?;
+    let mut rumor: UnsignedEvent = crate::event_json::unsigned(&rumor_json).map_err(|e| StreamError::Parse(e.to_string()))?;
 
     if rumor.pubkey != seal.pubkey {
         return Err(StreamError::AuthorMismatch);

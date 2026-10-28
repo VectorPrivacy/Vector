@@ -134,7 +134,7 @@ impl GuardedSigner {
             .map(|slot| {
                 let (seal, rumor) = slot?;
                 seal.verify().map_err(SignerError::backend)?;
-                let rumor = UnsignedEvent::from_json(rumor).map_err(SignerError::backend)?;
+                let rumor = crate::event_json::unsigned(&rumor).map_err(SignerError::backend)?;
                 if rumor.pubkey != seal.pubkey {
                     return Err(SignerError::from("sender mismatch"));
                 }
@@ -153,7 +153,7 @@ fn open_layers(
     let mut wrap_key = nip44::v2::ConversationKey::derive(key, &wrap.pubkey).map_err(SignerError::backend)?;
     let seal = nip44_open(&wrap_key, &wrap.content);
     wipe_conversation_key(&mut wrap_key);
-    let seal = Event::from_json(seal?).map_err(SignerError::backend)?;
+    let seal = crate::event_json::event(&seal?).map_err(SignerError::backend)?;
 
     let at = match senders.iter().position(|(pk, _)| *pk == seal.pubkey) {
         Some(at) => at,

@@ -43,6 +43,7 @@ use nostr_sdk::prelude::{FinalizeEventAsync, ToBech32};
 
 // === Core Types ===
 pub mod event_ext;
+pub mod event_json;
 pub mod tags;
 pub mod types;
 pub mod profile;

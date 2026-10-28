@@ -4983,7 +4983,7 @@ pub fn holds_wraps_at(community_id: &str, channel_id: &str, author: &str, addres
         let Ok(rows) = stmt.query_map(params![community_id, channel_id, author], |r| r.get::<_, String>(0)) else { return false };
         rows.flatten().collect()
     };
-    wraps.iter().any(|w| nostr_sdk::prelude::Event::from_json(dec_txt(w)).is_ok_and(|e| e.pubkey.to_bytes() == *address))
+    wraps.iter().any(|w| crate::event_json::event(&dec_txt(w)).is_ok_and(|e| e.pubkey.to_bytes() == *address))
 }
 
 struct DeferredWraps;
