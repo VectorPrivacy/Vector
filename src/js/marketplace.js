@@ -298,6 +298,19 @@ function syncMarketplaceApps(apps) {
     marketplaceApps = apps;
     VectorSvelte.mktSetApps(apps);
     for (const app of apps) resolveMarketplaceIcon(app);
+    if (_appDetailsAwaited) showAppDetailsById(_appDetailsAwaited);
+}
+
+// A link's app the catalogue doesn't hold yet: its page opens when the catalogue brings it.
+let _appDetailsAwaited = null;
+/** One app's page, by id: what a link to it opens. Never launches it. */
+function showAppDetailsById(id) {
+    const panel = VectorSvelte.mktState();
+    const app = marketplaceApps.find(a => a.id === id);
+    _appDetailsAwaited = null;
+    if (!panel.panelOpen || panel.panelClosing) return;
+    if (app) showAppDetails(app);
+    else _appDetailsAwaited = id;
 }
 
 function marketplaceIconKey(app) {

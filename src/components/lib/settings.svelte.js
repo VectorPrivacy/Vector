@@ -143,7 +143,8 @@ const screen = $state({
         status: '', statusClass: '',            // a handler's own line and its is-ok / is-error class
         busy: false, obfs4Hint: '',             // obfs4Hint: the install hint when obfs4proxy is missing
     },
-    scroll: { target: '', seq: 0 },               // a section to scroll into view on open
+    scroll: { target: '', seq: 0 },               // `category[/section]` or a section id to bring into view
+    at: { category: '', section: '' },            // where the screen is: what a link to here names
 });
 export function settingsScreen() { return screen; }
 export function setSettingsScreen(patch) {

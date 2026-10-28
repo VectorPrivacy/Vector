@@ -151,3 +151,12 @@ function navbarSelect(strSelectionID = '') {
     VectorSvelte.setTab(strSelectionID);
     if (strSelectionID !== 'miniapps-btn') leaveNexus();
 }
+
+// Where the user is, for Vector Web's address bar and history (web/tauri-shim.js listens; a
+// native window has no address). Silent until signed in: there is no place before then.
+VectorSvelte.watchPlace(
+    (chatId) => communityIdOfChat(arrChats.find(c => c.id === chatId)) || null,
+    (place) => {
+        if (!fInit && !fRouting) window.dispatchEvent(new CustomEvent('vector-location', { detail: { account: strPubkey, ...place } }));
+    },
+);

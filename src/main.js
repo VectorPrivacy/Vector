@@ -1884,7 +1884,25 @@ let fInit = true;
  * @param {Object} payload - The action payload with action_type and target
  */
 async function executeDeepLinkAction(payload) {
+    // Where the user lands, said once the link is done (fRouting holds the places on the way),
+    // even when it opened nothing: Vector Web's address follows it.
+    fRouting = true;
+    try { await openDeepLink(payload); } finally {
+        fRouting = false;
+        VectorSvelte.repeatPlace();
+    }
+}
+
+/** A deep link is opening: the places it passes on its way aren't reported. */
+let fRouting = false;
+
+/** Open what a link names. A link only ever opens a place: joining or launching takes a tap there. */
+async function openDeepLink(payload) {
     const { action_type, target } = payload;
+    // A place from Vector Web's history is the account's that went there: another account stays put.
+    if (payload.account && payload.account !== strPubkey) return;
+    // The pack modal sits over every screen, so a link to anywhere else closes it first.
+    if (action_type !== 'emoji_pack' && action_type !== 'community_invite') closePackDetailsModal();
     if (action_type === 'profile') {
         // Open the profile for the given npub
         // First, try to find an existing profile in our cache
@@ -1902,8 +1920,8 @@ async function executeDeepLinkAction(payload) {
         // Open the profile view
         await openProfile(profile);
     } else if (action_type === 'chat') {
-        // Open a specific chat (triggered by tapping a notification), at its message when named
-        await openChat(target);
+        // A chat (a notification tap, a DM link), at its message when named
+        if (!chatOnScreen(target)) await openChat(target);
         if (payload.message) jumpToMessage(payload.message);
     } else if (action_type === 'emoji_pack') {
         // Open the Pack Details modal for the given naddr. The modal
@@ -1918,6 +1936,20 @@ async function executeDeepLinkAction(payload) {
         // A Vector link (vectorapp.io/go#…): `target` is its payload.
         const link = parseGoPayload(target);
         if (link) await openGoLink(link);
+    } else if (action_type === 'settings') {
+        // `category[/section]`, brought into view
+        openSettings();
+        if (target) VectorSvelte.requestSettingsScroll(target);
+    } else if (action_type === 'nexus') {
+        // The Nexus, or one app's page in it
+        showMarketplacePanel();
+        if (target) showAppDetailsById(target);
+    } else if (action_type === 'requests' || action_type === 'home') {
+        // The chat list: its Requests tab (Community invites and DM requests), or as it was
+        if (strOpenChat) await closeChat();
+        else await openChatlist();
+        if (action_type === 'requests') VectorSvelte.setConsoleFilter('requests');
+        else if (VectorSvelte.consoleState().filter === 'requests') VectorSvelte.setConsoleFilter('messages');
     }
 }
 
@@ -2715,9 +2747,18 @@ function isAppChromeAnchor(anchor) {
     try {
         const url = new URL(anchor.href);
         // Vector Web serves received files same-origin under /vfs: those are content, not UI.
-        return url.origin === location.origin && !url.pathname.startsWith('/vfs/');
+        // A message's links open in a new tab, which on Vector Web can name Vector Web itself.
+        return url.origin === location.origin && !url.pathname.startsWith('/vfs/') && anchor.target !== '_blank';
     }
     catch { return true; }
+}
+
+/** A clicked link: a place in Vector opens here, anything else goes to the browser. */
+async function openAnchor(anchor) {
+    const place = await invoke('parse_deep_link', { url: anchor.href }).catch(() => null);
+    if (place) return executeDeepLinkAction(place);
+    if (anchorShowsItsDestination(anchor)) return openUrl(anchor.href);
+    return confirmAndOpenUrl(anchor.href);
 }
 
 // Hover tooltip: the honest counterpart to the open-confirm. Surfaces a
@@ -2765,13 +2806,13 @@ document.addEventListener('click', (e) => {
 
     // Any <a> click (including on styled children inside one) routes through
     // the confirm-then-open speed bump — except WYSIWYG links, whose visible
-    // text already IS the destination. UI anchors with their own handlers
-    // stopPropagation before reaching here.
+    // text already IS the destination, and links to a place in Vector, which
+    // open here. UI anchors with their own handlers stopPropagation before
+    // reaching here.
     const anchor = e.target.closest?.('a');
     if (anchor && anchor.href && !isAppChromeAnchor(anchor)) {
         e.preventDefault();
-        if (anchorShowsItsDestination(anchor)) return openUrl(anchor.href);
-        return confirmAndOpenUrl(anchor.href);
+        return openAnchor(anchor);
     }
 
     // If we're clicking a <summary> to toggle <details>, handle scroll adjustment

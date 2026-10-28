@@ -764,6 +764,7 @@ async function deleteFailedMessage(msgId) {
  */
 function jumpToMessage(targetMsgId) {
     if (!targetMsgId) return;
+    VectorSvelte.setPlaceMessage(strOpenChat, targetMsgId);
     const domMsg = document.getElementById(targetMsgId);
     if (domMsg) {
         centerInView(domMsg);

@@ -330,7 +330,8 @@ async function login(skipAnimations = false) {
                 // skips events while fInit was still true).
                 consumePendingShare();
                 // Same window exists for deep links: drain any action stored while
-                // fInit gated the live listener.
+                // fInit gated the live listener. The only drain at login: it follows the panes
+                // above, which would cover a chat opened before them.
                 invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
                 // Mount the chatlist island; from here every change flows through the signals.
@@ -411,16 +412,6 @@ async function login(skipAnimations = false) {
             // so the toggle reflects the actual backend state.
             initEncryptionSettings();
 
-            // Execute any pending deep link action that was received before login
-            try {
-                const pendingAction = await invoke('get_pending_deep_link');
-                if (pendingAction) {
-                    console.log('Executing pending deep link action:', pendingAction);
-                    await executeDeepLinkAction(pendingAction);
-                }
-            } catch (e) {
-                console.error('Failed to check for pending deep link:', e);
-            }
 
             // Handle a share (file/text from another app) that arrived on a cold
             // start before the live listener was attached.

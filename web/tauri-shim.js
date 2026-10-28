@@ -208,34 +208,124 @@
         return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}${at}`;
     });
 
-    // A Vector link opened into this tab (`/#go/<payload>`, from vectorapp.io/go): taken once,
-    // then wiped from the address bar and history, so a reload never replays it and the ids
-    // never linger. A link arriving while the app runs (hash edit, or a launch handed to
-    // this window) goes through the same pending slot the desktop's deep links use.
-    let pendingGo = null;
-    function takeGoLink(url) {
-        const m = /#go\/([^#?\s]+)$/.exec(url);
-        if (!m) return false;
-        pendingGo = { action_type: 'go', target: m[1] };
-        if (/#go\//.test(location.hash)) history.replaceState(history.state, '', location.pathname + location.search);
-        return true;
+    // The address bar is where you are, in the place grammar every Vector client parses
+    // (vector-core's deep_link.rs, which the worker runs): `#<place>`, e.g. `#settings/network`,
+    // `#profile/<npub>`, a channel as its Vector link `#go/c/<community>/<channel>`. Ids stay in
+    // the fragment, out of the server's reach. Opening a place is a history entry, so Back and
+    // Forward move between places; a change within one (a message jumped to, a Settings category)
+    // replaces it, and leaving a place for the one it was opened from is a Back. A route arriving
+    // from outside (load, Back, a link, a launch) goes through the pending slot the desktop's deep
+    // links use, and the app reports its place after every one.
+    const WEB_BASE = 'https://web.vectorapp.io/#';
+    function placeHash(p) {
+        switch (p.kind) {
+            case 'chat':
+                if (p.community) return '#go/' + ['c', p.community, p.chat, p.message].filter(Boolean).join('/');
+                // A DM message's Vector link opens for both of its people; the chat is ours alone.
+                return p.message ? `#go/m/${p.message}` : `#dm/${p.chat}`;
+            case 'settings': return '#' + ['settings', p.category, p.category && p.section].filter(Boolean).join('/');
+            case 'nexus': return p.app ? `#nexus/${p.app}` : '#nexus';
+            case 'profile': return `#profile/${p.npub}`;
+            case 'pack': return `#emojis/pack/${p.naddr}`;
+            case 'requests': return '#requests';
+            default: return '';
+        }
     }
-    takeGoLink(location.href);
+    // Two reports of one place share an entry: a chat's message or Settings' category isn't a new one.
+    function placeKey(p) {
+        switch (p.kind) {
+            case 'chat': return `chat:${p.chat}`;
+            case 'nexus': return p.app ? `nexus:${p.app}` : 'nexus';
+            case 'profile': return `profile:${p.npub}`;
+            case 'pack': return `pack:${p.naddr}`;
+            case 'settings': case 'requests': return p.kind;
+            default: return '';
+        }
+    }
+    async function routeAction(hash) {
+        if (!hash || hash === '#') return { action_type: 'home', target: '' };
+        return backend('parse_deep_link', { url: WEB_BASE + hash.slice(1) }).catch(() => null);
+    }
+
+    // A route the app hasn't taken yet. `settle`: it came from history (a load, Back, Forward),
+    // so the place the app then reports rewrites that entry rather than following it.
+    let pendingRoute = null;
+    let settling = false;
+    function followRoute(hash, settle) {
+        pendingRoute = { hash, settle, account: settle ? history.state?.vectorAccount ?? null : null };
+        dispatchEvent('deep_link_action', {});
+    }
+    local.set('get_pending_deep_link', async () => {
+        if (!pendingRoute) return null;
+        const { hash, settle, account } = pendingRoute;
+        pendingRoute = null;
+        settling = settle;
+        const action = await routeAction(hash);
+        // An entry this app wrote names its account: a switch or sign-out reloads into the same
+        // history, and the app leaves another account's place alone.
+        if (action && account) action.account = account;
+        return action;
+    });
+
+    // This session's entries, by `vectorIndex`: which place each was, so leaving a place for the
+    // one before it can step back instead of stacking a copy.
+    const trail = [];
+    let entry = null;
+    function readEntry() {
+        const st = history.state;
+        // An entry this app didn't write (a typed URL, a followed link) comes right after the one it left.
+        const index = st ? st.vectorIndex ?? 0 : entry ? entry.index + 1 : 0;
+        entry = { place: st?.vectorPlace ?? '', account: st?.vectorAccount ?? null, index };
+        if (st) trail[index] = entry.place;
+    }
+    readEntry();
+    if (location.hash) followRoute(location.hash, true);
+
+    let steppingBack = null;   // the report that asked for it, applied once the Back lands
+    function applyPlace(detail) {
+        const key = placeKey(detail);
+        const url = location.pathname + location.search + placeHash(detail);
+        const replace = settling || key === entry.place || (entry.account && entry.account !== detail.account);
+        settling = false;
+        if (!replace && entry.index > 0 && trail[entry.index - 1] === key
+            && !(key.startsWith('chat:') && entry.place.startsWith('chat:'))) {
+            steppingBack = detail;
+            history.back();
+            return;
+        }
+        const index = replace ? entry.index : entry.index + 1;
+        const state = { vectorPlace: key, vectorAccount: detail.account, vectorIndex: index };
+        if (!replace) {
+            trail.length = index;
+            history.pushState(state, '', url);
+        } else if (url !== location.href.slice(location.origin.length) || history.state?.vectorPlace !== key || history.state?.vectorAccount !== detail.account) {
+            history.replaceState(state, '', url);
+        }
+        trail[index] = key;
+        entry = { place: key, account: detail.account, index };
+    }
+    addEventListener('vector-location', ({ detail }) => {
+        if (pendingRoute) return;
+        if (steppingBack) steppingBack = detail;
+        else applyPlace(detail);
+    });
+    addEventListener('popstate', () => {
+        readEntry();
+        if (steppingBack) {
+            const detail = steppingBack;
+            steppingBack = null;
+            applyPlace(detail);
+            return;
+        }
+        followRoute(location.hash, true);
+    });
     // The flag vectorapp.io/go's probe reads: this browser has signed in to Vector Web.
     listen('init_finished', () => {
         try { localStorage.setItem('vector-web', '1'); } catch { /* private mode: the page offers both */ }
     });
-    local.set('get_pending_deep_link', () => {
-        const action = pendingGo;
-        pendingGo = null;
-        return action;
-    });
-    addEventListener('hashchange', () => {
-        if (takeGoLink(location.href)) dispatchEvent('deep_link_action', pendingGo);
-    });
     if ('launchQueue' in window) {
         window.launchQueue.setConsumer((params) => {
-            if (params.targetURL && takeGoLink(params.targetURL)) dispatchEvent('deep_link_action', pendingGo);
+            if (params.targetURL) followRoute(new URL(params.targetURL).hash, false);
         });
     }
 
@@ -679,7 +769,17 @@
             getName: async () => 'Vector',
         },
         opener: {
-            openUrl: async (url) => { window.open(url, '_blank', 'noopener,noreferrer'); },
+            // Our own origin is this app: opening it would load the app into itself (a PWA
+            // reloads). A route goes there in place; anything else there is already open.
+            openUrl: async (url) => {
+                let to = null;
+                try { to = new URL(url, location.href); } catch { /* not a URL: the browser decides */ }
+                if (to?.origin === location.origin) {
+                    if (to.hash.length > 1) followRoute(to.hash, false);
+                    return;
+                }
+                window.open(url, '_blank', 'noopener,noreferrer');
+            },
             openPath: async () => {},
             revealItemInDir: async () => {},
         },

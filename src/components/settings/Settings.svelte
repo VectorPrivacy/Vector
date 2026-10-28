@@ -135,7 +135,11 @@
     const category = $derived(CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0]);
     const anchors = anchorScroll('theme');
 
+    // The section a nav click or a link brought into view; a category alone names none.
+    let section = $state('');
+
     async function goCategory(id) {
+        section = '';
         if (catId === id) return;
         catId = id;
         await tick();
@@ -143,6 +147,7 @@
     }
 
     async function goAnchor(catIdTo, anchorId) {
+        section = anchorId;
         if (catId !== catIdTo) {
             catId = catIdTo;
             await tick();
@@ -206,6 +211,7 @@
             searchShut = searchShut.includes(id) ? searchShut.filter((x) => x !== id) : [...searchShut, id];
             return;
         }
+        section = '';
         openCat = openCat === id ? null : id;
         if (openCat) reveal(id);
     }
@@ -218,21 +224,34 @@
         }, 300);
     }
 
-    // A requested scroll (an update is waiting, the network needs attention) lands after the
-    // screen has been shown.
+    // A requested scroll (a link, an update waiting, the network needing attention) lands after
+    // the screen has been shown. `category[/section]`, or a bare section id; anything this build
+    // doesn't have leaves the screen where it is.
     $effect(() => {
         const { target, seq } = sc.scroll;
-        if (!seq || !['updates', 'routing', 'relays'].includes(target)) return;
-        if (shell.ws) {
-            if (target === 'updates') goCategory('updates');
-            else if (target === 'relays') goAnchor('network', 'relays');
-            else goAnchor('privacy', 'routing');
-            return;
-        }
-        const cat = { updates: 'updates', relays: 'network', routing: 'privacy' }[target];
-        setQuery('');
-        openCat = cat;
-        reveal(cat, target);
+        if (!seq || !target) return;
+        untrack(() => {
+            const [first, second] = target.split('/');
+            const cat = CATEGORIES.find((c) => c.id === first)
+                || (!second && CATEGORIES.find((c) => c.anchors.some((a) => a.id === first)));
+            if (!cat) return;
+            const anchorId = second || (cat.id === first ? '' : first);
+            if (anchorId && !cat.anchors.some((a) => a.id === anchorId)) return;
+            if (shell.ws) {
+                if (anchorId) goAnchor(cat.id, anchorId);
+                else goCategory(cat.id);
+                return;
+            }
+            setQuery('');
+            openCat = cat.id;
+            section = anchorId;
+            reveal(cat.id, anchorId || null);
+        });
+    });
+
+    // Where the screen is, for a link to here (Vector Web's address bar follows it).
+    $effect(() => {
+        sc.at = { category: shell.ws ? catId : (openCat || ''), section };
     });
 </script>
 

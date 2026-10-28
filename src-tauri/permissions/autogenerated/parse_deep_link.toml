@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-parse-deep-link"
+description = "Enables the parse_deep_link command without any pre-configured scope."
+commands.allow = ["parse_deep_link"]
+
+[[permission]]
+identifier = "deny-parse-deep-link"
+description = "Denies the parse_deep_link command without any pre-configured scope."
+commands.deny = ["parse_deep_link"]

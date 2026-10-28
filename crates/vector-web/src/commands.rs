@@ -137,6 +137,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "tor_prelogin_abandon" | "tor_get_host_circuit" | "transport_prelogin_abandon" => Ok(Value::Null),
         "get_logs" => Ok(json!("")),
         "get_pending_share" | "get_pending_deep_link" => Ok(Value::Null),
+        "parse_deep_link" => to_value(vector_core::deep_link::parse_deep_link(&a.str("url")?)),
 
         // --- Login ---
         "login" => account::login(a.str("importKey")?).await,

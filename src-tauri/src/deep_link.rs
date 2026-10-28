@@ -1,16 +1,11 @@
-//! Deep Link Handler Module
+//! Deep links from the OS: taken, held until the frontend has an account, and handed over.
 //!
-//! This module handles parsing and processing of deep link URLs for Vector.
-//! Supported URL formats:
-//! - `vector://profile/<npub>` - Opens a user's profile
-//! - `vector://emojis/pack/<naddr>` - Opens the Pack Details modal
-//! - `https://vectorapp.io/profile/<npub>` - Web URL for mobile app links
-//! - `https://vectorapp.io/emojis/pack/<naddr>` - Web URL for pack share links
-//! - `https://vectorapp.io/go#<payload>` / `vector://go#<payload>` - A community, channel or message
+//! The grammar lives in `vector_core::deep_link`, which Vector Web parses with too.
 
-use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Runtime};
+
+pub use vector_core::deep_link::DeepLinkAction;
 
 /// Global storage for pending deep link action (received before frontend is ready)
 static PENDING_DEEP_LINK: Mutex<Option<DeepLinkAction>> = Mutex::new(None);
@@ -18,163 +13,10 @@ static PENDING_DEEP_LINK: Mutex<Option<DeepLinkAction>> = Mutex::new(None);
 /// The URLs last handed to `handle_deep_link`, from any source.
 static LAST_URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Represents a parsed deep link action to be sent to the frontend
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct DeepLinkAction {
-    /// The type of action: "profile"
-    pub action_type: String,
-    /// The target identifier (npub)
-    pub target: String,
-    /// For "chat": the message to land on.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    /// The npub the action belongs to; dropped if a different account is live when it's taken.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
-}
-
-/// Parse a deep link URL and return the action to perform
-///
-/// Supports both custom scheme URLs (vector://) and web URLs (https://vectorapp.io/)
-///
-/// # Arguments
-/// * `url_str` - The URL string to parse
-///
-/// # Returns
-/// * `Some(DeepLinkAction)` if the URL is valid and recognized
-/// * `None` if the URL is invalid or not a recognized deep link
-pub fn parse_deep_link(url_str: &str) -> Option<DeepLinkAction> {
-    // Normalize the URL for parsing
-    let url_str = url_str.trim();
-
-    if let Some(link) = vector_core::golink::GoLink::parse_url(url_str) {
-        return Some(DeepLinkAction { action_type: "go".to_string(), target: link.payload(), ..Default::default() });
-    }
-
-    // Community invites carry secrets in the URL FRAGMENT (#…), which the path parsers below
-    // strip. Catch them first and pass the whole URL through — the join flow re-parses it.
-    if let Some((before, frag)) = url_str.split_once('#') {
-        if !frag.is_empty() && is_invite_locator(before) {
-            return Some(DeepLinkAction {
-                action_type: "community_invite".to_string(),
-                target: url_str.to_string(),
-                ..Default::default()
-            });
-        }
-    }
-
-    // Handle vector:// scheme
-    if url_str.starts_with("vector://") {
-        return parse_vector_scheme(url_str);
-    }
-    
-    // Handle https://vectorapp.io/ URLs (for mobile app links)
-    if url_str.starts_with("https://vectorapp.io/") || url_str.starts_with("http://vectorapp.io/") {
-        return parse_web_url(url_str);
-    }
-    
-    None
-}
-
-/// Parse a vector:// scheme URL
-fn parse_vector_scheme(url_str: &str) -> Option<DeepLinkAction> {
-    // Remove the scheme prefix
-    let path = url_str.strip_prefix("vector://")?;
-    parse_path_segments(path)
-}
-
-/// Parse a web URL (https://vectorapp.io/...)
-fn parse_web_url(url_str: &str) -> Option<DeepLinkAction> {
-    // Extract the path from the URL using simple string manipulation
-    // We know the URL starts with https://vectorapp.io/ or http://vectorapp.io/
-    let path = if url_str.starts_with("https://vectorapp.io/") {
-        url_str.strip_prefix("https://vectorapp.io/")?
-    } else {
-        url_str.strip_prefix("http://vectorapp.io/")?
-    };
-    // Remove any query string or fragment
-    let path = path.split('?').next().unwrap_or(path);
-    let path = path.split('#').next().unwrap_or(path);
-    parse_path_segments(path)
-}
-
-/// Parse path segments and return the appropriate action
-fn parse_path_segments(path: &str) -> Option<DeepLinkAction> {
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    
-    if segments.is_empty() {
-        return None;
-    }
-    
-    match segments[0] {
-        "profile" if segments.len() >= 2 => {
-            let npub = segments[1];
-            if validate_npub(npub) {
-                Some(DeepLinkAction {
-                    action_type: "profile".to_string(),
-                    target: npub.to_string(),
-                    ..Default::default()
-                })
-            } else {
-                println!("[DeepLink] Invalid npub format: {}", npub);
-                None
-            }
-        }
-        // Pack share links — `emojis/pack/<naddr>` matches the website
-        // route + the Vector app's `_sharePackToClipboard` output. Naddr
-        // decoding happens on the frontend; we only sanity-check the
-        // bech32 HRP + min length so a typo doesn't queue an action.
-        "emojis" if segments.len() >= 3 && segments[1] == "pack" => {
-            let naddr = strip_html_suffix(segments[2]);
-            if validate_naddr(naddr) {
-                Some(DeepLinkAction {
-                    action_type: "emoji_pack".to_string(),
-                    target: naddr.to_string(),
-                    ..Default::default()
-                })
-            } else {
-                println!("[DeepLink] Invalid naddr format: {}", naddr);
-                None
-            }
-        }
-        _ => {
-            println!("[DeepLink] Unknown action: {}", segments[0]);
-            None
-        }
-    }
-}
-
-/// Validate that a string is a valid npub (Nostr public key in bech32 format)
-fn validate_npub(npub: &str) -> bool {
-    // npub1 prefix + 58 characters of bech32 data = 63 total characters
-    npub.starts_with("npub1") && npub.len() == 63
-}
-
-/// Lightweight naddr sanity check. Real bech32 + TLV decoding happens
-/// on the frontend (vector-core has the helpers, but the parser doesn't
-/// need to load them just to gate a deep link). We just verify the
-/// bech32 HRP and a plausible minimum length; the frontend modal will
-/// surface a friendly error if decoding fails downstream.
-fn validate_naddr(naddr: &str) -> bool {
-    naddr.starts_with("naddr1") && naddr.len() >= 30
-}
-
-/// The locator half of an invite link (everything before the `#`).
-///
-/// The bundle coordinate rides as an naddr path segment (`/invite/<naddr>`) and is honoured
-/// from ANY host: the naddr+fragment self-authenticates and the domain is never contacted, so
-/// an Armada-minted link joins natively. Mirrors the frontend's `isCommunityInviteUrl`.
-fn is_invite_locator(before: &str) -> bool {
-    match before.rsplit_once("/invite/") {
-        Some((_, naddr)) => validate_naddr(strip_html_suffix(naddr.trim_end_matches('/'))),
-        None => false,
-    }
-}
-
-/// Some link expanders / mobile launchers append `.html` to a URL that
-/// looks like a file path. Strip it so the naddr decodes cleanly.
-fn strip_html_suffix(s: &str) -> &str {
-    s.strip_suffix(".html").unwrap_or(s)
+/// What a link inside the app opens, so it goes there in place rather than through the browser.
+#[tauri::command]
+pub fn parse_deep_link(url: String) -> Option<DeepLinkAction> {
+    vector_core::deep_link::parse_deep_link(&url)
 }
 
 /// Handle incoming deep link URLs
@@ -194,7 +36,7 @@ pub fn handle_deep_link<R: Runtime>(handle: &AppHandle<R>, urls: Vec<String>) {
         let locator = url.split('#').next().unwrap_or("");
         println!("[DeepLink] Received URL: {}", locator);
 
-        if let Some(action) = parse_deep_link(&url) {
+        if let Some(action) = vector_core::deep_link::parse_deep_link(&url) {
             println!("[DeepLink] Parsed action: {}", action.action_type);
             
             // Store the action for later retrieval (in case frontend isn't ready yet)
@@ -283,71 +125,4 @@ pub fn open_chat_from_notification<R: Runtime>(
         *pending = Some(action.clone());
     }
     let _ = handle.emit("deep_link_action", &action);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A retired fragment-only link is not an invite.
-    #[test]
-    fn a_fragment_only_invite_link_is_not_an_invite() {
-        for url in ["vector://invite#AgEs3q1MZz0", "https://vectorapp.io/invite#AgEs3q1MZz0"] {
-            assert!(parse_deep_link(url).map(|a| a.action_type) != Some("community_invite".into()), "{url}");
-        }
-    }
-
-    // The bundle coordinate rides in the PATH (`/invite/<naddr>#<frag>`), and the community-invite
-    // catch runs BEFORE the path parsers strip the fragment. Any host counts: the naddr+fragment
-    // self-authenticates.
-    const NADDR: &str = "naddr1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-
-    #[test]
-    fn v2_naddr_invite_parses_from_every_host() {
-        for url in [
-            format!("vector://invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
-            format!("https://vectorapp.io/invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
-            format!("https://armada.buzz/invite/{NADDR}#BAHs3q1MZz0aBcDeF"),
-        ] {
-            let action = parse_deep_link(&url).unwrap_or_else(|| panic!("{url}"));
-            assert_eq!(action.action_type, "community_invite");
-            assert_eq!(action.target, url, "join flow re-parses the full URL");
-        }
-    }
-
-    #[test]
-    fn invite_without_fragment_is_not_an_invite() {
-        assert!(parse_deep_link("vector://invite").is_none());
-        assert!(parse_deep_link("vector://invite#").is_none());
-        assert!(parse_deep_link(&format!("https://vectorapp.io/invite/{NADDR}")).is_none());
-    }
-
-    // A path segment that isn't an naddr must not be mistaken for a v2 coordinate.
-    #[test]
-    fn invite_path_that_is_not_an_naddr_is_not_an_invite() {
-        assert!(parse_deep_link("https://vectorapp.io/invite/npub1abc#frag").is_none());
-        assert!(parse_deep_link("https://evil.example/invite/naddr1#frag").is_none());
-    }
-
-    #[test]
-    fn fragment_on_non_invite_paths_does_not_hijack() {
-        // A fragment elsewhere must not classify as an invite, and the
-        // legitimate profile shape must keep working.
-        assert!(parse_deep_link("vector://profile/notanpub#x").is_none());
-        let npub = format!("npub1{}", "q".repeat(58));
-        let action = parse_deep_link(&format!("vector://profile/{npub}")).unwrap();
-        assert_eq!(action.action_type, "profile");
-        assert_eq!(action.target, npub);
-    }
-
-    #[test]
-    fn a_vector_link_opens_from_the_web_address_and_the_app_scheme() {
-        let payload = format!("c/{}/{}", "a".repeat(64), "b".repeat(64));
-        for url in [format!("https://vectorapp.io/go#{payload}"), format!("vector://go#{payload}")] {
-            let action = parse_deep_link(&url).unwrap();
-            assert_eq!((action.action_type.as_str(), action.target.as_str()), ("go", payload.as_str()));
-        }
-        assert!(parse_deep_link("https://vectorapp.io/go#c/not-an-id").is_none());
-        assert!(parse_deep_link("https://vectorapp.io/go").is_none());
-    }
 }

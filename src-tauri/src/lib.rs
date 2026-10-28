@@ -861,6 +861,7 @@ pub fn run() {
             commands::updates::download_and_install_update,
             // Deep link commands
             deep_link::get_pending_deep_link,
+            deep_link::parse_deep_link,
             share::get_pending_share,
             // Account manager commands
             account_manager::get_current_account,

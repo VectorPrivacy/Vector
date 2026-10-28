@@ -341,6 +341,7 @@
     "allow-refresh-profile-now",
     "allow-sync-all-profiles",
     "allow-get-pending-deep-link",
+    "allow-parse-deep-link",
     "allow-get-pending-share",
     "allow-get-current-account",
     "allow-list-all-accounts",

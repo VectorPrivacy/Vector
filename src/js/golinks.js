@@ -134,11 +134,11 @@ async function openGoLink(link) {
         return;
     }
     if (r.kind === 'channel') {
-        await openChat(r.chatId);
+        if (!chatOnScreen(r.chatId)) await openChat(r.chatId);
         return;
     }
     const chatId = r.chatId;
-    await openChat(chatId);
+    if (!chatOnScreen(chatId)) await openChat(chatId);
     jumpToMessage(link.message);
     // Stored but never drawn: say so, not nothing. Having appeared once is success; the user is
     // free to scroll it away straight after.
