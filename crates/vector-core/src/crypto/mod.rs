@@ -9,7 +9,7 @@ pub use chachapoly::{wipe, wipe_vec};
 pub use guarded_key::GuardedKey;
 
 mod signer;
-pub use signer::GuardedSigner;
+pub use signer::{GuardedSigner, WRAPS_PER_VAULT_READ};
 
 use argon2::Argon2;
 use chachapoly::{ChaCha20Poly1305, NONCE_LEN, TAG_LEN};

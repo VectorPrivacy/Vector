@@ -80,14 +80,16 @@ impl GuardedSigner {
         Self::unwrap_batch(&[gift_wrap]).pop().unwrap_or_else(|| Err(SignerError::from("empty batch")))
     }
 
-    /// NIP-59 unwrap of many wraps under one vault read, one result per wrap in order.
+    /// NIP-59 unwrap of many wraps, one result per wrap in order: opened
+    /// [`WRAPS_PER_VAULT_READ`] at a time under one vault read each, then every seal's
+    /// signature checked in one batch.
     /// Checks what nostr's `from_gift_wrap` checks, but opens every layer before verifying
     /// any seal, so the key lives only for the NIP-44 opens and never across a signature
     /// check. Opening an unverified seal is safe: its content authenticates under ECDH with
     /// its claimed author, and nothing from it is trusted until that author's signature
     /// verifies.
     ///
-    /// A sender's conversation key is derived once per batch and wiped with the secret key.
+    /// A sender's conversation key is derived once per vault read and wiped with the secret key.
     ///
     /// No identity check against `my_public_key`: a vault key that isn't the identity can
     /// only open wraps sealed to itself, which then authenticate their sender like any
@@ -107,25 +109,10 @@ impl GuardedSigner {
             })
             .collect();
 
-        let mut senders: Vec<(PublicKey, nip44::v2::ConversationKey)> = Vec::new();
-        let any_open = checked.iter().any(Result::is_ok);
-        let open_all = |key: Result<&SecretKey, SignerError>| -> Vec<Result<(Event, String), SignerError>> {
-            wraps
-                .iter()
-                .zip(checked)
-                .map(|(wrap, check)| {
-                    check?;
-                    match &key {
-                        Ok(key) => open_layers(key, wrap, &mut senders),
-                        Err(e) => Err(SignerError::from(e.to_string())),
-                    }
-                })
-                .collect()
-        };
-        // No wrap passed its checks: each fails on its own error before the key is asked for.
-        let opened = if any_open { Self::with_secret_key(open_all) } else { open_all(Err(SignerError::from("unreachable"))) };
-        for (_, ck) in senders.iter_mut() {
-            wipe_conversation_key(ck);
+        let mut checked = checked.into_iter();
+        let mut opened: Vec<Result<(Event, String), SignerError>> = Vec::with_capacity(wraps.len());
+        for part in wraps.chunks(WRAPS_PER_VAULT_READ) {
+            opened.extend(Self::open_under_one_read(part, checked.by_ref().take(part.len()).collect()));
         }
 
         // Every seal whose id matches has its signature checked in one batch. A seal that
@@ -153,7 +140,37 @@ impl GuardedSigner {
             })
             .collect()
     }
+
+    /// Opens `wraps`' two layers under one vault read, each sender's conversation key derived
+    /// once and wiped with the secret key.
+    fn open_under_one_read(wraps: &[&Event], checked: Vec<Result<(), SignerError>>) -> Vec<Result<(Event, String), SignerError>> {
+        let mut senders: Vec<(PublicKey, nip44::v2::ConversationKey)> = Vec::new();
+        let any_open = checked.iter().any(Result::is_ok);
+        let open_all = |key: Result<&SecretKey, SignerError>| -> Vec<Result<(Event, String), SignerError>> {
+            wraps
+                .iter()
+                .zip(checked)
+                .map(|(wrap, check)| {
+                    check?;
+                    match &key {
+                        Ok(key) => open_layers(key, wrap, &mut senders),
+                        Err(e) => Err(SignerError::from(e.to_string())),
+                    }
+                })
+                .collect()
+        };
+        // No wrap passed its checks: each fails on its own error before the key is asked for.
+        let opened = if any_open { Self::with_secret_key(open_all) } else { open_all(Err(SignerError::from("unreachable"))) };
+        for (_, ck) in senders.iter_mut() {
+            wipe_conversation_key(ck);
+        }
+        opened
+    }
 }
+
+/// Wraps opened per vault read, however many a batch holds. It bounds how long the key stays
+/// materialised: two ECDHs per wrap, about 1.5 ms per read on a desktop core.
+pub const WRAPS_PER_VAULT_READ: usize = 16;
 
 /// Opens a wrap's two layers: the seal event, and the rumor's JSON (seal unverified).
 fn open_layers(
@@ -417,8 +434,9 @@ mod tests {
     fn a_batch_matches_unwrapping_one_by_one() {
         let (me, stranger) = (Keys::generate(), Keys::generate());
         let senders: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        // 40 wraps: three vault reads of WRAPS_PER_VAULT_READ, one signature batch.
         let mut gifts = Vec::new();
-        for i in 0..12 {
+        for i in 0..40 {
             let from = &senders[i % 3];
             let r = rumor(&from.public_key(), &me.public_key());
             gifts.push(match i {

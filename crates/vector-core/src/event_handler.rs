@@ -453,9 +453,11 @@ pub async fn prepare_event(
     finish_prepare(&event, unwrapped, unwrap_start.elapsed().as_nanos() as u64, my_public_key)
 }
 
-/// Wraps opened per vault read on bulk paths. It bounds how long the key stays
-/// materialised: two ECDHs per wrap, about 1.5 ms per batch on a desktop core.
-pub const UNWRAP_BATCH: usize = 16;
+/// Wraps per [`prepare_events`] call on bulk paths (syncs, catch-up). Their seal signatures
+/// are checked in one batch, so a bigger batch checks each for less; the vault still opens
+/// them [`crate::crypto::WRAPS_PER_VAULT_READ`] at a time. A chunk holds whatever has
+/// arrived, up to this many: nothing waits to fill one.
+pub const UNWRAP_BATCH: usize = 64;
 
 /// [`prepare_event`] for many events, one result per event in order. The wraps that pass
 /// dedup are opened together, under one vault read for a local key.
