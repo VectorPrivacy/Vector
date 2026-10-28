@@ -100,10 +100,9 @@ impl GuardedSigner {
                     return Err(SignerError::from("not a gift wrap"));
                 }
                 // A wrap's signature is a throwaway key's and proves nothing (NIP-59); the seal's
-                // does. Its id must still match its fields: dedup and the ledger key on it.
-                if !wrap.verify_id() {
-                    return Err(SignerError::from("gift wrap id does not match its content"));
-                }
+                // does. Its id, which dedup and the ledger key on, was checked on arrival: the
+                // nostr-sdk fork verifies the id of every event a relay sends, and every wrap
+                // reaches here that way (syncs, catch-up, the live intake, the Android service).
                 Ok(())
             })
             .collect();
@@ -383,7 +382,6 @@ mod tests {
         let good_seal = seal(&sender, &good_rumor, &me.public_key());
 
         let cases: Vec<(&str, Event)> = vec![
-            ("wrap id does not match its fields", retime(wrap(&good_seal, &me.public_key()))),
             // Decrypts cleanly: only the signature check can refuse it.
             ("forged seal signature", wrap(&flip_sig(good_seal.clone()), &me.public_key())),
             ("rumor author is not the seal author",
@@ -399,14 +397,20 @@ mod tests {
         }
     }
 
+    /// The wrap's id and signature belong to the relay layer: the nostr-sdk fork checks every
+    /// arriving event's id (its `verify_and_cache` test refuses a retimed wrap), and a wrap's
+    /// signature proves nothing. The unwrap checks neither; the seal carries the sender.
     #[test]
-    fn a_wrap_is_checked_for_its_id_but_not_its_signature() {
+    fn a_wrap_is_checked_for_neither_its_id_nor_its_signature() {
         let (me, sender) = (Keys::generate(), Keys::generate());
         let good = wrap(&seal(&sender, &rumor(&sender.public_key(), &me.public_key()), &me.public_key()), &me.public_key());
         let forged_sig = flip_sig(good.clone());
-        assert!(forged_sig.verify().is_err() && forged_sig.verify_id());
-        assert!(with_me(&me, || GuardedSigner::unwrap_gift_wrap(&forged_sig)).is_ok());
-        assert!(with_me(&me, || GuardedSigner::unwrap_gift_wrap(&retime(good))).is_err());
+        let retimed = retime(good.clone());
+        assert!(forged_sig.verify().is_err() && !retimed.verify_id());
+        let opened = with_me(&me, || GuardedSigner::unwrap_gift_wrap(&good)).unwrap();
+        for odd in [&forged_sig, &retimed] {
+            assert_eq!(with_me(&me, || GuardedSigner::unwrap_gift_wrap(odd)).unwrap(), opened);
+        }
     }
 
     #[test]
@@ -420,7 +424,6 @@ mod tests {
             gifts.push(match i {
                 4 => wrap(&flip_sig(seal(from, &r, &me.public_key())), &me.public_key()),
                 7 => wrap(&seal(from, &r, &stranger.public_key()), &me.public_key()),
-                9 => retime(wrap(&seal(from, &r, &me.public_key()), &me.public_key())),
                 10 => seal(from, &r, &me.public_key()),
                 _ => wrap(&seal(from, &r, &me.public_key()), &me.public_key()),
             });
@@ -439,7 +442,7 @@ mod tests {
                     assert_eq!(*b, UnwrappedGift::from_gift_wrap(&me, gift).unwrap(), "wrap {i}");
                     assert_eq!(b.sender, senders[i % 3].public_key());
                 }
-                (Err(_), Err(_)) => assert!([4, 7, 9, 10].contains(&i), "wrap {i} refused"),
+                (Err(_), Err(_)) => assert!([4, 7, 10].contains(&i), "wrap {i} refused"),
                 _ => panic!("wrap {i}: batch and single disagree"),
             }
         }
