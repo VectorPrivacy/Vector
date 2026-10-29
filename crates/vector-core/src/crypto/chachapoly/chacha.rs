@@ -5,8 +5,8 @@
 
 use zeroize::Zeroize;
 
-/// Largest batch any backend produces (AVX2: 8 blocks).
-pub(super) const MAX_BLOCKS: usize = 8;
+/// Largest batch any backend produces (aarch64: eight NEON blocks and two on the integer units).
+pub(super) const MAX_BLOCKS: usize = 10;
 pub(super) const BUF: usize = MAX_BLOCKS * 64;
 
 const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
@@ -36,6 +36,16 @@ trait Lanes: Copy {
     unsafe fn rotl7(a: Self) -> Self;
     /// Write the N blocks contiguously to `out[..64 * N]`.
     unsafe fn store(x: &[Self; 16], out: &mut [u8]);
+    /// XOR the N blocks into `data[..64 * N]`.
+    #[inline(always)]
+    unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
+        let mut ks = [0u8; BUF];
+        Self::store(x, &mut ks);
+        for (d, k) in data.iter_mut().zip(&ks) {
+            *d ^= *k;
+        }
+        super::wipe(&mut ks);
+    }
 }
 
 #[inline(always)]
@@ -52,6 +62,17 @@ unsafe fn quarter<V: Lanes>(x: &mut [V; 16], a: usize, b: usize, c: usize, d: us
 
 #[inline(always)]
 unsafe fn blocks<V: Lanes>(st: &State, counter: u32, out: &mut [u8]) {
+    V::store(&words::<V>(st, counter), out);
+}
+
+/// [`blocks`], XORed into `data` as they leave the registers.
+#[inline(always)]
+unsafe fn blocks_xor<V: Lanes>(st: &State, counter: u32, data: &mut [u8]) {
+    V::store_xor(&words::<V>(st, counter), data);
+}
+
+#[inline(always)]
+unsafe fn words<V: Lanes>(st: &State, counter: u32) -> [V; 16] {
     let init: [V; 16] = [
         V::splat(SIGMA[0]), V::splat(SIGMA[1]), V::splat(SIGMA[2]), V::splat(SIGMA[3]),
         V::splat(st.key[0]), V::splat(st.key[1]), V::splat(st.key[2]), V::splat(st.key[3]),
@@ -72,7 +93,7 @@ unsafe fn blocks<V: Lanes>(st: &State, counter: u32, out: &mut [u8]) {
     for i in 0..16 {
         x[i] = V::add(x[i], init[i]);
     }
-    V::store(&x, out);
+    x
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +343,12 @@ mod x86 {
 // aarch64 — NEON is baseline, no runtime detection
 // ---------------------------------------------------------------------------
 
+/// Ten blocks XORed into `data` straight from the registers (aarch64).
+#[cfg(target_arch = "aarch64")]
+pub(super) fn xor10(st: &State, ctr: u32, data: &mut [u8; 640]) {
+    arm::xor10(st, ctr, data)
+}
+
 #[cfg(target_arch = "aarch64")]
 mod arm {
     use super::Lanes;
@@ -367,6 +394,23 @@ mod arm {
                 }
             }
         }
+        #[inline(always)]
+        unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
+            assert!(data.len() >= 256);
+            let p = data.as_mut_ptr();
+            for g in 0..4 {
+                let (a, b, c, d) = (x[4 * g].0, x[4 * g + 1].0, x[4 * g + 2].0, x[4 * g + 3].0);
+                let t0 = vreinterpretq_u64_u32(vzip1q_u32(a, b));
+                let t1 = vreinterpretq_u64_u32(vzip1q_u32(c, d));
+                let t2 = vreinterpretq_u64_u32(vzip2q_u32(a, b));
+                let t3 = vreinterpretq_u64_u32(vzip2q_u32(c, d));
+                let r = [vzip1q_u64(t0, t1), vzip2q_u64(t0, t1), vzip1q_u64(t2, t3), vzip2q_u64(t2, t3)];
+                for (j, v) in r.iter().enumerate() {
+                    let at = p.add(64 * j + 16 * g);
+                    vst1q_u8(at, veorq_u8(vld1q_u8(at), vreinterpretq_u8_u64(*v)));
+                }
+            }
+        }
     }
 
     /// Four NEON blocks and two integer-unit blocks in one instruction stream, so the
@@ -391,6 +435,80 @@ mod arm {
             Neon::store(&x.map(|h| h.0), &mut out[..256]);
             super::Pair::store(&x.map(|h| h.1), &mut out[256..384]);
         }
+        #[inline(always)]
+        unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
+            Neon::store_xor(&x.map(|h| h.0), &mut data[..256]);
+            super::Pair::store_xor(&x.map(|h| h.1), &mut data[256..384]);
+        }
+    }
+
+    /// Two NEON groups of four: eight independent chains, enough to keep every vector pipe
+    /// busy where one group of four waits on its own latency.
+    #[derive(Clone, Copy)]
+    pub(super) struct Neon8(Neon, Neon);
+
+    impl Lanes for Neon8 {
+        #[inline(always)] unsafe fn splat(x: u32) -> Self { Neon8(Neon::splat(x), Neon::splat(x)) }
+        #[inline(always)] unsafe fn counters(b: u32) -> Self { Neon8(Neon::counters(b), Neon::counters(b.wrapping_add(4))) }
+        #[inline(always)] unsafe fn add(a: Self, b: Self) -> Self { Neon8(Neon::add(a.0, b.0), Neon::add(a.1, b.1)) }
+        #[inline(always)] unsafe fn xor(a: Self, b: Self) -> Self { Neon8(Neon::xor(a.0, b.0), Neon::xor(a.1, b.1)) }
+        #[inline(always)] unsafe fn rotl16(a: Self) -> Self { Neon8(Neon::rotl16(a.0), Neon::rotl16(a.1)) }
+        #[inline(always)] unsafe fn rotl12(a: Self) -> Self { Neon8(Neon::rotl12(a.0), Neon::rotl12(a.1)) }
+        #[inline(always)] unsafe fn rotl8(a: Self) -> Self { Neon8(Neon::rotl8(a.0), Neon::rotl8(a.1)) }
+        #[inline(always)] unsafe fn rotl7(a: Self) -> Self { Neon8(Neon::rotl7(a.0), Neon::rotl7(a.1)) }
+        #[inline(always)]
+        unsafe fn store(x: &[Self; 16], out: &mut [u8]) {
+            debug_assert!(out.len() >= 512);
+            Neon::store(&x.map(|h| h.0), &mut out[..256]);
+            Neon::store(&x.map(|h| h.1), &mut out[256..512]);
+        }
+        #[inline(always)]
+        unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
+            Neon::store_xor(&x.map(|h| h.0), &mut data[..256]);
+            Neon::store_xor(&x.map(|h| h.1), &mut data[256..512]);
+        }
+    }
+
+    /// [`Neon8`] and a [`super::Pair`] on the integer units: ten blocks.
+    #[derive(Clone, Copy)]
+    pub(super) struct Hybrid10(Neon8, super::Pair);
+
+    impl Lanes for Hybrid10 {
+        #[inline(always)] unsafe fn splat(x: u32) -> Self { Hybrid10(Neon8::splat(x), super::Pair::splat(x)) }
+        #[inline(always)] unsafe fn counters(b: u32) -> Self { Hybrid10(Neon8::counters(b), super::Pair::counters(b.wrapping_add(8))) }
+        #[inline(always)] unsafe fn add(a: Self, b: Self) -> Self { Hybrid10(Neon8::add(a.0, b.0), super::Pair::add(a.1, b.1)) }
+        #[inline(always)] unsafe fn xor(a: Self, b: Self) -> Self { Hybrid10(Neon8::xor(a.0, b.0), super::Pair::xor(a.1, b.1)) }
+        #[inline(always)] unsafe fn rotl16(a: Self) -> Self { Hybrid10(Neon8::rotl16(a.0), super::Pair::rotl16(a.1)) }
+        #[inline(always)] unsafe fn rotl12(a: Self) -> Self { Hybrid10(Neon8::rotl12(a.0), super::Pair::rotl12(a.1)) }
+        #[inline(always)] unsafe fn rotl8(a: Self) -> Self { Hybrid10(Neon8::rotl8(a.0), super::Pair::rotl8(a.1)) }
+        #[inline(always)] unsafe fn rotl7(a: Self) -> Self { Hybrid10(Neon8::rotl7(a.0), super::Pair::rotl7(a.1)) }
+        #[inline(always)]
+        unsafe fn store(x: &[Self; 16], out: &mut [u8]) {
+            debug_assert!(out.len() >= 640);
+            Neon8::store(&x.map(|h| h.0), &mut out[..512]);
+            super::Pair::store(&x.map(|h| h.1), &mut out[512..640]);
+        }
+        #[inline(always)]
+        unsafe fn store_xor(x: &[Self; 16], data: &mut [u8]) {
+            Neon8::store_xor(&x.map(|h| h.0), &mut data[..512]);
+            super::Pair::store_xor(&x.map(|h| h.1), &mut data[512..640]);
+        }
+    }
+
+    pub(super) fn neon8(st: &super::State, ctr: u32, out: &mut [u8]) {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { super::blocks::<Neon8>(st, ctr, out) }
+    }
+
+    pub(super) fn hybrid10(st: &super::State, ctr: u32, out: &mut [u8]) {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { super::blocks::<Hybrid10>(st, ctr, out) }
+    }
+
+    /// Ten blocks XORed into `data` straight from the registers: the bulk of a long message.
+    pub(super) fn xor10(st: &super::State, ctr: u32, data: &mut [u8; 640]) {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { super::blocks_xor::<Hybrid10>(st, ctr, data) }
     }
 
     pub(super) fn neon(st: &super::State, ctr: u32, out: &mut [u8]) {
@@ -429,6 +547,10 @@ pub(super) enum Backend {
     Scalar2,
     #[cfg(target_arch = "aarch64")]
     Neon6,
+    #[cfg(target_arch = "aarch64")]
+    Neon8,
+    #[cfg(target_arch = "aarch64")]
+    Neon10,
 }
 
 
@@ -487,15 +609,19 @@ impl Backend {
             }
             // Per pass, by blocks still wanted, from an M4 Max sweep (`crypto_bench sweep`):
             // one block alone, two interleaved on the integer units (1.4x over a NEON
-            // pass), three or four in one NEON pass, five and up in the 4+2 hybrid
-            // (1.25-1.45x). Cortex cores may place these differently.
+            // pass), three or four in one NEON pass, five or six in the 4+2 hybrid
+            // (1.25-1.45x), seven or eight in two NEON groups, and past that two NEON
+            // groups and a scalar pair, which alone keep every pipe busy (3 GB/s against
+            // 2.4). Cortex cores may place these differently.
             #[cfg(target_arch = "aarch64")]
             Backend::Neon => {
                 let pick = match want {
                     0 | 1 => Backend::Portable,
                     2 => Backend::Scalar2,
                     3 | 4 => Backend::Neon4,
-                    _ => Backend::Neon6,
+                    5 | 6 => Backend::Neon6,
+                    7 | 8 => Backend::Neon8,
+                    _ => Backend::Neon10,
                 };
                 pick.keystream(st, counter, want, out)
             }
@@ -513,6 +639,16 @@ impl Backend {
             Backend::Neon6 => {
                 arm::hybrid(st, counter, out);
                 6
+            }
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon8 => {
+                arm::neon8(st, counter, out);
+                8
+            }
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon10 => {
+                arm::hybrid10(st, counter, out);
+                10
             }
         }
     }
@@ -538,6 +674,8 @@ impl Backend {
             ("neon4", Backend::Neon4),
             ("scalar2", Backend::Scalar2),
             ("neon6", Backend::Neon6),
+            ("neon8", Backend::Neon8),
+            ("neon10", Backend::Neon10),
         ]);
         v
     }

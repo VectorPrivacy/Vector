@@ -195,19 +195,21 @@ fn open_layers(
     Ok((seal, rumor))
 }
 
-/// nostr's own bound on an encoded v2 payload, checked before decoding allocates.
-const NIP44_MAX_ENCODED: usize = 87_472;
-
-/// `nip44::decrypt` with the conversation key already derived.
+/// `nip44::decrypt` with the conversation key already derived, to the same encoded bound.
 fn nip44_open(ck: &nip44::v2::ConversationKey, payload: &str) -> Result<String, SignerError> {
-    if payload.len() > NIP44_MAX_ENCODED {
+    nip44_open_within(ck, payload, usize::try_from(super::nip44::MAX_ENCODED_PAYLOAD_SIZE).unwrap_or(usize::MAX))
+}
+
+/// [`nip44_open`] taking encoded payloads up to `max_encoded` bytes.
+fn nip44_open_within(ck: &nip44::v2::ConversationKey, payload: &str, max_encoded: usize) -> Result<String, SignerError> {
+    if payload.len() > max_encoded {
         return Err(SignerError::from("nip44 payload too long"));
     }
     let bytes = crate::simd::base64::STANDARD.decode_to_vec(payload.as_bytes()).map_err(SignerError::backend)?;
     if bytes.first() != Some(&nip44::Version::V2.as_u8()) {
         return Err(SignerError::from("unsupported nip44 version"));
     }
-    let plain = nip44::v2::decrypt_to_bytes(ck, &bytes).map_err(SignerError::backend)?;
+    let plain = super::nip44::decrypt(ck, bytes).map_err(SignerError::backend)?;
     String::from_utf8(plain).map_err(SignerError::backend)
 }
 
@@ -254,12 +256,24 @@ impl Nip44 for GuardedSigner {
 
     fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String, Self::Error> {
         self.with_keys(|keys| {
-            nip44::encrypt(keys.secret_key(), public_key, content, nip44::Version::default()).map_err(SignerError::backend)
+            let mut ck = nip44::v2::ConversationKey::derive(keys.secret_key(), public_key).map_err(SignerError::backend)?;
+            let mut nonce = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+            let sealed = super::nip44::encrypt_with_nonce(&ck, content.as_bytes(), nonce);
+            wipe_conversation_key(&mut ck);
+            Ok(crate::simd::base64::STANDARD.encode_to_string(&sealed.map_err(SignerError::backend)?))
         })
     }
 
     fn nip44_decrypt(&self, public_key: &PublicKey, payload: &str) -> Result<String, Self::Error> {
-        Self::with_secret_key(|key| nip44::decrypt(key?, public_key, payload).map_err(SignerError::backend))
+        Self::with_secret_key(|key| {
+            let mut ck = nip44::v2::ConversationKey::derive(key?, public_key).map_err(SignerError::backend)?;
+            // nostr's own bound: this is its `nip44::decrypt`, which takes extended-length payloads.
+            let max = usize::try_from(super::nip44::MAX_ENCODED_PAYLOAD_SIZE).unwrap_or(usize::MAX);
+            let opened = nip44_open_within(&ck, payload, max);
+            wipe_conversation_key(&mut ck);
+            opened
+        })
     }
 }
 
@@ -477,6 +491,23 @@ mod tests {
     }
 
     #[test]
+    fn the_signers_nip44_round_trips_with_rust_nostr() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (me, them) = (Keys::generate(), Keys::generate());
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        let signer = GuardedSigner::new(me.public_key());
+        for len in [1usize, 32, 33, 500, 70_000] {
+            let text = "x".repeat(len);
+            let ours = signer.nip44_encrypt(&them.public_key(), &text).unwrap();
+            assert_eq!(nip44::decrypt(them.secret_key(), &me.public_key(), &ours).unwrap(), text);
+            let theirs = nip44::encrypt(them.secret_key(), &me.public_key(), &text, nip44::Version::V2).unwrap();
+            assert_eq!(signer.nip44_decrypt(&them.public_key(), &theirs).unwrap(), text);
+        }
+        assert!(signer.nip44_encrypt(&them.public_key(), "").is_err(), "nothing to seal, as nostr refuses it");
+        crate::state::MY_SECRET_KEY.clear(&[]);
+    }
+
+    #[test]
     fn nip44_open_accepts_and_refuses_exactly_what_nostr_does() {
         let (a, b) = (Keys::generate(), Keys::generate());
         let ck = nip44::v2::ConversationKey::derive(b.secret_key(), &a.public_key()).unwrap();
@@ -486,7 +517,8 @@ mod tests {
             assert_eq!(ours, theirs, "payload {p:?}");
         };
         let mut seed = 0x2545_f491_4f6c_dd1du64;
-        for len in [1usize, 2, 31, 32, 33, 100, 255, 256, 257, 1000, 5000, 65_000] {
+        // Past 65,535 bytes the extended length prefix, which nostr reads too.
+        for len in [1usize, 2, 31, 32, 33, 100, 255, 256, 257, 1000, 5000, 65_000, 65_535, 65_536, 100_000] {
             let text: String = (0..len).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
             let p = nip44::encrypt(a.secret_key(), &b.public_key(), &text, nip44::Version::V2).unwrap();
             same(&p);
@@ -513,7 +545,7 @@ mod tests {
         }
         same("");
         same("Ag==");
-        same(&"A".repeat(NIP44_MAX_ENCODED + 4));
+        same(&format!("Ag{}", "A".repeat(140_000)));
     }
 
     #[test]

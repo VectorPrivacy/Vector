@@ -426,7 +426,7 @@ pub fn read_pin_list(
     let Ok(raw) = crate::simd::base64::STANDARD.decode_to_vec(sealed.as_bytes()) else {
         return EMPTY();
     };
-    let Ok(inner) = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv_key, &raw) else {
+    let Ok(inner) = crate::crypto::nip44::decrypt(&conv_key, raw) else {
         return EMPTY();
     };
     let Ok(inner) = serde_json::from_slice::<serde_json::Value>(&inner) else {

@@ -57,3 +57,81 @@ pub fn gift_wrap_layers() {
     println!("{:<8}{seal_nostr:>14.0}{seal_ours:>14.0}{:>8.1}x", "seal", seal_nostr / seal_ours);
     println!("{:<8}{rumor_nostr:>14.0}{rumor_ours:>14.0}{:>8.1}x", "rumor", rumor_nostr / rumor_ours);
 }
+
+/// Raw ChaCha20 as NIP-44 runs it: the `chacha20` crate against Vector's own keystream.
+pub fn chacha20_raw() {
+    use chacha20::cipher::{KeyIvInit, StreamCipher};
+    let (key, nonce) = ([7u8; 32], [9u8; 12]);
+    for size in [256usize, 512, 1024, 2048, 4096, 16384, 65536] {
+        let mut buf = vec![0u8; size];
+        let iters = (32 * 1024 * 1024 / size).max(1000);
+        let (mut theirs, mut ours) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for _ in 0..iters {
+                let mut c = chacha20::ChaCha20::new(&key.into(), &nonce.into());
+                c.apply_keystream(std::hint::black_box(&mut buf));
+            }
+            theirs = theirs.min(t.elapsed().as_nanos() as f64 / iters as f64);
+            let t = std::time::Instant::now();
+            for _ in 0..iters {
+                vector_core::crypto::chachapoly::chacha20_xor(&key, &nonce, 0, std::hint::black_box(&mut buf));
+            }
+            ours = ours.min(t.elapsed().as_nanos() as f64 / iters as f64);
+        }
+        println!("{size:>6} B   chacha20 0.9 {theirs:>8.0} ns ({:.2} GB/s)   ours {ours:>8.0} ns ({:.2} GB/s)   {:.2}x", size as f64 / theirs, size as f64 / ours, theirs / ours);
+    }
+}
+
+/// One NIP-44 v2 decrypt: rust-nostr's against Vector's, at a rumor's, a seal's and a page's size.
+pub fn nip44_decrypt() {
+    use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes_with_nonce, ConversationKey};
+    let ck = ConversationKey::new([5u8; 32]);
+    for size in [487usize, 1124, 4096, 32_768] {
+        let payload = encrypt_to_bytes_with_nonce(&ck, &vec![0x61u8; size], [3u8; 32]).unwrap();
+        let iters = (16 * 1024 * 1024 / size).max(2000);
+        let (mut theirs, mut ours) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for _ in 0..iters {
+                std::hint::black_box(decrypt_to_bytes(&ck, std::hint::black_box(&payload)).unwrap());
+            }
+            theirs = theirs.min(t.elapsed().as_nanos() as f64 / iters as f64);
+            let t = std::time::Instant::now();
+            for _ in 0..iters {
+                std::hint::black_box(vector_core::crypto::nip44::decrypt(&ck, std::hint::black_box(payload.clone())).unwrap());
+            }
+            ours = ours.min(t.elapsed().as_nanos() as f64 / iters as f64);
+        }
+        println!("{size:>6} B plaintext   rust-nostr {theirs:>7.0} ns   ours (incl. the payload copy) {ours:>7.0} ns   {:.2}x", theirs / ours);
+    }
+}
+
+/// Each ChaCha20 backend forced, by message size: where the crossovers sit on this CPU.
+pub fn chacha20_backends() {
+    use vector_core::crypto::chachapoly::bench as cb;
+    let (key, nonce) = ([7u8; 32], [9u8; 12]);
+    let names = cb::chacha_backends();
+    print!("{:>7}", "bytes");
+    for n in &names {
+        print!("{n:>10}");
+    }
+    println!("   (GB/s)");
+    for size in [64usize, 128, 256, 384, 512, 640, 1024, 2048, 4096, 16384, 65536] {
+        let mut buf = vec![0u8; size];
+        let iters = (32 * 1024 * 1024 / size).max(2000);
+        print!("{size:>7}");
+        for n in &names {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                for _ in 0..iters {
+                    cb::chacha20_xor_on(n, &key, &nonce, std::hint::black_box(&mut buf));
+                }
+                best = best.min(t.elapsed().as_nanos() as f64 / iters as f64);
+            }
+            print!("{:>10.2}", size as f64 / best);
+        }
+        println!();
+    }
+}

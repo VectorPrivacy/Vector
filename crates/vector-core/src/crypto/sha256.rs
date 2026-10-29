@@ -50,6 +50,32 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
     h.finalize()
 }
 
+/// HMAC-SHA256 (RFC 2104) of `parts`, concatenated, under `key`.
+pub fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    use zeroize::Zeroize as _;
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut pad = block.map(|b| b ^ 0x36);
+    let mut inner = Sha256::new();
+    inner.update(pad);
+    for part in parts {
+        inner.update(part);
+    }
+    let mut inner = inner.finalize();
+    pad = block.map(|b| b ^ 0x5c);
+    let mut outer = Sha256::new();
+    outer.update(pad);
+    outer.update(inner);
+    block.zeroize();
+    pad.zeroize();
+    inner.zeroize();
+    outer.finalize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +99,17 @@ mod tests {
                 assert_eq!(h.finalize(), want, "len {len} split {split}");
             }
         }
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        let hex = |b: &[u8; 32]| super::super::hex::encode(b);
+        // Test cases 1, 2 and 6: a short key, a short ASCII key, a key longer than a block.
+        assert_eq!(hex(&hmac(&[0x0b; 20], &[b"Hi There"])), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(hex(&hmac(b"Jefe", &[b"what do ya want ", b"for nothing?"])), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(
+            hex(&hmac(&[0xaa; 131], &[b"Test Using Larger Than Block-Size Key - Hash Key First"])),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
     }
 }

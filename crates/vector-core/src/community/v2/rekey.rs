@@ -33,7 +33,7 @@
 //! apply-path concern keyed on prior-vs-current-root addressing) sits in the
 //! service layer.
 
-use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -432,7 +432,7 @@ pub fn open_blob_local(
     let payload = crate::simd::base64::STANDARD
         .decode_to_vec(blob.wrapped.as_bytes())
         .map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let inner_b64 = Zeroizing::new(decrypt_to_bytes(&ck, &payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    let inner_b64 = Zeroizing::new(crate::crypto::nip44::decrypt(&ck, payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
     let pt = Zeroizing::new(
         crate::simd::base64::STANDARD
             .decode_to_vec(inner_b64.as_slice())
@@ -1012,7 +1012,7 @@ pub fn build_history_blob_local(deliverer: &Keys, recipient: &PublicKey, channel
 pub fn open_history_blob_local(me: &SecretKey, deliverer: &PublicKey, channel: &ChannelId, epoch: Epoch, blob: &RekeyBlob) -> Result<HistoryView, RekeyError> {
     let ck = ConversationKey::derive(me, deliverer).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     let payload = crate::simd::base64::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let inner = Zeroizing::new(decrypt_to_bytes(&ck, &payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
+    let inner = Zeroizing::new(crate::crypto::nip44::decrypt(&ck, payload).map_err(|e| RekeyError::Crypto(e.to_string()))?);
     let pt = Zeroizing::new(crate::simd::base64::STANDARD.decode_to_vec(inner.as_slice()).map_err(|e| RekeyError::Crypto(e.to_string()))?);
     parse_history_plaintext(&pt, channel, epoch)
 }
@@ -1418,7 +1418,7 @@ mod tests {
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[5u8; 32]).unwrap();
         let ck = ConversationKey::derive(recipient.secret_key(), &rotator.public_key()).unwrap();
         let payload = crate::simd::base64::STANDARD.decode_to_vec(blob.wrapped.as_bytes()).unwrap();
-        let inner = decrypt_to_bytes(&ck, &payload).unwrap();
+        let inner = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&ck, &payload).unwrap();
         assert_eq!(String::from_utf8(inner).unwrap(), bound_plaintext_b64(RekeyScope::Root, Epoch(1), &[5u8; 32]));
     }
 

@@ -24,7 +24,7 @@
 
 use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::FinalizeEvent;
-use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use super::super::{ChannelId, Epoch};
@@ -579,7 +579,7 @@ fn open_nip44(conv_key: &ConversationKey, content_b64: &str) -> Result<String, S
     let ct = crate::simd::base64::STANDARD
         .decode_to_vec(content_b64.as_bytes())
         .map_err(|e| StreamError::Decrypt(e.to_string()))?;
-    let pt = decrypt_to_bytes(conv_key, &ct).map_err(|e| StreamError::Decrypt(e.to_string()))?;
+    let pt = crate::crypto::nip44::decrypt(conv_key, ct).map_err(|e| StreamError::Decrypt(e.to_string()))?;
     String::from_utf8(pt).map_err(|e| StreamError::Parse(e.to_string()))
 }
 

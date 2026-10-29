@@ -527,7 +527,7 @@ const SEALED_PREV: &str = "prev";
 pub fn open_sealed_channel_meta(s: &SealedChannelMeta, conv_key: &[u8; 32], prev: Option<&[u8; 32]>) -> Option<ChannelMetadata> {
     let conv = ConversationKey::from_slice(conv_key).ok()?;
     let raw = crate::simd::base64::STANDARD.decode_to_vec(s.sealed.as_bytes()).ok()?;
-    let inner = nostr_sdk::prelude::nip44::v2::decrypt_to_bytes(&conv, &raw).ok()?;
+    let inner = crate::crypto::nip44::decrypt(&conv, raw).ok()?;
     let serde_json::Value::Object(mut o) = serde_json::from_slice(&inner).ok()? else { return None };
     let named = o.remove(SEALED_PREV).and_then(|v| v.as_str().and_then(crate::simd::hex::hex_to_bytes_32_checked));
     if !s.deleted && named.as_ref() != prev {

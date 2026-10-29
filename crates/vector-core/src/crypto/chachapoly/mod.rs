@@ -158,6 +158,40 @@ impl ChaCha20Poly1305 {
     }
 }
 
+/// Raw ChaCha20 (RFC 8439, 96-bit nonce): XOR `buf` with the keystream from block `counter`
+/// on. NIP-44's cipher; the AEAD above starts its data at block 1.
+pub fn chacha20_xor(key: &[u8; KEY_LEN], nonce: &[u8; NONCE_LEN], counter: u32, buf: &mut [u8]) {
+    xor_with(&ChaCha20Poly1305::new(key), nonce, counter, buf)
+}
+
+fn xor_with(cipher: &ChaCha20Poly1305, nonce: &[u8; NONCE_LEN], counter: u32, buf: &mut [u8]) {
+    let st = cipher.state(nonce);
+    let (mut counter, mut rest) = (counter, buf);
+    // The bulk XORed from the registers ten blocks at a time; the rest, and the partial block
+    // a NIP-44 length prefix leaves, in one buffered pass sized to what remains.
+    #[cfg(target_arch = "aarch64")]
+    if cipher.backend == Backend::Neon {
+        while rest.len() >= 640 {
+            let (now, later) = rest.split_at_mut(640);
+            chacha::xor10(&st, counter, now.try_into().expect("640 bytes"));
+            rest = later;
+            counter = counter.wrapping_add(10);
+        }
+    }
+    let mut ks = [0u8; BUF];
+    let mut used = 0;
+    while !rest.is_empty() {
+        let n = cipher.backend.keystream(&st, counter, rest.len().div_ceil(64), &mut ks);
+        used = used.max(64 * n);
+        let take = (64 * n).min(rest.len());
+        let (now, later) = rest.split_at_mut(take);
+        xor(now, &ks[..take]);
+        rest = later;
+        counter = counter.wrapping_add(n as u32);
+    }
+    wipe(&mut ks[..used]);
+}
+
 #[inline]
 fn finish(mut mac: Poly1305, aad_len: usize, ct_len: usize) -> [u8; TAG_LEN] {
     let mut lens = [0u8; 16];
@@ -235,6 +269,15 @@ pub mod bench {
     pub fn default_chacha_backend() -> &'static str {
         let chosen = Backend::detect();
         Backend::available().into_iter().find(|(_, b)| *b == chosen).map_or("portable", |(n, _)| n)
+    }
+
+    /// [`super::chacha20_xor`] on the named backend, or false if this CPU can't run it.
+    pub fn chacha20_xor_on(chacha: &str, key: &[u8; 32], nonce: &[u8; 12], buf: &mut [u8]) -> bool {
+        let Some((_, backend)) = Backend::available().into_iter().find(|(n, _)| *n == chacha) else { return false };
+        let mut c = ChaCha20Poly1305::new(key);
+        c.backend = backend;
+        super::xor_with(&c, nonce, 0, buf);
+        true
     }
 
     /// Whether this CPU has the Poly1305 lanes.

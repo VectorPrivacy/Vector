@@ -1,6 +1,6 @@
 //! Raw-key NIP-44 v2 sealing with a nonce no call site can choose.
 
-use nostr_sdk::prelude::nip44::v2::{encrypt_to_bytes_with_nonce, ConversationKey};
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use rand::RngCore;
 
 /// NIP-44 v2 encrypt with a freshly generated nonce.
@@ -15,7 +15,7 @@ pub fn encrypt_with_random_nonce(
 ) -> Result<Vec<u8>, String> {
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    encrypt_to_bytes_with_nonce(ck, plaintext, nonce).map_err(|e| e.to_string())
+    crate::crypto::nip44::encrypt_with_nonce(ck, plaintext, nonce).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

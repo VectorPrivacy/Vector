@@ -228,3 +228,23 @@ fn two_block_scalar_matches_single_blocks() {
         assert_eq!(&pair[..], &single[..128], "counter {counter}");
     }
 }
+
+#[test]
+fn raw_chacha20_matches_the_chacha20_crate_at_every_length_and_counter() {
+    use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+    let key = [0x42u8; 32];
+    let nonce = [0x24u8; 12];
+    let lengths = (0..=1500).chain([1919, 2048, 2559, 2560, 4096, 6399, 6400, 6401, 65_536, 100_003]);
+    for len in lengths {
+        for counter in [0u32, 1, 7] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 + len) as u8).collect();
+            let mut ours = data.clone();
+            super::chacha20_xor(&key, &nonce, counter, &mut ours);
+            let mut theirs = data;
+            let mut c = chacha20::ChaCha20::new(&key.into(), &nonce.into());
+            c.seek(counter as u64 * 64);
+            c.apply_keystream(&mut theirs);
+            assert!(ours == theirs, "len {len} counter {counter}");
+        }
+    }
+}

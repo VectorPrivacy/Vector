@@ -1,5 +1,6 @@
 pub mod batch_verify;
 pub mod chachapoly;
+pub mod nip44;
 pub mod gate;
 pub mod gcm;
 pub mod guarded_key;

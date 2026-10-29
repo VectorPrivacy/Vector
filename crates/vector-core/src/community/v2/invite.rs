@@ -23,7 +23,7 @@ use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::FinalizeEvent;
 use nostr_sdk::prelude::nip44::{
     self,
-    v2::{decrypt_to_bytes, ConversationKey},
+    v2::ConversationKey,
 };
 use nostr_sdk::prelude::{
     Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
@@ -893,7 +893,7 @@ fn open_bundle(bundle_key: &[u8; 32], content: &str) -> Result<String, InviteErr
     let ct = crate::simd::base64::STANDARD
         .decode_to_vec(content.as_bytes())
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let pt = decrypt_to_bytes(&ck, &ct).map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let pt = crate::crypto::nip44::decrypt(&ck, ct).map_err(|e| InviteError::Crypto(e.to_string()))?;
     String::from_utf8(pt).map_err(|e| InviteError::Crypto(e.to_string()))
 }
 

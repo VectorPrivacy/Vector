@@ -19,7 +19,6 @@
 //! (`vector-community/v1/edition`, `community::version::EDITION_LABEL`), which
 //! upstream froze verbatim.
 
-use hkdf::Hkdf;
 use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
@@ -82,10 +81,10 @@ fn build_info(label: &str, id32: &[u8; 32], epoch: Option<u64>) -> Vec<u8> {
 /// a 32-zero-byte salt under HMAC-SHA256). `ikm` length varies by caller: 32
 /// for keys/ids, 64 for the recipient-locator pair, 16 for an invite token.
 fn hkdf32(ikm: &[u8], info: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm)
-        .expect("HKDF expand of 32 bytes is infallible");
+    // L = 32 is one expand block: T(1) = HMAC(PRK, info || 0x01).
+    let mut prk = crate::crypto::sha256::hmac(&[0u8; 32], &[ikm]);
+    let okm = crate::crypto::sha256::hmac(&prk, &[info, &[1]]);
+    zeroize::Zeroize::zeroize(&mut prk);
     okm
 }
 
@@ -487,7 +486,20 @@ mod tests {
     }
 
     #[test]
-    fn a_full_group_key_memo_starts_over_in_a_small_table() {
+    fn hkdf32_matches_the_hkdf_crate_for_every_input_shape() {
+        for ikm_len in [0usize, 16, 32, 64, 65, 200] {
+            let ikm: Vec<u8> = (0..ikm_len).map(|i| (i * 7 + 3) as u8).collect();
+            for info_len in [0usize, 1, 33, 41, 63, 64, 120] {
+                let info: Vec<u8> = (0..info_len).map(|i| (i * 13 + 5) as u8).collect();
+                let mut want = [0u8; 32];
+                hkdf::Hkdf::<Sha256>::new(None, &ikm).expand(&info, &mut want).unwrap();
+                assert_eq!(hkdf32(&ikm, &info), want, "ikm {ikm_len} info {info_len}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_group_key_memo_ages_a_generation_and_keeps_what_is_used() {
         let value = guestbook_group_key(&[7; 32], &CommunityId([8; 32]), Epoch(0));
         let mut map = std::collections::HashMap::new();
         for i in 0..GROUP_KEY_MEMO_CAP as u32 {
