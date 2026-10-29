@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 123;
+pub const HIGHEST_MIGRATION_ID: u32 = 124;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1722,6 +1722,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS idx_events_writer_post ON events(chat_id, npub) WHERE instr(tags, '[\"writer\"]') > 0;",
         )
         .map_err(|e| format!("migration 123: {e}"))?;
+        Ok(())
+    })?;
+
+    // The gift wraps that delivered a parked invite, space-separated hex ids: a decline asks
+    // our relays to delete each, as the `p`-tagged recipient.
+    run_atomic_migration(conn, 124, "Pending invite wrap ids", |tx| {
+        tx.execute("ALTER TABLE pending_community_invites ADD COLUMN wrap_ids TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| format!("migration 124: {e}"))?;
         Ok(())
     })?;
 

@@ -825,6 +825,36 @@ pub fn save_pending_invite(
     Ok(changed > 0)
 }
 
+/// Record a gift wrap that delivered `community_id`'s parked invite. A sender re-wrapping one
+/// invite without end adds nothing past the cap.
+pub fn note_pending_invite_wrap(community_id: &str, wrap_hex: &str) -> Result<(), String> {
+    const MAX_WRAPS: usize = 16;
+    let conn = super::get_write_connection_guard_static()?;
+    let held: Option<String> = conn
+        .query_row("SELECT wrap_ids FROM pending_community_invites WHERE community_id = ?1", params![community_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read invite wraps: {e}"))?;
+    let Some(held) = held else { return Ok(()) };
+    let mut ids: Vec<&str> = held.split_whitespace().collect();
+    if ids.contains(&wrap_hex) || ids.len() >= MAX_WRAPS {
+        return Ok(());
+    }
+    ids.push(wrap_hex);
+    conn.execute("UPDATE pending_community_invites SET wrap_ids = ?2 WHERE community_id = ?1", params![community_id, ids.join(" ")])
+        .map_err(|e| format!("note invite wrap: {e}"))?;
+    Ok(())
+}
+
+/// The gift wraps recorded for a parked invite.
+pub fn pending_invite_wraps(community_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let held: Option<String> = conn
+        .query_row("SELECT wrap_ids FROM pending_community_invites WHERE community_id = ?1", params![community_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read invite wraps: {e}"))?;
+    Ok(held.map(|s| s.split_whitespace().map(String::from).collect()).unwrap_or_default())
+}
+
 /// Drop every parked invite for a community we ALREADY hold — once joined on any device, the
 /// invite must never resurface. Ordering-independent: covers the cross-device case where the
 /// historical gift-wrapped invites are ingested BEFORE the synced membership list rehydrates
@@ -4431,6 +4461,25 @@ mod tests {
         assert_eq!(n, 1, "only the held community's invite is purged");
         assert!(!pending_invite_exists(&held_hex).unwrap(), "held → invite gone");
         assert!(pending_invite_exists(&stranger).unwrap(), "unknown community → invite kept");
+    }
+
+    #[test]
+    fn an_invites_wraps_are_kept_once_each_up_to_a_cap_and_go_with_it() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "ef".repeat(32);
+        note_pending_invite_wrap(&cid, &"01".repeat(32)).unwrap();
+        assert!(pending_invite_wraps(&cid).unwrap().is_empty(), "no parked invite, nothing kept");
+        save_pending_invite(&cid, "{}", "npub1x", 0).unwrap();
+        for n in [1u8, 2, 1] {
+            note_pending_invite_wrap(&cid, &format!("{n:02x}").repeat(32)).unwrap();
+        }
+        assert_eq!(pending_invite_wraps(&cid).unwrap(), ["01".repeat(32), "02".repeat(32)]);
+        for n in 3u8..40 {
+            note_pending_invite_wrap(&cid, &format!("{n:02x}").repeat(32)).unwrap();
+        }
+        assert_eq!(pending_invite_wraps(&cid).unwrap().len(), 16);
+        delete_pending_invite(&cid).unwrap();
+        assert!(pending_invite_wraps(&cid).unwrap().is_empty());
     }
 
     #[test]

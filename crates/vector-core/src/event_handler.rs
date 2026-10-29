@@ -1143,7 +1143,9 @@ pub async fn commit_prepared_event(
                 park_catch_up_channel_keys(&community_id, &bundle_json, &inviter);
                 return false;
             }
+            let wrap_hex = crate::simd::hex::bytes_to_hex_32(&wrapper_event_id_bytes);
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
+                let _ = crate::db::community::note_pending_invite_wrap(&community_id, &wrap_hex);
                 return false;
             }
             // From someone we blocked: declined on arrival, never shown or announced.
@@ -1155,12 +1157,17 @@ pub async fn commit_prepared_event(
             // Supersession: a decline/leave tombstone suppresses a re-wrapped invite no newer
             // than the decision, so a declined/left community can't be re-nagged by a fresh
             // ephemeral wrap. Ordered on the inner rumor time, not the NIP-59-backdated wrapper.
+            // Its copy on our relays goes too, as the decision's own invite did.
             if crate::community::v2::service::tombstone_suppresses(&community_id, rumor_created_at) {
+                crate::deletion::delete_received_wrap(EventId::from_byte_array(wrapper_event_id_bytes));
                 return false;
             }
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.
             match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter, expires_at as i64) {
-                Ok(true) => handler.on_community_invite(&community_id),
+                Ok(true) => {
+                    let _ = crate::db::community::note_pending_invite_wrap(&community_id, &wrap_hex);
+                    handler.on_community_invite(&community_id)
+                }
                 Ok(false) => {} // raced — already parked
                 Err(e) => log_warn!("[community] v2 invite park failed: {}", e),
             }
@@ -1732,5 +1739,62 @@ mod wrapper_dedup_tests {
         assert!(matches!(dedup_skip(&legacy).await, Some(PreparedEvent::DedupSkip { .. })));
         assert!(dedup_skip(&wrap()).await.is_none(), "an unseen wrap still processes");
         crate::db::close_database();
+    }
+}
+
+#[cfg(test)]
+mod invite_wrap_tests {
+    use super::*;
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn invite(community_id: &str, wrap: u8, rumor_created_at: u64) -> PreparedEvent {
+        PreparedEvent::CommunityInviteV2 {
+            bundle_json: "{}".into(),
+            community_id: community_id.into(),
+            inviter: Keys::generate().public_key().to_hex(),
+            is_mine: false,
+            wrapper_event_id_bytes: [wrap; 32],
+            wrapper_created_at: rumor_created_at,
+            rumor_created_at,
+            expires_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_wrap_that_delivers_an_invite_is_kept_and_a_decline_deletes_them_all() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "ab".repeat(32);
+        let now = Timestamp::now().as_secs();
+        commit_prepared_event(invite(&cid, 0x11, now), true, &NoOpEventHandler).await;
+        commit_prepared_event(invite(&cid, 0x22, now), true, &NoOpEventHandler).await;
+        assert_eq!(crate::db::community::pending_invite_wraps(&cid).unwrap(), ["11".repeat(32), "22".repeat(32)]);
+
+        crate::VectorCore.decline_community_invite(&cid).await.unwrap();
+        assert!(crate::db::community::get_pending_invite(&cid).unwrap().is_none());
+        let queued = crate::deletion::queued_received_wrap_deletions();
+        assert_eq!(queued, [EventId::from_byte_array([0x11; 32]), EventId::from_byte_array([0x22; 32])]);
+    }
+
+    #[tokio::test]
+    async fn an_invite_met_again_after_its_decline_is_deleted_not_parked() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "cd".repeat(32);
+        let now = Timestamp::now().as_secs();
+        crate::community::v2::service::note_local_removal(&cid, now * 1000);
+        commit_prepared_event(invite(&cid, 0x33, now - 60), true, &NoOpEventHandler).await;
+        assert!(crate::db::community::get_pending_invite(&cid).unwrap().is_none());
+        assert_eq!(crate::deletion::queued_received_wrap_deletions(), [EventId::from_byte_array([0x33; 32])]);
     }
 }

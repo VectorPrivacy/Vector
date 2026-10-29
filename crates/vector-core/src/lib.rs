@@ -5113,6 +5113,35 @@ impl VectorCore {
         .await
     }
 
+    /// Decline a parked invite: dropped here, tombstoned in the Community List so no device parks
+    /// it again, the wraps that delivered it deleted from our relays, and the relays its bundle
+    /// named shed.
+    pub async fn decline_community_invite(&self, community_id: &str) -> Result<()> {
+        crate::db::scoped(async move {
+            use crate::db::community as db;
+            // A bundle this build can't parse names no community the List could ever hold: only drop it.
+            let bundle = db::get_pending_invite(community_id)
+                .ok()
+                .flatten()
+                .and_then(|j| crate::community::v2::invite::CommunityInvite::from_bundle_json(&j).ok());
+            let relays: Vec<String> = bundle.as_ref().map(|b| b.relays.clone()).unwrap_or_default();
+            let wraps = db::pending_invite_wraps(community_id).unwrap_or_default();
+            db::delete_pending_invite(community_id).map_err(VectorError::Other)?;
+            if let Some(cid) = bundle.and_then(|_| crate::simd::hex::hex_to_bytes_32_checked(community_id)) {
+                let removed_at = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                crate::community::v2::service::tombstone_community_list_durable(crate::community::CommunityId(cid), relays.clone(), removed_at);
+            }
+            for wrap in wraps.iter().filter_map(|w| nostr_sdk::prelude::EventId::from_hex(w).ok()) {
+                crate::deletion::delete_received_wrap(wrap);
+            }
+            if !relays.is_empty() {
+                crate::community::transport::prune_unneeded_community_relays(&relays).await;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Sync DM history from relays using NIP-77 negentropy set reconciliation.
     ///
     /// Reconciles local wrapper history with relay state, fetches missing events,

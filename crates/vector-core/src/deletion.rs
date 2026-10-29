@@ -342,6 +342,11 @@ fn received_wrap_deletions() -> std::sync::Arc<std::sync::Mutex<Vec<EventId>>> {
     crate::db::current_session().scoped::<ReceivedWrapDeletions, _>()
 }
 
+#[cfg(test)]
+pub(crate) fn queued_received_wrap_deletions() -> Vec<EventId> {
+    received_wrap_deletions().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Delete a wrap addressed to us that carried a message since deleted, with our own key: the
 /// copy a hide request asks us to take down, or one more copy of a message already gone.
 pub(crate) fn delete_received_wrap(wrap_id: EventId) {

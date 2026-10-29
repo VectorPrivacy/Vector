@@ -470,10 +470,7 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "preview_public_invite" => cm::preview_public_invite(&a.str("url")?).await,
         "accept_public_invite" => cm::accept_public_invite(a.str("url")?).await,
         "accept_community_invite" => cm::accept_community_invite(&a.str("communityId")?).await,
-        "decline_community_invite" => {
-            db::community::delete_pending_invite(&a.str("communityId")?)?;
-            Ok(Value::Null)
-        }
+        "decline_community_invite" => core(VectorCore.decline_community_invite(&a.str("communityId")?).await),
         "create_public_invite" => {
             let expires_at_ms = a.de::<Option<u64>>("expiresInSecs")?.map(|secs| {
                 let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_secs();

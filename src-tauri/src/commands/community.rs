@@ -2458,37 +2458,10 @@ pub async fn accept_community_invite(community_id: String) -> Result<CommunitySu
     .await
 }
 
-/// Decline a parked invite. Drops it locally, writes a decline tombstone to the synced Community List
-/// (so a sibling device drops its copy too, and a re-delivered/older invite stays suppressed — a
-/// strictly-newer one resurfaces), and sheds the relays the invite's bundle named.
+/// Decline a parked invite: gone here and on every device, its wraps deleted from our relays.
 #[tauri::command]
 pub async fn decline_community_invite(community_id: String) -> Result<(), String> {
-    // A bundle this build can't parse names no community the List could ever hold: only drop it.
-    let bundle = vector_core::db::community::get_pending_invite(&community_id)
-        .ok()
-        .flatten()
-        .and_then(|j| vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&j).ok());
-    let relays: Vec<String> = bundle.as_ref().map(|b| b.relays.clone()).unwrap_or_default();
-
-    vector_core::db::community::delete_pending_invite(&community_id)?;
-    // Cross-device + durable suppression: tombstone the kind-33302 List so the un-deletable
-    // invite wrap can't re-nag and other devices drop their parked copy on their next list sync.
-    if let Some(cid) = bundle.and_then(|_| vector_core::simd::hex::hex_to_bytes_32_checked(&community_id)) {
-        let removed_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        vector_core::community::v2::service::tombstone_community_list_durable(
-            vector_core::community::CommunityId(cid),
-            relays.clone(),
-            removed_at,
-        );
-    }
-    // Prune the relays no joined community needs.
-    if !relays.is_empty() {
-        vector_core::community::transport::prune_unneeded_community_relays(&relays).await;
-    }
-    Ok(())
+    vector_core::VectorCore.decline_community_invite(&community_id).await.map_err(|e| e.to_string())
 }
 
 // ============================================================================
