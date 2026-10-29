@@ -11393,7 +11393,112 @@ fn persist_writers(cid_hex: &str, channel_hex: &str, content: &str, version: u64
 /// stands. Chains grow from the head this reader holds (`anchor`) and from one root: of those an
 /// `authorized` edition builds on (a first edition, version 1 with one entry, or the head a
 /// Refounding carried, whose predecessor isn't served), the one with the longest history.
-fn ledger_chain_ok(
+fn ledger_chain_ok<'a>(
+    group: &[&'a ParsedEdition],
+    authorized: &[bool],
+    channel_hex: &str,
+    key: &dyn Fn(&ParsedEdition) -> (u32, [u8; 32]),
+    anchor: Option<&([u8; 32], super::writers::Ledger)>,
+) -> std::collections::HashMap<[u8; 32], bool> {
+    use std::collections::HashMap;
+    let mut keys = super::writers::KeyCheck::default();
+    let parsed: HashMap<[u8; 32], super::writers::Ledger> = group
+        .iter()
+        .filter_map(|e| super::writers::Ledger::parse_with(&e.content, &mut keys).filter(|l| crate::simd::hex::bytes_to_hex_32(&l.channel) == channel_hex).map(|l| (e.self_hash, l)))
+        .collect();
+    let by_hash: HashMap<[u8; 32], &ParsedEdition> = group.iter().map(|e| (e.self_hash, *e)).collect();
+    let now = now_ms();
+    let own = |e: &ParsedEdition| parsed.get(&e.self_hash).is_some_and(|l| l.tail_fits(e.created_at, &e.author.to_bytes()) && l.not_ahead(now));
+    // Built on the held head, which isn't served: judged against what this reader holds.
+    let anchored = |e: &ParsedEdition| anchor.is_some_and(|(h, _)| e.prev_hash == Some(*h) && !by_hash.contains_key(h));
+    let root = |e: &ParsedEdition| match e.prev_hash {
+        None => own(e) && e.version == 1 && parsed.get(&e.self_hash).is_some_and(|l| l.is_first()),
+        Some(p) => !by_hash.contains_key(&p) && !anchored(e) && own(e),
+    };
+    // Each edition's children, in the group's order, so a walk down visits each edition once.
+    let mut children: HashMap<[u8; 32], Vec<&ParsedEdition>> = HashMap::new();
+    for e in group {
+        if let Some(p) = e.prev_hash {
+            children.entry(p).or_default().push(*e);
+        }
+    }
+    // Down each chain from what is judged so far: an edition stands on its predecessor's verdict.
+    let grow = |mut ok: HashMap<[u8; 32], bool>| {
+        let mut down: Vec<[u8; 32]> = ok.keys().copied().collect();
+        while let Some(p) = down.pop() {
+            let before = ok[&p];
+            for e in children.get(&p).into_iter().flatten() {
+                if ok.contains_key(&e.self_hash) {
+                    continue;
+                }
+                let extends = parsed.get(&e.self_hash).zip(parsed.get(&p)).is_some_and(|(l, b)| l.extends(b));
+                ok.insert(e.self_hash, before && own(e) && extends);
+                down.push(e.self_hash);
+            }
+        }
+        ok
+    };
+    // Where an edition's chain starts in the group. An edition with no predecessor here is its
+    // own start; above it, each predecessor's start is found once.
+    let mut top_of: HashMap<[u8; 32], &ParsedEdition> = HashMap::new();
+    let mut top = |e: &'a ParsedEdition| -> &'a ParsedEdition {
+        let Some(mut at) = e.prev_hash.and_then(|p| by_hash.get(&p)).copied() else { return e };
+        let mut path = Vec::new();
+        let found = loop {
+            if let Some(t) = top_of.get(&at.self_hash) {
+                break *t;
+            }
+            path.push(at.self_hash);
+            match at.prev_hash.and_then(|p| by_hash.get(&p)) {
+                // A chain of distinct hashes is no longer than the group.
+                Some(up) if path.len() < group.len() => at = up,
+                _ => break at,
+            }
+        };
+        for h in path {
+            top_of.insert(h, found);
+        }
+        found
+    };
+    // The roots an authorized edition builds on.
+    let mut endorsed: Vec<&ParsedEdition> = Vec::new();
+    for (e, _) in group.iter().zip(authorized).filter(|(_, &a)| a) {
+        let at = top(e);
+        if root(at) && !endorsed.iter().any(|r| r.self_hash == at.self_hash) {
+            endorsed.push(at);
+        }
+    }
+    // The longest history wins, as for every Control entity: the highest version an authorized
+    // edition that stands reaches from each root. The fork key settles a tie.
+    let chosen = endorsed
+        .iter()
+        .map(|r| {
+            let ok = grow(HashMap::from([(r.self_hash, true)]));
+            let tip = group.iter().zip(authorized).filter(|(e, &a)| a && ok.get(&e.self_hash) == Some(&true)).map(|(e, _)| e.version).max().unwrap_or(0);
+            (tip, *r)
+        })
+        .min_by_key(|(tip, r)| (std::cmp::Reverse(*tip), key(r)))
+        .map(|(_, r)| r.self_hash);
+    let mut ok: HashMap<[u8; 32], bool> = HashMap::new();
+    if let Some((h, _)) = anchor.filter(|(h, _)| by_hash.contains_key(h)) {
+        ok.insert(*h, true);
+    }
+    for e in group {
+        if ok.contains_key(&e.self_hash) {
+            continue;
+        }
+        if let Some((_, held)) = anchor.filter(|_| anchored(e)) {
+            ok.insert(e.self_hash, own(e) && parsed.get(&e.self_hash).is_some_and(|l| l.extends(held)));
+        } else if e.prev_hash.is_none_or(|p| !by_hash.contains_key(&p)) {
+            ok.insert(e.self_hash, Some(e.self_hash) == chosen);
+        }
+    }
+    grow(ok)
+}
+
+/// [`ledger_chain_ok`] as it was first written, kept to check the faster one against.
+#[cfg(test)]
+fn ledger_chain_ok_reference(
     group: &[&ParsedEdition],
     authorized: &[bool],
     channel_hex: &str,
@@ -11476,6 +11581,7 @@ fn ledger_chain_ok(
     }
     grow(ok)
 }
+
 
 /// Fold one entity's editions against its persisted floor into a head index (into the
 /// input slice) plus whether a TRACKING gap was hit (the caller pages older history).
@@ -14593,6 +14699,50 @@ pub(crate) async fn bench_control_stages<T: Transport + ?Sized>(transport: &T, c
     (read_at, authority_at, t.elapsed(), read.editions.len())
 }
 
+/// One `ledger_chain_ok` over a Writers ledger `n` versions long, every edition authorized, read
+/// newest first or oldest first, for `cargo bench`.
+#[cfg(feature = "bench")]
+pub(crate) fn bench_ledger_chain(n: usize, newest_first: bool) -> std::time::Duration {
+    use super::writers::{Ledger, Spell};
+    let ch = ChannelId([7; 32]);
+    let author = Keys::generate().public_key();
+    let base = now_ms() - (n as u64 + 10) * 1000;
+    let mut ledger = Ledger::new(&ch);
+    let mut editions = Vec::with_capacity(n);
+    let mut prev = None;
+    for i in 0..n as u64 {
+        let at = base + i * 1000;
+        let spell = Spell::Writer { epoch: Epoch(i + 1), pk: Keys::generate().public_key().to_bytes(), root: Epoch(0), by: author.to_bytes(), certifier: None };
+        ledger = ledger.appended(at, spell).expect("a ledger that grows");
+        let self_hash = crate::crypto::sha256::digest(&i.to_le_bytes());
+        editions.push(ParsedEdition {
+            author,
+            vsk: String::new(),
+            entity_id: [0; 32],
+            version: i + 1,
+            prev_hash: prev,
+            content: ledger.to_json(),
+            self_hash,
+            created_at: at / 1000,
+            inner_id: self_hash,
+            authority: None,
+            binding: None,
+        });
+        prev = Some(self_hash);
+    }
+    if newest_first {
+        editions.reverse();
+    }
+    let group: Vec<&ParsedEdition> = editions.iter().collect();
+    let authorized = vec![true; n];
+    let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+    let t = crate::rt::time_std::Instant::now();
+    let ok = ledger_chain_ok(&group, &authorized, &ch_hex, &|e| (0, e.inner_id), None);
+    let took = t.elapsed();
+    assert!(ok.len() == n && ok.values().all(|v| *v), "every edition of a well-formed chain stands");
+    took
+}
+
 #[cfg(test)]
 mod tests {
     std::thread_local! {
@@ -15301,6 +15451,102 @@ mod tests {
         let unnamed: Vec<String> = wraps.iter().map(|w| w.pubkey.to_hex()).filter(|pk| !named.contains(pk.as_str())).collect();
         assert_eq!(unnamed, vec![staff_posts], "planes: {:#?}", seen.planes);
         assert!(named.contains(link_signer_of(&link.url).as_str()));
+    }
+
+    #[test]
+    fn ledger_chains_are_judged_as_the_reference_judges_them() {
+        use super::super::writers::{Ledger, Spell};
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let (ch, elsewhere) = (ChannelId([7; 32]), ChannelId([8; 32]));
+        let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let authors: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        // One that is no point on the curve: a ledger naming it never parses.
+        let writers: Vec<[u8; 32]> = (0..6).map(|_| Keys::generate().public_key().to_bytes()).chain([[0xff; 32]]).collect();
+        let unserved: Vec<[u8; 32]> = (1..=3u8).map(|k| [k; 32]).collect();
+        let now = now_ms();
+        let mut forked = 0;
+        for case in 0..600u64 {
+            let n = 1 + rnd(36);
+            let mut eds: Vec<ParsedEdition> = Vec::new();
+            let mut ledgers: Vec<Ledger> = Vec::new();
+            for i in 0..n {
+                if !eds.is_empty() && rnd(14) == 0 {
+                    // The same edition again, as two relays serve it. A Writers edition is read
+                    // marked only, so its hash covers its signer: a copy is a copy.
+                    let k = rnd(eds.len());
+                    ledgers.push(ledgers[k].clone());
+                    eds.push(eds[k].clone());
+                    continue;
+                }
+                let parent = (!eds.is_empty() && rnd(5) != 0).then(|| rnd(eds.len()));
+                let author = &authors[rnd(authors.len())];
+                let at = now - 5_000_000 + i as u64 * 1000;
+                let base = parent.map(|p| ledgers[p].clone()).unwrap_or_else(|| Ledger::new(&ch));
+                let epoch = base.writers().last().map_or(1, |(e, ..)| e.0 + 1);
+                let spell = match rnd(5) {
+                    0 => Spell::Open,
+                    1 => Spell::Stop { writer: writers[rnd(writers.len())] },
+                    _ => Spell::Writer { epoch: Epoch(epoch), pk: writers[rnd(writers.len())], root: Epoch(0), by: author.public_key().to_bytes(), certifier: None },
+                };
+                let grown = base.appended(at, spell).unwrap_or_else(|| base.clone());
+                let content = match rnd(12) {
+                    0 => "not a ledger".to_string(),
+                    1 => Ledger::new(&elsewhere).appended(at, Spell::Open).unwrap().to_json(),
+                    2 => base.to_json(),
+                    _ => grown.to_json(),
+                };
+                let prev_hash = match parent {
+                    Some(p) => Some(eds[p].self_hash),
+                    None if rnd(3) == 0 => Some(unserved[rnd(unserved.len())]),
+                    None => None,
+                };
+                let version = parent.map_or(1, |p| eds[p].version + 1) + u64::from(rnd(12) == 0);
+                let created_at = at / 1000 + if rnd(10) == 0 { 3600 } else { 0 };
+                let self_hash = crate::crypto::sha256::digest(&[case.to_le_bytes(), (i as u64).to_le_bytes()].concat());
+                eds.push(ParsedEdition {
+                    author: author.public_key(),
+                    vsk: String::new(),
+                    entity_id: [0; 32],
+                    version,
+                    prev_hash,
+                    content,
+                    self_hash,
+                    created_at,
+                    inner_id: self_hash,
+                    authority: None,
+                    binding: None,
+                });
+                ledgers.push(grown);
+            }
+            forked += usize::from(eds.iter().filter(|e| eds.iter().filter(|o| o.prev_hash == e.prev_hash && e.prev_hash.is_some()).count() > 1).count() > 0);
+            let mut order: Vec<usize> = (0..eds.len()).collect();
+            for k in (1..order.len()).rev() {
+                order.swap(k, rnd(k + 1));
+            }
+            let group: Vec<&ParsedEdition> = order.iter().map(|&k| &eds[k]).collect();
+            let authorized: Vec<bool> = group.iter().map(|_| rnd(4) != 0).collect();
+            let anchor = match rnd(4) {
+                0 => {
+                    let k = rnd(eds.len());
+                    Some((eds[k].self_hash, ledgers[k].clone()))
+                }
+                1 => Some((unserved[rnd(unserved.len())], ledgers[rnd(ledgers.len())].clone())),
+                _ => None,
+            };
+            let key = |e: &ParsedEdition| (u32::from(e.author.to_bytes()[0] % 2), e.inner_id);
+            assert_eq!(
+                ledger_chain_ok(&group, &authorized, &ch_hex, &key, anchor.as_ref()),
+                ledger_chain_ok_reference(&group, &authorized, &ch_hex, &key, anchor.as_ref()),
+                "case {case}"
+            );
+        }
+        assert!(forked > 200, "the cases fork: {forked}");
     }
 
     #[tokio::test]

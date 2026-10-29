@@ -91,10 +91,17 @@ fn hex32(v: &serde_json::Value) -> Option<[u8; 32]> {
     crate::simd::hex::hex_to_bytes_32_checked(v.as_str()?)
 }
 
-fn writer_pk(v: &serde_json::Value) -> Option<[u8; 32]> {
-    let pk = hex32(v)?;
-    nostr_sdk::prelude::PublicKey::from_slice(&pk).ok()?.xonly().ok()?;
-    Some(pk)
+/// Which keys a run of parses found to be x-only public keys, each checked once: a ledger names
+/// the same writers in every version, and each check is a point decompression.
+#[derive(Default)]
+pub struct KeyCheck(std::collections::HashMap<[u8; 32], bool>);
+
+impl KeyCheck {
+    fn writer_pk(&mut self, v: &serde_json::Value) -> Option<[u8; 32]> {
+        let pk = hex32(v)?;
+        let valid = *self.0.entry(pk).or_insert_with(|| nostr_sdk::prelude::PublicKey::from_slice(&pk).and_then(|p| p.xonly()).is_ok());
+        valid.then_some(pk)
+    }
 }
 
 fn epoch_of(v: &serde_json::Value) -> Option<Epoch> {
@@ -110,6 +117,11 @@ impl Ledger {
     /// (retired, then live) not strictly rising or out of range, more than [`MAX_LEDGER`]
     /// entries or [`MAX_RETIRED`] retired, or an entry that is neither one thing.
     pub fn parse(content: &str) -> Option<Self> {
+        Self::parse_with(content, &mut KeyCheck::default())
+    }
+
+    /// [`Self::parse`], sharing `keys` across a run of parses.
+    pub fn parse_with(content: &str, keys: &mut KeyCheck) -> Option<Self> {
         let serde_json::Value::Object(mut top) = serde_json::from_str(content).ok()? else { return None };
         let channel = hex32(&top.remove("channel")?)?;
         let serde_json::Value::Array(raw) = top.remove("ledger")? else { return None };
@@ -121,9 +133,9 @@ impl Ledger {
                     let x = x.as_array().filter(|x| x.len() == 4 || x.len() == 5)?;
                     let certifier = match x.get(4) {
                         None => None,
-                        Some(c) => Some(writer_pk(c)?),
+                        Some(c) => Some(keys.writer_pk(c)?),
                     };
-                    Some(Retired { epoch: epoch_of(&x[0])?, pk: writer_pk(&x[1])?, from: x[2].as_u64()?, to: x[3].as_u64()?, certifier })
+                    Some(Retired { epoch: epoch_of(&x[0])?, pk: keys.writer_pk(&x[1])?, from: x[2].as_u64()?, to: x[3].as_u64()?, certifier })
                 })
                 .collect::<Option<Vec<_>>>()?,
             Some(_) => return None,
@@ -137,15 +149,15 @@ impl Ledger {
             let at = e.remove("at")?.as_u64()?;
             let stop = e.remove("stop");
             let spell = match (e.remove("open"), e.remove("epoch"), e.remove("writer"), e.remove("root"), e.remove("by")) {
-                (None, None, None, None, None) if stop.is_some() => Spell::Stop { writer: writer_pk(stop.as_ref()?)? },
+                (None, None, None, None, None) if stop.is_some() => Spell::Stop { writer: keys.writer_pk(stop.as_ref()?)? },
                 (None, None, None, None, None) => Spell::Other,
                 (Some(serde_json::Value::Bool(true)), None, None, None, None) if stop.is_none() => Spell::Open,
                 (None, Some(epoch), Some(writer), Some(root), Some(by)) if stop.is_none() => {
                     let certifier = match e.remove("certifier") {
                         None => None,
-                        Some(c) => Some(writer_pk(&c)?),
+                        Some(c) => Some(keys.writer_pk(&c)?),
                     };
-                    Spell::Writer { epoch: epoch_of(&epoch)?, pk: writer_pk(&writer)?, root: Epoch(root.as_u64()?), by: hex32(&by)?, certifier }
+                    Spell::Writer { epoch: epoch_of(&epoch)?, pk: keys.writer_pk(&writer)?, root: Epoch(root.as_u64()?), by: hex32(&by)?, certifier }
                 }
                 _ => return None,
             };
@@ -601,6 +613,20 @@ mod tests {
         assert!(back.restricted() && back.current_writer() == Some((Epoch(3), pk(2))) && back.next_epoch() == Some(Epoch(4)));
         assert_eq!(back.live(), Some((Epoch(3), BY, 300)));
         assert_eq!((back.previous_writer(), back.minter(Epoch(2)), back.minter(Epoch(1))), (Some(Epoch(2)), Some(BY), None));
+    }
+
+    #[test]
+    fn a_run_of_parses_judges_each_key_as_one_parse_would() {
+        let good = ledger(&[(100, w(1, 1)), (150, w(2, 2))]).to_json();
+        let off_curve = good.replace(&crate::simd::hex::bytes_to_hex_32(&pk(2)), &"ff".repeat(32));
+        assert!(Ledger::parse(&off_curve).is_none());
+        let mut keys = KeyCheck::default();
+        for (content, parses) in [(&good, true), (&off_curve, false), (&good, true), (&off_curve, false)] {
+            assert_eq!(Ledger::parse_with(content, &mut keys).is_some(), parses);
+        }
+        let mut keys = KeyCheck::default();
+        assert!(Ledger::parse_with(&off_curve, &mut keys).is_none());
+        assert!(Ledger::parse_with(&good, &mut keys).is_some(), "a key judged bad leaves the good ones alone");
     }
 
     #[test]

@@ -25,6 +25,7 @@ const ALL: &[(&str, fn())] = &[
     ("concord::history_catchup", concord_history_catchup),
     ("concord::control_fold", concord_control_fold),
     ("concord::guestbook_ingest", concord_guestbook_ingest),
+    ("concord::ledger_chain", vector_core::community::v2::bench::ledger_chain),
     ("db::pool_uncontended", pool::uncontended),
     ("db::pool_contended", pool::contended),
     ("db::scoped_lookup", pool::scoped_lookup),

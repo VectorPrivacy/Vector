@@ -332,6 +332,21 @@ pub fn control_fold() {
     });
 }
 
+/// `ledger_chain_ok` over Writers ledgers of growing length, read in either order.
+pub fn ledger_chain() {
+    for n in [64, 256, 1024] {
+        for newest_first in [false, true] {
+            let best = (0..5).map(|_| service::bench_ledger_chain(n, newest_first)).min().unwrap();
+            report(&format!("ledger_chain_ok, {n} versions, {}", if newest_first { "newest first" } else { "oldest first" }), best);
+        }
+    }
+    let loops: u64 = std::env::var("CONCORD_LOOP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let t = Instant::now();
+    while t.elapsed().as_secs() < loops {
+        black_box(service::bench_ledger_chain(1024, true));
+    }
+}
+
 /// A Guestbook of `CONCORD_GUESTBOOK` (default 5000) joins and leaves: one live event's ingest,
 /// the store read alone, and the memberlist a member panel reads.
 pub fn guestbook_ingest() {
