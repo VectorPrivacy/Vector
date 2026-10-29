@@ -321,6 +321,13 @@ impl ControlPlane {
         }
     }
 
+    /// Check a page's signatures together before it is opened (see
+    /// [`stream::check_signatures_together`]); hold the guard across the page's opens.
+    pub fn check_page(&self, wraps: &[&Event]) -> stream::BatchChecked {
+        let page: Vec<_> = wraps.iter().map(|w| (*w, vec![&self.conv_key], self.restricted)).collect();
+        stream::check_signatures_together(&page)
+    }
+
     /// Open a control wrap under this view — [`open_control_edition`] with the
     /// split's mandatory wrap-signature check on a restricted plane (CORD-01
     /// Write-Restricted Streams: the signature IS the write gate there).

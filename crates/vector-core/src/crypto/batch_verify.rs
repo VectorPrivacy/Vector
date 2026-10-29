@@ -30,6 +30,13 @@ pub fn signatures(events: &[&Event]) -> Vec<bool> {
     ok
 }
 
+/// Whether one event's signature is valid for its id and author: `Event::verify_signature`,
+/// with the author's parsed key from this thread's cache.
+pub fn signature(e: &Event) -> bool {
+    let sig = nostr_verify::SigRef { pubkey: e.pubkey.as_bytes(), msg: e.id.as_bytes(), sig: e.sig.as_bytes() };
+    VERIFIER.with_borrow_mut(|v| v.verify_one(&sig))
+}
+
 /// This thread's counters: batches and how many held, key-cache hits and misses.
 pub fn stats() -> nostr_verify::Stats {
     VERIFIER.with_borrow(|v| v.stats())
@@ -56,6 +63,7 @@ mod tests {
         let ours = signatures(&refs);
         let theirs: Vec<bool> = events.iter().map(Event::verify_signature).collect();
         assert_eq!(ours, theirs);
+        assert_eq!(events.iter().map(signature).collect::<Vec<_>>(), theirs, "one at a time too");
         assert_eq!(ours.iter().filter(|ok| !**ok).count(), 3);
         assert!(signatures(&[]).is_empty());
     }

@@ -1872,6 +1872,7 @@ async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, communi
         };
         let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return None };
         let mut fresh = 0usize;
+        let _batch = control.check_page(&wraps.iter().filter(|w| !seen_wraps.contains(&w.id)).collect::<Vec<_>>());
         for w in &wraps {
             if !seen_wraps.insert(w.id) {
                 continue;
@@ -2260,6 +2261,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
             // boundary events are free, and no-new-events means exhausted.
             let mut oldest = u64::MAX;
             let mut fresh = 0usize;
+            let _batch = control.check_page(&wraps.iter().filter(|w| !seen_wraps.contains(&w.id)).collect::<Vec<_>>());
             for w in &wraps {
                 if !seen_wraps.insert(w.id) {
                     continue;
@@ -3101,6 +3103,7 @@ async fn fetch_guestbook_from<T: Transport + ?Sized>(
         let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![gb_group.pk_hex()], until, limit: Some(GB_PAGE), evidence: crate::community::transport::Evidence::Full, ..Default::default() };
         let wraps = transport.fetch(&query, &community.relays).await?;
         let mut fresh = 0usize;
+        let _batch = stream::check_page(&wraps.iter().filter(|w| !seen.contains(&w.id) && w.created_at.as_secs() >= since_secs).collect::<Vec<_>>(), &gb_group);
         for wrap in &wraps {
             if !seen.insert(wrap.id) {
                 continue;
@@ -4086,6 +4089,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             };
             let wraps = transport.fetch(&query, &community.relays).await?;
             let mut fresh = 0usize;
+            let _batch = current_control.check_page(&wraps.iter().filter(|w| !seen_wraps.contains(&w.id)).collect::<Vec<_>>());
             for w in &wraps {
                 if !seen_wraps.insert(w.id) {
                     continue;
@@ -13601,6 +13605,7 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
         let page_complete = page.is_complete();
         let wraps = page.events;
         let mut fresh = 0usize;
+        let _batch = stream::check_page(&wraps.iter().filter(|w| !seen.contains(&w.id)).collect::<Vec<_>>(), group);
         for w in &wraps {
             if !seen.insert(w.id) {
                 continue;
