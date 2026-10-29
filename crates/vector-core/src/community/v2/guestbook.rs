@@ -497,47 +497,126 @@ pub fn departure_windows(
     can_kick: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
 ) -> BTreeMap<PublicKey, Vec<Span>> {
     let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
-    // (at, firsthand, rumor id, away, kicked): ordered as `supersedes` orders them.
-    let mut by_member: BTreeMap<PublicKey, Vec<(u64, bool, [u8; 32], bool, bool)>> = BTreeMap::new();
-    for ev in events.iter().filter(|e| e.entry.at_ms() <= horizon) {
+    let held = || events.iter().enumerate().filter(move |(_, e)| e.entry.at_ms() <= horizon);
+    let mut away: std::collections::HashMap<PublicKey, u32> = std::collections::HashMap::new();
+    let mut entries: Vec<Presence> = Vec::new();
+    for (i, ev) in held() {
+        let (member, at, kicked) = match &ev.entry {
+            GuestbookEntry::Leave { member, at_ms } => (member, *at_ms, false),
+            GuestbookEntry::Kick { actor, target, at_ms, citation } if can_kick(actor, target, citation.as_ref()) => (target, *at_ms, true),
+            _ => continue,
+        };
+        let next = away.len() as u32;
+        let who = *away.entry(*member).or_insert(next);
+        entries.push(Presence { who, at, firsthand: true, event: i as u32, away: true, kicked });
+    }
+    if entries.is_empty() {
+        return BTreeMap::new();
+    }
+    // Only a member who went away has a span to close.
+    for (i, ev) in held() {
         match &ev.entry {
-            GuestbookEntry::Join { member, at_ms, .. } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, false, false)),
-            GuestbookEntry::Leave { member, at_ms } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, true, false)),
-            GuestbookEntry::Kick { actor, target, at_ms, citation } if can_kick(actor, target, citation.as_ref()) => by_member.entry(*target).or_default().push((*at_ms, true, ev.rumor_id, true, true)),
+            GuestbookEntry::Join { member, at_ms, .. } => {
+                if let Some(&who) = away.get(member) {
+                    entries.push(Presence { who, at: *at_ms, firsthand: true, event: i as u32, away: false, kicked: false });
+                }
+            }
             GuestbookEntry::Snapshot { refounder, members, at_ms, .. } if snapshot_authority == Some(refounder) => {
-                for m in members {
-                    by_member.entry(*m).or_default().push((*at_ms, false, ev.rumor_id, false, false));
+                for who in members.iter().filter_map(|m| away.get(m)) {
+                    entries.push(Presence { who: *who, at: *at_ms, firsthand: false, event: i as u32, away: false, kicked: false });
                 }
             }
             _ => {}
         }
     }
-    let mut out = BTreeMap::new();
-    for (member, mut entries) in by_member {
-        if !entries.iter().any(|e| e.3) {
-            continue;
-        }
-        entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2)));
-        let (mut windows, mut open): (Vec<Span>, Option<(u64, bool)>) = (Vec::new(), None);
-        for (at, _, _, away, kicked) in entries {
-            match (away, open) {
-                (true, None) => open = Some((at, kicked)),
-                (true, Some((from, was))) => open = Some((from, was || kicked)),
-                (false, Some((from, kicked))) => {
-                    windows.push((from, Some(at), kicked));
-                    open = None;
-                }
-                _ => {}
+    let mut members: Vec<PublicKey> = vec![PublicKey::from_byte_array([0; 32]); away.len()];
+    for (member, who) in away {
+        members[who as usize] = member;
+    }
+    entries.sort_unstable_by(|a, b| a.who.cmp(&b.who).then_with(|| a.supersede_order(b, events)));
+    entries
+        .chunk_by(|a, b| a.who == b.who)
+        .filter_map(|run| {
+            let windows = windows_of(run);
+            (!windows.is_empty()).then(|| (members[run[0].who as usize], windows))
+        })
+        .collect()
+}
+
+/// One member's spans away, as [`departure_windows`] finds them: what a write that moves only
+/// that member needs folded again.
+pub fn member_departure_windows(
+    events: &[GuestbookEvent],
+    member: &PublicKey,
+    now_ms: u64,
+    snapshot_authority: Option<&PublicKey>,
+    can_kick: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
+) -> Vec<Span> {
+    let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
+    let mut entries: Vec<Presence> = Vec::new();
+    for (i, ev) in events.iter().enumerate().filter(|(_, e)| e.entry.at_ms() <= horizon) {
+        let event = i as u32;
+        match &ev.entry {
+            GuestbookEntry::Join { member: m, at_ms, .. } if m == member => entries.push(Presence { who: 0, at: *at_ms, firsthand: true, event, away: false, kicked: false }),
+            GuestbookEntry::Leave { member: m, at_ms } if m == member => entries.push(Presence { who: 0, at: *at_ms, firsthand: true, event, away: true, kicked: false }),
+            GuestbookEntry::Kick { actor, target, at_ms, citation } if target == member && can_kick(actor, target, citation.as_ref()) => {
+                entries.push(Presence { who: 0, at: *at_ms, firsthand: true, event, away: true, kicked: true })
             }
-        }
-        if let Some((from, kicked)) = open {
-            windows.push((from, None, kicked));
-        }
-        if !windows.is_empty() {
-            out.insert(member, windows);
+            GuestbookEntry::Snapshot { refounder, members, at_ms, .. } if snapshot_authority == Some(refounder) && members.contains(member) => {
+                entries.push(Presence { who: 0, at: *at_ms, firsthand: false, event, away: false, kicked: false })
+            }
+            _ => {}
         }
     }
-    out
+    if !entries.iter().any(|e| e.away) {
+        return Vec::new();
+    }
+    entries.sort_unstable_by(|a, b| a.supersede_order(b, events));
+    windows_of(&entries)
+}
+
+/// One entry of a member's presence, for folding their spans away.
+struct Presence {
+    who: u32,
+    at: u64,
+    firsthand: bool,
+    /// Index into the events, for the rumor id tie-break and then arrival.
+    event: u32,
+    away: bool,
+    kicked: bool,
+}
+
+impl Presence {
+    /// As [`supersedes`] orders them: time, then a snapshot seed before a member's own word,
+    /// then the higher rumor id first; arrival breaks what is left.
+    fn supersede_order(&self, other: &Presence, events: &[GuestbookEvent]) -> std::cmp::Ordering {
+        self.at
+            .cmp(&other.at)
+            .then(self.firsthand.cmp(&other.firsthand))
+            .then_with(|| events[other.event as usize].rumor_id.cmp(&events[self.event as usize].rumor_id))
+            .then(self.event.cmp(&other.event))
+    }
+}
+
+/// A member's spans from their presence in fold order: the first departure after being here
+/// opens one, the next return closes it.
+fn windows_of(entries: &[Presence]) -> Vec<Span> {
+    let (mut windows, mut open): (Vec<Span>, Option<(u64, bool)>) = (Vec::new(), None);
+    for e in entries {
+        match (e.away, open) {
+            (true, None) => open = Some((e.at, e.kicked)),
+            (true, Some((from, was))) => open = Some((from, was || e.kicked)),
+            (false, Some((from, kicked))) => {
+                windows.push((from, Some(e.at), kicked));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some((from, kicked)) = open {
+        windows.push((from, None, kicked));
+    }
+    windows
 }
 
 /// Does `next` beat `prev`? Later ms wins; at a tie a firsthand entry beats a
@@ -872,6 +951,188 @@ pub fn complete_memberlist(
     out
 }
 
+/// A stored event's body: the event without its rumor id (the row's key), in a compact binary
+/// form. `[format = 1][flags: epoch, observed_at][varints for those][entry tag][entry]`, keys as
+/// 32 raw bytes, numbers as LEB128, strings length-prefixed. Never 32 bytes long, which at-rest
+/// storage would take for a bare key.
+pub(crate) fn event_body(ev: &GuestbookEvent) -> Vec<u8> {
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+    fn text(out: &mut Vec<u8>, s: &str) {
+        varint(out, s.len() as u64);
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn citation(out: &mut Vec<u8>, c: &Option<AuthorityCitation>) {
+        match c {
+            None => out.push(0),
+            Some(c) => {
+                out.push(1);
+                out.extend_from_slice(&c.entity_id);
+                varint(out, c.version);
+                out.extend_from_slice(&c.edition_hash);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(80);
+    out.push(1);
+    out.push(ev.epoch.is_some() as u8 | (ev.observed_at.is_some() as u8) << 1);
+    if let Some(e) = ev.epoch {
+        varint(&mut out, e);
+    }
+    if let Some(o) = ev.observed_at {
+        varint(&mut out, o);
+    }
+    match &ev.entry {
+        GuestbookEntry::Join { member, invited_by, at_ms } => {
+            out.push(0);
+            out.extend_from_slice(member.as_bytes());
+            varint(&mut out, *at_ms);
+            match invited_by {
+                None => out.push(0),
+                Some((creator, label)) => {
+                    out.push(1);
+                    text(&mut out, creator);
+                    text(&mut out, label);
+                }
+            }
+        }
+        GuestbookEntry::Leave { member, at_ms } => {
+            out.push(1);
+            out.extend_from_slice(member.as_bytes());
+            varint(&mut out, *at_ms);
+        }
+        GuestbookEntry::Kick { actor, target, citation: c, at_ms } => {
+            out.push(2);
+            out.extend_from_slice(actor.as_bytes());
+            out.extend_from_slice(target.as_bytes());
+            citation(&mut out, c);
+            varint(&mut out, *at_ms);
+        }
+        GuestbookEntry::Snapshot { refounder, members, snapshot_id, chunk, at_ms } => {
+            out.push(3);
+            out.extend_from_slice(refounder.as_bytes());
+            varint(&mut out, members.len() as u64);
+            for m in members {
+                out.extend_from_slice(m.as_bytes());
+            }
+            out.extend_from_slice(snapshot_id);
+            varint(&mut out, chunk.0 as u64);
+            varint(&mut out, chunk.1 as u64);
+            varint(&mut out, *at_ms);
+        }
+        GuestbookEntry::Timeout { actor, target, until_secs, citation: c, at_ms } => {
+            out.push(4);
+            out.extend_from_slice(actor.as_bytes());
+            out.extend_from_slice(target.as_bytes());
+            varint(&mut out, *until_secs);
+            citation(&mut out, c);
+            varint(&mut out, *at_ms);
+        }
+        GuestbookEntry::Nickname { actor, target, nick, citation: c, at_ms } => {
+            out.push(5);
+            out.extend_from_slice(actor.as_bytes());
+            out.extend_from_slice(target.as_bytes());
+            text(&mut out, nick);
+            citation(&mut out, c);
+            varint(&mut out, *at_ms);
+        }
+    }
+    out
+}
+
+/// The event an [`event_body`] holds under `rumor_id`; `None` for a body it can't read whole.
+pub(crate) fn event_from_body(rumor_id: [u8; 32], body: &[u8]) -> Option<GuestbookEvent> {
+    struct Reader<'a>(&'a [u8]);
+    impl<'a> Reader<'a> {
+        fn byte(&mut self) -> Option<u8> {
+            let (&b, rest) = self.0.split_first()?;
+            self.0 = rest;
+            Some(b)
+        }
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (head, rest) = self.0.split_at(n);
+            self.0 = rest;
+            Some(head)
+        }
+        fn bytes32(&mut self) -> Option<[u8; 32]> {
+            self.take(32)?.try_into().ok()
+        }
+        fn key(&mut self) -> Option<PublicKey> {
+            PublicKey::from_slice(&self.bytes32()?).ok()
+        }
+        fn varint(&mut self) -> Option<u64> {
+            let mut v = 0u64;
+            for shift in (0..64).step_by(7) {
+                let b = self.byte()?;
+                v |= ((b & 0x7f) as u64).checked_shl(shift)?;
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        fn text(&mut self) -> Option<String> {
+            let n = usize::try_from(self.varint()?).ok()?;
+            String::from_utf8(self.take(n)?.to_vec()).ok()
+        }
+        fn citation(&mut self) -> Option<Option<AuthorityCitation>> {
+            Some(match self.byte()? {
+                0 => None,
+                1 => Some(AuthorityCitation { entity_id: self.bytes32()?, version: self.varint()?, edition_hash: self.bytes32()? }),
+                _ => return None,
+            })
+        }
+    }
+    let mut r = Reader(body);
+    if r.byte()? != 1 {
+        return None;
+    }
+    let flags = r.byte()?;
+    let epoch = if flags & 1 != 0 { Some(r.varint()?) } else { None };
+    let observed_at = if flags & 2 != 0 { Some(r.varint()?) } else { None };
+    let entry = match r.byte()? {
+        0 => {
+            let member = r.key()?;
+            let at_ms = r.varint()?;
+            let invited_by = match r.byte()? {
+                0 => None,
+                1 => Some((r.text()?, r.text()?)),
+                _ => return None,
+            };
+            GuestbookEntry::Join { member, invited_by, at_ms }
+        }
+        1 => GuestbookEntry::Leave { member: r.key()?, at_ms: r.varint()? },
+        2 => GuestbookEntry::Kick { actor: r.key()?, target: r.key()?, citation: r.citation()?, at_ms: r.varint()? },
+        3 => {
+            let refounder = r.key()?;
+            let n = usize::try_from(r.varint()?).ok()?;
+            // Bounded by what the body actually holds, so a corrupt count can't reserve memory.
+            if n > r.0.len() / 32 {
+                return None;
+            }
+            let members = (0..n).map(|_| r.key()).collect::<Option<Vec<_>>>()?;
+            let snapshot_id = r.bytes32()?;
+            let chunk = (u32::try_from(r.varint()?).ok()?, u32::try_from(r.varint()?).ok()?);
+            GuestbookEntry::Snapshot { refounder, members, snapshot_id, chunk, at_ms: r.varint()? }
+        }
+        4 => GuestbookEntry::Timeout { actor: r.key()?, target: r.key()?, until_secs: r.varint()?, citation: r.citation()?, at_ms: r.varint()? },
+        5 => GuestbookEntry::Nickname { actor: r.key()?, target: r.key()?, nick: r.text()?, citation: r.citation()?, at_ms: r.varint()? },
+        _ => return None,
+    };
+    if !r.0.is_empty() {
+        return None;
+    }
+    Some(GuestbookEvent { rumor_id, entry, epoch, observed_at })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -907,6 +1168,96 @@ mod tests {
     use super::super::super::{CommunityId, Epoch};
     use super::super::derive::guestbook_group_key;
     use super::*;
+
+    /// [`departure_windows`] as first written: a list per member, each sorted alone.
+    fn departure_windows_by_member(
+        events: &[GuestbookEvent],
+        now_ms: u64,
+        snapshot_authority: Option<&PublicKey>,
+        can_kick: &dyn Fn(&PublicKey, &PublicKey, Option<&AuthorityCitation>) -> bool,
+    ) -> BTreeMap<PublicKey, Vec<Span>> {
+        let horizon = now_ms.saturating_add(MAX_FUTURE_MS);
+        // (at, firsthand, rumor id, away, kicked)
+        type Entry = (u64, bool, [u8; 32], bool, bool);
+        let mut by_member: BTreeMap<PublicKey, Vec<Entry>> = BTreeMap::new();
+        for ev in events.iter().filter(|e| e.entry.at_ms() <= horizon) {
+            match &ev.entry {
+                GuestbookEntry::Join { member, at_ms, .. } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, false, false)),
+                GuestbookEntry::Leave { member, at_ms } => by_member.entry(*member).or_default().push((*at_ms, true, ev.rumor_id, true, false)),
+                GuestbookEntry::Kick { actor, target, at_ms, citation } if can_kick(actor, target, citation.as_ref()) => by_member.entry(*target).or_default().push((*at_ms, true, ev.rumor_id, true, true)),
+                GuestbookEntry::Snapshot { refounder, members, at_ms, .. } if snapshot_authority == Some(refounder) => {
+                    for m in members {
+                        by_member.entry(*m).or_default().push((*at_ms, false, ev.rumor_id, false, false));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = BTreeMap::new();
+        for (member, mut entries) in by_member {
+            if !entries.iter().any(|e| e.3) {
+                continue;
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2)));
+            let (mut windows, mut open): (Vec<Span>, Option<(u64, bool)>) = (Vec::new(), None);
+            for (at, _, _, away, kicked) in entries {
+                match (away, open) {
+                    (true, None) => open = Some((at, kicked)),
+                    (true, Some((from, was))) => open = Some((from, was || kicked)),
+                    (false, Some((from, kicked))) => {
+                        windows.push((from, Some(at), kicked));
+                        open = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((from, kicked)) = open {
+                windows.push((from, None, kicked));
+            }
+            if !windows.is_empty() {
+                out.insert(member, windows);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn departure_windows_agree_with_a_list_per_member() {
+        let keys: Vec<PublicKey> = (0..6).map(|_| Keys::generate().public_key()).collect();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let now = 1_000_000_000;
+        for round in 0..4_000 {
+            let len = next(24) as usize;
+            let events: Vec<GuestbookEvent> = (0..len)
+                .map(|_| {
+                    let k = keys[next(6) as usize];
+                    // Few times and ids, so ties are common; some too far ahead to count.
+                    let at_ms = if next(10) == 0 { now + MAX_FUTURE_MS + 1 + next(5) } else { now - next(8) };
+                    let entry = match next(5) {
+                        0 => GuestbookEntry::Join { member: k, invited_by: None, at_ms },
+                        1 => GuestbookEntry::Leave { member: k, at_ms },
+                        2 => GuestbookEntry::Kick { actor: keys[next(6) as usize], target: k, citation: None, at_ms },
+                        3 => GuestbookEntry::Snapshot { refounder: keys[next(2) as usize], members: (0..next(4)).map(|_| keys[next(6) as usize]).collect(), snapshot_id: [0; 32], chunk: (1, 1), at_ms },
+                        _ => GuestbookEntry::Nickname { actor: k, target: k, nick: String::new(), citation: None, at_ms },
+                    };
+                    GuestbookEvent { rumor_id: [next(4) as u8; 32], entry, epoch: None, observed_at: None }
+                })
+                .collect();
+            let can_kick = |actor: &PublicKey, target: &PublicKey, _: Option<&AuthorityCitation>| !(actor.as_bytes()[0] ^ target.as_bytes()[1]).is_multiple_of(3);
+            let authority = (round % 3 != 0).then_some(&keys[0]);
+            let all = departure_windows(&events, now, authority, &can_kick);
+            assert_eq!(all, departure_windows_by_member(&events, now, authority, &can_kick), "round {round}");
+            for k in &keys {
+                assert_eq!(member_departure_windows(&events, k, now, authority, &can_kick), all.get(k).cloned().unwrap_or_default(), "round {round}: one member alone");
+            }
+        }
+    }
 
     /// A stable "receiver clock" for the fold tests, far above every event time.
     const NOW: u64 = 1_722_500_000_000;
@@ -1581,4 +1932,38 @@ mod tests {
         let ev = through(&rumor, &k);
         assert!(matches!(ev.entry, GuestbookEntry::Snapshot { ref members, .. } if members == &vec![good]));
     }
+
+    #[test]
+    fn every_entry_round_trips_through_its_stored_body() {
+        let k = || Keys::generate().public_key();
+        let cite = Some(AuthorityCitation { entity_id: [4; 32], version: 300, edition_hash: [5; 32] });
+        let entries = vec![
+            GuestbookEntry::Join { member: k(), invited_by: None, at_ms: 1_790_000_000_123 },
+            GuestbookEntry::Join { member: k(), invited_by: Some(("ab".repeat(32), "the café link".into())), at_ms: 0 },
+            GuestbookEntry::Leave { member: k(), at_ms: u64::MAX },
+            GuestbookEntry::Kick { actor: k(), target: k(), citation: cite.clone(), at_ms: 5 },
+            GuestbookEntry::Kick { actor: k(), target: k(), citation: None, at_ms: 6 },
+            GuestbookEntry::Snapshot { refounder: k(), members: (0..40).map(|_| k()).collect(), snapshot_id: [9; 32], chunk: (3, u32::MAX), at_ms: 7 },
+            GuestbookEntry::Snapshot { refounder: k(), members: Vec::new(), snapshot_id: [1; 32], chunk: (1, 1), at_ms: 8 },
+            GuestbookEntry::Timeout { actor: k(), target: k(), until_secs: 1 << 40, citation: cite.clone(), at_ms: 9 },
+            GuestbookEntry::Nickname { actor: k(), target: k(), nick: String::new(), citation: None, at_ms: 10 },
+            GuestbookEntry::Nickname { actor: k(), target: k(), nick: "ナイト🌙".into(), citation: cite, at_ms: 11 },
+        ];
+        for (i, entry) in entries.into_iter().enumerate() {
+            for (epoch, observed_at) in [(None, None), (Some(0), None), (None, Some(1_790_000_000)), (Some(u64::MAX), Some(u64::MAX))] {
+                let ev = GuestbookEvent { rumor_id: [i as u8; 32], entry: entry.clone(), epoch, observed_at };
+                let body = event_body(&ev);
+                assert_ne!(body.len(), 32, "never the length at-rest storage reads as a bare key");
+                assert_eq!(event_from_body(ev.rumor_id, &body).as_ref(), Some(&ev));
+                // Any cut, or any byte past the end, is no event.
+                for cut in 0..body.len() {
+                    assert_eq!(event_from_body(ev.rumor_id, &body[..cut]), None, "cut {cut} of {i}");
+                }
+                assert_eq!(event_from_body(ev.rumor_id, &[&body[..], &[0]].concat()), None);
+            }
+        }
+        let join = GuestbookEvent { rumor_id: [0; 32], entry: GuestbookEntry::Join { member: k(), invited_by: None, at_ms: 1_790_000_000_123 }, epoch: Some(3), observed_at: Some(1_790_000_000) };
+        assert!(event_body(&join).len() < 60, "a join is {} bytes", event_body(&join).len());
+    }
+
 }

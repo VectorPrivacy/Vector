@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 118;
+pub const HIGHEST_MIGRATION_ID: u32 = 121;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1646,6 +1646,59 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 118, "Saved files", |tx| {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS saved_files (path TEXT PRIMARY KEY);")
             .map_err(|e| format!("migration 118: {e}"))?;
+        Ok(())
+    })?;
+
+    // A Guestbook one row per event, so storing one is an insert rather than a rewrite of all of
+    // them. `book` and `seq` are INTEGER PRIMARY KEYs because VACUUM keeps those. A community's
+    // blob in `community_guestbook.events` moves in when it is next read (sealed blobs open only
+    // once the account is unlocked); the cursor stays where it was.
+    run_atomic_migration(conn, 119, "Guestbook events as rows", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_guestbook_books (
+                 book INTEGER PRIMARY KEY,
+                 community_id TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS community_guestbook_events (
+                 seq INTEGER PRIMARY KEY,
+                 book INTEGER NOT NULL,
+                 rumor_id BLOB NOT NULL,
+                 body BLOB NOT NULL,
+                 UNIQUE (book, rumor_id)
+             );",
+        )
+        .map_err(|e| format!("migration 119: {e}"))?;
+        Ok(())
+    })?;
+
+    // The departures each member has been owed for, one sealed row per member, so a Leave writes
+    // its member's row rather than every member's. A record still in `settings` moves in when next read.
+    run_atomic_migration(conn, 120, "Owed departures as rows", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_departures_seen (
+                 seq INTEGER PRIMARY KEY,
+                 book INTEGER NOT NULL,
+                 body BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS community_departures_seen_book ON community_departures_seen (book);",
+        )
+        .map_err(|e| format!("migration 120: {e}"))?;
+        Ok(())
+    })?;
+
+    // Owed per-author take-backs, sealed: the settings rows they were kept in named the author in
+    // the clear. Those move in when next read.
+    run_atomic_migration(conn, 121, "Owed author take-backs sealed", |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS community_owed_authors (
+                 seq INTEGER PRIMARY KEY,
+                 book INTEGER NOT NULL,
+                 channel_id TEXT NOT NULL,
+                 body BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS community_owed_authors_book ON community_owed_authors (book, channel_id);",
+        )
+        .map_err(|e| format!("migration 121: {e}"))?;
         Ok(())
     })?;
 

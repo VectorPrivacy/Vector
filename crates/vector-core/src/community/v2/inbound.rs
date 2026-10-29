@@ -541,16 +541,17 @@ pub enum DispatchedV2 {
     Typing { channel_id: String, npub: String },
     /// A voice presence that changed who is in `channel_id`'s call.
     VoicePresence { channel_id: String },
-    /// A Guestbook join/leave for `npub`.
-    Presence { npub: String, joined: bool },
+    /// A Guestbook join/leave for `npub`. Each Guestbook variant carries the event it opened, for
+    /// the store.
+    Presence { npub: String, joined: bool, event: Box<guestbook::GuestbookEvent> },
     /// A Guestbook Kick naming `target`. Returned unjudged: the store keeps the
     /// raw rumor and the memberlist fold is what applies KICK authority, so the
     /// realtime layer ingests it and re-folds rather than trusting the wrap.
-    Kick { target: PublicKey },
+    Kick { target: PublicKey, event: Box<guestbook::GuestbookEvent> },
     /// A Guestbook Nickname, unjudged like a Kick: the store keeps it and the fold judges it.
-    Nickname,
+    Nickname(Box<guestbook::GuestbookEvent>),
     /// A Guestbook Timeout, unjudged the same way.
-    Timeout,
+    Timeout(Box<guestbook::GuestbookEvent>),
     /// A wrap on this community's Control Plane — its metadata/channel set may
     /// have changed. Recognized here (address match) but NOT folded: the fold
     /// needs the whole edition chain, so the realtime layer re-fetches + re-folds
@@ -626,7 +627,7 @@ pub fn dispatch_wrap(
     if wrap.pubkey == gb.pk() {
         if let Ok(opened) = stream::open_wrap(wrap, &gb) {
             if let Ok(ev) = guestbook::parse_guestbook_event(&opened) {
-                return dispatch_guestbook(&ev, community, handler);
+                return dispatch_guestbook(ev, community, handler);
             }
         }
         return DispatchedV2::Ignored;
@@ -772,7 +773,7 @@ fn dispatch_chat_event(
     }
 }
 
-fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, handler: &dyn InboundEventHandler) -> DispatchedV2 {
+fn dispatch_guestbook(ev: guestbook::GuestbookEvent, community: &CommunityV2, handler: &dyn InboundEventHandler) -> DispatchedV2 {
     // CORD-04 §4 is a RENDER/FOLD rule, not a storage rule: a banned npub's
     // presence draws no line, but the event still reaches the store, because the
     // fold subtracts the banlist REVERSIBLY. Dropping it here instead is
@@ -811,22 +812,22 @@ fn dispatch_guestbook(ev: &guestbook::GuestbookEvent, community: &CommunityV2, h
             if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
                 handler.on_community_presence(chat, &npub, true, &event_id, at_ms / 1000, by, label);
             }
-            DispatchedV2::Presence { npub: npub.clone(), joined: true }
+            DispatchedV2::Presence { npub, joined: true, event: Box::new(ev) }
         }
         GuestbookEntry::Leave { member, at_ms } => {
             let npub = member.to_bech32().unwrap_or_default();
             if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
                 handler.on_community_presence(chat, &npub, false, &event_id, at_ms / 1000, None, None);
             }
-            DispatchedV2::Presence { npub: npub.clone(), joined: false }
+            DispatchedV2::Presence { npub, joined: false, event: Box::new(ev) }
         }
         // A Kick shapes the memberlist, not the feed — so no presence line, but it
         // MUST reach the store or the target never leaves anyone's roster.
-        GuestbookEntry::Kick { target, .. } => DispatchedV2::Kick { target: *target },
+        GuestbookEntry::Kick { target, .. } => DispatchedV2::Kick { target: *target, event: Box::new(ev) },
         GuestbookEntry::Snapshot { .. } => DispatchedV2::Ignored,
-        GuestbookEntry::Nickname { .. } => DispatchedV2::Nickname,
+        GuestbookEntry::Nickname { .. } => DispatchedV2::Nickname(Box::new(ev)),
         // A Timeout shapes how a member's posts read, not who is a member: no presence line.
-        GuestbookEntry::Timeout { .. } => DispatchedV2::Timeout,
+        GuestbookEntry::Timeout { .. } => DispatchedV2::Timeout(Box::new(ev)),
     }
 }
 
@@ -1743,7 +1744,7 @@ mod tests {
         let cap = Capture::default();
         let out = dispatch_wrap(&wrap, &community, &me.public_key(), &cap);
         match out {
-            DispatchedV2::Kick { target: t } => assert_eq!(t, target.public_key(), "the kick names its target"),
+            DispatchedV2::Kick { target: t, .. } => assert_eq!(t, target.public_key(), "the kick names its target"),
             other => panic!("a Kick must reach the store, got {other:?}"),
         }
         // A kick shapes the memberlist, not the feed.

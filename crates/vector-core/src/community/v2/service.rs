@@ -2736,15 +2736,15 @@ pub async fn timeout_member<T: Transport + ?Sized>(transport: &T, community: &Co
         // Held at once, so this device honours its own Timeout before the follow reads it back.
         let gate = guestbook_write_gate();
         let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
-        if !events.iter().any(|e| e.rumor_id == rumor_id) {
-            events.push(guestbook::GuestbookEvent {
+        let (events, cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
+        if events.get(&rumor_id).is_none() {
+            let timeout = guestbook::GuestbookEvent {
                 rumor_id,
                 entry: guestbook::GuestbookEntry::Timeout { actor: my_pk, target: *target, until_secs: until, citation, at_ms },
                 epoch: Some(community.root_epoch.0),
                 observed_at: Some(at_ms / 1000),
-            });
-            crate::db::community::set_guestbook(&cid_hex, &events, cursor)?;
+            };
+            store_guestbook_and_departures(community, &cid_hex, &[timeout], cursor)?;
         }
         Ok(())
     })
@@ -2812,14 +2812,15 @@ async fn publish_nickname<T: Transport + ?Sized>(transport: &T, community: &Comm
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let gate = guestbook_write_gate();
     let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    let (events, cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
     // A member's own carried Nickname is the very rumor they first sent, now on this epoch too.
-    match events.iter_mut().find(|e| e.rumor_id == rumor_id) {
+    let stored = match events.get(&rumor_id) {
         Some(held) if held.epoch == Some(community.root_epoch.0) => return Ok(()),
-        Some(held) => held.epoch = Some(community.root_epoch.0),
-        None => events.push(guestbook::GuestbookEvent { rumor_id, entry, epoch: Some(community.root_epoch.0), observed_at: Some(at_ms / 1000) }),
-    }
-    crate::db::community::set_guestbook(&cid_hex, &events, cursor)
+        Some(held) => guestbook::GuestbookEvent { epoch: Some(community.root_epoch.0), ..held.clone() },
+        None => guestbook::GuestbookEvent { rumor_id, entry, epoch: Some(community.root_epoch.0), observed_at: Some(at_ms / 1000) },
+    };
+    drop(events);
+    store_guestbook_and_departures(community, &cid_hex, &[stored], cursor)
 }
 
 /// Name `target` in this community (`""` clears it): your own with Change Nickname, a member
@@ -3452,7 +3453,7 @@ pub(crate) fn stored_departures(community: &CommunityV2) -> Vec<PublicKey> {
 /// [`stored_departures`] with when each took effect: the Leave or Kick, or the Refounding's cut.
 pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collections::HashMap<PublicKey, u64> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else { return Default::default() };
+    let Ok((events, _cursor)) = crate::db::community::get_guestbook_shared(&cid_hex) else { return Default::default() };
     let Ok(owner) = community.owner() else { return Default::default() };
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
@@ -3467,7 +3468,7 @@ pub(crate) fn stored_departure_times(community: &CommunityV2) -> std::collection
     guestbook::coalesce(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick).into_iter().filter(|(_, st)| st.verdict != guestbook::Verdict::Joined).map(|(pk, st)| (pk, st.at_ms)).collect()
 }
 
-pub(crate) type DepartureSpans = std::collections::BTreeMap<PublicKey, Vec<guestbook::Span>>;
+pub(crate) type DepartureSpans = crate::db::community::DepartureSpans;
 
 struct DepartureCache;
 
@@ -3476,34 +3477,160 @@ struct DepartureCache;
 pub(crate) fn stored_departure_windows(community: &CommunityV2) -> std::sync::Arc<DepartureSpans> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let generation = crate::db::community::membership_generation();
-    let cache = crate::db::current_session().scoped::<DepartureCache, std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<DepartureSpans>)>>>();
-    if let Some((g, spans)) = cache.lock().ok().and_then(|c| c.get(&cid_hex).cloned()) {
-        if g == generation {
-            return spans;
+    let cache = departure_cache();
+    if let Some(held) = cache.lock().ok().and_then(|c| c.get(&cid_hex).cloned()) {
+        if held.generation == generation {
+            return held.spans;
         }
     }
-    let spans = std::sync::Arc::new(fold_departure_windows(community, &cid_hex));
+    let (spans, due) = fold_departure_windows(community, &cid_hex);
+    let spans = std::sync::Arc::new(spans);
     if let Ok(mut c) = cache.lock() {
-        c.insert(cid_hex, (generation, spans.clone()));
+        if c.get(&cid_hex).is_none_or(|held| held.generation <= generation) {
+            c.insert(cid_hex, HeldDepartures { generation, spans: spans.clone(), due });
+        }
     }
     spans
 }
 
-fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> DepartureSpans {
-    let cid_hex = cid_hex.to_string();
-    let Ok((events, _cursor)) = crate::db::community::get_guestbook(&cid_hex) else { return Default::default() };
-    let Ok(owner) = community.owner() else { return Default::default() };
+#[derive(Clone)]
+struct HeldDepartures {
+    generation: u64,
+    spans: std::sync::Arc<DepartureSpans>,
+    /// The earliest entry the fold left out as too far ahead: once it is due, fold again.
+    due: Option<u64>,
+}
+
+fn departure_cache() -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, HeldDepartures>>> {
+    crate::db::current_session().scoped::<DepartureCache, std::sync::Mutex<std::collections::HashMap<String, HeldDepartures>>>()
+}
+
+/// What storing some entries does to the windows held at the current membership generation.
+enum DeparturesAfter {
+    /// Only these members' windows can move: none for a Join or snapshot seed of members never away.
+    Members(u64, Vec<PublicKey>),
+    Refold,
+}
+
+/// Past this many members moved, one fold of everyone costs less than one fold each.
+const MEMBER_REFOLDS_MAX: usize = 8;
+
+fn departures_after<'a>(cid_hex: &str, entries: impl IntoIterator<Item = &'a guestbook::GuestbookEntry>) -> DeparturesAfter {
+    use guestbook::GuestbookEntry;
+    let cache = departure_cache();
+    let Ok(c) = cache.lock() else { return DeparturesAfter::Refold };
+    let Some(held) = c.get(cid_hex).filter(|h| h.generation == crate::db::community::membership_generation() && !h.is_due()) else {
+        return DeparturesAfter::Refold;
+    };
+    let mut moved: Vec<PublicKey> = Vec::new();
+    for entry in entries {
+        let member = match entry {
+            GuestbookEntry::Join { member, .. } if !held.spans.contains_key(member) => continue,
+            GuestbookEntry::Join { member, .. } | GuestbookEntry::Leave { member, .. } | GuestbookEntry::Kick { target: member, .. } => member,
+            GuestbookEntry::Snapshot { members, .. } if members.iter().all(|m| !held.spans.contains_key(m)) => continue,
+            GuestbookEntry::Snapshot { .. } => return DeparturesAfter::Refold,
+            _ => continue,
+        };
+        if !moved.contains(member) {
+            moved.push(*member);
+        }
+        if moved.len() > MEMBER_REFOLDS_MAX {
+            return DeparturesAfter::Refold;
+        }
+    }
+    DeparturesAfter::Members(held.generation, moved)
+}
+
+impl HeldDepartures {
+    fn is_due(&self) -> bool {
+        self.due.is_some_and(|due| now_ms().saturating_add(guestbook::MAX_FUTURE_MS) >= due)
+    }
+
+    /// `due` once entries dated `at_ms` are stored: one too far ahead to fold yet comes due later.
+    fn due_with(&self, at_ms: impl IntoIterator<Item = u64>) -> Option<u64> {
+        let horizon = now_ms().saturating_add(guestbook::MAX_FUTURE_MS);
+        self.due.into_iter().chain(at_ms.into_iter().filter(|&at| at > horizon)).min()
+    }
+}
+
+/// Store `events` with the Guestbook write gate held, and bring the departure windows over the
+/// write without folding everyone again.
+fn store_guestbook_and_departures(community: &CommunityV2, cid_hex: &str, events: &[guestbook::GuestbookEvent], cursor_secs: u64) -> Result<(), String> {
+    let after = departures_after(cid_hex, events.iter().map(|e| &e.entry));
+    crate::db::community::store_guestbook_events(cid_hex, events, cursor_secs)?;
+    departures_stored(community, cid_hex, after, events.iter().map(|e| e.entry.at_ms()));
+    Ok(())
+}
+
+/// Bring windows held at `generation` over the one write that moved it on, which stored entries
+/// dated `at_ms`. Any other write since moved it further, so what is brought over is never served.
+fn departures_stored(community: &CommunityV2, cid_hex: &str, after: DeparturesAfter, at_ms: impl IntoIterator<Item = u64>) {
+    let DeparturesAfter::Members(generation, moved) = after else { return };
+    let cache = departure_cache();
+    let held = cache.lock().ok().and_then(|c| c.get(cid_hex).filter(|h| h.generation == generation).cloned());
+    let Some(held) = held else { return };
+    if held.is_due() {
+        return;
+    }
+    let spans = if moved.is_empty() {
+        held.spans.clone()
+    } else {
+        let Some(folded) = with_departure_fold(community, cid_hex, |events, now, authority, can_kick| {
+            moved.iter().map(|member| (*member, guestbook::member_departure_windows(events, member, now, authority, can_kick))).collect::<Vec<_>>()
+        }) else {
+            return;
+        };
+        let changed: Vec<_> = folded.into_iter().filter(|(member, windows)| !held.spans.get(member).map_or(windows.is_empty(), |was| was[..] == windows[..])).collect();
+        if changed.is_empty() {
+            held.spans.clone()
+        } else {
+            let mut spans = (*held.spans).clone();
+            for (member, windows) in changed {
+                if windows.is_empty() {
+                    spans.remove(&member);
+                } else {
+                    spans.insert(member, windows.into());
+                }
+            }
+            std::sync::Arc::new(spans)
+        }
+    };
+    let due = held.due_with(at_ms);
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = c.get_mut(cid_hex).filter(|h| h.generation == generation) {
+        *entry = HeldDepartures { generation: generation + 1, spans, due };
+    }
+}
+
+/// Run `f` over the stored Guestbook with the Kick and snapshot judgements every departure
+/// fold makes.
+fn with_departure_fold<R>(
+    community: &CommunityV2,
+    cid_hex: &str,
+    f: impl FnOnce(&[guestbook::GuestbookEvent], u64, Option<&PublicKey>, &dyn Fn(&PublicKey, &PublicKey, Option<&crate::community::edition::AuthorityCitation>) -> bool) -> R,
+) -> Option<R> {
+    let (events, _cursor) = crate::db::community::get_guestbook_shared(cid_hex).ok()?;
+    let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
-    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let roles = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
+    let snapshot_authority_pk = snapshot_authority_for(cid_hex, community, &owner);
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
         // A banned member's Guestbook events count for nothing (CORD-04 §4).
-        !crate::db::community::is_author_banned(&cid_hex, actor)
-            && citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+        !crate::db::community::is_author_banned(cid_hex, actor)
+            && citation_is_synced(cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
-    guestbook::departure_windows(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick)
+    Some(f(&events, now_ms(), snapshot_authority_pk.as_ref(), &can_kick))
+}
+
+fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> (DepartureSpans, Option<u64>) {
+    with_departure_fold(community, cid_hex, |events, now, authority, can_kick| {
+        let horizon = now.saturating_add(guestbook::MAX_FUTURE_MS);
+        let due = events.iter().map(|e| e.entry.at_ms()).filter(|&at| at > horizon).min();
+        (guestbook::departure_windows(events, now, authority, can_kick).into_iter().map(|(member, spans)| (member, spans.into())).collect(), due)
+    })
+    .unwrap_or_default()
 }
 
 /// A departure this device hasn't owed for yet undoes what its member posted at a writer address
@@ -3515,24 +3642,39 @@ fn fold_departure_windows(community: &CommunityV2, cid_hex: &str) -> DepartureSp
 pub(crate) fn owe_new_departures(community: &CommunityV2) {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let Ok(seen) = crate::db::community::departures_seen(&cid_hex) else { return };
-    let now: std::collections::BTreeMap<String, Vec<guestbook::Span>> = stored_departure_windows(community).iter().map(|(p, w)| (p.to_hex(), w.clone())).collect();
-    if now == seen {
+    let now = stored_departure_windows(community);
+    if std::sync::Arc::ptr_eq(&now, &seen.spans) {
         return;
     }
-    let ledgers: Vec<(String, &super::writers::Ledger)> = community.channels.iter().filter_map(|c| Some((crate::simd::hex::bytes_to_hex_32(&c.id.0), c.writers.as_ref()?))).collect();
-    let mut owed = false;
-    for (author, spans) in &now {
-        let Ok(pk) = PublicKey::from_hex(author) else { continue };
-        let Ok(npub) = nostr_sdk::prelude::ToBech32::to_bech32(&pk);
-        for &(from, until, kicked) in spans.iter().filter(|w| !seen.get(author).is_some_and(|s| s.iter().any(|v| v.0 == w.0 && v.1 == w.1 && v.2 == w.2))) {
-            for (chan, ledger) in &ledgers {
+    let mut ledgers: Option<Vec<(String, &super::writers::Ledger)>> = None;
+    let (mut moved, mut owed) = (false, false);
+    // Both are in key order: one walk pairs each member with what was seen of them.
+    let mut was = seen.spans.iter().peekable();
+    for (pk, spans) in now.iter() {
+        while was.next_if(|(k, _)| *k < pk).is_some() {
+            moved = true;
+        }
+        let before = was.next_if(|(k, _)| *k == pk).map(|(_, s)| s);
+        if before == Some(spans) {
+            continue;
+        }
+        moved = true;
+        let mut fresh = spans.iter().filter(|w| !before.is_some_and(|s| s.contains(w))).peekable();
+        if fresh.peek().is_none() {
+            continue;
+        }
+        let ledgers = ledgers.get_or_insert_with(|| community.channels.iter().filter_map(|c| Some((crate::simd::hex::bytes_to_hex_32(&c.id.0), c.writers.as_ref()?))).collect());
+        let author = pk.to_hex();
+        let Ok(npub) = nostr_sdk::prelude::ToBech32::to_bech32(pk);
+        for &(from, until, kicked) in fresh {
+            for (chan, ledger) in ledgers.iter() {
                 let Some(first) = ledger.writers().filter_map(|(e, ..)| ledger.writer_start(e)).min() else { continue };
                 let since = from.max(first);
                 let end = if kicked { ledger.writers().find(|(e, _, end)| ledger.writer_start(*e).is_some_and(|s| s <= since) && end.is_none_or(|end| end > since)).and_then(|(_, _, end)| end) } else { until };
                 // A read that fails leaves the record unwritten, so the next pass owes it again.
                 let Ok(posts) = crate::db::events::posts_since_by(chan, since, Some(&npub)) else { return };
                 if posts.iter().any(|p| p.writer && end.is_none_or(|end| p.at_ms < end)) {
-                    if crate::db::community::owe_author_retraction(&cid_hex, chan, author, since, end).is_err() {
+                    if crate::db::community::owe_author_retraction(&cid_hex, chan, &author, since, end).is_err() {
                         return;
                     }
                     owed = true;
@@ -3540,7 +3682,10 @@ pub(crate) fn owe_new_departures(community: &CommunityV2) {
             }
         }
     }
-    if crate::db::community::set_departures_seen(&cid_hex, &now).is_ok() && owed {
+    if !moved && was.next().is_none() {
+        return;
+    }
+    if crate::db::community::set_departures_seen(&cid_hex, now.clone()).is_ok() && owed {
         super::realtime::enqueue_follow(community.id());
     }
 }
@@ -3561,7 +3706,7 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
 /// When the authorized Guestbook fold last ruled `member` kicked, if it does now.
 pub fn stored_kick_at(community: &CommunityV2, member: &PublicKey) -> Option<u64> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).ok()?;
+    let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex).ok()?;
     let owner = community.owner().ok()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
@@ -3602,7 +3747,7 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
 ) -> Result<Vec<guestbook::GuestbookEvent>, String> {
     crate::db::scoped(async move {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let (_, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+        let (_, cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
         // First sync of the session walks the WHOLE plane; later ones ride the cursor.
         // The cursor alone can only ever move forward, so any history a walk missed —
         // a page cap, an open breaker, stream-auth not yet landed, one relay of several
@@ -3629,45 +3774,50 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         // Merged into the store as it stands now: another walk may have written while this one read.
         let gate = guestbook_write_gate();
         let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-        let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
-        let mut by_id: std::collections::HashMap<[u8; 32], usize> = events.iter().enumerate().map(|(i, e)| (e.rumor_id, i)).collect();
+        let (held, cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
+        // Where in `events` a rumor this walk stored sits; the rest are found in `held`.
+        let mut written: std::collections::HashMap<[u8; 32], usize> = std::collections::HashMap::new();
+        let mut events: Vec<guestbook::GuestbookEvent> = Vec::new();
         let mut added = Vec::new();
         let mut restamped = false;
+        // A member's carried Nickname is the very rumor they first sent, now on this plane.
+        let stamp = |had: &guestbook::GuestbookEvent| (had.epoch.is_none() || matches!(had.entry, guestbook::GuestbookEntry::Nickname { .. }) && had.epoch < live).then(|| guestbook::GuestbookEvent { epoch: live, ..had.clone() });
         for mut ev in fresh {
             ev.epoch = live;
-            match by_id.get(&ev.rumor_id) {
-                Some(&i) => {
-                    // A member's carried Nickname is the very rumor they first sent, now on this plane.
-                    let carried = matches!(events[i].entry, guestbook::GuestbookEntry::Nickname { .. }) && events[i].epoch < live;
-                    if events[i].epoch.is_none() || carried {
-                        events[i].epoch = live;
-                        restamped = true;
-                    }
+            if let Some(&j) = written.get(&ev.rumor_id) {
+                if let Some(stamped) = stamp(&events[j]) {
+                    events[j] = stamped;
+                    restamped = true;
                 }
-                None => {
-                    // First sight on THIS client. The author writes `at_ms`; they do
-                    // not write this.
-                    let mut ev = ev;
-                    if ev.observed_at.is_none() {
-                        ev.observed_at = Some(
-                            web_time::SystemTime::now()
-                                .duration_since(web_time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        );
-                    }
-                    by_id.insert(ev.rumor_id, events.len());
-                    events.push(ev.clone());
-                    added.push(ev);
+            } else if let Some(had) = held.get(&ev.rumor_id) {
+                if let Some(stamped) = stamp(had) {
+                    written.insert(stamped.rumor_id, events.len());
+                    events.push(stamped);
+                    restamped = true;
                 }
+            } else {
+                // First sight on THIS client. The author writes `at_ms`; they do
+                // not write this.
+                if ev.observed_at.is_none() {
+                    ev.observed_at = Some(
+                        web_time::SystemTime::now()
+                            .duration_since(web_time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    );
+                }
+                written.insert(ev.rumor_id, events.len());
+                events.push(ev.clone());
+                added.push(ev);
             }
         }
+        drop(held);
         // Advance ONLY on a walk that ran out of plane. `newest` counts every wrap seen,
         // including ones skipped or that failed to open, so moving it after a truncated
         // walk is what buries the events that walk never reached.
         let advanced = if reached_end { newest.max(cursor) } else { cursor };
         if !added.is_empty() || advanced > cursor || restamped {
-            crate::db::community::set_guestbook(&cid_hex, &events, advanced)?;
+            store_guestbook_and_departures(community, &cid_hex, &events, advanced)?;
             mark_guestbook_observed_since(&cid_hex);
             if !added.is_empty() {
                 owe_new_departures(community);
@@ -3754,19 +3904,19 @@ pub fn ingest_guestbook_event(community: &CommunityV2, mut ev: guestbook::Guestb
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let gate = guestbook_write_gate();
     let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    let (events, cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
     let live = Some(community.root_epoch.0);
-    if let Some(held) = events.iter_mut().find(|e| e.rumor_id == ev.rumor_id) {
+    let stored = match events.get(&ev.rumor_id) {
         // A member's carried Nickname is the very rumor they first sent, now on this plane.
-        if !matches!(held.entry, guestbook::GuestbookEntry::Nickname { .. }) || held.epoch >= live {
-            return Ok(false);
+        Some(held) if !matches!(held.entry, guestbook::GuestbookEntry::Nickname { .. }) || held.epoch >= live => return Ok(false),
+        Some(held) => guestbook::GuestbookEvent { epoch: live, ..held.clone() },
+        None => {
+            ev.epoch = live;
+            ev
         }
-        held.epoch = live;
-    } else {
-        ev.epoch = live;
-        events.push(ev);
-    }
-    crate::db::community::set_guestbook(&cid_hex, &events, cursor.max(wrap_secs))?;
+    };
+    drop(events);
+    store_guestbook_and_departures(community, &cid_hex, std::slice::from_ref(&stored), cursor.max(wrap_secs))?;
     drop(_gate);
     owe_new_departures(community);
     Ok(true)
@@ -4341,8 +4491,8 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                     // watching later sees everyone as new, and trusting it would evict
                     // the whole community.
                     if guestbook_observed_since(&cid_hex).is_some_and(|since| since < joined_after_cut) {
-                        if let Ok((local, _)) = crate::db::community::get_guestbook(&cid_hex) {
-                            for ev in &local {
+                        if let Ok((local, _)) = crate::db::community::get_guestbook_shared(&cid_hex) {
+                            for ev in local.iter() {
                                 let (guestbook::GuestbookEntry::Join { member, .. }, Some(seen)) = (&ev.entry, ev.observed_at) else {
                                     continue;
                                 };
@@ -27562,7 +27712,7 @@ mod tests {
         // Their own Leave dated later never moves the Kick.
         ingest_guestbook_event(&held(), event(3, guestbook::GuestbookEntry::Leave { member: w.public_key(), at_ms: at + 50 * 60_000 }), at / 1000).unwrap();
         let away = stored_departure_windows(&held());
-        assert_eq!(away.get(&w.public_key()).cloned(), Some(vec![(at - 50_000, None, true)]));
+        assert_eq!(away.get(&w.public_key()).map(|s| s.to_vec()), Some(vec![(at - 50_000, None, true)]));
         ingest_guestbook_event(&held(), event(4, guestbook::GuestbookEntry::Join { member: w.public_key(), invited_by: None, at_ms: at - 10_000 }), at / 1000 - 10).unwrap();
         let away = stored_departure_windows(&held());
         assert_eq!(away.get(&w.public_key()).map(|w| w[0]), Some((at - 50_000, Some(at - 10_000), true)), "a Join ends the span, it doesn't erase it");
@@ -27651,6 +27801,172 @@ mod tests {
         let leave = guestbook::GuestbookEvent { rumor_id: [7; 32], entry: guestbook::GuestbookEntry::Leave { member: w.public_key(), at_ms: now_ms() }, epoch: Some(held().root_epoch.0), observed_at: None };
         ingest_guestbook_event(&held(), leave, now_ms() / 1000).unwrap();
         assert!(stored_departure_windows(&held()).contains_key(&w.public_key()), "a Guestbook write refolds");
+    }
+
+    #[tokio::test]
+    async fn a_guestbook_entry_that_moves_no_departure_keeps_the_folded_spans() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let at = now_ms();
+        let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
+        let (gone, stayer, fresh) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Join { member: gone, invited_by: None, at_ms: at - 10_000 }), at / 1000).unwrap();
+        ingest_guestbook_event(&held(), event(2, guestbook::GuestbookEntry::Leave { member: gone, at_ms: at - 5_000 }), at / 1000).unwrap();
+        ingest_guestbook_event(&held(), event(3, guestbook::GuestbookEntry::Join { member: stayer, invited_by: None, at_ms: at - 4_000 }), at / 1000).unwrap();
+        let folded = stored_departure_windows(&held());
+        ingest_guestbook_event(&held(), event(4, guestbook::GuestbookEntry::Join { member: fresh, invited_by: None, at_ms: at - 3_000 }), at / 1000).unwrap();
+        let carried = stored_departure_windows(&held());
+        assert!(std::sync::Arc::ptr_eq(&folded, &carried), "a newcomer's Join opens or closes nothing");
+        departure_cache().lock().unwrap().clear();
+        assert_eq!(*carried, *stored_departure_windows(&held()), "what was carried is what a fold from scratch finds");
+        ingest_guestbook_event(&held(), event(5, guestbook::GuestbookEntry::Join { member: gone, invited_by: None, at_ms: at - 1_000 }), at / 1000).unwrap();
+        let back = stored_departure_windows(&held());
+        assert_eq!(back.get(&gone).map(|s| s.to_vec()), Some(vec![(at - 5_000, Some(at - 1_000), false)]), "a departed member's Join closes their span");
+        departure_cache().lock().unwrap().clear();
+        assert_eq!(*back, *stored_departure_windows(&held()));
+    }
+
+    #[tokio::test]
+    async fn folded_spans_are_not_carried_over_a_write_they_did_not_judge() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let at = now_ms();
+        let join = guestbook::GuestbookEvent { rumor_id: [9; 32], entry: guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: at }, epoch: Some(held().root_epoch.0), observed_at: None };
+        let folded = stored_departure_windows(&held());
+        let after = departures_after(&cid_hex, [&join.entry]);
+        assert!(matches!(&after, DeparturesAfter::Members(_, moved) if moved.is_empty()), "a newcomer's Join moves nothing");
+        crate::db::community::bump_membership_generation();
+        crate::db::community::store_guestbook_events(&cid_hex, std::slice::from_ref(&join), at / 1000).unwrap();
+        departures_stored(&held(), &cid_hex, after, [at]);
+        assert!(!std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())), "a write landing in between is folded");
+        // Nor windows some slower fold put back, read before the generation the Join was judged at.
+        let join = guestbook::GuestbookEvent { rumor_id: [10; 32], ..join };
+        let DeparturesAfter::Members(judged, _) = departures_after(&cid_hex, [&join.entry]) else { panic!("a newcomer's Join moves nothing") };
+        let stale = std::sync::Arc::new(DepartureSpans::from([(Keys::generate().public_key(), vec![(1, None, false)].into())]));
+        departure_cache().lock().unwrap().insert(cid_hex.clone(), HeldDepartures { generation: judged - 1, spans: stale.clone(), due: None });
+        crate::db::community::store_guestbook_events(&cid_hex, std::slice::from_ref(&join), at / 1000).unwrap();
+        departures_stored(&held(), &cid_hex, DeparturesAfter::Members(judged, Vec::new()), [at]);
+        assert!(!std::sync::Arc::ptr_eq(&stale, &stored_departure_windows(&held())));
+    }
+
+    #[tokio::test]
+    async fn departure_windows_kept_across_writes_match_a_fold_from_scratch() {
+        let (_bed, owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let pool: Vec<PublicKey> = (0..5).map(|_| Keys::generate().public_key()).collect();
+        let stranger = Keys::generate().public_key();
+        let base = now_ms() - 100_000;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut event = |i: u32| {
+            let member = pool[next(5) as usize];
+            // Few distinct times, so ties are common; some too far ahead to count yet.
+            let at_ms = if next(12) == 0 { now_ms() + guestbook::MAX_FUTURE_MS + 60_000 + next(1_000) } else { base + next(40) * 1_000 };
+            let entry = match next(6) {
+                0 | 1 => guestbook::GuestbookEntry::Join { member, invited_by: None, at_ms },
+                2 => guestbook::GuestbookEntry::Leave { member, at_ms },
+                3 => guestbook::GuestbookEntry::Kick { actor: owner.keys.public_key(), target: member, citation: None, at_ms },
+                4 => guestbook::GuestbookEntry::Kick { actor: stranger, target: member, citation: None, at_ms },
+                _ => guestbook::GuestbookEntry::Nickname { actor: member, target: member, nick: "n".into(), citation: None, at_ms },
+            };
+            let mut rumor_id = [next(256) as u8; 32];
+            rumor_id[..4].copy_from_slice(&i.to_le_bytes());
+            (guestbook::GuestbookEvent { rumor_id, entry, epoch: Some(held().root_epoch.0), observed_at: None }, next(12) as u32 + 1)
+        };
+        for i in 0..300u32 {
+            ingest_guestbook_event(&held(), event(i).0, now_ms() / 1000).unwrap();
+            let c = held();
+            assert_eq!(*stored_departure_windows(&c), fold_departure_windows(&c, &cid_hex).0, "after write {i}");
+        }
+        // A walk stores a batch at once.
+        let mut i = 300u32;
+        for round in 0..60 {
+            let size = event(0).1;
+            let batch: Vec<_> = (0..size).map(|_| { i += 1; event(i).0 }).collect();
+            store_guestbook_and_departures(&held(), &cid_hex, &batch, now_ms() / 1000).unwrap();
+            let c = held();
+            assert_eq!(*stored_departure_windows(&c), fold_departure_windows(&c, &cid_hex).0, "after batch {round}");
+        }
+        assert!(stored_departure_windows(&held()).values().any(|w| w.iter().any(|s| s.2)), "an honoured Kick was folded");
+    }
+
+    #[tokio::test]
+    async fn an_entry_too_far_ahead_brought_over_is_due_later() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
+        let folded = stored_departure_windows(&held());
+        assert_eq!(departure_cache().lock().unwrap()[&cid_hex].due, None);
+        let ahead = now_ms() + guestbook::MAX_FUTURE_MS + 60_000;
+        ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: ahead }), now_ms() / 1000).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())));
+        assert_eq!(departure_cache().lock().unwrap()[&cid_hex].due, Some(ahead), "folded again once it is due");
+        let sooner = ahead - 1_000;
+        let batch = [event(2, guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: now_ms() }), event(3, guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: sooner })];
+        store_guestbook_and_departures(&held(), &cid_hex, &batch, now_ms() / 1000).unwrap();
+        assert_eq!(departure_cache().lock().unwrap()[&cid_hex].due, Some(sooner), "whichever entry of a batch comes due first");
+    }
+
+    #[tokio::test]
+    async fn the_owed_record_lets_go_of_members_the_windows_no_longer_hold() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let at = now_ms();
+        let w = Keys::generate().public_key();
+        let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
+        ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Join { member: w, invited_by: None, at_ms: at - 5_000 }), at / 1000).unwrap();
+        ingest_guestbook_event(&held(), event(2, guestbook::GuestbookEntry::Leave { member: w, at_ms: at - 1_000 }), at / 1000).unwrap();
+        // Ahead of every member in key order, then behind them all.
+        for extra in [[0u8; 32], [0xff; 32]] {
+            let mut seen = (*stored_departure_windows(&held())).clone();
+            seen.insert(PublicKey::from_byte_array(extra), vec![(1, None, false)].into());
+            crate::db::community::set_departures_seen(&cid_hex, std::sync::Arc::new(seen)).unwrap();
+            owe_new_departures(&held());
+            assert_eq!(*crate::db::community::departures_seen(&cid_hex).unwrap().spans, *stored_departure_windows(&held()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nickname_or_timeout_write_folds_no_departure_again() {
+        let (bed, owner, member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        bed.swap_to(&owner);
+        let at = now_ms();
+        let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
+        let gone = Keys::generate().public_key();
+        ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Leave { member: gone, at_ms: at - 1_000 }), at / 1000).unwrap();
+        let folded = stored_departure_windows(&held());
+        set_nickname(&bed.relay, &held(), &owner.keys.public_key(), "Boss").await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())), "a Nickname moves nobody's departure");
+        timeout_member(&bed.relay, &held(), &member.keys.public_key(), 60).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())), "nor does a Timeout");
+    }
+
+    #[tokio::test]
+    async fn folded_spans_are_never_carried_past_an_entry_coming_due() {
+        let (_bed, _owner, _member, community, _general) = restricted_bed(false).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let at = now_ms();
+        let event = |id: u8, entry| guestbook::GuestbookEvent { rumor_id: [id; 32], entry, epoch: Some(held().root_epoch.0), observed_at: None };
+        let ahead = Keys::generate().public_key();
+        ingest_guestbook_event(&held(), event(1, guestbook::GuestbookEntry::Leave { member: ahead, at_ms: at + guestbook::MAX_FUTURE_MS + 60_000 }), at / 1000).unwrap();
+        let folded = stored_departure_windows(&held());
+        assert!(!folded.contains_key(&ahead), "too far ahead to count yet");
+        ingest_guestbook_event(&held(), event(2, guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: at }), at / 1000).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())));
+        departure_cache().lock().unwrap().get_mut(&cid_hex).unwrap().due = Some(at);
+        ingest_guestbook_event(&held(), event(3, guestbook::GuestbookEntry::Join { member: Keys::generate().public_key(), invited_by: None, at_ms: at }), at / 1000).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&folded, &stored_departure_windows(&held())), "folded again once what it left out comes due");
     }
 
     #[tokio::test]
@@ -27804,6 +28120,14 @@ mod tests {
         let owed = crate::db::community::owed_author_retractions(&cid_hex).unwrap();
         assert!(owed.iter().any(|o| o.3 == Some(at + 2_000)), "a Leave's take-back ends at the Join that ended it: {owed:?}");
         assert!(owed.iter().all(|o| o.3.is_some()), "nothing owed past the span");
+        // Away again: only the new span is owed, never the one already taken back.
+        clear_owed(&cid_hex);
+        ingest_guestbook_event(&held(), event(4, guestbook::GuestbookEntry::Leave { member: w.public_key(), at_ms: at + 3_000 }), at / 1000 + 3).unwrap();
+        let again = crate::types::Message { id: "c".repeat(64), at: at + 4_000, wrapper_event_id: Some("d".repeat(64)), ..shown };
+        crate::db::events::save_message(&chan_hex, &again).await.unwrap();
+        ingest_guestbook_event(&held(), event(5, guestbook::GuestbookEntry::Join { member: w.public_key(), invited_by: None, at_ms: at + 5_000 }), at / 1000 + 5).unwrap();
+        let owed = crate::db::community::owed_author_retractions(&cid_hex).unwrap();
+        assert!(!owed.is_empty() && owed.iter().all(|o| o.2 >= at + 3_000), "{owed:?}");
     }
 
     #[tokio::test]

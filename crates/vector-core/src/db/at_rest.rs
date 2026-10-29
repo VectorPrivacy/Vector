@@ -594,6 +594,9 @@ mod xform_tests {
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
              CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);
              CREATE TABLE community_guestbook (community_id TEXT, events TEXT, cursor_secs INTEGER);
+             CREATE TABLE community_guestbook_events (seq INTEGER PRIMARY KEY, book INTEGER, rumor_id BLOB, body BLOB);
+             CREATE TABLE community_departures_seen (seq INTEGER PRIMARY KEY, book INTEGER, body BLOB);
+             CREATE TABLE community_owed_authors (seq INTEGER PRIMARY KEY, book INTEGER, channel_id TEXT, body BLOB);
              CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);
              CREATE TABLE community_pins (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
              CREATE TABLE community_writers (community_id TEXT, channel_id TEXT, content TEXT, PRIMARY KEY (community_id, channel_id));
@@ -925,6 +928,9 @@ const SWEEP: &[(&str, &[&str])] = &[
     ("pending_channel_keys", &["channel_key", "sender"]),
     ("pending_community_invites", &["bundle_json", "inviter_npub"]),
     ("community_guestbook", &["events"]),
+    ("community_guestbook_events", &["body"]),
+    ("community_departures_seen", &["body"]),
+    ("community_owed_authors", &["body"]),
     ("community_policies", &["bytes"]),
     ("community_public_invites", &["token", "url", "label"]),
     ("community_invite_link_sets", &["creator", "locators"]),

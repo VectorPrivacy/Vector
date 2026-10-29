@@ -900,6 +900,17 @@ impl AtRestSealer {
         Ok(crate::simd::hex::bytes_to_hex_string(&framed))
     }
 
+    /// `maybe_encrypt_blob` for one value, sharing the batch's cipher.
+    pub fn seal_blob(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        if self.cipher.is_none() {
+            gate::with_sealing_key(|key| self.cipher = Some(key.map(ChaCha20Poly1305::new)))?;
+        }
+        let Some(Some(cipher)) = self.cipher.as_ref() else {
+            return Ok(plaintext.to_vec());
+        };
+        seal_framed_with(cipher, plaintext).map_err(|e| format!("blob encryption failed: {e}"))
+    }
+
     /// [`Self::seal`], leaving an empty string empty so `<> ''` checks keep meaning "unset".
     pub fn seal_set(&mut self, plaintext: &str) -> Result<String, String> {
         if plaintext.is_empty() { Ok(String::new()) } else { self.seal(plaintext) }

@@ -1097,8 +1097,8 @@ impl Judge {
         Some(Judge { ledger, community: community.clone(), channel: ch.clone(), roster, owner_hex, banned, members: Default::default(), departures: Default::default(), me_manages })
     }
 
-    fn spans(&self, author: &PublicKey) -> Option<&Vec<super::super::guestbook::Span>> {
-        self.departures.get_or_init(|| stored_departure_windows(&self.community)).get(author)
+    fn spans(&self, author: &PublicKey) -> Option<&[super::super::guestbook::Span]> {
+        self.departures.get_or_init(|| stored_departure_windows(&self.community)).get(author).map(|s| &s[..])
     }
 
     /// Whether the Guestbook records `author` away from the Community at `at_ms`.

@@ -993,39 +993,27 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     }
                     return;
                 }
-                inbound::DispatchedV2::Presence { .. } => {
+                inbound::DispatchedV2::Presence { event: ev, .. } => {
                     // Live membership motion: fold it into the persisted Guestbook so
                     // the memberlist stays a local read (the presence callback already
-                    // fired inline). Reopen here — the dispatcher stays pure — and
-                    // refresh the overview when it lands.
-                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
-                    if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
-                        if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
-                            let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
-                            remember();
-                            if changed {
-                                handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
-                            }
-                        }
+                    // fired inline), and refresh the overview when it lands.
+                    let changed = super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false);
+                    remember();
+                    if changed {
+                        handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
                     }
                     return;
                 }
-                ruling @ (inbound::DispatchedV2::Nickname | inbound::DispatchedV2::Timeout) => {
-                    let changed = if matches!(ruling, inbound::DispatchedV2::Nickname) { "community_nicknames" } else { "community_timeouts" };
-                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
-                    let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
-                    let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
+                inbound::DispatchedV2::Nickname(ev) | inbound::DispatchedV2::Timeout(ev) => {
+                    let changed = if matches!(ev.entry, super::guestbook::GuestbookEntry::Nickname { .. }) { "community_nicknames" } else { "community_timeouts" };
                     remember();
-                    if super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
+                    if super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false) {
                         crate::traits::emit_event_json(changed, serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&c.id().0) }));
                     }
                     return;
                 }
-                inbound::DispatchedV2::Kick { target } => {
-                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
-                    let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
-                    let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
-                    if !super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
+                inbound::DispatchedV2::Kick { target, event: ev } => {
+                    if !super::service::ingest_guestbook_event(c, *ev, event.created_at.as_secs()).unwrap_or(false) {
                         return;
                     }
                     let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);

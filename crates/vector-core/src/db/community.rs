@@ -1158,7 +1158,9 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM settings WHERE key LIKE 'writer_cert:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract:' || ?1 || ':%'"),
         Some("DELETE FROM settings WHERE key LIKE 'writer_retract_by:' || ?1 || ':%'"),
+        Some("DELETE FROM community_owed_authors WHERE book IN (SELECT book FROM community_guestbook_books WHERE community_id = ?1)"),
         Some("DELETE FROM settings WHERE key = 'departures_seen:' || ?1"),
+        Some("DELETE FROM community_departures_seen WHERE book IN (SELECT book FROM community_guestbook_books WHERE community_id = ?1)"),
     ]
     .into_iter()
     .flatten()
@@ -1167,6 +1169,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
             .map_err(|e| format!("delete community: {e}"))?;
     }
     tx.commit().map_err(|e| format!("delete community commit: {e}"))?;
+    departures_seen_cache().lock().unwrap_or_else(|e| e.into_inner()).moved(community_id);
     if let Some(cid) = crate::community::id32_from_hex(community_id) {
         banlist_cache().write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
     }
@@ -2860,24 +2863,219 @@ fn parse_hex32(hex: &str) -> Result<[u8; 32], String> {
     Ok(crate::simd::hex::hex_to_bytes_32(hex))
 }
 
-/// Load a community's persisted Guestbook: the raw membership events + the
-/// newest-seen cursor (relay seconds). `([], 0)` when never synced; unparseable
-/// stored JSON degrades the same way (the next sync re-seeds from zero).
+/// What was parsed out of a community's stored rows, for the last `CAP` communities read or
+/// written this session: parsing costs far more than most uses of the result. Each slot carries
+/// the write generation it was read under, and a writer moves the generation on while it still
+/// holds the write connection, so a read that overlapped a write is never served after it.
+struct Parsed<T, const CAP: usize> {
+    generations: std::collections::HashMap<String, u64>,
+    /// Most recently used last.
+    slots: Vec<(String, u64, T)>,
+}
+
+impl<T, const CAP: usize> Default for Parsed<T, CAP> {
+    fn default() -> Self {
+        Parsed { generations: Default::default(), slots: Vec::new() }
+    }
+}
+
+impl<T: Clone, const CAP: usize> Parsed<T, CAP> {
+    fn generation(&self, community_id: &str) -> u64 {
+        self.generations.get(community_id).copied().unwrap_or(0)
+    }
+
+    fn get(&mut self, community_id: &str) -> Option<T> {
+        let generation = self.generation(community_id);
+        let i = self.slots.iter().position(|(id, g, _)| id == community_id && *g == generation)?;
+        let slot = self.slots.remove(i);
+        let held = slot.2.clone();
+        self.slots.push(slot);
+        Some(held)
+    }
+
+    fn put(&mut self, community_id: &str, generation: u64, held: T) {
+        if generation != self.generation(community_id) {
+            return;
+        }
+        self.slots.retain(|(id, ..)| id != community_id);
+        if self.slots.len() >= CAP {
+            self.slots.remove(0);
+        }
+        self.slots.push((community_id.to_string(), generation, held));
+    }
+
+    /// A write is landing: what was read before it is stale. Returns the new generation.
+    fn moved(&mut self, community_id: &str) -> u64 {
+        let generation = self.generation(community_id) + 1;
+        self.generations.insert(community_id.to_string(), generation);
+        self.slots.retain(|(id, ..)| id != community_id);
+        generation
+    }
+}
+
+/// A community's stored Guestbook in arrival order, found by rumor id.
+#[derive(Clone, Default)]
+pub struct Guestbook {
+    events: Vec<crate::community::v2::guestbook::GuestbookEvent>,
+    by_id: std::collections::HashMap<[u8; 32], u32>,
+}
+
+impl Guestbook {
+    /// Keeps the first of any rumor given twice, as the rows do.
+    fn new(given: Vec<crate::community::v2::guestbook::GuestbookEvent>) -> Self {
+        let mut book = Guestbook { events: Vec::with_capacity(given.len()), by_id: std::collections::HashMap::with_capacity(given.len()) };
+        for ev in given {
+            if !book.by_id.contains_key(&ev.rumor_id) {
+                book.by_id.insert(ev.rumor_id, book.events.len() as u32);
+                book.events.push(ev);
+            }
+        }
+        book
+    }
+
+    pub fn get(&self, rumor_id: &[u8; 32]) -> Option<&crate::community::v2::guestbook::GuestbookEvent> {
+        self.by_id.get(rumor_id).map(|&i| &self.events[i as usize])
+    }
+
+    pub fn into_events(self) -> Vec<crate::community::v2::guestbook::GuestbookEvent> {
+        self.events
+    }
+
+    /// A rumor held already takes `ev` in its place; a new one goes last.
+    fn upsert(&mut self, ev: &crate::community::v2::guestbook::GuestbookEvent) {
+        match self.by_id.get(&ev.rumor_id) {
+            Some(&i) => self.events[i as usize] = ev.clone(),
+            None => {
+                self.by_id.insert(ev.rumor_id, self.events.len() as u32);
+                self.events.push(ev.clone());
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Guestbook {
+    type Target = [crate::community::v2::guestbook::GuestbookEvent];
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+type GuestbookShared = (std::sync::Arc<Guestbook>, u64);
+type GuestbookCache = Parsed<GuestbookShared, 8>;
+
+fn guestbook_cache() -> std::sync::Arc<std::sync::Mutex<GuestbookCache>> {
+    struct Key;
+    super::current_session().scoped::<Key, std::sync::Mutex<GuestbookCache>>()
+}
+
+/// [`get_guestbook`] without copying the events out: what a fold that only reads them wants.
+pub fn get_guestbook_shared(community_id: &str) -> Result<GuestbookShared, String> {
+    let cache = guestbook_cache();
+    let generation = {
+        let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = held.get(community_id) {
+            return Ok(hit);
+        }
+        held.generation(community_id)
+    };
+    let (events, cursor) = read_guestbook(community_id)?;
+    let shared = (std::sync::Arc::new(Guestbook::new(events)), cursor);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).put(community_id, generation, shared.clone());
+    Ok(shared)
+}
+
+/// A community's persisted Guestbook: its membership events in arrival order and the
+/// newest-seen cursor (relay seconds). `([], 0)` when never synced.
 pub fn get_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guestbook::GuestbookEvent>, u64), String> {
-    // The reader goes back before the decrypt and parse, which outlast the read by far.
-    let row = super::get_db_connection_guard_static()?
-        .query_row(
-            "SELECT events, cursor_secs FROM community_guestbook WHERE community_id = ?1",
-            params![community_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-        )
-        .optional()
-        .map_err(|e| format!("load guestbook: {e}"))?;
-    let Some((events_e, cursor)) = row else {
+    let (events, cursor) = get_guestbook_shared(community_id)?;
+    Ok((std::sync::Arc::unwrap_or_clone(events).into_events(), cursor))
+}
+
+fn read_guestbook(community_id: &str) -> Result<(Vec<crate::community::v2::guestbook::GuestbookEvent>, u64), String> {
+    let legacy = {
+        let conn = super::get_db_connection_guard_static()?;
+        conn.query_row("SELECT events, cursor_secs FROM community_guestbook WHERE community_id = ?1", params![community_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .optional()
+            .map_err(|e| format!("load guestbook: {e}"))?
+    };
+    let Some((blob, cursor)) = legacy else {
         return Ok((Vec::new(), 0));
     };
-    let events = serde_json::from_str(&dec_txt(&events_e)).unwrap_or_default();
+    if !blob.is_empty() {
+        move_guestbook_blob(community_id, &blob)?;
+    }
+    // The reader goes back before the decrypt and decode, which outlast the read by far.
+    let rows: Vec<([u8; 32], Vec<u8>)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT e.rumor_id, e.body FROM community_guestbook_events e
+                 JOIN community_guestbook_books b ON b.book = e.book
+                 WHERE b.community_id = ?1 ORDER BY e.seq",
+            )
+            .map_err(|e| format!("load guestbook events: {e}"))?;
+        let rows = stmt
+            .query_map(params![community_id], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .map_err(|e| format!("load guestbook events: {e}"))?;
+        rows.filter_map(|r| r.ok()).filter_map(|(id, body)| Some((id.try_into().ok()?, body))).collect()
+    };
+    let events = crate::crypto::open_batch(|o| {
+        rows.into_iter().filter_map(|(id, body)| crate::community::v2::guestbook::event_from_body(id, &o.open_blob_or_keep(&body))).collect()
+    });
     Ok((events, cursor.max(0) as u64))
+}
+
+/// Move a Guestbook still stored as one blob into rows, leaving the blob column empty. A blob
+/// that doesn't read (sealed under a key not held) stays as it is.
+fn move_guestbook_blob(community_id: &str, blob: &str) -> Result<(), String> {
+    let Ok(events) = serde_json::from_str::<Vec<crate::community::v2::guestbook::GuestbookEvent>>(&dec_txt(blob)) else {
+        return Ok(());
+    };
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("move guestbook tx: {e}"))?;
+    // Another read may have moved it first.
+    let still: Option<String> = tx
+        .query_row("SELECT events FROM community_guestbook WHERE community_id = ?1", params![community_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("move guestbook: {e}"))?;
+    if still.as_deref() != Some(blob) {
+        return Ok(());
+    }
+    insert_guestbook_events(&tx, community_id, &events, false)?;
+    tx.execute("UPDATE community_guestbook SET events = '' WHERE community_id = ?1", params![community_id])
+        .map_err(|e| format!("move guestbook: {e}"))?;
+    tx.commit().map_err(|e| format!("move guestbook commit: {e}"))
+}
+
+/// The number of `community_id`'s Guestbook, given on first use.
+fn guestbook_book(tx: &rusqlite::Connection, community_id: &str) -> Result<i64, String> {
+    tx.prepare_cached("INSERT OR IGNORE INTO community_guestbook_books (community_id) VALUES (?1)")
+        .and_then(|mut s| s.execute(params![community_id]))
+        .map_err(|e| format!("guestbook book: {e}"))?;
+    tx.prepare_cached("SELECT book FROM community_guestbook_books WHERE community_id = ?1")
+        .and_then(|mut s| s.query_row(params![community_id], |r| r.get(0)))
+        .map_err(|e| format!("guestbook book: {e}"))
+}
+
+/// Store `events` in order. A rumor already held keeps its place, and with `restamp` takes the
+/// new body (an epoch or arrival stamp it gained).
+fn insert_guestbook_events(tx: &rusqlite::Connection, community_id: &str, events: &[crate::community::v2::guestbook::GuestbookEvent], restamp: bool) -> Result<(), String> {
+    let book = guestbook_book(tx, community_id)?;
+    let sql = if restamp {
+        "INSERT INTO community_guestbook_events (book, rumor_id, body) VALUES (?1, ?2, ?3)
+         ON CONFLICT (book, rumor_id) DO UPDATE SET body = excluded.body"
+    } else {
+        "INSERT OR IGNORE INTO community_guestbook_events (book, rumor_id, body) VALUES (?1, ?2, ?3)"
+    };
+    let mut stmt = tx.prepare_cached(sql).map_err(|e| format!("store guestbook event: {e}"))?;
+    crate::crypto::seal_batch(|sealer| {
+        for ev in events {
+            let body = sealer.seal_blob(&crate::community::v2::guestbook::event_body(ev))?;
+            stmt.execute(params![book, &ev.rumor_id[..], body]).map_err(|e| format!("store guestbook event: {e}"))?;
+        }
+        Ok(())
+    })
 }
 
 struct StandingCache;
@@ -2932,21 +3130,84 @@ pub fn set_guestbook(
     let _seal = crate::crypto::gate::sealing();
     forget_console_verdict(community_id);
     let conn = super::get_write_connection_guard_static()?;
-    let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
-    let enc = enc_txt(&json)?;
-    conn.execute(
-        "INSERT INTO community_guestbook (community_id, events, cursor_secs)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(community_id) DO UPDATE SET events=?2, cursor_secs=?3",
-        params![community_id, enc, cursor_secs as i64],
+    let tx = conn.unchecked_transaction().map_err(|e| format!("save guestbook tx: {e}"))?;
+    let book = guestbook_book(&tx, community_id)?;
+    tx.execute("DELETE FROM community_guestbook_events WHERE book = ?1", params![book])
+        .map_err(|e| format!("save guestbook: {e}"))?;
+    insert_guestbook_events(&tx, community_id, events, false)?;
+    upsert_guestbook_cursor(&tx, community_id, cursor_secs)?;
+    tx.commit().map_err(|e| format!("save guestbook commit: {e}"))?;
+    {
+        let cache = guestbook_cache();
+        let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = held.moved(community_id);
+        held.put(community_id, generation, (std::sync::Arc::new(Guestbook::new(events.to_vec())), cursor_secs));
+    }
+    drop(conn);
+    guestbook_moved_on(community_id);
+    Ok(())
+}
+
+/// Store the Guestbook events a fold added or restamped, and the cursor: each a row of its own,
+/// nothing else rewritten.
+pub fn store_guestbook_events(
+    community_id: &str,
+    events: &[crate::community::v2::guestbook::GuestbookEvent],
+    cursor_secs: u64,
+) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    forget_console_verdict(community_id);
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("store guestbook tx: {e}"))?;
+    insert_guestbook_events(&tx, community_id, events, true)?;
+    upsert_guestbook_cursor(&tx, community_id, cursor_secs)?;
+    tx.commit().map_err(|e| format!("store guestbook commit: {e}"))?;
+    guestbook_written(
+        community_id,
+        |held| {
+            for ev in events {
+                held.upsert(ev);
+            }
+        },
+        cursor_secs,
+    );
+    drop(conn);
+    guestbook_moved_on(community_id);
+    Ok(())
+}
+
+fn upsert_guestbook_cursor(tx: &rusqlite::Connection, community_id: &str, cursor_secs: u64) -> Result<(), String> {
+    tx.prepare_cached(
+        "INSERT INTO community_guestbook (community_id, events, cursor_secs) VALUES (?1, '', ?2)
+         ON CONFLICT(community_id) DO UPDATE SET cursor_secs = ?2",
     )
-    .map_err(|e| format!("save guestbook: {e}"))?;
+    .and_then(|mut s| s.execute(params![community_id, cursor_secs as i64]))
+    .map(|_| ())
+    .map_err(|e| format!("save guestbook cursor: {e}"))
+}
+
+/// Carry a committed write into the parsed copy. Call while the write connection is still held,
+/// so no later write lands between the two. A copy not cached is read again when next asked for.
+fn guestbook_written(community_id: &str, apply: impl FnOnce(&mut Guestbook), cursor_secs: u64) {
+    let cache = guestbook_cache();
+    let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let before = held.get(community_id);
+    let generation = held.moved(community_id);
+    if let Some((events, _)) = before {
+        let mut events = std::sync::Arc::unwrap_or_clone(events);
+        apply(&mut events);
+        held.put(community_id, generation, (std::sync::Arc::new(events), cursor_secs));
+    }
+}
+
+/// What every Guestbook write moves on, once its write connection is let go.
+fn guestbook_moved_on(community_id: &str) {
     let map = standing_cache();
     let mut cache = map.write().unwrap_or_else(|e| e.into_inner());
     let entry = cache.entry(community_id.to_string()).or_insert((0, None));
     *entry = (entry.0 + 1, None);
+    drop(cache);
     bump_membership_generation();
-    Ok(())
 }
 
 #[cfg(test)]
@@ -3198,9 +3459,279 @@ mod tests {
         let cid = "d".repeat(64);
         assert_eq!(get_guestbook(&cid).unwrap(), (Vec::new(), 0), "absent reads as empty at cursor 0");
         set_guestbook(&cid, std::slice::from_ref(&ev), 42).unwrap();
-        let (events, cursor) = get_guestbook(&cid).unwrap();
-        assert_eq!(events, vec![ev], "events round-trip through the encrypted blob");
+        let (events, cursor) = read_guestbook(&cid).unwrap();
+        assert_eq!(events, vec![ev.clone()], "events round-trip through the encrypted blob");
         assert_eq!(cursor, 42);
+        assert_eq!(get_guestbook(&cid).unwrap(), (vec![ev], 42), "and the cached read agrees");
+    }
+
+    fn gb(b: u8, epoch: Option<u64>) -> crate::community::v2::guestbook::GuestbookEvent {
+        crate::community::v2::guestbook::GuestbookEvent {
+            rumor_id: [b; 32],
+            entry: crate::community::v2::guestbook::GuestbookEntry::Join { member: nostr_sdk::prelude::Keys::generate().public_key(), invited_by: None, at_ms: b as u64 * 1000 },
+            epoch,
+            observed_at: Some(1_790_000_000 + b as u64),
+        }
+    }
+
+    #[test]
+    fn a_guestbook_blob_moves_into_rows_in_order_and_once() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "f".repeat(64);
+        let events: Vec<_> = [9u8, 3, 7, 1].iter().map(|&b| gb(b, Some(2))).collect();
+        {
+            let _seal = crate::crypto::gate::sealing();
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "INSERT INTO community_guestbook (community_id, events, cursor_secs) VALUES (?1, ?2, 55)",
+                params![cid, enc_txt(&serde_json::to_string(&events).unwrap()).unwrap()],
+            )
+            .unwrap();
+        }
+        assert_eq!(read_guestbook(&cid).unwrap(), (events.clone(), 55), "arrival order kept");
+        let blob: String = crate::db::get_db_connection_guard_static().unwrap().query_row("SELECT events FROM community_guestbook WHERE community_id = ?1", params![cid], |r| r.get(0)).unwrap();
+        assert!(blob.is_empty(), "the blob is moved out, not kept beside the rows");
+        assert_eq!(read_guestbook(&cid).unwrap(), (events, 55), "and reads the same from rows");
+    }
+
+    #[test]
+    fn a_guestbook_blob_that_does_not_read_is_left_as_it_is() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "c".repeat(64);
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("INSERT INTO community_guestbook (community_id, events, cursor_secs) VALUES (?1, 'not json', 3)", params![cid]).unwrap();
+        }
+        assert_eq!(read_guestbook(&cid).unwrap(), (Vec::new(), 3));
+        let blob: String = crate::db::get_db_connection_guard_static().unwrap().query_row("SELECT events FROM community_guestbook WHERE community_id = ?1", params![cid], |r| r.get(0)).unwrap();
+        assert_eq!(blob, "not json", "nothing it couldn't read is thrown away");
+    }
+
+    #[test]
+    fn stored_guestbook_events_dedup_restamp_in_place_and_match_the_cache() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "b".repeat(64);
+        let (a, b, c) = (gb(1, None), gb(2, Some(1)), gb(3, Some(1)));
+        store_guestbook_events(&cid, &[a.clone(), b.clone()], 10).unwrap();
+        assert_eq!(get_guestbook(&cid).unwrap().0, vec![a.clone(), b.clone()]);
+        // The same rumor again changes nothing; a restamp takes its place in the order.
+        let a2 = crate::community::v2::guestbook::GuestbookEvent { epoch: Some(4), ..a.clone() };
+        store_guestbook_events(&cid, &[b.clone(), a2.clone(), c.clone()], 20).unwrap();
+        let want = (vec![a2, b, c], 20);
+        assert_eq!(get_guestbook(&cid).unwrap(), want, "the cached copy");
+        assert_eq!(read_guestbook(&cid).unwrap(), want, "the rows");
+        let rows: i64 = crate::db::get_db_connection_guard_static().unwrap().query_row("SELECT COUNT(*) FROM community_guestbook_events", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 3);
+        // A whole replace leaves exactly what it was given.
+        set_guestbook(&cid, &[want.0[2].clone()], 30).unwrap();
+        assert_eq!(read_guestbook(&cid).unwrap(), (vec![want.0[2].clone()], 30));
+        assert_eq!(get_guestbook(&cid).unwrap(), (vec![want.0[2].clone()], 30));
+    }
+
+    #[test]
+    fn owed_departures_write_only_the_members_that_changed() {
+        let (_tmp, _guard) = init_test_db();
+        let cid = "e".repeat(64);
+        let mut keys: Vec<PublicKey> = (0..3).map(|_| Keys::generate().public_key()).collect();
+        keys.sort();
+        let (a, b, c) = (keys[0], keys[1], keys[2]);
+        let rows = || -> Vec<(i64, Vec<u8>)> {
+            let conn = crate::db::get_db_connection_guard_static().unwrap();
+            let mut stmt = conn.prepare("SELECT seq, body FROM community_departures_seen ORDER BY seq").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+        };
+        let stored = || {
+            departures_seen_cache().lock().unwrap().moved(&cid);
+            (*departures_seen(&cid).unwrap().spans).clone()
+        };
+        let first: DepartureSpans = [(a, vec![(5, Some(9), false)].into()), (b, vec![(1, None, true)].into())].into_iter().collect();
+        set_departures_seen(&cid, std::sync::Arc::new(first.clone())).unwrap();
+        assert_eq!(stored(), first);
+        let before = rows();
+        let second: DepartureSpans = [(a, vec![(5, Some(9), false)].into()), (b, vec![(1, Some(4), true), (12, None, false)].into()), (c, vec![(7, None, false)].into())].into_iter().collect();
+        set_departures_seen(&cid, std::sync::Arc::new(second.clone())).unwrap();
+        let after = rows();
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0], before[0], "an unchanged member's row is left alone");
+        assert_eq!(after[1].0, before[1].0, "a changed member keeps its row");
+        assert_ne!(after[1].1, before[1].1);
+        assert_eq!(stored(), second);
+        let third: DepartureSpans = [(c, vec![(7, None, false)].into())].into_iter().collect();
+        set_departures_seen(&cid, std::sync::Arc::new(third.clone())).unwrap();
+        assert_eq!(rows().iter().map(|r| r.0).collect::<Vec<_>>(), vec![after[2].0], "a member with no spans left goes");
+        assert_eq!(stored(), third);
+        let fourth: DepartureSpans = [(a, vec![(5, Some(9), false)].into())].into_iter().collect();
+        set_departures_seen(&cid, std::sync::Arc::new(fourth.clone())).unwrap();
+        assert_eq!(rows().len(), 1, "and one after every member written");
+        assert_eq!(stored(), fourth);
+        delete_community(&cid).unwrap();
+        assert!(departures_seen(&cid).unwrap().spans.is_empty());
+        assert!(rows().is_empty());
+    }
+
+    #[test]
+    fn owed_departures_kept_in_settings_move_into_sealed_rows() {
+        let (_tmp, _guard) = init_test_db();
+        crate::state::ENCRYPTION_KEY.set([0x37u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let cid = "f".repeat(64);
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let json = format!(r#"{{"{}":[[5,9,false]],"{}":[[1,null,true],[12,20,false]]}}"#, a.to_hex(), b.to_hex());
+        super::super::settings::set_sql_setting(format!("departures_seen:{cid}"), json).unwrap();
+        let want: DepartureSpans = [(a, vec![(5, Some(9), false)].into()), (b, vec![(1, None, true), (12, Some(20), false)].into())].into_iter().collect();
+        assert_eq!(*departures_seen(&cid).unwrap().spans, want);
+        assert_eq!(super::super::settings::get_sql_setting(format!("departures_seen:{cid}")).unwrap(), None);
+        let bodies: Vec<Vec<u8>> = {
+            let conn = crate::db::get_db_connection_guard_static().unwrap();
+            let mut stmt = conn.prepare("SELECT body FROM community_departures_seen").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(bodies.len(), 2);
+        for body in &bodies {
+            assert!(!body.windows(32).any(|w| w == a.as_bytes() || w == b.as_bytes()), "who left is never stored in the clear");
+        }
+        departures_seen_cache().lock().unwrap().moved(&cid);
+        assert_eq!(*departures_seen(&cid).unwrap().spans, want, "read back from the sealed rows");
+        crate::state::set_encryption_enabled(false);
+    }
+
+    #[test]
+    fn an_owed_author_take_back_widens_narrows_and_settles_as_it_did_in_settings() {
+        let (_tmp, _guard) = init_test_db();
+        let (cid, chan) = ("a".repeat(64), "c".repeat(64));
+        let author = Keys::generate().public_key().to_hex();
+        let owed = || owed_author_retractions(&cid).unwrap();
+        owe_author_retraction(&cid, &chan, &author, 10, None).unwrap();
+        assert_eq!(owed(), vec![(chan.clone(), author.clone(), 10, None, 1)]);
+        owe_author_retraction(&cid, &chan, &author, 10, Some(20)).unwrap();
+        assert_eq!(owed(), vec![(chan.clone(), author.clone(), 10, Some(20), 2)], "the same span closing narrows its own owe");
+        owe_author_retraction(&cid, &chan, &author, 15, Some(30)).unwrap();
+        assert_eq!(owed(), vec![(chan.clone(), author.clone(), 10, Some(30), 3)]);
+        owe_author_retraction(&cid, &chan, &author, 5, None).unwrap();
+        assert_eq!(owed(), vec![(chan.clone(), author.clone(), 5, None, 4)], "any other range widens it");
+        settle_author_retraction(&cid, &chan, &author, 5, None, 3).unwrap();
+        assert_eq!(owed().len(), 1, "more was owed since it was read");
+        settle_author_retraction(&cid, &chan, &author, 5, None, 4).unwrap();
+        assert!(owed().is_empty());
+        let other = Keys::generate().public_key().to_hex();
+        owe_author_retraction(&cid, &chan, &author, 1, None).unwrap();
+        owe_author_retraction(&cid, &"d".repeat(64), &other, 2, Some(3)).unwrap();
+        assert_eq!(owed().len(), 2, "one row per author and Channel");
+        delete_community(&cid).unwrap();
+        assert!(owed().is_empty());
+    }
+
+    #[test]
+    fn owed_author_take_backs_kept_in_settings_move_into_sealed_rows() {
+        let (_tmp, _guard) = init_test_db();
+        crate::state::ENCRYPTION_KEY.set([0x41u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let (cid, elsewhere, chan) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let legacy = |c: &str, author: &PublicKey, value: &str| super::super::settings::set_sql_setting(format!("writer_retract_by:{c}:{chan}:{}", author.to_hex()), value.into()).unwrap();
+        legacy(&cid, &a, "7:3:");
+        legacy(&cid, &b, "4:1:9");
+        legacy(&elsewhere, &a, "1:1:");
+        let mut want = vec![(chan.clone(), a.to_hex(), 7, None, 3), (chan.clone(), b.to_hex(), 4, Some(9), 1)];
+        want.sort();
+        assert_eq!(owed_author_retractions(&cid).unwrap(), want);
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let left: Vec<String> = conn.prepare("SELECT key FROM settings WHERE key LIKE 'writer_retract_by:%'").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(left, vec![format!("writer_retract_by:{elsewhere}:{chan}:{}", a.to_hex())], "another community's rows wait for their own read");
+        let bodies: Vec<Vec<u8>> = conn.prepare("SELECT body FROM community_owed_authors").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        drop(conn);
+        assert_eq!(bodies.len(), 2);
+        for body in &bodies {
+            assert!(!body.windows(32).any(|w| w == a.as_bytes() || w == b.as_bytes()), "who is owed a take-back is never stored in the clear");
+        }
+        // Owing and settling an author still kept in settings goes through the moved row.
+        legacy(&elsewhere, &b, "2:5:");
+        owe_author_retraction(&elsewhere, &chan, &b.to_hex(), 1, None).unwrap();
+        settle_author_retraction(&elsewhere, &chan, &a.to_hex(), 1, None, 1).unwrap();
+        assert_eq!(owed_author_retractions(&elsewhere).unwrap(), vec![(chan.clone(), b.to_hex(), 1, None, 6)]);
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let bodies: Vec<Vec<u8>> = conn.prepare("SELECT body FROM community_owed_authors").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert!(bodies.iter().all(|body| !body.windows(32).any(|w| w == a.as_bytes() || w == b.as_bytes())), "nor once owed again");
+        drop(conn);
+        crate::state::set_encryption_enabled(false);
+    }
+
+    #[test]
+    fn an_owed_author_body_round_trips_and_refuses_what_it_did_not_write() {
+        let author = [7u8; 32];
+        for (since, generation, until) in [(0, 0, None), (1, 2, Some(3)), (u64::MAX, u64::MAX, Some(u64::MAX))] {
+            let body = author_owed_body(&author, since, generation, until);
+            assert_ne!(body.len(), 32);
+            assert_eq!(author_owed_from_body(&body), Some((author, since, generation, until)));
+            let mut longer = body.clone();
+            longer.push(0);
+            assert_eq!(author_owed_from_body(&longer), None, "no trailing bytes");
+            assert_eq!(author_owed_from_body(&body[..body.len() - 1]), None, "no cut body");
+        }
+        let mut flags = author_owed_body(&author, 1, 1, None);
+        *flags.last_mut().unwrap() = 2;
+        assert_eq!(author_owed_from_body(&flags), None, "unknown flags");
+        let mut format = author_owed_body(&author, 1, 1, None);
+        format[0] = 2;
+        assert_eq!(author_owed_from_body(&format), None);
+    }
+
+    #[test]
+    fn an_owed_departure_body_round_trips_and_refuses_what_it_did_not_write() {
+        let member = Keys::generate().public_key();
+        for spans in [vec![], vec![(0, None, false)], vec![(1, Some(2), true), (u64::MAX, Some(u64::MAX), false), (300, None, true)]] {
+            let body = departure_body(&member, &spans);
+            assert_ne!(body.len(), 32);
+            assert_eq!(departure_from_body(&body), Some((member, spans.clone())));
+            let mut longer = body.clone();
+            longer.push(0);
+            assert_eq!(departure_from_body(&longer), None, "no trailing bytes");
+            assert_eq!(departure_from_body(&body[..body.len() - 1]), None, "no cut body");
+        }
+        let mut forged = departure_body(&member, &[(1, None, false)]);
+        forged[33] = 0x7f;
+        assert_eq!(departure_from_body(&forged), None, "a count beyond the body");
+        let mut flags = departure_body(&member, &[(1, None, false)]);
+        flags[34] = 0b100;
+        assert_eq!(departure_from_body(&flags), None, "unknown flags");
+        let mut format = departure_body(&member, &[]);
+        format[0] = 2;
+        assert_eq!(departure_from_body(&format), None);
+    }
+
+    #[test]
+    fn guestbook_rows_are_sealed_at_rest() {
+        let (_tmp, _guard) = init_test_db();
+        crate::state::ENCRYPTION_KEY.set([0x31u8; 32], &[]);
+        crate::state::set_encryption_enabled(true);
+        let cid = "d".repeat(64);
+        let ev = gb(5, Some(1));
+        store_guestbook_events(&cid, std::slice::from_ref(&ev), 1).unwrap();
+        let body: Vec<u8> = crate::db::get_db_connection_guard_static().unwrap().query_row("SELECT body FROM community_guestbook_events", [], |r| r.get(0)).unwrap();
+        assert_ne!(body, crate::community::v2::guestbook::event_body(&ev), "not stored in the clear");
+        assert_eq!(read_guestbook(&cid).unwrap().0, vec![ev]);
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    #[test]
+    fn a_guestbook_read_overlapping_a_write_is_never_served_after_it() {
+        let (_tmp, _guard) = init_test_db();
+        let ev = |b: u8| crate::community::v2::guestbook::GuestbookEvent {
+            epoch: None,
+            observed_at: None,
+            rumor_id: [b; 32],
+            entry: crate::community::v2::guestbook::GuestbookEntry::Leave { member: nostr_sdk::prelude::Keys::generate().public_key(), at_ms: b as u64 },
+        };
+        let cid = "e".repeat(64);
+        let (one, two) = (ev(1), ev(2));
+        set_guestbook(&cid, std::slice::from_ref(&one), 1).unwrap();
+        assert_eq!(get_guestbook(&cid).unwrap().0, vec![one.clone()]);
+        // A read that began before the write below and finishes after it.
+        let began_under = guestbook_cache().lock().unwrap().generation(&cid);
+        set_guestbook(&cid, &[one.clone(), two.clone()], 2).unwrap();
+        guestbook_cache().lock().unwrap().put(&cid, began_under, (std::sync::Arc::new(Guestbook::new(vec![one.clone()])), 1));
+        assert_eq!(get_guestbook(&cid).unwrap(), (vec![one, two], 2), "the write stands over the late read");
     }
 
     #[test]
@@ -4740,13 +5271,15 @@ pub fn owed_retractions(community_id: &str) -> Result<Vec<(String, u64, u64)>, S
     Ok(rows.flatten().filter_map(|(k, v)| parse_owed(&v).map(|(since, generation)| (k[prefix.len()..].to_string(), since, generation))).collect())
 }
 
-fn author_retraction_key(community_id: &str, channel_id: &str, author: &str) -> String {
-    format!("writer_retract_by:{community_id}:{channel_id}:{author}")
+/// The settings rows owed author take-backs were kept in before they were sealed.
+fn legacy_author_retraction_range(community_id: &str) -> (String, String) {
+    (format!("writer_retract_by:{community_id}:"), format!("writer_retract_by:{community_id};"))
 }
 
 /// Owe `channel_id` a retraction of what `author` (hex) posted there from `since_ms`, before
 /// `until_ms` when given.
 pub fn owe_author_retraction(community_id: &str, channel_id: &str, author: &str, since_ms: u64, until_ms: Option<u64>) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
     owe_author_retraction_on(&conn, community_id, channel_id, author, since_ms, until_ms)
 }
@@ -4760,58 +5293,372 @@ fn parse_author_owed(value: &str) -> Option<(u64, u64, Option<u64>)> {
     Some((since, generation, until))
 }
 
-fn author_owed_value(since: u64, generation: u64, until: Option<u64>) -> String {
-    format!("{since}:{generation}:{}", until.map_or(String::new(), |u| u.to_string()))
+/// One author's owed take-back in a Channel.
+struct AuthorOwed {
+    seq: i64,
+    channel: String,
+    author: [u8; 32],
+    since: u64,
+    generation: u64,
+    until: Option<u64>,
 }
 
-fn owe_author_retraction_on(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, author: &str, since_ms: u64, until_ms: Option<u64>) -> Result<(), String> {
-    let key = author_retraction_key(community_id, channel_id, author);
-    let held: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional().map_err(|e| format!("owed retraction: {e}"))?;
-    let (since, generation, until) = match held.as_deref().and_then(parse_author_owed) {
-        // The same span closing narrows its own owe; any other range widens it.
-        Some((s, g, u)) => (s.min(since_ms), g + 1, match (u, until_ms) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (None, Some(b)) if s == since_ms => Some(b),
-            _ => None,
-        }),
-        None => (since_ms, 1, until_ms),
+/// An owed take-back at rest: `[format = 1][author][since][generation][flags: until][until]`,
+/// numbers as LEB128. Sealed, so who is owed one is never kept in the clear.
+fn author_owed_body(author: &[u8; 32], since: u64, generation: u64, until: Option<u64>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    out.push(1);
+    out.extend_from_slice(author);
+    varint(&mut out, since);
+    varint(&mut out, generation);
+    out.push(until.is_some() as u8);
+    if let Some(until) = until {
+        varint(&mut out, until);
+    }
+    out
+}
+
+fn author_owed_from_body(body: &[u8]) -> Option<([u8; 32], u64, u64, Option<u64>)> {
+    let (&1, rest) = body.split_first()? else { return None };
+    let (author, mut rest) = rest.split_at_checked(32)?;
+    let since = take_varint(&mut rest)?;
+    let generation = take_varint(&mut rest)?;
+    let (&flags, tail) = rest.split_first()?;
+    rest = tail;
+    let until = match flags {
+        0 => None,
+        1 => Some(take_varint(&mut rest)?),
+        _ => return None,
     };
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, author_owed_value(since, generation, until)]).map_err(|e| format!("owe retraction: {e}"))?;
+    rest.is_empty().then_some((author.try_into().ok()?, since, generation, until))
+}
+
+/// `community_id`'s owed author take-backs, in `channel_id` alone when given.
+fn held_author_retractions(conn: &rusqlite::Connection, community_id: &str, channel_id: Option<&str>) -> Result<Vec<AuthorOwed>, String> {
+    let rows: Vec<(i64, String, Vec<u8>)> = {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT o.seq, o.channel_id, o.body FROM community_owed_authors o
+                 JOIN community_guestbook_books b ON b.book = o.book
+                 WHERE b.community_id = ?1 AND (?2 IS NULL OR o.channel_id = ?2) ORDER BY o.seq",
+            )
+            .map_err(|e| format!("owed retractions: {e}"))?;
+        let rows = stmt.query_map(params![community_id, channel_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| format!("owed retractions: {e}"))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    Ok(crate::crypto::open_batch(|o| {
+        rows.into_iter()
+            .filter_map(|(seq, channel, body)| {
+                let (author, since, generation, until) = author_owed_from_body(&o.open_blob_or_keep(&body))?;
+                Some(AuthorOwed { seq, channel, author, since, generation, until })
+            })
+            .collect()
+    }))
+}
+
+fn has_legacy_author_retractions(conn: &rusqlite::Connection, community_id: &str) -> Result<bool, String> {
+    let (lo, hi) = legacy_author_retraction_range(community_id);
+    conn.query_row("SELECT 1 FROM settings WHERE key >= ?1 AND key < ?2 LIMIT 1", params![lo, hi], |_| Ok(()))
+        .optional()
+        .map(|r| r.is_some())
+        .map_err(|e| format!("owed retractions: {e}"))
+}
+
+/// Move owed take-backs still kept as settings rows into sealed rows. One that doesn't parse
+/// was never read as owed, and goes.
+fn move_author_retraction_settings(conn: &rusqlite::Connection, community_id: &str) -> Result<(), String> {
+    let (lo, hi) = legacy_author_retraction_range(community_id);
+    let legacy: Vec<(String, String)> = {
+        let mut stmt = conn.prepare_cached("SELECT key, value FROM settings WHERE key >= ?1 AND key < ?2").map_err(|e| format!("move owed retractions: {e}"))?;
+        let rows = stmt.query_map(params![lo, hi], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| format!("move owed retractions: {e}"))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    let book = guestbook_book(conn, community_id)?;
+    let mut insert = conn.prepare_cached("INSERT INTO community_owed_authors (book, channel_id, body) VALUES (?1, ?2, ?3)").map_err(|e| format!("move owed retractions: {e}"))?;
+    crate::crypto::seal_batch(|sealer| {
+        for (key, value) in &legacy {
+            let Some((channel, author)) = key[lo.len()..].split_once(':') else { continue };
+            let (Some(author), Some((since, generation, until))) = (crate::simd::hex::hex_to_bytes_32_checked(author), parse_author_owed(value)) else { continue };
+            insert.execute(params![book, channel, sealer.seal_blob(&author_owed_body(&author, since, generation, until))?]).map_err(|e| format!("move owed retractions: {e}"))?;
+        }
+        Ok::<(), String>(())
+    })?;
+    conn.execute("DELETE FROM settings WHERE key >= ?1 AND key < ?2", params![lo, hi]).map_err(|e| format!("move owed retractions: {e}"))?;
     Ok(())
+}
+
+/// Run `f` as one unit on `conn`, inside a caller's transaction or not.
+fn in_savepoint<T>(conn: &rusqlite::Connection, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    conn.execute_batch("SAVEPOINT owed_authors").map_err(|e| format!("owed retractions: {e}"))?;
+    match f() {
+        Ok(v) => {
+            conn.execute_batch("RELEASE owed_authors").map_err(|e| format!("owed retractions: {e}"))?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO owed_authors; RELEASE owed_authors");
+            Err(e)
+        }
+    }
+}
+
+/// On the write connection, under a sealing ticket.
+fn owe_author_retraction_on(conn: &rusqlite::Connection, community_id: &str, channel_id: &str, author: &str, since_ms: u64, until_ms: Option<u64>) -> Result<(), String> {
+    let author = crate::simd::hex::hex_to_bytes_32_checked(author).ok_or_else(|| format!("owe retraction: not an author key: {author}"))?;
+    in_savepoint(conn, || {
+        move_author_retraction_settings(conn, community_id)?;
+        let held = held_author_retractions(conn, community_id, Some(channel_id))?.into_iter().find(|o| o.author == author);
+        let (since, generation, until) = match &held {
+            // The same span closing narrows its own owe; any other range widens it.
+            Some(o) => (o.since.min(since_ms), o.generation + 1, match (o.until, until_ms) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (None, Some(b)) if o.since == since_ms => Some(b),
+                _ => None,
+            }),
+            None => (since_ms, 1, until_ms),
+        };
+        let body = crate::crypto::seal_batch(|sealer| sealer.seal_blob(&author_owed_body(&author, since, generation, until)))?;
+        match held {
+            Some(o) => conn.execute("UPDATE community_owed_authors SET body = ?1 WHERE seq = ?2", params![body, o.seq]),
+            None => conn.execute("INSERT INTO community_owed_authors (book, channel_id, body) VALUES (?1, ?2, ?3)", params![guestbook_book(conn, community_id)?, channel_id, body]),
+        }
+        .map_err(|e| format!("owe retraction: {e}"))?;
+        Ok(())
+    })
 }
 
 /// What `community_id` owes one author's posts: `(channel, author hex, since_ms, until_ms, generation)`.
 pub fn owed_author_retractions(community_id: &str) -> Result<Vec<(String, String, u64, Option<u64>, u64)>, String> {
-    let prefix = author_retraction_key(community_id, "", "");
-    let prefix = &prefix[..prefix.len() - 1];
-    let conn = super::get_db_connection_guard_static()?;
-    let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1").map_err(|e| format!("owed retractions: {e}"))?;
-    let rows = stmt.query_map(params![prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| format!("owed retractions: {e}"))?;
-    Ok(rows
-        .flatten()
-        .filter_map(|(k, v)| {
-            let (channel, author) = k[prefix.len()..].split_once(':')?;
-            let (since, generation, until) = parse_author_owed(&v)?;
-            Some((channel.to_string(), author.to_string(), since, until, generation))
-        })
-        .collect())
+    if has_legacy_author_retractions(&*super::get_db_connection_guard_static()?, community_id)? {
+        let _seal = crate::crypto::gate::sealing();
+        let conn = super::get_write_connection_guard_static()?;
+        in_savepoint(&conn, || move_author_retraction_settings(&conn, community_id))?;
+    }
+    let mut owed: Vec<_> = held_author_retractions(&*super::get_db_connection_guard_static()?, community_id, None)?
+        .into_iter()
+        .map(|o| (o.channel, crate::simd::hex::bytes_to_hex_32(&o.author), o.since, o.until, o.generation))
+        .collect();
+    owed.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    Ok(owed)
 }
 
 /// Clear one author's owed retraction once done, unless more was owed since it was read.
 pub fn settle_author_retraction(community_id: &str, channel_id: &str, author: &str, since: u64, until: Option<u64>, generation: u64) -> Result<(), String> {
+    let Some(author) = crate::simd::hex::hex_to_bytes_32_checked(author) else { return Ok(()) };
+    let _seal = crate::crypto::gate::sealing();
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![author_retraction_key(community_id, channel_id, author), author_owed_value(since, generation, until)])
-        .map_err(|e| format!("settle retraction: {e}"))?;
+    in_savepoint(&conn, || {
+        move_author_retraction_settings(&conn, community_id)?;
+        let done = held_author_retractions(&conn, community_id, Some(channel_id))?
+            .into_iter()
+            .filter(|o| o.author == author && o.since == since && o.until == until && o.generation == generation);
+        for o in done {
+            conn.execute("DELETE FROM community_owed_authors WHERE seq = ?1", params![o.seq]).map_err(|e| format!("settle retraction: {e}"))?;
+        }
+        Ok(())
+    })
+}
+
+/// Each departed member's spans away, as the Guestbook fold reads them. Shared, so a fold that
+/// moves one member copies no one else's.
+pub type DepartureSpans = std::collections::BTreeMap<PublicKey, std::sync::Arc<[crate::community::v2::guestbook::Span]>>;
+
+/// The departures this device has already owed take-backs for, and the row each member's sits in.
+#[derive(Default)]
+pub struct DeparturesSeen {
+    pub spans: std::sync::Arc<DepartureSpans>,
+    /// The row of each of `spans` in turn.
+    rows: Vec<i64>,
+}
+
+type DeparturesSeenCache = Parsed<std::sync::Arc<DeparturesSeen>, 8>;
+
+fn departures_seen_cache() -> std::sync::Arc<std::sync::Mutex<DeparturesSeenCache>> {
+    struct Key;
+    super::current_session().scoped::<Key, std::sync::Mutex<DeparturesSeenCache>>()
+}
+
+fn legacy_departures_key(community_id: &str) -> String {
+    format!("departures_seen:{community_id}")
+}
+
+pub fn departures_seen(community_id: &str) -> Result<std::sync::Arc<DeparturesSeen>, String> {
+    let cache = departures_seen_cache();
+    let generation = {
+        let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = held.get(community_id) {
+            return Ok(hit);
+        }
+        held.generation(community_id)
+    };
+    let legacy = super::get_db_connection_guard_static()?
+        .query_row("SELECT 1 FROM settings WHERE key = ?1", params![legacy_departures_key(community_id)], |_| Ok(()))
+        .optional()
+        .map_err(|e| format!("load departures: {e}"))?
+        .is_some();
+    if legacy {
+        let _seal = crate::crypto::gate::sealing();
+        let conn = super::get_write_connection_guard_static()?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("move departures tx: {e}"))?;
+        move_departures_setting(&tx, community_id)?;
+        tx.commit().map_err(|e| format!("move departures commit: {e}"))?;
+    }
+    let seen = std::sync::Arc::new(read_departures(&*super::get_db_connection_guard_static()?, community_id)?);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).put(community_id, generation, seen.clone());
+    Ok(seen)
+}
+
+fn read_departures(conn: &rusqlite::Connection, community_id: &str) -> Result<DeparturesSeen, String> {
+    let rows: Vec<(i64, Vec<u8>)> = {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT d.seq, d.body FROM community_departures_seen d
+                 JOIN community_guestbook_books b ON b.book = d.book
+                 WHERE b.community_id = ?1 ORDER BY d.seq",
+            )
+            .map_err(|e| format!("load departures: {e}"))?;
+        let rows = stmt.query_map(params![community_id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| format!("load departures: {e}"))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let held: std::collections::BTreeMap<PublicKey, (i64, Vec<crate::community::v2::guestbook::Span>)> = crate::crypto::open_batch(|o| {
+        rows.into_iter().filter_map(|(seq, body)| departure_from_body(&o.open_blob_or_keep(&body)).map(|(member, owed)| (member, (seq, owed)))).collect()
+    });
+    let rows = held.values().map(|(seq, _)| *seq).collect();
+    Ok(DeparturesSeen { spans: std::sync::Arc::new(held.into_iter().map(|(member, (_, owed))| (member, owed.into())).collect()), rows })
+}
+
+/// Move a record still kept as one settings row into rows. One that doesn't parse read as nothing seen.
+fn move_departures_setting(tx: &rusqlite::Connection, community_id: &str) -> Result<(), String> {
+    let key = legacy_departures_key(community_id);
+    let Some(json) = tx.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get::<_, String>(0)).optional().map_err(|e| format!("move departures: {e}"))? else {
+        return Ok(());
+    };
+    let by_hex: std::collections::BTreeMap<String, Vec<crate::community::v2::guestbook::Span>> = serde_json::from_str(&json).unwrap_or_default();
+    let book = guestbook_book(tx, community_id)?;
+    let mut stmt = tx.prepare_cached("INSERT INTO community_departures_seen (book, body) VALUES (?1, ?2)").map_err(|e| format!("move departures: {e}"))?;
+    crate::crypto::seal_batch(|sealer| {
+        for (member, owed) in by_hex.iter().filter_map(|(k, v)| Some((PublicKey::from_hex(k).ok()?, v))) {
+            stmt.execute(params![book, sealer.seal_blob(&departure_body(&member, owed))?]).map_err(|e| format!("move departures: {e}"))?;
+        }
+        Ok::<(), String>(())
+    })?;
+    tx.execute("DELETE FROM settings WHERE key = ?1", params![key]).map_err(|e| format!("move departures: {e}"))?;
     Ok(())
 }
 
-/// The departures this device has already owed take-backs for, by author hex.
-pub fn departures_seen(community_id: &str) -> Result<std::collections::BTreeMap<String, Vec<crate::community::v2::guestbook::Span>>, String> {
-    Ok(super::settings::get_sql_setting(format!("departures_seen:{community_id}"))?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+/// Record `now` as owed for, writing only the members whose spans changed.
+pub fn set_departures_seen(community_id: &str, now: std::sync::Arc<DepartureSpans>) -> Result<(), String> {
+    let _seal = crate::crypto::gate::sealing();
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("store departures tx: {e}"))?;
+    move_departures_setting(&tx, community_id)?;
+    let cache = departures_seen_cache();
+    let cached = cache.lock().unwrap_or_else(|e| e.into_inner()).get(community_id);
+    let held = match cached {
+        Some(held) => held,
+        None => std::sync::Arc::new(read_departures(&tx, community_id)?),
+    };
+    let book = guestbook_book(&tx, community_id)?;
+    let mut rows = Vec::with_capacity(now.len());
+    {
+        let mut update = tx.prepare_cached("UPDATE community_departures_seen SET body = ?1 WHERE seq = ?2").map_err(|e| format!("store departures: {e}"))?;
+        let mut insert = tx.prepare_cached("INSERT INTO community_departures_seen (book, body) VALUES (?1, ?2)").map_err(|e| format!("store departures: {e}"))?;
+        let mut delete = tx.prepare_cached("DELETE FROM community_departures_seen WHERE seq = ?1").map_err(|e| format!("store departures: {e}"))?;
+        // Both sides are in key order: one walk pairs each member with its row.
+        let mut was = held.spans.iter().zip(held.rows.iter().copied()).peekable();
+        crate::crypto::seal_batch(|sealer| {
+            for (member, owed) in now.iter() {
+                while let Some((_, seq)) = was.next_if(|((m, _), _)| *m < member) {
+                    delete.execute(params![seq]).map_err(|e| format!("store departures: {e}"))?;
+                }
+                let seq = match was.next_if(|((m, _), _)| *m == member) {
+                    Some(((_, before), seq)) if before == owed => seq,
+                    Some((_, seq)) => {
+                        update.execute(params![sealer.seal_blob(&departure_body(member, owed))?, seq]).map_err(|e| format!("store departures: {e}"))?;
+                        seq
+                    }
+                    None => {
+                        insert.execute(params![book, sealer.seal_blob(&departure_body(member, owed))?]).map_err(|e| format!("store departures: {e}"))?;
+                        tx.last_insert_rowid()
+                    }
+                };
+                rows.push(seq);
+            }
+            for (_, seq) in was.by_ref() {
+                delete.execute(params![seq]).map_err(|e| format!("store departures: {e}"))?;
+            }
+            Ok::<(), String>(())
+        })?;
+    }
+    tx.commit().map_err(|e| format!("store departures commit: {e}"))?;
+    let mut cached = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let generation = cached.moved(community_id);
+    cached.put(community_id, generation, std::sync::Arc::new(DeparturesSeen { spans: now, rows }));
+    Ok(())
 }
 
-pub fn set_departures_seen(community_id: &str, seen: &std::collections::BTreeMap<String, Vec<crate::community::v2::guestbook::Span>>) -> Result<(), String> {
-    super::settings::set_sql_setting(format!("departures_seen:{community_id}"), serde_json::to_string(seen).map_err(|e| e.to_string())?)
+fn varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+fn take_varint(rest: &mut &[u8]) -> Option<u64> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let (&b, tail) = rest.split_first()?;
+        *rest = tail;
+        v |= ((b & 0x7f) as u64).checked_shl(shift)?;
+        if b & 0x80 == 0 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// A member's owed spans at rest: `[format = 1][member][count][flags: until, kicked][from][until]…`,
+/// numbers as LEB128. Sealed with the rest, so who left and when is never kept in the clear.
+fn departure_body(member: &PublicKey, spans: &[crate::community::v2::guestbook::Span]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(34 + spans.len() * 13);
+    out.push(1);
+    out.extend_from_slice(member.as_bytes());
+    varint(&mut out, spans.len() as u64);
+    for &(from, until, kicked) in spans {
+        out.push(until.is_some() as u8 | (kicked as u8) << 1);
+        varint(&mut out, from);
+        if let Some(until) = until {
+            varint(&mut out, until);
+        }
+    }
+    out
+}
+
+fn departure_from_body(body: &[u8]) -> Option<(PublicKey, Vec<crate::community::v2::guestbook::Span>)> {
+    let (&1, rest) = body.split_first()? else { return None };
+    let (member, mut rest) = rest.split_at_checked(32)?;
+    let member = PublicKey::from_byte_array(member.try_into().ok()?);
+    let count = take_varint(&mut rest)?;
+    // Each span takes at least two bytes, so a count beyond that is a forged length.
+    if count > rest.len() as u64 / 2 {
+        return None;
+    }
+    let mut spans = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (&flags, tail) = rest.split_first()?;
+        rest = tail;
+        if flags & !0b11 != 0 {
+            return None;
+        }
+        let from = take_varint(&mut rest)?;
+        let until = if flags & 1 != 0 { Some(take_varint(&mut rest)?) } else { None };
+        spans.push((from, until, flags & 2 != 0));
+    }
+    rest.is_empty().then_some((member, spans))
 }
 
 /// Clear `channel_id`'s owed retraction once done, unless more was owed since it was read.
