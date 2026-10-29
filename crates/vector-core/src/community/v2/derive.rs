@@ -117,17 +117,35 @@ pub struct GroupKey {
     conv_key: ConversationKey,
 }
 
-/// Bound on the session's [`GroupKey`] memo: communities x channels x a few epochs
-/// is tiny, so only a runaway (mass rekey probing) reaches it.
-const GROUP_KEY_MEMO_CAP: usize = 1024;
+/// Entries per generation of the session's [`GroupKey`] memo. Every held plane is one entry, and
+/// the live route table alone walks all of them, so the bound sits well above a large held set.
+const GROUP_KEY_MEMO_CAP: usize = 4096;
 
-/// A full memo starts over in a NEW table: a cleared one keeps the runaway's
-/// allocation for the rest of the session.
-fn memo_insert(map: &mut std::collections::HashMap<[u8; 32], GroupKey>, key: [u8; 32], value: GroupKey) {
-    if map.len() >= GROUP_KEY_MEMO_CAP {
-        *map = std::collections::HashMap::new();
+/// The memo in two generations: a full `cur` ages into `prev` rather than being wiped, and a hit
+/// in `prev` moves back, so a working set within the bound never goes cold all at once.
+#[derive(Default)]
+struct GroupKeyMemo {
+    cur: std::collections::HashMap<[u8; 32], GroupKey>,
+    prev: std::collections::HashMap<[u8; 32], GroupKey>,
+}
+
+impl GroupKeyMemo {
+    fn get(&mut self, key: &[u8; 32]) -> Option<GroupKey> {
+        if let Some(hit) = self.cur.get(key) {
+            return Some(hit.clone());
+        }
+        let hit = self.prev.remove(key)?;
+        self.insert(*key, hit.clone());
+        Some(hit)
     }
-    map.insert(key, value);
+
+    fn insert(&mut self, key: [u8; 32], value: GroupKey) {
+        if self.cur.len() >= GROUP_KEY_MEMO_CAP {
+            // A new table, not a cleared one: a runaway's allocation goes with its generation.
+            self.prev = std::mem::take(&mut self.cur);
+        }
+        self.cur.insert(key, value);
+    }
 }
 
 impl GroupKey {
@@ -157,12 +175,11 @@ impl GroupKey {
             h.update([epoch.is_some() as u8]);
             h.finalize()
         };
-        struct GroupKeyMemo;
-        type MemoMap = std::sync::Mutex<std::collections::HashMap<[u8; 32], GroupKey>>;
-        let memo: std::sync::Arc<MemoMap> =
-            crate::db::current_session().scoped::<GroupKeyMemo, MemoMap>();
+        struct MemoKey;
+        type MemoMap = std::sync::Mutex<GroupKeyMemo>;
+        let memo: std::sync::Arc<MemoMap> = crate::db::current_session().scoped::<MemoKey, MemoMap>();
         if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(&memo_key) {
-            return hit.clone();
+            return hit;
         }
         let info = build_info(label, id32, epoch);
         let sk = hkdf_to_secret_key(secret, &info);
@@ -170,7 +187,7 @@ impl GroupKey {
         let conv_key = ConversationKey::derive(keys.secret_key(), &keys.public_key())
             .expect("self-ECDH of a valid keypair cannot fail");
         let out = GroupKey { keys, conv_key };
-        memo_insert(&mut memo.lock().unwrap_or_else(|e| e.into_inner()), memo_key, out.clone());
+        memo.lock().unwrap_or_else(|e| e.into_inner()).insert(memo_key, out.clone());
         out
     }
 
@@ -501,20 +518,30 @@ mod tests {
     #[test]
     fn a_full_group_key_memo_ages_a_generation_and_keeps_what_is_used() {
         let value = guestbook_group_key(&[7; 32], &CommunityId([8; 32]), Epoch(0));
-        let mut map = std::collections::HashMap::new();
-        for i in 0..GROUP_KEY_MEMO_CAP as u32 {
+        let key = |i: u32| {
             let mut k = [0u8; 32];
             k[..4].copy_from_slice(&i.to_le_bytes());
-            memo_insert(&mut map, k, value.clone());
+            k
+        };
+        let mut memo = GroupKeyMemo::default();
+        let cap = GROUP_KEY_MEMO_CAP as u32;
+        for i in 0..cap {
+            memo.insert(key(i), value.clone());
         }
-        assert_eq!(map.len(), GROUP_KEY_MEMO_CAP);
-        let peak = map.capacity();
-        memo_insert(&mut map, [0xEE; 32], value.clone());
-        assert_eq!(map.len(), 1, "a full memo resets rather than grows");
-        assert!(map.contains_key(&[0xEE; 32]), "the entry that tripped the reset is kept");
-        assert!(map.capacity() < peak / 8, "the reset frees the runaway's table ({} of {peak})", map.capacity());
-        memo_insert(&mut map, [0xEF; 32], value);
-        assert_eq!(map.len(), 2, "below the cap the memo only grows");
+        memo.insert(key(cap), value.clone());
+        assert_eq!((memo.cur.len(), memo.prev.len()), (1, GROUP_KEY_MEMO_CAP), "a full generation ages whole");
+        // A working set as large as the bound, walked again and again, never misses.
+        for round in 0..3 {
+            for i in 0..cap {
+                assert!(memo.get(&key(i)).is_some(), "round {round}: key {i} went cold");
+            }
+        }
+        // What nobody touches for two generations is gone, and the tables stay bounded.
+        for i in cap..cap * 3 {
+            memo.insert(key(i + 1), value.clone());
+        }
+        assert!(memo.get(&key(0)).is_none());
+        assert!(memo.cur.len() <= GROUP_KEY_MEMO_CAP && memo.prev.len() <= GROUP_KEY_MEMO_CAP);
     }
 
     // Fixed test inputs. The golden hex below was produced by an INDEPENDENT

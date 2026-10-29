@@ -204,6 +204,7 @@ pub fn seat_channel_key(
     )
     .map_err(|e| format!("seat channel key: {e}"))?;
     tx.commit().map_err(|e| format!("seat channel key commit: {e}"))?;
+    crate::community::v2::realtime::invalidate_held_v2_community(community_id);
     Ok(())
 }
 
@@ -309,6 +310,9 @@ pub fn advance_channel_epoch(
         .map_err(|e| format!("advance channel head: {e}"))?;
     }
     tx.commit().map_err(|e| format!("advance channel epoch commit: {e}"))?;
+    if advanced {
+        crate::community::v2::realtime::invalidate_held_v2_community(community_id);
+    }
     Ok(advanced)
 }
 
@@ -357,6 +361,9 @@ pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &
         .map_err(|e| format!("advance server-root head: {e}"))?;
     }
     tx.commit().map_err(|e| format!("advance server root commit: {e}"))?;
+    if advanced {
+        crate::community::v2::realtime::invalidate_held_v2_community(community_id);
+    }
     Ok(advanced)
 }
 
@@ -380,6 +387,9 @@ pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8
         .map_err(|e| format!("converge server-root head: {e}"))?
         > 0;
     tx.commit().map_err(|e| format!("converge server root commit: {e}"))?;
+    if switched {
+        crate::community::v2::realtime::invalidate_held_v2_community(community_id);
+    }
     Ok(switched)
 }
 
@@ -1098,8 +1108,9 @@ pub fn list_all_public_invites() -> Result<Vec<PublicInviteRecord>, String> {
 /// is no protocol "leave" (membership is key possession), so leaving is purely local:
 /// drop the keys + stop subscribing.
 pub fn delete_community(community_id: &str) -> Result<(), String> {
-    crate::community::v2::realtime::invalidate_held_v2_cache();
-    delete_community_inner(community_id, false)
+    let out = delete_community_inner(community_id, false);
+    crate::community::v2::realtime::invalidate_held_v2_community(community_id);
+    out
 }
 
 /// self-removal teardown: drop all local community state EXCEPT the held epoch keys
@@ -1108,8 +1119,9 @@ pub fn delete_community(community_id: &str) -> Result<(), String> {
 /// `3305` self-delete of one's own past messages, each sealed under the epoch key it was sent
 /// at. Used by every self-removal trigger (voluntary leave, kick of me, ban-rekey exclusion).
 pub fn delete_community_retain_keys(community_id: &str) -> Result<(), String> {
-    crate::community::v2::realtime::invalidate_held_v2_cache();
-    delete_community_inner(community_id, true)
+    let out = delete_community_inner(community_id, true);
+    crate::community::v2::realtime::invalidate_held_v2_community(community_id);
+    out
 }
 
 fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), String> {
@@ -2395,7 +2407,6 @@ pub fn get_invite_link_sets(community_id: &str) -> Result<Vec<InviteLinkSetRow>,
 /// exactly once — a re-wrapped tombstone (fresh outer id, same owner seal) then
 /// can't spam the handler.
 pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
-    crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let changed = conn
         .execute(
@@ -2403,6 +2414,7 @@ pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
             params![community_id],
         )
         .map_err(|e| format!("set dissolved: {e}"))?;
+    crate::community::v2::realtime::invalidate_held_v2_community(community_id);
     Ok(changed > 0)
 }
 
@@ -2542,7 +2554,6 @@ struct ChannelMetaStash {
 /// re-save preserves banlist/roles (managed by the fold, not here).
 pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
     let _seal = crate::crypto::gate::sealing();
-    crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let id_hex = crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0);
     let relays_json = serde_json::to_string(&c.relays).map_err(|e| e.to_string())?;
@@ -2662,6 +2673,7 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     }
 
     tx.commit().map_err(|e| format!("commit v2 community: {e}"))?;
+    crate::community::v2::realtime::invalidate_held_v2_community(&id_hex);
     // The save may have pruned channels (DELETE ... NOT IN the new set); evict so a
     // pruned channel stops resolving to this community.
     forget_community_channels(&id_hex);
@@ -4655,6 +4667,7 @@ pub fn set_community_writers(community_id: &str, channel_id: &str, content: &str
         .map_err(|e| format!("set writers: {e}"))?;
     // Whichever fold stored it, what a new writer or stop entry undoes is owed a retraction.
     if changed > 0 {
+        crate::community::v2::realtime::invalidate_held_v2_community(community_id);
         if let Some(since) = retraction_since(old.as_deref(), content) {
             owe_retraction(&conn, community_id, channel_id, since)?;
         }

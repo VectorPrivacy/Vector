@@ -474,16 +474,24 @@ async fn stamp_dissolved_chats(id: &CommunityId) {
     }
 }
 
-/// Session-scoped short-TTL cache over [`load_held_v2`] for the dispatch hot
-/// path: dispatch runs per arriving wrap (typing indicators included), and a
-/// fresh load vault-decrypts EVERY community row each time — measured at a
-/// full core on a live evening. Writers invalidate on every community-row
-/// write, and the TTL only backstops a missed writer; it adds nothing to
-/// rotation propagation, which already waits on the follow worker's write.
-struct HeldV2Cache;
-type HeldV2Slot = std::sync::Mutex<Option<(web_time::Instant, Arc<HeldV2>)>>;
-fn held_v2_cache() -> Arc<HeldV2Slot> {
-    crate::db::current_session().scoped::<HeldV2Cache, HeldV2Slot>()
+/// Session-scoped cache over [`load_held_v2`] for the dispatch hot path: dispatch runs per
+/// arriving wrap (typing indicators included), and a fresh load vault-decrypts EVERY community
+/// row. Every writer of what a load reads moves `generation` once its write has committed, naming
+/// the community it wrote, and a snapshot serves only the generation it was loaded under, so a
+/// load overlapping a write is never served past it. The next load reads again only the rows
+/// written since. The TTL only backstops a writer outside `db::community`.
+#[derive(Default)]
+struct HeldV2Cache {
+    generation: u64,
+    /// Communities written since the snapshot, each with the generation of its latest write.
+    written: HashMap<[u8; 32], u64>,
+    /// The generation of the latest write that named no community: the next load reads every row.
+    whole: Option<u64>,
+    snapshot: Option<(web_time::Instant, u64, Arc<HeldV2>)>,
+}
+fn held_v2_cache() -> Arc<std::sync::Mutex<HeldV2Cache>> {
+    struct Key;
+    crate::db::current_session().scoped::<Key, std::sync::Mutex<HeldV2Cache>>()
 }
 
 /// The held communities, and which of them each plane address belongs to: a wrap's author is
@@ -515,27 +523,132 @@ impl HeldV2 {
     }
 }
 
-pub fn load_held_v2_cached() -> Arc<HeldV2> {
-    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
-    let cache = held_v2_cache();
-    {
-        let g = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, held)) = g.as_ref() {
-            if at.elapsed() < TTL {
-                return Arc::clone(held);
-            }
-        }
+#[cfg(feature = "bench")]
+impl HeldV2 {
+    pub fn for_bench(communities: Vec<CommunityV2>) -> Self {
+        HeldV2 { communities: communities.into_boxed_slice(), routes: std::sync::OnceLock::new() }
     }
-    let fresh = Arc::new(HeldV2 { communities: load_held_v2().into_boxed_slice(), routes: std::sync::OnceLock::new() });
-    *cache.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((web_time::Instant::now(), Arc::clone(&fresh)));
+}
+
+#[cfg(feature = "bench")]
+pub fn bench_cache_age_secs() -> u64 {
+    held_v2_cache().lock().unwrap().snapshot.as_ref().map_or(u64::MAX, |(at, ..)| at.elapsed().as_secs())
+}
+
+#[cfg(feature = "bench")]
+pub fn bench_addresses(c: &CommunityV2) -> usize {
+    community_addresses(c).len()
+}
+
+/// One held community as [`load_held_v2`] reads it: `None` when it is gone or dissolved.
+fn load_held_one(id: &CommunityId) -> Result<Option<CommunityV2>, String> {
+    if crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0))? {
+        return Ok(None);
+    }
+    crate::db::community::load_community_v2(id)
+}
+
+pub fn load_held_v2_cached() -> Arc<HeldV2> {
+    let cache = held_v2_cache();
+    let load = {
+        let held = cache.lock().unwrap_or_else(|e| e.into_inner());
+        match &held.snapshot {
+            // Marks left at the snapshot's own generation are rows it failed to read: read them again.
+            Some((at, loaded_under, snapshot)) if *loaded_under == held.generation && held.written.is_empty() && at.elapsed() < HELD_TTL => return Arc::clone(snapshot),
+            Some((at, _, snapshot)) if held.whole.is_none() && at.elapsed() < HELD_TTL => HeldLoad {
+                generation: held.generation,
+                written: held.written.clone(),
+                whole: None,
+                previous: Some((*at, Arc::clone(snapshot))),
+                unread: Vec::new(),
+            },
+            _ => HeldLoad { generation: held.generation, written: HashMap::new(), whole: held.whole, previous: None, unread: Vec::new() },
+        }
+    };
+    let mut load = load;
+    let communities: Vec<CommunityV2> = match &load.previous {
+        // Only the rows written since are read again; the rest stand as they were loaded. A row
+        // that fails to read keeps the copy loaded before and is read again next time.
+        Some((_, previous)) => match crate::db::community::list_community_ids() {
+            Ok(ids) => ids
+                .iter()
+                .filter_map(|id| {
+                    let kept = previous.communities.iter().find(|c| c.id() == id);
+                    match kept {
+                        Some(kept) if !load.written.contains_key(&id.0) => Some(kept.clone()),
+                        _ => load_held_one(id).unwrap_or_else(|_| {
+                            load.unread.push(id.0);
+                            kept.cloned()
+                        }),
+                    }
+                })
+                .collect(),
+            Err(_) => return Arc::clone(previous),
+        },
+        None => load_held_v2(),
+    };
+    let fresh = Arc::new(HeldV2 { communities: communities.into_boxed_slice(), routes: std::sync::OnceLock::new() });
+    load.settle(&mut cache.lock().unwrap_or_else(|e| e.into_inner()), Arc::clone(&fresh), web_time::Instant::now());
     fresh
 }
 
-/// Drop the held-communities cache — call after ANY write that changes what
-/// [`load_held_v2`] returns (row save, dissolve, delete, join).
+/// The backstop for a writer outside `db::community`: a snapshot this old is read whole again.
+const HELD_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What one load of the held set captured before it read.
+struct HeldLoad {
+    generation: u64,
+    written: HashMap<[u8; 32], u64>,
+    whole: Option<u64>,
+    /// For a load of only the rows written since: when the snapshot it builds on was read whole.
+    previous: Option<(web_time::Instant, Arc<HeldV2>)>,
+    /// Rows it failed to read.
+    unread: Vec<[u8; 32]>,
+}
+
+impl HeldLoad {
+    fn settle(self, held: &mut HeldV2Cache, fresh: Arc<HeldV2>, now: web_time::Instant) {
+        // A write that landed during the load keeps its mark for the next one.
+        for (id, at) in &self.written {
+            if held.written.get(id) == Some(at) && !self.unread.contains(id) {
+                held.written.remove(id);
+            }
+        }
+        if self.previous.is_none() {
+            held.written.retain(|_, at| *at > self.generation);
+            if held.whole == self.whole {
+                held.whole = None;
+            }
+        }
+        // A loader that captured an older generation finishing after a newer one keeps its result
+        // to itself: installed, it would stand as current over what the newer one read.
+        if held.snapshot.as_ref().is_none_or(|(_, under, _)| *under <= self.generation) {
+            let read_whole_at = self.previous.map_or(now, |(at, _)| at);
+            held.snapshot = Some((read_whole_at, self.generation, fresh));
+        }
+    }
+}
+
+/// Retire the held-communities snapshot. Call after ANY committed write that changes what
+/// [`load_held_v2`] returns; when the write is one community's, [`invalidate_held_v2_community`]
+/// lets the next load read that row alone.
 pub fn invalidate_held_v2_cache() {
-    *held_v2_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let cache = held_v2_cache();
+    let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+    held.generation += 1;
+    held.whole = Some(held.generation);
+}
+
+/// [`invalidate_held_v2_cache`] for a committed write to the community `community_id` (hex).
+pub fn invalidate_held_v2_community(community_id: &str) {
+    let Some(id) = crate::community::id32_from_hex(community_id) else {
+        return invalidate_held_v2_cache();
+    };
+    let cache = held_v2_cache();
+    let mut held = cache.lock().unwrap_or_else(|e| e.into_inner());
+    held.generation += 1;
+    let at = held.generation;
+    held.written.insert(id, at);
 }
 
 /// Refresh the v2 subscription for the held communities: register
@@ -1544,6 +1657,35 @@ mod tests {
         assert_eq!(plane_authors(&[b, a]), two);
     }
 
+    #[test]
+    fn an_older_load_finishing_last_never_stands_over_a_newer_one() {
+        let empty = || Arc::new(HeldV2 { communities: Box::new([]), routes: std::sync::OnceLock::new() });
+        let load = |generation: u64, written: &[([u8; 32], u64)], previous: Option<(web_time::Instant, Arc<HeldV2>)>| HeldLoad {
+            generation,
+            written: written.iter().copied().collect(),
+            whole: None,
+            previous,
+            unread: Vec::new(),
+        };
+        let y = [7u8; 32];
+        let t0 = web_time::Instant::now();
+        let mut held = HeldV2Cache { generation: 2, written: [(y, 2)].into_iter().collect(), whole: None, snapshot: Some((t0, 0, empty())) };
+        // A captured generation 1 (y written at 1), B generation 2 (y written again at 2); B finishes first.
+        let (a, b) = (load(1, &[(y, 1)], Some((t0, empty()))), load(2, &[(y, 2)], Some((t0, empty()))));
+        let newer = empty();
+        b.settle(&mut held, Arc::clone(&newer), t0);
+        a.settle(&mut held, empty(), t0);
+        let (at, under, standing) = held.snapshot.as_ref().unwrap();
+        assert_eq!(*under, 2, "the later finisher's older snapshot is not installed");
+        assert!(Arc::ptr_eq(standing, &newer));
+        assert!(held.written.is_empty(), "y's write was read by the newer load");
+        // A load of only the written rows keeps the time the set was last read whole.
+        assert_eq!(*at, t0);
+        let later = t0 + std::time::Duration::from_secs(5);
+        load(2, &[], None).settle(&mut held, empty(), later);
+        assert_eq!(held.snapshot.as_ref().unwrap().0, later, "a whole read restarts the backstop");
+    }
+
     #[tokio::test]
     async fn a_live_subscription_check_never_waits_on_a_refresh() {
         let live = SubscriptionId::new("live-targeted");
@@ -1557,6 +1699,65 @@ mod tests {
         drop(held);
         *V2_SUB_ID.lock().await = None;
         assert!(!is_live_subscription(&live));
+    }
+
+    #[tokio::test]
+    async fn a_committed_key_or_epoch_change_reaches_the_live_routes_at_once() {
+        use crate::community::transport::memory::MemoryRelay;
+        let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let acct = {
+            const B: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+            let mut s = String::from("npub1");
+            for i in 0..58 {
+                s.push(B[(i * 23 + 3) % 32] as char);
+            }
+            s
+        };
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(acct.clone()).unwrap();
+        crate::db::init_database(&acct).unwrap();
+        let me = Keys::generate();
+        crate::state::MY_SECRET_KEY.store_from_keys(&me, &[]);
+        crate::state::set_my_public_key(me.public_key());
+
+        let relay = MemoryRelay::new();
+        let c = super::super::service::create_community(&relay, "Routes", vec!["wss://r".into()], None).await.unwrap();
+        let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+        let general = c.channels[0].id;
+        let routed = |root: &[u8; 32], epoch: u64| {
+            let pk = derive::channel_group_key(root, &general, Epoch(epoch)).pk();
+            load_held_v2_cached().route(&pk).is_some()
+        };
+        assert!(routed(&c.community_root, 0));
+
+        // A rotation adopted mid-session: the new epoch's plane routes the moment it is stored.
+        let next = [0x5au8; 32];
+        assert!(crate::db::community::advance_server_root_epoch(&cid, 1, &next).unwrap());
+        assert!(routed(&next, 1), "the adopted epoch's plane routes without waiting out a cache");
+        assert!(!routed(&c.community_root, 0), "and the retired one no longer does");
+
+        // A same-epoch convergence onto a sibling key moves the routes the same way.
+        let sibling = [0x11u8; 32];
+        assert!(crate::db::community::converge_server_root_epoch(&cid, 1, &sibling).unwrap());
+        assert!(routed(&sibling, 1));
+
+        // A second community: a write to one is read again while the other's routes stand,
+        // and a deleted one stops routing.
+        let other = super::super::service::create_community(&relay, "Other", vec!["wss://r".into()], None).await.unwrap();
+        let other_general = other.channels[0].id;
+        let other_routed = || load_held_v2_cached().route(&derive::channel_group_key(&other.community_root, &other_general, Epoch(0)).pk()).is_some();
+        assert!(other_routed() && routed(&sibling, 1));
+        let third = [0x22u8; 32];
+        assert!(crate::db::community::advance_server_root_epoch(&cid, 2, &third).unwrap());
+        assert!(routed(&third, 2) && !routed(&sibling, 1), "the written community is read again");
+        assert!(other_routed(), "the other one still routes");
+        crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&other.id().0)).unwrap();
+        assert!(!other_routed(), "a deleted community stops routing");
+        assert!(routed(&third, 2));
+        invalidate_held_v2_cache();
+        assert!(routed(&third, 2) && !other_routed(), "a whole reload agrees");
     }
 
     #[tokio::test]
