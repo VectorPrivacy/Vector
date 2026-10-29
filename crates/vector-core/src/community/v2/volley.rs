@@ -81,13 +81,7 @@ impl Job {
 /// Learned from live NIP-42 challenges (streamauth records the KV): a gating
 /// relay answers batch REQs with silence no matter what it holds.
 fn relay_auth_gating(url: &str) -> bool {
-    crate::db::get_sql_setting(format!(
-        "auth_gate:{}",
-        crate::inbox_relays::normalize_relay_url(url)
-    ))
-    .ok()
-    .flatten()
-    .is_some()
+    crate::community::transport::auth_gate_live(url)
 }
 
 /// The subset of `relays` currently CONNECTED on the shared client, waiting up

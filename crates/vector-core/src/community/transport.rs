@@ -817,14 +817,47 @@ fn with_plane_relay<R>(generation: u64, key: &str, f: impl FnOnce(&mut PlaneRela
     f(g.1.entry(key.to_string()).or_default())
 }
 
+/// How long a relay's AUTH challenge stands: one that stops asking (new software, a changed
+/// config) is read openly again within this.
+const AUTH_GATE_TTL_SECS: u64 = 3 * 24 * 60 * 60;
+/// A relay that challenges every connection rewrites its record at most this often.
+const AUTH_GATE_REFRESH_SECS: u64 = 24 * 60 * 60;
+
+fn auth_gate_setting(url: &str) -> String {
+    format!("auth_gate:{}", crate::inbox_relays::normalize_relay_url(url))
+}
+
+/// When this account last recorded the relay's AUTH challenge (unix secs). A record without a
+/// time reads as none.
+fn auth_gate_at(url: &str) -> Option<u64> {
+    crate::db::get_sql_setting(auth_gate_setting(url)).ok().flatten()?.parse().ok()
+}
+
+fn now_secs() -> u64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Whether the relay has challenged this account within [`AUTH_GATE_TTL_SECS`].
+pub(crate) fn auth_gate_live(url: &str) -> bool {
+    auth_gate_at(url).is_some_and(|at| now_secs().saturating_sub(at) < AUTH_GATE_TTL_SECS)
+}
+
+/// Record a challenge from the relay now, unless one was recorded within a day.
+pub(crate) fn note_auth_gate(url: &str) {
+    let now = now_secs();
+    if auth_gate_at(url).is_some_and(|at| now.saturating_sub(at) < AUTH_GATE_REFRESH_SECS) {
+        return;
+    }
+    let _ = crate::db::set_sql_setting(auth_gate_setting(url), now.to_string());
+}
+
 /// The relay's gate, seeded from the challenges this account has recorded (`auth_gate:`).
 fn plane_gate(generation: u64, url: &str) -> Option<RelayGate> {
     let key = crate::inbox_relays::normalize_relay_url(url);
     if let Some(gate) = with_plane_relay(generation, &key, |r| r.gate) {
         return Some(gate);
     }
-    let recorded = crate::db::get_sql_setting(format!("auth_gate:{key}")).ok().flatten().is_some();
-    recorded.then(|| {
+    auth_gate_live(&key).then(|| {
         mark_auth(generation, &key);
         RelayGate::Auth
     })
@@ -841,10 +874,7 @@ fn learn_auth(generation: u64, key: &str) {
     if crate::db::current_session_id() != generation {
         return;
     }
-    let setting = format!("auth_gate:{key}");
-    if crate::db::get_sql_setting(setting.clone()).ok().flatten().is_none() {
-        let _ = crate::db::set_sql_setting(setting, "1".to_string());
-    }
+    note_auth_gate(key);
 }
 
 fn redial_waits(generation: u64, key: &str) -> bool {
@@ -3078,6 +3108,40 @@ mod tests {
         fn into_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
             self
         }
+    }
+
+    #[test]
+    fn an_auth_record_stands_three_days_is_refreshed_daily_and_one_without_a_time_never_counts() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        use nostr_sdk::prelude::ToBech32;
+        let tmp = tempfile::tempdir().unwrap();
+        let account = Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+
+        let url = "wss://gate.example/nostr";
+        let set = |at: String| crate::db::set_sql_setting(super::auth_gate_setting(url), at).unwrap();
+        let ago = |secs: u64| (super::now_secs() - secs).to_string();
+        assert!(!super::auth_gate_live(url));
+        set("1".into());
+        assert!(!super::auth_gate_live(url), "a record from before the TTL says nothing of today");
+        super::note_auth_gate(url);
+        assert!(super::auth_gate_live(url));
+        set(ago(super::AUTH_GATE_TTL_SECS - 60));
+        assert!(super::auth_gate_live(url));
+        set(ago(super::AUTH_GATE_TTL_SECS + 1));
+        assert!(!super::auth_gate_live(url), "a relay that stopped asking is read openly again");
+
+        set(ago(3600));
+        super::note_auth_gate(url);
+        assert_eq!(super::auth_gate_at(url), Some(super::now_secs() - 3600), "no rewrite within a day");
+        set(ago(super::AUTH_GATE_REFRESH_SECS + 1));
+        super::note_auth_gate(url);
+        assert!(super::auth_gate_at(url).is_some_and(|at| super::now_secs() - at < 5), "a day on, a challenge refreshes it");
     }
 
     /// Holds the process-wide network for one test and puts Clearnet back however it ends.

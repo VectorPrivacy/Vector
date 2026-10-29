@@ -23318,8 +23318,7 @@ mod tests {
         let query = Query { kinds: vec![stream::KIND_WRAP], authors: vec![plane.public_key().to_hex()], ..Default::default() };
         let live = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
         live.fetch_plane(&plane, &query, &[relay.url()]).await.unwrap();
-        let gate_key = format!("auth_gate:{}", crate::inbox_relays::normalize_relay_url(&relay.url()));
-        assert!(crate::db::get_sql_setting(gate_key).unwrap().is_some());
+        assert!(crate::community::transport::auth_gate_live(&relay.url()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -23328,8 +23327,7 @@ mod tests {
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = crate::community::transport::wire::WireRelay::start().await;
         relay.gate(true);
-        let gate_key = format!("auth_gate:{}", crate::inbox_relays::normalize_relay_url(&relay.url()));
-        crate::db::settings::set_sql_setting(gate_key, "1".into()).unwrap();
+        crate::community::transport::note_auth_gate(&relay.url());
         crate::transport::set_preference(Some(crate::transport::Kind::Clearnet));
         let plane = Keys::generate();
         let wrap = nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(stream::KIND_WRAP), "sealed").finalize(&plane).unwrap();
