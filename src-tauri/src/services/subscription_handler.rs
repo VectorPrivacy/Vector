@@ -355,6 +355,39 @@ pub(crate) async fn reassert_dm_sub() {
     }
 }
 
+/// Which [`start_subscriptions`] owns this session's notification loops. Each call starts a full
+/// set (a reloaded webview calls it again), so the loops of an earlier call stand down at their
+/// next event instead of surfacing and handling every event a second time.
+#[derive(Clone)]
+struct NotifsRun {
+    current: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    mine: u64,
+}
+
+impl NotifsRun {
+    fn claim() -> Self {
+        struct Key;
+        let current = vector_core::db::current_session().scoped::<Key, std::sync::atomic::AtomicU64>();
+        let mine = current.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        NotifsRun { current, mine }
+    }
+
+    fn superseded(&self) -> bool {
+        self.current.load(std::sync::atomic::Ordering::Acquire) != self.mine
+    }
+
+    /// The next notification for this run's loop: waited for while the run is current, and once a
+    /// newer run has claimed the loops only what is already queued, so nothing that reached this
+    /// receiver alone is dropped. The newer run's receivers hold the rest.
+    async fn next<S: futures_util::Stream + Unpin>(&self, stream: &mut S) -> Option<S::Item> {
+        use futures_util::{FutureExt, StreamExt};
+        if self.superseded() {
+            return stream.next().now_or_never().flatten();
+        }
+        stream.next().await
+    }
+}
+
 pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Stage timing, INFO on purpose: the live pipe going up is the moment the
     // app stops being deaf, and a stage stalling here reads from the outside as
@@ -426,14 +459,26 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // device's prefs. Until this lands, those lists are unpublishable.
     crate::commands::prefs::hydrate_prefs().await;
 
+    // This run's receivers exist before it claims the loops, so whatever an earlier run's loops let
+    // go is already queued here. Past the last step that can fail: a call that errors out leaves
+    // the running loops be.
+    let monitor_rx = client.monitor().map(|m| m.subscribe());
+    let mut dm_notifications = client.notifications();
+    let mut tap = client.notifications();
+    let mut notifications = client.notifications();
+    let run = NotifsRun::claim();
+
     // v2 reconnect catch-up: a `limit(0)` sub never replays what a relay missed
     // while down, so each Connected transition enqueues a refold + re-tracks the
     // subs at the current epochs (debounced across a reconnect burst).
-    if let Some(monitor) = client.monitor() {
-        let mut rx = monitor.subscribe();
+    if let Some(mut rx) = monitor_rx {
+        let run = run.clone();
         vector_core::db::spawn_bound(async move {
             let mut last: Option<std::time::Instant> = None;
             while let Ok(n) = rx.recv().await {
+                if run.superseded() {
+                    break;
+                }
                 let MonitorNotification::StatusChanged { status, .. } = n;
                 if status == RelayStatus::Connected {
                     if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
@@ -463,7 +508,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // handled in ~3ms once dequeued). A DM's handler is fast, so a dedicated
     // lane makes DM latency independent of community-event handling entirely.
     {
-        let mut dm_notifications = client.notifications();
         // The broadcast skips what a lagging reader missed: the reader only queues, so a slow
         // handler during a boot sweep can never cost a DM.
         let (dm_tx, mut dm_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
@@ -472,8 +516,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                 super::handle_event(event, true).await;
             }
         });
+        let run = run.clone();
         vector_core::db::spawn_bound(async move {
-            while let Some(n) = dm_notifications.next().await {
+            while let Some(n) = run.next(&mut dm_notifications).await {
                 if let ClientNotification::Event { event, .. } = n {
                     let is_dm = event.kind.as_u16() == 1059
                         && vector_core::state::my_public_key()
@@ -491,9 +536,12 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // directly measurable (broadcast receivers have independent queues; this one
     // never awaits handlers). Old fetched history stays silent via the age gate.
     {
-        let mut tap = client.notifications();
+        let run = run.clone();
         vector_core::db::spawn_bound(async move {
             while let Some(n) = tap.next().await {
+                if run.superseded() {
+                    break;
+                }
                 if let ClientNotification::Event { event, subscription_id, .. } = n {
                     let k = event.kind.as_u16();
                     if k == 1059 || k == 21059 {
@@ -553,8 +601,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         }
     });
 
-    let mut notifications = client.notifications();
-    while let Some(notification) = notifications.next().await {
+    while let Some(notification) = run.next(&mut notifications).await {
         {
             match notification {
                 ClientNotification::Event { event, subscription_id, .. } => {
@@ -579,15 +626,18 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // wrap. This loop's job is everything else.
                         continue;
                     } else if k == 1059 || k == 21059 {
-                        // Route Community events by KIND, not by subscription id: an event can arrive on the
-                        // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
-                        // id would drop the rest. dispatch resolves the channel from the event itself and
-                        // dedups by outer id, so forwarding every community event the pool surfaces is
-                        // correct and idempotent. The wall-clock age picks the lane (v2 wraps carry
-                        // untweaked timestamps by CORD-01): realtime-fresh events preempt backfill.
+                        // A fresh Community event routes by KIND, whichever subscription carried it: a
+                        // live sub can be the one a platform fails to stream, and dispatch dedups by
+                        // outer id. The wall-clock age picks the lane (v2 wraps carry untweaked
+                        // timestamps by CORD-01): realtime-fresh events preempt backfill.
                         let fresh = vector_core::community::is_realtime_fresh(
                             event.created_at.as_secs().saturating_mul(1000),
                         );
+                        // An older one a fetch read is that fetch's to open (a slow relay's late
+                        // answer comes through the straggler sink): dispatching it too opens it twice.
+                        if !fresh && !vector_core::community::v2::realtime::is_live_subscription(&subscription_id) {
+                            continue;
+                        }
                         let _ = if fresh { fresh_tx.send(*event) } else { bulk_tx.send(*event) };
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
                         handle_self_sync_event(*event).await;

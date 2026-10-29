@@ -200,6 +200,15 @@ pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<
     (rekeys, control, guestbook)
 }
 
+/// Whether `id` is one of the live Concord subscriptions, without waiting: while a refresh holds
+/// them, every id answers yes.
+pub fn is_live_subscription(id: &SubscriptionId) -> bool {
+    match (V2_SUB_ID.try_lock(), V2_POOLWIDE_SUB_ID.try_lock()) {
+        (Ok(targeted), Ok(poolwide)) => targeted.as_ref() == Some(id) || poolwide.as_ref() == Some(id),
+        _ => true,
+    }
+}
+
 pub async fn subscription_id() -> Option<SubscriptionId> {
     V2_SUB_ID.lock().await.clone()
 }
@@ -1533,6 +1542,21 @@ mod tests {
         assert_eq!(two.len(), one.len() * 2);
         // Order-independent: reversing the input yields the identical sorted set.
         assert_eq!(plane_authors(&[b, a]), two);
+    }
+
+    #[tokio::test]
+    async fn a_live_subscription_check_never_waits_on_a_refresh() {
+        let live = SubscriptionId::new("live-targeted");
+        let other = SubscriptionId::new("a-fetch");
+        *V2_SUB_ID.lock().await = Some(live.clone());
+        assert!(is_live_subscription(&live));
+        assert!(!is_live_subscription(&other), "a fetch's subscription is not the live one");
+        // A refresh holding the ids answers at once, and errs toward dispatching.
+        let held = V2_POOLWIDE_SUB_ID.lock().await;
+        assert!(is_live_subscription(&other));
+        drop(held);
+        *V2_SUB_ID.lock().await = None;
+        assert!(!is_live_subscription(&live));
     }
 
     #[tokio::test]
