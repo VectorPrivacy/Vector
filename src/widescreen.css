@@ -2387,6 +2387,12 @@ body.ws #chat-list .chatlist-contact {
   margin-left: -8px;
   border-radius: 0;
 }
+/* An invite has a fill and can't be selected: it keeps the gutter on both sides, its avatar
+   still in line with the rows around it. */
+body.ws #chat-list .chatlist-contact.chatlist-invite {
+  padding-left: 4px;
+  margin-left: 0;
+}
 
 body.ws .chatlist-contact-header h4 {
   line-height: 20px;
