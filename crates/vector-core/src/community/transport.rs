@@ -774,6 +774,7 @@ pub fn clear_plane_pool() {
     let mut drained = PLANE_POOL.clear();
     drained.extend(OPEN_PLANES.clear());
     disconnect_clients(drained);
+    GREETINGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     for relay in PLANE_RELAYS.lock().unwrap_or_else(|e| e.into_inner()).1.values_mut() {
         relay.dial_failed = None;
     }
@@ -900,6 +901,7 @@ async fn open_plane_client(generation: u64, url: &str, key: &str, timeout: std::
             return None;
         }
         watch_for_challenge(generation, key, &relay);
+        GREETINGS.lock().unwrap_or_else(|e| e.into_inner()).insert((generation, key.to_string()), (hold.id, relay.notifications()));
         relay.connect();
     }
     relay.wait_for_connection(crate::relay_connect_timeout(timeout)).await;
@@ -920,6 +922,10 @@ async fn open_plane_client(generation: u64, url: &str, key: &str, timeout: std::
 /// Marks the relay `Auth` when it challenges on this socket outside any read: on connect, before
 /// the first REQ.
 fn watch_for_challenge(generation: u64, key: &str, relay: &Relay) {
+    #[cfg(test)]
+    if UNWATCHED.lock().unwrap().contains(key) {
+        return;
+    }
     let mut notifications = relay.notifications();
     let key = key.to_string();
     // spawn-detached: one socket's frames into the generation-keyed gate map; no account state.
@@ -934,6 +940,64 @@ fn watch_for_challenge(generation: u64, key: &str, relay: &Relay) {
             }
         }
     });
+}
+
+type Frames = std::pin::Pin<Box<dyn futures_util::Stream<Item = RelayNotification> + Send>>;
+
+/// Each fresh open socket's frames from before it connected, by pool entry, until a read settles
+/// its gate. The watcher above marks a challenge whenever it runs, which can be after a read has
+/// already reached EOSE.
+static GREETINGS: std::sync::LazyLock<std::sync::Mutex<Greetings>> = std::sync::LazyLock::new(Default::default);
+
+/// `(generation, relay key)` to the pool entry the frames belong to, and the frames.
+type Greetings = std::collections::HashMap<(u64, String), (u64, Frames)>;
+
+#[cfg(test)]
+static UNWATCHED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The relay's gate once a read on pool entry `id` has its EOSE. A relay challenges on connect
+/// before it answers any REQ, so that challenge is already among the socket's frames by now.
+fn settle_gate(generation: u64, key: &str, id: u64) -> RelayGate {
+    use futures_util::{FutureExt, StreamExt};
+    let mut greetings = GREETINGS.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = (generation, key.to_string());
+    if greetings.get(&slot).is_some_and(|(held, _)| *held == id) {
+        let (_, mut frames) = greetings.remove(&slot).expect("held above");
+        while let Some(Some(frame)) = frames.next().now_or_never() {
+            if matches!(frame, RelayNotification::Message { ref message } if matches!(**message, RelayMessage::Auth { .. })) {
+                mark_auth(generation, key);
+                break;
+            }
+        }
+    }
+    // Still holding the greetings: a read settling after this one sees what this one learned.
+    with_plane_relay(generation, key, |r| *r.gate.get_or_insert(RelayGate::Open))
+}
+
+/// Returns once a relay that challenged on `frames` has had its AUTH answered, accepted or not,
+/// or `budget` has passed; at once for one that never challenged.
+async fn authenticated(mut frames: Frames, budget: std::time::Duration) {
+    use futures_util::{FutureExt, StreamExt};
+    let deadline = crate::rt::time::Instant::now() + budget;
+    let mut challenged = false;
+    loop {
+        let frame = if challenged {
+            match crate::rt::time::timeout_at(deadline, frames.next()).await {
+                Ok(Some(frame)) => frame,
+                _ => return,
+            }
+        } else {
+            match frames.next().now_or_never() {
+                Some(Some(frame)) => frame,
+                _ => return,
+            }
+        };
+        match frame {
+            RelayNotification::Authenticated | RelayNotification::AuthenticationFailed => return,
+            RelayNotification::Message { ref message } if matches!(**message, RelayMessage::Auth { .. }) => challenged = true,
+            _ => {}
+        }
+    }
 }
 
 enum OpenRead {
@@ -951,8 +1015,7 @@ async fn read_open_plane(generation: u64, url: &str, filter: Filter, timeout: st
     let permits = open_read_permits(&key);
     let _permit = permits.acquire().await;
     let (gate, events) = match read_relay_eose(&client, url, vec![filter], timeout, true).await {
-        // Under one lock, so a challenge the watcher saw first is never overwritten.
-        Ok(events) => (with_plane_relay(generation, &key, |r| *r.gate.get_or_insert(RelayGate::Open)), events),
+        Ok(events) => (settle_gate(generation, &key, hold.id), events),
         Err(ReadFail::Gated) => (RelayGate::Auth, Vec::new()),
         Err(ReadFail::Eose(_)) => return OpenRead::Failed,
     };
@@ -1403,9 +1466,12 @@ impl LiveTransport {
             // Authenticates as the PLANE key, not the user — hence its own
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
+            let auth = nostr_sdk::prelude::SignerAuthenticator::new(plane.clone());
+            #[cfg(test)]
+            let auth = tests::SlowAuth(auth);
             let client = crate::apply_transport(
                 nostr_sdk::prelude::Client::builder()
-                    .authenticator(nostr_sdk::prelude::SignerAuthenticator::new(plane.clone()))
+                    .authenticator(auth)
                     // Nothing reads a plane client's pool notifications; the default
                     // channel allocates 4096 of them up front.
                     .notification_channel_size(std::num::NonZeroUsize::MIN),
@@ -1419,6 +1485,12 @@ impl LiveTransport {
             for r in &targets {
                 let _ = client.add_managed_relay(r.clone()).capabilities(crate::community_relay_capabilities()).await;
             }
+            let mut frames = Vec::with_capacity(targets.len());
+            for r in &targets {
+                if let Ok(Some(relay)) = client.relay(r).await {
+                    frames.push(relay.notifications());
+                }
+            }
             client.connect().await;
             // Warmup with the gated filter shape triggers each relay's NIP-42
             // challenge so auto-auth completes ONCE here; pooled reuses skip it.
@@ -1431,6 +1503,10 @@ impl LiveTransport {
                     .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
                     .await;
             }
+            // The warmup ends at its EOSE while nostr-sdk answers the challenge on a task of its
+            // own, and a relay may answer a REQ that reaches it before the AUTH with nothing.
+            let budget = crate::relay_request_timeout(std::time::Duration::from_secs(5));
+            futures_util::future::join_all(frames.into_iter().map(|f| authenticated(f, budget))).await;
             let ev = PLANE_POOL.insert(generation, key, client.clone());
             disconnect_clients(ev);
             client
@@ -2465,6 +2541,24 @@ pub(crate) mod adversarial {
 mod tests {
     use super::*;
 
+    /// Relays whose plane AUTH answers [`SlowAuth`] holds back.
+    static SLOW_AUTH: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+    /// The plane authenticator, slowed for the relays in [`SLOW_AUTH`].
+    #[derive(Debug)]
+    pub(super) struct SlowAuth<T: nostr_sdk::prelude::Authenticator>(pub(super) T);
+
+    impl<T: nostr_sdk::prelude::Authenticator> nostr_sdk::prelude::Authenticator for SlowAuth<T> {
+        fn make_auth_event<'a>(&'a self, relay_url: &'a RelayUrl, challenge: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event, nostr_sdk::prelude::Error>> + Send + 'a>> {
+            Box::pin(async move {
+                if SLOW_AUTH.lock().unwrap().contains(&crate::inbox_relays::normalize_relay_url(relay_url.as_str())) {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                }
+                self.0.make_auth_event(relay_url, challenge).await
+            })
+        }
+    }
+
     // ── Plane read coverage ───────────────────────────────────────────────────
 
     fn urls(n: usize) -> Vec<String> {
@@ -2839,6 +2933,85 @@ mod tests {
         assert!(pool.lock().1.contains_key("wss://a"), "a dial or read in flight keeps it");
         drop(hold);
         assert!(eventually(|| !pool.lock().1.contains_key("wss://a")).await, "and it idles out after");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_challenge_on_connect_gates_the_first_read_however_late_its_watcher_runs() {
+        let _s = GateScene::new();
+        let relay = wire::WireRelay::start().await;
+        let key = crate::inbox_relays::normalize_relay_url(&relay.url());
+        UNWATCHED.lock().unwrap().insert(key.clone());
+        relay.greet(true);
+        let (plane, wrap) = plane_on(&relay);
+        // Every read slot held until the greeting has long landed, so the read subscribes after it.
+        let held = open_read_permits(&key).acquire_many_owned(OPEN_READS_PER_RELAY as u32).await.unwrap();
+        let read = tokio::spawn({
+            let (url, plane) = (relay.url(), plane.clone());
+            async move { read_plane_at(url, plane).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(held);
+        let read = read.await.unwrap();
+        UNWATCHED.lock().unwrap().remove(&key);
+        assert_eq!(read.events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![wrap.id]);
+        assert_eq!(gate_of(&relay), Some(RelayGate::Auth));
+        assert!(authed_pooled(&plane) && !open_pooled(&relay), "read again on a connection authed as the plane");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_authed_read_asks_only_once_its_auth_has_landed() {
+        let _s = GateScene::new();
+        let relay = wire::WireRelay::start().await;
+        relay.gate(true);
+        relay.quiet(true);
+        let key = crate::inbox_relays::normalize_relay_url(&relay.url());
+        SLOW_AUTH.lock().unwrap().insert(key.clone());
+        let (plane, wrap) = plane_on(&relay);
+        let read = read_plane(&relay, &plane).await;
+        SLOW_AUTH.lock().unwrap().remove(&key);
+        assert_eq!(read.events.iter().map(|e| e.id).collect::<Vec<_>>(), vec![wrap.id], "an answer ahead of the AUTH is no answer");
+        assert!(authed_pooled(&plane));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_auth_ends_on_its_answer_and_never_starts_without_a_challenge() {
+        let auth = || RelayNotification::Message { message: Box::new(RelayMessage::auth("c")) };
+        let budget = std::time::Duration::from_secs(5);
+        let started = tokio::time::Instant::now();
+        authenticated(Box::pin(futures_util::stream::iter(vec![RelayNotification::Authenticated])), budget).await;
+        authenticated(Box::pin(futures_util::stream::pending()), budget).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "no challenge, nothing to wait for");
+        let answered = futures_util::stream::iter(vec![auth()]).chain(futures_util::stream::once(async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            RelayNotification::AuthenticationFailed
+        }));
+        let started = tokio::time::Instant::now();
+        authenticated(Box::pin(answered.chain(futures_util::stream::pending())), budget).await;
+        let waited = started.elapsed();
+        assert!(waited >= std::time::Duration::from_millis(200) && waited < std::time::Duration::from_secs(2), "waited for the answer, refused or not: {waited:?}");
+        let started = tokio::time::Instant::now();
+        authenticated(Box::pin(futures_util::stream::iter(vec![auth()]).chain(futures_util::stream::pending())), std::time::Duration::from_millis(300)).await;
+        assert!(started.elapsed() >= std::time::Duration::from_millis(300), "a challenge unanswered waits out the budget");
+    }
+
+    #[test]
+    fn a_settled_gate_reads_only_its_own_sockets_greeting() {
+        let _s = GateScene::new();
+        let generation = crate::db::current_session_id();
+        let auth = || RelayNotification::Message { message: Box::new(RelayMessage::auth("c")) };
+        let greet = |key: &str, id: u64, frames: Vec<RelayNotification>| {
+            GREETINGS.lock().unwrap().insert((generation, key.to_string()), (id, Box::pin(futures_util::stream::iter(frames))));
+        };
+        greet("wss://greets", 1, vec![auth()]);
+        assert_eq!(settle_gate(generation, "wss://greets", 1), RelayGate::Auth);
+        greet("wss://quiet", 1, vec![]);
+        assert_eq!(settle_gate(generation, "wss://quiet", 1), RelayGate::Open);
+        greet("wss://replaced", 2, vec![auth()]);
+        assert_eq!(settle_gate(generation, "wss://replaced", 1), RelayGate::Open, "another socket's greeting is not this one's");
+        assert!(GREETINGS.lock().unwrap().contains_key(&(generation, "wss://replaced".to_string())), "and stays for its own socket");
+        assert!(!GREETINGS.lock().unwrap().contains_key(&(generation, "wss://greets".to_string())), "a settled socket's frames are let go");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
