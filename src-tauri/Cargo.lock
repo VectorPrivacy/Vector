@@ -11787,6 +11787,7 @@ dependencies = [
  "ctr 0.10.1",
  "curve25519-dalek 4.1.3",
  "fast-thumbhash",
+ "foldhash 0.2.0",
  "futures-util",
  "getrandom 0.2.15",
  "getrandom 0.4.1",

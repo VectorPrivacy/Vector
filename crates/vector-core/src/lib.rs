@@ -81,6 +81,7 @@ mod vault_audit;
 
 // === Network ===
 pub mod net;
+pub mod fasthash;
 pub mod event_size;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;

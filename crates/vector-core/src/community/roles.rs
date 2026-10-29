@@ -414,12 +414,12 @@ impl CommunityRoles {
     /// Every grantee [`is_authorized`](Self::is_authorized) for `permission`, found in one pass
     /// over the grants rather than one scan of them per member.
     pub fn authorized_grantees(&self, owner_hex: Option<&str>, permission: u64) -> std::collections::HashSet<&str> {
-        let mut bits: std::collections::HashMap<&str, Permissions> = std::collections::HashMap::new();
+        let mut bits: crate::fasthash::FastMap<&str, Permissions> = Default::default();
         for r in &self.roles {
             // `role` finds the first of a repeated id.
             bits.entry(r.role_id.as_str()).or_insert(r.permissions);
         }
-        let mut held: std::collections::HashMap<&str, Permissions> = std::collections::HashMap::new();
+        let mut held: crate::fasthash::FastMap<&str, Permissions> = Default::default();
         for g in &self.grants {
             let member = held.entry(g.member.as_str()).or_insert(self.everyone.unwrap_or_default());
             for rid in &g.role_ids {
@@ -605,18 +605,18 @@ impl CommunityRoles {
 /// candidate it judges, so over a large roster the scans dominate.
 pub struct RoleIndex<'a> {
     everyone: Permissions,
-    by_id: std::collections::HashMap<&'a str, &'a Role>,
-    held: std::collections::HashMap<&'a str, Vec<&'a Role>>,
+    by_id: crate::fasthash::FastMap<&'a str, &'a Role>,
+    held: crate::fasthash::FastMap<&'a str, Vec<&'a Role>>,
 }
 
 impl<'a> RoleIndex<'a> {
     pub fn of(roster: &'a CommunityRoles) -> Self {
-        let mut by_id: std::collections::HashMap<&'a str, &'a Role> = std::collections::HashMap::new();
+        let mut by_id: crate::fasthash::FastMap<&'a str, &'a Role> = Default::default();
         for r in &roster.roles {
             // `role` finds the first of a repeated id.
             by_id.entry(r.role_id.as_str()).or_insert(r);
         }
-        let mut held: std::collections::HashMap<&str, Vec<&Role>> = std::collections::HashMap::new();
+        let mut held: crate::fasthash::FastMap<&str, Vec<&Role>> = Default::default();
         for g in &roster.grants {
             let roles = held.entry(g.member.as_str()).or_default();
             roles.extend(g.role_ids.iter().filter_map(|rid| by_id.get(rid.as_str()).copied()));

@@ -2327,7 +2327,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // Join-time reconcile folds only the owner's editions (genesis-authenticated
     // above), and the owner is supreme — so owner-only authority suffices. The full
     // roster (admins) folds on the first post-join follow_control.
-    let empty_floors = Floors::new();
+    let empty_floors = Floors::default();
     // Join-time banlist: fold authority over the ANY-author edition set (roles/grants
     // chain to the genesis-verified owner; the banlist head is honored only if its signer
     // held BAN). Returned so the accept path can refuse a banned self BEFORE it publishes
@@ -10445,8 +10445,8 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     // floor link evicted from the window — H1/M8 refetch), bounded like the join
     // verifier. A withholding relay still converges to fail-closed after the cap.
     let mut editions: Vec<ParsedEdition> = Vec::new();
-    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
+    let mut seen: crate::fasthash::FastSet<[u8; 32]> = Default::default();
+    let mut seen_wraps: crate::fasthash::FastSet<nostr_sdk::prelude::EventId> = Default::default();
     let mut fold = ControlFold::default();
     let mut authority = AuthoritySet::owner_only();
     // Whether this round gave up with editions still unread. The follow is
@@ -10459,7 +10459,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     // Every entity some edition in hand speaks for, and how many editions the folds above last
     // saw: a page that can't account for everything tracked folds nothing, since a head needs an
     // edition of its own entity.
-    let mut entities: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut entities: crate::fasthash::FastSet<[u8; 32]> = Default::default();
     let mut folded: Option<usize> = None;
     let fold_now = |editions: &[ParsedEdition], folded: &mut Option<usize>, authority: &mut AuthoritySet, fold: &mut ControlFold| {
         if *folded != Some(editions.len()) {
@@ -11025,7 +11025,7 @@ struct ControlFold {
     /// down to: this device keeps it as its head, but nobody new would fold it.
     kept: std::collections::HashSet<String>,
     /// Every edition this fold found authorized, by inner id.
-    admitted: std::collections::HashSet<[u8; 32]>,
+    admitted: crate::fasthash::FastSet<[u8; 32]>,
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id, author, family)` of the committed head. The id
@@ -11077,7 +11077,7 @@ impl HeldKey {
         }
     }
 }
-type Floors = std::collections::HashMap<String, Floor>;
+type Floors = crate::fasthash::FastMap<String, Floor>;
 
 /// Which fold an edition kind's floor belongs to.
 fn floor_family(vsk_code: &str) -> &'static str {
@@ -11137,7 +11137,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut pins_persist = Vec::new();
     let mut deleted_channels = Vec::new();
     let mut writers_persist = Vec::new();
-    let (mut kept, mut admitted) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    let (mut kept, mut admitted) = (std::collections::HashSet::new(), crate::fasthash::FastSet::default());
     // Pin List eids are one-way HKDF locators, so attribution runs the other
     // direction: precompute every known channel's locator. An eid matching no
     // channel folds nothing this round — once the channel's metadata lands, the
@@ -11640,7 +11640,7 @@ struct AuthoritySet {
     /// Role and grant entities whose held head is refused with nothing to fall back to.
     carried: std::collections::BTreeSet<String>,
     /// Every role and grant edition the fold admitted.
-    admitted: std::collections::HashSet<[u8; 32]>,
+    admitted: crate::fasthash::FastSet<[u8; 32]>,
     /// Roles v2 is active (CORD-04 §2).
     activated: bool,
     /// Each member's sealed standings (CORD-04 §9).
@@ -11745,7 +11745,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
         let mut grant_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
         let mut tenure_cands: BTreeMap<String, Vec<AuthorityCand>> = BTreeMap::new();
         let mut gapped = false;
-        let ranks: std::collections::HashMap<String, u32> = if activated {
+        let ranks: crate::fasthash::FastMap<String, u32> = if activated {
             let mut keys: Vec<String> = editions
                 .iter()
                 .filter(|e| e.vsk == vsk::ROLE_V2 && e.binding.is_some())
@@ -11871,8 +11871,8 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
             .collect()
     };
     // What `held_is` matches on, for every edition in hand: by version and hash, and with the id.
-    let served: std::collections::HashSet<(u64, [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash)).collect();
-    let served_as: std::collections::HashSet<(u64, [u8; 32], [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash, e.inner_id)).collect();
+    let served: crate::fasthash::FastSet<(u64, [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash)).collect();
+    let served_as: crate::fasthash::FastSet<(u64, [u8; 32], [u8; 32])> = editions.iter().map(|e| (e.version, e.self_hash, e.inner_id)).collect();
     let held_served = |f: &Floor| match f.2 {
         None => served.contains(&(f.0, f.1)),
         Some(id) => served_as.contains(&(f.0, f.1, id)),
@@ -11922,7 +11922,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // a BAN-holder whose grant-strip hasn't yet folded could publish a list omitting their
     // OWN ban to un-ban themselves (removals aren't outrank-checked). Exclude them from
     // head eligibility, not just from the roster.
-    let banned_authors: std::collections::HashSet<&str> = persisted_banned.iter().map(String::as_str).collect();
+    let banned_authors: crate::fasthash::FastSet<&str> = persisted_banned.iter().map(String::as_str).collect();
     let prelim_index = HeadIndex::of(&prelim_heads);
     let banlist_authored: Vec<&ParsedEdition> = groups
         .get(&banlist_eid)
@@ -12357,11 +12357,11 @@ fn citation_ok_in_fold(
 
 /// A fold's heads by entity, for the citation checks it makes per candidate: the first head held
 /// for each entity, as a scan of the list would find it.
-struct HeadIndex<'a>(std::collections::HashMap<&'a str, (u64, [u8; 32])>);
+struct HeadIndex<'a>(crate::fasthash::FastMap<&'a str, (u64, [u8; 32])>);
 
 impl<'a> HeadIndex<'a> {
     fn of(heads: &'a [FoldedHead]) -> Self {
-        let mut index = std::collections::HashMap::with_capacity(heads.len());
+        let mut index = crate::fasthash::FastMap::with_capacity_and_hasher(heads.len(), Default::default());
         for h in heads {
             index.entry(h.entity_hex.as_str()).or_insert((h.version, h.self_hash));
         }
@@ -12412,7 +12412,7 @@ struct Selected {
     /// An admitted edition sits above a head out of reach: a link withheld.
     gapped: bool,
     /// Every role and grant edition the last round admitted.
-    admitted: std::collections::HashSet<[u8; 32]>,
+    admitted: crate::fasthash::FastSet<[u8; 32]>,
     /// Each member's sealed standings, from the Tenures admitted.
     sealed: SealedBy,
     /// The fixpoint was reached within its bound.
@@ -12455,7 +12455,7 @@ fn select_authorized(
     let mut refused: std::collections::BTreeSet<String> = Default::default();
     let mut carried: std::collections::BTreeSet<String> = Default::default();
     let mut gapped = false;
-    let mut admitted: std::collections::HashSet<[u8; 32]> = Default::default();
+    let mut admitted: crate::fasthash::FastSet<[u8; 32]> = Default::default();
     let mut sealed: SealedBy = Default::default();
     let mut converged = false;
     let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(cid));
@@ -12469,7 +12469,7 @@ fn select_authorized(
         let mut next_refused: std::collections::BTreeSet<String> = Default::default();
         let mut next_carried: std::collections::BTreeSet<String> = Default::default();
         let mut next_gapped = false;
-        let mut next_admitted: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::with_capacity(admitted.len());
+        let mut next_admitted: crate::fasthash::FastSet<[u8; 32]> = crate::fasthash::FastSet::with_capacity_and_hasher(admitted.len(), Default::default());
         let mut next_sealed: SealedBy = Default::default();
         let cite_heads = HeadIndex::of(&heads);
         let standing = crate::community::roles::RoleIndex::of(&accepted);
@@ -12754,7 +12754,7 @@ struct Stand {
 /// An entity's editions by hash, each hash's in `cands` order.
 #[derive(Default)]
 struct HashGroups {
-    at: std::collections::HashMap<[u8; 32], (u32, u32)>,
+    at: crate::fasthash::FastMap<[u8; 32], (u32, u32)>,
     order: Vec<usize>,
 }
 
@@ -12790,7 +12790,7 @@ struct ReplayScratch {
     stand: Vec<Stand>,
     key: Vec<(u32, [u8; 32])>,
     viable: Vec<bool>,
-    runs: std::collections::HashMap<([u8; 32], u64), (Option<u32>, bool)>,
+    runs: crate::fasthash::FastMap<([u8; 32], u64), (Option<u32>, bool)>,
     reachable: Vec<bool>,
 }
 
@@ -12820,7 +12820,7 @@ fn replay(
     claims: &dyn Fn(&AuthorityCand) -> Option<u32>,
     judge: &mut dyn FnMut(&AuthorityCand, u32) -> Option<Option<u32>>,
     // Every edition this replay admits, collected for the caller.
-    admitted_out: &mut std::collections::HashSet<[u8; 32]>,
+    admitted_out: &mut crate::fasthash::FastSet<[u8; 32]>,
     scratch: &mut ReplayScratch,
 ) -> (Picked, bool) {
     #[cfg(test)]

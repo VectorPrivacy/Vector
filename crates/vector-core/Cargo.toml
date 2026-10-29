@@ -109,6 +109,7 @@ fast-thumbhash = "0.2"
 # std::time on native; the browser clock on wasm32, where std's panics.
 web-time = "1"
 rand = "0.8"
+foldhash = "0.2"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Indexed GIF frames, for a crop that keeps every palette and timing (`image_crop::crop_gif`).
 gif = "0.14"
