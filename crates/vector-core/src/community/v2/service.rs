@@ -2348,16 +2348,18 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // An anchored walk read the plane back to genesis, so the window is complete
     // by construction; `gapped` still gates the persist for the same reason
     // follow_control's does — a withheld edition must not fold into a baseline.
-    let roles = (!authority_full.gapped).then(|| (authority_full.roles.clone(), newest_roster_at));
+    // A Roster fold that ran out its bound seeds nothing it judged; the first follow folds again.
+    let settled = authority_full.converged;
+    let roles = (!authority_full.gapped && settled).then(|| (authority_full.roles.clone(), newest_roster_at));
     Ok(VerifiedJoin {
         community: fold.updated.unwrap_or(community),
         heads: fold.heads,
         banned: authority_full.banned,
-        pins,
-        writers,
-        banlist_persist: authority_full.banlist_persist,
+        pins: if settled { pins } else { Vec::new() },
+        writers: if settled { writers } else { Vec::new() },
+        banlist_persist: authority_full.banlist_persist.filter(|_| settled),
         roles,
-        authority_heads: if authority_full.converged { authority_full.heads } else { Vec::new() },
+        authority_heads: if settled { authority_full.heads } else { Vec::new() },
     })
 }
 
@@ -4322,18 +4324,25 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         // Authority heads first: a control head never takes an authority entity's place.
         let mut decided: std::collections::HashMap<String, [u8; 32]> = decided_control.heads.iter().map(|h| (h.entity_hex.clone(), h.inner_id)).collect();
         decided.extend(decided_authority.heads.iter().map(|h| (h.entity_hex.clone(), h.inner_id)));
-        let (kept, settled_absent) = (&decided_authority.carried, &decided_authority.refused);
-        // For a kept head, a floorless reader's pick, and only one this device's own evidence
-        // admits too.
-        let cold: std::collections::HashMap<String, [u8; 32]> = if kept.is_empty() {
+        let (kept, kept_control, settled_absent) = (&decided_authority.carried, &decided_control.kept, &decided_authority.refused);
+        // For a kept head, a floorless reader's pick (CORD-06 §3), and only one this device's own
+        // evidence admits too.
+        let cold: std::collections::HashMap<String, [u8; 32]> = if kept.is_empty() && kept_control.is_empty() {
             Default::default()
         } else {
-            fold_authority(community, &eds, &Floors::default())
+            let cold_authority = fold_authority(community, &eds, &Floors::default());
+            if !cold_authority.converged {
+                return Err("re-founding aborted: the roster fold of a reader holding no floor did not settle; no state published".to_string());
+            }
+            let cold_control = apply_control_fold(community, &eds, &Floors::default(), &cold_authority);
+            let mut cold: std::collections::HashMap<String, [u8; 32]> = cold_control
                 .heads
                 .into_iter()
-                .filter(|h| decided_authority.admitted.contains(&h.inner_id))
+                .filter(|h| decided_control.admitted.contains(&h.inner_id))
                 .map(|h| (h.entity_hex, h.inner_id))
-                .collect()
+                .collect();
+            cold.extend(cold_authority.heads.into_iter().filter(|h| decided_authority.admitted.contains(&h.inner_id)).map(|h| (h.entity_hex, h.inner_id)));
+            cold
         };
         let mut carried: Vec<(FoldedHead, Event, &'static str)> = Vec::new();
         for (floor_key, floor) in &floors {
@@ -4347,7 +4356,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             if settled_absent.contains(floor_key) {
                 continue;
             }
-            let pick = if kept.contains(floor_key) {
+            let pick = if kept.contains(floor_key) || kept_control.contains(floor_key) {
                 // Refused whole for a floorless reader: nothing stands to carry.
                 let Some(id) = cold.get(floor_key) else { continue };
                 Some(*id)
@@ -10399,7 +10408,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
     let mut editions: Vec<ParsedEdition> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-    let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new(), writers_persist: Vec::new(), deleted_channels: Vec::new() };
+    let mut fold = ControlFold::default();
     let mut authority = AuthoritySet::owner_only();
     // Whether this round gave up with editions still unread. The follow is
     // procedural by design — process what arrives, converge with everyone else —
@@ -10590,14 +10599,17 @@ pub async fn follow_control<T: Transport + ?Sized>(
         if !crate::db::community::community_held(community.id())? {
             return Ok(ControlFollow::default());
         }
+        // A Roster fold that ran out its bound has no single answer (CORD-04 §1): every verdict
+        // below rests on its last round's guess, so none of it is kept, and the next follow folds again.
+        if !authority.converged {
+            return Ok(ControlFollow::default());
+        }
         // Persist advanced floors BEFORE the state save (a failed floor write must not
         // let saved state outrun its floor), stamping the epoch this fold ran under —
         // not the row's write-time value, which a concurrent re-founding can bump. Both
         // the metadata/channel heads and the roster/banlist heads advance their floors;
         // run the advance (v+1) and same-version convergence (fork tiebreak) paths.
-        // Roster heads from a fold that ran out its bound are one round's guess, not a result.
-        let roster_heads: &[FoldedHead] = if authority.converged { &authority.heads } else { &[] };
-        let families = fold.heads.iter().map(|h| (h, crate::db::community::FLOOR_CONTROL)).chain(roster_heads.iter().map(|h| (h, crate::db::community::FLOOR_AUTHORITY)));
+        let families = fold.heads.iter().map(|h| (h, crate::db::community::FLOOR_CONTROL)).chain(authority.heads.iter().map(|h| (h, crate::db::community::FLOOR_AUTHORITY)));
         crate::db::community::write_folded_heads(&cid_hex, |w| {
             for (h, family) in families {
                 if h.rebased {
@@ -10957,6 +10969,7 @@ struct FoldedHead {
 /// unchanged, so the floor still seeds/advances), and whether any TRACKING entity
 /// hit an unresolvable gap — the caller's signal to page older history and re-fold
 /// (CORD-04 H1/M8's refetch).
+#[derive(Default)]
 struct ControlFold {
     updated: Option<CommunityV2>,
     heads: Vec<FoldedHead>,
@@ -10969,6 +10982,11 @@ struct ControlFold {
     writers_persist: Vec<(String, String, u64, bool)>,
     /// Channels a standing deletion took out, whose history every device drops.
     deleted_channels: Vec<ChannelId>,
+    /// Entities whose held edition the Roster now refuses with no authorized edition to step
+    /// down to: this device keeps it as its head, but nobody new would fold it.
+    kept: std::collections::HashSet<String>,
+    /// Every edition this fold found authorized, by inner id.
+    admitted: std::collections::HashSet<[u8; 32]>,
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id, author)` of the committed head. The id and
@@ -11079,6 +11097,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
     let mut pins_persist = Vec::new();
     let mut deleted_channels = Vec::new();
     let mut writers_persist = Vec::new();
+    let (mut kept, mut admitted) = (std::collections::HashSet::new(), std::collections::HashSet::new());
     // Pin List eids are one-way HKDF locators, so attribution runs the other
     // direction: precompute every known channel's locator. An eid matching no
     // channel folds nothing this round — once the channel's metadata lands, the
@@ -11197,12 +11216,8 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
                     && !(is_channel && e.binding.is_none() && authority.roles.legacy_channels.as_ref().is_some_and(|l| !l.contains(&crate::simd::hex::bytes_to_hex_32(eid))))
             })
             .collect();
-        if !ok.contains(&true) {
-            continue;
-        }
         let entity_hex = crate::simd::hex::bytes_to_hex_32(eid);
-        // Every served edition links the chain; only an authorized one can be the head.
-        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition_ranked(rank(&p.author.to_hex()))).collect();
+        admitted.extend(group.iter().zip(&ok).filter(|(_, &a)| a).map(|(e, _)| e.inner_id));
         // Refuse-downgrade holds for the newest AUTHORIZED edition: when the edition this
         // device holds (that very one, not a re-signed copy) is served yet no copy of it is
         // authorized, the floor steps down to the predecessor it names, if an authorized
@@ -11214,6 +11229,14 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         let refused = authority.complete
             && floor.is_some_and(|f| f.2.is_some())
             && held.is_some_and(|h| !group.iter().zip(&ok).any(|(e, &a)| a && e.self_hash == h.self_hash));
+        if !ok.contains(&true) {
+            if refused && writers_channel.is_none() {
+                kept.insert(entity_hex);
+            }
+            continue;
+        }
+        // Every served edition links the chain; only an authorized one can be the head.
+        let fold_eds: Vec<version::Edition> = group.iter().map(|p| p.to_fold_edition_ranked(rank(&p.author.to_hex()))).collect();
         // An authorized edition built on the held one moves the entity on, refused or not.
         let (linked, entity_gapped) = fold_head_among(&fold_eds, floor, &|a| rank(&crate::simd::hex::bytes_to_hex_32(a)), &|i| ok[i]);
         gapped |= entity_gapped;
@@ -11232,7 +11255,10 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
             None if refused && writers_channel.is_none() => {
                 let prev = held.and_then(|h| h.prev_hash);
                 let target = (0..group.len()).filter(|&i| ok[i] && Some(group[i].self_hash) == prev).min_by_key(|&i| (rank(&group[i].author.to_hex()), group[i].inner_id));
-                let Some(hi) = target else { continue };
+                let Some(hi) = target else {
+                    kept.insert(entity_hex);
+                    continue;
+                };
                 (hi, true)
             }
             None => continue,
@@ -11279,7 +11305,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
         }
     }
     changed |= unseal_held(&mut out);
-    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist, writers_persist, deleted_channels }
+    ControlFold { updated: changed.then_some(out), heads, gapped, pins_persist, writers_persist, deleted_channels, kept, admitted }
 }
 
 /// Whether a Channel (or, with `category`, a Category) edition's content deletes it.
@@ -12288,6 +12314,8 @@ fn select_authorized(
     let mut converged = false;
     let everyone_hex = crate::simd::hex::bytes_to_hex_32(&super::derive::everyone_locator(cid));
     let bound = 2 * (role_cands.len() + grant_cands.len() + tenure_cands.len()) + 8;
+    #[cfg(test)]
+    let bound = tests::FOLD_BOUND.with(|b| b.get()).unwrap_or(bound);
     for _ in 0..bound {
         let mut next = CommunityRoles::default();
         let mut next_heads: Vec<FoldedHead> = Vec::new();
@@ -14478,6 +14506,11 @@ pub(crate) async fn bench_control_stages<T: Transport + ?Sized>(transport: &T, c
 
 #[cfg(test)]
 mod tests {
+    std::thread_local! {
+        /// The Roster fixpoint's round bound, when a test sets one on its thread.
+        pub(super) static FOLD_BOUND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+
     // The legacy (pre-split) Control derivation, still reachable for the
     // migration-compat paths under test.
     use super::super::derive::control_group_key;
@@ -21732,6 +21765,117 @@ mod tests {
         let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
         let fresh = fold_authority(&refounded, &fetch_control(&bed.relay, &refounded).await, &Floors::default());
         assert_eq!(fresh.roles.role(&rr).map(|r| r.name.as_str()), Some("R by S"), "the new epoch carries S's move");
+    }
+
+    #[tokio::test]
+    async fn a_refounding_never_carries_a_refused_control_head_it_keeps() {
+        // A Mod renamed the Community twice and then lost the bit: the tracker keeps the second
+        // rename, its predecessor refused too. The new epoch must read the owner's name, never
+        // the kept rename re-wrapped as if it stood (CORD-06 §3).
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Original", bed.relays.clone(), None).await.unwrap();
+        let mod_key = Keys::generate();
+        let rm = "d2".repeat(32);
+        let bits = Permissions::MANAGE_METADATA | Permissions::MANAGE_CHANNELS;
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&rm, "Mod", 2, bits), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &mod_key.public_key(), vec![rm.clone()], 1).await;
+        publish_community_meta(&bed.relay, &community, &mod_key, "By Mod", 2).await;
+        publish_community_meta(&bed.relay, &community, &mod_key, "By Mod again", 3).await;
+        let channel = ChannelId([0xd7; 32]);
+        publish_fork(&[&bed.relay], &community, &mod_key, vsk::CHANNEL_METADATA, &channel.0, 1, None, &channel_meta_json("mods"), None).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert_eq!(floor_of(&community, &community.id().0).0, 3);
+        assert_eq!(floor_of(&community, &channel.0).0, 1);
+        publish_grant(&bed.relay, &community, &owner.keys, &mod_key.public_key(), vec![], 2).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let eds = fetch_control(&bed.relay, &community).await;
+        let floors = load_floors(&community);
+        let tracked = apply_control_fold(&community, &eds, &floors, &fold_authority(&community, &eds, &floors));
+        assert!(tracked.kept.contains(&crate::simd::hex::bytes_to_hex_32(&community.id().0)), "the tracker keeps the refused rename");
+        assert!(tracked.kept.contains(&crate::simd::hex::bytes_to_hex_32(&channel.0)), "and the refused Channel");
+
+        let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        let carried = fetch_control(&bed.relay, &refounded).await;
+        assert!(carried.iter().all(|e| e.author != mod_key.public_key()), "nothing the Roster refuses crosses");
+        let fresh = apply_control_fold(&refounded, &carried, &Floors::default(), &fold_authority(&refounded, &carried, &Floors::default()));
+        let meta = fresh.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(&community.id().0)).expect("a metadata head crosses");
+        let content = &carried.iter().find(|e| e.inner_id == meta.inner_id).unwrap().content;
+        assert_eq!(serde_json::from_str::<control::CommunityMetadata>(content).unwrap().name, "Original", "the head a floorless reader folds");
+    }
+
+    #[tokio::test]
+    async fn a_demoted_mods_rename_stands_through_a_refounding() {
+        // A demotion seals what the Mod decided before it lands (CORD-04 §9), so the rename stands
+        // for every reader, a fresh joiner of the next epoch included.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Original", bed.relays.clone(), None).await.unwrap();
+        publish_everyone(&bed.relay, &community, &owner.keys, 0, 1).await;
+        let mod_key = Keys::generate();
+        let rm = "d6".repeat(32);
+        publish_role_v2(&bed.relay, &community, &owner.keys, &role_v2(&rm, "Mod", "F", Permissions::MANAGE_METADATA), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &mod_key.public_key(), vec![rm.clone()], 1).await;
+        publish_community_meta(&bed.relay, &community, &mod_key, "By Mod", 2).await;
+        publish_community_meta(&bed.relay, &community, &mod_key, "By Mod again", 3).await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().name, "By Mod again");
+
+        grant_roles(&bed.relay, &held(), &mod_key.public_key(), vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let eds = fetch_control(&bed.relay, &held()).await;
+        assert!(eds.iter().any(|e| e.vsk == vsk::TENURE), "the demotion wrote a Tenure");
+        assert_eq!(fold_authority(&held(), &eds, &load_floors(&held())).roles.roles_of(&mod_key.public_key().to_hex()).count(), 0, "the Mod holds no Role");
+        assert_eq!(held().name, "By Mod again", "and the rename stands for this member");
+
+        let refounded = refound_community(&bed.relay, &held(), &[]).await.unwrap();
+        let carried = fetch_control(&bed.relay, &refounded).await;
+        let fresh = apply_control_fold(&refounded, &carried, &Floors::default(), &fold_authority(&refounded, &carried, &Floors::default()));
+        let meta = fresh.heads.iter().find(|h| h.entity_hex == crate::simd::hex::bytes_to_hex_32(&community.id().0)).expect("a metadata head crosses");
+        let head = carried.iter().find(|e| e.inner_id == meta.inner_id).unwrap();
+        assert_eq!(head.author, mod_key.public_key());
+        assert_eq!(serde_json::from_str::<control::CommunityMetadata>(&head.content).unwrap().name, "By Mod again", "and for a fresh joiner of the new epoch");
+    }
+
+    #[tokio::test]
+    async fn a_roster_fold_that_runs_out_its_bound_keeps_nothing_it_judged() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Bound", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let cid = community.id().0;
+        let before = floor_of(&community, &cid);
+        publish_community_meta(&bed.relay, &community, &owner.keys, "Renamed", 2).await;
+        FOLD_BOUND.with(|b| b.set(Some(0)));
+        let follow = follow_control(&bed.relay, &community).await;
+        FOLD_BOUND.with(|b| b.set(None));
+        assert!(follow.unwrap().updated.is_none(), "nothing adopted");
+        assert_eq!(floor_of(&community, &cid), before, "no floor moves");
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held().name, "Bound");
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert_eq!(held().name, "Renamed", "the next settled fold keeps it");
+        assert_eq!(floor_of(&community, &cid).0, 2);
+    }
+
+    #[tokio::test]
+    async fn a_join_seeds_nothing_from_a_roster_fold_that_runs_out_its_bound() {
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BoundJoin", bed.relays.clone(), None).await.unwrap();
+        let rm = "d4".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &role_at(&rm, "Mod", 2, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &Keys::generate().public_key(), vec![rm.clone()], 1).await;
+        publish_banlist(&bed.relay, &community, &owner.keys, &[Keys::generate().public_key().to_hex()], 1).await;
+        let settled = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await.unwrap();
+        assert!(settled.roles.is_some() && settled.banlist_persist.is_some() && !settled.authority_heads.is_empty());
+        FOLD_BOUND.with(|b| b.set(Some(0)));
+        let guessed = verify_owner_root_and_reconcile(&bed.relay, community.clone()).await;
+        FOLD_BOUND.with(|b| b.set(None));
+        let guessed = guessed.unwrap();
+        assert!(guessed.roles.is_none() && guessed.banlist_persist.is_none() && guessed.authority_heads.is_empty(), "no Roster, banlist or floor from a guess");
+        assert_eq!(guessed.community.name, settled.community.name, "the owner's own document still folds");
     }
 
     #[tokio::test]
