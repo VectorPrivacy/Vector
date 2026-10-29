@@ -322,27 +322,126 @@ impl ControlPlane {
     }
 
     /// Check a page's signatures together before it is opened (see
-    /// [`stream::check_signatures_together`]); hold the guard across the page's opens.
+    /// [`stream::check_signatures_together`]); hold the guard across the page's opens. A wrap
+    /// this view already opened is left out: its open needs no signature.
     pub fn check_page(&self, wraps: &[&Event]) -> stream::BatchChecked {
-        let page: Vec<_> = wraps.iter().map(|w| (*w, vec![&self.conv_key], self.restricted)).collect();
+        let page: Vec<_> = {
+            let memo = opened_memo();
+            let memo = memo.lock().unwrap_or_else(|e| e.into_inner());
+            wraps.iter().filter(|w| !memo.contains(&self.opened_key(w))).map(|w| (*w, vec![&self.conv_key], self.restricted)).collect()
+        };
         stream::check_signatures_together(&page)
+    }
+
+    /// What this view's open of `wrap` is memoized under: an open is a pure function of the
+    /// wrap, which its id and signature pin (the id leaves the signature out), and of the view's
+    /// address, read key and restriction. Hashed, so no key sits in the map.
+    fn opened_key(&self, wrap: &Event) -> [u8; 32] {
+        let mut h = crate::crypto::sha256::Sha256::new();
+        h.update(b"concord/opened-control-wrap");
+        h.update(wrap.id.as_bytes());
+        h.update(wrap.sig.as_bytes());
+        h.update(self.pk.to_bytes());
+        h.update(self.conv_key.as_bytes());
+        h.update([self.restricted as u8]);
+        h.finalize()
     }
 
     /// Open a control wrap under this view — [`open_control_edition`] with the
     /// split's mandatory wrap-signature check on a restricted plane (CORD-01
     /// Write-Restricted Streams: the signature IS the write gate there).
     pub fn open(&self, wrap: &Event) -> Result<(ParsedEdition, OpenedStream), ControlError> {
-        let opened = stream::open_wrap_at(wrap, &self.pk, &self.conv_key, self.restricted)?;
-        if opened.seal_form != SealForm::Plaintext {
-            return Err(ControlError::NotPlaintextSealed);
-        }
-        let edition = parse_edition_rumor(&opened.rumor)?;
+        let opened = self.opened(wrap)?;
+        Ok((opened.0.clone(), opened.1.clone()))
+    }
+
+    /// [`Self::open`] for a reader that needs only the edition.
+    pub fn open_edition(&self, wrap: &Event) -> Result<ParsedEdition, ControlError> {
+        Ok(self.opened(wrap)?.0.clone())
+    }
+
+    fn opened(&self, wrap: &Event) -> Result<Opened, ControlError> {
+        let memo_key = self.opened_key(wrap);
+        let memo = opened_memo();
+        let hit = memo.lock().unwrap_or_else(|e| e.into_inner()).get(&memo_key);
+        let opened = match hit {
+            Some(hit) => hit,
+            None => {
+                let opened = stream::open_wrap_at(wrap, &self.pk, &self.conv_key, self.restricted)?;
+                if opened.seal_form != SealForm::Plaintext {
+                    return Err(ControlError::NotPlaintextSealed);
+                }
+                let edition = parse_edition_rumor(&opened.rumor)?;
+                let bytes = wrap.content.len() * 2 + edition.content.len() + 512;
+                let opened = std::sync::Arc::new((edition, opened));
+                memo.lock().unwrap_or_else(|e| e.into_inner()).insert(memo_key, opened.clone(), bytes);
+                opened
+            }
+        };
         // A marked edition from another Community, re-wrapped here, is not this Community's.
-        if edition.binding.is_some_and(|b| self.binding.is_some_and(|mine| mine != b)) {
+        if opened.0.binding.is_some_and(|b| self.binding.is_some_and(|mine| mine != b)) {
             return Err(ControlError::Edition(EditionError::BadField("eb")));
         }
-        Ok((edition, opened))
+        Ok(opened)
     }
+}
+
+/// Bytes per generation of the session's [`OpenedMemo`]: a follow re-reads every edition the
+/// plane serves, and a large plane runs to a few thousand of them.
+const OPENED_MEMO_BYTES: usize = 8 << 20;
+
+type Opened = std::sync::Arc<(ParsedEdition, OpenedStream)>;
+
+/// Control wraps already opened, in two generations: a full `cur` ages into `prev`, and a hit
+/// in `prev` moves back, so a working set within the bound never goes cold all at once.
+#[derive(Default)]
+struct OpenedMemo {
+    cur: std::collections::HashMap<[u8; 32], (Opened, usize)>,
+    prev: std::collections::HashMap<[u8; 32], (Opened, usize)>,
+    cur_bytes: usize,
+}
+
+impl OpenedMemo {
+    fn contains(&self, key: &[u8; 32]) -> bool {
+        self.cur.contains_key(key) || self.prev.contains_key(key)
+    }
+
+    fn get(&mut self, key: &[u8; 32]) -> Option<Opened> {
+        if let Some((hit, _)) = self.cur.get(key) {
+            return Some(hit.clone());
+        }
+        let (hit, bytes) = self.prev.remove(key)?;
+        self.insert(*key, hit.clone(), bytes);
+        Some(hit)
+    }
+
+    fn insert(&mut self, key: [u8; 32], value: Opened, bytes: usize) {
+        if self.cur_bytes + bytes > OPENED_MEMO_BYTES && !self.cur.is_empty() {
+            self.prev = std::mem::take(&mut self.cur);
+            self.cur_bytes = 0;
+        }
+        if self.cur.insert(key, (value, bytes)).is_none() {
+            self.cur_bytes += bytes;
+        }
+    }
+}
+
+/// The session's [`OpenedMemo`]: an account's opened editions go with its session.
+fn opened_memo() -> std::sync::Arc<std::sync::Mutex<OpenedMemo>> {
+    struct Key;
+    crate::db::current_session().scoped::<Key, std::sync::Mutex<OpenedMemo>>()
+}
+
+/// Empty this session's [`OpenedMemo`], so the next opens run whole.
+#[cfg(test)]
+pub(crate) fn forget_opened() {
+    *opened_memo().lock().unwrap() = OpenedMemo::default();
+}
+
+/// Whether this session holds `view`'s open of `wrap`.
+#[cfg(test)]
+pub(crate) fn opened_held(view: &ControlPlane, wrap: &Event) -> bool {
+    opened_memo().lock().unwrap().contains(&view.opened_key(wrap))
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -767,6 +866,74 @@ pub async fn genesis_signed<S: crate::signer::VectorSigner + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    fn shown(r: Result<(ParsedEdition, OpenedStream), ControlError>) -> String {
+        format!("{r:?}")
+    }
+
+    #[test]
+    fn an_open_served_from_the_memo_is_exactly_a_fresh_open() {
+        let owner = Keys::generate();
+        let g = genesis(&owner, CommunityMetadata { name: "Memo".into(), ..Default::default() }, 1_000).unwrap();
+        let held = super::super::community::CommunityV2::from_genesis(&g, "Memo", None, vec![], 0);
+        let view = ControlPlane::of(&held);
+        assert!(!g.wraps.is_empty());
+        for wrap in &g.wraps {
+            forget_opened();
+            let fresh = shown(view.open(wrap));
+            assert!(fresh.starts_with("Ok"), "{fresh}");
+            assert!(opened_held(&view, wrap), "the open is kept");
+            assert_eq!(shown(view.open(wrap)), fresh, "and served again as it was");
+            assert_eq!(format!("{:?}", view.open_edition(wrap)), format!("{:?}", view.open(wrap).map(|(e, _)| e)));
+        }
+    }
+
+    #[test]
+    fn the_memo_serves_no_view_what_its_own_open_would_refuse() {
+        let owner = Keys::generate();
+        let g = genesis(&owner, CommunityMetadata { name: "A".into(), ..Default::default() }, 1_000).unwrap();
+        let other = genesis(&owner, CommunityMetadata { name: "B".into(), ..Default::default() }, 1_000).unwrap();
+        let a = super::super::community::CommunityV2::from_genesis(&g, "A", None, vec![], 0);
+        let b = super::super::community::CommunityV2::from_genesis(&other, "B", None, vec![], 0);
+        forget_opened();
+        assert!(ControlPlane::of(&a).open(&g.wraps[0]).is_ok());
+        assert!(ControlPlane::of(&b).open(&g.wraps[0]).is_err(), "another Community's view opens nothing of A's");
+
+        // A bare group view checks no binding; this Community's view still does, cached or not.
+        let mut legacy = a.clone();
+        legacy.control_pk = None;
+        let group = control_group_key(&legacy.community_root, legacy.id(), legacy.root_epoch);
+        let elsewhere = super::super::derive::edition_binding(&CommunityId([0x42; 32]));
+        let rumor = build_edition_rumor_bound(owner.public_key(), vsk::ROLE_V2, &[0x51; 32], 1, None, "{}", 1_000, None, Some(elsewhere));
+        let (wrap, _) = seal_control_edition(&rumor, &group, &owner, Timestamp::from_secs(1_000)).unwrap();
+        assert!(ControlPlane::legacy(&group).open(&wrap).is_ok());
+        assert!(opened_held(&ControlPlane::of(&legacy), &wrap), "the same address and key: one memo entry");
+        assert!(
+            matches!(ControlPlane::of(&legacy).open(&wrap), Err(ControlError::Edition(EditionError::BadField("eb")))),
+            "an edition bound to another Community is refused whoever filled the memo"
+        );
+    }
+
+    #[test]
+    fn the_open_memo_ages_a_generation_at_a_time() {
+        let owner = Keys::generate();
+        let g = genesis(&owner, CommunityMetadata { name: "Ages".into(), ..Default::default() }, 1_000).unwrap();
+        let held = super::super::community::CommunityV2::from_genesis(&g, "Ages", None, vec![], 0);
+        let value: Opened = std::sync::Arc::new(ControlPlane::of(&held).open(&g.wraps[0]).unwrap());
+        let half = OPENED_MEMO_BYTES / 2 + 1;
+        let mut memo = OpenedMemo::default();
+        memo.insert([1; 32], value.clone(), half);
+        memo.insert([2; 32], value.clone(), half);
+        assert!(memo.prev.contains_key(&[1; 32]) && memo.cur.contains_key(&[2; 32]), "a full generation ages into the previous one");
+        assert!(memo.get(&[1; 32]).is_some() && memo.cur.contains_key(&[1; 32]), "and a hit there moves back");
+        memo.insert([3; 32], value.clone(), half);
+        memo.insert([4; 32], value.clone(), half);
+        assert!(!memo.contains(&[2; 32]), "two generations on, what nothing touched is gone");
+        assert!(memo.contains(&[4; 32]));
+        let big = OPENED_MEMO_BYTES * 2;
+        memo.insert([5; 32], value, big);
+        assert!(memo.cur.contains_key(&[5; 32]), "one larger than a generation still keeps a generation of its own");
+    }
+
     #[test]
     fn sealed_channel_metadata_round_trips_and_hides_everything_but_access() {
         let mut meta = ChannelMetadata { name: "war room".into(), private: true, voice: None, deleted: None, custom: Some(serde_json::Map::from_iter([("x".to_string(), 1.into())])), extra: Default::default() };

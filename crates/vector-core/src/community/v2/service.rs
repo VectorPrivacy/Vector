@@ -135,7 +135,7 @@ pub async fn create_community<T: Transport + ?Sized>(
         let control = control::ControlPlane::of(&community);
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         for wrap in &genesis.wraps {
-            if let Ok((ed, _)) = control.open(wrap) {
+            if let Ok(ed) = control.open_edition(wrap) {
                 let entity_hex = crate::simd::hex::bytes_to_hex_32(&ed.entity_id);
                 crate::db::community::set_family_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, &ed.author.to_bytes(), community.root_epoch.0, floor_family(&ed.vsk))?;
             }
@@ -1882,7 +1882,7 @@ async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, communi
             if oldest.is_none_or(|o| at < o) {
                 oldest = Some(at);
             }
-            if let Ok((ed, _)) = control.open(w) {
+            if let Ok(ed) = control.open_edition(w) {
                 editions.push(ed);
             }
         }
@@ -2268,7 +2268,7 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
                 }
                 fresh += 1;
                 oldest = oldest.min(w.created_at.as_secs());
-                if let Ok((ed, _)) = control.open(w) {
+                if let Ok(ed) = control.open_edition(w) {
                     crate::log_trace!(
                         "[JoinVerify] edition vsk={} eid={} owner={} at={}",
                         ed.vsk, crate::simd::hex::bytes_to_hex_32(&ed.entity_id)[..12].to_string(),
@@ -10471,7 +10471,7 @@ async fn read_control<T: Transport + ?Sized>(transport: &T, community: &Communit
                 }
                 // Open + seal-verify every edition; authority is resolved by the roster
                 // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
-                if let Ok((ed, _)) = control.open(w) {
+                if let Ok(ed) = control.open_edition(w) {
                     if seen.insert(ed.inner_id) {
                         entities.insert(ed.entity_id);
                         editions.push(ed);
@@ -17534,6 +17534,13 @@ mod tests {
         assert!(owner.supports(1, u64::MAX) && owner.outranks(1));
     }
 
+    /// Everything a fold decides, as one comparable string.
+    fn authority_whole(a: &AuthoritySet) -> String {
+        let mut admitted: Vec<String> = a.admitted.iter().map(crate::simd::hex::bytes_to_hex_32).collect();
+        admitted.sort();
+        format!("{} refused={:?} carried={:?} admitted={admitted:?} gapped={} complete={}", authority_and_heads(a), a.refused, a.carried, a.gapped, a.complete)
+    }
+
     /// The roster, banlist and the heads a follow would floor, as one comparable string.
     fn authority_and_heads(a: &AuthoritySet) -> String {
         let mut heads: Vec<_> = a.heads.iter().map(|h| (h.entity_hex.clone(), h.version, crate::simd::hex::bytes_to_hex_32(&h.self_hash), crate::simd::hex::bytes_to_hex_32(&h.inner_id), h.rebased)).collect();
@@ -21836,6 +21843,96 @@ mod tests {
         let head = carried.iter().find(|e| e.inner_id == meta.inner_id).unwrap();
         assert_eq!(head.author, mod_key.public_key());
         assert_eq!(serde_json::from_str::<control::CommunityMetadata>(&head.content).unwrap().name, "By Mod again", "and for a fresh joiner of the new epoch");
+    }
+
+    /// Every edition a follow's read holds, against a fresh open of the same wrap.
+    async fn read_as_fresh_opens_read(relay: &MemoryRelay, community: &CommunityV2, step: &str) {
+        let read = read_control(relay, community).await.unwrap();
+        let fresh: std::collections::HashMap<[u8; 32], String> = fetch_control(relay, community).await.iter().map(|e| (e.inner_id, format!("{e:?}"))).collect();
+        assert!(!read.editions.is_empty(), "{step}: the read found the plane");
+        for e in &read.editions {
+            assert_eq!(fresh.get(&e.inner_id), Some(&format!("{e:?}")), "{step}: an edition the follow read differs from its fresh open");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_follow_reads_what_fresh_opens_read_through_every_kind_of_change() {
+        // Each change arrives as new wraps; the memo serves only wraps the relay serves again,
+        // as their own open would. So after any change a follow sees what a cold read does.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Churn", bed.relays.clone(), None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let (a, b) = (Keys::generate().public_key(), Keys::generate().public_key());
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "created").await;
+        let view = control::ControlPlane::of(&held());
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![view.pk().to_hex()], limit: Some(500), ..Default::default() };
+        let before = bed.relay.fetch(&q, &held().relays).await.unwrap();
+        assert!(before.iter().all(|w| control::opened_held(&view, w)), "the follow kept every open");
+
+        grant_admin(&bed.relay, &held(), &a).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "granted").await;
+        assert!(crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().grants.iter().any(|g| g.member == a.to_hex()));
+
+        let renamed = control::CommunityMetadata { name: "Churned".into(), ..held().metadata() };
+        edit_community_metadata(&bed.relay, &held(), &renamed).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "renamed").await;
+        assert_eq!(held().name, "Churned");
+
+        let ch = create_channel_in(&bed.relay, &held(), "side", false, None).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "channel created").await;
+        assert!(held().channel(&ch).is_some());
+
+        set_banlist(&bed.relay, &held(), &[b.to_hex()]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "banned").await;
+        assert!(crate::db::community::get_community_banlist(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().contains(&b.to_hex()));
+
+        kick_member(&bed.relay, &held(), &a).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "kicked").await;
+
+        grant_roles(&bed.relay, &held(), &a, vec![]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "revoked").await;
+        assert!(crate::db::community::get_community_roles(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().grants.iter().all(|g| g.member != a.to_hex() || g.role_ids.is_empty()));
+
+        delete_channel(&bed.relay, &held(), &ch, "side").await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "channel deleted").await;
+        assert!(held().channel(&ch).is_none());
+
+        set_banlist(&bed.relay, &held(), &[]).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+        read_as_fresh_opens_read(&bed.relay, &held(), "unbanned").await;
+        assert!(crate::db::community::get_community_banlist(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap().is_empty());
+
+        // And the fold over what the follow read equals one over fresh opens, end to end.
+        let floors = load_floors(&held());
+        let read = read_control(&bed.relay, &held()).await.unwrap();
+        control::forget_opened();
+        let cold = read_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(authority_whole(&read.authority), authority_whole(&cold.authority));
+        assert_eq!(format!("{:?}", read.fold.updated.map(|c| c.metadata())), format!("{:?}", cold.fold.updated.map(|c| c.metadata())));
+        assert_eq!(authority_whole(&fold_authority(&held(), &read.editions, &floors)), authority_whole(&fold_authority(&held(), &cold.editions, &floors)));
+    }
+
+    #[tokio::test]
+    async fn opened_control_editions_stay_with_the_account_that_opened_them() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Mine", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap();
+        let view = control::ControlPlane::of(&community);
+        let q = Query { kinds: vec![stream::KIND_WRAP], authors: vec![view.pk().to_hex()], limit: Some(500), ..Default::default() };
+        let wraps = bed.relay.fetch(&q, &community.relays).await.unwrap();
+        assert!(wraps.iter().any(|w| control::opened_held(&view, w)));
+        bed.swap_to(&member);
+        assert!(!wraps.iter().any(|w| control::opened_held(&view, w)), "another account's session holds none of them");
     }
 
     #[tokio::test]
