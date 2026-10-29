@@ -3838,6 +3838,13 @@ impl VectorCore {
 
     /// The held community `community_id` names, or `Ok(None)`. A DB read error
     /// PROPAGATES (fail-closed) rather than reading as "unknown".
+    /// A community id read from the caller, for one this device no longer holds.
+    fn unheld_id(community_id: &str) -> Result<crate::community::CommunityId> {
+        crate::simd::hex::hex_to_bytes_32_checked(community_id)
+            .map(crate::community::CommunityId)
+            .ok_or_else(|| VectorError::Other("malformed community id".into()))
+    }
+
     fn load_held(community_id: &str) -> Result<Option<crate::community::v2::community::CommunityV2>> {
         if community_id.len() != 64 {
             return Ok(None);
@@ -5054,16 +5061,19 @@ impl VectorCore {
             if community_id.len() != 64 {
                 return Err(VectorError::Other("malformed community id".into()));
             }
+            use crate::community::v2::service;
+            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            let Some(v2) = Self::load_held(community_id)? else {
+                let cid = Self::unheld_id(community_id)?;
+                let at_ms = service::leave_unheld_locally(&cid).await.ok_or_else(|| VectorError::Other("community not found".into()))?;
+                service::announce_unheld_leave(&transport, &cid, at_ms).await;
+                return Ok(());
+            };
             // Guestbook Leave + cross-device List tombstone + local delete, in the service.
-            let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
             let channel_ids: Vec<String> =
                 v2.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
-            let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            crate::community::v2::service::leave_community(&transport, &v2)
-                .await
-                .map_err(VectorError::Other)?;
-            let mut st = state::STATE.lock().await;
-            st.chats.retain(|c| !channel_ids.contains(&c.id));
+            service::leave_community(&transport, &v2).await.map_err(VectorError::Other)?;
+            service::forget_community_chats(&crate::simd::hex::bytes_to_hex_32(&v2.id().0), &channel_ids).await;
             Ok(())
         })
         .await
@@ -5075,11 +5085,19 @@ impl VectorCore {
     pub async fn leave_community_now(&self, community_id: &str) -> Result<()> {
         crate::db::scoped(async move {
             use crate::community::v2::service;
-            let v2 = Self::load_held(community_id)?.ok_or_else(|| VectorError::Other("community not found".into()))?;
+            let Some(v2) = Self::load_held(community_id)? else {
+                let cid = Self::unheld_id(community_id)?;
+                let at_ms = service::leave_unheld_locally(&cid).await.ok_or_else(|| VectorError::Other("community not found".into()))?;
+                crate::db::spawn_bound(async move {
+                    let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+                    service::announce_unheld_leave(&transport, &cid, at_ms).await;
+                });
+                return Ok(());
+            };
             let channel_ids: Vec<String> =
                 v2.channels.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.id.0)).collect();
             let at_ms = service::leave_locally(&v2).map_err(VectorError::Other)?;
-            state::STATE.lock().await.chats.retain(|c| !channel_ids.contains(&c.id));
+            service::forget_community_chats(&crate::simd::hex::bytes_to_hex_32(&v2.id().0), &channel_ids).await;
             crate::db::spawn_bound(async move {
                 let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
                 service::announce_leave(&transport, &v2, at_ms).await;

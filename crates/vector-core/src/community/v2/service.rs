@@ -2595,6 +2595,45 @@ pub fn leave_locally(community: &CommunityV2) -> Result<u64, String> {
     Ok(at_ms)
 }
 
+/// [`leave_locally`] for a community this device lists but no longer holds, its chats having
+/// outlived its row: they go, and the List tombstone is kept pending. `None` when nothing here
+/// names the community.
+pub async fn leave_unheld_locally(community_id: &crate::community::CommunityId) -> Option<u64> {
+    let id_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
+    let named = crate::state::STATE.lock().await.chats.iter().any(|c| c.metadata.community_id() == Some(id_hex.as_str()));
+    if !named {
+        return None;
+    }
+    let at_ms = now_ms();
+    add_pending_tombstone(community_id, at_ms);
+    forget_community_chats(&id_hex, &[]).await;
+    Some(at_ms)
+}
+
+/// The network half of [`leave_unheld_locally`]: the List tombstone alone, as no key is left
+/// to seal a Guestbook Leave. The stock set stands in for the community's unknown relays.
+pub async fn announce_unheld_leave<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, at_ms: u64) {
+    crate::db::scoped(async move { record_leave(transport, community_id, &invite::stock_relays(), at_ms).await }).await
+}
+
+/// Drop a left community's channel chats, messages included, from STATE and the database,
+/// with any chat that still names the community.
+pub async fn forget_community_chats(community_id: &str, channel_ids: &[String]) {
+    let mut gone: Vec<String> = channel_ids.to_vec();
+    {
+        let mut st = crate::state::STATE.lock().await;
+        for chat in &st.chats {
+            if chat.metadata.community_id() == Some(community_id) && !gone.contains(&chat.id) {
+                gone.push(chat.id.clone());
+            }
+        }
+        st.chats.retain(|c| !gone.contains(&c.id));
+    }
+    for id in &gone {
+        let _ = crate::db::chats::delete_chat(id);
+    }
+}
+
 /// The network half of [`leave_locally`]: the Guestbook Leave, then the List
 /// tombstone, which retries from its pending record until it lands.
 pub async fn announce_leave<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, at_ms: u64) {
@@ -15662,6 +15701,58 @@ mod tests {
         announce_leave(&bed.relay, &joined, at_ms).await;
         bed.swap_to(&owner);
         assert!(!memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()), "the Leave lands after");
+    }
+
+    async fn chats_naming(community_hex: &str) -> usize {
+        crate::state::STATE.lock().await.chats.iter().filter(|c| c.metadata.community_id() == Some(community_hex)).count()
+    }
+
+    fn chat_rows(ids: &[String]) -> usize {
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        ids.iter()
+            .filter(|id| conn.query_row("SELECT 1 FROM chats WHERE chat_identifier = ?1", [id.as_str()], |_| Ok(())).is_ok())
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_leave_takes_every_chat_of_the_community_with_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chatty", vec!["wss://r".to_string()], None).await.unwrap();
+        create_public_channel(&relay, &community, "second").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        crate::register_v2_chats_inner(&community).await;
+        let id_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let channels: Vec<String> = community.channels.iter().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
+        assert_eq!((chats_naming(&id_hex).await, chat_rows(&channels)), (2, 2));
+
+        crate::VectorCore.leave_community_now(&id_hex).await.unwrap();
+        assert_eq!(chats_naming(&id_hex).await, 0);
+        assert_eq!(chat_rows(&channels), 0, "no chat row is left to come back as a ghost on the next load");
+    }
+
+    #[tokio::test]
+    async fn a_community_whose_chats_outlived_it_can_still_be_left_here_and_on_the_list() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Ghost", vec!["wss://r".to_string()], None).await.unwrap();
+        crate::register_v2_chats_inner(&community).await;
+        let id_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let channels: Vec<String> = community.channels.iter().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
+        crate::db::community::delete_community(&id_hex).unwrap();
+        assert_eq!((chats_naming(&id_hex).await, chat_rows(&channels)), (1, 1), "the row is gone, its chat is not");
+
+        let at_ms = leave_unheld_locally(community.id()).await.expect("its chat names it");
+        assert_eq!((chats_naming(&id_hex).await, chat_rows(&channels)), (0, 0));
+        assert!(tombstone_suppresses(&id_hex, at_ms / 1000), "kept pending before it publishes");
+
+        announce_unheld_leave(&relay, community.id(), at_ms).await;
+        let read = read_fragments(&relay, &list_read_relays(&[]).await).await.unwrap();
+        let list = read.set.expect("the List was written").list;
+        assert!(list.tombstones.iter().any(|t| t.community_id == id_hex), "the List carries the leave");
+
+        assert!(leave_unheld_locally(community.id()).await.is_none(), "nothing here names it now");
+        assert!(crate::VectorCore.leave_community_now(&id_hex).await.is_err());
     }
 
     #[tokio::test]
