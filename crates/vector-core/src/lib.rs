@@ -2654,7 +2654,7 @@ impl VectorCore {
         // background and refreshes the UI when it lands.
         let Ok(Some(community)) = Self::load_held(community_id) else { return Vec::new() };
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let (events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+        let (events, cursor) = crate::db::community::get_guestbook_shared(&cid_hex).unwrap_or_default();
         if cursor == 0 {
             if crate::community::v2::realtime::follow_worker_running() {
                 crate::community::v2::realtime::enqueue_follow(community.id());
@@ -2992,10 +2992,10 @@ impl VectorCore {
         let roles_of: std::collections::HashMap<String, Vec<String>> =
             roster.grants.iter().map(|g| (g.member.clone(), g.role_ids.clone())).collect();
 
-        let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+        let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex).unwrap_or_default();
         let mut joined_at: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         let mut invite_label: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for e in &events {
+        for e in events.iter() {
             let GuestbookEntry::Join { member, invited_by, at_ms } = &e.entry else { continue };
             let hex = member.to_hex();
             let slot = joined_at.entry(hex.clone()).or_insert(*at_ms);
@@ -3234,9 +3234,9 @@ impl VectorCore {
         let roles_of: std::collections::HashMap<String, Vec<String>> =
             roster.grants.iter().map(|g| (g.member.clone(), g.role_ids.clone())).collect();
 
-        let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+        let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex).unwrap_or_default();
         let mut joined_at: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for e in &events {
+        for e in events.iter() {
             let GuestbookEntry::Join { member, at_ms, .. } = &e.entry else { continue };
             let hex = member.to_hex();
             let slot = joined_at.entry(hex).or_insert(*at_ms);

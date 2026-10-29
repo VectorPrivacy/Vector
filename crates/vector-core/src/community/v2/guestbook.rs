@@ -624,7 +624,7 @@ fn windows_of(entries: &[Presence]) -> Vec<Span> {
 /// the lower rumor id. The id tie-break is author-grindable — an accepted
 /// residual: the coalesce is per-npub, so an author only ever grinds ties
 /// against their own entries (CORD-02 §5).
-fn supersedes(prev: &MemberState, next: &MemberState) -> bool {
+fn supersedes(prev: &MemberState, next: &Claim<'_>) -> bool {
     if next.at_ms != prev.at_ms {
         return next.at_ms > prev.at_ms;
     }
@@ -634,11 +634,25 @@ fn supersedes(prev: &MemberState, next: &MemberState) -> bool {
     next.rumor_id < prev.rumor_id
 }
 
-fn apply(fold: &mut BTreeMap<PublicKey, MemberState>, member: PublicKey, next: MemberState) {
-    match fold.get(&member) {
-        Some(prev) if !supersedes(prev, &next) => {}
-        _ => {
-            fold.insert(member, next);
+/// An entry's claim on a member's state, its invite attribution copied only if it wins.
+struct Claim<'a> {
+    verdict: Verdict,
+    at_ms: u64,
+    source: Source,
+    invited_by: Option<&'a (String, String)>,
+    rumor_id: [u8; 32],
+}
+
+fn apply(fold: &mut BTreeMap<PublicKey, MemberState>, member: PublicKey, next: Claim<'_>) {
+    let state = || MemberState { verdict: next.verdict, at_ms: next.at_ms, source: next.source, invited_by: next.invited_by.cloned(), rumor_id: next.rumor_id };
+    match fold.entry(member) {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(state());
+        }
+        std::collections::btree_map::Entry::Occupied(mut slot) => {
+            if supersedes(slot.get(), &next) {
+                *slot.get_mut() = state();
+            }
         }
     }
 }
@@ -677,18 +691,18 @@ pub fn coalesce(
             GuestbookEntry::Join { member, invited_by, at_ms } => apply(
                 &mut fold,
                 *member,
-                MemberState {
+                Claim {
                     verdict: Verdict::Joined,
                     at_ms: *at_ms,
                     source: Source::Firsthand,
-                    invited_by: invited_by.clone(),
+                    invited_by: invited_by.as_ref(),
                     rumor_id: ev.rumor_id,
                 },
             ),
             GuestbookEntry::Leave { member, at_ms } => apply(
                 &mut fold,
                 *member,
-                MemberState {
+                Claim {
                     verdict: Verdict::Left,
                     at_ms: *at_ms,
                     source: Source::Firsthand,
@@ -703,7 +717,7 @@ pub fn coalesce(
                 apply(
                     &mut fold,
                     *target,
-                    MemberState {
+                    Claim {
                         verdict: Verdict::Kicked,
                         at_ms: *at_ms,
                         source: Source::Firsthand,
@@ -728,7 +742,7 @@ pub fn coalesce(
                     apply(
                         &mut fold,
                         *m,
-                        MemberState {
+                        Claim {
                             verdict: Verdict::Joined,
                             at_ms: *at_ms,
                             source: Source::Snapshot,
@@ -931,10 +945,11 @@ pub fn complete_memberlist(
     // A member offline across the whole ban→un-ban window never actually left; they are
     // suppressed only until they next publish, and the observed path re-admits them.
     let stale_pre_ban = |pk: &PublicKey, ms: u64| banned_at.get(pk).is_some_and(|at| ms <= at.saturating_mul(1000));
-    let mut out = BTreeSet::new();
+    // Two runs already in key order, so the set builds in one sorted pass.
+    let mut out = Vec::with_capacity(coalesced.len() + observed.len());
     for (pk, st) in coalesced {
         if st.verdict == Verdict::Joined && !banlist.contains(pk) && !stale_pre_ban(pk, st.at_ms) {
-            out.insert(*pk);
+            out.push(*pk);
         }
     }
     for (pk, seen_ms) in observed {
@@ -943,12 +958,10 @@ pub fn complete_memberlist(
         }
         match coalesced.get(pk) {
             Some(st) if st.verdict != Verdict::Joined && *seen_ms <= st.at_ms => {}
-            _ => {
-                out.insert(*pk);
-            }
+            _ => out.push(*pk),
         }
     }
-    out
+    out.into_iter().collect()
 }
 
 /// A stored event's body: the event without its rumor id (the row's key), in a compact binary

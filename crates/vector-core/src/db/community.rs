@@ -1205,6 +1205,26 @@ pub fn community_member_activity_strict(community_id: &str) -> Result<Vec<(Strin
     member_activity(community_id, false, true)
 }
 
+/// Each author's newest post per Channel and kind: grouped in `idx_events_chat_kind_npub`'s
+/// order, so it streams.
+fn activity_sql(placeholders: &str) -> String {
+    let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
+    format!("SELECT npub, MAX(created_at) FROM events WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND npub != '' GROUP BY chat_id, kind, npub")
+}
+
+/// The authors with a post that is no sign of membership, one indexed read per kind of sign.
+/// Binds the Channel rows once per sign.
+fn flagged_sql(placeholders: &str, strict: bool) -> String {
+    let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
+    let read = |sign: &str| format!("SELECT npub FROM events WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND {sign}");
+    if strict { format!("{} UNION {}", read(HELD_POST), read(WRITER_POST)) } else { format!("SELECT DISTINCT npub FROM ({})", read(HELD_POST)) }
+}
+
+/// A post its Channel's rules held, and a post at a writer address: each the predicate of a
+/// partial index (migrations 122, 123), which the planner uses only for this very text.
+pub(crate) const HELD_POST: &str = "instr(tags, '[\"unauthorized\"]') > 0";
+pub(crate) const WRITER_POST: &str = "instr(tags, '[\"writer\"]') > 0";
+
 /// `strict`: Grants stamped 0 rather than now, and a post at a writer address no sign of
 /// presence, since a writer who left still holds a key to post there.
 fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec<(String, u64)>, String> {
@@ -1238,12 +1258,8 @@ fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec
     let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     {
-        let sql = format!(
-            "SELECT npub, MAX(created_at) FROM events \
-             WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND npub != '' \
-             GROUP BY npub"
-        );
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        // Each author's newest across Channels and kinds is taken here.
+        let mut stmt = conn.prepare(&activity_sql(&placeholders)).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
@@ -1251,17 +1267,18 @@ fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec
             .map_err(|e| e.to_string())?;
         for row in rows {
             let (npub, at) = row.map_err(|e| e.to_string())?;
-            active.insert(npub, at);
+            let newest = active.entry(npub).or_insert(at);
+            *newest = (*newest).max(at);
         }
     }
 
     // A post its Channel's rules held, kept marked on a manager's device, is no sign of membership;
     // for the writer rules, neither is one at a writer address.
     {
-        let excluded = if strict { "(instr(tags, '[\"unauthorized\"]') > 0 OR instr(tags, '[\"writer\"]') > 0)" } else { "instr(tags, '[\"unauthorized\"]') > 0" };
-        let sql = format!("SELECT DISTINCT npub FROM events WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND {excluded}");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let flagged: Vec<String> = stmt.query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect();
+        let excluded = if strict { format!("({HELD_POST} OR {WRITER_POST})") } else { HELD_POST.to_string() };
+        let mut stmt = conn.prepare(&flagged_sql(&placeholders, strict)).map_err(|e| e.to_string())?;
+        let binds = chat_ints.iter().chain(chat_ints.iter().filter(|_| strict));
+        let flagged: Vec<String> = stmt.query_map(rusqlite::params_from_iter(binds), |r| r.get(0)).map_err(|e| e.to_string())?.flatten().collect();
         let sql = format!("SELECT MAX(created_at) FROM events WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub = ? AND NOT {excluded}");
         for npub in flagged {
             let mut args: Vec<rusqlite::types::Value> = chat_ints.iter().map(|i| rusqlite::types::Value::Integer(*i)).collect();
@@ -3593,6 +3610,23 @@ mod tests {
         departures_seen_cache().lock().unwrap().moved(&cid);
         assert_eq!(*departures_seen(&cid).unwrap().spans, want, "read back from the sealed rows");
         crate::state::set_encryption_enabled(false);
+    }
+
+    #[test]
+    fn a_member_list_reads_posts_through_indexes_not_a_scan() {
+        let (_tmp, _guard) = init_test_db();
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let binds = vec![1i64; stmt.parameter_count()];
+            stmt.query_map(rusqlite::params_from_iter(binds), |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>().join(" | ") + " "
+        };
+        let held = plan(&flagged_sql("?, ?", false));
+        assert!(held.contains("USING INDEX idx_events_unauthorized ") && !held.contains("writer"), "{held}");
+        let strict = plan(&flagged_sql("?, ?", true));
+        assert!(strict.contains("USING INDEX idx_events_unauthorized ") && strict.contains("USING INDEX idx_events_writer_post "), "{strict}");
+        let activity = plan(&activity_sql("?, ?"));
+        assert!(activity.contains("idx_events_chat_kind_npub") && !activity.contains("TEMP B-TREE"), "{activity}");
     }
 
     #[test]

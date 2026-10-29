@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 121;
+pub const HIGHEST_MIGRATION_ID: u32 = 123;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1699,6 +1699,29 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS community_owed_authors_book ON community_owed_authors (book, channel_id);",
         )
         .map_err(|e| format!("migration 121: {e}"))?;
+        Ok(())
+    })?;
+
+    // A member list reads which authors' posts are no sign of membership: a scan of every
+    // post's tags without an index on each predicate.
+    run_atomic_migration(conn, 122, "Index posts that are no sign of membership", |tx| {
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_events_unauthorized ON events(chat_id, npub) WHERE instr(tags, '[\"unauthorized\"]') > 0;
+             CREATE INDEX IF NOT EXISTS idx_events_unauthorized_or_writer ON events(chat_id, npub) WHERE (instr(tags, '[\"unauthorized\"]') > 0 OR instr(tags, '[\"writer\"]') > 0);",
+        )
+        .map_err(|e| format!("migration 122: {e}"))?;
+        Ok(())
+    })?;
+
+    // One index per sign, each WHERE the very predicate the reader writes
+    // (`db::community::HELD_POST`/`WRITER_POST`): the planner took the either-sign index for a
+    // held-post read too, reading every writer post with it.
+    run_atomic_migration(conn, 123, "Index each sign of a post that is no sign of membership", |tx| {
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS idx_events_unauthorized_or_writer;
+             CREATE INDEX IF NOT EXISTS idx_events_writer_post ON events(chat_id, npub) WHERE instr(tags, '[\"writer\"]') > 0;",
+        )
+        .map_err(|e| format!("migration 123: {e}"))?;
         Ok(())
     })?;
 

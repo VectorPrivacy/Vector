@@ -3955,7 +3955,7 @@ fn mark_guestbook_observed_since(cid_hex: &str) {
 
 pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
     stored_memberlist_from(community, &events)
 }
 
@@ -3969,7 +3969,7 @@ pub fn stored_memberlist_from(community: &CommunityV2, events: &[guestbook::Gues
 /// manages a restricted Channel's writers.
 pub fn stored_memberlist_strict(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-    let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    let (events, _cursor) = crate::db::community::get_guestbook_shared(&cid_hex)?;
     memberlist_folded(community, &events, true)
 }
 
@@ -16405,10 +16405,19 @@ mod tests {
         };
         crate::db::community::set_community_roles(&cid_hex, &roles, 1).unwrap();
 
+        // A reaction later than their text, ahead of it in index order: the newest of the two counts.
+        let chat = crate::db::id_cache::get_chat_id_by_identifier(&channel_hex).unwrap();
+        crate::db::get_write_connection_guard_static()
+            .unwrap()
+            .execute(
+                "INSERT INTO events (id, kind, chat_id, content, created_at, received_at, npub) VALUES (?1, 7, ?2, '', 2000000, 2000000, ?3)",
+                rusqlite::params!["ee".repeat(32), chat, talker.to_bech32().unwrap()],
+            )
+            .unwrap();
         let activity: std::collections::HashMap<String, u64> =
             crate::db::community::community_member_activity(&cid_hex).unwrap().into_iter().collect();
         let at = |pk: &PublicKey| activity.get(&pk.to_bech32().unwrap()).copied();
-        assert!(at(&talker).is_some_and(|t| t < 1_000_000_000), "an author keeps the time they spoke");
+        assert_eq!(at(&talker), Some(2_000_000), "an author keeps the newest time they spoke");
         assert!(at(&revoked).is_some_and(|t| t < 1_000_000_000), "an empty grant is not re-asserted");
         assert!(at(&staff).is_some(), "a grant holder counts without a word");
         assert_eq!(at(&banned), None);
