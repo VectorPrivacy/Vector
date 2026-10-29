@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 124;
+pub const HIGHEST_MIGRATION_ID: u32 = 125;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1730,6 +1730,14 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
     run_atomic_migration(conn, 124, "Pending invite wrap ids", |tx| {
         tx.execute("ALTER TABLE pending_community_invites ADD COLUMN wrap_ids TEXT NOT NULL DEFAULT ''", [])
             .map_err(|e| format!("migration 124: {e}"))?;
+        Ok(())
+    })?;
+
+    // When a parked invite was sent (its rumor's time, unix secs; 0 = parked before this): its
+    // lifetime runs from then, as the ingest rule's does.
+    run_atomic_migration(conn, 125, "Pending invite send time", |tx| {
+        tx.execute("ALTER TABLE pending_community_invites ADD COLUMN sent_at INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|e| format!("migration 125: {e}"))?;
         Ok(())
     })?;
 

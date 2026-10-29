@@ -15447,6 +15447,34 @@ button.popout-thumb {
   padding: 10px 15px;
 }
 
+.invite-details-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  text-align: center;
+}
+.invite-details-head .invite-details-name { max-width: 100%; margin: 8px 0 0; color: #fff; font-size: 20px; font-weight: 700; }
+.invite-details-sub { margin: 0; color: rgba(255, 255, 255, 0.5); font-size: 13px; }
+.invite-details-rows { display: flex; flex-direction: column; border: 1px solid #262626; border-radius: 12px; overflow: hidden; }
+.invite-details-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 42px;
+  padding: 0 14px;
+  color: #e8e8e8;
+  font-size: 14px;
+}
+.invite-details-row + .invite-details-row { border-top: 1px solid #1e1e1e; }
+.invite-details-label { flex-shrink: 0; color: rgba(255, 255, 255, 0.5); }
+.invite-details-person { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.invite-details-relays { align-items: flex-start; padding-top: 11px; padding-bottom: 11px; }
+.invite-details-list { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; }
+.invite-details-list .cutoff { max-width: 100%; }
+
 .relay-dialog-buttons .primary-btn:hover {
   opacity: 0.8;
 }
@@ -16650,7 +16678,7 @@ button.popout-thumb {
 
 /* MLS Group Invite Styles */
 .chatlist-invite {
-  cursor: default !important;
+  cursor: pointer !important;
   background-color: rgba(255, 255, 255, 0.05);
 }
 

@@ -210,6 +210,8 @@ function chatlistSnapshot() {
  * @property {(npub: string) => boolean} npubIsKnown   their invites show their icon
  * @property {(invite: object) => void} acceptInvite
  * @property {(invite: object) => void} declineInvite
+ * @property {(invite: object) => void} openInvite   its details overlay
+ * @property {(invite: object, x: number, y: number) => void} inviteMenu   Advanced Mode's copies
  * @property {() => void} newChat
  * @property {() => void} openHub
  * @property {(el: Element) => void} bindViktor
@@ -283,6 +285,12 @@ function chatlistHelpers() {
         npubIsKnown,
         acceptInvite: acceptCommunityInvite,
         declineInvite: declineCommunityInvite,
+        openInvite: (invite) => {
+            if (wasContextMenuJustDismissed()) return;
+            if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+            openInviteDetails(invite);
+        },
+        inviteMenu: showInviteMenu,
         // empty state
         newChat: () => openNewChat(),
         openHub: () => openUrl('https://vectorapp.io/hub'),

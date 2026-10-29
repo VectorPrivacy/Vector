@@ -776,6 +776,11 @@ pub struct PendingCommunityInvite {
     pub received_at: i64,
     /// Sender-declared NIP-40 expiry (unix secs); 0 = none declared, so permanent.
     pub expires_at: i64,
+    /// When it was sent (unix secs); 0 when parked before this was kept.
+    pub sent_at: i64,
+    /// When it leaves the list (unix secs): the sender's deadline or the recipient's lifetime,
+    /// whichever comes first.
+    pub ends_at: i64,
 }
 
 /// Park an inbound invite bundle for explicit user consent (the carrier never
@@ -845,6 +850,17 @@ pub fn note_pending_invite_wrap(community_id: &str, wrap_hex: &str) -> Result<()
     Ok(())
 }
 
+/// Record when a parked invite was sent, once.
+pub fn set_pending_invite_sent(community_id: &str, sent_at: i64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("UPDATE pending_community_invites SET sent_at = ?2 WHERE community_id = ?1 AND sent_at = 0", params![community_id, sent_at])
+        .map_err(|e| format!("set invite send time: {e}"))?;
+    Ok(())
+}
+
+/// When a parked invite's lifetime began, in SQL: its send time, or its park time when unknown.
+const INVITE_LIFETIME_FROM: &str = "CASE WHEN sent_at > 0 THEN sent_at ELSE received_at END";
+
 /// The gift wraps recorded for a parked invite.
 pub fn pending_invite_wraps(community_id: &str) -> Result<Vec<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
@@ -884,9 +900,11 @@ pub fn purge_expired_pending_invites() -> Result<usize, String> {
     let now = now_secs();
     let n = conn
         .execute(
-            "DELETE FROM pending_community_invites
-              WHERE (expires_at != 0 AND expires_at <= ?1)
-                 OR received_at <= ?2",
+            &format!(
+                "DELETE FROM pending_community_invites
+                  WHERE (expires_at != 0 AND expires_at <= ?1)
+                     OR {INVITE_LIFETIME_FROM} <= ?2"
+            ),
             params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64],
         )
         .map_err(|e| format!("purge expired pending invites: {e}"))?;
@@ -896,32 +914,38 @@ pub fn purge_expired_pending_invites() -> Result<usize, String> {
 /// All parked invites, newest first.
 pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
     let now = now_secs();
-    let raw: Vec<(String, String, String, i64, i64)> = {
+    let raw: Vec<(String, String, String, i64, i64, i64)> = {
         let conn = super::get_db_connection_guard_static()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
+            .prepare(&format!(
+                "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at, sent_at
                    FROM pending_community_invites
                   WHERE (expires_at = 0 OR expires_at > ?1)
-                    AND received_at > ?2
-                  ORDER BY received_at DESC",
-            )
+                    AND {INVITE_LIFETIME_FROM} > ?2
+                  ORDER BY received_at DESC"
+            ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
     };
     Ok(raw
         .into_iter()
-        .map(|(community_id, bundle, inviter, received_at, expires_at)| PendingCommunityInvite {
-            community_id,
-            bundle_json: dec_txt(&bundle),
-            inviter_npub: dec_txt(&inviter),
-            received_at,
-            expires_at,
+        .map(|(community_id, bundle, inviter, received_at, expires_at, sent_at)| {
+            let from = if sent_at > 0 { sent_at } else { received_at };
+            let lifetime_end = from + crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64;
+            PendingCommunityInvite {
+                community_id,
+                bundle_json: dec_txt(&bundle),
+                inviter_npub: dec_txt(&inviter),
+                received_at,
+                expires_at,
+                sent_at,
+                ends_at: if expires_at != 0 { expires_at.min(lifetime_end) } else { lifetime_end },
+            }
         })
         .collect())
 }
@@ -4461,6 +4485,32 @@ mod tests {
         assert_eq!(n, 1, "only the held community's invite is purged");
         assert!(!pending_invite_exists(&held_hex).unwrap(), "held → invite gone");
         assert!(pending_invite_exists(&stranger).unwrap(), "unknown community → invite kept");
+    }
+
+    #[test]
+    fn an_invites_lifetime_runs_from_when_it_was_sent() {
+        let (_tmp, _guard) = init_test_db();
+        let lifetime = crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64;
+        let now = now_secs();
+        let (old, fresh, unknown, deadline) = ("a1".repeat(32), "a2".repeat(32), "a3".repeat(32), "a4".repeat(32));
+        for cid in [&old, &fresh, &unknown] {
+            save_pending_invite(cid, "{}", "npub1x", 0).unwrap();
+        }
+        save_pending_invite(&deadline, "{}", "npub1x", now + 60).unwrap();
+        set_pending_invite_sent(&old, now - lifetime - 1).unwrap();
+        set_pending_invite_sent(&fresh, now - 60).unwrap();
+        set_pending_invite_sent(&fresh, 1).unwrap();
+        set_pending_invite_sent(&deadline, now - 60).unwrap();
+
+        let listed = list_pending_invites().unwrap();
+        let get = |cid: &str| listed.iter().find(|i| i.community_id == cid);
+        assert!(get(&old).is_none(), "sent past its lifetime, so gone though parked just now");
+        let f = get(&fresh).unwrap();
+        assert_eq!((f.sent_at, f.ends_at), (now - 60, now - 60 + lifetime), "the first send time stands");
+        let u = get(&unknown).unwrap();
+        assert_eq!((u.sent_at, u.ends_at), (0, u.received_at + lifetime));
+        assert_eq!(get(&deadline).unwrap().ends_at, now + 60, "the sender's earlier deadline wins");
+        assert_eq!(purge_expired_pending_invites().unwrap(), 1);
     }
 
     #[test]

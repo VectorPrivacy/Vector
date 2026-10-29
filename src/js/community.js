@@ -12,6 +12,8 @@ async function loadCommunityInvites() {
             let name = 'Community';
             let channels = [];
             let icon = null;
+            let owner = null;
+            let relays = [];
             // The bundle carries name + the channel id(s) + keys; we pull the ids so Accept can
             // render the real community row optimistically (same channel id → no swap on reconcile).
             // It also carries the community icon (encrypted ref) so the invite card shows the real logo.
@@ -20,12 +22,87 @@ async function loadCommunityInvites() {
                 name = b.name || name;
                 channels = (b.channels || []).map(c => ({ id: c.id, name: c.name }));
                 icon = b.icon || null;
+                owner = b.owner || null;
+                relays = Array.isArray(b.relays) ? b.relays : [];
             } catch (_) {}
-            return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels, icon };
+            return {
+                community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels, icon, owner, relays,
+                bundle: inv.bundle_json, received_at: inv.received_at, sent_at: inv.sent_at, ends_at: inv.ends_at,
+            };
         });
     } catch (e) {
         console.error('Failed to load community invites:', e);
     }
+}
+
+VectorSvelte.setScreen('inviteDetails', {
+    h: {
+        close: () => closeInviteDetails(),
+        accept: (communityId) => { closeInviteDetails(); acceptCommunityInvite(communityId); },
+        decline: (communityId) => { closeInviteDetails(); declineCommunityInvite(communityId); },
+    },
+});
+
+/** A person as the invite overlay names them; a stranger's picture stays unloaded, as on the row. */
+function invitePerson(npub) {
+    const profile = getProfile(npub);
+    return { npub, name: getName(profile || npub), avatar: profile && npubIsKnown(npub) ? getProfileAvatarSrc(profile) || null : null };
+}
+
+/** A time as the invite overlay shows it: relative, the full date on hover. */
+function inviteTime(unix) {
+    return { text: ttRelativeText(unix), title: ttFull(unix) };
+}
+
+/** Open a parked invite's details: who sent it, when, until when, and where it lives. */
+function openInviteDetails(invite) {
+    if (!invite) return;
+    const ownerNpub = hexNpub(invite.owner);
+    const owner = ownerNpub && ownerNpub !== invite.inviter_npub ? invitePerson(ownerNpub) : null;
+    VectorSvelte.inviteDetails.open({
+        view: {
+            communityId: invite.community_id,
+            name: invite.name,
+            iconSrc: null,
+            inviter: invitePerson(invite.inviter_npub),
+            owner,
+            sent: invite.sent_at ? { label: 'Sent', ...inviteTime(invite.sent_at) } : { label: 'Received', ...inviteTime(invite.received_at) },
+            ends: inviteTime(invite.ends_at),
+            relays: invite.relays.map((r) => r.replace(/^wss?:\/\//, '').replace(/\/$/, '')),
+        },
+    });
+    pushBack('invite-details', () => VectorSvelte.inviteDetails.close());
+    if (invite.icon && npubIsKnown(invite.inviter_npub)) {
+        invoke('cache_invite_logo', { image: invite.icon }).then((path) => {
+            const view = VectorSvelte.inviteDetails.state().view;
+            if (path && view?.communityId === invite.community_id) view.iconSrc = convertFileSrc(path);
+        }).catch(() => {});
+    }
+}
+
+function closeInviteDetails() {
+    if (VectorSvelte.inviteDetails.closing()) return;
+    popBack('invite-details');
+    VectorSvelte.inviteDetails.close();
+}
+
+/** An invite row's menu: Advanced Mode's copies, the bundle in the CORD-05 form Concord CLI reads. */
+function showInviteMenu(invite, x, y) {
+    if (!VectorSvelte.advancedState().on) return;
+    window._chatRowMenuAt = Date.now();
+    const copy = (label, text) => ({
+        label: `Copy ${label}`,
+        icon: 'copy',
+        onClick: () => navigator.clipboard.writeText(text).then(() => showToast(`Copied ${label}`)).catch(() => showToast('Failed to Copy')),
+    });
+    showContextMenu({
+        x, y,
+        items: [
+            copy('Invite Bundle', invite.bundle),
+            ...copyIdItems('Community', invite.community_id),
+            ...copyIdItems('User', invite.inviter_npub),
+        ],
+    });
 }
 
 /**

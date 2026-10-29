@@ -41,6 +41,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
     import ReactionPopups from '../chat/ReactionPopups.svelte';
     import EditHistoryPopup from '../chat/EditHistoryPopup.svelte';
     import QrOverlay from '../ui/QrOverlay.svelte';
+    import InviteDetails from '../chatlist/InviteDetails.svelte';
     import QrScanner from '../ui/QrScanner.svelte';
     import StatusDialog from '../ui/StatusDialog.svelte';
     import KeysModal from '../settings/KeysModal.svelte';
@@ -157,6 +158,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
 {#if screens.reactionPopups}<ReactionPopups h={screens.reactionPopups.h} />{/if}
 {#if screens.editHistory}<EditHistoryPopup h={screens.editHistory.h} />{/if}
 {#if screens.qrOverlay}<QrOverlay h={screens.qrOverlay.h} />{/if}
+{#if screens.inviteDetails}<InviteDetails h={screens.inviteDetails.h} />{/if}
 {#if screens.qrScanner}<QrScanner h={screens.qrScanner.h} />{/if}
 {#if screens.statusDialog}<StatusDialog h={screens.statusDialog.h} />{/if}
 {#if screens.keysModal}<KeysModal h={screens.keysModal.h} />{/if}

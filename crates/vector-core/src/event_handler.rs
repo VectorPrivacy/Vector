@@ -1165,6 +1165,7 @@ pub async fn commit_prepared_event(
             // Park for explicit consent — do NOT join/subscribe here. Accept via the command layer.
             match crate::db::community::save_pending_invite(&community_id, &bundle_json, &inviter, expires_at as i64) {
                 Ok(true) => {
+                    let _ = crate::db::community::set_pending_invite_sent(&community_id, rumor_created_at as i64);
                     let _ = crate::db::community::note_pending_invite_wrap(&community_id, &wrap_hex);
                     handler.on_community_invite(&community_id)
                 }
@@ -1780,6 +1781,7 @@ mod invite_wrap_tests {
         commit_prepared_event(invite(&cid, 0x11, now), true, &NoOpEventHandler).await;
         commit_prepared_event(invite(&cid, 0x22, now), true, &NoOpEventHandler).await;
         assert_eq!(crate::db::community::pending_invite_wraps(&cid).unwrap(), ["11".repeat(32), "22".repeat(32)]);
+        assert_eq!(crate::db::community::list_pending_invites().unwrap()[0].sent_at, now as i64, "parked with its send time");
 
         crate::VectorCore.decline_community_invite(&cid).await.unwrap();
         assert!(crate::db::community::get_pending_invite(&cid).unwrap().is_none());

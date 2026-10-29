@@ -3,7 +3,7 @@
     // The bundled icon is decrypted once per invite and swaps in over the placeholder.
     import Avatar from '../ui/Avatar.svelte';
 
-    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, npubIsKnown, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite
+    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, npubIsKnown, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite, openInvite, inviteMenu, attachLongPressContextMenu
 
     // Only from someone known: a stranger's icon is theirs to choose, so it stays unloaded.
     let src = $state(null);
@@ -15,9 +15,17 @@
         h.cacheInviteLogo(icon).then((s) => { if (live && s) src = s; }).catch(() => {});
         return () => { live = false; };
     });
+
+    // Right-click or long-press: Advanced Mode's copies, always of the invite on screen now.
+    function inviteMenu(node, inv) {
+        let cur = inv;
+        h.attachLongPressContextMenu(node, (x, y) => h.inviteMenu(cur, x, y));
+        return { update: (inv) => { cur = inv; } };
+    }
 </script>
 
-<div class="chatlist-contact chatlist-invite" id="community-invite-{invite.community_id}">
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="chatlist-contact chatlist-invite" id="community-invite-{invite.community_id}" use:inviteMenu={invite} onclick={() => h.openInvite(invite)}>
     <div style="position: relative;">
         <Avatar {src} size={50} group />
     </div>

@@ -139,12 +139,22 @@ function nprofileNpub(nprofile) {
     const bytes = bech32Regroup(words.slice(0, -6), 5, 8, false);
     for (let i = 0; bytes && i + 2 <= bytes.length; i += 2 + bytes[i + 1]) {
         if (bytes[i] !== 0 || bytes[i + 1] !== 32 || i + 34 > bytes.length) continue;
-        const data = bech32Regroup(bytes.slice(i + 2, i + 34), 8, 5, true);
-        const mod = bech32Polymod([...bech32HrpExpand('npub'), ...data, 0, 0, 0, 0, 0, 0]) ^ 1;
-        const check = [0, 1, 2, 3, 4, 5].map(k => (mod >>> (5 * (5 - k))) & 31);
-        return 'npub1' + [...data, ...check].map(v => BECH32_CHARS[v]).join('');
+        return npubFromBytes(bytes.slice(i + 2, i + 34));
     }
     return '';
+}
+
+/** The npub for a 32-byte hex public key, or '' when it isn't one. */
+function hexNpub(hex) {
+    if (!/^[0-9a-f]{64}$/i.test(hex || '')) return '';
+    return npubFromBytes(hex.match(/../g).map((b) => parseInt(b, 16)));
+}
+
+function npubFromBytes(bytes) {
+    const data = bech32Regroup(bytes, 8, 5, true);
+    const mod = bech32Polymod([...bech32HrpExpand('npub'), ...data, 0, 0, 0, 0, 0, 0]) ^ 1;
+    const check = [0, 1, 2, 3, 4, 5].map(k => (mod >>> (5 * (5 - k))) & 31);
+    return 'npub1' + [...data, ...check].map(v => BECH32_CHARS[v]).join('');
 }
 
 /** The non-name part of a system-event line (" has joined", etc.). Split from the name so the
