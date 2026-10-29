@@ -12316,6 +12316,7 @@ fn select_authorized(
     let bound = 2 * (role_cands.len() + grant_cands.len() + tenure_cands.len()) + 8;
     #[cfg(test)]
     let bound = tests::FOLD_BOUND.with(|b| b.get()).unwrap_or(bound);
+    let mut scratch = ReplayScratch::default();
     for _ in 0..bound {
         let mut next = CommunityRoles::default();
         let mut next_heads: Vec<FoldedHead> = Vec::new();
@@ -12367,7 +12368,7 @@ fn select_authorized(
                 }
                 Some(None)
             };
-            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted, &mut scratch);
             next_gapped |= gap;
             let j = match picked {
                 Picked::Head(j, rebased) => {
@@ -12427,7 +12428,7 @@ fn select_authorized(
                 }
                 Some((c.kind != RoleKind::Deleted).then_some(role.position))
             };
-            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted, &mut scratch);
             next_gapped |= gap;
             // Deletion is terminal over the authorized chain, not the head alone (CORD-04 §2):
             // once one stands, the Role is gone whatever was written after it.
@@ -12527,7 +12528,7 @@ fn select_authorized(
                 next_refused.insert(entity.clone());
                 continue;
             }
-            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted);
+            let (picked, gap) = replay(cands, &standing, owner_hex, complete, voided(cands), &claims, &mut judge, &mut next_admitted, &mut scratch);
             next_gapped |= gap;
             let (j, rebased) = match picked {
                 Picked::Head(j, rebased) => (j, rebased),
@@ -12604,6 +12605,54 @@ struct Stand {
     proven: bool,
 }
 
+/// An entity's editions by hash, each hash's in `cands` order.
+#[derive(Default)]
+struct HashGroups {
+    at: std::collections::HashMap<[u8; 32], (u32, u32)>,
+    order: Vec<usize>,
+}
+
+impl HashGroups {
+    fn build(&mut self, n: usize, hash: impl Fn(usize) -> [u8; 32]) {
+        self.at.clear();
+        self.order.clear();
+        self.order.extend(0..n);
+        // Stable, so a hash's indices keep their order.
+        self.order.sort_by_key(|&j| hash(j));
+        let mut i = 0;
+        while i < self.order.len() {
+            let h = hash(self.order[i]);
+            let run = self.order[i..].iter().take_while(|&&j| hash(j) == h).count();
+            self.at.insert(h, (i as u32, run as u32));
+            i += run;
+        }
+    }
+
+    fn get(&self, h: &[u8; 32]) -> Option<&[usize]> {
+        self.at.get(h).map(|&(start, len)| &self.order[start as usize..(start + len) as usize])
+    }
+}
+
+/// What [`replay`] works in, kept across the entities and rounds of one fold: it is filled
+/// afresh on every call, so only its allocations carry over.
+#[derive(Default)]
+struct ReplayScratch {
+    by_hash: HashGroups,
+    admitted: Vec<bool>,
+    sure: Vec<bool>,
+    conf: Vec<Option<Option<u32>>>,
+    stand: Vec<Stand>,
+    key: Vec<(u32, [u8; 32])>,
+    viable: Vec<bool>,
+    runs: std::collections::HashMap<([u8; 32], u64), (Option<u32>, bool)>,
+    reachable: Vec<bool>,
+}
+
+fn refill<T: Clone>(v: &mut Vec<T>, n: usize, value: T) {
+    v.clear();
+    v.resize(n, value);
+}
+
 /// One entity's chain, replayed ascending (CORD-04 §1/§3), and its head. Each version acts
 /// on what the newest admitted version below it left: never on what its own `prev` names,
 /// which its author chooses and so could point at a branch where nothing stood. A link
@@ -12626,24 +12675,28 @@ fn replay(
     judge: &mut dyn FnMut(&AuthorityCand, u32) -> Option<Option<u32>>,
     // Every edition this replay admits, collected for the caller.
     admitted_out: &mut std::collections::HashSet<[u8; 32]>,
+    scratch: &mut ReplayScratch,
 ) -> (Picked, bool) {
+    #[cfg(test)]
+    let mut fresh = ReplayScratch::default();
+    #[cfg(test)]
+    let scratch = if tests::FRESH_SCRATCH.with(|f| f.get()) { &mut fresh } else { scratch };
     let n = cands.len();
     let Some(first) = cands.first() else { return (Picked::Nothing, false) };
     let floor = first.floor;
     let is_owner = |c: &AuthorityCand| owner_hex == Some(c.author_hex.as_str());
-    let mut by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> = Default::default();
-    for (j, c) in cands.iter().enumerate() {
-        by_hash.entry(c.head.self_hash).or_default().push(j);
-    }
+    let ReplayScratch { by_hash, admitted, sure, conf, stand, key, viable, runs, reachable } = scratch;
+    by_hash.build(n, |j| cands[j].head.self_hash);
+    let by_hash = &*by_hash;
     // Copies of one hash share version, predecessor and content; any admitted one stands.
     let node = |h: &[u8; 32], at: u64| by_hash.get(h).filter(|js| cands[js[0]].head.version == at);
-    let mut admitted = vec![false; n];
-    let mut sure = vec![false; n];
-    let mut conf: Vec<Option<Option<u32>>> = vec![None; n];
-    let mut stand = vec![Stand { standing: None, proven: false }; n];
-    let mut key = vec![(u32::MAX, [0u8; 32]); n];
-    let mut viable = vec![false; n];
-    let mut runs: std::collections::HashMap<([u8; 32], u64), (Option<u32>, bool)> = Default::default();
+    refill(admitted, n, false);
+    refill(sure, n, false);
+    refill(conf, n, None);
+    refill(stand, n, Stand { standing: None, proven: false });
+    refill(key, n, (u32::MAX, [0u8; 32]));
+    refill(viable, n, false);
+    runs.clear();
     // What the newest admitted version left.
     let mut base: Option<u32> = None;
 
@@ -12657,7 +12710,7 @@ fn replay(
         for j in i..hi {
             let (constraint, proven) = match cands[j].prev {
                 None => (None, ver == 1),
-                Some(h) => *runs.entry((h, ver)).or_insert_with(|| link_run(cands, h, ver, &by_hash, &sure, &conf, claims)),
+                Some(h) => *runs.entry((h, ver)).or_insert_with(|| link_run(cands, h, ver, by_hash, sure, conf, claims)),
             };
             stand[j] = Stand { standing: stricter(base, constraint), proven };
         }
@@ -12712,20 +12765,17 @@ fn replay(
     };
     // Reachable from the floor along served links: its version (bar a rival that doesn't
     // beat the held key), then whatever names the held hash or a reachable edition.
-    let mut reachable = vec![false; n];
-    let mut reached: std::collections::HashSet<[u8; 32]> = Default::default();
+    refill(reachable, n, false);
+    // Ascending, so a link's target one version down is decided before what names it.
     for j in (0..n).rev() {
         let c = &cands[j];
         reachable[j] = match c.head.version.cmp(&f.0) {
             std::cmp::Ordering::Less => false,
             std::cmp::Ordering::Equal => !c.loses_to_floor(accepted, owner_hex),
             std::cmp::Ordering::Greater => c.prev.is_some_and(|h| {
-                (Some(c.head.version) == f.0.checked_add(1) && h == f.1) || (reached.contains(&h) && node(&h, c.head.version - 1).is_some())
+                (Some(c.head.version) == f.0.checked_add(1) && h == f.1) || node(&h, c.head.version - 1).is_some_and(|js| js.iter().any(|&k| reachable[k]))
             }),
         };
-        if reachable[j] {
-            reached.insert(c.head.self_hash);
-        }
     }
     let gap_above = |v: u64| (0..n).any(|j| admitted[j] && !reachable[j] && cands[j].head.version > v);
     // Above the floor an edition stands on evidence: a withheld link leaves the rank it
@@ -12778,7 +12828,7 @@ fn link_run(
     cands: &[AuthorityCand],
     mut h: [u8; 32],
     ver: u64,
-    by_hash: &std::collections::HashMap<[u8; 32], Vec<usize>>,
+    by_hash: &HashGroups,
     sure: &[bool],
     conf: &[Option<Option<u32>>],
     claims: &dyn Fn(&AuthorityCand) -> Option<u32>,
@@ -14509,6 +14559,8 @@ mod tests {
     std::thread_local! {
         /// The Roster fixpoint's round bound, when a test sets one on its thread.
         pub(super) static FOLD_BOUND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+        /// [`replay`] on fresh scratch for every call, as it ran before reusing it.
+        pub(super) static FRESH_SCRATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     // The legacy (pre-split) Control derivation, still reachable for the
@@ -17548,6 +17600,30 @@ mod tests {
         format!("{} heads={heads:?} converged={}", authority_fingerprint(a), a.converged)
     }
 
+    #[test]
+    fn hash_groups_list_each_hash_in_index_order_whatever_came_before() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut groups = HashGroups::default();
+        for _ in 0..200 {
+            let n = next(12) as usize;
+            let hashes: Vec<[u8; 32]> = (0..n).map(|_| [next(4) as u8; 32]).collect();
+            groups.build(n, |j| hashes[j]);
+            let mut want: std::collections::HashMap<[u8; 32], Vec<usize>> = Default::default();
+            for (j, h) in hashes.iter().enumerate() {
+                want.entry(*h).or_default().push(j);
+            }
+            for h in (0..5u8).map(|b| [b; 32]) {
+                assert_eq!(groups.get(&h), want.get(&h).map(|v| v.as_slice()), "{hashes:?}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn random_control_planes_fold_alike_in_any_order_and_for_a_reader_holding_its_heads() {
         let (_tmp, _guard, owner) = init_test_db();
@@ -17568,7 +17644,7 @@ mod tests {
         };
         let perms: [u64; 5] = [Permissions::MANAGE_ROLES | Permissions::BAN, Permissions::MANAGE_ROLES, Permissions::BAN, Permissions::KICK, 0];
         let mut failures: Vec<String> = Vec::new();
-        for case in 0..100 {
+        for case in 0..400 {
             // Entities: three Roles, a Grant per actor, the Banlist.
             let mut entities: Vec<([u8; 32], &str)> = roles.iter().map(|r| (crate::simd::hex::hex_to_bytes_32(r), vsk::ROLE)).collect();
             entities.extend(actors.iter().map(|a| (crate::community::v2::derive::grant_locator(cid, &a.public_key().to_bytes()), vsk::GRANT)));
@@ -17579,7 +17655,10 @@ mod tests {
             // Interleave entities by version, so a citation can name what came before it.
             let lens: Vec<u64> = entities.iter().map(|_| 1 + next(3)).collect();
             let mut at_version: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> = Default::default();
+            // Every entity's editions one version down: what a link aimed at another entity names.
+            let mut any_below: Vec<[u8; 32]> = Vec::new();
             for v in 1..=3u64 {
+                let mut any_here: Vec<[u8; 32]> = Vec::new();
                 for (k, (eid, kind)) in entities.iter().enumerate() {
                     if v > lens[k] {
                         continue;
@@ -17588,9 +17667,10 @@ mod tests {
                     let mut here = Vec::new();
                     for _ in 0..(1 + u64::from(next(4) == 0)) {
                         let signer = if next(2) == 0 { &signers[0] } else { &signers[1 + next(4) as usize] };
-                        let prev = match (v, next(6)) {
+                        let prev = match (v, next(7)) {
                             (1, _) => None,
                             (_, 0) => Some([0xee; 32]),
+                            (_, 1) if !any_below.is_empty() => Some(any_below[next(any_below.len() as u64) as usize]),
                             _ if below.is_empty() => None,
                             _ => Some(below[next(below.len() as u64) as usize]),
                         };
@@ -17629,9 +17709,18 @@ mod tests {
                             written.entry(*eid).or_default().push((v, ed.self_hash));
                         }
                         eds.push(ed);
+                        // A copy of it under another signer: the same hash, on that signer's authority.
+                        if next(3) == 0 {
+                            let copier = &signers[next(signers.len() as u64) as usize];
+                            let rumor = control::build_edition_rumor(copier.public_key(), kind, eid, v, prev.as_ref(), &content, ts + 1, None);
+                            let (wrap, _) = control::seal_control_edition(&rumor, &group, copier, Timestamp::from_secs(ts + 1)).unwrap();
+                            eds.push(control::open_control_edition(&wrap, &group).unwrap().0);
+                        }
                     }
+                    any_here.extend(&here);
                     at_version.insert(*eid, here);
                 }
+                any_below = any_here;
             }
             let base = fold_authority(&community, &eds, &Floors::default());
             let want = authority_and_heads(&base);
@@ -17651,8 +17740,27 @@ mod tests {
             if tracked != authority_fingerprint(&base) {
                 failures.push(format!("case {case} tracking:\n  fresh {}\n  held  {tracked}", authority_fingerprint(&base)));
             }
+            // A reader holding any served edition of each entity, refused ones among them.
+            let mut held: Floors = Floors::default();
+            for (eid, _) in &entities {
+                let of: Vec<&ParsedEdition> = eds.iter().filter(|e| e.entity_id == *eid).collect();
+                if !of.is_empty() && next(4) != 0 {
+                    let e = of[next(of.len() as u64) as usize];
+                    held.insert(crate::simd::hex::bytes_to_hex_32(eid), (e.version, e.self_hash, Some(e.inner_id), Some(e.author.to_bytes())));
+                }
+            }
+            // Every fold above again with fresh scratch per entity, as replay ran before reusing it.
+            for (label, f) in [("floorless", Floors::default()), ("tracking", floors.clone()), ("holding", held)] {
+                let reused = authority_whole(&fold_authority(&community, &eds, &f));
+                FRESH_SCRATCH.with(|x| x.set(true));
+                let fresh = authority_whole(&fold_authority(&community, &eds, &f));
+                FRESH_SCRATCH.with(|x| x.set(false));
+                if reused != fresh {
+                    failures.push(format!("case {case} scratch {label}:\n  fresh  {fresh}\n  reused {reused}"));
+                }
+            }
         }
-        assert!(failures.is_empty(), "{} of 100 cases folded differently:\n{}", failures.len(), failures.join("\n"));
+        assert!(failures.is_empty(), "{} of 400 cases folded differently:\n{}", failures.len(), failures.join("\n"));
     }
 
     #[tokio::test]
