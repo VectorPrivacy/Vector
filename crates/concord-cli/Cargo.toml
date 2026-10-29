@@ -1,0 +1,16 @@
+[package]
+name = "concord-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Read a Concord Community from its invite link: no account, nothing stored, nothing published."
+
+[[bin]]
+name = "concord"
+path = "src/main.rs"
+
+[dependencies]
+vector-core = { path = "../vector-core" }
+nostr-sdk = "=0.45.4"
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+async-trait = "0.1"
+serde_json = "1.0"

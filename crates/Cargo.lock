@@ -908,6 +908,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
+name = "concord-cli"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nostr-sdk",
+ "serde_json",
+ "tokio",
+ "vector-core",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

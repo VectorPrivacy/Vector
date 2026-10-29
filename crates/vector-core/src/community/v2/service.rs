@@ -25,6 +25,8 @@ use crate::community::edition::ParsedEdition;
 
 mod audit;
 pub use audit::{audit_log, AuditEntry, AuditLog};
+mod inspect;
+pub use inspect::{inspect_public_link, InspectedChannel, InspectedPlane, Inspection};
 mod relocate;
 pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_RELAY_GRACE_MS};
 pub(crate) use relocate::{relays_moved, resume_relay_copy, retired_relays};
@@ -2389,6 +2391,16 @@ pub async fn accept_parked_invite<T: Transport + ?Sized>(
 /// the newest valid Live by `created_at`. Read-only.
 pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityInvite, String> {
     let parsed = invite::parse_invite_link(url).map_err(|e| e.to_string())?;
+    let relays = if parsed.bootstrap_relays.is_empty() {
+        invite::stock_relays()
+    } else {
+        parsed.bootstrap_relays.clone()
+    };
+    fetch_bundle_on(transport, &parsed, &relays).await
+}
+
+/// [`fetch_public_bundle`] on a chosen relay set.
+async fn fetch_bundle_on<T: Transport + ?Sized>(transport: &T, parsed: &invite::ParsedInviteLink, relays: &[String]) -> Result<CommunityInvite, String> {
     // NO `#d` filter, even though the coordinate's `d` is empty (CORD-05 §2). Relays disagree on
     // indexing an empty tag value: some answer the REQ and then never EOSE, so the fetch burns its
     // whole union grace on every invite. The per-link signer pins the coordinate on its own (it
@@ -2398,20 +2410,15 @@ pub async fn fetch_public_bundle<T: Transport + ?Sized>(transport: &T, url: &str
         authors: vec![parsed.link_signer.to_hex()],
         ..Default::default()
     };
-    let relays = if parsed.bootstrap_relays.is_empty() {
-        invite::stock_relays()
-    } else {
-        parsed.bootstrap_relays.clone()
-    };
     // One bounded retry: a join fired while the pool is still warming (bootstrap
     // relays mid-handshake, routine during boot contention) reads back a transport
     // error, not an absent bundle. The pool add already happened on the first try,
     // so wait for a socket rather than guessing with a fixed sleep.
-    let events = match transport.fetch(&query, &relays).await {
+    let events = match transport.fetch(&query, relays).await {
         Ok(evs) => evs,
         Err(_) => {
-            wait_for_bootstrap_relay(&relays).await;
-            transport.fetch(&query, &relays).await?
+            wait_for_bootstrap_relay(relays).await;
+            transport.fetch(&query, relays).await?
         }
     };
     let bundle_key = super::derive::invite_bundle_key(&parsed.token);
@@ -14902,6 +14909,45 @@ mod tests {
         }
         let roots = channel_rekey_addressing_roots(cur_root, &cid_hex);
         assert_eq!(roots.len(), MAX_ADDRESSING_ROOTS, "the fan is bounded so a relay can't feed an unbounded walk");
+    }
+
+    #[tokio::test]
+    async fn inspecting_a_public_link_names_every_plane_and_publishes_nothing() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Guild", bed.relays.clone(), None).await.unwrap();
+        let general = community.channels[0].id;
+        send_message(&bed.relay, &community, &general, "hello").await.unwrap();
+        let staff = create_private_channel(&bed.relay, &community, "staff").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        send_message(&bed.relay, &community, &staff, "staff only").await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let before = bed.relay.stored_count();
+        let seen = inspect_public_link(&bed.relay, &link.url, None).await.unwrap();
+        assert_eq!(bed.relay.stored_count(), before, "inspecting publishes nothing");
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "nor joins");
+        assert!(seen.verified);
+        assert_eq!((seen.name.as_str(), seen.community_id.as_str()), ("Guild", community.id().to_hex().as_str()));
+
+        // A public link carries no Private Channel's key: #staff's posts are the one address it
+        // can't name, and the inspection says so.
+        let staff_ch = community.channels.iter().find(|c| c.id == staff).unwrap();
+        let (staff_key, staff_epoch) = community.channel_secret(staff_ch);
+        let staff_posts = channel_group_key(&staff_key, &staff, staff_epoch).pk().to_hex();
+        assert!(seen.channels.iter().any(|c| c.name == "staff" && c.keyless));
+        assert!(seen.gaps.iter().any(|g| g.contains("#staff")), "{:?}", seen.gaps);
+
+        let named: std::collections::HashSet<&str> = seen.planes.iter().map(|p| p.pk.as_str()).collect();
+        let wraps = bed.relay.fetch(&Query { kinds: vec![stream::KIND_WRAP], ..Default::default() }, &bed.relays).await.unwrap();
+        let unnamed: Vec<String> = wraps.iter().map(|w| w.pubkey.to_hex()).filter(|pk| !named.contains(pk.as_str())).collect();
+        assert_eq!(unnamed, vec![staff_posts], "planes: {:#?}", seen.planes);
+        assert!(named.contains(link_signer_of(&link.url).as_str()));
+    }
+
+    fn link_signer_of(url: &str) -> String {
+        invite::parse_invite_link(url).unwrap().link_signer.to_hex()
     }
 
     #[tokio::test]

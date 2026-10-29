@@ -1,5 +1,5 @@
 [workspace]
-members = ["vector-calls", "vector-core", "vector-cli", "vector-agent", "vector-sdk", "vector-web", "vector-push", "vector-pusher"]
+members = ["vector-calls", "vector-core", "vector-cli", "concord-cli", "vector-agent", "vector-sdk", "vector-web", "vector-push", "vector-pusher"]
 resolver = "2"
 
 # Dependencies compile OPTIMIZED even in dev/test; our own crates stay unoptimized
